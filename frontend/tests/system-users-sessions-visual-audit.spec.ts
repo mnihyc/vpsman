@@ -2,7 +2,11 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
-import { activate, openConsoleSubpage } from "./support/consoleNavigation";
+import {
+  activate,
+  openConsoleSubpage,
+  unlockPrivilegeFromTop,
+} from "./support/consoleNavigation";
 
 test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual System users/sessions screenshots only");
 
@@ -16,6 +20,7 @@ test("captures System users and sessions interaction loop", async ({ page }, tes
   const manifest: Array<Record<string, unknown>> = [];
 
   await page.goto("/");
+  await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "System", "Users");
   await expect(page.getByRole("heading", { name: "System users", exact: true })).toBeVisible();
   await expect(page.getByText("2 operator records")).toBeVisible();

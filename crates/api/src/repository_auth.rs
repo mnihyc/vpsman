@@ -1388,6 +1388,7 @@ impl Repository {
             "reset_by_operator_username": actor.operator.username,
             "session_id": actor.session_id,
             "sessions_revoked": true,
+            "totp_cleared": true,
         });
         match self {
             Self::Memory(memory) => {
@@ -1399,6 +1400,10 @@ impl Repository {
                     return Ok(None);
                 };
                 operator.password_hash = password_hash;
+                operator.totp_enabled = false;
+                operator.totp_secret_ciphertext_hex = None;
+                operator.totp_secret_nonce_hex = None;
+                operator.totp_secret_salt_hex = None;
                 let view = operator.view();
                 drop(operators);
                 revoke_memory_operator_sessions(memory, operator_id).await;
@@ -1418,7 +1423,11 @@ impl Repository {
                 let row = sqlx::query(
                     r#"
                     UPDATE operators
-                    SET password_hash = $2
+                    SET password_hash = $2,
+                        totp_enabled = FALSE,
+                        totp_secret_ciphertext_hex = NULL,
+                        totp_secret_nonce_hex = NULL,
+                        totp_secret_salt_hex = NULL
                     WHERE id = $1 AND status <> 'deleted'
                     RETURNING
                         id, username, status, role, scopes, preferences,
@@ -1770,6 +1779,80 @@ impl Repository {
                         })
                     })
                     .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn operator_session_by_id(
+        &self,
+        session_id: Uuid,
+        current_session_id: Uuid,
+    ) -> Result<Option<OperatorSessionView>> {
+        match self {
+            Self::Memory(memory) => {
+                let operators = memory.operators.read().await.clone();
+                let sessions = memory.sessions.read().await;
+                let Some(session) = sessions
+                    .iter()
+                    .find(|session| session.session_id == session_id)
+                else {
+                    return Ok(None);
+                };
+                let Some(operator) = operators
+                    .iter()
+                    .find(|operator| operator.id == session.operator_id)
+                else {
+                    return Ok(None);
+                };
+                Ok(Some(OperatorSessionView {
+                    id: session.session_id,
+                    operator_id: operator.id,
+                    operator_username: operator.username.clone(),
+                    operator_role: operator.role.clone(),
+                    current: session.session_id == current_session_id,
+                    created_at: session.created_unix.to_string(),
+                    expires_at: session.expires_unix.to_string(),
+                    refresh_expires_at: session.refresh_expires_unix.to_string(),
+                    revoked: session.revoked,
+                    revoked_at: None,
+                }))
+            }
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        s.id,
+                        s.operator_id,
+                        o.username AS operator_username,
+                        o.role AS operator_role,
+                        s.created_at::text AS created_at,
+                        s.expires_at::text AS expires_at,
+                        s.refresh_expires_at::text AS refresh_expires_at,
+                        s.revoked_at::text AS revoked_at
+                    FROM operator_sessions s
+                    JOIN operators o ON o.id = s.operator_id
+                    WHERE s.id = $1
+                    "#,
+                )
+                .bind(session_id)
+                .fetch_optional(pool)
+                .await?;
+                let Some(row) = row else {
+                    return Ok(None);
+                };
+                let revoked_at: Option<String> = row.try_get("revoked_at")?;
+                Ok(Some(OperatorSessionView {
+                    id: row.try_get("id")?,
+                    operator_id: row.try_get("operator_id")?,
+                    operator_username: row.try_get("operator_username")?,
+                    operator_role: row.try_get("operator_role")?,
+                    current: session_id == current_session_id,
+                    created_at: row.try_get("created_at")?,
+                    expires_at: row.try_get("expires_at")?,
+                    refresh_expires_at: row.try_get("refresh_expires_at")?,
+                    revoked: revoked_at.is_some(),
+                    revoked_at,
+                }))
             }
         }
     }

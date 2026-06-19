@@ -240,7 +240,8 @@ viewer_json="$(VPSMAN_API_URL="$api_url" \
   "$bin" operator-create \
     --username vpsctl-viewer \
     --role viewer \
-    --password-env VPSMAN_NEW_OPERATOR_PASSWORD)"
+    --password-env VPSMAN_NEW_OPERATOR_PASSWORD \
+    --confirmed)"
 require_no_secret "$viewer_json" "$viewer_password" "operator-create"
 jq -e '.username == "vpsctl-viewer" and .role == "viewer" and (.scopes == ["fleet:read"]) and (.id | length) > 0' \
   <<<"$viewer_json" >/dev/null
@@ -269,7 +270,7 @@ viewer_session_id="$(jq -r 'map(select(.operator_username == "vpsctl-viewer" and
 if [[ -z "$viewer_session_id" || "$viewer_session_id" == "null" ]]; then
   fail "operator-sessions did not include active viewer session: $operator_sessions_json"
 fi
-revoked_session_json="$(vpsctl_auth operator-session-revoke --session-id "$viewer_session_id")"
+revoked_session_json="$(vpsctl_auth operator-session-revoke --session-id "$viewer_session_id" --confirmed)"
 jq -e --arg session_id "$viewer_session_id" '.id == $session_id and .revoked == true' \
   <<<"$revoked_session_json" >/dev/null
 viewer_me_response="$(curl -sS -w '\n%{http_code}' \
@@ -289,7 +290,8 @@ scoped_json="$(VPSMAN_API_URL="$api_url" \
     --username vpsctl-fleet-reader \
     --role operator \
     --scopes fleet:read \
-    --password-env VPSMAN_NEW_OPERATOR_PASSWORD)"
+    --password-env VPSMAN_NEW_OPERATOR_PASSWORD \
+    --confirmed)"
 require_no_secret "$scoped_json" "$scoped_password" "operator-create scoped"
 jq -e '.username == "vpsctl-fleet-reader" and .role == "operator" and (.scopes == ["fleet:read"])' \
   <<<"$scoped_json" >/dev/null

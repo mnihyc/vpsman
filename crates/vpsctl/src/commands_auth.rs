@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
+use vpsman_common::{operator_db_payload_hash, OperatorDbPayloadInput};
 
 use crate::{
-    http::{http_delete, http_get, http_post_json, http_put_json},
+    http::{http_get, http_post_json, http_put_json},
+    privilege::{
+        build_privilege_for_db, load_super_password, load_super_salt_hex, DbPrivilegeRequest,
+    },
     util::percent_encode_query_value,
 };
 
@@ -86,9 +90,22 @@ pub(crate) fn operator_create(
     password_env: String,
     session_refresh_ttl_secs: u64,
     admin_risk_acknowledged: bool,
+    confirmed: bool,
 ) -> Result<()> {
+    anyhow::ensure!(confirmed, "operator-create requires --confirmed");
     let password = std::env::var(&password_env)
         .with_context(|| format!("environment variable {password_env} is not set"))?;
+    let privilege_assertion = operator_management_privilege(
+        "operator.create",
+        &username,
+        Some(&username),
+        Some(&role),
+        &scopes,
+        Some(session_refresh_ttl_secs),
+        None,
+        admin_risk_acknowledged,
+        confirmed,
+    )?;
     println!(
         "{}",
         http_post_json(
@@ -101,7 +118,9 @@ pub(crate) fn operator_create(
                 "role": role,
                 "scopes": scopes,
                 "session_refresh_ttl_secs": session_refresh_ttl_secs,
+                "confirmed": confirmed,
                 "admin_risk_acknowledged": admin_risk_acknowledged,
+                "privilege_assertion": privilege_assertion,
             }),
         )?
     );
@@ -116,7 +135,20 @@ pub(crate) fn operator_update(
     scopes: Vec<String>,
     session_refresh_ttl_secs: u64,
     admin_risk_acknowledged: bool,
+    confirmed: bool,
 ) -> Result<()> {
+    anyhow::ensure!(confirmed, "operator-update requires --confirmed");
+    let privilege_assertion = operator_management_privilege(
+        "operator.update",
+        &operator_id,
+        None,
+        Some(&role),
+        &scopes,
+        Some(session_refresh_ttl_secs),
+        None,
+        admin_risk_acknowledged,
+        confirmed,
+    )?;
     println!(
         "{}",
         http_put_json(
@@ -127,8 +159,9 @@ pub(crate) fn operator_update(
                 "role": role,
                 "scopes": scopes,
                 "session_refresh_ttl_secs": session_refresh_ttl_secs,
-                "confirmed": true,
+                "confirmed": confirmed,
                 "admin_risk_acknowledged": admin_risk_acknowledged,
+                "privilege_assertion": privilege_assertion,
             }),
         )?
     );
@@ -141,7 +174,21 @@ pub(crate) fn operator_set_status(
     operator_id: String,
     action: &str,
     admin_risk_acknowledged: bool,
+    confirmed: bool,
 ) -> Result<()> {
+    anyhow::ensure!(confirmed, "operator-{action} requires --confirmed");
+    let (privilege_action, status) = operator_lifecycle_privilege_action(action)?;
+    let privilege_assertion = operator_management_privilege(
+        privilege_action,
+        &operator_id,
+        None,
+        None,
+        &[],
+        None,
+        status,
+        admin_risk_acknowledged,
+        confirmed,
+    )?;
     println!(
         "{}",
         http_post_json(
@@ -149,8 +196,9 @@ pub(crate) fn operator_set_status(
             &format!("/api/v1/operators/{operator_id}/{action}"),
             token,
             &serde_json::json!({
-                "confirmed": true,
+                "confirmed": confirmed,
                 "admin_risk_acknowledged": admin_risk_acknowledged,
+                "privilege_assertion": privilege_assertion,
             }),
         )?
     );
@@ -163,9 +211,22 @@ pub(crate) fn operator_password_reset(
     operator_id: String,
     password_env: String,
     admin_risk_acknowledged: bool,
+    confirmed: bool,
 ) -> Result<()> {
+    anyhow::ensure!(confirmed, "operator-password-reset requires --confirmed");
     let password = std::env::var(&password_env)
         .with_context(|| format!("environment variable {password_env} is not set"))?;
+    let privilege_assertion = operator_management_privilege(
+        "operator.password_reset",
+        &operator_id,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        admin_risk_acknowledged,
+        confirmed,
+    )?;
     println!(
         "{}",
         http_post_json(
@@ -174,8 +235,9 @@ pub(crate) fn operator_password_reset(
             token,
             &serde_json::json!({
                 "password": password,
-                "confirmed": true,
+                "confirmed": confirmed,
                 "admin_risk_acknowledged": admin_risk_acknowledged,
+                "privilege_assertion": privilege_assertion,
             }),
         )?
     );
@@ -233,16 +295,99 @@ pub(crate) fn operator_session_revoke(
     api_url: &str,
     token: Option<&str>,
     session_id: String,
+    admin_risk_acknowledged: bool,
+    confirmed: bool,
 ) -> Result<()> {
+    anyhow::ensure!(confirmed, "operator-session-revoke requires --confirmed");
+    let privilege_assertion = operator_management_privilege(
+        "operator_session.revoke",
+        &session_id,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        admin_risk_acknowledged,
+        confirmed,
+    )?;
     println!(
         "{}",
-        http_delete(
+        http_post_json(
             api_url,
-            &format!("/api/v1/operator-sessions/{session_id}"),
+            &format!("/api/v1/operator-sessions/{session_id}/revoke"),
             token,
+            &serde_json::json!({
+                "confirmed": confirmed,
+                "admin_risk_acknowledged": admin_risk_acknowledged,
+                "privilege_assertion": privilege_assertion,
+            }),
         )?
     );
     Ok(())
+}
+
+fn operator_management_privilege(
+    action: &str,
+    target: &str,
+    username: Option<&str>,
+    role: Option<&str>,
+    scopes: &[String],
+    session_refresh_ttl_secs: Option<u64>,
+    status: Option<&str>,
+    admin_risk_acknowledged: bool,
+    confirmed: bool,
+) -> Result<vpsman_common::PrivilegeAssertion> {
+    let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+    let salt_hex = load_super_salt_hex(None)?;
+    let normalized_scopes = normalized_requested_scopes(scopes);
+    let payload_hash = operator_db_payload_hash(OperatorDbPayloadInput {
+        action,
+        target,
+        username,
+        role,
+        scopes: &normalized_scopes,
+        session_refresh_ttl_secs,
+        status,
+        admin_risk_acknowledged,
+    })?;
+    let targets = vec![target.to_string()];
+    build_privilege_for_db(
+        DbPrivilegeRequest {
+            action,
+            target,
+            selector_expression: None,
+            resolved_targets: &targets,
+            confirmed,
+            payload_hash: Some(&payload_hash),
+        },
+        &password,
+        &salt_hex,
+        300,
+    )
+}
+
+fn operator_lifecycle_privilege_action(
+    action: &str,
+) -> Result<(&'static str, Option<&'static str>)> {
+    match action {
+        "enable" => Ok(("operator.enable", Some("active"))),
+        "disable" => Ok(("operator.disable", Some("disabled"))),
+        "delete" => Ok(("operator.delete", Some("deleted"))),
+        "totp-clear" => Ok(("operator.totp_clear", None)),
+        _ => anyhow::bail!("invalid operator lifecycle action {action}"),
+    }
+}
+
+fn normalized_requested_scopes(scopes: &[String]) -> Vec<String> {
+    let mut scopes = scopes
+        .iter()
+        .map(|scope| scope.trim())
+        .filter(|scope| !scope.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    scopes.sort();
+    scopes.dedup();
+    scopes
 }
 
 pub(crate) fn totp_setup(api_url: &str, token: Option<&str>, password_env: String) -> Result<()> {

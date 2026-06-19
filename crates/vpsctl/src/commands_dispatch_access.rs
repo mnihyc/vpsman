@@ -48,6 +48,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.password_env,
                 command.session_refresh_ttl_secs,
                 command.admin_risk_acknowledged,
+                command.confirmed,
             )?;
             Ok(None)
         }
@@ -60,6 +61,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.scopes,
                 command.session_refresh_ttl_secs,
                 command.admin_risk_acknowledged,
+                command.confirmed,
             )?;
             Ok(None)
         }
@@ -70,6 +72,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.operator_id,
                 "disable",
                 command.admin_risk_acknowledged,
+                command.confirmed,
             )?;
             Ok(None)
         }
@@ -80,6 +83,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.operator_id,
                 "enable",
                 command.admin_risk_acknowledged,
+                command.confirmed,
             )?;
             Ok(None)
         }
@@ -90,6 +94,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.operator_id,
                 "delete",
                 command.admin_risk_acknowledged,
+                command.confirmed,
             )?;
             Ok(None)
         }
@@ -100,6 +105,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.operator_id,
                 command.password_env,
                 command.admin_risk_acknowledged,
+                command.confirmed,
             )?;
             Ok(None)
         }
@@ -110,6 +116,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.operator_id,
                 "totp-clear",
                 command.admin_risk_acknowledged,
+                command.confirmed,
             )?;
             Ok(None)
         }
@@ -118,7 +125,13 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             Ok(None)
         }
         Command::OperatorSessionRevoke(command) => {
-            commands_auth::operator_session_revoke(api_url, token, command.session_id)?;
+            commands_auth::operator_session_revoke(
+                api_url,
+                token,
+                command.session_id,
+                command.admin_risk_acknowledged,
+                command.confirmed,
+            )?;
             Ok(None)
         }
         Command::OperatorAuthEvents(command) => {

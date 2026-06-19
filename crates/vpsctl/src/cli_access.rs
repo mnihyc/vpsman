@@ -44,6 +44,8 @@ pub(crate) struct OperatorCreateCommand {
     pub(crate) session_refresh_ttl_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) admin_risk_acknowledged: bool,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -62,6 +64,8 @@ pub(crate) struct OperatorUpdateCommand {
     pub(crate) session_refresh_ttl_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) admin_risk_acknowledged: bool,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -70,6 +74,8 @@ pub(crate) struct OperatorLifecycleCommand {
     pub(crate) operator_id: String,
     #[arg(long, default_value_t = false)]
     pub(crate) admin_risk_acknowledged: bool,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -80,6 +86,8 @@ pub(crate) struct OperatorPasswordResetCommand {
     pub(crate) password_env: String,
     #[arg(long, default_value_t = false)]
     pub(crate) admin_risk_acknowledged: bool,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -104,6 +112,10 @@ pub(crate) struct OperatorSessionsCommand {
 pub(crate) struct OperatorSessionRevokeCommand {
     #[arg(long)]
     pub(crate) session_id: String,
+    #[arg(long, default_value_t = false)]
+    pub(crate) admin_risk_acknowledged: bool,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]

@@ -59,7 +59,7 @@ of the same root cause.
 | AUD-043 | High | Confirmed | Frontend/Alerts | Fleet alert triage actions bypass required operator review |
 | AUD-044 | Medium/High | Confirmed | Frontend/File Transfers | Source and handoff artifact persistence bypasses operator review |
 | AUD-045 | Medium/High | Confirmed | Frontend/Command Templates | Command template saves persist reusable operation payloads without review |
-| AUD-046 | High | Confirmed | API/CLI/Auth | Operator access-management mutations bypass or auto-confirm the confirmation contract |
+| AUD-046 | High | Fixed | API/CLI/Auth | Operator access-management mutations bypass or auto-confirm the confirmation contract |
 | AUD-047 | Medium/High | Confirmed | API/Backups/Auth | Migration-link listings expose restore metadata with fleet-read scope |
 | AUD-048 | High | Confirmed | API/History/Auth | History retention prune can delete job and backup payload history with inventory-write only |
 | AUD-049 | High | Confirmed | API/Worker/Artifact Cleanup/Auth | Server artifact cleanup can delete backup artifacts with jobs-write only |
@@ -74,7 +74,7 @@ of the same root cause.
 | AUD-058 | Medium/High | Confirmed | API/Integrations/Auth | Integration mutations use inventory-write instead of an integrations write boundary |
 | AUD-059 | Medium/High | Confirmed | API/Command Templates/Auth | Command-template mutations use jobs-write instead of a templates write boundary |
 | AUD-060 | Medium/High | Confirmed | API/Agent Updates/Auth | Update-release registry mutations use jobs-write instead of config-write |
-| AUD-061 | High | Confirmed | Frontend/System Users | User-management confirmations remain armed after editor or selection changes |
+| AUD-061 | High | Fixed | Frontend/System Users | User-management confirmations remain armed after editor or selection changes |
 | AUD-062 | High | Confirmed | API/Object Storage/Artifacts | Artifact creation can commit metadata or bytes without cleanup-registry consistency |
 | AUD-063 | High | Confirmed | Frontend/Schedules | Schedule confirmations remain armed after form, defer, or table context changes |
 | AUD-064 | Medium/High | Confirmed | Frontend/Agent Updates | Release-registry manual update shortcut cannot provide the artifact URL it requires |
@@ -164,7 +164,7 @@ of the same root cause.
 | AUD-148 | High | Confirmed | API/Frontend/CLI/Backups/Retention | Backup policy prune confirms scope and mode but reselects live artifacts instead of the reviewed candidate set |
 | AUD-149 | High | Confirmed | Deploy/Update/Rollback | Compose update and rollback swap release directories without forcing container recreation |
 | AUD-150 | High | Confirmed | Gateway/API/Telemetry/Lifecycle | Displaced gateway sessions can keep forwarding telemetry after replacement |
-| AUD-151 | High | Confirmed | API/Frontend/CLI/Auth/Privilege | Operator management mutations lack request-bound privilege verification |
+| AUD-151 | High | Fixed | API/Frontend/CLI/Auth/Privilege | Operator management mutations lack request-bound privilege verification |
 | AUD-152 | High | Confirmed | Frontend/Backups/Migrations | Migration restore runs can use stale hidden restore options |
 | AUD-153 | Medium/High | Confirmed | API/Telemetry/Retention | Per-interface network-rate telemetry has no retention path |
 | AUD-154 | High | Confirmed | API/Frontend/CLI/History Retention | History retention prune reselects live rows instead of deleting the reviewed dry-run set |
@@ -185,7 +185,7 @@ of the same root cause.
 | AUD-169 | Medium/High | Fixed | API/Backups/Restore Workflow | Agent backups can be valid above the API restore-preparation inline limit |
 | AUD-170 | High | Fixed | Frontend/API/Backups/Key Custody | Dashboard restore preparation sends the backup private key to the API |
 | AUD-171 | Critical | Fixed | API/Backups/Restore Payloads/Webhooks | Inline restore archives persist decrypted backup content in jobs and webhooks |
-| AUD-172 | High | Confirmed | API/Auth/User Management | Password reset preserves old-password-encrypted TOTP secrets |
+| AUD-172 | High | Fixed | API/Auth/User Management | Password reset preserves old-password-encrypted TOTP secrets |
 | AUD-173 | High | Fixed | Frontend/Fleet Tags | Bulk tag preview races can apply a stale target set to a newer tag form |
 | AUD-174 | High | Fixed | Frontend/Server Jobs/Artifact Cleanup | Artifact cleanup preview races can queue a stale cleanup set after expression edits |
 | AUD-175 | High | Fixed | Frontend/Job Dispatch | Dispatch review can open a stale confirmation after operation or selector edits |
@@ -1225,7 +1225,7 @@ of the same root cause.
 ### AUD-046: Operator Access-Management Mutations Bypass Or Auto-Confirm The Confirmation Contract
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/CLI/Auth
 - Context: Operator management can create accounts, grant roles and scopes,
   disable/delete users, reset passwords, clear TOTP secrets, and revoke bearer
@@ -1260,6 +1260,10 @@ of the same root cause.
   operator mutations should have one consistent confirmation requirement across
   API, CLI, VTY, frontend, docs, smoke scripts, and tests. Bootstrap remains a
   separate first-operator setup path.
+- Resolution: Fixed by requiring explicit confirmation on create/update/status,
+  password reset, TOTP clear, and session revoke API requests; by replacing raw
+  session DELETE with a confirmed POST revoke request; and by requiring
+  `--confirmed` from CLI/VTY operator mutation paths instead of hardcoding it.
 
 ### AUD-047: Migration-Link Listings Expose Restore Metadata With Fleet-Read Scope
 
@@ -1732,7 +1736,7 @@ of the same root cause.
 ### AUD-061: User-Management Confirmations Remain Armed After Editor Or Selection Changes
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/System Users
 - Context: System > Users manages operator creation, role/scope changes,
   session TTL changes, password resets, TOTP clearing, disabling, and deletion.
@@ -1766,6 +1770,9 @@ of the same root cause.
   input, scope shortcut, selected row, opened row, or new user action changes
   the reviewed intent, forcing operators to review and confirm the current
   snapshot again.
+- Resolution: Fixed by closing pending user and session confirmations whenever
+  the selected operator, operator/session lists, or review-relevant editor
+  fields change, and by submitting only the frozen review snapshot.
 
 ### AUD-062: Artifact Creation Can Commit Metadata Or Bytes Without Cleanup-Registry Consistency
 
@@ -5527,7 +5534,7 @@ of the same root cause.
 ### AUD-151: Operator Management Mutations Lack Request-Bound Privilege Verification
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/CLI/Auth/Privilege
 - Context: System > Users and the CLI manage operator accounts, roles, scopes,
   passwords, TOTP state, status, and sessions. These actions decide who can
@@ -5562,6 +5569,10 @@ of the same root cause.
   privilege intent bound to action, target operator IDs, role, scopes, session
   TTL, password-reset marker or password hash, and admin-risk acknowledgement.
   First bootstrap remains the special unauthenticated setup path.
+- Resolution: Fixed by adding request-bound privilege assertions to operator
+  create/update/lifecycle/password-reset/TOTP-clear/session-revoke contracts.
+  The API recomputes a non-secret canonical payload hash from the actual
+  request shape and verifies the DB privilege intent through the gateway.
 
 ### AUD-152: Migration Restore Runs Can Use Stale Hidden Restore Options
 
@@ -6417,7 +6428,7 @@ of the same root cause.
 ### AUD-172: Password Reset Preserves Old-Password-Encrypted TOTP Secrets
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Auth/User Management
 - Context: Admin operators can reset another operator's password from
   System > Users, or reset their own password. Existing sessions for the
@@ -6457,6 +6468,9 @@ of the same root cause.
   secret only when the current password is available. The current behavior is
   unsafe because the UI/API present password reset as account recovery while
   preserving unusable TOTP material.
+- Resolution: Fixed by clearing TOTP enabled state and encrypted TOTP secret
+  material as part of password reset while continuing to revoke target
+  sessions; frontend confirmation copy now reflects that behavior.
 
 ### AUD-173: Bulk Tag Preview Races Can Apply A Stale Target Set To A Newer Tag Form
 

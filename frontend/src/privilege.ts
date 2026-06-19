@@ -65,6 +65,17 @@ export type DbPrivilegeIntentInput = {
   payloadHash?: string | null;
 };
 
+export type OperatorDbPayloadInput = {
+  action: string;
+  target: string;
+  username?: string | null;
+  role?: string | null;
+  scopes?: string[];
+  sessionRefreshTtlSecs?: number | null;
+  status?: string | null;
+  adminRiskAcknowledged: boolean;
+};
+
 export function parseCommandArgv(input: string): string[] {
   const argv: string[] = [];
   let current = "";
@@ -220,6 +231,21 @@ export async function operationPayloadHashHex(operation: JobOperation): Promise<
 
 export async function textPayloadHashHex(text: string): Promise<string> {
   return sha256Hex(encoder.encode(text));
+}
+
+export async function operatorDbPayloadHashHex(input: OperatorDbPayloadInput): Promise<string> {
+  const payload = ordered([
+    ["version", 1],
+    ["action", input.action],
+    ["target", input.target],
+    ["username", input.username ? input.username.trim() : null],
+    ["role", input.role ? input.role.trim() : null],
+    ["scopes", Array.from(new Set([...(input.scopes ?? [])].map((scope) => scope.trim()).filter(Boolean))).sort()],
+    ["session_refresh_ttl_secs", input.sessionRefreshTtlSecs ?? null],
+    ["status", input.status ? input.status.trim() : null],
+    ["admin_risk_acknowledged", input.adminRiskAcknowledged],
+  ]);
+  return sha256Hex(encoder.encode(JSON.stringify(payload)));
 }
 
 export async function buildPrivilegeAssertion({

@@ -154,8 +154,8 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/operator-sessions", get(list_operator_sessions))
         .route(
-            "/api/v1/operator-sessions/{session_id}",
-            delete(revoke_operator_session),
+            "/api/v1/operator-sessions/{session_id}/revoke",
+            post(revoke_operator_session),
         )
         .route("/api/v1/agent-identities", post(upsert_agent_identity))
         .route(

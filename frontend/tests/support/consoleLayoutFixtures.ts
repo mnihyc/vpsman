@@ -2145,6 +2145,32 @@ export async function installConsoleApiMock(
           username: "noc-operator",
         },
       ];
+      const operatorSessions = [
+        {
+          id: "88888888-aaaa-4bbb-8ccc-000000000001",
+          operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+          operator_role: "admin",
+          operator_username: "console-admin",
+          current: true,
+          created_at: "2026-01-01T00:00:00Z",
+          expires_at: "2026-01-01T00:15:00Z",
+          refresh_expires_at: "2026-01-15T00:00:00Z",
+          revoked: false,
+          revoked_at: null as string | null,
+        },
+        {
+          id: "88888888-aaaa-4bbb-8ccc-000000000002",
+          operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+          operator_role: "admin",
+          operator_username: "console-admin",
+          current: false,
+          created_at: "2026-01-01T01:00:00Z",
+          expires_at: "2026-01-01T01:15:00Z",
+          refresh_expires_at: "2026-01-15T01:00:00Z",
+          revoked: false,
+          revoked_at: null as string | null,
+        },
+      ];
       const operatorView = (record: (typeof operatorRecords)[number]) => ({
         ...record,
         preferences: currentOperatorPreferences,
@@ -3181,32 +3207,24 @@ export async function installConsoleApiMock(
           return jsonResponse(operatorView(record));
         }
         if (pathname === "/api/v1/operator-sessions" && method === "GET")
-          return jsonResponse([
-            {
-              id: "88888888-aaaa-4bbb-8ccc-000000000001",
-              operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-              operator_role: "admin",
-              operator_username: "console-admin",
-              current: true,
-              created_at: "2026-01-01T00:00:00Z",
-              expires_at: "2026-01-01T00:15:00Z",
-              refresh_expires_at: "2026-01-15T00:00:00Z",
-              revoked: false,
-              revoked_at: null,
-            },
-            {
-              id: "88888888-aaaa-4bbb-8ccc-000000000002",
-              operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-              operator_role: "admin",
-              operator_username: "console-admin",
-              current: false,
-              created_at: "2026-01-01T01:00:00Z",
-              expires_at: "2026-01-01T01:15:00Z",
-              refresh_expires_at: "2026-01-15T01:00:00Z",
-              revoked: false,
-              revoked_at: null,
-            },
-          ]);
+          return jsonResponse(operatorSessions);
+        const operatorSessionRevokeMatch = pathname.match(
+          /^\/api\/v1\/operator-sessions\/([^/]+)\/revoke$/,
+        );
+        if (operatorSessionRevokeMatch && method === "POST") {
+          const sessionId = decodeURIComponent(operatorSessionRevokeMatch[1]);
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          requests.operatorActions.push({
+            action: "session-revoke",
+            body,
+            session_id: sessionId,
+          });
+          const session = operatorSessions.find((item) => item.id === sessionId);
+          if (!session) return jsonResponse({ error: "not found" }, { status: 404 });
+          session.revoked = true;
+          session.revoked_at = "2026-01-03T00:15:00Z";
+          return jsonResponse(session);
+        }
         if (pathname === "/api/v1/operator-auth-events" && method === "GET")
           return jsonResponse([
             {

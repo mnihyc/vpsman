@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use vpsman_common::PrivilegeAssertion;
 
 #[derive(Clone, Debug)]
 pub(crate) struct OperatorRecord {
@@ -291,7 +292,10 @@ pub(crate) struct CreateOperatorRequest {
     pub(crate) scopes: Vec<String>,
     pub(crate) session_refresh_ttl_secs: Option<u64>,
     #[serde(default)]
+    pub(crate) confirmed: bool,
+    #[serde(default)]
     pub(crate) admin_risk_acknowledged: bool,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,6 +308,7 @@ pub(crate) struct UpdateOperatorRequest {
     pub(crate) confirmed: bool,
     #[serde(default)]
     pub(crate) admin_risk_acknowledged: bool,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,6 +317,7 @@ pub(crate) struct OperatorLifecycleRequest {
     pub(crate) confirmed: bool,
     #[serde(default)]
     pub(crate) admin_risk_acknowledged: bool,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -321,6 +327,16 @@ pub(crate) struct OperatorPasswordResetRequest {
     pub(crate) confirmed: bool,
     #[serde(default)]
     pub(crate) admin_risk_acknowledged: bool,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OperatorSessionRevokeRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) admin_risk_acknowledged: bool,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Debug, Deserialize)]

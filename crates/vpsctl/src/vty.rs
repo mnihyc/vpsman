@@ -79,6 +79,7 @@ Access:
   operators | operator-create | operator-update | operator-disable | operator-enable
   operator-delete | operator-password-reset | operator-totp-clear
   operator-sessions | operator-session-revoke | operator-auth-events
+  operator mutations require enable and --confirmed
   totp-setup | totp-confirm | totp-disable
   agent-identity-upsert | client-key-revoke (privileged mode required)
   client-key-revocations | key-lifecycle-report

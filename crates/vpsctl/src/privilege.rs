@@ -149,6 +149,7 @@ pub(crate) struct DbPrivilegeRequest<'a> {
     pub(crate) selector_expression: Option<&'a str>,
     pub(crate) resolved_targets: &'a [String],
     pub(crate) confirmed: bool,
+    pub(crate) payload_hash: Option<&'a str>,
 }
 
 pub(crate) fn build_privilege_for_db(
@@ -163,7 +164,7 @@ pub(crate) fn build_privilege_for_db(
         request.selector_expression,
         request.resolved_targets,
         request.confirmed,
-        None,
+        request.payload_hash,
     )?;
     build_privilege_assertion(&intent, password, salt_hex, ttl_secs)
 }

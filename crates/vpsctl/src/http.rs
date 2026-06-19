@@ -107,14 +107,6 @@ pub(crate) fn http_get_to_file(
     }
 }
 
-pub(crate) fn http_delete(
-    base_url: &str,
-    path: &str,
-    bearer_token: Option<&str>,
-) -> Result<String> {
-    http_request(base_url, "DELETE", path, bearer_token, None)
-}
-
 pub(crate) fn http_delete_json(
     base_url: &str,
     path: &str,

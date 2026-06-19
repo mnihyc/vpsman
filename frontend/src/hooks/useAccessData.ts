@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { apiDelete, apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
+import { apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
 import type {
   GatewaySessionRecord,
   OperatorAuthEventRecord,
@@ -207,6 +207,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       scopes: string[],
       sessionRefreshTtlSecs: number,
       adminRiskAcknowledged: boolean,
+      privilegeAssertion: PrivilegeAssertion,
     ) => {
       setAccessError(null);
       try {
@@ -216,7 +217,9 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           password,
           scopes,
           session_refresh_ttl_secs: sessionRefreshTtlSecs,
+          confirmed: true,
           admin_risk_acknowledged: adminRiskAcknowledged,
+          privilege_assertion: privilegeAssertion,
         });
         await loadCurrentOperator();
       } catch (error) {
@@ -265,12 +268,21 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   );
 
   const revokeOperatorSession = useCallback(
-    async (sessionId: string) => {
+    async (
+      sessionId: string,
+      adminRiskAcknowledged: boolean,
+      privilegeAssertion: PrivilegeAssertion,
+    ) => {
       setAccessError(null);
       try {
-        await apiDelete<OperatorSessionRecord>(
-          `/api/v1/operator-sessions/${encodeURIComponent(sessionId)}`,
+        await apiPost<OperatorSessionRecord>(
+          `/api/v1/operator-sessions/${encodeURIComponent(sessionId)}/revoke`,
           apiToken,
+          {
+            confirmed: true,
+            admin_risk_acknowledged: adminRiskAcknowledged,
+            privilege_assertion: privilegeAssertion,
+          },
         );
         await loadCurrentOperator();
       } catch (error) {
@@ -296,6 +308,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       scopes: string[],
       sessionRefreshTtlSecs: number,
       adminRiskAcknowledged: boolean,
+      privilegeAssertion: PrivilegeAssertion,
     ) => {
       setAccessError(null);
       try {
@@ -308,6 +321,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
             session_refresh_ttl_secs: sessionRefreshTtlSecs,
             confirmed: true,
             admin_risk_acknowledged: adminRiskAcknowledged,
+            privilege_assertion: privilegeAssertion,
           },
         );
         await loadCurrentOperator();
@@ -332,6 +346,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       operatorId: string,
       status: "active" | "disabled" | "deleted",
       adminRiskAcknowledged: boolean,
+      privilegeAssertion: PrivilegeAssertion,
     ) => {
       setAccessError(null);
       const action =
@@ -343,6 +358,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           {
             confirmed: true,
             admin_risk_acknowledged: adminRiskAcknowledged,
+            privilege_assertion: privilegeAssertion,
           },
         );
         await loadCurrentOperator();
@@ -367,6 +383,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
       operatorId: string,
       password: string,
       adminRiskAcknowledged: boolean,
+      privilegeAssertion: PrivilegeAssertion,
     ) => {
       setAccessError(null);
       try {
@@ -377,6 +394,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
             password,
             confirmed: true,
             admin_risk_acknowledged: adminRiskAcknowledged,
+            privilege_assertion: privilegeAssertion,
           },
         );
         await loadCurrentOperator();
@@ -397,7 +415,11 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   );
 
   const clearOperatorTotp = useCallback(
-    async (operatorId: string, adminRiskAcknowledged: boolean) => {
+    async (
+      operatorId: string,
+      adminRiskAcknowledged: boolean,
+      privilegeAssertion: PrivilegeAssertion,
+    ) => {
       setAccessError(null);
       try {
         await apiPost<OperatorView>(
@@ -406,6 +428,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
           {
             confirmed: true,
             admin_risk_acknowledged: adminRiskAcknowledged,
+            privilege_assertion: privilegeAssertion,
           },
         );
         await loadCurrentOperator();

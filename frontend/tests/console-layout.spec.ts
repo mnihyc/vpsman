@@ -937,7 +937,7 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
 test("surfaces operator users and sessions under System", async ({ page }) => {
   await page.goto("/");
 
-  await openConsoleSubpage(page, "System", "Users");
+  await unlockPrivilegeFor(page, "System", "Users");
   await expect(
     page.getByRole("heading", { name: "System users", exact: true }),
   ).toBeVisible();
@@ -950,11 +950,18 @@ test("surfaces operator users and sessions under System", async ({ page }) => {
   await runGridAction(page, "Users", "Edit selected");
   await expect(page.getByLabel("Operator username")).toHaveValue("console-admin");
   await activate(page.getByRole("button", { name: "Disable" }));
+  await expect(page.getByText("Preparing review")).toBeVisible();
   await expect(
     page.getByLabel("Confirm admin user action"),
   ).toBeVisible();
   await expect(
     page.getByText(/targets or grants admin privileges/),
+  ).toBeVisible();
+  await page.getByLabel("Session refresh TTL days").fill("31");
+  await expect(page.getByLabel("Confirm admin user action")).toBeHidden();
+  await activate(page.getByRole("button", { name: "Disable" }));
+  await expect(
+    page.getByLabel("Confirm admin user action"),
   ).toBeVisible();
   await activate(page.getByRole("button", { name: "Cancel" }));
 
@@ -976,6 +983,7 @@ test("surfaces operator users and sessions under System", async ({ page }) => {
   );
   await page.getByLabel("Operator password").fill("replacement-password-123");
   await activate(page.getByRole("button", { name: "Save", exact: true }));
+  await expect(page.getByText("Preparing review")).toBeVisible();
   const savePrompt = page.getByLabel("Confirm user action");
   await expect(savePrompt).toBeVisible();
   await expect(savePrompt).not.toContainText("replacement-password-123");
@@ -989,8 +997,10 @@ test("surfaces operator users and sessions under System", async ({ page }) => {
   expect(JSON.stringify(operatorUpdate)).not.toContain("replacement-password-123");
   expect(operatorUpdate).toMatchObject({
     action: "update",
+    body: { confirmed: true },
     operator_id: "99999999-aaaa-4bbb-8ccc-000000000002",
   });
+  expectPrivilegeAssertion((operatorUpdate as { body?: unknown }).body);
 
   await openConsoleSubpage(page, "System", "Sessions");
   await expect(
@@ -1005,6 +1015,24 @@ test("surfaces operator users and sessions under System", async ({ page }) => {
   await expect(page.getByText("console-admin").first()).toBeVisible();
   await expect(page.getByText("unknown-user")).toBeVisible();
   await expect(page.getByText("invalid_credentials")).toBeVisible();
+  await selectGridRow(page, "Sessions", "88888888-aaaa-4bbb-8ccc-000000000002");
+  await runGridAction(page, "Sessions", "Revoke selected");
+  await expect(page.getByText("Preparing review")).toBeVisible();
+  const revokePrompt = page.getByLabel("Confirm admin session revoke");
+  await expect(revokePrompt).toBeVisible();
+  await activate(revokePrompt.getByRole("button", { name: "Revoke session" }));
+  const sessionRevoke = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { operatorActions: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.operatorActions.at(-1);
+  });
+  expect(sessionRevoke).toMatchObject({
+    action: "session-revoke",
+    body: { admin_risk_acknowledged: true, confirmed: true },
+    session_id: "88888888-aaaa-4bbb-8ccc-000000000002",
+  });
+  expectPrivilegeAssertion((sessionRevoke as { body?: unknown }).body);
 });
 
 test("packs dashboard top VPS cards by label length", async ({

@@ -1671,6 +1671,46 @@ impl<'a> DbPrivilegeIntent<'a> {
     }
 }
 
+pub struct OperatorDbPayloadInput<'a> {
+    pub action: &'a str,
+    pub target: &'a str,
+    pub username: Option<&'a str>,
+    pub role: Option<&'a str>,
+    pub scopes: &'a [String],
+    pub session_refresh_ttl_secs: Option<u64>,
+    pub status: Option<&'a str>,
+    pub admin_risk_acknowledged: bool,
+}
+
+#[derive(Serialize)]
+struct OperatorDbPayload<'a> {
+    version: u8,
+    action: &'a str,
+    target: &'a str,
+    username: Option<&'a str>,
+    role: Option<&'a str>,
+    scopes: Vec<&'a str>,
+    session_refresh_ttl_secs: Option<u64>,
+    status: Option<&'a str>,
+    admin_risk_acknowledged: bool,
+}
+
+impl<'a> OperatorDbPayload<'a> {
+    fn new(input: OperatorDbPayloadInput<'a>) -> Self {
+        Self {
+            version: 1,
+            action: input.action,
+            target: input.target,
+            username: input.username.map(str::trim),
+            role: input.role.map(str::trim),
+            scopes: sorted_str_refs(input.scopes),
+            session_refresh_ttl_secs: input.session_refresh_ttl_secs,
+            status: input.status.map(str::trim),
+            admin_risk_acknowledged: input.admin_risk_acknowledged,
+        }
+    }
+}
+
 pub fn canonical_job_privilege_intent(
     input: JobPrivilegeIntentInput<'_>,
 ) -> serde_json::Result<String> {
@@ -1699,6 +1739,11 @@ pub fn canonical_db_privilege_intent(
         confirmed,
         payload_hash,
     ))
+}
+
+pub fn operator_db_payload_hash(input: OperatorDbPayloadInput<'_>) -> serde_json::Result<String> {
+    let payload = serde_json::to_string(&OperatorDbPayload::new(input))?;
+    Ok(crate::auth::payload_hash(payload.as_bytes()))
 }
 
 fn sorted_str_refs(values: &[String]) -> Vec<&str> {
@@ -3565,5 +3610,23 @@ mod tests {
             intent,
             r#"{"version":1,"action":"suite_config.update","target":"suite_config","selector_expression":null,"resolved_targets":["client-a","client-b"],"confirmed":true,"payload_hash":"ab"}"#
         );
+    }
+
+    #[test]
+    fn operator_db_payload_hash_uses_stable_non_secret_shape() {
+        let scopes = vec!["jobs:write".to_string(), "fleet:read".to_string()];
+        let payload_hash = super::operator_db_payload_hash(super::OperatorDbPayloadInput {
+            action: "operator.update",
+            target: "operator-id",
+            username: None,
+            role: Some("operator"),
+            scopes: &scopes,
+            session_refresh_ttl_secs: Some(86_400),
+            status: None,
+            admin_risk_acknowledged: false,
+        })
+        .unwrap();
+
+        assert_eq!(payload_hash.len(), 64);
     }
 }

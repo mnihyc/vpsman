@@ -13,10 +13,11 @@ use crate::{
         is_valid_operator_timezone, AuthResponse, BootstrapOperatorRequest, CreateOperatorRequest,
         HistoryQuery, LoginRequest, OperatorAuthEventQuery, OperatorAuthEventView,
         OperatorLifecycleRequest, OperatorPasswordResetRequest, OperatorPreferences,
-        OperatorSessionView, OperatorView, RefreshRequest, TotpConfirmRequest, TotpDisableRequest,
-        TotpSetupOutcome, TotpSetupRequest, TotpSetupResponse, TotpUpdateOutcome,
-        UpdateOperatorRequest,
+        OperatorSessionRevokeRequest, OperatorSessionView, OperatorView, RefreshRequest,
+        TotpConfirmRequest, TotpDisableRequest, TotpSetupOutcome, TotpSetupRequest,
+        TotpSetupResponse, TotpUpdateOutcome, UpdateOperatorRequest,
     },
+    privilege::{verify_privilege_intent, DbPrivilegeIntent},
     repository_auth::OperatorLoginAttempt,
     security::{
         normalize_operator_scopes, validate_operator_credentials, validate_operator_role,
@@ -24,6 +25,7 @@ use crate::{
     },
     state::AppState,
 };
+use vpsman_common::{operator_db_payload_hash, OperatorDbPayloadInput, PrivilegeAssertion};
 
 pub(crate) async fn bootstrap_operator(
     State(state): State<AppState>,
@@ -312,14 +314,14 @@ pub(crate) async fn create_operator(
     Json(request): Json<CreateOperatorRequest>,
 ) -> Result<Json<OperatorView>, ApiError> {
     let operator = state.require_operator_role(&headers, "admin").await?;
+    require_confirmed(request.confirmed)?;
     validate_operator_credentials(&request.username, &request.password)?;
     validate_operator_role(&request.role)?;
     let _scopes = normalize_operator_scopes(&request.role, &request.scopes)?;
-    validate_session_refresh_ttl(
-        request
-            .session_refresh_ttl_secs
-            .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
-    )?;
+    let session_refresh_ttl_secs = request
+        .session_refresh_ttl_secs
+        .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS);
+    validate_session_refresh_ttl(session_refresh_ttl_secs)?;
     if request.role.trim() == "admin" && !request.admin_risk_acknowledged {
         return Err(ApiError::bad_request("admin_risk_acknowledgement_required"));
     }
@@ -331,6 +333,19 @@ pub(crate) async fn create_operator(
     {
         return Err(ApiError::conflict("operator_username_exists"));
     }
+    verify_operator_management_privilege(
+        &state,
+        "operator.create",
+        request.username.trim(),
+        Some(request.username.trim()),
+        Some(request.role.trim()),
+        &request.scopes,
+        Some(session_refresh_ttl_secs),
+        None,
+        request.admin_risk_acknowledged,
+        request.privilege_assertion.clone(),
+    )
+    .await?;
     Ok(Json(state.repo.create_operator(&request, &operator).await?))
 }
 
@@ -356,6 +371,20 @@ pub(crate) async fn update_operator(
         Some(&request.role),
         request.admin_risk_acknowledged,
     )?;
+    let target = operator_id.to_string();
+    verify_operator_management_privilege(
+        &state,
+        "operator.update",
+        &target,
+        None,
+        Some(request.role.trim()),
+        &request.scopes,
+        Some(request.session_refresh_ttl_secs),
+        None,
+        request.admin_risk_acknowledged,
+        request.privilege_assertion.clone(),
+    )
+    .await?;
     state
         .repo
         .update_operator(operator_id, &request, &actor)
@@ -408,6 +437,26 @@ async fn set_operator_lifecycle_status(
         .filter(|operator| operator.status != "deleted")
         .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
     require_admin_risk_if_needed(&target.role, None, request.admin_risk_acknowledged)?;
+    let action = match status {
+        "active" => "operator.enable",
+        "disabled" => "operator.disable",
+        "deleted" => "operator.delete",
+        _ => return Err(ApiError::bad_request("invalid_operator_status")),
+    };
+    let target = operator_id.to_string();
+    verify_operator_management_privilege(
+        &state,
+        action,
+        &target,
+        None,
+        None,
+        &[],
+        None,
+        Some(status),
+        request.admin_risk_acknowledged,
+        request.privilege_assertion.clone(),
+    )
+    .await?;
     state
         .repo
         .set_operator_status(operator_id, status, &actor)
@@ -433,6 +482,20 @@ pub(crate) async fn reset_operator_password(
         .filter(|operator| operator.status != "deleted")
         .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
     require_admin_risk_if_needed(&target.role, None, request.admin_risk_acknowledged)?;
+    let target = operator_id.to_string();
+    verify_operator_management_privilege(
+        &state,
+        "operator.password_reset",
+        &target,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        request.admin_risk_acknowledged,
+        request.privilege_assertion.clone(),
+    )
+    .await?;
     state
         .repo
         .reset_operator_password(operator_id, &request.password, &actor)
@@ -456,6 +519,20 @@ pub(crate) async fn clear_operator_totp(
         .filter(|operator| operator.status != "deleted")
         .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
     require_admin_risk_if_needed(&target.role, None, request.admin_risk_acknowledged)?;
+    let target = operator_id.to_string();
+    verify_operator_management_privilege(
+        &state,
+        "operator.totp_clear",
+        &target,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        request.admin_risk_acknowledged,
+        request.privilege_assertion.clone(),
+    )
+    .await?;
     state
         .repo
         .clear_operator_totp(operator_id, &actor)
@@ -496,8 +573,34 @@ pub(crate) async fn revoke_operator_session(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(session_id): Path<Uuid>,
+    Json(request): Json<OperatorSessionRevokeRequest>,
 ) -> Result<Json<OperatorSessionView>, ApiError> {
     let operator = state.require_operator_role(&headers, "admin").await?;
+    require_confirmed(request.confirmed)?;
+    let target_session = state
+        .repo
+        .operator_session_by_id(session_id, operator.session_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("operator_session_not_found"))?;
+    require_admin_risk_if_needed(
+        &target_session.operator_role,
+        None,
+        request.admin_risk_acknowledged,
+    )?;
+    let target = session_id.to_string();
+    verify_operator_management_privilege(
+        &state,
+        "operator_session.revoke",
+        &target,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        request.admin_risk_acknowledged,
+        request.privilege_assertion.clone(),
+    )
+    .await?;
     state
         .repo
         .revoke_operator_session(session_id, &operator)
@@ -520,6 +623,47 @@ fn require_confirmed(confirmed: bool) -> Result<(), ApiError> {
     } else {
         Err(ApiError::bad_request("confirmation_required"))
     }
+}
+
+async fn verify_operator_management_privilege(
+    state: &AppState,
+    action: &str,
+    target: &str,
+    username: Option<&str>,
+    role: Option<&str>,
+    scopes: &[String],
+    session_refresh_ttl_secs: Option<u64>,
+    status: Option<&str>,
+    admin_risk_acknowledged: bool,
+    assertion: Option<PrivilegeAssertion>,
+) -> Result<(), ApiError> {
+    let normalized_scopes = normalized_requested_scopes(scopes);
+    let payload_hash = operator_db_payload_hash(OperatorDbPayloadInput {
+        action,
+        target,
+        username,
+        role,
+        scopes: &normalized_scopes,
+        session_refresh_ttl_secs,
+        status,
+        admin_risk_acknowledged,
+    })
+    .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    let targets = vec![target.to_string()];
+    let intent = DbPrivilegeIntent::new(action, target, None, &targets, true, Some(&payload_hash));
+    verify_privilege_intent(state, &intent, assertion).await
+}
+
+fn normalized_requested_scopes(scopes: &[String]) -> Vec<String> {
+    let mut scopes = scopes
+        .iter()
+        .map(|scope| scope.trim())
+        .filter(|scope| !scope.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    scopes.sort();
+    scopes.dedup();
+    scopes
 }
 
 fn operator_management_error(error: anyhow::Error) -> ApiError {

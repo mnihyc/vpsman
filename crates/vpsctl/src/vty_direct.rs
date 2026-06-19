@@ -1,6 +1,7 @@
 use anyhow::Result;
+use vpsman_common::{operator_db_payload_hash, OperatorDbPayloadInput};
 
-use crate::http::{http_delete, http_get, http_post_json, http_put_json};
+use crate::http::{http_get, http_post_json, http_put_json};
 use crate::privilege::{build_privilege_for_db, DbPrivilegeRequest};
 use crate::vty_jobs::VtyPrivilegeContext;
 
@@ -64,32 +65,50 @@ pub(crate) fn submit_vty_direct_command(
             command,
             privilege_context,
         )?)),
-        command if command.starts_with("operator-create ") => {
-            Ok(Some(submit_operator_create(api_url, token, command)?))
-        }
-        command if command.starts_with("operator-update ") => {
-            Ok(Some(submit_operator_update(api_url, token, command)?))
-        }
+        command if command.starts_with("operator-create ") => Ok(Some(submit_operator_create(
+            api_url,
+            token,
+            command,
+            privilege_context,
+        )?)),
+        command if command.starts_with("operator-update ") => Ok(Some(submit_operator_update(
+            api_url,
+            token,
+            command,
+            privilege_context,
+        )?)),
         command if command.starts_with("operator-disable ") => Ok(Some(submit_operator_lifecycle(
-            api_url, token, command, "disable",
+            api_url,
+            token,
+            command,
+            "disable",
+            privilege_context,
         )?)),
         command if command.starts_with("operator-enable ") => Ok(Some(submit_operator_lifecycle(
-            api_url, token, command, "enable",
+            api_url,
+            token,
+            command,
+            "enable",
+            privilege_context,
         )?)),
         command if command.starts_with("operator-delete ") => Ok(Some(submit_operator_lifecycle(
-            api_url, token, command, "delete",
+            api_url,
+            token,
+            command,
+            "delete",
+            privilege_context,
         )?)),
         command if command.starts_with("operator-password-reset ") => Ok(Some(
-            submit_operator_password_reset(api_url, token, command)?,
+            submit_operator_password_reset(api_url, token, command, privilege_context)?,
         )),
         command if command.starts_with("operator-totp-clear ") => Ok(Some(
-            submit_operator_lifecycle(api_url, token, command, "totp-clear")?,
+            submit_operator_lifecycle(api_url, token, command, "totp-clear", privilege_context)?,
         )),
         command if command.starts_with("operator-sessions ") => {
             Ok(Some(submit_operator_sessions(api_url, token, command)?))
         }
         command if command.starts_with("operator-session-revoke ") => Ok(Some(
-            submit_operator_session_revoke(api_url, token, command)?,
+            submit_operator_session_revoke(api_url, token, command, privilege_context)?,
         )),
         command if command.starts_with("history-retention-upsert ") => Ok(Some(
             submit_history_retention_upsert(api_url, token, command)?,
@@ -157,6 +176,7 @@ fn submit_agent_identity_upsert(
             selector_expression: None,
             resolved_targets: &targets,
             confirmed,
+            payload_hash: None,
         },
         &privilege_context.password,
         &privilege_context.salt_hex,
@@ -199,6 +219,7 @@ fn submit_client_key_revoke(
             selector_expression: None,
             resolved_targets: &targets,
             confirmed,
+            payload_hash: None,
         },
         &privilege_context.password,
         &privilege_context.salt_hex,
@@ -230,13 +251,24 @@ fn has_flag(parts: &[&str], name: &str) -> bool {
     parts.contains(&name)
 }
 
-fn submit_operator_create(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {
+fn submit_operator_create(
+    api_url: &str,
+    token: Option<&str>,
+    command: &str,
+    privilege_context: &VtyPrivilegeContext,
+) -> Result<String> {
+    anyhow::ensure!(
+        privilege_context.enabled,
+        "enter privileged mode first with: enable"
+    );
     let parts = command.split_whitespace().collect::<Vec<_>>();
     if parts.len() < 4 {
         return Ok(
-            "usage: operator-create <username> <role> <password_env> [scope,scope] [--session-refresh-ttl-secs <secs>] [--admin-risk-acknowledged]".to_string(),
+            "usage: operator-create <username> <role> <password_env> [scope,scope] [--session-refresh-ttl-secs <secs>] [--admin-risk-acknowledged] --confirmed".to_string(),
         );
     }
+    let confirmed = has_flag(&parts, "--confirmed");
+    anyhow::ensure!(confirmed, "operator-create requires --confirmed");
     let password = match std::env::var(parts[3]) {
         Ok(password) => password,
         Err(error) => {
@@ -246,6 +278,33 @@ fn submit_operator_create(api_url: &str, token: Option<&str>, command: &str) -> 
             ));
         }
     };
+    let scopes = parts
+        .get(4)
+        .filter(|value| !value.starts_with("--"))
+        .map(|scopes| {
+            scopes
+                .split(',')
+                .filter(|scope| !scope.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let session_refresh_ttl_secs = optional_flag(&parts, "--session-refresh-ttl-secs")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(31_536_000);
+    let admin_risk_acknowledged = has_flag(&parts, "--admin-risk-acknowledged");
+    let privilege_assertion = operator_management_privilege(
+        privilege_context,
+        "operator.create",
+        parts[1],
+        Some(parts[1]),
+        Some(parts[2]),
+        &scopes,
+        Some(session_refresh_ttl_secs),
+        None,
+        admin_risk_acknowledged,
+        confirmed,
+    )?;
     http_post_json(
         api_url,
         "/api/v1/operators",
@@ -254,22 +313,49 @@ fn submit_operator_create(api_url: &str, token: Option<&str>, command: &str) -> 
             "username": parts[1],
             "role": parts[2],
             "password": password,
-            "scopes": parts.get(4).filter(|value| !value.starts_with("--")).map(|scopes| scopes.split(',').filter(|scope| !scope.is_empty()).collect::<Vec<_>>()).unwrap_or_default(),
-            "session_refresh_ttl_secs": optional_flag(&parts, "--session-refresh-ttl-secs")
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(31_536_000),
-            "admin_risk_acknowledged": has_flag(&parts, "--admin-risk-acknowledged"),
+            "scopes": scopes,
+            "session_refresh_ttl_secs": session_refresh_ttl_secs,
+            "confirmed": confirmed,
+            "admin_risk_acknowledged": admin_risk_acknowledged,
+            "privilege_assertion": privilege_assertion,
         }),
     )
 }
 
-fn submit_operator_update(api_url: &str, token: Option<&str>, command: &str) -> Result<String> {
+fn submit_operator_update(
+    api_url: &str,
+    token: Option<&str>,
+    command: &str,
+    privilege_context: &VtyPrivilegeContext,
+) -> Result<String> {
+    anyhow::ensure!(
+        privilege_context.enabled,
+        "enter privileged mode first with: enable"
+    );
     let parts = command.split_whitespace().collect::<Vec<_>>();
     let operator_id = required_flag(&parts, "--operator-id")?;
     let role = required_flag(&parts, "--role")?;
     let scopes = optional_flag(&parts, "--scopes")
         .map(|value| split_csv(&value))
         .unwrap_or_default();
+    let session_refresh_ttl_secs = optional_flag(&parts, "--session-refresh-ttl-secs")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(31_536_000);
+    let admin_risk_acknowledged = has_flag(&parts, "--admin-risk-acknowledged");
+    let confirmed = has_flag(&parts, "--confirmed");
+    anyhow::ensure!(confirmed, "operator-update requires --confirmed");
+    let privilege_assertion = operator_management_privilege(
+        privilege_context,
+        "operator.update",
+        &operator_id,
+        None,
+        Some(&role),
+        &scopes,
+        Some(session_refresh_ttl_secs),
+        None,
+        admin_risk_acknowledged,
+        confirmed,
+    )?;
     http_put_json(
         api_url,
         &format!("/api/v1/operators/{operator_id}"),
@@ -277,11 +363,10 @@ fn submit_operator_update(api_url: &str, token: Option<&str>, command: &str) -> 
         &serde_json::json!({
             "role": role,
             "scopes": scopes,
-            "session_refresh_ttl_secs": optional_flag(&parts, "--session-refresh-ttl-secs")
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(31_536_000),
-            "confirmed": true,
-            "admin_risk_acknowledged": has_flag(&parts, "--admin-risk-acknowledged"),
+            "session_refresh_ttl_secs": session_refresh_ttl_secs,
+            "confirmed": confirmed,
+            "admin_risk_acknowledged": admin_risk_acknowledged,
+            "privilege_assertion": privilege_assertion,
         }),
     )
 }
@@ -291,7 +376,12 @@ fn submit_operator_lifecycle(
     token: Option<&str>,
     command: &str,
     action: &str,
+    privilege_context: &VtyPrivilegeContext,
 ) -> Result<String> {
+    anyhow::ensure!(
+        privilege_context.enabled,
+        "enter privileged mode first with: enable"
+    );
     let parts = command.split_whitespace().collect::<Vec<_>>();
     let operator_id = required_flag(&parts, "--operator-id").or_else(|_| {
         parts
@@ -299,13 +389,30 @@ fn submit_operator_lifecycle(
             .map(|value| (*value).to_string())
             .ok_or_else(|| anyhow::anyhow!("missing operator id"))
     })?;
+    let confirmed = has_flag(&parts, "--confirmed");
+    anyhow::ensure!(confirmed, "operator-{action} requires --confirmed");
+    let admin_risk_acknowledged = has_flag(&parts, "--admin-risk-acknowledged");
+    let (privilege_action, status) = operator_lifecycle_privilege_action(action)?;
+    let privilege_assertion = operator_management_privilege(
+        privilege_context,
+        privilege_action,
+        &operator_id,
+        None,
+        None,
+        &[],
+        None,
+        status,
+        admin_risk_acknowledged,
+        confirmed,
+    )?;
     http_post_json(
         api_url,
         &format!("/api/v1/operators/{operator_id}/{action}"),
         token,
         &serde_json::json!({
-            "confirmed": true,
-            "admin_risk_acknowledged": has_flag(&parts, "--admin-risk-acknowledged"),
+            "confirmed": confirmed,
+            "admin_risk_acknowledged": admin_risk_acknowledged,
+            "privilege_assertion": privilege_assertion,
         }),
     )
 }
@@ -314,7 +421,12 @@ fn submit_operator_password_reset(
     api_url: &str,
     token: Option<&str>,
     command: &str,
+    privilege_context: &VtyPrivilegeContext,
 ) -> Result<String> {
+    anyhow::ensure!(
+        privilege_context.enabled,
+        "enter privileged mode first with: enable"
+    );
     let parts = command.split_whitespace().collect::<Vec<_>>();
     let operator_id = required_flag(&parts, "--operator-id").or_else(|_| {
         parts
@@ -325,15 +437,31 @@ fn submit_operator_password_reset(
     let password_env = optional_flag(&parts, "--password-env")
         .or_else(|| parts.get(2).map(|value| (*value).to_string()))
         .unwrap_or_else(|| "VPSMAN_NEW_OPERATOR_PASSWORD".to_string());
+    let confirmed = has_flag(&parts, "--confirmed");
+    anyhow::ensure!(confirmed, "operator-password-reset requires --confirmed");
+    let admin_risk_acknowledged = has_flag(&parts, "--admin-risk-acknowledged");
     let password = std::env::var(&password_env)?;
+    let privilege_assertion = operator_management_privilege(
+        privilege_context,
+        "operator.password_reset",
+        &operator_id,
+        None,
+        None,
+        &[],
+        None,
+        None,
+        admin_risk_acknowledged,
+        confirmed,
+    )?;
     http_post_json(
         api_url,
         &format!("/api/v1/operators/{operator_id}/password-reset"),
         token,
         &serde_json::json!({
             "password": password,
-            "confirmed": true,
-            "admin_risk_acknowledged": has_flag(&parts, "--admin-risk-acknowledged"),
+            "confirmed": confirmed,
+            "admin_risk_acknowledged": admin_risk_acknowledged,
+            "privilege_assertion": privilege_assertion,
         }),
     )
 }
@@ -355,16 +483,107 @@ fn submit_operator_session_revoke(
     api_url: &str,
     token: Option<&str>,
     command: &str,
+    privilege_context: &VtyPrivilegeContext,
 ) -> Result<String> {
+    anyhow::ensure!(
+        privilege_context.enabled,
+        "enter privileged mode first with: enable"
+    );
     let parts = command.split_whitespace().collect::<Vec<_>>();
-    if parts.len() != 2 {
-        return Ok("usage: operator-session-revoke <session_uuid>".to_string());
+    if parts.len() < 2 {
+        return Ok(
+            "usage: operator-session-revoke <session_uuid> [--admin-risk-acknowledged] --confirmed"
+                .to_string(),
+        );
     }
-    http_delete(
+    let confirmed = has_flag(&parts, "--confirmed");
+    anyhow::ensure!(confirmed, "operator-session-revoke requires --confirmed");
+    let admin_risk_acknowledged = has_flag(&parts, "--admin-risk-acknowledged");
+    let privilege_assertion = operator_management_privilege(
+        privilege_context,
+        "operator_session.revoke",
+        parts[1],
+        None,
+        None,
+        &[],
+        None,
+        None,
+        admin_risk_acknowledged,
+        confirmed,
+    )?;
+    http_post_json(
         api_url,
-        &format!("/api/v1/operator-sessions/{}", parts[1]),
+        &format!("/api/v1/operator-sessions/{}/revoke", parts[1]),
         token,
+        &serde_json::json!({
+            "confirmed": confirmed,
+            "admin_risk_acknowledged": admin_risk_acknowledged,
+            "privilege_assertion": privilege_assertion,
+        }),
     )
+}
+
+fn operator_management_privilege(
+    privilege_context: &VtyPrivilegeContext,
+    action: &str,
+    target: &str,
+    username: Option<&str>,
+    role: Option<&str>,
+    scopes: &[String],
+    session_refresh_ttl_secs: Option<u64>,
+    status: Option<&str>,
+    admin_risk_acknowledged: bool,
+    confirmed: bool,
+) -> Result<vpsman_common::PrivilegeAssertion> {
+    let normalized_scopes = normalized_requested_scopes(scopes);
+    let payload_hash = operator_db_payload_hash(OperatorDbPayloadInput {
+        action,
+        target,
+        username,
+        role,
+        scopes: &normalized_scopes,
+        session_refresh_ttl_secs,
+        status,
+        admin_risk_acknowledged,
+    })?;
+    let targets = vec![target.to_string()];
+    build_privilege_for_db(
+        DbPrivilegeRequest {
+            action,
+            target,
+            selector_expression: None,
+            resolved_targets: &targets,
+            confirmed,
+            payload_hash: Some(&payload_hash),
+        },
+        &privilege_context.password,
+        &privilege_context.salt_hex,
+        300,
+    )
+}
+
+fn operator_lifecycle_privilege_action(
+    action: &str,
+) -> Result<(&'static str, Option<&'static str>)> {
+    match action {
+        "enable" => Ok(("operator.enable", Some("active"))),
+        "disable" => Ok(("operator.disable", Some("disabled"))),
+        "delete" => Ok(("operator.delete", Some("deleted"))),
+        "totp-clear" => Ok(("operator.totp_clear", None)),
+        _ => anyhow::bail!("invalid operator lifecycle action {action}"),
+    }
+}
+
+fn normalized_requested_scopes(scopes: &[String]) -> Vec<String> {
+    let mut scopes = scopes
+        .iter()
+        .map(|scope| scope.trim())
+        .filter(|scope| !scope.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    scopes.sort();
+    scopes.dedup();
+    scopes
 }
 
 fn split_csv(value: &str) -> Vec<String> {

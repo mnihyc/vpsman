@@ -26,9 +26,12 @@ import { TimeSeriesChart, type TimeSeriesChartLine } from "../components/TimeSer
 import {
   buildPrivilegeAssertion,
   canonicalDbPrivilegeIntent,
+  operatorDbPayloadHashHex,
   textPayloadHashHex,
+  type PrivilegeAssertion,
   type PrivilegeMaterial,
 } from "../privilege";
+import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import type {
   JsonValue,
   OperatorAuthEventRecord,
@@ -55,7 +58,11 @@ type SystemPanelProps = {
   onDashboardPointDensityChange: (density: SystemDashboardPointDensity) => void;
   onDashboardRefresh: () => void;
   onDashboardWindowChange: (window: SystemDashboardWindow) => void;
-  onClearOperatorTotp: (operatorId: string, adminRiskAcknowledged: boolean) => Promise<void>;
+  onClearOperatorTotp: (
+    operatorId: string,
+    adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
   onCreateOperator: (
     username: string,
     role: string,
@@ -63,6 +70,7 @@ type SystemPanelProps = {
     scopes: string[],
     sessionRefreshTtlSecs: number,
     adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
   onLoadSuiteConfig: () => void;
   onOpenPrivilegeUnlock: () => void;
@@ -70,12 +78,18 @@ type SystemPanelProps = {
     operatorId: string,
     password: string,
     adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
-  onRevokeOperatorSession: (sessionId: string) => Promise<void>;
+  onRevokeOperatorSession: (
+    sessionId: string,
+    adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
   onSetOperatorStatus: (
     operatorId: string,
     status: "active" | "disabled" | "deleted",
     adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
   onUpdateOperator: (
     operatorId: string,
@@ -83,6 +97,7 @@ type SystemPanelProps = {
     scopes: string[],
     sessionRefreshTtlSecs: number,
     adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
   onUpdateSuiteConfig: (
     toml: string,
@@ -152,7 +167,7 @@ const operatorHelpText = {
   save:
     "Save role, scopes, and refresh-token session TTL only. This action never changes the password field.",
   resetPassword:
-    "Apply the New password field, then revoke existing sessions for this operator.",
+    "Apply the New password field, clear existing TOTP secret material, then revoke existing sessions for this operator.",
   clearTotp:
     "Remove stored TOTP secret material and revoke existing sessions. The user must enroll TOTP again before using it.",
   enable:
@@ -219,10 +234,12 @@ export function SystemPanel({
         currentOperator={operator}
         onClearOperatorTotp={onClearOperatorTotp}
         onCreateOperator={onCreateOperator}
+        onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
         onResetOperatorPassword={onResetOperatorPassword}
         onSetOperatorStatus={onSetOperatorStatus}
         onUpdateOperator={onUpdateOperator}
         operators={operators}
+        privilegeMaterial={privilegeMaterial}
       />
     );
   }
@@ -230,7 +247,9 @@ export function SystemPanel({
     return (
       <SystemSessionsPanel
         authEvents={operatorAuthEvents}
+        onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
         onRevokeOperatorSession={onRevokeOperatorSession}
+        privilegeMaterial={privilegeMaterial}
         sessions={operatorSessions}
       />
     );
@@ -261,6 +280,7 @@ type PendingUserAction =
       scopes: string[];
       sessionRefreshTtlSecs: number;
       adminRisk: boolean;
+      privilege: OperatorPrivilegeSnapshot;
     }
   | {
       kind: "update";
@@ -269,24 +289,39 @@ type PendingUserAction =
       scopes: string[];
       sessionRefreshTtlSecs: number;
       adminRisk: boolean;
+      privilege: OperatorPrivilegeSnapshot;
     }
   | {
       kind: "status";
       operators: OperatorView[];
       status: "active" | "disabled" | "deleted";
       adminRisk: boolean;
+      privileges: Record<string, OperatorPrivilegeSnapshot>;
     }
   | {
       kind: "password";
       operator: OperatorView;
       password: string;
       adminRisk: boolean;
+      privilege: OperatorPrivilegeSnapshot;
     }
   | {
       kind: "totp";
       operators: OperatorView[];
       adminRisk: boolean;
+      privileges: Record<string, OperatorPrivilegeSnapshot>;
     };
+
+type OperatorPrivilegeSnapshot = {
+  payloadHashHex: string;
+  privilegeAssertion: PrivilegeAssertion;
+};
+
+type PendingSessionRevoke = {
+  sessions: OperatorSessionRecord[];
+  adminRisk: boolean;
+  privileges: Record<string, OperatorPrivilegeSnapshot>;
+};
 
 function FieldLabel({ help, label }: { help: string; label: string }) {
   return (
@@ -309,13 +344,19 @@ function SystemUsersPanel({
   currentOperator,
   onClearOperatorTotp,
   onCreateOperator,
+  onOpenPrivilegeUnlock,
   onResetOperatorPassword,
   onSetOperatorStatus,
   onUpdateOperator,
   operators,
+  privilegeMaterial,
 }: {
   currentOperator: OperatorView | null;
-  onClearOperatorTotp: (operatorId: string, adminRiskAcknowledged: boolean) => Promise<void>;
+  onClearOperatorTotp: (
+    operatorId: string,
+    adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
   onCreateOperator: (
     username: string,
     role: string,
@@ -323,16 +364,20 @@ function SystemUsersPanel({
     scopes: string[],
     sessionRefreshTtlSecs: number,
     adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
+  onOpenPrivilegeUnlock: () => void;
   onResetOperatorPassword: (
     operatorId: string,
     password: string,
     adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
   onSetOperatorStatus: (
     operatorId: string,
     status: "active" | "disabled" | "deleted",
     adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
   onUpdateOperator: (
     operatorId: string,
@@ -340,8 +385,10 @@ function SystemUsersPanel({
     scopes: string[],
     sessionRefreshTtlSecs: number,
     adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
   ) => Promise<void>;
   operators: OperatorView[];
+  privilegeMaterial: PrivilegeMaterial | null;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedOperator = operators.find((item) => item.id === selectedId) ?? null;
@@ -353,7 +400,13 @@ function SystemUsersPanel({
   const [pendingAction, setPendingAction] = useState<PendingUserAction | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
+  const [reviewPending, setReviewPending] = useState(false);
   const canManageUsers = currentOperator?.role === "admin";
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
 
   useEffect(() => {
     if (!selectedOperator) {
@@ -365,7 +418,14 @@ function SystemUsersPanel({
     setDraftScopes(selectedOperator.scopes.join(", "));
     setDraftSessionTtlDays(secondsToDays(selectedOperator.session_refresh_ttl_secs));
     setActionError(null);
-  }, [selectedOperator]);
+    setPendingAction(null);
+    invalidateReviewGeneration();
+  }, [selectedOperator, invalidateReviewGeneration]);
+
+  useEffect(() => {
+    setPendingAction(null);
+    invalidateReviewGeneration();
+  }, [operators, invalidateReviewGeneration]);
 
   const userColumns = useMemo<ConsoleDataGridColumn<OperatorView>[]>(
     () => [
@@ -417,7 +477,19 @@ function SystemUsersPanel({
     [],
   );
 
+  function invalidateUserReview() {
+    setPendingAction(null);
+    setReviewPending(false);
+    invalidateReviewGeneration();
+  }
+
+  function setSelectedOperatorId(nextId: string | null) {
+    invalidateUserReview();
+    setSelectedId(nextId);
+  }
+
   function resetCreateDraft() {
+    invalidateUserReview();
     setSelectedId(null);
     setDraftUsername("");
     setDraftPassword("");
@@ -427,7 +499,73 @@ function SystemUsersPanel({
     setActionError(null);
   }
 
-  function submitCreate() {
+  async function requestPendingAction(
+    builder: (material: PrivilegeMaterial) => Promise<PendingUserAction>,
+  ) {
+    if (!privilegeMaterial) {
+      setActionError("Local privilege unlock is required");
+      onOpenPrivilegeUnlock();
+      return;
+    }
+    const reviewGeneration = captureReviewGeneration();
+    setReviewPending(true);
+    setActionError(null);
+    try {
+      await waitForReviewRender();
+      const action = await builder(privilegeMaterial);
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
+      setPendingAction(action);
+    } catch (error) {
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
+      setActionError(error instanceof Error ? error.message : "Privilege assertion failed");
+    } finally {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setReviewPending(false);
+      }
+    }
+  }
+
+  async function buildOperatorPrivilegeSnapshot(
+    material: PrivilegeMaterial,
+    input: {
+      action: string;
+      target: string;
+      username?: string | null;
+      role?: string | null;
+      scopes?: string[];
+      sessionRefreshTtlSecs?: number | null;
+      status?: string | null;
+      adminRisk: boolean;
+    },
+  ): Promise<OperatorPrivilegeSnapshot> {
+    const payloadHashHex = await operatorDbPayloadHashHex({
+      action: input.action,
+      target: input.target,
+      username: input.username ?? null,
+      role: input.role ?? null,
+      scopes: input.scopes ?? [],
+      sessionRefreshTtlSecs: input.sessionRefreshTtlSecs ?? null,
+      status: input.status ?? null,
+      adminRiskAcknowledged: input.adminRisk,
+    });
+    const privilegeAssertion = await buildPrivilegeAssertion({
+      intent: canonicalDbPrivilegeIntent({
+        action: input.action,
+        confirmed: true,
+        payloadHash: payloadHashHex,
+        resolvedTargets: [input.target],
+        target: input.target,
+      }),
+      privilegeMaterial: material,
+    });
+    return { payloadHashHex, privilegeAssertion };
+  }
+
+  async function submitCreate() {
     const username = draftUsername.trim();
     const password = draftPassword;
     if (!username || password.length < 12) {
@@ -436,89 +574,143 @@ function SystemUsersPanel({
     }
     const scopes = parseScopeList(draftScopes);
     const sessionRefreshTtlSecs = daysToSeconds(draftSessionTtlDays);
-    setPendingAction({
+    const adminRisk = draftRole === "admin";
+    await requestPendingAction(async (material) => ({
       kind: "create",
       username,
       role: draftRole,
       password,
       scopes,
       sessionRefreshTtlSecs,
-      adminRisk: draftRole === "admin",
-    });
+      adminRisk,
+      privilege: await buildOperatorPrivilegeSnapshot(material, {
+        action: "operator.create",
+        target: username,
+        username,
+        role: draftRole,
+        scopes,
+        sessionRefreshTtlSecs,
+        adminRisk,
+      }),
+    }));
   }
 
-  function submitUpdate() {
+  async function submitUpdate() {
     if (!selectedOperator) {
       return;
     }
-    setPendingAction({
+    const role = draftRole;
+    const scopes = parseScopeList(draftScopes);
+    const sessionRefreshTtlSecs = daysToSeconds(draftSessionTtlDays);
+    const adminRisk = selectedOperator.role === "admin" || role === "admin";
+    await requestPendingAction(async (material) => ({
       kind: "update",
       operator: selectedOperator,
-      role: draftRole,
-      scopes: parseScopeList(draftScopes),
-      sessionRefreshTtlSecs: daysToSeconds(draftSessionTtlDays),
-      adminRisk: selectedOperator.role === "admin" || draftRole === "admin",
-    });
+      role,
+      scopes,
+      sessionRefreshTtlSecs,
+      adminRisk,
+      privilege: await buildOperatorPrivilegeSnapshot(material, {
+        action: "operator.update",
+        target: selectedOperator.id,
+        role,
+        scopes,
+        sessionRefreshTtlSecs,
+        adminRisk,
+      }),
+    }));
   }
 
-  function submitStatus(status: "active" | "disabled" | "deleted") {
+  async function submitStatus(status: "active" | "disabled" | "deleted") {
     if (!selectedOperator) {
       return;
     }
-    setPendingAction({
-      kind: "status",
-      operators: [selectedOperator],
-      status,
-      adminRisk: selectedOperator.role === "admin",
-    });
+    await submitBulkStatus([selectedOperator], status);
   }
 
-  function submitBulkStatus(rows: OperatorView[], status: "active" | "disabled" | "deleted") {
+  async function submitBulkStatus(rows: OperatorView[], status: "active" | "disabled" | "deleted") {
     const operatorsToChange = rows.filter((operator) => operator.status !== "deleted");
     if (operatorsToChange.length === 0) {
       return;
     }
-    setPendingAction({
-      kind: "status",
-      operators: operatorsToChange,
-      status,
-      adminRisk: operatorsToChange.some((operator) => operator.role === "admin"),
+    const adminRisk = operatorsToChange.some((operator) => operator.role === "admin");
+    const action = status === "active" ? "operator.enable" : status === "disabled" ? "operator.disable" : "operator.delete";
+    await requestPendingAction(async (material) => {
+      const privileges = Object.fromEntries(
+        await Promise.all(
+          operatorsToChange.map(async (operator) => [
+            operator.id,
+            await buildOperatorPrivilegeSnapshot(material, {
+              action,
+              target: operator.id,
+              status,
+              adminRisk,
+            }),
+          ]),
+        ),
+      );
+      return {
+        kind: "status",
+        operators: operatorsToChange,
+        status,
+        adminRisk,
+        privileges,
+      };
     });
   }
 
-  function submitPasswordReset() {
+  async function submitPasswordReset() {
     if (!selectedOperator || draftPassword.length < 12) {
       setActionError("A 12+ character replacement password is required");
       return;
     }
-    setPendingAction({
+    const password = draftPassword;
+    const adminRisk = selectedOperator.role === "admin";
+    await requestPendingAction(async (material) => ({
       kind: "password",
       operator: selectedOperator,
-      password: draftPassword,
-      adminRisk: selectedOperator.role === "admin",
-    });
+      password,
+      adminRisk,
+      privilege: await buildOperatorPrivilegeSnapshot(material, {
+        action: "operator.password_reset",
+        target: selectedOperator.id,
+        adminRisk,
+      }),
+    }));
   }
 
-  function submitTotpClear() {
+  async function submitTotpClear() {
     if (!selectedOperator) {
       return;
     }
-    setPendingAction({
-      kind: "totp",
-      operators: [selectedOperator],
-      adminRisk: selectedOperator.role === "admin",
-    });
+    await submitBulkTotpClear([selectedOperator]);
   }
 
-  function submitBulkTotpClear(rows: OperatorView[]) {
+  async function submitBulkTotpClear(rows: OperatorView[]) {
     const operatorsToChange = rows.filter((operator) => operator.totp_enabled && operator.status !== "deleted");
     if (operatorsToChange.length === 0) {
       return;
     }
-    setPendingAction({
-      kind: "totp",
-      operators: operatorsToChange,
-      adminRisk: operatorsToChange.some((operator) => operator.role === "admin"),
+    const adminRisk = operatorsToChange.some((operator) => operator.role === "admin");
+    await requestPendingAction(async (material) => {
+      const privileges = Object.fromEntries(
+        await Promise.all(
+          operatorsToChange.map(async (operator) => [
+            operator.id,
+            await buildOperatorPrivilegeSnapshot(material, {
+              action: "operator.totp_clear",
+              target: operator.id,
+              adminRisk,
+            }),
+          ]),
+        ),
+      );
+      return {
+        kind: "totp",
+        operators: operatorsToChange,
+        adminRisk,
+        privileges,
+      };
     });
   }
 
@@ -537,6 +729,7 @@ function SystemUsersPanel({
           pendingAction.scopes,
           pendingAction.sessionRefreshTtlSecs,
           pendingAction.adminRisk,
+          pendingAction.privilege.privilegeAssertion,
         );
         resetCreateDraft();
       } else if (pendingAction.kind === "update") {
@@ -546,6 +739,7 @@ function SystemUsersPanel({
           pendingAction.scopes,
           pendingAction.sessionRefreshTtlSecs,
           pendingAction.adminRisk,
+          pendingAction.privilege.privilegeAssertion,
         );
       } else if (pendingAction.kind === "status") {
         for (const operator of pendingAction.operators) {
@@ -553,6 +747,7 @@ function SystemUsersPanel({
             operator.id,
             pendingAction.status,
             pendingAction.adminRisk,
+            pendingAction.privileges[operator.id].privilegeAssertion,
           );
         }
       } else if (pendingAction.kind === "password") {
@@ -560,11 +755,16 @@ function SystemUsersPanel({
           pendingAction.operator.id,
           pendingAction.password,
           pendingAction.adminRisk,
+          pendingAction.privilege.privilegeAssertion,
         );
         setDraftPassword("");
       } else {
         for (const operator of pendingAction.operators) {
-          await onClearOperatorTotp(operator.id, pendingAction.adminRisk);
+          await onClearOperatorTotp(
+            operator.id,
+            pendingAction.adminRisk,
+            pendingAction.privileges[operator.id].privilegeAssertion,
+          );
         }
       }
       setPendingAction(null);
@@ -599,7 +799,7 @@ function SystemUsersPanel({
                   : "Select exactly one operator to edit.",
               disabled: (rows) => rows.length !== 1,
               icon: <Pencil size={14} />,
-              onSelect: (rows) => setSelectedId(rows[0].id),
+              onSelect: (rows) => setSelectedOperatorId(rows[0].id),
             },
             {
               label: "Enable selected",
@@ -607,9 +807,9 @@ function SystemUsersPanel({
                 rows.length === 1
                   ? `Allow ${rows[0].username} to log in again.`
                   : `Allow ${rows.length} disabled operators to log in again.`,
-              disabled: (rows) => !canManageUsers || rows.length === 0 || rows.some((row) => row.status !== "disabled"),
+              disabled: (rows) => reviewPending || actionPending || !canManageUsers || rows.length === 0 || rows.some((row) => row.status !== "disabled"),
               icon: <CheckCircle2 size={14} />,
-              onSelect: (rows) => submitBulkStatus(rows, "active"),
+              onSelect: (rows) => void submitBulkStatus(rows, "active"),
             },
             {
               label: "Disable selected",
@@ -617,9 +817,9 @@ function SystemUsersPanel({
                 rows.length === 1
                   ? `Block ${rows[0].username} login and revoke existing sessions.`
                   : `Block login and revoke existing sessions for ${rows.length} operators.`,
-              disabled: (rows) => !canManageUsers || rows.length === 0 || rows.some((row) => row.status !== "active"),
+              disabled: (rows) => reviewPending || actionPending || !canManageUsers || rows.length === 0 || rows.some((row) => row.status !== "active"),
               icon: <UserX size={14} />,
-              onSelect: (rows) => submitBulkStatus(rows, "disabled"),
+              onSelect: (rows) => void submitBulkStatus(rows, "disabled"),
               tone: "danger",
             },
             {
@@ -628,9 +828,9 @@ function SystemUsersPanel({
                 rows.length === 1
                   ? `Delete ${rows[0].username} for login purposes and revoke existing sessions.`
                   : `Delete ${rows.length} operators for login purposes and revoke existing sessions.`,
-              disabled: (rows) => !canManageUsers || rows.length === 0 || rows.some((row) => row.status === "deleted"),
+              disabled: (rows) => reviewPending || actionPending || !canManageUsers || rows.length === 0 || rows.some((row) => row.status === "deleted"),
               icon: <Trash2 size={14} />,
-              onSelect: (rows) => submitBulkStatus(rows, "deleted"),
+              onSelect: (rows) => void submitBulkStatus(rows, "deleted"),
               tone: "danger",
             },
             {
@@ -639,9 +839,9 @@ function SystemUsersPanel({
                 rows.length === 1
                   ? `Remove stored TOTP secret material for ${rows[0].username} and revoke existing sessions.`
                   : `Remove stored TOTP secret material and revoke sessions for ${rows.length} operators.`,
-              disabled: (rows) => !canManageUsers || rows.length === 0 || rows.some((row) => !row.totp_enabled || row.status === "deleted"),
+              disabled: (rows) => reviewPending || actionPending || !canManageUsers || rows.length === 0 || rows.some((row) => !row.totp_enabled || row.status === "deleted"),
               icon: <ShieldCheck size={14} />,
-              onSelect: submitBulkTotpClear,
+              onSelect: (rows) => void submitBulkTotpClear(rows),
             },
           ]}
           columns={userColumns}
@@ -649,7 +849,7 @@ function SystemUsersPanel({
           empty="No operators"
           getRowId={(row) => row.id}
           itemLabel="users"
-          onOpenRow={(row) => setSelectedId(row.id)}
+          onOpenRow={(row) => setSelectedOperatorId(row.id)}
           rows={operators}
           searchPlaceholder="Search username, role, status, or TOTP"
           storageKey="vpsman.system.users"
@@ -672,7 +872,7 @@ function SystemUsersPanel({
         <div className="sectionHeader fleetInstancesHeader">
           <div>
             <h2>{selectedOperator ? "Edit user" : "Create user"}</h2>
-            <span>{actionError ?? (canManageUsers ? "Ready" : "Admin role required for changes")}</span>
+            <span>{actionError ?? (reviewPending ? "Preparing review" : canManageUsers ? "Ready" : "Admin role required for changes")}</span>
           </div>
           {selectedOperator && (
             <span className="sectionContext">
@@ -687,7 +887,10 @@ function SystemUsersPanel({
               <input
                 aria-label="Operator username"
                 disabled={Boolean(selectedOperator)}
-                onChange={(event) => setDraftUsername(event.target.value)}
+                onChange={(event) => {
+                  invalidateUserReview();
+                  setDraftUsername(event.target.value);
+                }}
                 title={operatorHelpText.username}
                 value={draftUsername}
               />
@@ -701,7 +904,10 @@ function SystemUsersPanel({
                 aria-label="Operator password"
                 disabled={!canManageUsers || editingDeleted}
                 minLength={12}
-                onChange={(event) => setDraftPassword(event.target.value)}
+                onChange={(event) => {
+                  invalidateUserReview();
+                  setDraftPassword(event.target.value);
+                }}
                 placeholder={selectedOperator ? "Only fill to reset" : "12+ characters"}
                 title={selectedOperator ? operatorHelpText.newPassword : operatorHelpText.createPassword}
                 type="password"
@@ -713,7 +919,10 @@ function SystemUsersPanel({
               <select
                 aria-label="Operator role"
                 disabled={!canManageUsers || editingDeleted}
-                onChange={(event) => setDraftRole(event.target.value)}
+                onChange={(event) => {
+                  invalidateUserReview();
+                  setDraftRole(event.target.value);
+                }}
                 title={operatorHelpText.role}
                 value={draftRole}
               >
@@ -729,7 +938,10 @@ function SystemUsersPanel({
                 disabled={!canManageUsers || editingDeleted}
                 max={3650}
                 min={1}
-                onChange={(event) => setDraftSessionTtlDays(Number(event.target.value))}
+                onChange={(event) => {
+                  invalidateUserReview();
+                  setDraftSessionTtlDays(Number(event.target.value));
+                }}
                 title={operatorHelpText.sessionRefreshTtl}
                 type="number"
                 value={draftSessionTtlDays}
@@ -743,7 +955,10 @@ function SystemUsersPanel({
               <textarea
                 aria-label="Operator scopes"
                 disabled={!canManageUsers || editingDeleted}
-                onChange={(event) => setDraftScopes(event.target.value)}
+                onChange={(event) => {
+                  invalidateUserReview();
+                  setDraftScopes(event.target.value);
+                }}
                 placeholder="Leave empty for role defaults"
                 rows={4}
                 title={operatorHelpText.scopes}
@@ -760,7 +975,10 @@ function SystemUsersPanel({
                   className="tagChip"
                   disabled={!canManageUsers || editingDeleted}
                   key={scope}
-                  onClick={() => setDraftScopes(addScopeToken(draftScopes, scope))}
+                  onClick={() => {
+                    invalidateUserReview();
+                    setDraftScopes(addScopeToken(draftScopes, scope));
+                  }}
                   title={scope === "*" ? "Append * to grant all operator scopes." : `Append ${scope} to the scope override field.`}
                   type="button"
                 >
@@ -775,8 +993,8 @@ function SystemUsersPanel({
               <>
                 <button
                   className="secondaryAction"
-                  disabled={!canManageUsers || editingDeleted}
-                  onClick={submitUpdate}
+                  disabled={!canManageUsers || editingDeleted || reviewPending || actionPending}
+                  onClick={() => void submitUpdate()}
                   title={operatorHelpText.save}
                   type="button"
                 >
@@ -785,8 +1003,8 @@ function SystemUsersPanel({
                 </button>
                 <button
                   className="secondaryAction"
-                  disabled={!canManageUsers || editingDeleted || draftPassword.length < 12}
-                  onClick={submitPasswordReset}
+                  disabled={!canManageUsers || editingDeleted || draftPassword.length < 12 || reviewPending || actionPending}
+                  onClick={() => void submitPasswordReset()}
                   title={operatorHelpText.resetPassword}
                   type="button"
                 >
@@ -795,8 +1013,8 @@ function SystemUsersPanel({
                 </button>
                 <button
                   className="secondaryAction"
-                  disabled={!canManageUsers || editingDeleted || !selectedOperator.totp_enabled}
-                  onClick={submitTotpClear}
+                  disabled={!canManageUsers || editingDeleted || !selectedOperator.totp_enabled || reviewPending || actionPending}
+                  onClick={() => void submitTotpClear()}
                   title={operatorHelpText.clearTotp}
                   type="button"
                 >
@@ -805,8 +1023,8 @@ function SystemUsersPanel({
                 </button>
                 <button
                   className="secondaryAction"
-                  disabled={!canManageUsers || selectedOperator.status !== "disabled"}
-                  onClick={() => submitStatus("active")}
+                  disabled={!canManageUsers || selectedOperator.status !== "disabled" || reviewPending || actionPending}
+                  onClick={() => void submitStatus("active")}
                   title={operatorHelpText.enable}
                   type="button"
                 >
@@ -815,8 +1033,8 @@ function SystemUsersPanel({
                 </button>
                 <button
                   className="secondaryAction dangerAction"
-                  disabled={!canManageUsers || selectedOperator.status !== "active"}
-                  onClick={() => submitStatus("disabled")}
+                  disabled={!canManageUsers || selectedOperator.status !== "active" || reviewPending || actionPending}
+                  onClick={() => void submitStatus("disabled")}
                   title={operatorHelpText.disable}
                   type="button"
                 >
@@ -825,8 +1043,8 @@ function SystemUsersPanel({
                 </button>
                 <button
                   className="secondaryAction dangerAction"
-                  disabled={!canManageUsers || editingDeleted}
-                  onClick={() => submitStatus("deleted")}
+                  disabled={!canManageUsers || editingDeleted || reviewPending || actionPending}
+                  onClick={() => void submitStatus("deleted")}
                   title={operatorHelpText.delete}
                   type="button"
                 >
@@ -837,8 +1055,8 @@ function SystemUsersPanel({
             ) : (
               <button
                 className="secondaryAction"
-                disabled={!canManageUsers}
-                onClick={submitCreate}
+                disabled={!canManageUsers || reviewPending || actionPending}
+                onClick={() => void submitCreate()}
                 title={operatorHelpText.create}
                 type="button"
               >
@@ -866,16 +1084,30 @@ function SystemUsersPanel({
 
 function SystemSessionsPanel({
   authEvents,
+  onOpenPrivilegeUnlock,
   onRevokeOperatorSession,
+  privilegeMaterial,
   sessions,
 }: {
   authEvents: OperatorAuthEventRecord[];
-  onRevokeOperatorSession: (sessionId: string) => Promise<void>;
+  onOpenPrivilegeUnlock: () => void;
+  onRevokeOperatorSession: (
+    sessionId: string,
+    adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
+  privilegeMaterial: PrivilegeMaterial | null;
   sessions: OperatorSessionRecord[];
 }) {
-  const [pendingSessions, setPendingSessions] = useState<OperatorSessionRecord[]>([]);
+  const [pendingRevoke, setPendingRevoke] = useState<PendingSessionRevoke | null>(null);
   const [pending, setPending] = useState(false);
+  const [reviewPending, setReviewPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
   const sessionColumns = useMemo<ConsoleDataGridColumn<OperatorSessionRecord>[]>(
     () => [
       { id: "operator", header: "User", cell: (row) => row.operator_username, searchValue: (row) => row.operator_username },
@@ -927,17 +1159,85 @@ function SystemSessionsPanel({
     [],
   );
 
+  useEffect(() => {
+    setPendingRevoke(null);
+    setReviewPending(false);
+    invalidateReviewGeneration();
+  }, [sessions, invalidateReviewGeneration]);
+
+  async function requestSessionRevoke(rows: OperatorSessionRecord[]) {
+    const sessionsToRevoke = rows.filter((session) => !session.current && !session.revoked);
+    if (sessionsToRevoke.length === 0) {
+      return;
+    }
+    if (!privilegeMaterial) {
+      setError("Local privilege unlock is required");
+      onOpenPrivilegeUnlock();
+      return;
+    }
+    const reviewGeneration = captureReviewGeneration();
+    const adminRisk = sessionsToRevoke.some((session) => session.operator_role === "admin");
+    setReviewPending(true);
+    setError(null);
+    try {
+      await waitForReviewRender();
+      const privileges = Object.fromEntries(
+        await Promise.all(
+          sessionsToRevoke.map(async (session) => {
+            const payloadHashHex = await operatorDbPayloadHashHex({
+              action: "operator_session.revoke",
+              target: session.id,
+              adminRiskAcknowledged: adminRisk,
+            });
+            const privilegeAssertion = await buildPrivilegeAssertion({
+              intent: canonicalDbPrivilegeIntent({
+                action: "operator_session.revoke",
+                confirmed: true,
+                payloadHash: payloadHashHex,
+                resolvedTargets: [session.id],
+                target: session.id,
+              }),
+              privilegeMaterial,
+            });
+            return [session.id, { payloadHashHex, privilegeAssertion }];
+          }),
+        ),
+      );
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
+      setPendingRevoke({
+        sessions: sessionsToRevoke,
+        adminRisk,
+        privileges,
+      });
+    } catch (actionError) {
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
+      setError(actionError instanceof Error ? actionError.message : "Privilege assertion failed");
+    } finally {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setReviewPending(false);
+      }
+    }
+  }
+
   async function confirmSessionRevoke() {
-    if (pendingSessions.length === 0) {
+    if (!pendingRevoke || pendingRevoke.sessions.length === 0) {
       return;
     }
     setPending(true);
     setError(null);
     try {
-      for (const session of pendingSessions) {
-        await onRevokeOperatorSession(session.id);
+      for (const session of pendingRevoke.sessions) {
+        await onRevokeOperatorSession(
+          session.id,
+          pendingRevoke.adminRisk,
+          pendingRevoke.privileges[session.id].privilegeAssertion,
+        );
       }
-      setPendingSessions([]);
+      setPendingRevoke(null);
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : "Session revoke failed");
     } finally {
@@ -951,7 +1251,7 @@ function SystemSessionsPanel({
         <section className="controlPanel">
           <div className="sectionHeader compact">
             <h2>Sessions</h2>
-            <span>{sessions.length} recent sessions</span>
+            <span>{reviewPending ? "Preparing review" : `${sessions.length} recent sessions`}</span>
           </div>
           {error && <div className="panelError">{error}</div>}
           <ConsoleDataGrid
@@ -964,8 +1264,8 @@ function SystemSessionsPanel({
                     : `Revoke ${rows.length} selected bearer sessions.`,
                 tone: "danger",
                 icon: <UserX size={14} />,
-                disabled: (rows) => rows.length === 0 || rows.some((row) => row.current || row.revoked),
-                onSelect: (rows) => setPendingSessions(rows),
+                disabled: (rows) => reviewPending || pending || rows.length === 0 || rows.some((row) => row.current || row.revoked),
+                onSelect: (rows) => void requestSessionRevoke(rows),
               },
             ]}
             columns={sessionColumns}
@@ -998,24 +1298,30 @@ function SystemSessionsPanel({
         </section>
       </div>
       <ConfirmationPrompt
-        confirmLabel={pendingSessions.length === 1 ? "Revoke session" : "Revoke sessions"}
+        confirmLabel={(pendingRevoke?.sessions.length ?? 0) === 1 ? "Revoke session" : "Revoke sessions"}
         detail={
-          pendingSessions.some((session) => session.operator_role === "admin")
+          pendingRevoke?.sessions.some((session) => session.operator_role === "admin")
             ? "This revokes an admin user's bearer session. Existing browser state for that session will stop working after the current access token expires or is checked again."
-            : pendingSessions.length === 1
+            : (pendingRevoke?.sessions.length ?? 0) === 1
               ? "This revokes the selected bearer session."
               : "This revokes the selected bearer sessions."
         }
         items={[
-          { label: "Sessions", value: pendingSessions.length },
-          { label: "Users", value: pendingSessions.map((session) => session.operator_username).join(", ") || "-" },
-          { label: "Admin sessions", value: pendingSessions.filter((session) => session.operator_role === "admin").length },
+          { label: "Sessions", value: pendingRevoke?.sessions.length ?? 0 },
+          { label: "Users", value: pendingRevoke?.sessions.map((session) => session.operator_username).join(", ") || "-" },
+          { label: "Admin sessions", value: pendingRevoke?.sessions.filter((session) => session.operator_role === "admin").length ?? 0 },
+          {
+            label: "Payload",
+            value: pendingRevoke?.sessions[0]
+              ? shortId(pendingRevoke.privileges[pendingRevoke.sessions[0].id].payloadHashHex)
+              : "-",
+          },
         ]}
-        onCancel={() => setPendingSessions([])}
+        onCancel={() => setPendingRevoke(null)}
         onConfirm={() => void confirmSessionRevoke()}
-        open={pendingSessions.length > 0}
+        open={Boolean(pendingRevoke)}
         pending={pending}
-        title={pendingSessions.some((session) => session.operator_role === "admin") ? "Confirm admin session revoke" : "Confirm session revoke"}
+        title={pendingRevoke?.sessions.some((session) => session.operator_role === "admin") ? "Confirm admin session revoke" : "Confirm session revoke"}
         tone="danger"
       />
     </div>
@@ -1082,7 +1388,7 @@ function pendingUserActionDetail(action: PendingUserAction | null): ReactNode {
     case "status":
       return `${pendingUserActionLabel(action)} for ${formatOperatorSelection(action.operators)}.${adminDetail}`;
     case "password":
-      return `Replace the password and revoke existing sessions for ${action.operator.username}.${adminDetail}`;
+      return `Replace the password, clear stored TOTP secret material, and revoke existing sessions for ${action.operator.username}.${adminDetail}`;
     case "totp":
       return `Clear stored TOTP secret material and revoke existing sessions for ${formatOperatorSelection(action.operators)}.${adminDetail}`;
   }
@@ -1098,6 +1404,7 @@ function pendingUserActionItems(action: PendingUserAction | null): Array<{ label
       { label: "Role", value: action.role },
       { label: "Session TTL", value: `${secondsToDays(action.sessionRefreshTtlSecs)}d` },
       { label: "Scopes", value: action.scopes.length ? action.scopes.join(", ") : "role defaults" },
+      { label: "Payload", value: shortId(action.privilege.payloadHashHex) },
     ];
   }
   if (action.kind === "update") {
@@ -1106,18 +1413,25 @@ function pendingUserActionItems(action: PendingUserAction | null): Array<{ label
       { label: "Role", value: action.role },
       { label: "Session TTL", value: `${secondsToDays(action.sessionRefreshTtlSecs)}d` },
       { label: "Scopes", value: action.scopes.length ? action.scopes.join(", ") : "role defaults" },
+      { label: "Payload", value: shortId(action.privilege.payloadHashHex) },
     ];
   }
   if (action.kind === "password") {
     return [
       { label: "Username", value: action.operator.username },
       { label: "Role", value: action.operator.role },
+      { label: "Payload", value: shortId(action.privilege.payloadHashHex) },
     ];
   }
   if (action.kind === "status" || action.kind === "totp") {
+    const firstOperator = action.operators[0];
     return [
       { label: action.operators.length === 1 ? "Username" : "Users", value: formatOperatorSelection(action.operators) },
       { label: "Count", value: action.operators.length },
+      {
+        label: "Payload",
+        value: firstOperator ? shortId(action.privileges[firstOperator.id].payloadHashHex) : "-",
+      },
     ];
   }
   return [];

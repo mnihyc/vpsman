@@ -1081,7 +1081,9 @@ async fn admin_can_create_sanitized_operator_record() {
             role: "viewer".to_string(),
             scopes: Vec::new(),
             session_refresh_ttl_secs: None,
+            confirmed: true,
             admin_risk_acknowledged: false,
+            privilege_assertion: None,
         },
         &admin,
     )
@@ -1101,7 +1103,7 @@ async fn admin_can_create_sanitized_operator_record() {
 
 #[tokio::test]
 async fn admin_user_routes_require_admin_risk_acknowledgement() {
-    let state = memory_test_state();
+    let state = memory_privilege_test_state();
     let (_admin, headers) = crate::test_auth_context_and_headers(&state).await;
 
     let error = routes_auth::create_operator(
@@ -1113,7 +1115,9 @@ async fn admin_user_routes_require_admin_risk_acknowledgement() {
             role: "admin".to_string(),
             scopes: Vec::new(),
             session_refresh_ttl_secs: None,
+            confirmed: true,
             admin_risk_acknowledged: false,
+            privilege_assertion: None,
         }),
     )
     .await
@@ -1129,7 +1133,9 @@ async fn admin_user_routes_require_admin_risk_acknowledgement() {
             role: "admin".to_string(),
             scopes: Vec::new(),
             session_refresh_ttl_secs: Some(crate::DEFAULT_REFRESH_TOKEN_TTL_SECS),
+            confirmed: true,
             admin_risk_acknowledged: true,
+            privilege_assertion: None,
         }),
     )
     .await
@@ -1144,6 +1150,7 @@ async fn admin_user_routes_require_admin_risk_acknowledgement() {
         axum::Json(OperatorLifecycleRequest {
             confirmed: true,
             admin_risk_acknowledged: false,
+            privilege_assertion: None,
         }),
     )
     .await
@@ -1157,6 +1164,7 @@ async fn admin_user_routes_require_admin_risk_acknowledgement() {
         axum::Json(OperatorLifecycleRequest {
             confirmed: true,
             admin_risk_acknowledged: true,
+            privilege_assertion: None,
         }),
     )
     .await
@@ -1168,7 +1176,7 @@ async fn admin_user_routes_require_admin_risk_acknowledgement() {
 
 #[tokio::test]
 async fn admin_user_routes_preserve_one_active_admin() {
-    let state = memory_test_state();
+    let state = memory_privilege_test_state();
     let (admin, headers) = crate::test_auth_context_and_headers(&state).await;
 
     let error = routes_auth::update_operator(
@@ -1181,6 +1189,7 @@ async fn admin_user_routes_preserve_one_active_admin() {
             session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
             confirmed: true,
             admin_risk_acknowledged: true,
+            privilege_assertion: None,
         }),
     )
     .await
@@ -1195,6 +1204,7 @@ async fn admin_user_routes_preserve_one_active_admin() {
         axum::Json(OperatorLifecycleRequest {
             confirmed: true,
             admin_risk_acknowledged: true,
+            privilege_assertion: None,
         }),
     )
     .await
@@ -1209,12 +1219,161 @@ async fn admin_user_routes_preserve_one_active_admin() {
         axum::Json(OperatorLifecycleRequest {
             confirmed: true,
             admin_risk_acknowledged: true,
+            privilege_assertion: None,
         }),
     )
     .await
     .unwrap_err();
     assert_eq!(error.status, StatusCode::CONFLICT);
     assert_eq!(error.code, "last_active_admin_required");
+}
+
+#[tokio::test]
+async fn operator_management_routes_require_confirmation_and_privilege() {
+    let state = memory_gateway_test_state();
+    let (admin, headers) = crate::test_auth_context_and_headers(&state).await;
+
+    let error = routes_auth::create_operator(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::Json(CreateOperatorRequest {
+            username: "unconfirmed-operator".to_string(),
+            password: "operator-password-123".to_string(),
+            role: "operator".to_string(),
+            scopes: Vec::new(),
+            session_refresh_ttl_secs: None,
+            confirmed: false,
+            admin_risk_acknowledged: false,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "confirmation_required");
+
+    let error = routes_auth::create_operator(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::Json(CreateOperatorRequest {
+            username: "missing-privilege".to_string(),
+            password: "operator-password-123".to_string(),
+            role: "operator".to_string(),
+            scopes: Vec::new(),
+            session_refresh_ttl_secs: None,
+            confirmed: true,
+            admin_risk_acknowledged: false,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "privilege_assertion_required");
+
+    let target = state
+        .repo
+        .create_operator(
+            &CreateOperatorRequest {
+                username: "route-target".to_string(),
+                password: "operator-password-123".to_string(),
+                role: "operator".to_string(),
+                scopes: Vec::new(),
+                session_refresh_ttl_secs: None,
+                confirmed: true,
+                admin_risk_acknowledged: false,
+                privilege_assertion: None,
+            },
+            &admin,
+        )
+        .await
+        .unwrap();
+
+    let error = routes_auth::update_operator(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(target.id),
+        axum::Json(UpdateOperatorRequest {
+            role: "viewer".to_string(),
+            scopes: Vec::new(),
+            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            confirmed: true,
+            admin_risk_acknowledged: false,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "privilege_assertion_required");
+
+    let error = routes_auth::disable_operator(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(target.id),
+        axum::Json(OperatorLifecycleRequest {
+            confirmed: true,
+            admin_risk_acknowledged: false,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "privilege_assertion_required");
+
+    let error = routes_auth::reset_operator_password(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(target.id),
+        axum::Json(OperatorPasswordResetRequest {
+            password: "replacement-password-123".to_string(),
+            confirmed: true,
+            admin_risk_acknowledged: false,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "privilege_assertion_required");
+
+    let error = routes_auth::clear_operator_totp(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(target.id),
+        axum::Json(OperatorLifecycleRequest {
+            confirmed: true,
+            admin_risk_acknowledged: false,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "privilege_assertion_required");
+
+    let issued = state.repo.issue_session(target).await.unwrap();
+    let session = state
+        .repo
+        .authenticate_access_token(&issued.access_token)
+        .await
+        .unwrap()
+        .unwrap();
+    let error = routes_auth::revoke_operator_session(
+        axum::extract::State(state),
+        headers,
+        axum::extract::Path(session.session_id),
+        axum::Json(OperatorSessionRevokeRequest {
+            confirmed: true,
+            admin_risk_acknowledged: false,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "privilege_assertion_required");
 }
 
 #[tokio::test]
@@ -1270,7 +1429,9 @@ async fn disabled_and_deleted_operators_cannot_login_and_deleted_usernames_remai
                 role: "operator".to_string(),
                 scopes: Vec::new(),
                 session_refresh_ttl_secs: Some(86_400),
+                confirmed: true,
                 admin_risk_acknowledged: false,
+                privilege_assertion: None,
             },
             &admin,
         )
@@ -1323,7 +1484,9 @@ async fn disabled_and_deleted_operators_cannot_login_and_deleted_usernames_remai
                 role: "operator".to_string(),
                 scopes: Vec::new(),
                 session_refresh_ttl_secs: None,
+                confirmed: true,
                 admin_risk_acknowledged: false,
+                privilege_assertion: None,
             },
             &admin,
         )
@@ -1727,6 +1890,71 @@ async fn operator_totp_lifecycle_encrypts_secret_and_gates_login() {
     assert!(!audit_json.contains(&setup.secret_base32));
 }
 
+#[tokio::test]
+async fn operator_password_reset_clears_totp_secret_material() {
+    let repo = Repository::Memory(MemoryState::default());
+    let password = "admin-password-123";
+    let auth = repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: password.to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator.clone(),
+        session_id: Uuid::new_v4(),
+    };
+
+    let TotpSetupOutcome::Created(_) = repo.setup_operator_totp(&actor, password).await.unwrap()
+    else {
+        panic!("expected TOTP setup");
+    };
+    let operator = repo
+        .operator_by_id(actor.operator.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let encrypted = operator
+        .encrypted_totp_secret()
+        .expect("encrypted totp secret");
+    let secret = crate::auth_totp::decrypt_totp_secret(password, &encrypted).unwrap();
+    let code = crate::auth_totp::totp_code_for_step(&secret, unix_now() / 30);
+    let TotpUpdateOutcome::Updated(enabled) = repo
+        .confirm_operator_totp(&actor, password, &code)
+        .await
+        .unwrap()
+    else {
+        panic!("expected TOTP enabled");
+    };
+    assert!(enabled.totp_enabled);
+
+    let reset = repo
+        .reset_operator_password(actor.operator.id, "replacement-password-123", &actor)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!reset.totp_enabled);
+    let stored = repo
+        .operator_by_id(actor.operator.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!stored.totp_enabled);
+    assert!(stored.encrypted_totp_secret().is_none());
+
+    let login = repo
+        .login_operator(&LoginRequest {
+            username: "admin".to_string(),
+            password: "replacement-password-123".to_string(),
+            totp_code: None,
+        })
+        .await
+        .unwrap()
+        .expect("login after reset without stale TOTP");
+    assert!(!login.operator.totp_enabled);
+}
+
 #[test]
 fn internal_gateway_token_requires_matching_bearer() {
     let (events, _) = broadcast::channel(1);
@@ -1831,6 +2059,21 @@ fn memory_test_state() -> AppState {
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
         dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
+}
+
+fn memory_privilege_test_state() -> AppState {
+    let mut state = memory_test_state();
+    state.gateway = crate::gateway_client::GatewayDispatchClient::test_privilege_auto_approve();
+    state
+}
+
+fn memory_gateway_test_state() -> AppState {
+    let mut state = memory_test_state();
+    state.gateway = crate::gateway_client::GatewayDispatchClient::new(
+        Some("http://127.0.0.1:9".to_string()),
+        Some("gateway-secret-at-least-32-characters".to_string()),
+    );
+    state
 }
 
 async fn issue_test_operator_headers(
