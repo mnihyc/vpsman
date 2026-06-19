@@ -1,10 +1,14 @@
 use axum::{
-    body::to_bytes,
+    body::{to_bytes, Body},
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{
+        header::{AUTHORIZATION, CONTENT_TYPE},
+        Request, StatusCode,
+    },
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use tower::ServiceExt;
 
 use crate::{
     gateway_client::GatewayDispatchClient,
@@ -29,7 +33,7 @@ use crate::{
 use vpsman_common::{
     encode_chunked_file_payload, encode_inline_file_payload, payload_hash, CommandOutput,
     FileActionPolicy, FileExistingPolicy, FileOwnershipPolicy, FilePushChunk, JobCommand,
-    OutputStream, MAX_INLINE_FILE_PUSH_BYTES,
+    OutputStream, MAX_CHUNKED_FILE_PUSH_BYTES, MAX_INLINE_FILE_PUSH_BYTES,
 };
 
 #[test]
@@ -456,6 +460,68 @@ fn chunked_file_push_job_command_uses_operation_payload_and_type() {
         }
         other => panic!("unexpected command: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn job_create_route_accepts_max_chunked_file_push_body() {
+    let object_root = std::env::temp_dir().join(format!(
+        "vpsman-api-job-create-body-limit-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        Repository::Memory(MemoryState::default()),
+        BackupObjectStore::filesystem(object_root.clone()).unwrap(),
+    );
+    let headers = crate::test_auth_headers(&state).await;
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .expect("test authorization header")
+        .clone();
+    let data = vec![7_u8; MAX_CHUNKED_FILE_PUSH_BYTES];
+    let operation = JobCommand::FilePushChunked {
+        path: "/tmp/vpsman-chunked-upload.bin".to_string(),
+        mode: 0o640,
+        size_bytes: data.len() as u64,
+        sha256_hex: payload_hash(&data),
+        chunks: encode_chunked_file_payload(&data).unwrap(),
+        existing_policy: FileExistingPolicy::Replace,
+        owner: None,
+        group: None,
+        uid: None,
+        gid: None,
+        ownership_policy: FileOwnershipPolicy::Fail,
+    };
+    let body = serde_json::to_vec(&serde_json::json!({
+        "selector_expression": "id:missing-client",
+        "target_client_ids": ["missing-client"],
+        "destructive": false,
+        "confirmed": true,
+        "command": "file_push_chunked",
+        "argv": [],
+        "operation": operation,
+        "timeout_secs": 30,
+        "force_unprivileged": false,
+        "privileged": true,
+    }))
+    .unwrap();
+    assert!(body.len() > 2 * 1024 * 1024);
+    assert!(body.len() <= crate::routes::MAX_JOB_CREATE_BODY_BYTES);
+
+    let response = crate::routes::build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/jobs")
+                .header(AUTHORIZATION, authorization)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let _ = tokio::fs::remove_dir_all(object_root).await;
 }
 
 #[test]

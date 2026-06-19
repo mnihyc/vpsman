@@ -434,6 +434,11 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
     if let Repository::Memory(memory) = &repo {
+        memory
+            .operators
+            .write()
+            .await
+            .push(test_operator_record(&operator));
         memory.agents.write().await.extend([
             AgentView {
                 id: "edge-a".to_string(),
@@ -714,6 +719,26 @@ fn test_operator() -> AuthContext {
             deleted_at: None,
         },
         session_id: Uuid::new_v4(),
+    }
+}
+
+fn test_operator_record(auth: &AuthContext) -> crate::auth_model::OperatorRecord {
+    crate::auth_model::OperatorRecord {
+        id: auth.operator.id,
+        username: auth.operator.username.clone(),
+        password_hash: "test-only-session-issued-directly".to_string(),
+        status: auth.operator.status.clone(),
+        role: auth.operator.role.clone(),
+        scopes: auth.operator.scopes.clone(),
+        preferences: auth.operator.preferences.clone(),
+        totp_enabled: auth.operator.totp_enabled,
+        totp_secret_ciphertext_hex: None,
+        totp_secret_nonce_hex: None,
+        totp_secret_salt_hex: None,
+        session_refresh_ttl_secs: auth.operator.session_refresh_ttl_secs,
+        created_at: auth.operator.created_at.clone(),
+        disabled_at: auth.operator.disabled_at.clone(),
+        deleted_at: auth.operator.deleted_at.clone(),
     }
 }
 

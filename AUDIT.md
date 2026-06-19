@@ -230,8 +230,8 @@ of the same root cause.
 | AUD-214 | High | Fixed | API/Dispatcher/Auth/Job Lifecycle | Queued jobs keep dispatching after actor disable/delete or scope loss |
 | AUD-215 | High | Confirmed | API/Frontend/CLI/Terminal/Resource Bounds | Terminal replay loads full session output history before applying replay bounds |
 | AUD-216 | High | Confirmed | Gateway/Spool/Replay | Gateway spool replay can strand valid events after per-target queue saturation |
-| AUD-217 | High | Confirmed | API/Frontend/CLI/Backups | Chunked backup artifact upload defaults exceed the route body limit |
-| AUD-218 | High | Confirmed | API/Frontend/CLI/File Operations | Chunked file-push jobs exceed the job-create route body limit |
+| AUD-217 | High | Fixed | API/Frontend/CLI/Backups | Chunked backup artifact upload defaults exceed the route body limit |
+| AUD-218 | High | Fixed | API/Frontend/CLI/File Operations | Chunked file-push jobs exceed the job-create route body limit |
 | AUD-219 | Medium/High | Confirmed | API/Worker/Integrations/Delivery State | Disabled integrations can still deliver already queued outbound work |
 | AUD-220 | High | Fixed | API/Worker/Integrations/Auth | Queued integration deliveries are not bound to the originating actor authority |
 | AUD-221 | Medium/High | Confirmed | API/Frontend/System Dashboard | System dashboard omits agent-lost lifecycle failures |
@@ -247,7 +247,7 @@ of the same root cause.
 | AUD-231 | Medium/High | Confirmed | API/CLI/Agent/Network Speed Tests | Network speed tests are treated as confirmation-free read-only jobs despite opening listeners and sending traffic |
 | AUD-232 | Medium/High | Confirmed | API/Dispatcher/Agent/Network Speed Tests | Network speed tests bypass exclusive dispatch serialization and can overlap on the same tunnel endpoints |
 | AUD-233 | Medium/High | Confirmed | API/Worker/Agent/Network Speed Tests | Network speed tests can dispatch one endpoint after the peer target is skipped |
-| AUD-234 | High | Confirmed | API/Worker/Webhooks/Security | Job-created webhooks deliver full job operation payloads to external targets |
+| AUD-234 | High | Skipped | API/Worker/Webhooks/Security | Job-created webhooks deliver full job operation payloads to external targets |
 | AUD-235 | High | Confirmed | API/Frontend/Jobs/Idempotency | Job-create retries can dispatch the same reviewed action under a new job ID |
 
 ## Issues
@@ -8394,7 +8394,7 @@ of the same root cause.
 ### AUD-217: Chunked Backup Artifact Upload Defaults Exceed The Route Body Limit
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/CLI/Backups
 - Context: Operators use chunked backup artifact upload for encrypted backup
   artifacts that are too large for the inline upload route. This is the normal
@@ -8431,11 +8431,15 @@ of the same root cause.
   upload-session staging files. A clean fix should make the advertised
   `max_chunk_bytes`, frontend/CLI default chunk size, per-route body limit, and
   JSON/base64 overhead agree.
+- Resolution: Fixed by adding a chunk-upload route body limit that explicitly
+  covers the advertised 4 MiB binary chunk plus base64/JSON overhead. The
+  advertised server chunk size and existing frontend/CLI defaults remain
+  unchanged.
 
 ### AUD-218: Chunked File-Push Jobs Exceed The Job-Create Route Body Limit
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/CLI/File Operations
 - Context: Operators use file push from the dashboard, CLI, and VTY to place
   small operational files on selected VPSs. The system advertises inline push
@@ -8470,6 +8474,10 @@ of the same root cause.
   precise body limit that matches all accepted command payloads plus JSON
   overhead, or steer non-trivial file pushes through the resumable workflow and
   stop presenting embedded `file_push_chunked` as an 8 MiB path.
+- Resolution: Fixed by giving the job-create route a bounded body limit that
+  covers the existing 8 MiB `file_push_chunked` command envelope plus
+  base64/JSON overhead. Direct reviewed file push remains inline up to 1 MiB
+  and chunked up to 8 MiB; larger files continue to use resumable transfer.
 
 ### AUD-219: Disabled Integrations Can Still Deliver Already Queued Outbound Work
 
@@ -9136,7 +9144,7 @@ of the same root cause.
 ### AUD-234: Job-Created Webhooks Deliver Full Job Operation Payloads To External Targets
 
 - Severity: High
-- Status: Confirmed
+- Status: Skipped
 - Area: API/Worker/Webhooks/Security
 - Context: Operators can configure expression webhook rules for job events such
   as `job.created`, `job.type:<type>`, or `job.status:<status>`. Those
@@ -9171,6 +9179,11 @@ of the same root cause.
   one field. A clean fix should define a redacted webhook job summary and make
   payload-bearing fields opt-in only where an integration workflow explicitly
   requires them.
+- Skip Rationale: Product decision: expression webhook templates and job
+  commands are operator-managed surfaces, and this project intentionally allows
+  operator-controlled webhook payloads to contain reviewed command context. The
+  added redaction/product-policy complexity is not aligned with the current
+  pre-release enterprise console design.
 
 ### AUD-235: Job-Create Retries Can Dispatch The Same Reviewed Action Under A New Job ID
 

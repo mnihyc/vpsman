@@ -3124,6 +3124,7 @@ dependencies = [
  "tar",
  "tokio",
  "toml",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",

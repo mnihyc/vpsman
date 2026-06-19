@@ -5,6 +5,7 @@ use axum::{
 };
 
 use crate::{
+    backup_upload_sessions::MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES,
     routes_alerts::{
         delete_fleet_alert_notification_channel, delete_fleet_alert_policy,
         dispatch_fleet_alert_notifications, export_fleet_alerts,
@@ -98,6 +99,17 @@ use crate::{
     routes_ws::ws_handler,
     state::AppState,
 };
+use vpsman_common::MAX_CHUNKED_FILE_PUSH_BYTES;
+
+const JSON_BODY_OVERHEAD_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BODY_BYTES: usize =
+    base64_json_body_limit(MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES, 64 * 1024);
+pub(crate) const MAX_JOB_CREATE_BODY_BYTES: usize =
+    base64_json_body_limit(MAX_CHUNKED_FILE_PUSH_BYTES, JSON_BODY_OVERHEAD_BYTES);
+
+const fn base64_json_body_limit(raw_payload_bytes: usize, json_overhead_bytes: usize) -> usize {
+    ((raw_payload_bytes + 2) / 3 * 4) + json_overhead_bytes
+}
 
 pub(crate) fn build_router(state: AppState) -> Router {
     Router::new()
@@ -292,7 +304,12 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/agents/{client_id}/tags", post(assign_agent_tag))
         .route("/api/v1/agents/{client_id}/alias", post(update_agent_alias))
         .route("/api/v1/bulk/resolve", post(resolve_bulk_targets))
-        .route("/api/v1/jobs", get(list_jobs).post(create_job))
+        .route(
+            "/api/v1/jobs",
+            get(list_jobs)
+                .post(create_job)
+                .layer(DefaultBodyLimit::max(MAX_JOB_CREATE_BODY_BYTES)),
+        )
         .route("/api/v1/server-jobs", get(list_server_jobs))
         .route(
             "/api/v1/server-jobs/{job_id}/cancel",
@@ -477,7 +494,9 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/backups/{backup_request_id}/artifact-upload-sessions/{upload_id}/chunks",
-            post(upload_backup_artifact_session_chunk),
+            post(upload_backup_artifact_session_chunk).layer(DefaultBodyLimit::max(
+                MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BODY_BYTES,
+            )),
         )
         .route(
             "/api/v1/backups/{backup_request_id}/artifact-upload-sessions/{upload_id}/commit",

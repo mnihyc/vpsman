@@ -36,3 +36,6 @@ vpsman-common = { path = "../common" }
 vpsman-object-store = { path = "../object-store" }
 vpsman-server-core = { path = "../server-core" }
 vpsman-server-build-info = { path = "../server-build-info" }
+
+[dev-dependencies]
+tower.workspace = true

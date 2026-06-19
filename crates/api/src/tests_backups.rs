@@ -1,6 +1,10 @@
 use axum::{
-    body::to_bytes,
+    body::{to_bytes, Body},
     extract::{Path, State},
+    http::{
+        header::{AUTHORIZATION, CONTENT_TYPE},
+        Request, StatusCode,
+    },
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -9,6 +13,7 @@ use tokio::{
     net::TcpListener,
     sync::broadcast,
 };
+use tower::ServiceExt;
 use uuid::Uuid;
 use vpsman_common::{
     encode_json, payload_hash, AgentHello, CommandOutput, GatewayCommandDispatch,
@@ -1075,6 +1080,43 @@ async fn backup_artifact_upload_session_stages_chunks_and_commits_artifact() {
         .any(|audit| audit.action == "backup.artifact_metadata_recorded"));
 
     let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
+async fn backup_artifact_upload_chunk_route_accepts_advertised_chunk_body() {
+    let state = test_state(Repository::Memory(MemoryState::default()));
+    let headers = crate::test_auth_headers(&state).await;
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .expect("test authorization header")
+        .clone();
+    let chunk = vec![0_u8; crate::backup_upload_sessions::MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES];
+    let body = serde_json::to_vec(&serde_json::json!({
+        "offset_bytes": 0,
+        "data_base64": BASE64.encode(&chunk),
+    }))
+    .unwrap();
+    assert!(body.len() > 2 * 1024 * 1024);
+    assert!(body.len() <= crate::routes::MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BODY_BYTES);
+
+    let response = crate::routes::build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/api/v1/backups/{}/artifact-upload-sessions/{}/chunks",
+                    Uuid::new_v4(),
+                    Uuid::new_v4()
+                ))
+                .header(AUTHORIZATION, authorization)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
