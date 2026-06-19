@@ -27,6 +27,7 @@ pub(crate) struct VtyTunnelSpeedTestRequest {
     pub(crate) connect_timeout_ms: u16,
     pub(crate) timeout_secs: u64,
     pub(crate) privilege_ttl_secs: u64,
+    pub(crate) confirmed: bool,
 }
 
 pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSpeedTestRequest> {
@@ -39,6 +40,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
     let mut connect_timeout_ms = 5_000_u16;
     let mut timeout_secs = 30_u64;
     let mut privilege_ttl_secs = 300_u64;
+    let mut confirmed = false;
 
     let mut index = 0;
     while index < tokens.len() {
@@ -199,9 +201,17 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
                 )?;
                 index += 1;
             }
+            "--confirmed" => {
+                confirmed = true;
+                index += 1;
+            }
             other => anyhow::bail!("unknown tunnel-speed-test flag {other}"),
         }
     }
+    anyhow::ensure!(
+        confirmed,
+        "tunnel-speed-test requires --confirmed because it opens a listener and sends traffic"
+    );
 
     Ok(VtyTunnelSpeedTestRequest {
         plan_file: required(plan_file, "--plan-file")?,
@@ -213,6 +223,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
         connect_timeout_ms,
         timeout_secs,
         privilege_ttl_secs,
+        confirmed,
     })
 }
 
@@ -266,7 +277,7 @@ pub(crate) fn submit_vty_tunnel_speed_test(
             "target_client_ids": target_clients,
             "privileged": true,
             "destructive": false,
-            "confirmed": false,
+            "confirmed": request.confirmed,
             "timeout_secs": request.timeout_secs,
             "operation": operation,
             "privilege_assertion": privilege.privilege_assertion,
@@ -362,6 +373,7 @@ mod tests {
             "--timeout=120",
             "--privilege-ttl",
             "90",
+            "--confirmed",
         ])
         .unwrap();
 
@@ -377,6 +389,7 @@ mod tests {
         assert_eq!(request.connect_timeout_ms, 2500);
         assert_eq!(request.timeout_secs, 120);
         assert_eq!(request.privilege_ttl_secs, 90);
+        assert!(request.confirmed);
     }
 
     #[test]
@@ -396,8 +409,13 @@ mod tests {
         assert!(parse_vty_tunnel_speed_test(&[
             "--plan-file=/tmp/plan.json",
             "--server-side=middle",
+            "--confirmed",
         ])
         .is_err());
         assert!(parse_vty_tunnel_speed_test(&["--plan-file=/tmp/plan.json"]).is_err());
+        assert!(parse_vty_tunnel_speed_test(
+            &["--plan-file=/tmp/plan.json", "--server-side=left",]
+        )
+        .is_err());
     }
 }

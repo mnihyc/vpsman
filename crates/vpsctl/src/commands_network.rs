@@ -452,6 +452,8 @@ pub(crate) struct TunnelSpeedTestCommand {
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 30)]
     pub(crate) timeout_secs: u64,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 pub(crate) fn tunnel_plans(api_url: &str, token: Option<&str>) -> Result<()> {
@@ -689,6 +691,10 @@ pub(crate) fn tunnel_speed_test(
     token: Option<&str>,
     request: TunnelSpeedTestCommand,
 ) -> Result<()> {
+    anyhow::ensure!(
+        request.confirmed,
+        "tunnel-speed-test requires --confirmed because it opens a listener and sends traffic"
+    );
     validate_speed_test_bounds(
         request.duration_secs,
         request.max_bytes,
@@ -727,7 +733,7 @@ pub(crate) fn tunnel_speed_test(
             request.privilege_ttl_secs,
             request.timeout_secs,
             false,
-            false,
+            request.confirmed,
             false,
         )?
     );

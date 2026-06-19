@@ -53,6 +53,7 @@ const CONFIG_SINGLE_SELECTOR_STORAGE_KEY = "vpsman.config.single.selectorExpress
 const CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY = "vpsman.config.single.clientId";
 
 type BulkConfigApplySnapshot = {
+  jobId: string;
   selectorExpression: string;
   clientIds: string[];
   targets: AgentView[];
@@ -67,6 +68,7 @@ type BulkConfigApplySnapshot = {
 type SingleConfigApplySnapshot = {
   baseHash: string;
   clientId: string;
+  jobId: string;
   operation: JobOperation;
   payloadHashHex: string;
   privilegeAssertion: PrivilegeAssertion;
@@ -613,6 +615,7 @@ function BulkConfigApply({
         setRendered(nextRendered);
         setApplySnapshot({
           clientIds,
+          jobId: crypto.randomUUID(),
           operation,
           payloadHashHex: built.payloadHashHex,
           privilegeAssertion: built.privilegeAssertion,
@@ -644,6 +647,7 @@ function BulkConfigApply({
         confirmed: true,
         destructive: true,
         force_unprivileged: false,
+        job_id: snapshot.jobId,
         operation: snapshot.operation,
         privileged: true,
         privilege_assertion: snapshot.privilegeAssertion,
@@ -885,6 +889,7 @@ function SingleVpsConfig({
         confirmed: true,
         destructive: false,
         force_unprivileged: false,
+        job_id: crypto.randomUUID(),
         operation,
         privileged: true,
         privilege_assertion: built.privilegeAssertion,
@@ -964,6 +969,7 @@ function SingleVpsConfig({
         setSingleApplySnapshot({
           baseHash: frozenBaseHash,
           clientId: frozenTarget.id,
+          jobId: crypto.randomUUID(),
           operation,
           payloadHashHex: built.payloadHashHex,
           privilegeAssertion: built.privilegeAssertion,
@@ -987,6 +993,7 @@ function SingleVpsConfig({
         confirmed: true,
         destructive: true,
         force_unprivileged: false,
+        job_id: snapshot.jobId,
         operation: snapshot.operation,
         privileged: true,
         privilege_assertion: snapshot.privilegeAssertion,

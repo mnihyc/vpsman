@@ -79,6 +79,7 @@ type DataSourceAssignmentSnapshot = {
 type DataSourceApplySnapshot = {
   clientId: string;
   clientLabel: string;
+  jobId: string;
   operation: JobOperation;
   payloadHashHex: string;
   privilegeAssertion: PrivilegeAssertion;
@@ -367,6 +368,7 @@ export function DataSourcePresetPanel({
         confirmed: true,
         destructive: false,
         force_unprivileged: false,
+        job_id: snapshot.jobId,
         operation: snapshot.operation,
         privileged: true,
         privilege_assertion: snapshot.privilegeAssertion,
@@ -422,6 +424,7 @@ export function DataSourcePresetPanel({
         setApplySnapshot({
           clientId: frozenClientId,
           clientLabel: target ? formatVpsName(target, vpsNameDisplayMode) : frozenClientId,
+          jobId: crypto.randomUUID(),
           operation,
           payloadHashHex: built.payloadHashHex,
           privilegeAssertion: built.privilegeAssertion,

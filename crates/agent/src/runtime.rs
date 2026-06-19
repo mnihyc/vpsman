@@ -1315,6 +1315,7 @@ async fn execute_authorized_command(
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
     let operation_type = job_command_type_label(&request.command);
+    let request_payload_hash = command_payload_hash(&request.command)?;
     cancel_token.check(operation_type)?;
     match &request.command {
         JobCommand::ConfigRead
@@ -1473,6 +1474,7 @@ async fn execute_authorized_command(
         } => {
             execute_network_speed_test_command(NetworkSpeedTestInput {
                 job_id: request.job_id,
+                command_payload_hash: &request_payload_hash,
                 config: &config,
                 plan,
                 server_side: *server_side,

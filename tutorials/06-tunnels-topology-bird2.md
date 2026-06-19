@@ -102,7 +102,8 @@ cargo run -p vpsctl -- tunnel-speed-test \
   --server-side left \
   --duration-secs 3 \
   --max-bytes 16777216 \
-  --rate-limit-kbps 100000
+  --rate-limit-kbps 100000 \
+  --confirmed
 ```
 
 Review persisted evidence:

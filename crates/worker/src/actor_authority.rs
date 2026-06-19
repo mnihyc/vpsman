@@ -26,7 +26,7 @@ pub(crate) async fn actor_authorized(
     else {
         return Ok(false);
     };
-    Ok(row_authorized(&row, required_role, required_scopes)?)
+    row_authorized(&row, required_role, required_scopes)
 }
 
 pub(crate) async fn actor_authorized_in_tx(
@@ -51,7 +51,7 @@ pub(crate) async fn actor_authorized_in_tx(
     else {
         return Ok(false);
     };
-    Ok(row_authorized(&row, required_role, required_scopes)?)
+    row_authorized(&row, required_role, required_scopes)
 }
 
 fn row_authorized(

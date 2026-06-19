@@ -14,7 +14,11 @@ use tokio::time;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 #[cfg(test)]
-use vpsman_common::{expression_matches, parse_expression, ExpressionContext, VpsMetadata};
+use vpsman_common::{
+    expression_matches, parse_expression, plan_tunnel, BandwidthTier, ExpressionContext,
+    OspfCostPolicy, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+    VpsMetadata,
+};
 use vpsman_common::{
     payload_hash, read_secret_file_ref, AgentCapabilitySnapshot, JobCommand, SuiteConfig,
     SERVER_JOB_STATUS_COMPLETED, SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_QUEUED,
@@ -1826,11 +1830,19 @@ async fn materialize_due_schedule(
         .iter()
         .map(|skip| skip.client_id.as_str())
         .collect::<HashSet<_>>();
-    let dispatch_targets_after_precomplete = dispatch_targets
+    let mut dispatch_targets_after_precomplete = dispatch_targets
         .iter()
         .filter(|client_id| !busy_update_skip_set.contains(client_id.as_str()))
         .cloned()
         .collect::<Vec<_>>();
+    let network_speed_peer_skips =
+        network_speed_test_peer_schedule_skips(&operation, &dispatch_targets_after_precomplete);
+    let network_speed_peer_skip_set = network_speed_peer_skips
+        .iter()
+        .map(|skip| skip.client_id.as_str())
+        .collect::<HashSet<_>>();
+    dispatch_targets_after_precomplete
+        .retain(|client_id| !network_speed_peer_skip_set.contains(client_id.as_str()));
     let unavailable_skips = target_availability
         .unavailable_targets
         .iter()
@@ -1855,6 +1867,7 @@ async fn materialize_due_schedule(
         .chain(never_connected_skips.iter())
         .chain(missing_target_skips.iter())
         .chain(busy_update_target_skips.iter())
+        .chain(network_speed_peer_skips.iter())
         .cloned()
         .collect::<Vec<_>>();
     let materialized_targets =
@@ -2237,6 +2250,43 @@ fn busy_update_schedule_target_skip(client_id: String) -> ScheduleTargetSkip {
         hint: "update command was not dispatched because the client already has another active job target",
         message: "busy_agent_active_jobs: target has another active job; update skipped",
         accepted: true,
+    }
+}
+
+fn network_speed_test_peer_schedule_skips(
+    command: &JobCommand,
+    dispatch_targets: &[String],
+) -> Vec<ScheduleTargetSkip> {
+    let JobCommand::NetworkSpeedTest { plan, .. } = command else {
+        return Vec::new();
+    };
+    let left_dispatchable = dispatch_targets
+        .iter()
+        .any(|target| target == &plan.left_client_id);
+    let right_dispatchable = dispatch_targets
+        .iter()
+        .any(|target| target == &plan.right_client_id);
+    if left_dispatchable == right_dispatchable {
+        return Vec::new();
+    }
+    if left_dispatchable {
+        return vec![network_speed_test_peer_schedule_skip(
+            plan.left_client_id.clone(),
+        )];
+    }
+    vec![network_speed_test_peer_schedule_skip(
+        plan.right_client_id.clone(),
+    )]
+}
+
+fn network_speed_test_peer_schedule_skip(client_id: String) -> ScheduleTargetSkip {
+    ScheduleTargetSkip {
+        client_id,
+        output_type: "network_speed_test_peer_unavailable",
+        reason: "network_speed_test_peer_unavailable",
+        hint: "network speed tests require both tunnel endpoints to remain dispatchable after availability filtering",
+        message: "network_speed_test_peer_unavailable: peer target was skipped; speed test requires both endpoints",
+        accepted: false,
     }
 }
 
@@ -2807,6 +2857,46 @@ mod schedule_tests {
         }
     }
 
+    fn scheduled_speed_test_operation() -> serde_json::Value {
+        let plan = plan_tunnel(&TunnelPlanInput {
+            name: "left-a-right-b".to_string(),
+            interface_name: "tunab".to_string(),
+            kind: TunnelKind::Gre,
+            runtime_control: Default::default(),
+            runtime_topology: Default::default(),
+            left_client_id: "left-a".to_string(),
+            right_client_id: "right-b".to_string(),
+            left_underlay: "198.51.100.10".to_string(),
+            right_underlay: "203.0.113.20".to_string(),
+            address_pool_cidr: "10.255.0.0/30".to_string(),
+            reserved_addresses: Vec::new(),
+            ipv4_tunnel: Some(TunnelAddressPair {
+                left: "10.255.0.0".to_string(),
+                right: "10.255.0.1".to_string(),
+                prefix_len: 31,
+            }),
+            ipv6_address_pool_cidr: None,
+            ipv6_tunnel: None,
+            latency_primary_family: Default::default(),
+            bandwidth: BandwidthTier::M100,
+            latency_ms: 18.0,
+            packet_loss_ratio: 0.0,
+            preference: 1.0,
+            ospf_policy: OspfCostPolicy::default(),
+        })
+        .unwrap();
+        serde_json::to_value(JobCommand::NetworkSpeedTest {
+            plan: Box::new(plan),
+            server_side: TunnelEndpointSide::Left,
+            duration_secs: 3,
+            max_bytes: 16 * 1024 * 1024,
+            rate_limit_kbps: 100_000,
+            port: 5201,
+            connect_timeout_ms: 5000,
+        })
+        .unwrap()
+    }
+
     #[test]
     fn schedule_catch_up_run_count_is_bounded() {
         assert_eq!(
@@ -2998,6 +3088,60 @@ mod schedule_tests {
         let output = job_status_output(&db.pool, job_id, "edge-b").await;
         assert_eq!(output["type"], "schedule_target_skipped");
         assert_eq!(output["reason"], "target_never_connected");
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_due_schedule_speed_test_skips_both_endpoints_when_peer_is_unavailable() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        insert_worker_client(&db.pool, "left-a", "online", false).await;
+        insert_worker_client_with_incarnation(&db.pool, "right-b", "never", false, None).await;
+        let schedule_id = insert_worker_schedule(
+            &db.pool,
+            "speed-test-peer-unavailable-schedule",
+            scheduled_speed_test_operation(),
+            &["left-a", "right-b"],
+        )
+        .await;
+
+        let processed = process_due_schedule(
+            &db.pool,
+            schedule_id,
+            &ScheduleDispatchConfig::new(60, false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(processed, 1);
+        let (job_id, status, failure_count, last_error) =
+            schedule_result(&db.pool, schedule_id).await;
+        assert_eq!(status.as_deref(), Some(JOB_STATUS_SKIPPED));
+        assert_eq!(failure_count, 0);
+        assert_eq!(last_error, None);
+        let targets = job_targets(&db.pool, job_id).await;
+        assert_eq!(
+            targets,
+            vec![
+                (
+                    "left-a".to_string(),
+                    TARGET_STATUS_SKIPPED.to_string(),
+                    Some("network_speed_test_peer_unavailable: peer target was skipped; speed test requires both endpoints".to_string())
+                ),
+                (
+                    "right-b".to_string(),
+                    TARGET_STATUS_SKIPPED.to_string(),
+                    Some("target_never_connected: schedule target skipped".to_string())
+                ),
+            ]
+        );
+        let left_output = job_status_output(&db.pool, job_id, "left-a").await;
+        assert_eq!(left_output["type"], "network_speed_test_peer_unavailable");
+        assert_eq!(left_output["reason"], "network_speed_test_peer_unavailable");
+        let right_output = job_status_output(&db.pool, job_id, "right-b").await;
+        assert_eq!(right_output["type"], "schedule_target_skipped");
+        assert_eq!(right_output["reason"], "target_never_connected");
         db.cleanup().await;
     }
 

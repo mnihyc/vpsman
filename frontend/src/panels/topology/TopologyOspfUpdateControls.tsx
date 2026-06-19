@@ -148,6 +148,7 @@ export function TopologyOspfUpdateControls({
       setOspfSnapshot({
         detail: `OSPF cost update on ${vpsCountLabel(targets.length)}.`,
         forceUnprivileged,
+        jobId: crypto.randomUUID(),
         items: [
           { label: "Operation", value: "OSPF cost update" },
           { label: "Selector", value: selectorExpression },
@@ -195,6 +196,7 @@ export function TopologyOspfUpdateControls({
         destructive: true,
         operation: snapshot.operation,
         force_unprivileged: snapshot.forceUnprivileged,
+        job_id: snapshot.jobId,
         privileged: true,
         privilege_assertion: snapshot.privilegeAssertion,
         timeout_secs: snapshot.timeoutSecs,
@@ -370,6 +372,7 @@ export function TopologyOspfUpdateControls({
 type OspfUpdateSnapshot = {
   detail: string;
   forceUnprivileged: boolean;
+  jobId: string;
   items: Array<{ label: string; value: string }>;
   operation: JobOperation;
   payloadHashHex: string;

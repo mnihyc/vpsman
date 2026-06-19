@@ -146,6 +146,7 @@ type DispatchConfirmationSnapshot = {
       argv: string[];
       commandType: GeneratedJobCommandType;
       destructive: boolean;
+      jobId: string;
       operation: CreateJobRequest["operation"];
       payloadHashHex: string;
       privilegeAssertion: PrivilegeAssertion;
@@ -819,6 +820,7 @@ export function JobDispatchPanel({
       argv: mode === "shell" && operation.type === "shell" ? operation.argv : [],
       commandType,
       destructive: operationNeedsConfirmation,
+      jobId: crypto.randomUUID(),
       kind: "job",
       operation,
       payloadHashHex,
@@ -1075,7 +1077,7 @@ export function JobDispatchPanel({
       }
       const clientIds = confirmed.targets.map((target) => target.id);
       const nextJob = await onCreateJob({
-        job_id: crypto.randomUUID(),
+        job_id: confirmed.jobId,
         selector_expression: confirmed.selectorExpression,
         target_client_ids: clientIds,
         destructive: confirmed.destructive,

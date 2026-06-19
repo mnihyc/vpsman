@@ -429,6 +429,100 @@ async fn gateway_identity_validation_uses_direct_client_public_key() {
 }
 
 #[tokio::test]
+async fn create_job_requires_client_supplied_job_id() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
+    let state = test_app_state(repo);
+    let operator = test_operator();
+    let request = route_job_request(None, "uptime");
+
+    let error = routes_jobs::create_job_with_operator(&state, &operator, request)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(error.code, "job_id_required");
+    assert!(state.repo.list_jobs(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn create_job_retry_with_same_job_id_returns_existing_job() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
+    let state = test_app_state(repo);
+    let operator = test_operator();
+    let job_id = Uuid::new_v4();
+
+    let (first_status, axum::Json(first)) = routes_jobs::create_job_with_operator(
+        &state,
+        &operator,
+        route_job_request(Some(job_id), "uptime"),
+    )
+    .await
+    .unwrap();
+    let (retry_status, axum::Json(retry)) = routes_jobs::create_job_with_operator(
+        &state,
+        &operator,
+        route_job_request(Some(job_id), "uptime"),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(first_status, axum::http::StatusCode::ACCEPTED);
+    assert_eq!(retry_status, axum::http::StatusCode::OK);
+    assert_eq!(first.job_id, job_id);
+    assert_eq!(retry.job_id, job_id);
+    assert_eq!(retry.target_count, first.target_count);
+    assert_eq!(retry.target_counts.total, 1);
+    assert_eq!(retry.target_counts.skipped, 1);
+    assert_eq!(state.repo.list_jobs(10).await.unwrap().len(), 1);
+    let targets = state.repo.list_job_targets(job_id).await.unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].status, TARGET_STATUS_SKIPPED);
+    assert!(targets[0].completed_at.is_some());
+    let outputs = state.repo.list_job_outputs(job_id).await.unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].client_id, "client-a");
+    assert_eq!(outputs[0].seq, 0);
+    assert_eq!(outputs[0].stream, "status");
+    assert!(outputs[0].done);
+    assert!(state
+        .repo
+        .claim_due_job_targets(10, 30, 0)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn create_job_rejects_same_job_id_for_different_request() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
+    let state = test_app_state(repo);
+    let operator = test_operator();
+    let job_id = Uuid::new_v4();
+
+    let _ = routes_jobs::create_job_with_operator(
+        &state,
+        &operator,
+        route_job_request(Some(job_id), "uptime"),
+    )
+    .await
+    .unwrap();
+    let error = routes_jobs::create_job_with_operator(
+        &state,
+        &operator,
+        route_job_request(Some(job_id), "hostname"),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(error.code, "job_id_reused_with_different_request");
+    assert_eq!(state.repo.list_jobs(10).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn rejected_job_records_frozen_target_results() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
@@ -969,6 +1063,80 @@ async fn dispatching_job_records_and_updates_target_results() {
 }
 
 #[tokio::test]
+async fn memory_final_output_insert_terminalizes_target_atomically() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let request = test_job_request(&["client-a"]);
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "final_output_atomic",
+            &operator,
+            &["client-a".to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.claim_due_job_targets(10, 30, 0).await.unwrap().len(),
+        1
+    );
+
+    let output = CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: br#"{"type":"completed"}"#.to_vec(),
+        exit_code: Some(0),
+        done: true,
+    };
+    let outcome = TargetDispatchOutcome {
+        status: "completed".to_string(),
+        exit_code: Some(0),
+        command_version: Some(1),
+        accepted: true,
+        message: "ok".to_string(),
+        received_at: None,
+        outputs: vec![output.clone()],
+    };
+    let result = repo
+        .record_active_final_job_output_and_target_result_with_config(
+            job_id,
+            "client-a",
+            0,
+            &output,
+            Some("1700000000".to_string()),
+            repository_job_outputs::JobOutputPersistConfig {
+                object_store: None,
+                artifact_min_bytes: usize::MAX,
+            },
+            &outcome,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.write_result,
+        repository_job_outputs::JobOutputWriteResult::Inserted
+    );
+    assert!(result.target_terminalized);
+    let job = repo.get_job(job_id).await.unwrap().unwrap();
+    let targets = repo.list_job_targets(job_id).await.unwrap();
+    let outputs = repo.list_job_outputs(job_id).await.unwrap();
+    assert_eq!(job.status, "completed");
+    assert!(job.completed_at.is_some());
+    assert_eq!(targets[0].status, "completed");
+    assert_eq!(targets[0].exit_code, Some(0));
+    assert!(targets[0].completed_at.is_some());
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].stream, "status");
+    assert_eq!(outputs[0].exit_code, Some(0));
+    assert!(outputs[0].done);
+}
+
+#[tokio::test]
 async fn memory_dispatch_claims_one_exclusive_target_per_client_per_batch() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
@@ -1484,6 +1652,61 @@ fn test_operator() -> AuthContext {
     }
 }
 
+fn test_app_state(repo: Repository) -> AppState {
+    let (events, _) = tokio::sync::broadcast::channel(1);
+    AppState {
+        repo,
+        events,
+        internal_token: None,
+        gateway: GatewayDispatchClient::test_privilege_auto_approve(),
+        backup_object_store: None,
+        update_release_policy: Default::default(),
+        fleet_alert_policy: Default::default(),
+        job_output_artifact_min_bytes: 32768,
+        artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
+        require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
+        dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
+    }
+}
+
+async fn seed_never_connected_memory_agent(repo: &Repository, client_id: &str) {
+    let Repository::Memory(memory) = repo else {
+        panic!("seed_never_connected_memory_agent supports only memory repository tests");
+    };
+    memory.agents.write().await.push(AgentView {
+        id: client_id.to_string(),
+        display_name: client_id.to_string(),
+        status: "never".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
+    });
+}
+
+fn route_job_request(job_id: Option<Uuid>, command: &str) -> CreateJobRequest {
+    CreateJobRequest {
+        job_id,
+        selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
+        destructive: false,
+        confirmed: true,
+        command: command.to_string(),
+        argv: Vec::new(),
+        operation: None,
+        timeout_secs: Some(5),
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: None,
+    }
+}
+
 fn test_job_request(clients: &[&str]) -> CreateJobRequest {
     CreateJobRequest {
         job_id: None,
@@ -1540,6 +1763,18 @@ fn exclusive_dispatch_operation_cases() -> Vec<(&'static str, JobCommand)> {
             JobCommand::NetworkRollback {
                 plan: Box::new(test_dispatch_tunnel_plan()),
                 side: TunnelEndpointSide::Left,
+            },
+        ),
+        (
+            "network_speed_test",
+            JobCommand::NetworkSpeedTest {
+                plan: Box::new(test_dispatch_tunnel_plan()),
+                server_side: TunnelEndpointSide::Left,
+                duration_secs: 3,
+                max_bytes: 16 * 1024 * 1024,
+                rate_limit_kbps: 100_000,
+                port: 5201,
+                connect_timeout_ms: 5000,
             },
         ),
     ]

@@ -240,6 +240,7 @@ export function FileBrowserPanel({
       confirmed: true,
       command: operation.type,
       argv: [],
+      job_id: crypto.randomUUID(),
       operation,
       timeout_secs: timeoutSecs,
       force_unprivileged: false,

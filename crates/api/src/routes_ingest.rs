@@ -178,43 +178,40 @@ pub(crate) async fn ingest_command_output(
         }
     }
     let received_at = command_output_received_at(event.received_unix);
-    let write_result = match state
-        .repo
-        .record_active_job_output_chunk_checked_with_config(
-            event.job_id,
-            &event.client_id,
-            event.seq,
-            &event.output,
-            Some(received_at.clone()),
-            persist_config,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) if error.to_string().contains("job_target_not_active") => {
-            return Err(ApiError::conflict("job_target_not_active"));
-        }
-        Err(error) if error.to_string().contains("job_target_not_found") => {
-            return Err(ApiError::not_found("job_target_not_found"));
-        }
-        Err(error) => return Err(ApiError::from(error)),
-    };
-    if write_result == JobOutputWriteResult::DuplicateConflict {
-        return Err(ApiError::conflict("job_output_sequence_conflict"));
-    }
-    state.publish(WsEvent::JobOutputRecorded {
-        job_id: event.job_id,
-        client_id: event.client_id.clone(),
-        seq: event.seq,
-        done: event.output.done,
-    });
     if event.output.done {
         let outcome = target_outcome_from_done_output(event.job_id, &event.output, received_at);
-        let target_terminalized = state
+        let record_result = match state
             .repo
-            .update_job_target_result(event.job_id, &event.client_id, &outcome)
-            .await?;
-        if target_terminalized {
+            .record_active_final_job_output_and_target_result_with_config(
+                event.job_id,
+                &event.client_id,
+                event.seq,
+                &event.output,
+                outcome.received_at.clone(),
+                persist_config,
+                &outcome,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(error) if error.to_string().contains("job_target_not_active") => {
+                return Err(ApiError::conflict("job_target_not_active"));
+            }
+            Err(error) if error.to_string().contains("job_target_not_found") => {
+                return Err(ApiError::not_found("job_target_not_found"));
+            }
+            Err(error) => return Err(ApiError::from(error)),
+        };
+        if record_result.write_result == JobOutputWriteResult::DuplicateConflict {
+            return Err(ApiError::conflict("job_output_sequence_conflict"));
+        }
+        state.publish(WsEvent::JobOutputRecorded {
+            job_id: event.job_id,
+            client_id: event.client_id.clone(),
+            seq: event.seq,
+            done: event.output.done,
+        });
+        if record_result.target_terminalized {
             let refreshed = state
                 .repo
                 .refresh_job_status_from_targets(event.job_id)
@@ -236,6 +233,36 @@ pub(crate) async fn ingest_command_output(
             }
         }
     } else {
+        let write_result = match state
+            .repo
+            .record_active_job_output_chunk_checked_with_config(
+                event.job_id,
+                &event.client_id,
+                event.seq,
+                &event.output,
+                Some(received_at.clone()),
+                persist_config,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(error) if error.to_string().contains("job_target_not_active") => {
+                return Err(ApiError::conflict("job_target_not_active"));
+            }
+            Err(error) if error.to_string().contains("job_target_not_found") => {
+                return Err(ApiError::not_found("job_target_not_found"));
+            }
+            Err(error) => return Err(ApiError::from(error)),
+        };
+        if write_result == JobOutputWriteResult::DuplicateConflict {
+            return Err(ApiError::conflict("job_output_sequence_conflict"));
+        }
+        state.publish(WsEvent::JobOutputRecorded {
+            job_id: event.job_id,
+            client_id: event.client_id.clone(),
+            seq: event.seq,
+            done: event.output.done,
+        });
         let message = status_output_message(&event.output)
             .unwrap_or_else(|| TARGET_STATUS_RUNNING.to_string());
         state

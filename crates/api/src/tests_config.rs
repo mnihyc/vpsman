@@ -414,7 +414,7 @@ async fn agent_update_degrades_unprivileged_target_after_privilege_verification(
         sha256_hex: "ab".repeat(32),
     };
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-a".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         destructive: false,

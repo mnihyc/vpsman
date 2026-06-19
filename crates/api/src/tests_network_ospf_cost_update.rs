@@ -90,7 +90,7 @@ async fn network_ospf_cost_update_create_job_rejects_wrong_side_target() {
     plan.recommended_ospf_cost = recommended_ospf_cost;
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:right-b".to_string(),
         target_client_ids: vec!["right-b".to_string()],
         destructive: true,

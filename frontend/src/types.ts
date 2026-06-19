@@ -1808,7 +1808,7 @@ type _FrontendOperationTypesMissingFromGenerated = AssertNever<Exclude<JobOperat
 type _GeneratedOperationTypesMissingFromFrontend = AssertNever<Exclude<GeneratedJobOperationType, JobOperation["type"]>>;
 
 export type CreateJobRequest = {
-  job_id?: string;
+  job_id: string;
   selector_expression: string;
   target_client_ids: string[];
   destructive: boolean;

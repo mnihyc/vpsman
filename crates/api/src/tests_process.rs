@@ -32,7 +32,7 @@ async fn wait_for_job_status(
 #[test]
 fn process_supervisor_job_commands_validate_operation_payloads() {
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-a".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         destructive: false,
@@ -77,7 +77,7 @@ fn process_supervisor_job_commands_validate_operation_payloads() {
 #[test]
 fn process_supervisor_job_commands_accept_policy_and_limits() {
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-a".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         destructive: false,
@@ -115,7 +115,7 @@ fn process_supervisor_job_commands_accept_policy_and_limits() {
 #[test]
 fn process_supervisor_job_commands_reject_unbounded_limits() {
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-a".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         destructive: false,
@@ -147,7 +147,7 @@ fn process_supervisor_job_commands_reject_unbounded_limits() {
 #[test]
 fn process_supervisor_job_commands_reject_bad_payloads() {
     let mut request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-a".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         destructive: false,
@@ -223,7 +223,7 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
         },
     };
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-a".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         destructive: false,

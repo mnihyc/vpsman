@@ -149,7 +149,7 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
     };
     let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-a".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         destructive: false,

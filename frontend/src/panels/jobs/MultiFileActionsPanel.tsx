@@ -55,6 +55,7 @@ const BULK_OUTPUT_SUMMARY_WAIT_MS = 5_000;
 type MultiFileAction = "download_files" | "upload_file" | "copy" | "rename" | "delete" | "chmod" | "chown" | "mkdir" | "write_text";
 
 type PendingBulkConfirmation = {
+  jobId: string;
   operation: JobOperation;
   selectorExpression: string;
   targets: AgentView[];
@@ -191,7 +192,12 @@ export function MultiFileActionsPanel({
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
       }
-      setPendingConfirmation({ operation, selectorExpression: reviewSelectorExpression, targets: resolved.targets });
+      setPendingConfirmation({
+        jobId: crypto.randomUUID(),
+        operation,
+        selectorExpression: reviewSelectorExpression,
+        targets: resolved.targets,
+      });
     });
     } finally {
       setReviewStatus(null);
@@ -305,6 +311,7 @@ export function MultiFileActionsPanel({
         confirmed: true,
         command: confirmation.operation.type,
         argv: [],
+        job_id: confirmation.jobId,
         operation: confirmation.operation,
         timeout_secs: BULK_JOB_TIMEOUT_SECS,
         force_unprivileged: false,

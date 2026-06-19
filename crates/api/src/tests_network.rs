@@ -1,6 +1,7 @@
 use super::*;
 
 use axum::{extract::State, http::StatusCode, Json};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use tokio::sync::broadcast;
 use vpsman_common::{
     backend_config_signature_payload, payload_hash, plan_tunnel,
@@ -1167,7 +1168,7 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
     let plan = test_plan();
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:right-b".to_string(),
         target_client_ids: vec!["right-b".to_string()],
         destructive: true,
@@ -1233,7 +1234,7 @@ async fn network_apply_degrades_unprivileged_target_after_privilege_verification
         bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:left-a".to_string(),
         target_client_ids: vec!["left-a".to_string()],
         destructive: true,
@@ -1280,7 +1281,7 @@ async fn network_rollback_create_job_rejects_wrong_side_target() {
     }
 
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:right-b".to_string(),
         target_client_ids: vec!["right-b".to_string()],
         destructive: true,
@@ -1327,7 +1328,7 @@ async fn network_status_create_job_rejects_wrong_side_target() {
     }
 
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:right-b".to_string(),
         target_client_ids: vec!["right-b".to_string()],
         destructive: false,
@@ -1374,7 +1375,7 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
     }
 
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:right-b".to_string(),
         target_client_ids: vec!["right-b".to_string()],
         destructive: false,
@@ -1423,11 +1424,11 @@ async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
     }
 
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:left-a".to_string(),
         target_client_ids: vec!["left-a".to_string()],
         destructive: false,
-        confirmed: false,
+        confirmed: true,
         command: "network_speed_test".to_string(),
         argv: Vec::new(),
         operation: Some(JobCommand::NetworkSpeedTest {
@@ -1454,8 +1455,150 @@ async fn network_speed_test_create_job_requires_both_tunnel_endpoints() {
     assert_eq!(error.code, "network_speed_test_target_mismatch");
 }
 
+#[tokio::test]
+async fn network_speed_test_create_job_requires_confirmation() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        seed_online_agent(memory, "left-a").await;
+        seed_online_agent(memory, "right-b").await;
+    }
+    let request = CreateJobRequest {
+        job_id: Some(Uuid::new_v4()),
+        selector_expression: "id:left-a || id:right-b".to_string(),
+        target_client_ids: vec!["left-a".to_string(), "right-b".to_string()],
+        destructive: false,
+        confirmed: false,
+        command: "network_speed_test".to_string(),
+        argv: Vec::new(),
+        operation: Some(network_speed_test_operation(test_plan())),
+        timeout_secs: Some(60),
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: None,
+    };
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let error = create_job(State(state), headers, Json(request))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "network_speed_test_confirmation_required");
+}
+
+#[tokio::test]
+async fn network_speed_test_create_job_skips_both_endpoints_when_peer_is_unavailable() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        seed_online_agent(memory, "left-a").await;
+        seed_never_connected_memory_agent(memory, "right-b").await;
+    }
+    let request = CreateJobRequest {
+        job_id: Some(Uuid::new_v4()),
+        selector_expression: "id:left-a || id:right-b".to_string(),
+        target_client_ids: vec!["left-a".to_string(), "right-b".to_string()],
+        destructive: false,
+        confirmed: true,
+        command: "network_speed_test".to_string(),
+        argv: Vec::new(),
+        operation: Some(network_speed_test_operation(test_plan())),
+        timeout_secs: Some(60),
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: None,
+    };
+    let state = test_state_with_privilege_auto_approve(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (status, Json(response)) = create_job(State(state), headers, Json(request))
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(response.status, "skipped");
+    assert_eq!(response.target_counts.total, 2);
+    assert_eq!(response.target_counts.skipped, 2);
+    let targets = repo.list_job_targets(response.job_id).await.unwrap();
+    assert_eq!(targets.len(), 2);
+    let left = targets
+        .iter()
+        .find(|target| target.client_id == "left-a")
+        .unwrap();
+    let right = targets
+        .iter()
+        .find(|target| target.client_id == "right-b")
+        .unwrap();
+    assert_eq!(left.status, "skipped");
+    assert_eq!(
+        left.message.as_deref(),
+        Some("network_speed_test_peer_unavailable: peer target was skipped; speed test requires both endpoints")
+    );
+    assert_eq!(right.status, "skipped");
+    assert_eq!(
+        right.message.as_deref(),
+        Some("target_never_connected: target has never connected; job skipped")
+    );
+
+    let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
+    assert_eq!(outputs.len(), 2);
+    let left_output = outputs
+        .iter()
+        .find(|output| output.client_id == "left-a")
+        .unwrap();
+    let output_bytes = BASE64_STANDARD.decode(&left_output.data_base64).unwrap();
+    let output: serde_json::Value = serde_json::from_slice(&output_bytes).unwrap();
+    assert_eq!(output["type"], "network_speed_test_peer_unavailable");
+    assert_eq!(output["reason"], "network_speed_test_peer_unavailable");
+    assert_eq!(output["peer_client_id"], "right-b");
+}
+
 fn test_plan() -> TunnelPlan {
     plan_tunnel(&test_plan_input()).unwrap()
+}
+
+fn network_speed_test_operation(plan: TunnelPlan) -> JobCommand {
+    JobCommand::NetworkSpeedTest {
+        plan: Box::new(plan),
+        server_side: TunnelEndpointSide::Left,
+        duration_secs: 3,
+        max_bytes: 16 * 1024 * 1024,
+        rate_limit_kbps: 100_000,
+        port: 5201,
+        connect_timeout_ms: 5000,
+    }
+}
+
+async fn seed_online_agent(memory: &MemoryState, client_id: &str) {
+    upsert_memory_agent(
+        &memory.agents,
+        &AgentHello {
+            client_id: client_id.to_string(),
+            process_incarnation_id: uuid::Uuid::new_v4(),
+            agent_version: "test".to_string(),
+            os_release: "test".to_string(),
+            arch: "x86_64".to_string(),
+            update_heartbeat: None,
+            internal_build_number: 1,
+            capabilities: Default::default(),
+        },
+    )
+    .await;
+}
+
+async fn seed_never_connected_memory_agent(memory: &MemoryState, client_id: &str) {
+    memory.agents.write().await.push(AgentView {
+        id: client_id.to_string(),
+        display_name: client_id.to_string(),
+        status: "never".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: AgentCapabilitySnapshot::default(),
+    });
 }
 
 fn test_plan_input() -> TunnelPlanInput {

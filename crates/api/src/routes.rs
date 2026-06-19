@@ -108,7 +108,7 @@ pub(crate) const MAX_JOB_CREATE_BODY_BYTES: usize =
     base64_json_body_limit(MAX_CHUNKED_FILE_PUSH_BYTES, JSON_BODY_OVERHEAD_BYTES);
 
 const fn base64_json_body_limit(raw_payload_bytes: usize, json_overhead_bytes: usize) -> usize {
-    ((raw_payload_bytes + 2) / 3 * 4) + json_overhead_bytes
+    (raw_payload_bytes.div_ceil(3) * 4) + json_overhead_bytes
 }
 
 pub(crate) fn build_router(state: AppState) -> Router {

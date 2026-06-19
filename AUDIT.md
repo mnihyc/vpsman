@@ -145,7 +145,7 @@ of the same root cause.
 | AUD-129 | Medium/High | Confirmed | Gateway/Terminal/Resource Bounds | Terminal output forwarding bypasses the gateway RAM spool budget |
 | AUD-130 | High | Confirmed | Agent/File Browser/Safety | Copy, chmod, and chown can follow symlinks after validation races |
 | AUD-131 | High | Confirmed | Agent/File Read And Download/Safety | Read and download paths can dereference symlinks after validation |
-| AUD-132 | High | Confirmed | API/Jobs/State Machine | Precompleted skipped targets are not atomic with job creation |
+| AUD-132 | High | Fixed | API/Jobs/State Machine | Precompleted skipped targets are not atomic with job creation |
 | AUD-133 | High | Confirmed | Agent/File Upload/Safety | Upload staging pathnames can be swapped into symlinks before chmod, chown, chunk writes, or commit |
 | AUD-134 | High | Confirmed | Agent/Restore/Safety | Restore staging pathnames can be precreated or swapped into symlinks |
 | AUD-135 | High | Confirmed | Agent/File Browser/Safety | Text-write and copy staging pathnames can be swapped before chmod or commit |
@@ -239,16 +239,16 @@ of the same root cause.
 | AUD-223 | High | Confirmed | API/Gateway/Client Lifecycle | Lifecycle disconnect can report success while older queued commands still deliver |
 | AUD-224 | Medium/High | Confirmed | Agent/CLI/Frontend/File Pull | File pull byte caps can be bypassed when a file grows after stat |
 | AUD-225 | Medium/High | Confirmed | Agent/File Browser/Resource Bounds | Text save hash checks read the whole destination file into memory |
-| AUD-226 | High | Confirmed | API/Job Outputs/State Machine | Final output insertion is not atomic with target terminalization |
+| AUD-226 | High | Fixed | API/Job Outputs/State Machine | Final output insertion is not atomic with target terminalization |
 | AUD-227 | Medium/High | Confirmed | Agent/Frontend/File Browser/Resource Bounds | Directory listing reads and sorts every entry before applying the page limit |
-| AUD-228 | Medium/High | Confirmed | Agent/API/Network Speed Tests | Network speed-test server accepts the first TCP peer without verifying the expected tunnel peer |
+| AUD-228 | Medium/High | Fixed | Agent/API/Network Speed Tests | Network speed-test server accepts the first TCP peer without verifying the expected tunnel peer |
 | AUD-229 | High | Confirmed | API/Frontend/Network Topology | Topology evidence and OSPF recommendations are keyed by mutable tunnel-plan names |
 | AUD-230 | Medium/High | Confirmed | Agent/Telemetry/Network Probes | Autonomous latency monitoring captures custom probe output without a byte limit |
-| AUD-231 | Medium/High | Confirmed | API/CLI/Agent/Network Speed Tests | Network speed tests are treated as confirmation-free read-only jobs despite opening listeners and sending traffic |
-| AUD-232 | Medium/High | Confirmed | API/Dispatcher/Agent/Network Speed Tests | Network speed tests bypass exclusive dispatch serialization and can overlap on the same tunnel endpoints |
-| AUD-233 | Medium/High | Confirmed | API/Worker/Agent/Network Speed Tests | Network speed tests can dispatch one endpoint after the peer target is skipped |
+| AUD-231 | Medium/High | Fixed | API/CLI/Agent/Network Speed Tests | Network speed tests are treated as confirmation-free read-only jobs despite opening listeners and sending traffic |
+| AUD-232 | Medium/High | Fixed | API/Dispatcher/Agent/Network Speed Tests | Network speed tests bypass exclusive dispatch serialization and can overlap on the same tunnel endpoints |
+| AUD-233 | Medium/High | Fixed | API/Worker/Agent/Network Speed Tests | Network speed tests can dispatch one endpoint after the peer target is skipped |
 | AUD-234 | High | Skipped | API/Worker/Webhooks/Security | Job-created webhooks deliver full job operation payloads to external targets |
-| AUD-235 | High | Confirmed | API/Frontend/Jobs/Idempotency | Job-create retries can dispatch the same reviewed action under a new job ID |
+| AUD-235 | High | Fixed | API/Frontend/Jobs/Idempotency | Job-create retries can dispatch the same reviewed action under a new job ID |
 
 ## Issues
 
@@ -4710,7 +4710,7 @@ of the same root cause.
 ### AUD-132: Precompleted Skipped Targets Are Not Atomic With Job Creation
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Jobs/State Machine
 - Context: Job creation now pre-completes targets that should not dispatch,
   including never-connected targets, capability-degraded targets, and busy
@@ -4749,6 +4749,12 @@ of the same root cause.
   reconciler with durable skip intent that repairs queued precomplete targets
   before dispatch can claim them. Busy-update skip intent must be frozen at job
   creation time; it should not be re-evaluated later after active work changes.
+- Resolution: Fixed by passing frozen precompleted target outcomes into job
+  creation and inserting skipped target state, synthetic final output, and
+  target-result audit evidence inside the same memory/Postgres job-creation
+  operation. The create-job route no longer runs post-commit precompletion
+  helpers, and focused tests assert skipped targets are terminal, have done
+  output, and are not dispatch-claimable immediately after creation.
 
 ### AUD-133: Upload Staging Pathnames Can Be Swapped Into Symlinks Before Chmod, Chown, Chunk Writes, Or Commit
 
@@ -8781,7 +8787,7 @@ of the same root cause.
 ### AUD-226: Final Output Insertion Is Not Atomic With Target Terminalization
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Job Outputs/State Machine
 - Context: Command-output ingest is the authoritative path where an agent's
   final output turns a job target into `completed`, `failed`, or `canceled`.
@@ -8825,6 +8831,13 @@ of the same root cause.
   the same target/output-stream lock, or make competing terminalizers detect
   and honor an already-persisted final output before writing timeout/cancel
   evidence.
+- Resolution: Fixed by routing `done` command-output ingest through a single
+  repository operation that records the final output and terminalizes the
+  active target under the same output/target lock and Postgres transaction.
+  Parent job completion, webhook side effects, terminal/file-transfer refresh,
+  and backup artifact auto-recording now run only after that atomic operation
+  commits. Focused regression tests cover final-output terminalization and
+  late-output rejection behavior.
 
 ### AUD-227: Directory Listing Reads And Sorts Every Entry Before Applying The Page Limit
 
@@ -8865,7 +8878,7 @@ of the same root cause.
 ### AUD-228: Network Speed-Test Server Accepts The First TCP Peer Without Verifying The Expected Tunnel Peer
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/API/Network Speed Tests
 - Context: Operators can run topology speed tests from the dashboard, CLI, or
   VTY. The frontend and API treat `network_speed_test` as a two-endpoint tunnel
@@ -8903,6 +8916,9 @@ of the same root cause.
   include an explicit `peer_mismatch` result when that happens, and preferably
   include a per-test nonce in the stream so simultaneous tests on the same port
   cannot cross-contaminate evidence.
+- Resolution: Fixed by binding the client stream to the peer tunnel address,
+  validating the server-side remote IP, and requiring a per-job command-hash
+  nonce handshake before throughput bytes are counted.
 
 ### AUD-229: Topology Evidence And OSPF Recommendations Are Keyed By Mutable Tunnel-Plan Names
 
@@ -9002,7 +9018,7 @@ of the same root cause.
 ### AUD-231: Network Speed Tests Are Treated As Confirmation-Free Read-Only Jobs Despite Opening Listeners And Sending Traffic
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/CLI/Agent/Network Speed Tests
 - Context: Operators can run topology speed tests from the frontend, CLI, or
   VTY to measure tunnel throughput. The operation targets both tunnel endpoint
@@ -9045,11 +9061,14 @@ of the same root cause.
   or add a dedicated `network_io`/`requires_confirmation` flag so read-only
   topology inspections remain lightweight while traffic-generating tests still
   require explicit operator review.
+- Resolution: Fixed by classifying `network_speed_test` as `exclusive`, making
+  API confirmation mandatory, and updating frontend, CLI, VTY, and tutorial
+  flows to send or require explicit confirmation.
 
 ### AUD-232: Network Speed Tests Bypass Exclusive Dispatch Serialization And Can Overlap On The Same Tunnel Endpoints
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Dispatcher/Agent/Network Speed Tests
 - Context: Operators can start tunnel speed tests from the topology panel, CLI,
   or VTY. Each test targets both endpoint VPSs, opens a TCP listener on the
@@ -9095,11 +9114,14 @@ of the same root cause.
   `network_speed_test` as exclusive or introduce a dedicated network-I/O
   serialization class that blocks overlapping tests and conflicting tunnel
   mutations without unnecessarily serializing lightweight status/probe reads.
+- Resolution: Fixed by moving `network_speed_test` into the shared
+  `exclusive` safety class, so existing durable dispatcher and agent runtime
+  exclusivity blocks overlapping speed tests and conflicting exclusive work.
 
 ### AUD-233: Network Speed Tests Can Dispatch One Endpoint After The Peer Target Is Skipped
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Worker/Agent/Network Speed Tests
 - Context: Network speed tests are a paired operation: both tunnel endpoint VPSs
   must participate in the same job, one as the TCP listener and the other as
@@ -9140,6 +9162,10 @@ of the same root cause.
   filtering: if either endpoint is skipped or unclaimable, both target rows
   should become terminal with a clear peer-unavailable reason and no endpoint
   should receive the command.
+- Resolution: Fixed by applying an all-or-none speed-test dispatch filter in
+  manual job creation and schedule materialization. If only one endpoint
+  remains dispatchable, that endpoint is precompleted as
+  `network_speed_test_peer_unavailable` and no speed-test command is sent.
 
 ### AUD-234: Job-Created Webhooks Deliver Full Job Operation Payloads To External Targets
 
@@ -9188,7 +9214,7 @@ of the same root cause.
 ### AUD-235: Job-Create Retries Can Dispatch The Same Reviewed Action Under A New Job ID
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/Jobs/Idempotency
 - Context: Operators submit privileged and destructive jobs from the dashboard,
   CLI, VTY, or direct private API automation. Network ambiguity is normal in
@@ -9230,6 +9256,13 @@ of the same root cause.
   dashboard retry semantics are not anchored to the reviewed snapshot. A clean
   fix should require a client-supplied job ID for job creation and include that
   ID in every frontend confirmation snapshot before the first submit.
+- Resolution: Fixed by requiring a client-supplied `job_id` at the start of
+  job creation, returning `job_id_required` when it is missing, and returning
+  the existing job response when the same actor retries the same frozen request
+  fingerprint. Reusing a job ID for a different actor or different request now
+  conflicts. The shared frontend client no longer injects fallback IDs at send
+  time; reviewed confirmations freeze the UUID in their snapshots, and direct
+  actions generate one UUID when the action starts.
 
 ## Issue Template
 

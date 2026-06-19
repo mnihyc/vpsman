@@ -177,7 +177,7 @@ export const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE = {
   "network_status": "read_only",
   "network_interfaces": "read_only",
   "network_probe": "read_only",
-  "network_speed_test": "read_only",
+  "network_speed_test": "exclusive",
 } as const satisfies Record<GeneratedJobOperationType, GeneratedJobCommandSafety>;
 
 export const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE = {
@@ -232,7 +232,7 @@ export const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE = {
   "network_status": false,
   "network_interfaces": false,
   "network_probe": false,
-  "network_speed_test": false,
+  "network_speed_test": true,
 } as const satisfies Record<GeneratedJobOperationType, boolean>;
 
 export const JOB_COMMAND_TYPE_BY_OPERATION_TYPE = {

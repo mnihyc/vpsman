@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 use vpsman_common::{payload_hash, CommandOutput, OutputStream};
 use vpsman_server_core::{
-    target_status_is_active, INLINE_OUTPUT_PREVIEW_BYTES, STATUS_OUTPUT_MAX_BYTES,
+    aggregate_job_status_from_statuses, target_status_is_active, INLINE_OUTPUT_PREVIEW_BYTES,
+    STATUS_OUTPUT_MAX_BYTES,
 };
 
 use crate::model::{
@@ -14,7 +15,8 @@ use crate::model::{
 };
 use crate::object_store::BackupObjectStore;
 use crate::repository::{MemoryState, Repository};
-use crate::{output_stream_name, unix_now};
+use crate::repository_jobs::finish_job_in_tx_if_all_targets_terminal;
+use crate::{output_stream_name, unix_now, TargetDispatchOutcome};
 
 const JOB_OUTPUT_ARTIFACT_PREFIX: &str = "job-outputs";
 
@@ -29,6 +31,11 @@ pub(crate) enum JobOutputWriteResult {
     Inserted,
     DuplicateIdentical,
     DuplicateConflict,
+}
+
+pub(crate) struct FinalJobOutputRecordResult {
+    pub(crate) write_result: JobOutputWriteResult,
+    pub(crate) target_terminalized: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -261,6 +268,7 @@ impl Repository {
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_job_outputs_with_config(
         &self,
         job_id: Uuid,
@@ -345,6 +353,329 @@ impl Repository {
             )
             .await?;
         Ok(results.pop().unwrap_or(JobOutputWriteResult::Inserted))
+    }
+
+    pub(crate) async fn record_active_final_job_output_and_target_result_with_config(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        seq: i32,
+        output: &CommandOutput,
+        received_at: Option<String>,
+        config: JobOutputPersistConfig<'_>,
+        outcome: &TargetDispatchOutcome,
+    ) -> Result<FinalJobOutputRecordResult> {
+        if !output.done {
+            anyhow::bail!("final job output recorder requires done output");
+        }
+        let mut persisted = materialize_job_outputs(
+            job_id,
+            client_id,
+            seq,
+            std::slice::from_ref(output),
+            received_at.clone(),
+            config,
+        )
+        .await?;
+        let created_object_keys = persisted
+            .iter()
+            .filter_map(|output| output.created_artifact_object_key.clone())
+            .collect::<Vec<_>>();
+        let Some(stored_output) = persisted.pop() else {
+            anyhow::bail!("final output materialization produced no rows");
+        };
+        let mut orphaned_object_keys = Vec::new();
+        let mut accepted_persisted = Vec::new();
+        let mut conflict_audits = Vec::new();
+        let mut terminal_status = None::<String>;
+        let operation = match self {
+            Self::Memory(memory) => {
+                ensure_memory_job_output_target_active(memory, job_id, client_id).await?;
+                let write_result = {
+                    let mut stored = memory.job_outputs.write().await;
+                    if let Some(existing) = stored.iter().find(|existing| {
+                        existing.job_id == stored_output.job_id
+                            && existing.client_id == stored_output.client_id
+                            && existing.seq == stored_output.seq
+                    }) {
+                        if let Some(object_key) = stored_output.created_artifact_object_key.clone()
+                        {
+                            orphaned_object_keys.push(object_key);
+                        }
+                        if job_output_view_matches_stored(existing, &stored_output) {
+                            JobOutputWriteResult::DuplicateIdentical
+                        } else {
+                            conflict_audits.push(job_output_conflict_audit(
+                                stored_output.job_id,
+                                &stored_output.client_id,
+                                stored_output.seq,
+                            ));
+                            JobOutputWriteResult::DuplicateConflict
+                        }
+                    } else {
+                        stored.push(stored_output.clone().into_view());
+                        accepted_persisted.push(stored_output.clone());
+                        JobOutputWriteResult::Inserted
+                    }
+                };
+                let mut target_terminalized = false;
+                if write_result != JobOutputWriteResult::DuplicateConflict {
+                    let completed_at = unix_now().to_string();
+                    let statuses = {
+                        let mut targets = memory.job_targets.write().await;
+                        let Some(target) = targets.iter_mut().find(|target| {
+                            target.job_id == job_id
+                                && target.client_id == client_id
+                                && target.completed_at.is_none()
+                                && target_status_is_active(&target.status)
+                        }) else {
+                            anyhow::bail!("job_target_not_active");
+                        };
+                        target.status = outcome.status.clone();
+                        target.message = Some(outcome.message.clone());
+                        target.exit_code = outcome.exit_code;
+                        target
+                            .started_at
+                            .get_or_insert_with(|| completed_at.clone());
+                        target.completed_at = Some(completed_at.clone());
+                        target_terminalized = true;
+                        targets
+                            .iter()
+                            .filter(|target| target.job_id == job_id)
+                            .map(|target| target.status.clone())
+                            .collect::<Vec<_>>()
+                    };
+                    memory.audits.write().await.push(AuditLogView {
+                        id: Uuid::new_v4(),
+                        actor_id: None,
+                        action: "job.target_result".to_string(),
+                        target: format!("client:{client_id}"),
+                        command_hash: None,
+                        metadata: serde_json::json!({
+                            "job_id": job_id,
+                            "status": outcome.status,
+                            "exit_code": outcome.exit_code,
+                            "accepted": outcome.accepted,
+                            "message": outcome.message,
+                            "received_at": outcome.received_at,
+                        }),
+                        created_at: completed_at.clone(),
+                    });
+                    if !statuses.is_empty()
+                        && !statuses
+                            .iter()
+                            .any(|status| target_status_is_active(status))
+                    {
+                        let status = aggregate_job_status_from_statuses(&statuses, statuses.len())
+                            .to_string();
+                        if let Some(job) = memory
+                            .jobs
+                            .write()
+                            .await
+                            .iter_mut()
+                            .find(|job| job.id == job_id && job.completed_at.is_none())
+                        {
+                            job.status = status.clone();
+                            job.completed_at = Some(completed_at);
+                            terminal_status = Some(status);
+                        }
+                    }
+                }
+                Ok(FinalJobOutputRecordResult {
+                    write_result,
+                    target_terminalized,
+                })
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let (lock_a, lock_b) = append_lock_keys(job_id, client_id);
+                sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+                    .bind(lock_a)
+                    .bind(lock_b)
+                    .execute(&mut *tx)
+                    .await?;
+                ensure_job_output_target_active_in_tx(&mut tx, job_id, client_id).await?;
+                let existing = sqlx::query(
+                    r#"
+                    SELECT
+                        stream,
+                        data,
+                        storage,
+                        object_key,
+                        data_sha256_hex,
+                        data_size_bytes,
+                        exit_code,
+                        done
+                    FROM job_outputs
+                    WHERE job_id = $1 AND client_id = $2 AND seq = $3
+                    "#,
+                )
+                .bind(stored_output.job_id)
+                .bind(&stored_output.client_id)
+                .bind(stored_output.seq)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let write_result = match existing {
+                    Some(row) if job_output_row_matches_stored(&row, &stored_output) => {
+                        if let Some(object_key) = stored_output.created_artifact_object_key.clone()
+                        {
+                            orphaned_object_keys.push(object_key);
+                        }
+                        JobOutputWriteResult::DuplicateIdentical
+                    }
+                    Some(_) => {
+                        if let Some(object_key) = stored_output.created_artifact_object_key.clone()
+                        {
+                            orphaned_object_keys.push(object_key);
+                        }
+                        insert_job_output_conflict_audit(&mut tx, &stored_output).await?;
+                        JobOutputWriteResult::DuplicateConflict
+                    }
+                    None => {
+                        let inserted = sqlx::query(
+                            r#"
+                            INSERT INTO job_outputs (
+                                job_id,
+                                client_id,
+                                seq,
+                                stream,
+                                data,
+                                storage,
+                                object_key,
+                                data_sha256_hex,
+                                data_size_bytes,
+                                exit_code,
+                                done,
+                                received_at
+                            )
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz)
+                            ON CONFLICT (job_id, client_id, seq)
+                            DO NOTHING
+                            "#,
+                        )
+                        .bind(stored_output.job_id)
+                        .bind(&stored_output.client_id)
+                        .bind(stored_output.seq)
+                        .bind(&stored_output.stream)
+                        .bind(&stored_output.data)
+                        .bind(&stored_output.storage)
+                        .bind(&stored_output.artifact_object_key)
+                        .bind(&stored_output.artifact_sha256_hex)
+                        .bind(stored_output.artifact_size_bytes)
+                        .bind(stored_output.exit_code)
+                        .bind(stored_output.done)
+                        .bind(&stored_output.received_at)
+                        .execute(&mut *tx)
+                        .await?;
+                        if inserted.rows_affected() == 0 {
+                            anyhow::bail!(
+                                "job_output_sequence_conflict_after_preflight:{}:{}:{}",
+                                stored_output.job_id,
+                                stored_output.client_id,
+                                stored_output.seq
+                            );
+                        }
+                        accepted_persisted.push(stored_output.clone());
+                        JobOutputWriteResult::Inserted
+                    }
+                };
+                let mut target_terminalized = false;
+                if write_result != JobOutputWriteResult::DuplicateConflict {
+                    let updated = sqlx::query(
+                        r#"
+                        UPDATE job_targets
+                        SET status = $3,
+                            message = $4,
+                            exit_code = $5,
+                            started_at = COALESCE(started_at, now()),
+                            completed_at = now(),
+                            result_received_at = COALESCE($6::timestamptz, now()),
+                            dispatch_lease_until = NULL,
+                            last_dispatch_error = CASE WHEN $3 IN ('failed', 'control_timeout', 'agent_lost') THEN $4 ELSE NULL END
+                        WHERE job_id = $1
+                          AND client_id = $2
+                          AND completed_at IS NULL
+                          AND status IN ('queued', 'dispatching', 'running')
+                        "#,
+                    )
+                    .bind(job_id)
+                    .bind(client_id)
+                    .bind(&outcome.status)
+                    .bind(&outcome.message)
+                    .bind(outcome.exit_code)
+                    .bind(outcome.received_at.as_deref())
+                    .execute(&mut *tx)
+                    .await?;
+                    if updated.rows_affected() == 0 {
+                        anyhow::bail!("job_target_not_active");
+                    }
+                    target_terminalized = true;
+                    sqlx::query(
+                        r#"
+                        INSERT INTO audit_logs (
+                            id, actor_id, action, target, command_hash, metadata
+                        )
+                        VALUES ($1, NULL, $2, $3, NULL, $4)
+                        "#,
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind("job.target_result")
+                    .bind(format!("client:{client_id}"))
+                    .bind(serde_json::json!({
+                        "job_id": job_id,
+                        "status": outcome.status,
+                        "exit_code": outcome.exit_code,
+                        "accepted": outcome.accepted,
+                        "message": outcome.message,
+                        "received_at": outcome.received_at,
+                    }))
+                    .execute(&mut *tx)
+                    .await?;
+                    terminal_status =
+                        finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
+                }
+                tx.commit().await?;
+                Ok(FinalJobOutputRecordResult {
+                    write_result,
+                    target_terminalized,
+                })
+            }
+        };
+        let result = match operation {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(store) = config.object_store {
+                    for object_key in created_object_keys {
+                        store.delete_best_effort(&object_key).await;
+                    }
+                }
+                return Err(error);
+            }
+        };
+        if !conflict_audits.is_empty() {
+            if let Self::Memory(memory) = self {
+                memory.audits.write().await.extend(conflict_audits);
+            }
+        }
+        if let Some(store) = config.object_store {
+            for object_key in orphaned_object_keys {
+                store.delete_best_effort(&object_key).await;
+            }
+        }
+        self.register_persisted_job_output_artifacts(client_id, &accepted_persisted)
+            .await?;
+        self.refresh_file_transfer_sessions_for_client(client_id)
+            .await?;
+        self.refresh_terminal_sessions_for_client(client_id).await?;
+        if result.target_terminalized {
+            self.record_job_target_webhook_event(job_id, client_id, outcome)
+                .await?;
+            if let Some(status) = terminal_status {
+                self.record_job_terminal_side_effects(job_id, &status, None)
+                    .await?;
+            }
+        }
+        Ok(result)
     }
 
     pub(crate) async fn classify_existing_job_output_chunk_with_config(

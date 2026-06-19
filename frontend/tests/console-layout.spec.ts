@@ -2693,7 +2693,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     argv: [],
     selector_expression: "id:agent-sfo-01 || id:agent-fra-02",
     command: "network_speed_test",
-    confirmed: false,
+    confirmed: true,
     destructive: false,
     operation: {
       connect_timeout_ms: 2500,

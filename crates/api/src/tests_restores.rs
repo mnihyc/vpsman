@@ -283,7 +283,7 @@ async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
         }],
     };
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-b".to_string(),
         target_client_ids: vec!["client-b".to_string()],
         destructive: true,

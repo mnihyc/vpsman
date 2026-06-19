@@ -9,6 +9,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 use crate::{
     gateway_client::GatewayDispatchClient,
@@ -330,7 +331,7 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
 fn file_push_job_command_uses_operation_payload_and_type() {
     let data = b"file contents";
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-a".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         destructive: false,
@@ -418,7 +419,7 @@ fn rejects_invalid_chunked_file_push_job_document() {
 fn chunked_file_push_job_command_uses_operation_payload_and_type() {
     let data = vec![7_u8; MAX_INLINE_FILE_PUSH_BYTES + 17];
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-a".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         destructive: false,

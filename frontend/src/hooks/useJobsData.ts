@@ -473,10 +473,7 @@ export function useJobsData(
 
   const createJob = useCallback(
     async (request: CreateJobRequest) => {
-      const response = await apiPost<CreateJobResponse>("/api/v1/jobs", apiToken, {
-        ...request,
-        job_id: request.job_id ?? crypto.randomUUID(),
-      });
+      const response = await apiPost<CreateJobResponse>("/api/v1/jobs", apiToken, request);
       void Promise.allSettled([loadJobs(), onFleetChanged(), onAuditChanged()]);
       return response;
     },

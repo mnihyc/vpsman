@@ -1315,7 +1315,7 @@ pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 52] = [
     ("network_status", JOB_COMMAND_SAFETY_READ_ONLY),
     ("network_interfaces", JOB_COMMAND_SAFETY_READ_ONLY),
     ("network_probe", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("network_speed_test", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("network_speed_test", JOB_COMMAND_SAFETY_EXCLUSIVE),
 ];
 
 pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 52] = [
@@ -2882,8 +2882,7 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         | JobCommand::ProcessLogs { .. }
         | JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkInterfaces
-        | JobCommand::NetworkProbe { .. }
-        | JobCommand::NetworkSpeedTest { .. } => JobCommandSafety::ReadOnly,
+        | JobCommand::NetworkProbe { .. } => JobCommandSafety::ReadOnly,
         JobCommand::Shell { .. }
         | JobCommand::ShellScript { .. }
         | JobCommand::TerminalOpen { .. }
@@ -2918,7 +2917,8 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         | JobCommand::RestoreRollback { .. }
         | JobCommand::NetworkApply { .. }
         | JobCommand::NetworkOspfCostUpdate { .. }
-        | JobCommand::NetworkRollback { .. } => JobCommandSafety::Exclusive,
+        | JobCommand::NetworkRollback { .. }
+        | JobCommand::NetworkSpeedTest { .. } => JobCommandSafety::Exclusive,
     }
 }
 
@@ -3247,6 +3247,10 @@ mod tests {
             Some(false)
         );
         assert_eq!(
+            job_command_requires_confirmation_by_operation_type("network_speed_test"),
+            Some(true)
+        );
+        assert_eq!(
             job_command_type_label_from_operation_type("shell"),
             Some("shell_argv")
         );
@@ -3263,6 +3267,13 @@ mod tests {
                 .find(|(operation_type, _)| *operation_type == "network_status")
                 .map(|(_, safety)| *safety),
             Some(JOB_COMMAND_SAFETY_READ_ONLY)
+        );
+        assert_eq!(
+            job_command_safety_by_operation_type()
+                .iter()
+                .find(|(operation_type, _)| *operation_type == "network_speed_test")
+                .map(|(_, safety)| *safety),
+            Some(JOB_COMMAND_SAFETY_EXCLUSIVE)
         );
     }
 

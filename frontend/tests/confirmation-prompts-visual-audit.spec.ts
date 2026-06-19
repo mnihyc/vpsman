@@ -18,6 +18,7 @@ test("captures reviewed confirmation prompts in operator workflows", async ({ pa
   await page.goto("/");
   await captureSystemConfigSavePrompt(page, outputDir, manifest);
   await captureTopologyLifecyclePrompt(page, outputDir, manifest);
+  await captureTopologySpeedTestPrompt(page, outputDir, manifest);
   await captureTopologySavePrompt(page, outputDir, manifest);
   await captureServerJobCancelPrompt(page, outputDir, manifest);
   await captureBackupRestoreRunPrompt(page, outputDir, manifest);
@@ -59,6 +60,22 @@ async function captureTopologyLifecyclePrompt(
   await page.getByRole("menuitem", { name: "Disable plan" }).click();
   await expect(page.getByLabel("Confirm tunnel plan lifecycle")).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "topology-lifecycle-confirm");
+  await activate(page.getByRole("button", { name: "Close confirmation" }));
+}
+
+async function captureTopologySpeedTestPrompt(
+  page: Page,
+  outputDir: string,
+  manifest: Array<Record<string, unknown>>,
+) {
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Topology", "Apply / rollback");
+  await activate(page.getByRole("button", { name: "Review speed test" }));
+  const prompt = page.getByLabel("Confirm speed test");
+  await expect(prompt).toBeVisible();
+  await expect(prompt).toContainText("Speed test");
+  await expect(prompt).toContainText("2 VPSs");
+  await capture(page, page.locator("main.content"), outputDir, manifest, "topology-speed-test-confirm");
   await activate(page.getByRole("button", { name: "Close confirmation" }));
 }
 

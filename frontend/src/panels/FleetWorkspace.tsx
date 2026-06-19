@@ -1142,6 +1142,7 @@ function FleetInstanceDetail({
         command: "network_interfaces",
         confirmed: false,
         destructive: false,
+        job_id: crypto.randomUUID(),
         operation,
         force_unprivileged: false,
         privileged: true,

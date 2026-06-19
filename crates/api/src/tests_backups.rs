@@ -250,7 +250,7 @@ fn backup_job_command_validates_executable_scope() {
 #[tokio::test]
 async fn backup_job_dispatch_requires_confirmation() {
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-a".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         destructive: false,
@@ -300,7 +300,7 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         recipient_public_key_hex: None,
     };
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-a".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         destructive: false,
@@ -396,7 +396,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
             .with_test_privilege_auto_approve();
     let headers = crate::test_auth_headers(&state).await;
     let job_request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-a".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         destructive: false,

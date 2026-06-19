@@ -497,6 +497,7 @@ async function submitTransferStep(
     destructive: false,
     confirmed: request.confirmed,
     command,
+    job_id: crypto.randomUUID(),
     operation,
     timeout_secs: timeoutSecs,
     force_unprivileged: false,

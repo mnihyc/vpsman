@@ -202,7 +202,7 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-speed-test --plan-file <plan.json> --server-side <left|right> [--duration-secs <1-30>] [--max-bytes <16384-268435456>] [--rate-limit-kbps <64-1000000>] [--port <1024-65535>] [--connect-timeout-ms <100-30000>] [--timeout <1-3600>] [--privilege-ttl <15-300>]"
+                        "usage: tunnel-speed-test --plan-file <plan.json> --server-side <left|right> [--duration-secs <1-30>] [--max-bytes <16384-268435456>] [--rate-limit-kbps <64-1000000>] [--port <1024-65535>] [--connect-timeout-ms <100-30000>] [--timeout <1-3600>] [--privilege-ttl <15-300>] --confirmed"
                     );
                     return Ok(());
                 }

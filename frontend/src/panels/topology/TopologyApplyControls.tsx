@@ -198,10 +198,11 @@ export function TopologyApplyControls({
       setNetworkSnapshot({
         action: mode,
         command: commandName(mode),
-        confirmed: isMutation(mode),
+        confirmed: requiresConfirmation(mode),
         destructive: isMutation(mode),
         detail: `${actionLabel(mode)} ${selectedPlan.name} on ${vpsCountLabel(targets.length)}.`,
         forceUnprivileged: boundedForceUnprivileged,
+        jobId: crypto.randomUUID(),
         items: [
           { label: "Operation", value: actionLabel(mode) },
           { label: "Selector", value: selectorExpression },
@@ -248,6 +249,7 @@ export function TopologyApplyControls({
         destructive: snapshot.destructive,
         operation: snapshot.operation,
         force_unprivileged: snapshot.forceUnprivileged,
+        job_id: snapshot.jobId,
         privileged: true,
         privilege_assertion: snapshot.privilegeAssertion,
         timeout_secs: snapshot.timeoutSecs,
@@ -579,6 +581,7 @@ type NetworkActionSnapshot = {
   destructive: boolean;
   detail: string;
   forceUnprivileged: boolean;
+  jobId: string;
   items: Array<{ label: string; value: string }>;
   operation: JobOperation;
   payloadHashHex: string;
@@ -643,6 +646,10 @@ function actionConfirmLabel(mode: NetworkAction): string {
 
 function isMutation(mode: NetworkAction) {
   return mode === "apply" || mode === "rollback";
+}
+
+function requiresConfirmation(mode: NetworkAction) {
+  return isMutation(mode) || mode === "speed_test";
 }
 
 function backendLabel(backend: TunnelConfigBackend) {

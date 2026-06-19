@@ -1159,6 +1159,7 @@ export function TopologyPanel({
           confirmed: true,
           destructive: true,
           force_unprivileged: false,
+          job_id: crypto.randomUUID(),
           operation,
           privileged: true,
           privilege_assertion: builtPrivilege.privilegeAssertion,

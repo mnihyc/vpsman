@@ -29,7 +29,7 @@ use crate::{
         CreateJobRequest, CreateJobResponse, CreateJobTargetCounts, WsEvent,
     },
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
-    repository_job_outputs::JobOutputPersistConfig,
+    repository_jobs::PrecompletedJobTarget,
     state::AppState,
 };
 
@@ -177,6 +177,9 @@ async fn create_job_inner(
     privilege_source: JobPrivilegeSource,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
     validate_job_audit_selector(&request.selector_expression)?;
+    let job_id = request
+        .job_id
+        .ok_or_else(|| ApiError::conflict("job_id_required"))?;
     if request.destructive && !request.confirmed {
         return Err(ApiError::conflict("destructive_confirmation_required"));
     }
@@ -190,7 +193,6 @@ async fn create_job_inner(
         ))
     })?;
     let command_hash = payload_hash(&command_payload);
-    let job_id = request.job_id.unwrap_or_else(Uuid::new_v4);
     let fixed_target_ids = request.fixed_target_ids()?;
     let target_selection = request.target_selection()?;
     let resolved_agents = state
@@ -313,11 +315,28 @@ async fn create_job_inner(
         .iter()
         .map(|skip| skip.client_id.as_str())
         .collect::<HashSet<_>>();
-    let dispatch_targets_after_precomplete = dispatch_targets
+    let mut dispatch_targets_after_precomplete = dispatch_targets
         .iter()
         .filter(|client_id| !busy_update_skip_set.contains(client_id.as_str()))
-        .count();
-    if dispatch_targets_after_precomplete > 0 && !state.gateway.configured() {
+        .cloned()
+        .collect::<Vec<_>>();
+    let network_speed_peer_skips =
+        network_speed_test_peer_skips(&job_command, &dispatch_targets_after_precomplete);
+    let network_speed_peer_skip_set = network_speed_peer_skips
+        .iter()
+        .map(|skip| skip.client_id.as_str())
+        .collect::<HashSet<_>>();
+    dispatch_targets_after_precomplete
+        .retain(|client_id| !network_speed_peer_skip_set.contains(client_id.as_str()));
+    let precompleted_targets = precompleted_target_outcomes(
+        job_id,
+        &job_command,
+        never_connected_skips,
+        capability_skips,
+        busy_update_skips,
+        network_speed_peer_skips,
+    )?;
+    if !dispatch_targets_after_precomplete.is_empty() && !state.gateway.configured() {
         return reject_job(
             state,
             job_id,
@@ -335,7 +354,7 @@ async fn create_job_inner(
     if let Some(schedule_id) = source_schedule_id {
         state
             .repo
-            .record_dispatching_job_from_schedule(
+            .record_dispatching_job_from_schedule_with_precompleted(
                 job_id,
                 &request,
                 &command_hash,
@@ -343,24 +362,31 @@ async fn create_job_inner(
                 operator,
                 &resolved_targets,
                 schedule_id,
+                &precompleted_targets,
             )
             .await?
     } else {
         state
             .repo
-            .record_dispatching_job(
+            .record_dispatching_job_with_precompleted(
                 job_id,
                 &request,
                 &command_hash,
                 &request_fingerprint,
                 operator,
                 &resolved_targets,
+                &precompleted_targets,
             )
             .await?
     };
-    precomplete_never_connected_skips(state, job_id, &job_command, never_connected_skips).await?;
-    precomplete_capability_skips(state, job_id, &job_command, capability_skips).await?;
-    precomplete_busy_update_skips(state, job_id, &job_command, busy_update_skips).await?;
+    for precompleted in &precompleted_targets {
+        state.publish(WsEvent::JobOutputRecorded {
+            job_id,
+            client_id: precompleted.client_id.clone(),
+            seq: 0,
+            done: true,
+        });
+    }
     let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
     let status = state
         .terminal_job_status_after_refresh(job_id, refreshed)
@@ -387,6 +413,12 @@ struct BusyUpdateSkip {
 #[derive(Clone, Debug)]
 struct NeverConnectedSkip {
     client_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct NetworkSpeedPeerSkip {
+    client_id: String,
+    peer_client_id: String,
 }
 
 async fn busy_update_skip_targets(
@@ -442,9 +474,38 @@ fn target_has_never_connected(agent: &AgentView) -> bool {
     agent.process_incarnation_id.is_none() || agent.status == "never"
 }
 
+fn network_speed_test_peer_skips(
+    job_command: &JobCommand,
+    dispatch_targets: &[String],
+) -> Vec<NetworkSpeedPeerSkip> {
+    let JobCommand::NetworkSpeedTest { plan, .. } = job_command else {
+        return Vec::new();
+    };
+    let left_dispatchable = dispatch_targets
+        .iter()
+        .any(|target| target == &plan.left_client_id);
+    let right_dispatchable = dispatch_targets
+        .iter()
+        .any(|target| target == &plan.right_client_id);
+    if left_dispatchable == right_dispatchable {
+        return Vec::new();
+    }
+    if left_dispatchable {
+        return vec![NetworkSpeedPeerSkip {
+            client_id: plan.left_client_id.clone(),
+            peer_client_id: plan.right_client_id.clone(),
+        }];
+    }
+    vec![NetworkSpeedPeerSkip {
+        client_id: plan.right_client_id.clone(),
+        peer_client_id: plan.left_client_id.clone(),
+    }]
+}
+
 fn confirmation_error_code(command: &JobCommand) -> &'static str {
     match command {
         JobCommand::Backup { .. } => "backup_confirmation_required",
+        JobCommand::NetworkSpeedTest { .. } => "network_speed_test_confirmation_required",
         JobCommand::HotConfig { .. }
         | JobCommand::DataSourceConfigPatch { .. }
         | JobCommand::UpdateAgent { .. }
@@ -573,114 +634,46 @@ async fn agent_update_release_policy_allows(
         .map_err(ApiError::from)
 }
 
-async fn precomplete_capability_skips(
-    state: &AppState,
-    job_id: Uuid,
-    job_command: &JobCommand,
-    capability_skips: Vec<CapabilitySkip>,
-) -> Result<Vec<String>, ApiError> {
-    let mut precompleted_statuses = Vec::new();
-    for skip in capability_skips {
-        let outcome = capability_degraded_outcome(job_id, &skip, job_command)?;
-        state
-            .repo
-            .record_job_outputs_with_config(
-                job_id,
-                &skip.client_id,
-                &outcome.outputs,
-                JobOutputPersistConfig {
-                    object_store: state.backup_object_store.as_ref(),
-                    artifact_min_bytes: state.job_output_artifact_min_bytes(),
-                },
-            )
-            .await?;
-        let target_terminalized = state
-            .repo
-            .update_job_target_result(job_id, &skip.client_id, &outcome)
-            .await?;
-        if target_terminalized {
-            precompleted_statuses.push(outcome.status.clone());
-            state.publish(WsEvent::JobOutputRecorded {
-                job_id,
-                client_id: skip.client_id,
-                seq: 0,
-                done: true,
-            });
-        }
-    }
-    Ok(precompleted_statuses)
-}
-
-async fn precomplete_never_connected_skips(
-    state: &AppState,
+fn precompleted_target_outcomes(
     job_id: Uuid,
     job_command: &JobCommand,
     never_connected_skips: Vec<NeverConnectedSkip>,
-) -> Result<(), ApiError> {
+    capability_skips: Vec<CapabilitySkip>,
+    busy_skips: Vec<BusyUpdateSkip>,
+    peer_skips: Vec<NetworkSpeedPeerSkip>,
+) -> Result<Vec<PrecompletedJobTarget>, ApiError> {
+    let mut targets = Vec::with_capacity(
+        never_connected_skips.len() + capability_skips.len() + busy_skips.len() + peer_skips.len(),
+    );
     for skip in never_connected_skips {
         let outcome = never_connected_skip_outcome(job_id, &skip, job_command)?;
-        state
-            .repo
-            .record_job_outputs_with_config(
-                job_id,
-                &skip.client_id,
-                &outcome.outputs,
-                JobOutputPersistConfig {
-                    object_store: state.backup_object_store.as_ref(),
-                    artifact_min_bytes: state.job_output_artifact_min_bytes(),
-                },
-            )
-            .await?;
-        let target_terminalized = state
-            .repo
-            .update_job_target_result(job_id, &skip.client_id, &outcome)
-            .await?;
-        if target_terminalized {
-            state.publish(WsEvent::JobOutputRecorded {
-                job_id,
-                client_id: skip.client_id,
-                seq: 0,
-                done: true,
-            });
-        }
+        targets.push(PrecompletedJobTarget {
+            client_id: skip.client_id,
+            outcome,
+        });
     }
-    Ok(())
-}
-
-async fn precomplete_busy_update_skips(
-    state: &AppState,
-    job_id: Uuid,
-    job_command: &JobCommand,
-    busy_skips: Vec<BusyUpdateSkip>,
-) -> Result<(), ApiError> {
+    for skip in capability_skips {
+        let outcome = capability_degraded_outcome(job_id, &skip, job_command)?;
+        targets.push(PrecompletedJobTarget {
+            client_id: skip.client_id,
+            outcome,
+        });
+    }
     for skip in busy_skips {
         let outcome = busy_update_skip_outcome(job_id, &skip, job_command)?;
-        state
-            .repo
-            .record_job_outputs_with_config(
-                job_id,
-                &skip.client_id,
-                &outcome.outputs,
-                JobOutputPersistConfig {
-                    object_store: state.backup_object_store.as_ref(),
-                    artifact_min_bytes: state.job_output_artifact_min_bytes(),
-                },
-            )
-            .await?;
-        let target_terminalized = state
-            .repo
-            .update_job_target_result(job_id, &skip.client_id, &outcome)
-            .await?;
-        if target_terminalized {
-            state.publish(WsEvent::JobOutputRecorded {
-                job_id,
-                client_id: skip.client_id,
-                seq: 0,
-                done: true,
-            });
-        }
+        targets.push(PrecompletedJobTarget {
+            client_id: skip.client_id,
+            outcome,
+        });
     }
-    Ok(())
+    for skip in peer_skips {
+        let outcome = network_speed_peer_skip_outcome(job_id, &skip, job_command)?;
+        targets.push(PrecompletedJobTarget {
+            client_id: skip.client_id,
+            outcome,
+        });
+    }
+    Ok(targets)
 }
 
 #[cfg(test)]
@@ -837,6 +830,40 @@ fn busy_update_skip_outcome(
         accepted: true,
         message: "busy_agent_active_jobs: target has another active job; update skipped"
             .to_string(),
+        received_at: None,
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&status).map_err(|error| ApiError::from(anyhow!(error)))?,
+            exit_code: Some(0),
+            done: true,
+        }],
+    })
+}
+
+fn network_speed_peer_skip_outcome(
+    job_id: Uuid,
+    skip: &NetworkSpeedPeerSkip,
+    command: &JobCommand,
+) -> Result<TargetDispatchOutcome, ApiError> {
+    let message = "network_speed_test_peer_unavailable: peer target was skipped; speed test requires both endpoints";
+    let status = serde_json::json!({
+        "type": "network_speed_test_peer_unavailable",
+        "status": TARGET_STATUS_SKIPPED,
+        "client_id": skip.client_id,
+        "peer_client_id": skip.peer_client_id,
+        "command_type": crate::job_request::job_command_type_label(command),
+        "reason": "network_speed_test_peer_unavailable",
+        "hint": "network speed tests require both tunnel endpoints to remain dispatchable after availability filtering",
+        "message": message,
+    });
+    Ok(TargetDispatchOutcome {
+        status: TARGET_STATUS_SKIPPED.to_string(),
+        exit_code: Some(0),
+        #[cfg(test)]
+        command_version: None,
+        accepted: false,
+        message: message.to_string(),
         received_at: None,
         outputs: vec![CommandOutput {
             job_id,

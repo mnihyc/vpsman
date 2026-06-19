@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{bail, Result};
 use base64::Engine as _;
@@ -8,8 +8,8 @@ use serde_json::json;
 use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::{
-    job_command_safety, job_command_safety_by_operation_type, payload_hash, JobCommand,
-    JobCommandSafety, JOB_COMMAND_SAFETY_EXCLUSIVE,
+    job_command_safety, job_command_safety_by_operation_type, payload_hash, CommandOutput,
+    JobCommand, JobCommandSafety, JOB_COMMAND_SAFETY_EXCLUSIVE,
 };
 use vpsman_server_core::{
     target_status_is_active, JOB_STATUS_COMPLETED, JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_QUEUED,
@@ -27,8 +27,136 @@ use crate::model::*;
 use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
 use crate::repository_job_outputs::append_lock_keys;
-use crate::util::{limit_or_default, offset_or_default, search_pattern, sort_descending};
+use crate::util::{
+    limit_or_default, offset_or_default, output_stream_name, search_pattern, sort_descending,
+};
 use crate::{unix_now, TargetDispatchOutcome};
+
+#[derive(Debug)]
+pub(crate) struct PrecompletedJobTarget {
+    pub(crate) client_id: String,
+    pub(crate) outcome: TargetDispatchOutcome,
+}
+
+fn precompleted_targets_by_client<'a>(
+    resolved_targets: &[String],
+    precompleted_targets: &'a [PrecompletedJobTarget],
+) -> Result<HashMap<&'a str, &'a TargetDispatchOutcome>> {
+    let resolved = resolved_targets
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut by_client = HashMap::with_capacity(precompleted_targets.len());
+    for target in precompleted_targets {
+        if !resolved.contains(target.client_id.as_str()) {
+            bail!(
+                "precompleted target {} is not part of resolved job targets",
+                target.client_id
+            );
+        }
+        if by_client
+            .insert(target.client_id.as_str(), &target.outcome)
+            .is_some()
+        {
+            bail!("duplicate precompleted target {}", target.client_id);
+        }
+    }
+    Ok(by_client)
+}
+
+fn precompleted_output_view(
+    job_id: Uuid,
+    client_id: &str,
+    seq: i32,
+    output: &CommandOutput,
+    created_at: &str,
+) -> JobOutputView {
+    JobOutputView {
+        job_id,
+        client_id: client_id.to_string(),
+        seq,
+        stream: output_stream_name(output.stream).to_string(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(&output.data),
+        storage: "inline".to_string(),
+        artifact_object_key: None,
+        artifact_sha256_hex: Some(payload_hash(&output.data)),
+        artifact_size_bytes: Some(output.data.len() as i64),
+        exit_code: output.exit_code,
+        done: output.done,
+        received_at: None,
+        created_at: created_at.to_string(),
+    }
+}
+
+async fn insert_precompleted_output_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    client_id: &str,
+    seq: i32,
+    output: &CommandOutput,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO job_outputs (
+            job_id,
+            client_id,
+            seq,
+            stream,
+            data,
+            storage,
+            object_key,
+            data_sha256_hex,
+            data_size_bytes,
+            exit_code,
+            done,
+            received_at
+        )
+        VALUES ($1, $2, $3, $4, $5, 'inline', NULL, $6, $7, $8, $9, NULL)
+        "#,
+    )
+    .bind(job_id)
+    .bind(client_id)
+    .bind(seq)
+    .bind(output_stream_name(output.stream))
+    .bind(&output.data)
+    .bind(payload_hash(&output.data))
+    .bind(output.data.len() as i64)
+    .bind(output.exit_code)
+    .bind(output.done)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn insert_target_result_audit_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    client_id: &str,
+    outcome: &TargetDispatchOutcome,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        VALUES ($1, NULL, $2, $3, NULL, $4)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind("job.target_result")
+    .bind(format!("client:{client_id}"))
+    .bind(json!({
+        "job_id": job_id,
+        "status": outcome.status,
+        "exit_code": outcome.exit_code,
+        "accepted": outcome.accepted,
+        "message": outcome.message,
+        "received_at": outcome.received_at,
+    }))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
 
 fn agent_update_activation_failure_status(status: &str) -> bool {
     matches!(
@@ -63,6 +191,7 @@ mod tests {
         assert!(exclusive.contains(&"backup"));
         assert!(exclusive.contains(&"shell"));
         assert!(exclusive.contains(&"network_apply"));
+        assert!(exclusive.contains(&"network_speed_test"));
         assert!(!exclusive.contains(&"network_status"));
     }
 }
@@ -1265,6 +1394,7 @@ impl Repository {
         Ok(job_id)
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_dispatching_job(
         &self,
         job_id: Uuid,
@@ -1282,9 +1412,35 @@ impl Repository {
             operator,
             resolved_targets,
             None,
+            &[],
         )
         .await
     }
+
+    pub(crate) async fn record_dispatching_job_with_precompleted(
+        &self,
+        job_id: Uuid,
+        request: &CreateJobRequest,
+        command_hash: &str,
+        request_fingerprint: &str,
+        operator: &AuthContext,
+        resolved_targets: &[String],
+        precompleted_targets: &[PrecompletedJobTarget],
+    ) -> Result<Uuid> {
+        self.record_dispatching_job_with_source(
+            job_id,
+            request,
+            command_hash,
+            request_fingerprint,
+            operator,
+            resolved_targets,
+            None,
+            precompleted_targets,
+        )
+        .await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn record_dispatching_job_from_schedule(
         &self,
         job_id: Uuid,
@@ -1303,9 +1459,35 @@ impl Repository {
             operator,
             resolved_targets,
             Some(source_schedule_id),
+            &[],
         )
         .await
     }
+
+    pub(crate) async fn record_dispatching_job_from_schedule_with_precompleted(
+        &self,
+        job_id: Uuid,
+        request: &CreateJobRequest,
+        command_hash: &str,
+        request_fingerprint: &str,
+        operator: &AuthContext,
+        resolved_targets: &[String],
+        source_schedule_id: Uuid,
+        precompleted_targets: &[PrecompletedJobTarget],
+    ) -> Result<Uuid> {
+        self.record_dispatching_job_with_source(
+            job_id,
+            request,
+            command_hash,
+            request_fingerprint,
+            operator,
+            resolved_targets,
+            Some(source_schedule_id),
+            precompleted_targets,
+        )
+        .await
+    }
+
     async fn record_dispatching_job_with_source(
         &self,
         job_id: Uuid,
@@ -1315,6 +1497,7 @@ impl Repository {
         operator: &AuthContext,
         resolved_targets: &[String],
         source_schedule_id: Option<Uuid>,
+        precompleted_targets: &[PrecompletedJobTarget],
     ) -> Result<Uuid> {
         let command_type = request.command_type_label().to_string();
         let metadata = json!({
@@ -1333,6 +1516,9 @@ impl Repository {
         let operation = request
             .job_command()
             .map_err(|error| anyhow::anyhow!(error.code))?;
+        let precompleted_by_client =
+            precompleted_targets_by_client(resolved_targets, precompleted_targets)?;
+        let mut finished_status = None::<String>;
         match self {
             Self::Memory(memory) => {
                 let created_at = unix_now().to_string();
@@ -1373,21 +1559,43 @@ impl Repository {
                     .job_targets
                     .write()
                     .await
-                    .extend(
-                        resolved_targets
-                            .iter()
-                            .cloned()
-                            .map(|client_id| JobTargetView {
+                    .extend(resolved_targets.iter().cloned().map(|client_id| {
+                        JobTargetView {
+                            job_id,
+                            status: precompleted_by_client
+                                .get(client_id.as_str())
+                                .map(|outcome| outcome.status.clone())
+                                .unwrap_or_else(|| TARGET_STATUS_QUEUED.to_string()),
+                            message: precompleted_by_client
+                                .get(client_id.as_str())
+                                .map(|outcome| outcome.message.clone()),
+                            exit_code: precompleted_by_client
+                                .get(client_id.as_str())
+                                .and_then(|outcome| outcome.exit_code),
+                            started_at: precompleted_by_client
+                                .contains_key(client_id.as_str())
+                                .then_some(created_at.clone()),
+                            completed_at: precompleted_by_client
+                                .contains_key(client_id.as_str())
+                                .then_some(created_at.clone()),
+                            process_incarnation_id: None,
+                            client_id,
+                        }
+                    }));
+                if !precompleted_targets.is_empty() {
+                    let mut outputs = memory.job_outputs.write().await;
+                    for target in precompleted_targets {
+                        for (index, output) in target.outcome.outputs.iter().enumerate() {
+                            outputs.push(precompleted_output_view(
                                 job_id,
-                                client_id,
-                                status: TARGET_STATUS_QUEUED.to_string(),
-                                message: None,
-                                exit_code: None,
-                                started_at: None,
-                                completed_at: None,
-                                process_incarnation_id: None,
-                            }),
-                    );
+                                &target.client_id,
+                                i32::try_from(index)?,
+                                output,
+                                &created_at,
+                            ));
+                        }
+                    }
+                }
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: Some(operator.operator.id),
@@ -1397,6 +1605,61 @@ impl Repository {
                     metadata,
                     created_at: created_at.clone(),
                 });
+                if !precompleted_targets.is_empty() {
+                    let mut audits = memory.audits.write().await;
+                    for target in precompleted_targets {
+                        audits.push(AuditLogView {
+                            id: Uuid::new_v4(),
+                            actor_id: None,
+                            action: "job.target_result".to_string(),
+                            target: format!("client:{}", target.client_id),
+                            command_hash: None,
+                            metadata: json!({
+                                "job_id": job_id,
+                                "status": target.outcome.status,
+                                "exit_code": target.outcome.exit_code,
+                                "accepted": target.outcome.accepted,
+                                "message": target.outcome.message,
+                                "received_at": target.outcome.received_at,
+                            }),
+                            created_at: created_at.clone(),
+                        });
+                    }
+                }
+                let target_statuses = resolved_targets
+                    .iter()
+                    .map(|client_id| {
+                        precompleted_by_client
+                            .get(client_id.as_str())
+                            .map(|outcome| outcome.status.as_str())
+                            .unwrap_or(TARGET_STATUS_QUEUED)
+                    })
+                    .collect::<Vec<_>>();
+                if !target_statuses.is_empty()
+                    && !target_statuses
+                        .iter()
+                        .any(|status| target_status_is_active(status))
+                {
+                    let status = aggregate_job_status_from_statuses(
+                        &target_statuses
+                            .iter()
+                            .map(|status| (*status).to_string())
+                            .collect::<Vec<_>>(),
+                        target_statuses.len(),
+                    )
+                    .to_string();
+                    if let Some(job) = memory
+                        .jobs
+                        .write()
+                        .await
+                        .iter_mut()
+                        .find(|job| job.id == job_id && job.completed_at.is_none())
+                    {
+                        job.status = status.clone();
+                        job.completed_at = Some(created_at.clone());
+                        finished_status = Some(status);
+                    }
+                }
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -1407,14 +1670,14 @@ impl Repository {
                         target_count, payload_hash, operation, source_schedule_id, request_fingerprint,
                         timeout_secs
                     )
-	                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     "#,
                 )
                 .bind(job_id)
                 .bind(operator.operator.id)
                 .bind(&command_type)
                 .bind(request.privileged)
-                    .bind(JOB_STATUS_QUEUED)
+                .bind(JOB_STATUS_QUEUED)
                 .bind(resolved_targets.len() as i32)
                 .bind(command_hash)
                 .bind(sqlx::types::Json(operation.clone()))
@@ -1424,19 +1687,57 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 for client_id in resolved_targets {
-                    sqlx::query(
-                        r#"
-                        INSERT INTO job_targets (
-                            job_id, client_id, status, message
+                    if let Some(outcome) = precompleted_by_client.get(client_id.as_str()) {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO job_targets (
+                                job_id,
+                                client_id,
+                                status,
+                                message,
+                                exit_code,
+                                started_at,
+                                completed_at,
+                                result_received_at
+                            )
+                            VALUES ($1, $2, $3, $4, $5, now(), now(), COALESCE($6::timestamptz, now()))
+                            "#,
                         )
-                        VALUES ($1, $2, $3, NULL)
-                        "#,
-                    )
-                    .bind(job_id)
-                    .bind(client_id)
-                    .bind(TARGET_STATUS_QUEUED)
-                    .execute(&mut *tx)
-                    .await?;
+                        .bind(job_id)
+                        .bind(client_id)
+                        .bind(&outcome.status)
+                        .bind(&outcome.message)
+                        .bind(outcome.exit_code)
+                        .bind(outcome.received_at.as_deref())
+                        .execute(&mut *tx)
+                        .await?;
+                        for (index, output) in outcome.outputs.iter().enumerate() {
+                            insert_precompleted_output_in_tx(
+                                &mut tx,
+                                job_id,
+                                client_id,
+                                i32::try_from(index)?,
+                                output,
+                            )
+                            .await?;
+                        }
+                        insert_target_result_audit_in_tx(&mut tx, job_id, client_id, outcome)
+                            .await?;
+                    } else {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO job_targets (
+                                job_id, client_id, status, message
+                            )
+                            VALUES ($1, $2, $3, NULL)
+                            "#,
+                        )
+                        .bind(job_id)
+                        .bind(client_id)
+                        .bind(TARGET_STATUS_QUEUED)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
                 }
                 sqlx::query(
                     r#"
@@ -1454,13 +1755,14 @@ impl Repository {
                 .bind(metadata)
                 .execute(&mut *tx)
                 .await?;
+                finished_status = finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
                 tx.commit().await?;
             }
         }
         self.record_job_created_webhook_event(JobCreatedWebhookEvent {
             job_id,
             command_type: &command_type,
-            status: JOB_STATUS_QUEUED,
+            status: finished_status.as_deref().unwrap_or(JOB_STATUS_QUEUED),
             privileged: request.privileged,
             command_hash,
             resolved_targets,
@@ -1469,6 +1771,14 @@ impl Repository {
             operation: Some(&operation),
         })
         .await?;
+        for target in precompleted_targets {
+            self.record_job_target_webhook_event(job_id, &target.client_id, &target.outcome)
+                .await?;
+        }
+        if let Some(status) = finished_status {
+            self.record_job_terminal_side_effects(job_id, &status, None)
+                .await?;
+        }
         Ok(job_id)
     }
 
@@ -3063,7 +3373,7 @@ impl Repository {
         Ok(true)
     }
 
-    async fn record_job_terminal_side_effects(
+    pub(crate) async fn record_job_terminal_side_effects(
         &self,
         job_id: Uuid,
         status: &str,
@@ -3516,7 +3826,7 @@ impl Repository {
         Ok(())
     }
 
-    async fn record_job_target_webhook_event(
+    pub(crate) async fn record_job_target_webhook_event(
         &self,
         job_id: Uuid,
         client_id: &str,

@@ -126,7 +126,7 @@ async fn record_scheduled_memory_job(
     fingerprint_suffix: &str,
 ) -> Uuid {
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: schedule.selector_expression.clone(),
         target_client_ids: schedule.target_client_ids.clone(),
         destructive: false,
@@ -523,7 +523,7 @@ async fn saved_schedule_job_skips_never_connected_targets_immediately() {
     seed_never_connected_agent(&repo, "client-never").await;
     let state = schedule_test_state(repo.clone());
     let request = CreateJobRequest {
-        job_id: None,
+        job_id: Some(Uuid::new_v4()),
         selector_expression: "id:client-never".to_string(),
         target_client_ids: vec!["client-never".to_string()],
         destructive: false,
