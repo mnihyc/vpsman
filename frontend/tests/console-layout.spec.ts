@@ -2249,10 +2249,10 @@ test("dispatches executable restores with agent-local archive metadata only", as
     "restore artifact dispatch is covered in the desktop console layout",
   );
 
-  const archivePath = "/var/lib/vpsman/restores/agent-sfo-01.tar";
-  const archiveSizeBytes = 4096;
-  const archiveSha256Hex =
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const archivePath = "/var/lib/vpsman/restores/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.tar";
+  const archiveSizeBytes = 512;
+  const archiveSha256Hex = "b".repeat(64);
+  const destinationRoot = `/var/lib/vpsman/restores/${backupId}/agent-fra-02`;
 
   await page.goto("/");
   await openConsoleSubpage(page, "Backups", "Restore");
@@ -2271,7 +2271,7 @@ test("dispatches executable restores with agent-local archive metadata only", as
     .getByLabel("Restore source backup request")
     .selectOption(backupId);
   await chooseVpsBySearch(restoreWorkflow, "Restore target client", "fra", /core-fra-02.*agent-fra-02/);
-  await restoreWorkflow.getByLabel("Restore destination root").fill("/restore");
+  await expect(restoreWorkflow.getByText(destinationRoot)).toBeVisible();
   await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
   await expect(restoreWorkflow.getByLabel("Confirm restore plan")).toBeVisible();
   await activate(
@@ -2289,22 +2289,18 @@ test("dispatches executable restores with agent-local archive metadata only", as
     return requests.restorePlans.at(-1);
   });
   expect(restorePlanRequest).toMatchObject({
-    destination_root: "/restore",
+    destination_root: destinationRoot,
     include_config: false,
     paths: ["/etc/hostname"],
     source_backup_request_id: backupId,
     target_client_id: "agent-fra-02",
   });
   expectPrivilegeAssertion(restorePlanRequest);
-  await restoreWorkflow
-    .getByLabel("Agent-local restore archive path")
-    .fill(archivePath);
-  await restoreWorkflow
-    .getByLabel("Agent-local restore archive size bytes")
-    .fill(String(archiveSizeBytes));
-  await restoreWorkflow
-    .getByLabel("Agent-local restore archive SHA-256")
-    .fill(archiveSha256Hex);
+  const stagedArchive = restoreWorkflow.getByLabel("Staged archive");
+  await expect(stagedArchive).toHaveValue(
+    "agent-fra-02:50505050-2222-4333-8444-555555555555",
+  );
+  await expect(stagedArchive).toHaveAttribute("title", archivePath);
   await restoreWorkflow.getByLabel("Restore timeout seconds").fill("120");
   await activate(restoreWorkflow.getByRole("button", { name: "Review restore" }));
   await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
@@ -2333,7 +2329,7 @@ test("dispatches executable restores with agent-local archive metadata only", as
       archive_path: archivePath,
       archive_sha256_hex: archiveSha256Hex,
       archive_size_bytes: archiveSizeBytes,
-      destination_root: "/restore",
+      destination_root: destinationRoot,
       include_config: false,
       paths: ["/etc/hostname"],
       source_backup_request_id: backupId,
@@ -2352,8 +2348,8 @@ test("dispatches executable restores with agent-local archive metadata only", as
       restored_files: [
         {
           archive_path: "/etc/hostname",
-          destination_path: "/restore/etc/hostname",
-          rollback_path: "/restore/etc/.vpsman-restore-hostname.bak",
+          destination_path: `${destinationRoot}/etc/hostname`,
+          rollback_path: `${destinationRoot}/etc/.vpsman-restore-hostname.bak`,
           size_bytes: 64,
           sha256_hex: "a".repeat(64),
         },
@@ -2425,10 +2421,10 @@ test("dispatches executable restores with agent-local archive metadata only", as
       restored_files: [
         {
           archive_path: "/etc/hostname",
-          destination_path: "/restore/etc/hostname",
+          destination_path: `${destinationRoot}/etc/hostname`,
           restored_sha256_hex: "a".repeat(64),
           restored_size_bytes: 64,
-          rollback_path: "/restore/etc/.vpsman-restore-hostname.bak",
+          rollback_path: `${destinationRoot}/etc/.vpsman-restore-hostname.bak`,
         },
       ],
       source_restore_job_id: restoreJobId,

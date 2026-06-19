@@ -5,6 +5,7 @@ import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleActionDrawer } from "../components/ConsoleLayout";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { bytesToBase64 } from "../fileTransfer";
+import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
   buildPrivilegeAssertion,
@@ -21,7 +22,6 @@ import {
 } from "../searchExpression";
 import {
   DEFAULT_BACKUP_SELECTED_PATHS,
-  DEFAULT_RESTORE_SELECTED_PATHS,
 } from "../presets/backupPathPresets";
 import { ArtifactUploadForm } from "./backups/ArtifactUploadForm";
 import { BackupHistoryTables } from "./backups/BackupHistoryTables";
@@ -29,6 +29,7 @@ import { BackupPolicyForm } from "./backups/BackupPolicyForm";
 import { BackupPolicyPruneForm } from "./backups/BackupPolicyPruneForm";
 import { BackupRequestForm } from "./backups/BackupRequestForm";
 import { MigrationLinkForm } from "./backups/MigrationLinkForm";
+import type { RestoreArchiveTransferOption } from "./backups/RestoreArchiveTransferSelect";
 import { RestorePlanForm } from "./backups/RestorePlanForm";
 import { RestoreRollbackForm } from "./backups/RestoreRollbackForm";
 import { RestoreRunForm } from "./backups/RestoreRunForm";
@@ -55,6 +56,7 @@ import type {
   RestorePlanRecord,
   UploadBackupArtifactRequest,
 } from "../types";
+import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import {
   clientDisplayNameFromMap,
   clientDisplayNameMap,
@@ -69,6 +71,7 @@ type BackupsPanelProps = {
   artifacts: BackupArtifactRecord[];
   backupPolicies: BackupPolicyRecord[];
   backups: BackupRequestRecord[];
+  fileTransfers: FileTransferSessionRecord[];
   migrationLinks: MigrationLinkRecord[];
   restorePlans: RestorePlanRecord[];
   error: string | null;
@@ -118,9 +121,7 @@ type RestoreRunInput = {
   paths: string[];
   includeConfig: boolean;
   destinationRoot: string;
-  archivePath: string;
-  archiveSizeBytes: string;
-  archiveSha256Hex: string;
+  archiveTransfer: RestoreArchiveTransferOption | null;
   dryRun: boolean;
   postRestoreArgv: string;
   timeoutSecs: number;
@@ -238,6 +239,7 @@ export function BackupsPanel({
   artifacts,
   backupPolicies,
   backups,
+  fileTransfers,
   migrationLinks,
   restorePlans,
   error,
@@ -260,6 +262,11 @@ export function BackupsPanel({
   setPrivilegeMaterial,
 }: BackupsPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
   const [clientId, setClientId] = useState("");
   const [pathsText, setPathsText] = useState(DEFAULT_BACKUP_SELECTED_PATHS);
   const [includeConfig, setIncludeConfig] = useState(true);
@@ -301,15 +308,8 @@ export function BackupsPanel({
   );
   const [restoreSourceId, setRestoreSourceId] = useState("");
   const [restoreTargetId, setRestoreTargetId] = useState("");
-  const [restorePathsText, setRestorePathsText] = useState(
-    DEFAULT_RESTORE_SELECTED_PATHS,
-  );
-  const [restoreIncludeConfig, setRestoreIncludeConfig] = useState(false);
-  const [restoreDestinationRoot, setRestoreDestinationRoot] = useState("");
   const [restoreNote, setRestoreNote] = useState("");
-  const [restoreArchivePath, setRestoreArchivePath] = useState("");
-  const [restoreArchiveSizeBytes, setRestoreArchiveSizeBytes] = useState("");
-  const [restoreArchiveSha256Hex, setRestoreArchiveSha256Hex] = useState("");
+  const [restoreArchiveTransferKey, setRestoreArchiveTransferKey] = useState("");
   const [restoreDryRun, setRestoreDryRun] = useState(false);
   const [restorePostRestoreArgv, setRestorePostRestoreArgv] = useState("");
   const [restoreTimeoutSecs, setRestoreTimeoutSecs] = useState(60);
@@ -327,6 +327,8 @@ export function BackupsPanel({
   const [lastRollbackJob, setLastRollbackJob] =
     useState<CreateJobResponse | null>(null);
   const [migrationRestorePlanId, setMigrationRestorePlanId] = useState("");
+  const [migrationArchiveTransferKey, setMigrationArchiveTransferKey] =
+    useState("");
   const [migrationNote, setMigrationNote] = useState("");
   const [lastMigrationLink, setLastMigrationLink] =
     useState<MigrationLinkRecord | null>(null);
@@ -338,6 +340,7 @@ export function BackupsPanel({
     useState<BackupActionSnapshot | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [reviewStatus, setReviewStatus] = useState<string | null>(null);
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const paths = useMemo(() => parseBackupPaths(pathsText), [pathsText]);
   const policyPaths = useMemo(
@@ -356,10 +359,6 @@ export function BackupsPanel({
     [agents, policyTargetParse.error, policyTargetsText],
   );
   const policyTargetCount = policyTargetIds.length;
-  const restorePaths = useMemo(
-    () => parseBackupPaths(restorePathsText),
-    [restorePathsText],
-  );
   const agentNameById = useMemo(
     () => clientDisplayNameMap(agents, vpsNameDisplayMode),
     [agents, vpsNameDisplayMode],
@@ -371,6 +370,77 @@ export function BackupsPanel({
     agents.find((agent) => agent.id === rollbackTargetId) ?? null;
   const selectedMigrationRestorePlan =
     restorePlans.find((plan) => plan.id === migrationRestorePlanId) ?? null;
+  const selectedRestoreSourceBackup =
+    backups.find((backup) => backup.id === restoreSourceId) ?? null;
+  const restorePaths = selectedRestoreSourceBackup?.paths ?? [];
+  const restoreIncludeConfig =
+    selectedRestoreSourceBackup?.include_config ?? false;
+  const restoreDestinationRoot = generatedRestoreDestinationRoot(
+    restoreSourceId,
+    restoreTargetId,
+  );
+  const selectedRestoreSourceArtifact = backupArtifactForRequest(
+    selectedRestoreSourceBackup,
+    artifacts,
+  );
+  const restoreArchiveTransferOptions = useMemo(
+    () =>
+      buildRestoreArchiveTransferOptions(
+        fileTransfers,
+        selectedRestoreSourceBackup,
+        selectedRestoreSourceArtifact,
+        restoreTargetId,
+      ),
+    [
+      artifacts,
+      fileTransfers,
+      restoreSourceId,
+      restoreTargetId,
+      selectedRestoreSourceArtifact,
+      selectedRestoreSourceBackup,
+    ],
+  );
+  const activeRestoreArchiveTransferKey = activeRestoreArchiveKey(
+    restoreArchiveTransferKey,
+    restoreArchiveTransferOptions,
+  );
+  const selectedRestoreArchiveTransfer =
+    restoreArchiveTransferOptions.find(
+      (option) => option.key === activeRestoreArchiveTransferKey,
+    ) ?? null;
+  const selectedMigrationSourceBackup =
+    backups.find(
+      (backup) =>
+        backup.id === selectedMigrationRestorePlan?.source_backup_request_id,
+    ) ?? null;
+  const selectedMigrationSourceArtifact = backupArtifactForRequest(
+    selectedMigrationSourceBackup,
+    artifacts,
+  );
+  const migrationArchiveTransferOptions = useMemo(
+    () =>
+      buildRestoreArchiveTransferOptions(
+        fileTransfers,
+        selectedMigrationSourceBackup,
+        selectedMigrationSourceArtifact,
+        selectedMigrationRestorePlan?.target_client_id ?? "",
+      ),
+    [
+      artifacts,
+      fileTransfers,
+      selectedMigrationRestorePlan,
+      selectedMigrationSourceArtifact,
+      selectedMigrationSourceBackup,
+    ],
+  );
+  const activeMigrationArchiveTransferKey = activeRestoreArchiveKey(
+    migrationArchiveTransferKey,
+    migrationArchiveTransferOptions,
+  );
+  const selectedMigrationArchiveTransfer =
+    migrationArchiveTransferOptions.find(
+      (option) => option.key === activeMigrationArchiveTransferKey,
+    ) ?? null;
   const clientLabel = (clientId: string) =>
     clientDisplayNameFromMap(clientId, agentNameById);
   const backupSubpage = [
@@ -385,6 +455,7 @@ export function BackupsPanel({
   const backupSubpageMeta = backupSubpageSummaries[backupSubpage];
   const status =
     actionError ??
+    (reviewStatus ??
     (lastPolicyPrune
       ? policyPruneStatus(lastPolicyPrune)
       : lastPolicy
@@ -407,11 +478,27 @@ export function BackupsPanel({
                         artifacts.length === 1 ? "" : "s"
                       }, ${restorePlans.length} restore plan${restorePlans.length === 1 ? "" : "s"}, ${migrationLinks.length} migration link${
                         migrationLinks.length === 1 ? "" : "s"
-                      }`);
+                      }`));
+
+  async function runBackupReview(
+    statusLabel: string,
+    action: (reviewGeneration: number) => Promise<void>,
+  ) {
+    const reviewGeneration = captureReviewGeneration();
+    setReviewStatus(statusLabel);
+    try {
+      await waitForReviewRender();
+      await runPanelAction(setPending, setActionError, async () => {
+        await action(reviewGeneration);
+      });
+    } finally {
+      setReviewStatus(null);
+    }
+  }
 
   async function submitPolicy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await runPanelAction(setPending, setActionError, async () => {
+    await runBackupReview("Preparing backup policy review", async (reviewGeneration) => {
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is locked");
@@ -478,13 +565,16 @@ export function BackupsPanel({
             catchUpPolicy: "skip_missed",
             catchUpLimit: 1,
             retryDelaySecs: 300,
-            maxFailures: 3,
-            deferredUntil: null,
-            deleted: false,
-          }),
-          privilegeMaterial,
-        }),
+        maxFailures: 3,
+        deferredUntil: null,
+        deleted: false,
+      }),
+      privilegeMaterial,
+    }),
       };
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setPendingPolicySnapshot({
         request,
         selectorExpression,
@@ -508,11 +598,13 @@ export function BackupsPanel({
   }
 
   function clearPolicyConfirmation() {
+    invalidateReviewGeneration();
     setPendingPolicySnapshot(null);
     setPendingConfirmation((current) => (current === "policy" ? null : current));
   }
 
   function clearBackupConfirmations(actions: BackupConfirmationAction[]) {
+    invalidateReviewGeneration();
     const actionSet = new Set(actions);
     if (actionSet.has("policy")) {
       setPendingPolicySnapshot(null);
@@ -566,7 +658,7 @@ export function BackupsPanel({
 
   async function submitRequest(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await runPanelAction(setPending, setActionError, async () => {
+    await runBackupReview("Preparing backup request review", async (reviewGeneration) => {
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is locked");
@@ -591,6 +683,9 @@ export function BackupsPanel({
         selectorExpression,
         timeoutSecs: 30,
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setPendingActionSnapshot({
         action: "backup-request",
         clientLabel: selectedAgent
@@ -624,7 +719,7 @@ export function BackupsPanel({
 
   async function submitArtifactUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await runPanelAction(setPending, setActionError, async () => {
+    await runBackupReview("Preparing artifact upload review", async (reviewGeneration) => {
       if (!artifactBackupId) {
         throw new Error("Select a backup request");
       }
@@ -637,6 +732,9 @@ export function BackupsPanel({
       const objectKey = artifactObjectKey.trim();
       const artifactBase64 =
         artifactUploadMode === "inline" ? await fileToBase64(artifactFile) : null;
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setPendingActionSnapshot({
         action: "artifact-upload",
         artifactBase64,
@@ -721,7 +819,7 @@ export function BackupsPanel({
 
   async function submitRestorePlan(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await runPanelAction(setPending, setActionError, async () => {
+    await runBackupReview("Preparing restore plan review", async (reviewGeneration) => {
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is locked");
@@ -755,6 +853,9 @@ export function BackupsPanel({
         selectorExpression,
         timeoutSecs: 30,
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setPendingActionSnapshot({
         action: "restore-plan",
         payloadHashHex: built.payloadHashHex,
@@ -805,27 +906,21 @@ export function BackupsPanel({
     if (input.includeConfig && !input.destinationRoot.trim()) {
       throw new Error("Config restore requires a destination root");
     }
-    const archivePath = input.archivePath.trim();
-    const archiveSizeText = input.archiveSizeBytes.trim();
-    const archiveSha256Hex = input.archiveSha256Hex.trim().toLowerCase();
-    if (!archivePath) {
-      throw new Error("Agent-local restore archive path is required");
+    const archiveTransfer = input.archiveTransfer;
+    if (!archiveTransfer) {
+      throw new Error("Select a staged archive upload that matches the source backup artifact");
     }
+    const archivePath = archiveTransfer.path.trim();
+    const archiveSha256Hex = archiveTransfer.sha256Hex.trim().toLowerCase();
     if (!archivePath.startsWith("/")) {
-      throw new Error("Agent-local restore archive path must be absolute");
+      throw new Error("Selected staged archive path is not absolute");
     }
-    if (!archiveSizeText) {
-      throw new Error("Restore archive size is required");
-    }
-    const archiveSizeBytes = Number(archiveSizeText);
-    if (
-      !Number.isSafeInteger(archiveSizeBytes) ||
-      archiveSizeBytes <= 0
-    ) {
-      throw new Error("Restore archive size must be a positive integer");
+    const archiveSizeBytes = archiveTransfer.sizeBytes;
+    if (!Number.isSafeInteger(archiveSizeBytes) || archiveSizeBytes <= 0) {
+      throw new Error("Selected staged archive size is invalid");
     }
     if (!/^[0-9a-f]{64}$/.test(archiveSha256Hex)) {
-      throw new Error("Restore archive SHA-256 must be 64 hex characters");
+      throw new Error("Selected staged archive SHA-256 is invalid");
     }
     const postRestoreArgv = input.postRestoreArgv.trim()
       ? parseCommandArgv(input.postRestoreArgv)
@@ -901,9 +996,7 @@ export function BackupsPanel({
       paths: restorePaths,
       includeConfig: restoreIncludeConfig,
       destinationRoot: restoreDestinationRoot,
-      archivePath: restoreArchivePath,
-      archiveSizeBytes: restoreArchiveSizeBytes,
-      archiveSha256Hex: restoreArchiveSha256Hex,
+      archiveTransfer: selectedRestoreArchiveTransfer,
       dryRun: restoreDryRun,
       postRestoreArgv: restorePostRestoreArgv,
       timeoutSecs: restoreTimeoutSecs,
@@ -926,13 +1019,16 @@ export function BackupsPanel({
   }
 
   async function submitRestoreRun() {
-    await runPanelAction(setPending, setActionError, async () => {
+    await runBackupReview("Preparing restore run review", async (reviewGeneration) => {
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is locked");
       }
       const input = buildRestoreRunInput();
       const run = await buildRestoreRunJobSnapshot(input);
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setPendingActionSnapshot({
         action: "restore-run",
         run,
@@ -943,7 +1039,7 @@ export function BackupsPanel({
   }
 
   async function submitRestoreRollback() {
-    await runPanelAction(setPending, setActionError, async () => {
+    await runBackupReview("Preparing restore rollback review", async (reviewGeneration) => {
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is locked");
@@ -975,6 +1071,9 @@ export function BackupsPanel({
         selectorExpression,
         timeoutSecs: boundedTimeoutSecs,
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setPendingActionSnapshot({
         action: "restore-rollback",
         payloadHashHex: built.payloadHashHex,
@@ -1027,7 +1126,7 @@ export function BackupsPanel({
   }
 
   async function submitMigrationRun() {
-    await runPanelAction(setPending, setActionError, async () => {
+    await runBackupReview("Preparing migration restore review", async (reviewGeneration) => {
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is locked");
@@ -1042,15 +1141,16 @@ export function BackupsPanel({
         paths: restorePlan.paths,
         includeConfig: restorePlan.include_config,
         destinationRoot: restorePlan.destination_root ?? "",
-        archivePath: restoreArchivePath,
-        archiveSizeBytes: restoreArchiveSizeBytes,
-        archiveSha256Hex: restoreArchiveSha256Hex,
+        archiveTransfer: selectedMigrationArchiveTransfer,
         dryRun: restoreDryRun,
         postRestoreArgv: restorePostRestoreArgv,
         timeoutSecs: restoreTimeoutSecs,
         forceUnprivileged: restoreForceUnprivileged,
       };
       const run = await buildRestoreRunJobSnapshot(input);
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setPendingActionSnapshot({
         action: "migration-run",
         linkRequest: {
@@ -1073,9 +1173,7 @@ export function BackupsPanel({
       const nextJob = await onCreateJob(snapshot.run.request);
       setRestoreSourceId(snapshot.restorePlan.source_backup_request_id);
       setRestoreTargetId(snapshot.restorePlan.target_client_id);
-      setRestorePathsText(snapshot.restorePlan.paths.join("\n"));
-      setRestoreIncludeConfig(snapshot.restorePlan.include_config);
-      setRestoreDestinationRoot(snapshot.restorePlan.destination_root ?? "");
+      setRestoreArchiveTransferKey("");
       setLastMigrationLink(link);
       setLastPayloadHash(snapshot.run.payloadHashHex);
       setLastRestoreJob(nextJob);
@@ -1083,6 +1181,28 @@ export function BackupsPanel({
       setRollbackTargetId(snapshot.restorePlan.target_client_id);
       setPendingActionSnapshot(null);
     });
+  }
+
+  function restoreArchiveConfirmationItems(
+    run: RestoreRunJobSnapshot | null,
+  ): Array<{ label: string; value: ReactNode }> {
+    const operation = run?.request.operation;
+    const restoreOperation = operation?.type === "restore" ? operation : null;
+    const fallbackArchive =
+      backupSubpage === "migration"
+        ? selectedMigrationArchiveTransfer
+        : selectedRestoreArchiveTransfer;
+    const archivePath =
+      restoreOperation?.archive_path ?? fallbackArchive?.path;
+    const archiveSizeBytes =
+      restoreOperation?.archive_size_bytes ?? fallbackArchive?.sizeBytes;
+    const archiveSha256Hex =
+      restoreOperation?.archive_sha256_hex ?? fallbackArchive?.sha256Hex;
+    return [
+      { label: "Archive path", value: archivePath || "missing" },
+      { label: "Archive size", value: archiveSizeBytes || "missing" },
+      { label: "Archive SHA-256", value: archiveSha256Hex || "missing" },
+    ];
   }
 
   function buildBackupConfirmationItems(
@@ -1275,6 +1395,7 @@ export function BackupsPanel({
             label: "Mode",
             value: snapshot?.modeLabel ?? (restoreDryRun ? "dry run" : "live restore"),
           },
+          ...restoreArchiveConfirmationItems(snapshot?.run ?? null),
           {
             label: "Privilege",
             value: snapshot ? "Frozen assertion" : "Review restore to freeze",
@@ -1350,6 +1471,7 @@ export function BackupsPanel({
             label: "Mode",
             value: snapshot?.modeLabel ?? (restoreDryRun ? "dry run" : "live restore"),
           },
+          ...restoreArchiveConfirmationItems(snapshot?.run ?? null),
           {
             label: "Privilege",
             value: snapshot ? "Frozen assertion" : "Review migration to freeze",
@@ -1773,36 +1895,13 @@ export function BackupsPanel({
                 agents={agents}
                 backups={backups}
                 confirmationOpen={pendingConfirmation === "restore-plan"}
-                onDestinationRootChange={(value) => {
-                  setRestoreDestinationRoot(value);
-                  clearBackupConfirmations([
-                    "restore-plan",
-                    "restore-run",
-                    "migration-run",
-                  ]);
-                }}
-                onIncludeConfigChange={(value) => {
-                  setRestoreIncludeConfig(value);
-                  clearBackupConfirmations([
-                    "restore-plan",
-                    "restore-run",
-                    "migration-run",
-                  ]);
-                }}
                 onNoteChange={(value) => {
                   setRestoreNote(value);
                   clearBackupConfirmations(["restore-plan"]);
                 }}
-                onPathsTextChange={(value) => {
-                  setRestorePathsText(value);
-                  clearBackupConfirmations([
-                    "restore-plan",
-                    "restore-run",
-                    "migration-run",
-                  ]);
-                }}
                 onSourceIdChange={(value) => {
                   setRestoreSourceId(value);
+                  setRestoreArchiveTransferKey("");
                   clearBackupConfirmations([
                     "restore-plan",
                     "restore-run",
@@ -1812,6 +1911,7 @@ export function BackupsPanel({
                 onSubmit={submitRestorePlan}
                 onTargetIdChange={(value) => {
                   setRestoreTargetId(value);
+                  setRestoreArchiveTransferKey("");
                   clearBackupConfirmations([
                     "restore-plan",
                     "restore-run",
@@ -1823,8 +1923,7 @@ export function BackupsPanel({
                 restoreDestinationRoot={restoreDestinationRoot}
                 restoreIncludeConfig={restoreIncludeConfig}
                 restoreNote={restoreNote}
-                restorePathsCount={restorePaths.length}
-                restorePathsText={restorePathsText}
+                restorePaths={restorePaths}
                 restoreSourceId={restoreSourceId}
                 restoreTargetId={restoreTargetId}
                 restoreTargetName={
@@ -1835,22 +1934,22 @@ export function BackupsPanel({
                 clientLabel={clientLabel}
               />
               <RestoreRunForm
+                archiveEmptyMessage={restoreArchiveEmptyMessage(
+                  restoreSourceId,
+                  restoreTargetId,
+                  selectedRestoreSourceBackup,
+                  selectedRestoreSourceArtifact,
+                )}
+                archiveTransferKey={activeRestoreArchiveTransferKey}
+                archiveTransferOptions={restoreArchiveTransferOptions}
                 confirmationOpen={pendingConfirmation === "restore-run"}
                 forceUnprivileged={restoreForceUnprivileged}
+                onArchiveTransferChange={(value) => {
+                  setRestoreArchiveTransferKey(value);
+                  clearBackupConfirmations(["restore-run"]);
+                }}
                 onForceUnprivilegedChange={(value) => {
                   setRestoreForceUnprivileged(value);
-                  clearBackupConfirmations(["restore-run", "migration-run"]);
-                }}
-                onArchivePathChange={(value) => {
-                  setRestoreArchivePath(value);
-                  clearBackupConfirmations(["restore-run", "migration-run"]);
-                }}
-                onArchiveSizeBytesChange={(value) => {
-                  setRestoreArchiveSizeBytes(value);
-                  clearBackupConfirmations(["restore-run", "migration-run"]);
-                }}
-                onArchiveSha256HexChange={(value) => {
-                  setRestoreArchiveSha256Hex(value);
                   clearBackupConfirmations(["restore-run", "migration-run"]);
                 }}
                 onDryRunChange={(value) => {
@@ -1868,9 +1967,6 @@ export function BackupsPanel({
                 onRunRestore={submitRestoreRun}
                 pending={pending}
                 privilegeReady={Boolean(privilegeMaterial)}
-                restoreArchivePath={restoreArchivePath}
-                restoreArchiveSizeBytes={restoreArchiveSizeBytes}
-                restoreArchiveSha256Hex={restoreArchiveSha256Hex}
                 restoreDryRun={restoreDryRun}
                 restorePostRestoreArgv={restorePostRestoreArgv}
                 restoreSourceId={restoreSourceId}
@@ -1924,21 +2020,31 @@ export function BackupsPanel({
           {backupSubpage === "migration" && (
             <>
               <MigrationLinkForm
-                archivePath={restoreArchivePath}
-                archiveSha256Hex={restoreArchiveSha256Hex}
-                archiveSizeBytes={restoreArchiveSizeBytes}
+                archiveEmptyMessage={restoreArchiveEmptyMessage(
+                  selectedMigrationRestorePlan?.source_backup_request_id ?? "",
+                  selectedMigrationRestorePlan?.target_client_id ?? "",
+                  selectedMigrationSourceBackup,
+                  selectedMigrationSourceArtifact,
+                )}
+                archiveTransferKey={activeMigrationArchiveTransferKey}
+                archiveTransferOptions={migrationArchiveTransferOptions}
                 clientLabel={clientLabel}
                 forceUnprivileged={restoreForceUnprivileged}
                 lastMigrationLink={lastMigrationLink}
                 linkConfirmationOpen={pendingConfirmation === "migration-link"}
                 migrationNote={migrationNote}
                 migrationRestorePlanId={migrationRestorePlanId}
+                onArchiveTransferChange={(value) => {
+                  setMigrationArchiveTransferKey(value);
+                  clearBackupConfirmations(["migration-run"]);
+                }}
                 onMigrationNoteChange={(value) => {
                   setMigrationNote(value);
                   clearBackupConfirmations(["migration-link", "migration-run"]);
                 }}
                 onMigrationRestorePlanIdChange={(value) => {
                   setMigrationRestorePlanId(value);
+                  setMigrationArchiveTransferKey("");
                   clearBackupConfirmations(["migration-link", "migration-run"]);
                 }}
                 onRunMigrationRestore={submitMigrationRun}
@@ -1966,6 +2072,100 @@ export function BackupsPanel({
       </ConsoleActionDrawer>
     </section>
   );
+}
+
+function backupArtifactForRequest(
+  backup: BackupRequestRecord | null,
+  artifacts: BackupArtifactRecord[],
+): BackupArtifactRecord | null {
+  if (!backup?.artifact_id) {
+    return null;
+  }
+  return artifacts.find((artifact) => artifact.id === backup.artifact_id) ?? null;
+}
+
+function buildRestoreArchiveTransferOptions(
+  transfers: FileTransferSessionRecord[],
+  sourceBackup: BackupRequestRecord | null,
+  sourceArtifact: BackupArtifactRecord | null,
+  targetClientId: string,
+): RestoreArchiveTransferOption[] {
+  if (!sourceBackup || !sourceArtifact || !targetClientId) {
+    return [];
+  }
+  const artifactSha = sourceArtifact.sha256_hex.toLowerCase();
+  return transfers
+    .filter(
+      (transfer) =>
+        transfer.client_id === targetClientId &&
+        transfer.direction === "upload" &&
+        transfer.status === "completed" &&
+        transfer.path.startsWith("/") &&
+        transfer.size_bytes === sourceArtifact.size_bytes &&
+        transfer.sha256_hex?.toLowerCase() === artifactSha,
+    )
+    .sort((left, right) => right.observed_at.localeCompare(left.observed_at))
+    .map((transfer) => ({
+      key: restoreArchiveTransferKeyForRecord(transfer),
+      observedAt: transfer.observed_at,
+      path: transfer.path,
+      sessionId: transfer.session_id,
+      sha256Hex: transfer.sha256_hex ?? "",
+      sizeBytes: transfer.size_bytes ?? 0,
+    }));
+}
+
+function activeRestoreArchiveKey(
+  requestedKey: string,
+  options: RestoreArchiveTransferOption[],
+): string {
+  if (options.some((option) => option.key === requestedKey)) {
+    return requestedKey;
+  }
+  return options.length === 1 ? options[0].key : "";
+}
+
+function restoreArchiveTransferKeyForRecord(
+  transfer: FileTransferSessionRecord,
+): string {
+  return `${transfer.client_id}:${transfer.session_id}`;
+}
+
+function restoreArchiveEmptyMessage(
+  sourceBackupId: string,
+  targetClientId: string,
+  sourceBackup: BackupRequestRecord | null,
+  sourceArtifact: BackupArtifactRecord | null,
+): string {
+  if (!sourceBackupId) {
+    return "Select a source backup request first";
+  }
+  if (!targetClientId) {
+    return "Select a restore target first";
+  }
+  if (!sourceBackup?.artifact_id) {
+    return "Selected backup has no artifact record yet";
+  }
+  if (!sourceArtifact) {
+    return "Selected backup artifact metadata is unavailable";
+  }
+  return "No completed upload on the target matches this backup artifact";
+}
+
+function generatedRestoreDestinationRoot(
+  sourceBackupId: string,
+  targetClientId: string,
+): string {
+  if (!sourceBackupId || !targetClientId) {
+    return "";
+  }
+  return `/var/lib/vpsman/restores/${safeRestorePathSegment(
+    sourceBackupId,
+  )}/${safeRestorePathSegment(targetClientId)}`;
+}
+
+function safeRestorePathSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 120) || "unknown";
 }
 
 function clampInteger(value: number, min: number, max: number): number {

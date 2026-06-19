@@ -1,7 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
+import { backupId, installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import { activate, openConsoleSubpage, unlockPrivilegeFromTop } from "./support/consoleNavigation";
 
 test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual confirmation prompt screenshots only");
@@ -20,6 +20,7 @@ test("captures reviewed confirmation prompts in operator workflows", async ({ pa
   await captureTopologyLifecyclePrompt(page, outputDir, manifest);
   await captureTopologySavePrompt(page, outputDir, manifest);
   await captureServerJobCancelPrompt(page, outputDir, manifest);
+  await captureBackupRestoreRunPrompt(page, outputDir, manifest);
 
   writeFileSync(
     join(outputDir, `manifest-${testInfo.project.name}.json`),
@@ -109,6 +110,28 @@ async function captureServerJobCancelPrompt(
   await activate(serverJobsPanel.getByRole("button", { name: "Cancel" }).first());
   await expect(page.getByLabel("Confirm server job cancellation")).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "server-job-cancel-confirm");
+  await activate(page.getByRole("button", { name: "Close confirmation" }));
+}
+
+async function captureBackupRestoreRunPrompt(
+  page: Page,
+  outputDir: string,
+  manifest: Array<Record<string, unknown>>,
+) {
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Backups", "Restore");
+  await activate(page.getByRole("button", { name: "Open restore workflow" }));
+  const restoreWorkflow = page.getByLabel("Open restore workflow");
+  await restoreWorkflow.getByLabel("Restore source backup request").selectOption(backupId);
+  await chooseVpsBySearch(restoreWorkflow, "Restore target client", "fra", /core-fra-02.*agent-fra-02/);
+  await expect(restoreWorkflow.getByLabel("Staged archive")).toHaveValue(
+    "agent-fra-02:50505050-2222-4333-8444-555555555555",
+  );
+  await restoreWorkflow.getByLabel("Restore timeout seconds").fill("120");
+  await activate(restoreWorkflow.getByRole("button", { name: "Review restore" }));
+  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
+  await capture(page, page.locator("main.content"), outputDir, manifest, "backup-restore-run-confirm");
+  await activate(page.getByRole("button", { name: "Close confirmation" }));
 }
 
 async function chooseVpsBySearch(

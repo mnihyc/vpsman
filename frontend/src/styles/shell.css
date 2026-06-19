@@ -860,6 +860,10 @@ nav {
   overflow-wrap: anywhere;
 }
 
+.confirmationPromptBody span {
+  padding-right: 2px;
+}
+
 .confirmationPromptError {
   color: #b3261e;
   font-size: 12px;
@@ -876,12 +880,21 @@ nav {
 
 .confirmationPromptBody dl div {
   display: grid;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
   border: 1px solid #eef1f6;
   border-radius: 6px;
   background: #fff;
-  padding: 8px;
+  padding: 10px 12px;
+  overflow: hidden;
+}
+
+.confirmationPromptBody dd {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .confirmationPromptBody dt {

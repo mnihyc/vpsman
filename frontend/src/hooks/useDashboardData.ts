@@ -153,6 +153,7 @@ export function useDashboardData(activeView: ActiveView) {
       void jobs.loadJobs();
     } else if (activeView === "Backups") {
       void backups.loadBackups();
+      void jobs.loadJobs();
     } else if (activeView === "Audit") {
       void audit.loadAudits();
     } else if (activeView === "Access") {

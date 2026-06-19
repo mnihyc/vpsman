@@ -938,12 +938,6 @@ pub(crate) enum Command {
         source_backup_request_id: String,
         #[arg(long)]
         target_client_id: String,
-        #[arg(long, value_delimiter = ',')]
-        paths: Vec<String>,
-        #[arg(long, default_value_t = false)]
-        include_config: bool,
-        #[arg(long)]
-        destination_root: Option<String>,
         #[arg(long)]
         note: Option<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -967,11 +961,7 @@ pub(crate) enum Command {
         #[arg(long)]
         restore_plan_id: String,
         #[arg(long)]
-        archive_path: String,
-        #[arg(long)]
-        archive_size_bytes: u64,
-        #[arg(long)]
-        archive_sha256_hex: String,
+        archive_transfer_session_id: String,
         #[arg(long)]
         note: Option<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -993,17 +983,7 @@ pub(crate) enum Command {
         #[arg(long)]
         target_client_id: String,
         #[arg(long)]
-        archive_path: String,
-        #[arg(long)]
-        archive_size_bytes: u64,
-        #[arg(long)]
-        archive_sha256_hex: String,
-        #[arg(long, value_delimiter = ',')]
-        paths: Vec<String>,
-        #[arg(long, default_value_t = false)]
-        include_config: bool,
-        #[arg(long)]
-        destination_root: Option<String>,
+        archive_transfer_session_id: String,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
         #[arg(long)]

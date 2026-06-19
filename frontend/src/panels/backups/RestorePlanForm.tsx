@@ -1,11 +1,6 @@
 import type { FormEvent } from "react";
 import { RotateCcw } from "lucide-react";
 import { VpsCombobox } from "../../components/VpsCombobox";
-import {
-  RESTORE_PATH_PLACEHOLDER,
-  RESTORE_PATH_PRESETS,
-} from "../../presets/backupPathPresets";
-import { PathPresetButtons } from "./PathPresetButtons";
 import type { AgentView, BackupRequestRecord } from "../../types";
 import { shortId } from "../../utils";
 
@@ -14,10 +9,7 @@ type RestorePlanFormProps = {
   backups: BackupRequestRecord[];
   clientLabel: (clientId: string) => string;
   confirmationOpen: boolean;
-  onDestinationRootChange: (value: string) => void;
-  onIncludeConfigChange: (value: boolean) => void;
   onNoteChange: (value: string) => void;
-  onPathsTextChange: (value: string) => void;
   onSourceIdChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onTargetIdChange: (value: string) => void;
@@ -26,8 +18,7 @@ type RestorePlanFormProps = {
   restoreDestinationRoot: string;
   restoreIncludeConfig: boolean;
   restoreNote: string;
-  restorePathsCount: number;
-  restorePathsText: string;
+  restorePaths: string[];
   restoreSourceId: string;
   restoreTargetId: string;
   restoreTargetName: string | null;
@@ -38,10 +29,7 @@ export function RestorePlanForm({
   backups,
   clientLabel,
   confirmationOpen,
-  onDestinationRootChange,
-  onIncludeConfigChange,
   onNoteChange,
-  onPathsTextChange,
   onSourceIdChange,
   onSubmit,
   onTargetIdChange,
@@ -50,8 +38,7 @@ export function RestorePlanForm({
   restoreDestinationRoot,
   restoreIncludeConfig,
   restoreNote,
-  restorePathsCount,
-  restorePathsText,
+  restorePaths,
   restoreSourceId,
   restoreTargetId,
   restoreTargetName,
@@ -88,29 +75,18 @@ export function RestorePlanForm({
             value={restoreTargetId}
           />
         </label>
-        <label>
-          <span>Selected paths</span>
-          <textarea
-            aria-label="Restore selected paths"
-            onChange={(event) => onPathsTextChange(event.target.value)}
-            placeholder={RESTORE_PATH_PLACEHOLDER}
-            rows={4}
-            value={restorePathsText}
-          />
-          <PathPresetButtons
-            onApply={onPathsTextChange}
-            presets={RESTORE_PATH_PRESETS}
-          />
-        </label>
-        <label>
-          <span>Destination root</span>
-          <input
-            aria-label="Restore destination root"
-            onChange={(event) => onDestinationRootChange(event.target.value)}
-            placeholder="/restore"
-            value={restoreDestinationRoot}
-          />
-        </label>
+        <div className="restoreReadOnlyField">
+          <span>Source scope</span>
+          <strong title={restoreScopeTitle(restoreIncludeConfig, restorePaths)}>
+            {restoreScopeLabel(restoreIncludeConfig, restorePaths)}
+          </strong>
+        </div>
+        <div className="restoreReadOnlyField">
+          <span>Generated destination root</span>
+          <strong title={restoreDestinationRoot || "Select source and target"}>
+            {restoreDestinationRoot || "Select source and target"}
+          </strong>
+        </div>
         <label>
           <span>Note</span>
           <input
@@ -120,26 +96,22 @@ export function RestorePlanForm({
             value={restoreNote}
           />
         </label>
-        <label className="checkLine inlineCheck">
-          <input
-            checked={restoreIncludeConfig}
-            onChange={(event) => onIncludeConfigChange(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Include agent config</span>
-        </label>
         <div className="backupScopeList">
           <RotateCcw size={18} />
           <span>{restoreIncludeConfig ? "config" : "no config"}</span>
           <span>
-            {restorePathsCount} path{restorePathsCount === 1 ? "" : "s"}
+            {restorePaths.length} path{restorePaths.length === 1 ? "" : "s"}
           </span>
         </div>
         {!confirmationOpen && (
           <button
             className="primaryAction"
             disabled={
-              pending || !privilegeReady || !restoreSourceId || !restoreTargetId
+              pending ||
+              !privilegeReady ||
+              !restoreSourceId ||
+              !restoreTargetId ||
+              !restoreDestinationRoot
             }
             type="submit"
           >
@@ -150,4 +122,21 @@ export function RestorePlanForm({
       </form>
     </>
   );
+}
+
+function restoreScopeLabel(includeConfig: boolean, paths: string[]): string {
+  const parts = [];
+  if (includeConfig) {
+    parts.push("agent config");
+  }
+  if (paths.length > 0) {
+    parts.push(`${paths.length} path${paths.length === 1 ? "" : "s"}`);
+  }
+  return parts.join(", ") || "metadata only";
+}
+
+function restoreScopeTitle(includeConfig: boolean, paths: string[]): string {
+  const parts = includeConfig ? ["agent config"] : [];
+  parts.push(...paths);
+  return parts.join("\n") || "No paths recorded";
 }

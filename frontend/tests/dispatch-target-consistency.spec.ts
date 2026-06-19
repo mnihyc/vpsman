@@ -143,6 +143,49 @@ test("multi-file review resolves targets again instead of executing cached previ
   });
 });
 
+test("multi-file async review preparation ignores stale path edits", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "multi-file async review consistency is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await page.evaluate(() =>
+    localStorage.removeItem("vpsman.multiFile.selectorExpression"),
+  );
+  await openConsoleSubpage(page, "Jobs", "Multi files");
+  await unlockPrivilege(page, "Multi files");
+
+  await page.getByLabel("Bulk file path").fill("/etc/app.conf");
+  await activate(page.getByRole("button", { name: "Review download" }));
+  await expect(page.getByText("Preparing bulk file review")).toBeVisible();
+  await page.getByLabel("Bulk file path").fill("/etc/app.conf.next");
+  await expect(page.getByText("Preparing bulk file review")).toBeHidden();
+  await expect(page.getByText("Confirm multi-file operation")).toBeHidden();
+
+  await activate(page.getByRole("button", { name: "Review download" }));
+  await expect(page.getByText("Confirm multi-file operation")).toBeVisible();
+  await activate(page.getByRole("button", { name: "Run bulk action" }));
+
+  const request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.jobs.find(
+      (entry) =>
+        (entry as { operation?: { type?: string } }).operation?.type ===
+        "file_download",
+    );
+  });
+  expect(request).toMatchObject({
+    operation: { path: "/etc/app.conf.next", type: "file_download" },
+    selector_expression: "id:*",
+    target_client_ids: ["agent-fra-02", "agent-nyc-03", "agent-sfo-01"],
+  });
+});
+
 test("bulk config review uses the current backend-resolved selector instead of a stale preview", async ({
   page,
 }, testInfo) => {
@@ -367,6 +410,68 @@ test("topology network confirmation closes on edit and submits a fresh snapshot"
   });
 });
 
+test("topology async review preparation ignores stale edits", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "network async review consistency is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Topology", "Apply / rollback");
+  await unlockPrivilegeFor(page, "Topology", "Apply / rollback");
+
+  await activate(page.getByRole("button", { name: "Review apply" }));
+  await expect(page.getByText("Preparing apply review")).toBeVisible();
+  await page.getByLabel("Network apply timeout seconds").fill("135");
+  await expect(page.getByText("Preparing apply review")).toBeHidden();
+  await expect(page.getByText("Confirm apply")).toBeHidden();
+  await activate(page.getByRole("button", { name: "Review apply" }));
+  await expect(page.getByText("Confirm apply")).toBeVisible();
+  await activate(
+    page.locator(".confirmationPrompt").getByRole("button", {
+      name: "Apply side",
+    }),
+  );
+
+  const applyRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.jobs.at(-1);
+  });
+  expect(applyRequest).toMatchObject({
+    command: "network_apply",
+    timeout_secs: 135,
+  });
+
+  await openConsoleSubpage(page, "Topology", "OSPF");
+  await activate(page.getByRole("button", { name: "Review cost apply" }));
+  await expect(page.getByText("Preparing OSPF review")).toBeVisible();
+  await page.getByLabel("OSPF update timeout seconds").fill("105");
+  await expect(page.getByText("Preparing OSPF review")).toBeHidden();
+  await expect(page.getByText("Confirm OSPF cost update")).toBeHidden();
+  await activate(page.getByRole("button", { name: "Review cost apply" }));
+  await expect(page.getByText("Confirm OSPF cost update")).toBeVisible();
+  await activate(
+    page.locator(".confirmationPrompt").getByRole("button", {
+      name: "Apply cost",
+    }),
+  );
+
+  const ospfRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.jobs.at(-1);
+  });
+  expect(ospfRequest).toMatchObject({
+    command: "network_ospf_cost_update",
+    timeout_secs: 105,
+  });
+});
+
 test("privileged confirmation closes when the local assertion expires", async ({
   page,
 }, testInfo) => {
@@ -431,7 +536,7 @@ test("OSPF confirmation closes on edit and submits a fresh snapshot", async ({
   });
 });
 
-test("adapter promotion confirmation closes on edit and submits a fresh snapshot", async ({
+test("adapter promotion submits a fresh snapshot after reopening review", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -448,23 +553,46 @@ test("adapter promotion confirmation closes on edit and submits a fresh snapshot
   const adapterForm = promotionPanel.locator("form", {
     has: page.getByRole("heading", { name: "Adapter contract" }),
   });
+  for (const argvLabel of [
+    "Status argv",
+    "Start argv",
+    "Restart argv",
+    "Stop argv",
+    "Cleanup argv",
+    "Traffic argv",
+  ]) {
+    await expect(adapterForm.getByLabel(argvLabel, { exact: true })).toHaveAttribute(
+      "title",
+      /Command and arguments executed by the adapter/,
+    );
+  }
   await adapterForm
     .getByLabel("Observed plan")
     .selectOption("eeeeeeee-ffff-4000-8111-222222222222");
-  await adapterForm
-    .getByLabel("Status argv", { exact: true })
-    .fill("/usr/local/libexec/vpsman-openvpn-adapter\nstatus-a\n{interface}");
+  const statusArgv = adapterForm.getByLabel("Status argv", { exact: true });
+  await statusArgv.fill(
+    "/usr/local/libexec/vpsman-openvpn-adapter\nstatus-a\n{interface}",
+  );
   await activate(adapterForm.getByRole("button", { name: "Review promotion" }));
-  await expect(promotionPanel.getByText("Promote tunnel adapter")).toBeVisible();
-  await page.keyboard.press("ControlOrMeta+A");
-  await page.keyboard.insertText(
+  const promotionConfirmation = promotionPanel.locator(".confirmationPrompt", {
+    hasText: "Promote tunnel adapter",
+  });
+  await expect(promotionConfirmation).toBeVisible();
+  await expect(promotionConfirmation.locator("dd", { hasText: "status-a" })).toHaveAttribute(
+    "title",
+    /status-a/,
+  );
+  await activate(
+    promotionConfirmation.getByRole("button", { name: "Close confirmation" }),
+  );
+  await expect(promotionConfirmation).toBeHidden();
+  await statusArgv.fill(
     "/usr/local/libexec/vpsman-openvpn-adapter\nstatus-b\n{interface}",
   );
-  await expect(promotionPanel.getByText("Promote tunnel adapter")).toBeHidden();
   await activate(adapterForm.getByRole("button", { name: "Review promotion" }));
-  await expect(promotionPanel.getByText("Promote tunnel adapter")).toBeVisible();
+  await expect(promotionConfirmation).toBeVisible();
   await activate(
-    promotionPanel.locator(".confirmationPrompt").getByRole("button", {
+    promotionConfirmation.getByRole("button", {
       name: "Promote adapter",
     }),
   );
@@ -555,10 +683,10 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     testInfo.project.name.includes("mobile"),
     "backup restore consistency is covered in desktop workflow tests",
   );
-  const archivePath = "/var/lib/vpsman/restores/agent-sfo-01.tar";
-  const archiveSizeBytes = 4096;
-  const archiveSha256Hex =
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const archivePath = "/var/lib/vpsman/restores/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.tar";
+  const archiveSizeBytes = 512;
+  const archiveSha256Hex = "b".repeat(64);
+  const destinationRoot = `/var/lib/vpsman/restores/${backupId}/agent-fra-02`;
 
   await installConsoleApiMock(page);
   await page.goto("/");
@@ -576,16 +704,12 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     "fra",
     /core-fra-02.*agent-fra-02/,
   );
-  await restoreWorkflow
-    .getByLabel("Restore destination root")
-    .fill("/restore-a");
+  await restoreWorkflow.getByLabel("Restore note").fill("restore-a");
   await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
   await expect(
     restoreWorkflow.getByLabel("Confirm restore plan"),
   ).toBeVisible();
-  await restoreWorkflow
-    .getByLabel("Restore destination root")
-    .fill("/restore-b");
+  await restoreWorkflow.getByLabel("Restore note").fill("restore-b");
   await expect(
     restoreWorkflow.getByLabel("Confirm restore plan"),
   ).toBeHidden();
@@ -606,20 +730,17 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     return requests.restorePlans.at(-1);
   });
   expect(restorePlanRequest).toMatchObject({
-    destination_root: "/restore-b",
+    destination_root: destinationRoot,
+    note: "restore-b",
     source_backup_request_id: backupId,
     target_client_id: "agent-fra-02",
   });
 
-  await restoreWorkflow
-    .getByLabel("Agent-local restore archive path")
-    .fill(archivePath);
-  await restoreWorkflow
-    .getByLabel("Agent-local restore archive size bytes")
-    .fill(String(archiveSizeBytes));
-  await restoreWorkflow
-    .getByLabel("Agent-local restore archive SHA-256")
-    .fill(archiveSha256Hex);
+  const stagedArchive = restoreWorkflow.getByLabel("Staged archive");
+  await expect(stagedArchive).toHaveValue(
+    "agent-fra-02:50505050-2222-4333-8444-555555555555",
+  );
+  await expect(stagedArchive).toHaveAttribute("title", archivePath);
   await restoreWorkflow.getByLabel("Restore timeout seconds").fill("120");
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review restore" }),
@@ -637,6 +758,13 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
   await expect(
     restoreWorkflow.getByLabel("Confirm restore run"),
   ).toBeVisible();
+  const restoreRunConfirmation = restoreWorkflow.getByLabel("Confirm restore run");
+  await expect(
+    restoreRunConfirmation.locator("dd", { hasText: archivePath }),
+  ).toHaveAttribute("title", archivePath);
+  await expect(
+    restoreRunConfirmation.locator("dd", { hasText: archiveSha256Hex }),
+  ).toHaveAttribute("title", archiveSha256Hex);
   await activate(
     restoreWorkflow
       .getByLabel("Confirm restore run")
@@ -658,8 +786,96 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
       archive_path: archivePath,
       archive_sha256_hex: archiveSha256Hex,
       archive_size_bytes: archiveSizeBytes,
-      destination_root: "/restore-b",
+      destination_root: destinationRoot,
       source_backup_request_id: backupId,
+      type: "restore",
+    },
+  });
+});
+
+test("backup restore async review preparation ignores stale edits", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "backup restore async review consistency is covered in desktop workflow tests",
+  );
+  const archivePath = "/var/lib/vpsman/restores/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.tar";
+  const destinationRoot = `/var/lib/vpsman/restores/${backupId}/agent-fra-02`;
+
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Backups", "Restore");
+  await unlockPrivilegeFor(page, "Backups", "Restore");
+  await activate(page.getByRole("button", { name: "Open restore workflow" }));
+  const restoreWorkflow = page.getByLabel("Open restore workflow");
+
+  await restoreWorkflow
+    .getByLabel("Restore source backup request")
+    .selectOption(backupId);
+  await chooseVpsBySearch(
+    restoreWorkflow,
+    "Restore target client",
+    "fra",
+    /core-fra-02.*agent-fra-02/,
+  );
+  await restoreWorkflow.getByLabel("Restore note").fill("restore-stale-a");
+  await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
+  await expect(page.getByText("Preparing restore plan review")).toBeVisible();
+  await restoreWorkflow.getByLabel("Restore note").fill("restore-stale-b");
+  await expect(page.getByText("Preparing restore plan review")).toBeHidden();
+  await expect(
+    restoreWorkflow.getByLabel("Confirm restore plan"),
+  ).toBeHidden();
+
+  await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
+  await expect(
+    restoreWorkflow.getByLabel("Confirm restore plan"),
+  ).toBeVisible();
+  await activate(
+    restoreWorkflow
+      .getByLabel("Confirm restore plan")
+      .getByRole("button", { name: "Create restore plan" }),
+  );
+
+  await expect(restoreWorkflow.getByLabel("Staged archive")).toHaveValue(
+    "agent-fra-02:50505050-2222-4333-8444-555555555555",
+  );
+  await restoreWorkflow.getByLabel("Restore timeout seconds").fill("150");
+  await activate(
+    restoreWorkflow.getByRole("button", { name: "Review restore" }),
+  );
+  await expect(page.getByText("Preparing restore run review")).toBeVisible();
+  await restoreWorkflow.getByLabel("Restore timeout seconds").fill("55");
+  await expect(page.getByText("Preparing restore run review")).toBeHidden();
+  await expect(
+    restoreWorkflow.getByLabel("Confirm restore run"),
+  ).toBeHidden();
+
+  await activate(
+    restoreWorkflow.getByRole("button", { name: "Review restore" }),
+  );
+  await expect(
+    restoreWorkflow.getByLabel("Confirm restore run"),
+  ).toBeVisible();
+  await activate(
+    restoreWorkflow
+      .getByLabel("Confirm restore run")
+      .getByRole("button", { name: "Run restore" }),
+  );
+
+  const request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.jobs.at(-1);
+  });
+  expect(request).toMatchObject({
+    command: "restore",
+    timeout_secs: 55,
+    operation: {
+      archive_path: archivePath,
+      destination_root: destinationRoot,
       type: "restore",
     },
   });

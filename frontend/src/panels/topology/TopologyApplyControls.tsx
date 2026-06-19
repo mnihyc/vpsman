@@ -11,6 +11,7 @@ import {
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
+import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import { buildPrivilegeForJobOperation, type PrivilegeAssertion, type PrivilegeMaterial } from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
@@ -57,6 +58,11 @@ export function TopologyApplyControls({
   tunnelPlans: TunnelPlanRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
   const [selectedPlanId, setSelectedPlanId] = useState(() => tunnelPlans[0]?.id ?? "");
   const [side, setSide] = useState<TunnelEndpointSide>("left");
   const [backend, setBackend] = useState<TunnelConfigBackend>("ifupdown");
@@ -77,6 +83,7 @@ export function TopologyApplyControls({
   const [lastJobProgress, setLastJobProgress] = useState<BulkJobProgress | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [reviewPending, setReviewPending] = useState(false);
   const selectedPlan = tunnelPlans.find((plan) => plan.id === selectedPlanId) ?? tunnelPlans[0] ?? null;
   const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
   const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
@@ -88,7 +95,9 @@ export function TopologyApplyControls({
   const visibleJobProgress = jobProgress ?? lastJobProgress;
   const status =
     actionError ??
-    (visibleJobProgress
+    (reviewPending
+      ? `Preparing ${actionLabel(lastAction).toLowerCase()} review`
+      : visibleJobProgress
       ? `${actionLabel(lastAction)} result for job ${shortId(visibleJobProgress.jobId)}`
       : lastJob
         ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
@@ -119,9 +128,19 @@ export function TopologyApplyControls({
     void openNetworkPrompt("speed_test");
   }
 
+  function clearNetworkReview() {
+    invalidateReviewGeneration();
+    setNetworkSnapshot(null);
+  }
+
   async function openNetworkPrompt(mode: NetworkAction) {
     setActionError(null);
-    await runPanelAction(setPending, setActionError, async () => {
+    setLastAction(mode);
+    const reviewGeneration = captureReviewGeneration();
+    setReviewPending(true);
+    try {
+      await waitForReviewRender();
+      await runPanelAction(setPending, setActionError, async () => {
       if (!selectedPlan || !endpoint) {
         throw new Error("Select a tunnel plan");
       }
@@ -173,6 +192,9 @@ export function TopologyApplyControls({
         selectorExpression,
         timeoutSecs: boundedTimeoutSecs,
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setNetworkSnapshot({
         action: mode,
         command: commandName(mode),
@@ -202,6 +224,9 @@ export function TopologyApplyControls({
         timeoutSecs: boundedTimeoutSecs,
       });
     });
+    } finally {
+      setReviewPending(false);
+    }
   }
 
   function clearExecutionResults() {
@@ -275,7 +300,7 @@ export function TopologyApplyControls({
             <select
               aria-label="Network apply plan"
               onChange={(event) => {
-                setNetworkSnapshot(null);
+                clearNetworkReview();
                 setSelectedPlanId(event.target.value);
               }}
               value={selectedPlan?.id ?? ""}
@@ -292,7 +317,7 @@ export function TopologyApplyControls({
             <select
               aria-label="Network apply endpoint side"
               onChange={(event) => {
-                setNetworkSnapshot(null);
+                clearNetworkReview();
                 setSide(event.target.value as TunnelEndpointSide);
               }}
               value={side}
@@ -306,7 +331,7 @@ export function TopologyApplyControls({
             <select
               aria-label="Network apply backend"
               onChange={(event) => {
-                setNetworkSnapshot(null);
+                clearNetworkReview();
                 setBackend(event.target.value as TunnelConfigBackend);
               }}
               value={backend}
@@ -325,7 +350,7 @@ export function TopologyApplyControls({
               max={3600}
               min={1}
               onChange={(event) => {
-                setNetworkSnapshot(null);
+                clearNetworkReview();
                 setTimeoutSecs(Number(event.target.value));
               }}
               type="number"
@@ -341,7 +366,7 @@ export function TopologyApplyControls({
               max={20}
               min={1}
               onChange={(event) => {
-                setNetworkSnapshot(null);
+                clearNetworkReview();
                 setProbeCount(Number(event.target.value));
               }}
               type="number"
@@ -355,7 +380,7 @@ export function TopologyApplyControls({
               max={10_000}
               min={200}
               onChange={(event) => {
-                setNetworkSnapshot(null);
+                clearNetworkReview();
                 setProbeIntervalMs(Number(event.target.value));
               }}
               type="number"
@@ -371,7 +396,7 @@ export function TopologyApplyControls({
               max={30}
               min={1}
               onChange={(event) => {
-                setNetworkSnapshot(null);
+                clearNetworkReview();
                 setSpeedDurationSecs(Number(event.target.value));
               }}
               type="number"
@@ -385,7 +410,7 @@ export function TopologyApplyControls({
               max={256}
               min={1}
               onChange={(event) => {
-                setNetworkSnapshot(null);
+                clearNetworkReview();
                 setSpeedMaxBytesMiB(Number(event.target.value));
               }}
               type="number"
@@ -401,7 +426,7 @@ export function TopologyApplyControls({
               max={1_000_000}
               min={64}
               onChange={(event) => {
-                setNetworkSnapshot(null);
+                clearNetworkReview();
                 setSpeedRateLimitKbps(Number(event.target.value));
               }}
               type="number"
@@ -415,7 +440,7 @@ export function TopologyApplyControls({
               max={65_535}
               min={1024}
               onChange={(event) => {
-                setNetworkSnapshot(null);
+                clearNetworkReview();
                 setSpeedPort(Number(event.target.value));
               }}
               type="number"
@@ -431,7 +456,7 @@ export function TopologyApplyControls({
               max={30_000}
               min={100}
               onChange={(event) => {
-                setNetworkSnapshot(null);
+                clearNetworkReview();
                 setSpeedConnectTimeoutMs(Number(event.target.value));
               }}
               type="number"
@@ -458,7 +483,7 @@ export function TopologyApplyControls({
             aria-label="Force unprivileged network best effort"
             checked={forceUnprivileged}
             onChange={(event) => {
-              setNetworkSnapshot(null);
+              clearNetworkReview();
               setForceUnprivileged(event.target.checked);
             }}
             type="checkbox"
@@ -536,7 +561,7 @@ export function TopologyApplyControls({
         lastPayloadHash={lastPayloadHash}
         onOpenUnlock={onOpenPrivilegeUnlock}
         onPrivilegeMaterialChange={(material) => {
-          setNetworkSnapshot(null);
+          clearNetworkReview();
           setPrivilegeMaterial(material);
         }}
         privilegeMaterial={privilegeMaterial}

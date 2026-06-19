@@ -132,7 +132,7 @@ backup-policies
 backup-policy-upsert nightly-edge --path /etc/hostname --include-config tag:backup-critical --confirmed
 backup-policy-prune --dry-run
 restore-plans
-migration-run <restore_plan_uuid> --archive-path /var/lib/vpsman/restores/backup.tar --archive-size-bytes <bytes> --archive-sha256-hex <sha256> --confirmed
+migration-run <restore_plan_uuid> --archive-transfer-session-id <completed_upload_session_uuid> --confirmed
 agent-update-releases --limit 10
 agent-update-release-latest --name vpsman-agent --channel stable
 agent-update-release-record --name vpsman-agent --version 0.1.1 --artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.1/vpsman-agent-linux-x86_64-musl --sha256-hex <sha256> --rollback-artifact-url https://github.com/mnihyc/vpsman/releases/download/v0.1.0/vpsman-agent-linux-x86_64-musl --rollback-sha256-hex <rollback_sha256> --confirmed

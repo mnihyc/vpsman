@@ -754,13 +754,11 @@ jq -e '.client_id == "cli-agent-a" and .status == "requested_metadata_only" and 
 restore_json="$(vpsctl_auth restore-plan \
   --source-backup-request-id "$backup_id" \
   --target-client-id cli-agent-b \
-  --paths /etc/hostname \
-  --include-config \
-  --destination-root /restore \
   --note "vpsctl live api restore" \
   --confirmed)"
 require_no_secret "$restore_json" "$super_password" "restore-plan"
-jq -e --arg backup_id "$backup_id" '.source_backup_request_id == $backup_id and .source_client_id == "cli-agent-a" and .target_client_id == "cli-agent-b" and .status == "planned_metadata_only" and .command_scope == "client:cli-agent-b"' \
+restore_root="/var/lib/vpsman/restores/$backup_id/cli-agent-b"
+jq -e --arg backup_id "$backup_id" --arg restore_root "$restore_root" '.source_backup_request_id == $backup_id and .source_client_id == "cli-agent-a" and .target_client_id == "cli-agent-b" and .status == "planned_metadata_only" and .destination_root == $restore_root and .command_scope == "client:cli-agent-b"' \
   <<<"$restore_json" >/dev/null
 
 backups_json="$(vpsctl_auth backups --limit 10)"

@@ -15,9 +15,7 @@ pub(crate) struct VtyMigrationLinkRequest {
 
 pub(crate) struct VtyMigrationRunRequest {
     pub(crate) restore_plan_id: Uuid,
-    pub(crate) archive_path: String,
-    pub(crate) archive_size_bytes: u64,
-    pub(crate) archive_sha256_hex: String,
+    pub(crate) archive_transfer_session_id: Uuid,
     pub(crate) note: Option<String>,
     pub(crate) timeout_secs: u64,
     pub(crate) confirmed: bool,
@@ -59,12 +57,10 @@ pub(crate) fn parse_vty_migration_link(tokens: &[&str]) -> Result<VtyMigrationLi
 pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRunRequest> {
     let restore_plan_id = tokens
         .first()
-        .context("usage: migration-run <restore_plan_uuid> --archive-path <abs> --archive-size-bytes <bytes> --archive-sha256-hex <sha256> [--note <text>] [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
+        .context("usage: migration-run <restore_plan_uuid> --archive-transfer-session-id <uuid> [--note <text>] [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
     let mut request = VtyMigrationRunRequest {
         restore_plan_id: Uuid::parse_str(restore_plan_id).context("invalid restore plan UUID")?,
-        archive_path: String::new(),
-        archive_size_bytes: 0,
-        archive_sha256_hex: String::new(),
+        archive_transfer_session_id: Uuid::nil(),
         note: None,
         timeout_secs: 60,
         confirmed: false,
@@ -73,27 +69,35 @@ pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRun
     let mut index = 1;
     while index < tokens.len() {
         match tokens[index] {
-            "--archive-path" => {
-                request.archive_path = tokens
-                    .get(index + 1)
-                    .context("migration-run --archive-path requires a value")?
-                    .to_string();
+            "--archive-transfer-session-id" => {
+                request.archive_transfer_session_id = Uuid::parse_str(
+                    tokens
+                        .get(index + 1)
+                        .context("migration-run --archive-transfer-session-id requires a value")?,
+                )
+                .context("invalid migration-run --archive-transfer-session-id")?;
                 index += 2;
             }
-            "--archive-size-bytes" => {
-                request.archive_size_bytes = tokens
-                    .get(index + 1)
-                    .context("migration-run --archive-size-bytes requires a value")?
-                    .parse()
-                    .context("invalid migration-run --archive-size-bytes")?;
-                index += 2;
+            value if value.starts_with("--archive-transfer-session-id=") => {
+                request.archive_transfer_session_id =
+                    Uuid::parse_str(value.trim_start_matches("--archive-transfer-session-id="))
+                        .context("invalid migration-run --archive-transfer-session-id")?;
+                index += 1;
             }
-            "--archive-sha256-hex" => {
-                request.archive_sha256_hex = tokens
-                    .get(index + 1)
-                    .context("migration-run --archive-sha256-hex requires a value")?
-                    .to_string();
-                index += 2;
+            "--archive-path" | "--archive-size-bytes" | "--archive-sha256-hex" => {
+                anyhow::bail!(
+                    "{} was removed; use --archive-transfer-session-id",
+                    tokens[index]
+                );
+            }
+            value
+                if value.starts_with("--archive-path=")
+                    || value.starts_with("--archive-size-bytes=")
+                    || value.starts_with("--archive-sha256-hex=") =>
+            {
+                anyhow::bail!(
+                    "archive path/size/SHA flags were removed; use --archive-transfer-session-id"
+                );
             }
             "--note" => {
                 request.note = Some(
@@ -128,16 +132,8 @@ pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRun
         "migration-run timeout out of range"
     );
     anyhow::ensure!(
-        !request.archive_path.trim().is_empty(),
-        "migration-run requires --archive-path"
-    );
-    anyhow::ensure!(
-        request.archive_size_bytes > 0,
-        "migration-run requires --archive-size-bytes"
-    );
-    anyhow::ensure!(
-        !request.archive_sha256_hex.trim().is_empty(),
-        "migration-run requires --archive-sha256-hex"
+        !request.archive_transfer_session_id.is_nil(),
+        "migration-run requires --archive-transfer-session-id"
     );
     anyhow::ensure!(request.confirmed, "migration-run requires --confirmed");
     Ok(request)
@@ -166,9 +162,7 @@ pub(crate) fn submit_vty_migration_run(
         api_url,
         token,
         request.restore_plan_id,
-        request.archive_path,
-        request.archive_size_bytes,
-        request.archive_sha256_hex,
+        request.archive_transfer_session_id,
         request.note,
         &privilege_context.password,
         &privilege_context.salt_hex,
@@ -207,14 +201,11 @@ mod tests {
 
     #[test]
     fn parses_vty_migration_run() {
+        let archive_transfer_session_id = uuid::Uuid::new_v4();
         let request = parse_vty_migration_run(&[
             "49c7c3ea-0da8-40b6-b380-5543b1eb3adb",
-            "--archive-path",
-            "/var/lib/vpsman/restores/backup.tar",
-            "--archive-size-bytes",
-            "2048",
-            "--archive-sha256-hex",
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "--archive-transfer-session-id",
+            &archive_transfer_session_id.to_string(),
             "--note",
             "cutover",
             "--timeout",
@@ -227,11 +218,9 @@ mod tests {
             request.restore_plan_id.to_string(),
             "49c7c3ea-0da8-40b6-b380-5543b1eb3adb"
         );
-        assert_eq!(request.archive_path, "/var/lib/vpsman/restores/backup.tar");
-        assert_eq!(request.archive_size_bytes, 2048);
         assert_eq!(
-            request.archive_sha256_hex,
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            request.archive_transfer_session_id,
+            archive_transfer_session_id
         );
         assert_eq!(request.note.as_deref(), Some("cutover"));
         assert_eq!(request.timeout_secs, 120);

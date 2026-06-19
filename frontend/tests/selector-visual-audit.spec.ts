@@ -42,6 +42,17 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   await restoreWorkflow.getByLabel("Restore source backup request").selectOption({ index: 1 });
   await openVpsMenu(restoreWorkflow, "Restore target client", "fra", /core-fra-02.*agent-fra-02/);
   await capture(page, outputDir, manifest, "restore-target");
+  await restoreWorkflow.getByRole("option", { name: /core-fra-02.*agent-fra-02/ }).click();
+  await expect(restoreWorkflow.getByText("/var/lib/vpsman/restores/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/agent-fra-02")).toBeVisible();
+  await expect(restoreWorkflow.getByLabel("Staged archive")).toHaveValue(
+    "agent-fra-02:50505050-2222-4333-8444-555555555555",
+  );
+  await capture(page, outputDir, manifest, "restore-record-selected");
+  await restoreWorkflow.getByLabel("Staged archive").scrollIntoViewIfNeeded();
+  await capture(page, outputDir, manifest, "restore-staged-archive-selected", {
+    fullPage: false,
+    scrollToTop: false,
+  });
 
   await openConsoleSubpage(page, "Fleet", "Alert policies");
   await activate(page.getByRole("button", { name: "Create policy" }).first());
@@ -145,8 +156,11 @@ async function capture(
   outputDir: string,
   manifest: Array<Record<string, unknown>>,
   name: string,
+  options: { fullPage?: boolean; scrollToTop?: boolean } = {},
 ) {
-  await page.evaluate(() => window.scrollTo(0, 0));
+  if (options.scrollToTop ?? true) {
+    await page.evaluate(() => window.scrollTo(0, 0));
+  }
   await page.waitForTimeout(150);
   const layout = await page.evaluate(() => {
     const viewportWidth = document.documentElement.clientWidth;
@@ -196,6 +210,6 @@ async function capture(
     `${name} uncontained horizontal overflow candidates: ${JSON.stringify(layout.overflowCandidates)}`,
   ).toHaveLength(0);
   const screenshot = join(outputDir, `${name}-${page.viewportSize()?.width ?? "viewport"}.png`);
-  await page.screenshot({ fullPage: true, path: screenshot });
+  await page.screenshot({ fullPage: options.fullPage ?? true, path: screenshot });
   manifest.push({ name, screenshot, ...layout });
 }

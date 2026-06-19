@@ -2,56 +2,60 @@ import { CheckCircle2, CircleDashed, TriangleAlert } from "lucide-react";
 import { restorePlanStatusBadgeClass } from "../../jobStatusPresentation";
 import type { MigrationLinkRecord, RestorePlanRecord } from "../../types";
 import { shortId } from "../../utils";
+import {
+  RestoreArchiveTransferSelect,
+  type RestoreArchiveTransferOption,
+} from "./RestoreArchiveTransferSelect";
 
 type MigrationLinkFormProps = {
-  linkConfirmationOpen: boolean;
-  runConfirmationOpen: boolean;
-  migrationNote: string;
-  migrationRestorePlanId: string;
-  pending: boolean;
-  privilegeReady: boolean;
-  archivePath: string;
-  archiveSizeBytes: string;
-  archiveSha256Hex: string;
-  clientLabel: (clientId: string) => string;
+  archiveEmptyMessage: string;
+  archiveTransferKey: string;
+  archiveTransferOptions: RestoreArchiveTransferOption[];
   forceUnprivileged: boolean;
   lastMigrationLink: MigrationLinkRecord | null;
-  postRestoreArgv: string;
-  restoreDryRun: boolean;
-  restorePlans: RestorePlanRecord[];
-  selectedPlan: RestorePlanRecord | null;
+  linkConfirmationOpen: boolean;
+  migrationNote: string;
+  migrationRestorePlanId: string;
+  onArchiveTransferChange: (value: string) => void;
   onMigrationNoteChange: (value: string) => void;
   onMigrationRestorePlanIdChange: (value: string) => void;
   onRunMigrationRestore: () => void;
   onSubmit: () => void;
+  pending: boolean;
+  clientLabel: (clientId: string) => string;
+  postRestoreArgv: string;
+  privilegeReady: boolean;
+  restoreDryRun: boolean;
+  restorePlans: RestorePlanRecord[];
+  runConfirmationOpen: boolean;
+  selectedPlan: RestorePlanRecord | null;
 };
 
 export function MigrationLinkForm({
-  linkConfirmationOpen,
-  runConfirmationOpen,
-  migrationNote,
-  migrationRestorePlanId,
-  pending,
-  privilegeReady,
-  archivePath,
-  archiveSizeBytes,
-  archiveSha256Hex,
-  clientLabel,
+  archiveEmptyMessage,
+  archiveTransferKey,
+  archiveTransferOptions,
   forceUnprivileged,
   lastMigrationLink,
-  postRestoreArgv,
-  restoreDryRun,
-  restorePlans,
-  selectedPlan,
+  linkConfirmationOpen,
+  migrationNote,
+  migrationRestorePlanId,
+  onArchiveTransferChange,
   onMigrationNoteChange,
   onMigrationRestorePlanIdChange,
   onRunMigrationRestore,
   onSubmit,
+  pending,
+  clientLabel,
+  postRestoreArgv,
+  privilegeReady,
+  restoreDryRun,
+  restorePlans,
+  runConfirmationOpen,
+  selectedPlan,
 }: MigrationLinkFormProps) {
   const archiveReady = Boolean(
-    archivePath.trim() &&
-      archiveSizeBytes.trim() &&
-      /^[0-9a-fA-F]{64}$/.test(archiveSha256Hex.trim()),
+    archiveTransferOptions.some((option) => option.key === archiveTransferKey),
   );
   const checklist = [
     {
@@ -65,8 +69,8 @@ export function MigrationLinkForm({
     {
       label: "Archive metadata",
       detail: archiveReady
-        ? "Agent-local archive path, size, and SHA-256 ready"
-        : "Set the agent-local archive path, size, and SHA-256",
+        ? "Completed upload transfer selected"
+        : "Select a completed upload transfer record",
       ready: archiveReady,
       required: true,
     },
@@ -146,6 +150,13 @@ export function MigrationLinkForm({
             </div>
           </div>
         ) : null}
+        <RestoreArchiveTransferSelect
+          emptyMessage={archiveEmptyMessage}
+          label="Migration staged archive"
+          onChange={onArchiveTransferChange}
+          options={archiveTransferOptions}
+          value={archiveTransferKey}
+        />
         <div className="migrationChecklist">
           {checklist.map((item) => (
             <div className={`migrationCheckItem ${item.ready ? "ready" : item.required ? "blocked" : "optional"}`} key={item.label}>

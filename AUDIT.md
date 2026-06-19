@@ -190,14 +190,14 @@ of the same root cause.
 | AUD-174 | High | Confirmed | Frontend/Server Jobs/Artifact Cleanup | Artifact cleanup preview races can queue a stale cleanup set after expression edits |
 | AUD-175 | High | Confirmed | Frontend/Job Dispatch | Dispatch review can open a stale confirmation after operation or selector edits |
 | AUD-176 | High | Confirmed | Frontend/Config/Data Sources | Config and data-source review requests can open stale confirmations after edits |
-| AUD-177 | Critical | Confirmed | Frontend/Topology/Network | Network mutation review requests can open stale confirmations after topology edits |
-| AUD-178 | Critical | Confirmed | Frontend/Backups/Restore | Backup and restore review requests can open stale confirmations after edits |
+| AUD-177 | Critical | Fixed | Frontend/Topology/Network | Network mutation review requests can open stale confirmations after topology edits |
+| AUD-178 | Critical | Fixed | Frontend/Backups/Restore | Backup and restore review requests can open stale confirmations after edits |
 | AUD-179 | Medium/High | Confirmed | API/Backups/Object Storage | Multiple backup artifacts can reference the same object key |
 | AUD-180 | Medium/High | Confirmed | API/File Transfers/Artifact Cleanup | Reuploaded file-transfer source artifacts can inherit stale cleanup age |
 | AUD-181 | High | Confirmed | Frontend/Access/Keys | Key lifecycle review can open stale confirmations after key-field edits |
 | AUD-182 | Medium/High | Confirmed | API/Gateway/Terminal/Lifecycle | Terminal stream output can append after the terminal-open target is terminal |
 | AUD-183 | High | Confirmed | Frontend/Fleet/Delete | VPS deletion confirmation can remain armed after fleet selection changes |
-| AUD-184 | Critical | Confirmed | Frontend/Jobs/Multi-File | Bulk file review can open stale confirmations after selector or operation edits |
+| AUD-184 | Critical | Fixed | Frontend/Jobs/Multi-File | Bulk file review can open stale confirmations after selector or operation edits |
 | AUD-185 | High | Confirmed | Agent/API/Terminal | Terminal input sequencing can drop out-of-order or conflicting input |
 | AUD-186 | Medium/High | Confirmed | Agent/Gateway/Terminal/Lifecycle | Terminal PTYs can survive disconnect or access revocation without reconciliation |
 | AUD-187 | Medium/High | Confirmed | API/Frontend/History Retention | History retention policy saves ignore the confirmation contract |
@@ -6362,7 +6362,7 @@ of the same root cause.
 ### AUD-172: Password Reset Preserves Old-Password-Encrypted TOTP Secrets
 
 - Severity: High
-- Status: Fixed
+- Status: Confirmed
 - Area: API/Auth/User Management
 - Context: Admin operators can reset another operator's password from
   System > Users, or reset their own password. Existing sessions for the
@@ -6594,7 +6594,7 @@ of the same root cause.
 ### AUD-177: Network Mutation Review Requests Can Open Stale Confirmations After Topology Edits
 
 - Severity: Critical
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Topology/Network
 - Context: The topology panels can apply, rollback, inspect, probe, speed-test,
   and update OSPF cost for tunnel plans. Apply, rollback, and OSPF cost update
@@ -6635,11 +6635,16 @@ of the same root cause.
   fix should snapshot the review inputs and a form generation before the first
   await, ignore review completions from stale generations, and keep the
   confirmation bound to that exact frozen network mutation.
+- Fix: Added a shared frontend review-generation guard and wired topology
+  apply/rollback/probe/speed and OSPF cost review preparation through it.
+  Operation-affecting edits now invalidate in-flight review work before a stale
+  privilege assertion can reopen a prompt. Covered by desktop Playwright
+  stale-edit tests in `frontend/tests/dispatch-target-consistency.spec.ts`.
 
 ### AUD-178: Backup And Restore Review Requests Can Open Stale Confirmations After Edits
 
 - Severity: Critical
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Backups/Restore
 - Context: Operators use the backup workspace to create backup policies,
   request backups, upload/promote artifacts, create restore plans, run live or
@@ -6662,6 +6667,14 @@ of the same root cause.
   a stale snapshot if confirmed. For restore and rollback this can mutate the
   wrong target or path set; for backup policy creation it can save a recurring
   policy for an older fixed target set and path scope.
+- Fix: Backup/restore review preparation now uses the shared review-generation
+  guard so stale async completions are ignored after any relevant edit. Restore
+  execution no longer accepts manually entered archive path, size, or SHA-256
+  in frontend/CLI/VTY; it selects a completed upload transfer record whose size
+  and SHA-256 match the selected backup artifact. Restore scope and destination
+  root are derived from backup/target records in frontend and CLI/VTY. Covered
+  by desktop Playwright restore stale-edit tests, restore executable dispatch
+  tests, Rust VTY tests, CLI help smoke, and restore visual audit screenshots.
 - Evidence: Backup policy review resolves targets and builds a schedule
   privilege assertion before setting `pendingPolicySnapshot` and
   `pendingConfirmation` at `frontend/src/panels/BackupsPanel.tsx:428-511`.
@@ -6890,7 +6903,7 @@ of the same root cause.
 ### AUD-184: Bulk File Review Can Open Stale Confirmations After Selector Or Operation Edits
 
 - Severity: Critical
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Jobs/Multi-File
 - Context: Jobs > Multi files dispatches file downloads, uploads, copies,
   renames, deletes, chmod/chown, mkdir, and text writes across selector-resolved
@@ -6923,6 +6936,11 @@ of the same root cause.
   dispatch target consistency test covers resolving targets again instead of
   executing a cached preview, and it covers closing an already-open prompt on
   edits, but it does not cover stale in-flight review completion.
+- Fix: Multi-file review preparation now captures a review generation before
+  async target resolution and ignores completions after selector or operation
+  edits. Added a desktop Playwright regression that edits the path while review
+  preparation is pending and verifies only the fresh operation can open a
+  confirmation.
 - Notes: This is distinct from the earlier cached-preview bug and from
   AUD-175. AUD-175 covers the main job dispatch composer. This issue is in the
   dedicated multi-file workflow with its own target resolution and destructive

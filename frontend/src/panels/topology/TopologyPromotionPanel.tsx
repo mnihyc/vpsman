@@ -30,6 +30,8 @@ import {
 } from "../../utils";
 
 const bandwidthTiers: BandwidthTier[] = ["10m", "100m", "1000m"];
+const adapterArgvTooltip =
+  "Command and arguments executed by the adapter. Separate arguments with spaces; pasted comma or newline lists are also accepted.";
 
 type AdapterPromotionForm = {
   planId: string;
@@ -530,32 +532,56 @@ export function TopologyPromotionPanel({
             <span>Status is required; other commands are optional lifecycle hooks.</span>
           </div>
           <div className="dispatchControls">
-            <label>
+            <label className="adapterArgvField">
               <span>Status argv</span>
-              <textarea value={adapterForm.statusArgv} onChange={(event) => setAdapterField("statusArgv", event.target.value)} />
+              <input
+                title={adapterArgvTooltip}
+                value={adapterForm.statusArgv}
+                onChange={(event) => setAdapterField("statusArgv", event.target.value)}
+              />
             </label>
-            <label>
+            <label className="adapterArgvField">
               <span>Start argv</span>
-              <textarea value={adapterForm.startupArgv} onChange={(event) => setAdapterField("startupArgv", event.target.value)} />
+              <input
+                title={adapterArgvTooltip}
+                value={adapterForm.startupArgv}
+                onChange={(event) => setAdapterField("startupArgv", event.target.value)}
+              />
             </label>
           </div>
           <div className="dispatchControls">
-            <label>
+            <label className="adapterArgvField">
               <span>Restart argv</span>
-              <textarea value={adapterForm.restartArgv} onChange={(event) => setAdapterField("restartArgv", event.target.value)} />
+              <input
+                title={adapterArgvTooltip}
+                value={adapterForm.restartArgv}
+                onChange={(event) => setAdapterField("restartArgv", event.target.value)}
+              />
             </label>
-            <label>
+            <label className="adapterArgvField">
               <span>Stop argv</span>
-              <textarea value={adapterForm.stopArgv} onChange={(event) => setAdapterField("stopArgv", event.target.value)} />
+              <input
+                title={adapterArgvTooltip}
+                value={adapterForm.stopArgv}
+                onChange={(event) => setAdapterField("stopArgv", event.target.value)}
+              />
             </label>
           </div>
-          <label>
+          <label className="adapterArgvField">
             <span>Cleanup argv</span>
-            <textarea value={adapterForm.cleanupArgv} onChange={(event) => setAdapterField("cleanupArgv", event.target.value)} />
+            <input
+              title={adapterArgvTooltip}
+              value={adapterForm.cleanupArgv}
+              onChange={(event) => setAdapterField("cleanupArgv", event.target.value)}
+            />
           </label>
-          <label>
+          <label className="adapterArgvField">
             <span>Traffic argv</span>
-            <textarea value={adapterForm.trafficArgv} onChange={(event) => setAdapterField("trafficArgv", event.target.value)} />
+            <input
+              title={adapterArgvTooltip}
+              value={adapterForm.trafficArgv}
+              onChange={(event) => setAdapterField("trafficArgv", event.target.value)}
+            />
           </label>
           <label className="checkLine">
             <input

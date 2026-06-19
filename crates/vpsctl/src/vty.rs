@@ -233,9 +233,8 @@ const DATA_SOURCE_HOT_CONFIG_USAGE: &str = concat!(
 );
 
 const RESTORE_RUN_USAGE: &str = concat!(
-    "usage: restore-run <backup_uuid> <target_client_id> --archive-path <abs> ",
-    "--archive-size-bytes <bytes> --archive-sha256-hex <sha256> [--path <abs>] ",
-    "[--include-config] [--destination-root <abs>] [--timeout <1-3600>] ",
+    "usage: restore-run <backup_uuid> <target_client_id> ",
+    "--archive-transfer-session-id <uuid> [--timeout <1-3600>] ",
     "[--force-unprivileged] --confirmed"
 );
 
@@ -245,8 +244,8 @@ const RESTORE_ROLLBACK_USAGE: &str = concat!(
 );
 
 const MIGRATION_RUN_USAGE: &str = concat!(
-    "usage: migration-run <restore_plan_uuid> --archive-path <abs> ",
-    "--archive-size-bytes <bytes> --archive-sha256-hex <sha256> [--note <text>] ",
+    "usage: migration-run <restore_plan_uuid> --archive-transfer-session-id <uuid> ",
+    "[--note <text>] ",
     "[--timeout <1-3600>] [--force-unprivileged] --confirmed"
 );
 

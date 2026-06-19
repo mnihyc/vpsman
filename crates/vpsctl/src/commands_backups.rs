@@ -48,12 +48,7 @@ pub(crate) struct BackupPolicyUpsertOptions {
 pub(crate) struct RestoreRunOptions {
     pub(crate) source_backup_request_id: String,
     pub(crate) target_client_id: String,
-    pub(crate) archive_path: String,
-    pub(crate) archive_size_bytes: u64,
-    pub(crate) archive_sha256_hex: String,
-    pub(crate) paths: Vec<String>,
-    pub(crate) include_config: bool,
-    pub(crate) destination_root: Option<String>,
+    pub(crate) archive_transfer_session_id: String,
     pub(crate) password_env: String,
     pub(crate) super_salt_hex: Option<String>,
     pub(crate) privilege_ttl_secs: u64,
@@ -65,9 +60,7 @@ pub(crate) struct RestoreRunOptions {
 pub(crate) struct RestoreRunWithCredentials<'a> {
     pub(crate) source_backup_request_id: Uuid,
     pub(crate) target_client_id: String,
-    pub(crate) archive_path: String,
-    pub(crate) archive_size_bytes: u64,
-    pub(crate) archive_sha256_hex: String,
+    pub(crate) archive_transfer_session_id: Uuid,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) destination_root: Option<String>,
@@ -110,6 +103,44 @@ struct BackupArtifactUploadSessionRecord {
     upload_id: Uuid,
     next_offset_bytes: i64,
     max_chunk_bytes: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct BackupRequestRecord {
+    id: Uuid,
+    artifact_id: Option<Uuid>,
+    paths: Vec<String>,
+    include_config: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct BackupArtifactRecord {
+    id: Uuid,
+    sha256_hex: String,
+    size_bytes: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileTransferSessionRecord {
+    session_id: Uuid,
+    client_id: String,
+    direction: String,
+    status: String,
+    path: String,
+    size_bytes: Option<u64>,
+    sha256_hex: Option<String>,
+}
+
+struct RestoreArchiveTransfer {
+    path: String,
+    size_bytes: u64,
+    sha256_hex: String,
+}
+
+pub(crate) struct RestoreScope {
+    pub(crate) paths: Vec<String>,
+    pub(crate) include_config: bool,
+    pub(crate) destination_root: Option<String>,
 }
 
 pub(crate) fn backups(api_url: &str, token: Option<&str>, limit: u16) -> Result<()> {
@@ -634,42 +665,104 @@ fn sha256_file_hex(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+pub(crate) fn restore_scope_from_backup(
+    api_url: &str,
+    token: Option<&str>,
+    source_backup_request_id: Uuid,
+    target_client_id: &str,
+) -> Result<RestoreScope> {
+    let backup = find_backup_request(api_url, token, source_backup_request_id)?;
+    anyhow::ensure!(
+        backup.include_config || !backup.paths.is_empty(),
+        "source backup has no restorable config or paths"
+    );
+    for path in &backup.paths {
+        anyhow::ensure!(
+            path.starts_with('/'),
+            "source backup paths must be absolute"
+        );
+        anyhow::ensure!(
+            !path
+                .split('/')
+                .any(|segment| segment == "." || segment == ".."),
+            "source backup paths must not contain . or .. segments"
+        );
+    }
+    Ok(RestoreScope {
+        paths: backup.paths,
+        include_config: backup.include_config,
+        destination_root: Some(generated_restore_destination_root(
+            source_backup_request_id,
+            target_client_id,
+        )),
+    })
+}
+
+fn find_backup_request(
+    api_url: &str,
+    token: Option<&str>,
+    source_backup_request_id: Uuid,
+) -> Result<BackupRequestRecord> {
+    let backups_body = http_get(api_url, "/api/v1/backups?limit=200", token)?;
+    let backups: Vec<BackupRequestRecord> =
+        serde_json::from_str(&backups_body).context("invalid backups JSON")?;
+    backups
+        .into_iter()
+        .find(|backup| backup.id == source_backup_request_id)
+        .context("source backup request was not found in latest 200 backups")
+}
+
+fn generated_restore_destination_root(
+    source_backup_request_id: Uuid,
+    target_client_id: &str,
+) -> String {
+    format!(
+        "/var/lib/vpsman/restores/{}/{}",
+        safe_restore_path_segment(&source_backup_request_id.to_string()),
+        safe_restore_path_segment(target_client_id),
+    )
+}
+
+fn safe_restore_path_segment(value: &str) -> String {
+    let segment: String = value
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric()
+                || *character == '.'
+                || *character == '_'
+                || *character == '-'
+        })
+        .take(120)
+        .collect();
+    if segment.is_empty() {
+        "unknown".to_string()
+    } else {
+        segment
+    }
+}
+
 pub(crate) fn restore_plan(
     api_url: &str,
     token: Option<&str>,
     source_backup_request_id: String,
     target_client_id: String,
-    paths: Vec<String>,
-    include_config: bool,
-    destination_root: Option<String>,
     note: Option<String>,
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
-    anyhow::ensure!(
-        include_config || !paths.is_empty(),
-        "restore-plan needs --include-config or at least one --paths entry"
-    );
-    for path in &paths {
-        anyhow::ensure!(path.starts_with('/'), "restore paths must be absolute");
-    }
-    if let Some(destination_root) = &destination_root {
-        anyhow::ensure!(
-            destination_root.starts_with('/'),
-            "restore destination root must be absolute"
-        );
-    }
     let source_backup_request_id =
         Uuid::parse_str(&source_backup_request_id).context("invalid source backup request UUID")?;
+    let scope =
+        restore_scope_from_backup(api_url, token, source_backup_request_id, &target_client_id)?;
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
     let operation = JobCommand::Restore {
         source_backup_request_id,
-        paths: paths.clone(),
-        include_config,
-        destination_root: destination_root.clone(),
+        paths: scope.paths.clone(),
+        include_config: scope.include_config,
+        destination_root: scope.destination_root.clone(),
         archive_path: None,
         archive_size_bytes: None,
         archive_sha256_hex: None,
@@ -700,9 +793,9 @@ pub(crate) fn restore_plan(
             &serde_json::json!({
                 "source_backup_request_id": source_backup_request_id,
                 "target_client_id": target_client_id,
-                "paths": paths,
-                "include_config": include_config,
-                "destination_root": destination_root,
+                "paths": scope.paths,
+                "include_config": scope.include_config,
+                "destination_root": scope.destination_root,
                 "confirmed": confirmed,
                 "note": note,
                 "privilege_assertion": privilege.privilege_assertion,
@@ -720,6 +813,14 @@ pub(crate) fn restore_run(
     anyhow::ensure!(options.confirmed, "restore-run requires --confirmed");
     let source_backup_request_id = Uuid::parse_str(&options.source_backup_request_id)
         .context("invalid source backup request UUID")?;
+    let archive_transfer_session_id = Uuid::parse_str(&options.archive_transfer_session_id)
+        .context("invalid archive transfer session UUID")?;
+    let scope = restore_scope_from_backup(
+        api_url,
+        token,
+        source_backup_request_id,
+        &options.target_client_id,
+    )?;
     let password = load_super_password(&options.password_env)?;
     let salt_hex = load_super_salt_hex(options.super_salt_hex.as_deref())?;
     println!(
@@ -730,12 +831,10 @@ pub(crate) fn restore_run(
             RestoreRunWithCredentials {
                 source_backup_request_id,
                 target_client_id: options.target_client_id,
-                archive_path: options.archive_path,
-                archive_size_bytes: options.archive_size_bytes,
-                archive_sha256_hex: options.archive_sha256_hex,
-                paths: options.paths,
-                include_config: options.include_config,
-                destination_root: options.destination_root,
+                archive_transfer_session_id,
+                paths: scope.paths,
+                include_config: scope.include_config,
+                destination_root: scope.destination_root,
                 password: &password,
                 salt_hex: &salt_hex,
                 privilege_ttl_secs: options.privilege_ttl_secs,
@@ -754,11 +853,18 @@ pub(crate) fn restore_run_with_credentials(
     request: RestoreRunWithCredentials<'_>,
 ) -> Result<String> {
     anyhow::ensure!(request.confirmed, "restore-run requires --confirmed");
+    let archive = resolve_restore_archive_transfer(
+        api_url,
+        token,
+        request.source_backup_request_id,
+        &request.target_client_id,
+        request.archive_transfer_session_id,
+    )?;
     let operation = restore_run_operation(
         request.source_backup_request_id,
-        request.archive_path,
-        request.archive_size_bytes,
-        request.archive_sha256_hex,
+        archive.path,
+        archive.size_bytes,
+        archive.sha256_hex,
         request.paths,
         request.include_config,
         request.destination_root,
@@ -797,6 +903,67 @@ pub(crate) fn restore_run_with_credentials(
             "privilege_assertion": privilege.privilege_assertion,
         }),
     )
+}
+
+fn resolve_restore_archive_transfer(
+    api_url: &str,
+    token: Option<&str>,
+    source_backup_request_id: Uuid,
+    target_client_id: &str,
+    archive_transfer_session_id: Uuid,
+) -> Result<RestoreArchiveTransfer> {
+    let backup = find_backup_request(api_url, token, source_backup_request_id)?;
+    let artifact_id = backup
+        .artifact_id
+        .context("source backup has no artifact record")?;
+
+    let artifacts_body = http_get(api_url, "/api/v1/backup-artifacts?limit=200", token)?;
+    let artifacts: Vec<BackupArtifactRecord> =
+        serde_json::from_str(&artifacts_body).context("invalid backup artifacts JSON")?;
+    let artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.id == artifact_id)
+        .context("source backup artifact metadata was not found in latest 200 artifacts")?;
+
+    let transfers_body = http_get(api_url, "/api/v1/file-transfers?limit=200", token)?;
+    let transfers: Vec<FileTransferSessionRecord> =
+        serde_json::from_str(&transfers_body).context("invalid file transfers JSON")?;
+    let transfer = transfers
+        .iter()
+        .find(|transfer| {
+            transfer.session_id == archive_transfer_session_id
+                && transfer.client_id == target_client_id
+        })
+        .context("archive transfer session was not found for target client")?;
+    anyhow::ensure!(
+        transfer.direction == "upload" && transfer.status == "completed",
+        "archive transfer must be a completed upload"
+    );
+    anyhow::ensure!(
+        transfer.path.starts_with('/'),
+        "archive transfer path must be absolute"
+    );
+    let transfer_size = transfer
+        .size_bytes
+        .context("archive transfer size is missing")?;
+    let transfer_sha = transfer
+        .sha256_hex
+        .as_deref()
+        .context("archive transfer SHA-256 is missing")?
+        .to_ascii_lowercase();
+    anyhow::ensure!(
+        transfer_size == artifact.size_bytes,
+        "archive transfer size does not match source backup artifact"
+    );
+    anyhow::ensure!(
+        transfer_sha == artifact.sha256_hex.to_ascii_lowercase(),
+        "archive transfer SHA-256 does not match source backup artifact"
+    );
+    Ok(RestoreArchiveTransfer {
+        path: transfer.path.clone(),
+        size_bytes: transfer_size,
+        sha256_hex: transfer_sha,
+    })
 }
 
 pub(crate) fn restore_rollback(
@@ -932,7 +1099,7 @@ pub(crate) fn restore_run_operation(
 ) -> Result<JobCommand> {
     anyhow::ensure!(
         include_config || !paths.is_empty(),
-        "restore-run needs --include-config or at least one --paths entry"
+        "restore-run needs backup config or at least one recorded path"
     );
     for path in &paths {
         anyhow::ensure!(path.starts_with('/'), "restore paths must be absolute");
@@ -957,7 +1124,7 @@ pub(crate) fn restore_run_operation(
     }
     anyhow::ensure!(
         !include_config || destination_root.is_some(),
-        "restore-run --include-config requires --destination-root for safety"
+        "config restore requires a generated destination root for safety"
     );
     anyhow::ensure!(
         archive_path.starts_with('/'),

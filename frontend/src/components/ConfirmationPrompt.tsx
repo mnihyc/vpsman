@@ -84,12 +84,15 @@ export function ConfirmationPrompt({
         <span>{detail}</span>
         {items.length > 0 && (
           <dl>
-            {items.map((item) => (
-              <div key={item.label}>
-                <dt>{item.label}</dt>
-                <dd>{item.value}</dd>
-              </div>
-            ))}
+            {items.map((item) => {
+              const valueTitle = confirmationItemTitle(item.value);
+              return (
+                <div key={item.label}>
+                  <dt>{item.label}</dt>
+                  <dd title={valueTitle}>{item.value}</dd>
+                </div>
+              );
+            })}
           </dl>
         )}
         {error && <small className="confirmationPromptError">{error}</small>}
@@ -128,4 +131,11 @@ export function ConfirmationPrompt({
       </div>
     </section>
   );
+}
+
+function confirmationItemTitle(value: ReactNode): string | undefined {
+  if (typeof value === "string" || typeof value === "number") {
+    return String(value);
+  }
+  return undefined;
 }

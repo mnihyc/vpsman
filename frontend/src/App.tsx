@@ -523,6 +523,7 @@ export function App() {
                 artifacts={dashboard.backupArtifacts}
                 backupPolicies={dashboard.backupPolicies}
                 backups={dashboard.backups}
+                fileTransfers={dashboard.fileTransfers}
                 migrationLinks={dashboard.migrationLinks}
                 restorePlans={dashboard.restorePlans}
                 error={dashboard.backupsError}

@@ -738,13 +738,11 @@ smoke_postgres_backup_policy_prune_evidence
 restore_json="$(vpsctl_json restore-plan \
   --source-backup-request-id "$backup_id" \
   --target-client-id pg-agent-b \
-  --paths /etc/hostname \
-  --include-config \
-  --destination-root /restore \
   --note "postgres persistence restore" \
   --confirmed)"
 restore_id="$(jq -r '.id' <<<"$restore_json")"
-jq -e --arg backup_id "$backup_id" '.source_backup_request_id == $backup_id and .source_client_id == "pg-agent-a" and .target_client_id == "pg-agent-b" and .status == "planned_metadata_only" and .destination_root == "/restore" and .command_scope == "client:pg-agent-b"' \
+restore_root="/var/lib/vpsman/restores/$backup_id/pg-agent-b"
+jq -e --arg backup_id "$backup_id" --arg restore_root "$restore_root" '.source_backup_request_id == $backup_id and .source_client_id == "pg-agent-a" and .target_client_id == "pg-agent-b" and .status == "planned_metadata_only" and .destination_root == $restore_root and .command_scope == "client:pg-agent-b"' \
   <<<"$restore_json" >/dev/null
 
 degraded_update_json="$(vpsctl_json agent-update \
@@ -948,8 +946,8 @@ api_get "/api/v1/backup-artifacts?limit=20" | jq -e \
     (all(.[]; .id != $old_a and .id != $old_b)) and
     any(.[]; .id == $retained and .object_key == "backups/pg-agent-a/policy-prune-retained.cbor.zst.age")
   ' >/dev/null
-api_get "/api/v1/restore-plans?limit=10" | jq -e --arg restore_id "$restore_id" --arg backup_id "$backup_id" '
-  any(.[]; .id == $restore_id and .source_backup_request_id == $backup_id and .source_client_id == "pg-agent-a" and .target_client_id == "pg-agent-b" and .status == "planned_metadata_only" and .destination_root == "/restore" and .command_scope == "client:pg-agent-b")
+api_get "/api/v1/restore-plans?limit=10" | jq -e --arg restore_id "$restore_id" --arg backup_id "$backup_id" --arg restore_root "$restore_root" '
+  any(.[]; .id == $restore_id and .source_backup_request_id == $backup_id and .source_client_id == "pg-agent-a" and .target_client_id == "pg-agent-b" and .status == "planned_metadata_only" and .destination_root == $restore_root and .command_scope == "client:pg-agent-b")
 ' >/dev/null
 api_get "/api/v1/jobs/$scheduled_run_job_id" | jq -e --arg job_id "$scheduled_run_job_id" '
   .id == $job_id and (.command_type | startswith("scheduled_")) and (.status == "queued" or .status == "running")

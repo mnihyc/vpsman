@@ -11,6 +11,7 @@ import {
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
+import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import { buildPrivilegeForJobOperation, type PrivilegeAssertion, type PrivilegeMaterial } from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
@@ -51,6 +52,11 @@ export function TopologyOspfUpdateControls({
   tunnelPlans: TunnelPlanRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
   const [selectedPlanId, setSelectedPlanId] = useState(() => ospfUpdatePlans[0]?.plan_id ?? "");
   const [side, setSide] = useState<TunnelEndpointSide>("left");
   const [timeoutSecs, setTimeoutSecs] = useState(60);
@@ -62,6 +68,7 @@ export function TopologyOspfUpdateControls({
   const [lastJobProgress, setLastJobProgress] = useState<BulkJobProgress | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [reviewPending, setReviewPending] = useState(false);
 
   const selectedUpdatePlan =
     ospfUpdatePlans.find((plan) => plan.plan_id === selectedPlanId) ?? ospfUpdatePlans[0] ?? null;
@@ -77,7 +84,9 @@ export function TopologyOspfUpdateControls({
   const visibleJobProgress = jobProgress ?? lastJobProgress;
   const status =
     actionError ??
-    (visibleJobProgress
+    (reviewPending
+      ? "Preparing OSPF review"
+      : visibleJobProgress
       ? `OSPF result for job ${shortId(visibleJobProgress.jobId)}`
       : lastJob
         ? `OSPF update job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
@@ -93,9 +102,18 @@ export function TopologyOspfUpdateControls({
     !!privilegeMaterial &&
     selectedUpdatePlan.current_ospf_cost !== selectedUpdatePlan.recommended_ospf_cost;
 
+  function clearOspfReview() {
+    invalidateReviewGeneration();
+    setOspfSnapshot(null);
+  }
+
   async function openOspfPrompt() {
     setActionError(null);
-    await runPanelAction(setPending, setActionError, async () => {
+    const reviewGeneration = captureReviewGeneration();
+    setReviewPending(true);
+    try {
+      await waitForReviewRender();
+      await runPanelAction(setPending, setActionError, async () => {
       if (!selectedUpdatePlan || !selectedTunnelPlan || !targetClientId) {
         throw new Error("Select an OSPF update plan");
       }
@@ -124,6 +142,9 @@ export function TopologyOspfUpdateControls({
         selectorExpression,
         timeoutSecs: boundedTimeoutSecs,
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setOspfSnapshot({
         detail: `OSPF cost update on ${vpsCountLabel(targets.length)}.`,
         forceUnprivileged,
@@ -150,6 +171,9 @@ export function TopologyOspfUpdateControls({
         timeoutSecs: boundedTimeoutSecs,
       });
     });
+    } finally {
+      setReviewPending(false);
+    }
   }
 
   function clearExecutionResults() {
@@ -226,7 +250,7 @@ export function TopologyOspfUpdateControls({
             <select
               aria-label="OSPF update plan"
               onChange={(event) => {
-                setOspfSnapshot(null);
+                clearOspfReview();
                 setSelectedPlanId(event.target.value);
               }}
               value={selectedUpdatePlan?.plan_id ?? ""}
@@ -243,7 +267,7 @@ export function TopologyOspfUpdateControls({
             <select
               aria-label="OSPF update endpoint side"
               onChange={(event) => {
-                setOspfSnapshot(null);
+                clearOspfReview();
                 setSide(event.target.value as TunnelEndpointSide);
               }}
               value={side}
@@ -261,7 +285,7 @@ export function TopologyOspfUpdateControls({
               max={3600}
               min={1}
               onChange={(event) => {
-                setOspfSnapshot(null);
+                clearOspfReview();
                 setTimeoutSecs(Number(event.target.value));
               }}
               type="number"
@@ -290,7 +314,7 @@ export function TopologyOspfUpdateControls({
             aria-label="Force unprivileged OSPF best effort"
             checked={forceUnprivileged}
             onChange={(event) => {
-              setOspfSnapshot(null);
+              clearOspfReview();
               setForceUnprivileged(event.target.checked);
             }}
             type="checkbox"
@@ -331,7 +355,7 @@ export function TopologyOspfUpdateControls({
         lockPrivilegeLabel="Lock OSPF privilege"
         onOpenUnlock={onOpenPrivilegeUnlock}
         onPrivilegeMaterialChange={(material) => {
-          setOspfSnapshot(null);
+          clearOspfReview();
           setPrivilegeMaterial(material);
         }}
         privilegeMaterial={privilegeMaterial}

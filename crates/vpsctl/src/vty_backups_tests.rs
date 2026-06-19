@@ -107,15 +107,11 @@ fn rejects_vty_backup_policy_without_safe_recipient() {
 }
 
 #[test]
-fn parses_vty_restore_plan_scope_and_confirmation() {
+fn parses_vty_restore_plan_records_and_confirmation() {
     let source = Uuid::new_v4().to_string();
     let request = parse_vty_restore_plan(&[
         &source,
         "client-b",
-        "--path",
-        "/etc/hostname",
-        "--include-config",
-        "--destination-root=/restore",
         "--confirmed",
         "--note=restore-rehearsal",
     ])
@@ -123,24 +119,20 @@ fn parses_vty_restore_plan_scope_and_confirmation() {
 
     assert_eq!(request.source_backup_request_id.to_string(), source);
     assert_eq!(request.target_client_id, "client-b");
-    assert_eq!(request.paths, vec!["/etc/hostname"]);
-    assert!(request.include_config);
-    assert_eq!(request.destination_root.as_deref(), Some("/restore"));
     assert!(request.confirmed);
     assert_eq!(request.note.as_deref(), Some("restore-rehearsal"));
 }
 
 #[test]
-fn rejects_vty_restore_plan_without_scope_or_absolute_path() {
+fn rejects_vty_restore_plan_manual_scope_flags() {
     let source = Uuid::new_v4().to_string();
-    assert!(parse_vty_restore_plan(&[&source, "client-b"]).is_err());
-    assert!(parse_vty_restore_plan(&[&source, "client-b", "--path", "relative"]).is_err());
+    assert!(parse_vty_restore_plan(&[&source, "client-b", "--path", "/etc/hostname"]).is_err());
     assert!(parse_vty_restore_plan(&[
         &source,
         "client-b",
         "--include-config",
         "--destination-root",
-        "relative"
+        "/restore"
     ])
     .is_err());
 }
@@ -148,18 +140,12 @@ fn rejects_vty_restore_plan_without_scope_or_absolute_path() {
 #[test]
 fn parses_vty_restore_run_for_single_target_execution() {
     let source = Uuid::new_v4().to_string();
+    let archive_transfer_session_id = Uuid::new_v4();
     let request = parse_vty_restore_run(&[
         &source,
         "client-b",
-        "--archive-path",
-        "/var/lib/vpsman/restores/archive.tar",
-        "--archive-size-bytes=2048",
-        "--archive-sha256-hex",
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        "--path",
-        "/etc/hostname",
-        "--include-config",
-        "--destination-root=/restore",
+        "--archive-transfer-session-id",
+        &archive_transfer_session_id.to_string(),
         "--timeout=120",
         "--force-unprivileged",
         "--confirmed",
@@ -168,30 +154,26 @@ fn parses_vty_restore_run_for_single_target_execution() {
 
     assert_eq!(request.source_backup_request_id.to_string(), source);
     assert_eq!(request.target_client_id, "client-b");
-    assert_eq!(request.archive_path, "/var/lib/vpsman/restores/archive.tar");
-    assert_eq!(request.archive_size_bytes, 2048);
     assert_eq!(
-        request.archive_sha256_hex,
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        request.archive_transfer_session_id,
+        archive_transfer_session_id
     );
-    assert_eq!(request.paths, vec!["/etc/hostname"]);
-    assert!(request.include_config);
-    assert_eq!(request.destination_root.as_deref(), Some("/restore"));
     assert_eq!(request.timeout_secs, 120);
     assert!(request.confirmed);
     assert!(request.force_unprivileged);
 }
 
 #[test]
-fn rejects_vty_restore_run_without_agent_archive_metadata() {
+fn rejects_vty_restore_run_without_archive_transfer_record() {
     let source = Uuid::new_v4().to_string();
+    assert!(parse_vty_restore_run(&[&source, "client-b", "--confirmed"]).is_err());
     assert!(parse_vty_restore_run(&[
         &source,
         "client-b",
+        "--archive-transfer-session-id",
+        &Uuid::new_v4().to_string(),
         "--path",
         "/etc/hostname",
-        "--destination-root",
-        "/restore",
         "--confirmed",
     ])
     .is_err());

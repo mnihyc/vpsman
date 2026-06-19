@@ -57,9 +57,7 @@ pub(crate) fn migration_run(
     api_url: &str,
     token: Option<&str>,
     restore_plan_id: String,
-    archive_path: String,
-    archive_size_bytes: u64,
-    archive_sha256_hex: String,
+    archive_transfer_session_id: String,
     note: Option<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -69,15 +67,15 @@ pub(crate) fn migration_run(
     force_unprivileged: bool,
 ) -> Result<()> {
     let restore_plan_id = Uuid::parse_str(&restore_plan_id).context("invalid restore plan UUID")?;
+    let archive_transfer_session_id = Uuid::parse_str(&archive_transfer_session_id)
+        .context("invalid archive transfer session UUID")?;
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
     let response = migration_run_with_credentials(
         api_url,
         token,
         restore_plan_id,
-        archive_path,
-        archive_size_bytes,
-        archive_sha256_hex,
+        archive_transfer_session_id,
         note,
         &password,
         &salt_hex,
@@ -94,9 +92,7 @@ pub(crate) fn migration_run_with_credentials(
     api_url: &str,
     token: Option<&str>,
     restore_plan_id: Uuid,
-    archive_path: String,
-    archive_size_bytes: u64,
-    archive_sha256_hex: String,
+    archive_transfer_session_id: Uuid,
     note: Option<String>,
     password: &str,
     salt_hex: &str,
@@ -128,9 +124,7 @@ pub(crate) fn migration_run_with_credentials(
         RestoreRunWithCredentials {
             source_backup_request_id: plan.source_backup_request_id,
             target_client_id: plan.target_client_id,
-            archive_path,
-            archive_size_bytes,
-            archive_sha256_hex,
+            archive_transfer_session_id,
             paths: plan.paths,
             include_config: plan.include_config,
             destination_root: plan.destination_root,

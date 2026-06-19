@@ -322,8 +322,9 @@ export function addressFamilyLabel(family: string | null | undefined): string {
 }
 
 function commandFromText(value: string): RuntimeTunnelCommand | undefined {
-  const argv = value
-    .split(/[\n,]/)
+  const trimmed = value.trim();
+  const argv = trimmed
+    .split(/[\n,]/.test(trimmed) ? /[\n,]/ : /\s+/)
     .map((part) => part.trim())
     .filter(Boolean);
   return argv.length > 0 ? { argv } : undefined;

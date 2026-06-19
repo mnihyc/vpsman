@@ -176,24 +176,25 @@ bash scripts/smoke-minio-backup-artifact.sh
 cargo run -p vpsctl -- restore-plan \
   --source-backup-request-id <backup_request_uuid> \
   --target-client-id edge-b \
-  --paths /etc/hostname \
-  --destination-root /restore \
   --confirmed
 ```
 
-Restore from an operator-staged archive file that already exists on the target
-agent. The restore request sends only the archive path, exact byte length, and
-SHA-256; the API and dashboard do not accept a private key or restore payload:
+Restore from an archive staged through a completed file-transfer upload on the
+target agent. The restore request selects that transfer record; restore scope is
+derived from the backup request, while path, size, and SHA-256 are derived from
+the recorded transfer and matching backup artifact:
 
 ```sh
+cargo run -p vpsctl -- file-transfer-upload \
+  --source ./backup.tar \
+  --path /tmp/vpsman-restore-backup.tar \
+  --clients edge-b \
+  --confirmed
+
 cargo run -p vpsctl -- restore-run \
   --source-backup-request-id <backup_request_uuid> \
   --target-client-id edge-b \
-  --archive-path /var/lib/vpsman/restores/backup.tar \
-  --archive-size-bytes <archive_size_bytes> \
-  --archive-sha256-hex <archive_sha256_hex> \
-  --paths /etc/hostname \
-  --destination-root /restore \
+  --archive-transfer-session-id <completed_upload_session_uuid> \
   --confirmed
 ```
 
@@ -220,9 +221,7 @@ restore plan:
 ```sh
 cargo run -p vpsctl -- migration-run \
   --restore-plan-id <restore_plan_uuid> \
-  --archive-path /var/lib/vpsman/restores/backup.tar \
-  --archive-size-bytes <archive_size_bytes> \
-  --archive-sha256-hex <archive_sha256_hex> \
+  --archive-transfer-session-id <completed_upload_session_uuid> \
   --confirmed
 ```
 

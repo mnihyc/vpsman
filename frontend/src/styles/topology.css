@@ -318,6 +318,10 @@
   min-height: 72px;
 }
 
+.promotionStageCard .adapterArgvField {
+  grid-column: 1 / -1;
+}
+
 .promotionAdapterCard {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -328,11 +332,6 @@
 .promotionAdapterCard > label,
 .promotionAdapterCard > .primaryAction {
   grid-column: 1 / -1;
-}
-
-.promotionAdapterCard > label:nth-of-type(1),
-.promotionAdapterCard > label:nth-of-type(2) {
-  grid-column: auto;
 }
 
 .topologyPlanComposer .dispatchForm {

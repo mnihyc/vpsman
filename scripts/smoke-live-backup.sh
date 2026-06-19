@@ -296,10 +296,24 @@ with tarfile.open(archive_path, "w") as archive:
         info.mtime = created_unix
         archive.addfile(info, fileobj=io.BytesIO(data))
 PY
-restore_archive_size="$(python3 -c 'import os, sys; print(os.path.getsize(sys.argv[1]))' "$restore_archive")"
-restore_archive_sha="$(sha256sum "$restore_archive" | awk '{print $1}')"
+restore_archive_remote="/tmp/vpsman-restore-${backup_request_id}.tar"
+restore_upload_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
+  target/debug/vpsctl --api-url "$api_url" file-transfer-upload \
+    --source "$restore_archive" \
+    --path "$restore_archive_remote" \
+    --mode 0600 \
+    --clients "$client_id" \
+    --super-salt-hex "$super_salt_hex" \
+    --timeout-secs 30 \
+    --confirmed)"
+restore_archive_transfer_session_id="$(jq -r 'select(.event == "file_transfer_upload_complete") | .session_id' <<<"$restore_upload_json" | tail -1)"
+if [[ -z "$restore_archive_transfer_session_id" || "$restore_archive_transfer_session_id" == "null" ]]; then
+  echo "restore archive staging did not produce a transfer session id" >&2
+  printf '%s\n' "$restore_upload_json" >&2
+  exit 1
+fi
 
-restore_root="$SMOKE_TMPDIR/restore-root"
+restore_root="/var/lib/vpsman/restores/$backup_request_id/$client_id"
 restored_selected="$restore_root${selected_file}"
 restored_config="$restore_root/vpsman/agent_config.toml"
 restore_preexisting_payload="restore preexisting payload $(date +%s%N)"
@@ -309,12 +323,7 @@ restore_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
   target/debug/vpsctl --api-url "$api_url" restore-run \
     --source-backup-request-id "$backup_request_id" \
     --target-client-id "$client_id" \
-    --archive-path "$restore_archive" \
-    --archive-size-bytes "$restore_archive_size" \
-    --archive-sha256-hex "$restore_archive_sha" \
-    --paths "$selected_file" \
-    --include-config \
-    --destination-root "$restore_root" \
+    --archive-transfer-session-id "$restore_archive_transfer_session_id" \
     --super-salt-hex "$super_salt_hex" \
     --timeout-secs 30 \
     --force-unprivileged \
@@ -362,12 +371,12 @@ audits_json="$(api_auth_get "/api/v1/audit?limit=80")"
 jq -e '[.[].action] | index("job.dispatch_requested") and index("job.target_result")' \
   <<<"$audits_json" >/dev/null
 
-vty_restore_root="$SMOKE_TMPDIR/vty-restore-root"
+vty_restore_root="$restore_root"
 vty_restore_log="$SMOKE_TMPDIR/vty-restore.log"
 {
   printf 'enable\n'
-  printf 'restore-run %s %s --archive-path %s --archive-size-bytes %s --archive-sha256-hex %s --path %s --include-config --destination-root %s --timeout 30 --force-unprivileged --confirmed\n' \
-    "$backup_request_id" "$client_id" "$restore_archive" "$restore_archive_size" "$restore_archive_sha" "$selected_file" "$vty_restore_root"
+  printf 'restore-run %s %s --archive-transfer-session-id %s --timeout 30 --force-unprivileged --confirmed\n' \
+    "$backup_request_id" "$client_id" "$restore_archive_transfer_session_id"
   printf 'exit\n'
 } | VPSMAN_SUPER_PASSWORD="$super_password" \
   VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
@@ -382,14 +391,11 @@ smoke_wait_api_job_status "$api_url" "$vty_restore_job_id" completed 45 >/dev/nu
 vty_restored_selected="$vty_restore_root${selected_file}"
 cmp -s "$selected_file" "$vty_restored_selected"
 
-migration_restore_root="$SMOKE_TMPDIR/migration-restore-root"
+migration_restore_root="$restore_root"
 migration_plan_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
   target/debug/vpsctl --api-url "$api_url" restore-plan \
     --source-backup-request-id "$backup_request_id" \
     --target-client-id "$client_id" \
-    --paths "$selected_file" \
-    --include-config \
-    --destination-root "$migration_restore_root" \
     --super-salt-hex "$super_salt_hex" \
     --note "live executable migration" \
     --confirmed)"
@@ -403,9 +409,7 @@ jq -e --arg id "$backup_request_id" --arg target "$client_id" '
 migration_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
   target/debug/vpsctl --api-url "$api_url" migration-run \
     --restore-plan-id "$migration_restore_plan_id" \
-    --archive-path "$restore_archive" \
-    --archive-size-bytes "$restore_archive_size" \
-    --archive-sha256-hex "$restore_archive_sha" \
+    --archive-transfer-session-id "$restore_archive_transfer_session_id" \
     --super-salt-hex "$super_salt_hex" \
     --timeout-secs 30 \
     --force-unprivileged \

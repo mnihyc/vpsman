@@ -3,7 +3,10 @@ use uuid::Uuid;
 use vpsman_common::JobCommand;
 
 use crate::{
-    commands_backups::{restore_rollback_operation_from_api, restore_run_operation},
+    commands_backups::{
+        restore_rollback_operation_from_api, restore_run_with_credentials,
+        restore_scope_from_backup, RestoreRunWithCredentials,
+    },
     commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
     http::http_post_json,
     privilege::{
@@ -29,9 +32,6 @@ pub(crate) struct VtyBackupRequest {
 pub(crate) struct VtyRestorePlanRequest {
     pub(crate) source_backup_request_id: Uuid,
     pub(crate) target_client_id: String,
-    pub(crate) paths: Vec<String>,
-    pub(crate) include_config: bool,
-    pub(crate) destination_root: Option<String>,
     pub(crate) confirmed: bool,
     pub(crate) note: Option<String>,
 }
@@ -40,12 +40,7 @@ pub(crate) struct VtyRestorePlanRequest {
 pub(crate) struct VtyRestoreRunRequest {
     pub(crate) source_backup_request_id: Uuid,
     pub(crate) target_client_id: String,
-    pub(crate) archive_path: String,
-    pub(crate) archive_size_bytes: u64,
-    pub(crate) archive_sha256_hex: String,
-    pub(crate) paths: Vec<String>,
-    pub(crate) include_config: bool,
-    pub(crate) destination_root: Option<String>,
+    pub(crate) archive_transfer_session_id: Uuid,
     pub(crate) timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
@@ -474,61 +469,36 @@ fn normalize_vty_cron_value(value: &str) -> String {
 }
 
 pub(crate) fn parse_vty_restore_plan(tokens: &[&str]) -> Result<VtyRestorePlanRequest> {
-    let source_backup_request_id = tokens
-        .first()
-        .context("usage: restore-plan <source_backup_uuid> <target_client_id> [--path <abs>] [--include-config] [--destination-root <abs>] [--confirmed] [--note <text>]")?;
+    let source_backup_request_id = tokens.first().context(
+        "usage: restore-plan <source_backup_uuid> <target_client_id> [--confirmed] [--note <text>]",
+    )?;
     let target_client_id = tokens.get(1).context(
-        "usage: restore-plan <source_backup_uuid> <target_client_id> [--path <abs>] [--include-config] [--destination-root <abs>] [--confirmed] [--note <text>]",
+        "usage: restore-plan <source_backup_uuid> <target_client_id> [--confirmed] [--note <text>]",
     )?;
     let mut request = VtyRestorePlanRequest {
         source_backup_request_id: Uuid::parse_str(source_backup_request_id)
             .context("invalid source backup request UUID")?,
         target_client_id: (*target_client_id).to_string(),
-        paths: Vec::new(),
-        include_config: false,
-        destination_root: None,
         confirmed: false,
         note: None,
     };
     let mut index = 2;
     while index < tokens.len() {
         match tokens[index] {
-            "--include-config" => {
-                request.include_config = true;
-                index += 1;
-            }
             "--confirmed" => {
                 request.confirmed = true;
                 index += 1;
             }
-            "--path" => {
-                request.paths.push(
-                    tokens
-                        .get(index + 1)
-                        .context("--path requires a value")?
-                        .to_string(),
+            "--path" | "--include-config" | "--destination-root" => {
+                anyhow::bail!(
+                    "{} was removed; restore scope and destination root are derived from records",
+                    tokens[index]
                 );
-                index += 2;
             }
-            value if value.starts_with("--path=") => {
-                request
-                    .paths
-                    .push(value.trim_start_matches("--path=").to_string());
-                index += 1;
-            }
-            "--destination-root" => {
-                request.destination_root = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--destination-root requires a value")?
-                        .to_string(),
+            value if value.starts_with("--path=") || value.starts_with("--destination-root=") => {
+                anyhow::bail!(
+                    "restore scope and destination root flags were removed; select backup and target records"
                 );
-                index += 2;
-            }
-            value if value.starts_with("--destination-root=") => {
-                request.destination_root =
-                    Some(value.trim_start_matches("--destination-root=").to_string());
-                index += 1;
             }
             "--note" => {
                 request.note = Some(
@@ -546,33 +516,21 @@ pub(crate) fn parse_vty_restore_plan(tokens: &[&str]) -> Result<VtyRestorePlanRe
             other => anyhow::bail!("unknown restore-plan flag {other}"),
         }
     }
-    ensure_backup_scope(&request.paths, request.include_config, "restore-plan")?;
-    if let Some(destination_root) = &request.destination_root {
-        anyhow::ensure!(
-            destination_root.starts_with('/'),
-            "restore destination root must be absolute"
-        );
-    }
     Ok(request)
 }
 
 pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequest> {
     let source_backup_request_id = tokens
         .first()
-        .context("usage: restore-run <source_backup_uuid> <target_client_id> --archive-path <abs> --archive-size-bytes <bytes> --archive-sha256-hex <sha256> [--path <abs>] [--include-config] [--destination-root <abs>] [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
+        .context("usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
     let target_client_id = tokens.get(1).context(
-        "usage: restore-run <source_backup_uuid> <target_client_id> --archive-path <abs> --archive-size-bytes <bytes> --archive-sha256-hex <sha256> [--path <abs>] [--include-config] [--destination-root <abs>] [--timeout <1-3600>] [--force-unprivileged] --confirmed",
+        "usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--timeout <1-3600>] [--force-unprivileged] --confirmed",
     )?;
     let mut request = VtyRestoreRunRequest {
         source_backup_request_id: Uuid::parse_str(source_backup_request_id)
             .context("invalid source backup request UUID")?,
         target_client_id: (*target_client_id).to_string(),
-        archive_path: String::new(),
-        archive_size_bytes: 0,
-        archive_sha256_hex: String::new(),
-        paths: Vec::new(),
-        include_config: false,
-        destination_root: None,
+        archive_transfer_session_id: Uuid::nil(),
         timeout_secs: 60,
         confirmed: false,
         force_unprivileged: false,
@@ -580,48 +538,35 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
     let mut index = 2;
     while index < tokens.len() {
         match tokens[index] {
-            "--archive-path" => {
-                request.archive_path = tokens
-                    .get(index + 1)
-                    .context("--archive-path requires a value")?
-                    .to_string();
+            "--archive-transfer-session-id" => {
+                request.archive_transfer_session_id = Uuid::parse_str(
+                    tokens
+                        .get(index + 1)
+                        .context("--archive-transfer-session-id requires a value")?,
+                )
+                .context("invalid --archive-transfer-session-id")?;
                 index += 2;
             }
-            value if value.starts_with("--archive-path=") => {
-                request.archive_path = value.trim_start_matches("--archive-path=").to_string();
+            value if value.starts_with("--archive-transfer-session-id=") => {
+                request.archive_transfer_session_id =
+                    Uuid::parse_str(value.trim_start_matches("--archive-transfer-session-id="))
+                        .context("invalid --archive-transfer-session-id")?;
                 index += 1;
             }
-            "--archive-size-bytes" => {
-                request.archive_size_bytes = tokens
-                    .get(index + 1)
-                    .context("--archive-size-bytes requires a value")?
-                    .parse()
-                    .context("invalid --archive-size-bytes")?;
-                index += 2;
+            "--archive-path" | "--archive-size-bytes" | "--archive-sha256-hex" => {
+                anyhow::bail!(
+                    "{} was removed; use --archive-transfer-session-id",
+                    tokens[index]
+                );
             }
-            value if value.starts_with("--archive-size-bytes=") => {
-                request.archive_size_bytes = value
-                    .trim_start_matches("--archive-size-bytes=")
-                    .parse()
-                    .context("invalid --archive-size-bytes")?;
-                index += 1;
-            }
-            "--archive-sha256-hex" => {
-                request.archive_sha256_hex = tokens
-                    .get(index + 1)
-                    .context("--archive-sha256-hex requires a value")?
-                    .to_string();
-                index += 2;
-            }
-            value if value.starts_with("--archive-sha256-hex=") => {
-                request.archive_sha256_hex = value
-                    .trim_start_matches("--archive-sha256-hex=")
-                    .to_string();
-                index += 1;
-            }
-            "--include-config" => {
-                request.include_config = true;
-                index += 1;
+            value
+                if value.starts_with("--archive-path=")
+                    || value.starts_with("--archive-size-bytes=")
+                    || value.starts_with("--archive-sha256-hex=") =>
+            {
+                anyhow::bail!(
+                    "archive path/size/SHA flags were removed; use --archive-transfer-session-id"
+                );
             }
             "--confirmed" => {
                 request.confirmed = true;
@@ -631,34 +576,16 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
                 request.force_unprivileged = true;
                 index += 1;
             }
-            "--path" => {
-                request.paths.push(
-                    tokens
-                        .get(index + 1)
-                        .context("--path requires a value")?
-                        .to_string(),
+            "--path" | "--include-config" | "--destination-root" => {
+                anyhow::bail!(
+                    "{} was removed; restore scope and destination root are derived from records",
+                    tokens[index]
                 );
-                index += 2;
             }
-            value if value.starts_with("--path=") => {
-                request
-                    .paths
-                    .push(value.trim_start_matches("--path=").to_string());
-                index += 1;
-            }
-            "--destination-root" => {
-                request.destination_root = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--destination-root requires a value")?
-                        .to_string(),
+            value if value.starts_with("--path=") || value.starts_with("--destination-root=") => {
+                anyhow::bail!(
+                    "restore scope and destination root flags were removed; select backup and target records"
                 );
-                index += 2;
-            }
-            value if value.starts_with("--destination-root=") => {
-                request.destination_root =
-                    Some(value.trim_start_matches("--destination-root=").to_string());
-                index += 1;
             }
             "--timeout" => {
                 request.timeout_secs = tokens
@@ -678,28 +605,9 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
             other => anyhow::bail!("unknown restore-run flag {other}"),
         }
     }
-    ensure_backup_scope(&request.paths, request.include_config, "restore-run")?;
     anyhow::ensure!(
-        !request.archive_path.trim().is_empty(),
-        "restore-run requires --archive-path"
-    );
-    anyhow::ensure!(
-        request.archive_size_bytes > 0,
-        "restore-run requires --archive-size-bytes"
-    );
-    anyhow::ensure!(
-        !request.archive_sha256_hex.trim().is_empty(),
-        "restore-run requires --archive-sha256-hex"
-    );
-    if let Some(destination_root) = &request.destination_root {
-        anyhow::ensure!(
-            destination_root.starts_with('/'),
-            "restore destination root must be absolute"
-        );
-    }
-    anyhow::ensure!(
-        !request.include_config || request.destination_root.is_some(),
-        "restore-run --include-config requires --destination-root"
+        !request.archive_transfer_session_id.is_nil(),
+        "restore-run requires --archive-transfer-session-id"
     );
     anyhow::ensure!(
         (1..=3600).contains(&request.timeout_secs),
@@ -908,11 +816,17 @@ pub(crate) fn submit_vty_restore_plan(
     salt_hex: &str,
     request: VtyRestorePlanRequest,
 ) -> Result<String> {
+    let scope = restore_scope_from_backup(
+        api_url,
+        token,
+        request.source_backup_request_id,
+        &request.target_client_id,
+    )?;
     let operation = JobCommand::Restore {
         source_backup_request_id: request.source_backup_request_id,
-        paths: request.paths.clone(),
-        include_config: request.include_config,
-        destination_root: request.destination_root.clone(),
+        paths: scope.paths.clone(),
+        include_config: scope.include_config,
+        destination_root: scope.destination_root.clone(),
         archive_path: None,
         archive_size_bytes: None,
         archive_sha256_hex: None,
@@ -940,9 +854,9 @@ pub(crate) fn submit_vty_restore_plan(
         &serde_json::json!({
             "source_backup_request_id": request.source_backup_request_id,
             "target_client_id": request.target_client_id,
-            "paths": request.paths,
-            "include_config": request.include_config,
-            "destination_root": request.destination_root,
+            "paths": scope.paths,
+            "include_config": scope.include_config,
+            "destination_root": scope.destination_root,
             "confirmed": request.confirmed,
             "note": request.note,
             "privilege_assertion": privilege.privilege_assertion,
@@ -956,29 +870,29 @@ pub(crate) fn submit_vty_restore_run(
     privilege_context: &VtyPrivilegeContext,
     request: VtyRestoreRunRequest,
 ) -> Result<String> {
-    let operation = restore_run_operation(
-        request.source_backup_request_id,
-        request.archive_path,
-        request.archive_size_bytes,
-        request.archive_sha256_hex,
-        request.paths,
-        request.include_config,
-        request.destination_root,
-    )?;
-    vty_submit_operation_with_force(
+    let scope = restore_scope_from_backup(
         api_url,
         token,
-        privilege_context,
-        "restore",
-        &operation,
-        VtyJobSelection {
-            clients: vec![request.target_client_id],
-            tags: Vec::new(),
-            destructive: true,
+        request.source_backup_request_id,
+        &request.target_client_id,
+    )?;
+    restore_run_with_credentials(
+        api_url,
+        token,
+        RestoreRunWithCredentials {
+            source_backup_request_id: request.source_backup_request_id,
+            target_client_id: request.target_client_id,
+            archive_transfer_session_id: request.archive_transfer_session_id,
+            paths: scope.paths,
+            include_config: scope.include_config,
+            destination_root: scope.destination_root,
+            password: &privilege_context.password,
+            salt_hex: &privilege_context.salt_hex,
+            privilege_ttl_secs: 300,
+            timeout_secs: request.timeout_secs,
             confirmed: request.confirmed,
+            force_unprivileged: request.force_unprivileged,
         },
-        request.timeout_secs,
-        request.force_unprivileged,
     )
 }
 

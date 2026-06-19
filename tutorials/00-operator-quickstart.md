@@ -152,20 +152,23 @@ Create a restore plan before changing a rebuilt VPS:
 cargo run -p vpsctl -- restore-plan \
   --source-backup-request-id <backup_request_uuid> \
   --target-client-id "$EDGE_CLIENT_ID" \
-  --paths /etc/hostname \
-  --destination-root /restore \
   --confirmed
 ```
 
 For rebuilt-client migration, use `migration-run` so the migration link and
-restore job are created together:
+restore job are created together. Stage the restore archive with
+`file-transfer-upload` first, then use the completed upload session id:
 
 ```sh
+cargo run -p vpsctl -- file-transfer-upload \
+  --source ./backup.tar \
+  --path /tmp/vpsman-restore-backup.tar \
+  --clients "$EDGE_CLIENT_ID" \
+  --confirmed
+
 cargo run -p vpsctl -- migration-run \
   --restore-plan-id <restore_plan_uuid> \
-  --archive-path /var/lib/vpsman/restores/backup.tar \
-  --archive-size-bytes <archive_size_bytes> \
-  --archive-sha256-hex <archive_sha256_hex> \
+  --archive-transfer-session-id <completed_upload_session_uuid> \
   --confirmed
 ```
 

@@ -4333,7 +4333,7 @@ export async function installConsoleApiMock(
           return jsonResponse({
             actor_id: null,
             created_at: "2026-05-31T10:02:00Z",
-            destination_root: "/restore",
+            destination_root: body.destination_root,
             id: "cccccccc-dddd-4eee-8fff-000000000000",
             include_config: false,
             note: null,
@@ -4352,7 +4352,7 @@ export async function installConsoleApiMock(
           return jsonResponse({
             actor_id: null,
             created_at: "2026-05-31T10:03:00Z",
-            destination_root: "/restore",
+            destination_root: body.destination_root ?? "/restore",
             id: "dddddddd-eeee-4fff-8aaa-000000000000",
             include_config: false,
             note: null,

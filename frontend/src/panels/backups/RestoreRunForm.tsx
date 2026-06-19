@@ -1,23 +1,25 @@
 import { Play } from "lucide-react";
 import type { AgentView } from "../../types";
 import { TargetImpactPreview } from "../TargetImpactPreview";
+import {
+  RestoreArchiveTransferSelect,
+  type RestoreArchiveTransferOption,
+} from "./RestoreArchiveTransferSelect";
 
 type RestoreRunFormProps = {
+  archiveEmptyMessage: string;
+  archiveTransferKey: string;
+  archiveTransferOptions: RestoreArchiveTransferOption[];
   confirmationOpen: boolean;
   forceUnprivileged: boolean;
-  onForceUnprivilegedChange: (value: boolean) => void;
-  onArchivePathChange: (value: string) => void;
-  onArchiveSizeBytesChange: (value: string) => void;
-  onArchiveSha256HexChange: (value: string) => void;
+  onArchiveTransferChange: (value: string) => void;
   onDryRunChange: (value: boolean) => void;
+  onForceUnprivilegedChange: (value: boolean) => void;
   onPostRestoreArgvChange: (value: string) => void;
   onRestoreTimeoutSecsChange: (value: number) => void;
   onRunRestore: () => void;
   pending: boolean;
   privilegeReady: boolean;
-  restoreArchivePath: string;
-  restoreArchiveSizeBytes: string;
-  restoreArchiveSha256Hex: string;
   restoreDryRun: boolean;
   restorePostRestoreArgv: string;
   restoreSourceId: string;
@@ -27,21 +29,19 @@ type RestoreRunFormProps = {
 };
 
 export function RestoreRunForm({
+  archiveEmptyMessage,
+  archiveTransferKey,
+  archiveTransferOptions,
   confirmationOpen,
   forceUnprivileged,
-  onForceUnprivilegedChange,
-  onArchivePathChange,
-  onArchiveSizeBytesChange,
-  onArchiveSha256HexChange,
+  onArchiveTransferChange,
   onDryRunChange,
+  onForceUnprivilegedChange,
   onPostRestoreArgvChange,
   onRestoreTimeoutSecsChange,
   onRunRestore,
   pending,
   privilegeReady,
-  restoreArchivePath,
-  restoreArchiveSizeBytes,
-  restoreArchiveSha256Hex,
   restoreDryRun,
   restorePostRestoreArgv,
   restoreSourceId,
@@ -50,9 +50,7 @@ export function RestoreRunForm({
   restoreTimeoutSecs,
 }: RestoreRunFormProps) {
   const archiveReady = Boolean(
-    restoreArchivePath.trim() &&
-      restoreArchiveSizeBytes.trim() &&
-      /^[0-9a-fA-F]{64}$/.test(restoreArchiveSha256Hex.trim()),
+    archiveTransferOptions.some((option) => option.key === archiveTransferKey),
   );
   return (
     <>
@@ -61,41 +59,19 @@ export function RestoreRunForm({
         <span>Runs agent-local archive restores with rehearsal support</span>
       </div>
       <form className="dispatchForm" onSubmit={(event) => event.preventDefault()}>
-        <label>
-          <span>Agent-local archive path</span>
-          <input
-            aria-label="Agent-local restore archive path"
-            onChange={(event) => onArchivePathChange(event.target.value)}
-            placeholder="/var/lib/vpsman/restore/source.tar.zst"
-            value={restoreArchivePath}
-          />
-        </label>
-        <label>
-          <span>Archive size bytes</span>
-          <input
-            aria-label="Agent-local restore archive size bytes"
-            min={1}
-            onChange={(event) => onArchiveSizeBytesChange(event.target.value)}
-            placeholder="1048576"
-            type="number"
-            value={restoreArchiveSizeBytes}
-          />
-        </label>
-        <label>
-          <span>Archive SHA-256</span>
-          <input
-            aria-label="Agent-local restore archive SHA-256"
-            onChange={(event) => onArchiveSha256HexChange(event.target.value)}
-            placeholder="64 hex characters"
-            value={restoreArchiveSha256Hex}
-          />
-        </label>
+        <RestoreArchiveTransferSelect
+          emptyMessage={archiveEmptyMessage}
+          onChange={onArchiveTransferChange}
+          options={archiveTransferOptions}
+          value={archiveTransferKey}
+        />
         <label>
           <span>Post-restore argv</span>
           <input
             aria-label="Post-restore argv"
             onChange={(event) => onPostRestoreArgvChange(event.target.value)}
             placeholder="/usr/local/sbin/post-restore-check --json"
+            title="Command and arguments to run after restore, separated by spaces"
             value={restorePostRestoreArgv}
           />
         </label>

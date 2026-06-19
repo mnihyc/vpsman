@@ -4,6 +4,7 @@ import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
+import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
 import {
   buildBulkJobProgress,
   bulkProgressTimeoutMs,
@@ -86,6 +87,11 @@ export function MultiFileActionsPanel({
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (value: PrivilegeMaterial | null) => void;
 }) {
+  const {
+    captureReviewGeneration,
+    invalidateReviewGeneration,
+    isReviewGenerationCurrent,
+  } = useReviewGenerationGuard();
   const [selectorExpression, setSelectorExpression] = useState(() => localStorage.getItem(SELECTOR_STORAGE_KEY) ?? "id:*");
   const [path, setPath] = useState(initialPath || "/");
   const [newPath, setNewPath] = useState("");
@@ -105,6 +111,7 @@ export function MultiFileActionsPanel({
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [reviewStatus, setReviewStatus] = useState<string | null>(null);
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingBulkConfirmation | null>(null);
   const [lastSummary, setLastSummary] = useState<BulkSummaryGroup[]>([]);
@@ -119,7 +126,7 @@ export function MultiFileActionsPanel({
     () => (lastOperation?.type === "file_download" ? buildDownloadComparison(lastOutputs) : null),
     [lastOperation, lastOutputs],
   );
-  const summary = actionError ?? actionMessage ?? `${localMatches.length}/${agents.length} local matches`;
+  const summary = actionError ?? reviewStatus ?? actionMessage ?? `${localMatches.length}/${agents.length} local matches`;
 
   function clearExecutionResults() {
     setBulkProgress(null);
@@ -135,30 +142,60 @@ export function MultiFileActionsPanel({
     setPendingConfirmation(null);
   }
 
+  function invalidateBulkReview() {
+    invalidateReviewGeneration();
+    clearPendingConfirmation();
+  }
+
   async function refreshPreview() {
-    await runPanelAction(setPending, setActionError, async () => {
+    const reviewGeneration = captureReviewGeneration();
+    const reviewSelectorExpression = selectorExpression.trim();
+    setReviewStatus("Resolving bulk file targets");
+    try {
+      await waitForReviewRender();
+      await runPanelAction(setPending, setActionError, async () => {
       const next = await onResolveTargets({
-        selector_expression: selectorExpression.trim(),
+        selector_expression: reviewSelectorExpression,
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setPreview(next);
       clearPendingConfirmation();
-      localStorage.setItem(SELECTOR_STORAGE_KEY, selectorExpression.trim());
+      localStorage.setItem(SELECTOR_STORAGE_KEY, reviewSelectorExpression);
       setActionMessage(`${next.target_count} VPSs resolved`);
     });
+    } finally {
+      setReviewStatus(null);
+    }
   }
 
   async function prepareBulkOperation() {
-    await runPanelAction(setPending, setActionError, async () => {
+    const reviewGeneration = captureReviewGeneration();
+    const reviewSelectorExpression = selectorExpression.trim();
+    setReviewStatus("Preparing bulk file review");
+    try {
+      await waitForReviewRender();
+      await runPanelAction(setPending, setActionError, async () => {
       const resolved = await onResolveTargets({
-        selector_expression: selectorExpression.trim(),
+        selector_expression: reviewSelectorExpression,
       });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
       setPreview(resolved);
       if (resolved.targets.length === 0) {
         throw new Error("No VPSs match the selector");
       }
       const operation = await buildOperation();
-      setPendingConfirmation({ operation, selectorExpression: selectorExpression.trim(), targets: resolved.targets });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
+      setPendingConfirmation({ operation, selectorExpression: reviewSelectorExpression, targets: resolved.targets });
     });
+    } finally {
+      setReviewStatus(null);
+    }
   }
 
   async function buildOperation(): Promise<JobOperation> {
@@ -360,7 +397,7 @@ export function MultiFileActionsPanel({
               onChange={(value) => {
                 setSelectorExpression(value);
                 setPreview(null);
-                clearPendingConfirmation();
+                invalidateBulkReview();
                 localStorage.setItem(SELECTOR_STORAGE_KEY, value);
               }}
               placeholder="id:* && provider:example"
@@ -372,14 +409,14 @@ export function MultiFileActionsPanel({
           <div className="multiFilePrimaryActions">
             <button className={action === "download_files" ? "primaryAction" : "secondaryAction"} onClick={() => {
               setAction("download_files");
-              clearPendingConfirmation();
+              invalidateBulkReview();
             }} type="button">
               <Download size={14} />
               <span>Download files</span>
             </button>
             <button className={action === "upload_file" ? "primaryAction" : "secondaryAction"} onClick={() => {
               setAction("upload_file");
-              clearPendingConfirmation();
+              invalidateBulkReview();
             }} type="button">
               <Upload size={14} />
               <span>Upload files</span>
@@ -392,7 +429,7 @@ export function MultiFileActionsPanel({
                 aria-label={action === "upload_file" ? "Bulk file destination path" : "Bulk file path"}
                 onChange={(event) => {
                   setPath(event.target.value);
-                  clearPendingConfirmation();
+                  invalidateBulkReview();
                 }}
                 value={path}
               />
@@ -412,7 +449,7 @@ export function MultiFileActionsPanel({
                   aria-label="Bulk upload file"
                   onChange={(event) => {
                     setUploadFile(event.target.files?.[0] ?? null);
-                    clearPendingConfirmation();
+                    invalidateBulkReview();
                   }}
                   type="file"
                 />
@@ -420,10 +457,10 @@ export function MultiFileActionsPanel({
               <label>
                 <span>Mode</span>
                 <input
-                  onChange={(event) => {
-                    setUploadMode(event.target.value);
-                    clearPendingConfirmation();
-                  }}
+                onChange={(event) => {
+                  setUploadMode(event.target.value);
+                  invalidateBulkReview();
+                }}
                   value={uploadMode}
                 />
               </label>
@@ -432,7 +469,7 @@ export function MultiFileActionsPanel({
                 <select
                   onChange={(event) => {
                     setUploadExistingPolicy(event.target.value as FileExistingPolicy);
-                    clearPendingConfirmation();
+                    invalidateBulkReview();
                   }}
                   value={uploadExistingPolicy}
                 >
@@ -445,7 +482,7 @@ export function MultiFileActionsPanel({
                 <input
                   onChange={(event) => {
                     setUploadOwner(event.target.value);
-                    clearPendingConfirmation();
+                    invalidateBulkReview();
                   }}
                   value={uploadOwner}
                 />
@@ -455,7 +492,7 @@ export function MultiFileActionsPanel({
                 <input
                   onChange={(event) => {
                     setUploadGroup(event.target.value);
-                    clearPendingConfirmation();
+                    invalidateBulkReview();
                   }}
                   value={uploadGroup}
                 />
@@ -465,7 +502,7 @@ export function MultiFileActionsPanel({
                 <select
                   onChange={(event) => {
                     setUploadOwnershipPolicy(event.target.value as FileOwnershipPolicy);
-                    clearPendingConfirmation();
+                    invalidateBulkReview();
                   }}
                   value={uploadOwnershipPolicy}
                 >
@@ -481,7 +518,7 @@ export function MultiFileActionsPanel({
               <span>Action</span>
               <select onChange={(event) => {
                 setAction(event.target.value as MultiFileAction);
-                clearPendingConfirmation();
+                invalidateBulkReview();
               }} value={isAdvancedAction(action) ? action : ""}>
                 <option disabled value="">Choose action</option>
                 <option value="copy">Copy</option>
@@ -500,7 +537,7 @@ export function MultiFileActionsPanel({
               <select
                 onChange={(event) => {
                   setPolicy(event.target.value as FileActionPolicy);
-                  clearPendingConfirmation();
+                  invalidateBulkReview();
                 }}
                 value={policy}
               >
@@ -516,7 +553,7 @@ export function MultiFileActionsPanel({
               <input
                 onChange={(event) => {
                   setNewPath(event.target.value);
-                  clearPendingConfirmation();
+                  invalidateBulkReview();
                 }}
                 placeholder="/etc/app.conf.next"
                 value={newPath}
@@ -529,7 +566,7 @@ export function MultiFileActionsPanel({
               <input
                 onChange={(event) => {
                   setMode(event.target.value);
-                  clearPendingConfirmation();
+                  invalidateBulkReview();
                 }}
                 value={mode}
               />
@@ -542,7 +579,7 @@ export function MultiFileActionsPanel({
                 <input
                   onChange={(event) => {
                     setUploadOwner(event.target.value);
-                    clearPendingConfirmation();
+                    invalidateBulkReview();
                   }}
                   value={uploadOwner}
                 />
@@ -552,7 +589,7 @@ export function MultiFileActionsPanel({
                 <input
                   onChange={(event) => {
                     setUploadGroup(event.target.value);
-                    clearPendingConfirmation();
+                    invalidateBulkReview();
                   }}
                   value={uploadGroup}
                 />
@@ -562,7 +599,7 @@ export function MultiFileActionsPanel({
                 <select
                   onChange={(event) => {
                     setUploadOwnershipPolicy(event.target.value as FileOwnershipPolicy);
-                    clearPendingConfirmation();
+                    invalidateBulkReview();
                   }}
                   value={uploadOwnershipPolicy}
                 >
@@ -578,7 +615,7 @@ export function MultiFileActionsPanel({
               <textarea
                 onChange={(event) => {
                   setContent(event.target.value);
-                  clearPendingConfirmation();
+                  invalidateBulkReview();
                 }}
                 rows={8}
                 value={content}
@@ -593,7 +630,7 @@ export function MultiFileActionsPanel({
                     checked={recursive}
                     onChange={(event) => {
                       setRecursive(event.target.checked);
-                      clearPendingConfirmation();
+                      invalidateBulkReview();
                     }}
                     type="checkbox"
                   />
@@ -606,7 +643,7 @@ export function MultiFileActionsPanel({
                     checked={overwrite}
                     onChange={(event) => {
                       setOverwrite(event.target.checked);
-                      clearPendingConfirmation();
+                      invalidateBulkReview();
                     }}
                     type="checkbox"
                   />
