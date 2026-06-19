@@ -135,8 +135,12 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
         | JobCommand::TerminalClose { .. } => {
             execute_terminal_command(config, job_id, command, timeout_secs).await
         }
-        JobCommand::FilePull { path } => {
-            execute_file_pull_with_timeout(job_id, path, timeout_secs, output_tx).await
+        JobCommand::FilePull {
+            path,
+            follow_symlinks,
+        } => {
+            execute_file_pull_with_timeout(job_id, path, *follow_symlinks, timeout_secs, output_tx)
+                .await
         }
         JobCommand::FilePush {
             path,
@@ -269,6 +273,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             path,
             chunk_size_bytes,
             rate_limit_kbps,
+            follow_symlinks,
             resume_token_hash,
         } => time::timeout(
             Duration::from_secs(timeout_secs.max(1)),
@@ -278,6 +283,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
                 path,
                 *chunk_size_bytes,
                 *rate_limit_kbps,
+                *follow_symlinks,
                 resume_token_hash,
                 cancel_token,
             ),

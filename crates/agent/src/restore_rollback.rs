@@ -1,4 +1,8 @@
-use std::path::{Component, Path};
+use std::{
+    io::{Read, Write},
+    os::unix::fs::PermissionsExt,
+    path::{Component, Path},
+};
 
 use anyhow::{Context, Result};
 use tokio::time::{self, Duration};
@@ -6,7 +10,10 @@ use vpsman_common::{
     payload_hash, validate_absolute_file_path, CommandOutput, OutputStream, RestoreRollbackFile,
 };
 
-use crate::command_worker::{run_cancelable, CommandCancelToken};
+use crate::{
+    command_worker::{run_cancelable, CommandCancelToken},
+    safe_fs,
+};
 
 pub(crate) struct RestoreRollbackCommandInput<'a> {
     pub(crate) job_id: uuid::Uuid,
@@ -155,7 +162,7 @@ async fn validate_current_restored_file(
 }
 
 async fn rollback_one_successful_restore(
-    job_id: uuid::Uuid,
+    _job_id: uuid::Uuid,
     file: &RestoreRollbackFile,
     deadline: time::Instant,
     cancel_token: &CommandCancelToken,
@@ -171,55 +178,41 @@ async fn rollback_one_successful_restore(
             })?;
             cancel_token.check("restore_rollback")?;
             ensure_restore_rollback_deadline(deadline)?;
-            let parent = destination
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .context("restore rollback destination has no parent directory")?;
-            let file_name = destination
-                .file_name()
-                .context("restore rollback destination has no file name")?
-                .to_string_lossy();
-            let temp_path =
-                parent.join(format!(".vpsman-restore-rollback-{file_name}-{job_id}.tmp"));
-            tokio::fs::copy(rollback, &temp_path)
-                .await
-                .with_context(|| {
-                    format!("failed to copy rollback snapshot {}", rollback.display())
-                })?;
             cancel_token.check("restore_rollback")?;
-            if let Err(error) = ensure_restore_rollback_deadline(deadline) {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(error);
-            }
-            tokio::fs::set_permissions(&temp_path, rollback_metadata.permissions())
-                .await
-                .with_context(|| {
-                    format!("failed to set rollback temp mode {}", temp_path.display())
-                })?;
-            cancel_token.check("restore_rollback")?;
-            if let Err(error) = ensure_restore_rollback_deadline(deadline) {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(error);
-            }
-            if let Err(error) = tokio::fs::rename(&temp_path, destination).await {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(error).with_context(|| {
-                    format!("failed to move rollback into {}", destination.display())
-                });
-            }
+            ensure_restore_rollback_deadline(deadline)?;
+            let rollback_path = rollback.to_path_buf();
+            let rollback_path_display = rollback_path.display().to_string();
+            let destination_path = destination.to_path_buf();
+            let mode = rollback_metadata.permissions().mode() & 0o777;
+            tokio::task::spawn_blocking(move || {
+                copy_snapshot_into_destination(&rollback_path, &destination_path, mode)
+            })
+            .await
+            .context("restore rollback file worker failed")??;
             cancel_token.check("restore_rollback")?;
             ensure_restore_rollback_deadline(deadline)?;
             Ok(serde_json::json!({
                 "archive_path": file.archive_path,
                 "destination_path": file.destination_path,
-                "rollback_path": rollback_path,
+                "rollback_path": rollback_path_display,
                 "action": "restored_snapshot",
             }))
         }
         None => {
-            tokio::fs::remove_file(destination).await.with_context(|| {
-                format!("failed to remove restored file {}", destination.display())
-            })?;
+            let destination_path = destination.to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                let parent = safe_fs::resolve_parent(&destination_path)?;
+                safe_fs::remove_child_file(parent.dir(), parent.name()).with_context(|| {
+                    format!(
+                        "failed to remove restored file {}",
+                        destination_path.display()
+                    )
+                })?;
+                safe_fs::sync_dir_best_effort(parent.dir());
+                Ok::<(), anyhow::Error>(())
+            })
+            .await
+            .context("restore rollback remove worker failed")??;
             cancel_token.check("restore_rollback")?;
             ensure_restore_rollback_deadline(deadline)?;
             Ok(serde_json::json!({
@@ -229,6 +222,49 @@ async fn rollback_one_successful_restore(
                 "action": "removed_restored_file",
             }))
         }
+    }
+}
+
+fn copy_snapshot_into_destination(snapshot: &Path, destination: &Path, mode: u32) -> Result<()> {
+    let snapshot_parent = safe_fs::resolve_parent(snapshot)?;
+    let mut source = snapshot_parent.open_child_file_read(false)?;
+    let destination_parent = safe_fs::resolve_parent(destination)?;
+    let (mut temp_file, temp_name) = safe_fs::create_private_temp_file(
+        destination_parent.dir(),
+        destination_parent.name(),
+        "restore-rollback",
+    )?;
+    let result = (|| -> Result<()> {
+        copy_open_file(&mut source, &mut temp_file)?;
+        safe_fs::fchmod_file(&temp_file, mode)?;
+        temp_file.sync_all().with_context(|| {
+            format!("failed to sync rollback temp for {}", destination.display())
+        })?;
+        safe_fs::rename_child(
+            destination_parent.dir(),
+            &temp_name,
+            destination_parent.dir(),
+            destination_parent.name(),
+            true,
+        )
+        .with_context(|| format!("failed to move rollback into {}", destination.display()))?;
+        safe_fs::sync_dir_best_effort(destination_parent.dir());
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = safe_fs::remove_child_file(destination_parent.dir(), &temp_name);
+    }
+    result
+}
+
+fn copy_open_file(source: &mut std::fs::File, destination: &mut std::fs::File) -> Result<()> {
+    let mut buffer = vec![0_u8; 16 * 1024];
+    loop {
+        let read = source.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(());
+        }
+        destination.write_all(&buffer[..read])?;
     }
 }
 
@@ -254,7 +290,7 @@ fn ensure_restore_rollback_deadline(deadline: time::Instant) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
     use super::{
         execute_restore_rollback_command, rollback_successful_restore, RestoreRollbackCommandInput,
@@ -367,6 +403,45 @@ mod tests {
             b"operator-changed"
         );
 
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn restore_rollback_rejects_symlinked_destination_parent() {
+        let job_id = uuid::Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("vpsman-restore-rollback-symlink-{job_id}"));
+        let real = root.join("real");
+        let link = root.join("link");
+        let snapshot = root.join(".vpsman-restore-existing.bak");
+        tokio::fs::create_dir_all(&real).await.unwrap();
+        symlink(&real, &link).unwrap();
+        tokio::fs::write(&snapshot, b"old-existing").await.unwrap();
+        tokio::fs::write(real.join("existing.txt"), b"new-existing")
+            .await
+            .unwrap();
+        let restored_files = vec![RestoreRollbackFile {
+            archive_path: "/tmp/existing.txt".to_string(),
+            destination_path: link.join("existing.txt").display().to_string(),
+            rollback_path: Some(snapshot.display().to_string()),
+            restored_size_bytes: b"new-existing".len() as u64,
+            restored_sha256_hex: payload_hash(b"new-existing"),
+        }];
+
+        let error = execute_restore_rollback_command(RestoreRollbackCommandInput {
+            job_id,
+            source_restore_job_id: uuid::Uuid::new_v4(),
+            restored_files: &restored_files,
+            timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("real directory"));
+        assert_eq!(
+            tokio::fs::read(real.join("existing.txt")).await.unwrap(),
+            b"new-existing"
+        );
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 

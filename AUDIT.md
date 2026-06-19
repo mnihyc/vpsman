@@ -96,14 +96,14 @@ of the same root cause.
 | AUD-080 | High | Confirmed | Gateway/Spool/Security | Gateway spool files persist the internal API bearer token |
 | AUD-081 | High | Confirmed | API/Object Storage/Security | Filesystem object-store artifacts rely on default filesystem permissions |
 | AUD-082 | Medium/High | Confirmed | API/Downloads/Security | Transient payload spool files in temp directories rely on default permissions |
-| AUD-083 | High | Confirmed | Agent/File Transfer/Security | Agent file-upload staging exposes payloads before final modes are applied |
+| AUD-083 | High | Fixed | Agent/File Transfer/Security | Agent file-upload staging exposes payloads before final modes are applied |
 | AUD-084 | High | Fixed | Agent/Updates/Reliability | Agent updater cannot follow the official GitHub release redirects |
 | AUD-085 | Medium/High | Confirmed | CLI/Downloads/Security | vpsctl local download staging uses default-readable named temp files |
-| AUD-086 | High | Confirmed | Agent/Restore/Security | Agent restore staging exposes restored payloads before archive modes are applied |
-| AUD-087 | High | Confirmed | Agent/Restore/Safety | Restore destination roots can be escaped through symlinked parent components |
+| AUD-086 | High | Fixed | Agent/Restore/Security | Agent restore staging exposes restored payloads before archive modes are applied |
+| AUD-087 | High | Fixed | Agent/Restore/Safety | Restore destination roots can be escaped through symlinked parent components |
 | AUD-088 | High | Confirmed | Agent/Backup/Safety | Backup jobs follow selected-path symlinks without an explicit operator choice |
-| AUD-089 | Medium/High | Confirmed | Agent/File Browser/Security | Text-file edit staging exposes payloads before final modes are applied |
-| AUD-090 | Medium/High | Confirmed | Agent/File Browser/Ownership | Chown on a symlink reports success while changing nothing |
+| AUD-089 | Medium/High | Fixed | Agent/File Browser/Security | Text-file edit staging exposes payloads before final modes are applied |
+| AUD-090 | Medium/High | Fixed | Agent/File Browser/Ownership | Chown on a symlink reports success while changing nothing |
 | AUD-091 | High | Confirmed | Agent/Restore/Safety | Agent-local restore archives are not required to be hash-bound |
 | AUD-092 | High | Confirmed | Agent/Restore/Reliability | Agent-local restore reads the entire archive into memory without a cap |
 | AUD-093 | Medium/High | Confirmed | Agent/Config/Security | Hot config rewrites can lose restrictive config-file permissions |
@@ -141,15 +141,15 @@ of the same root cause.
 | AUD-125 | High | Confirmed | API/Fleet Alerts/Webhooks | Fleet alert read routes can enqueue webhook integration events |
 | AUD-126 | Medium/High | Confirmed | API/Data Sources/State | Data-source read paths persist default assignments for all clients, including hidden clients |
 | AUD-127 | High | Confirmed | Gateway/Forwarder/Shutdown | Controlled gateway shutdown can lose queued RAM forwarder events |
-| AUD-128 | High | Confirmed | Agent/File Browser/Safety | Recursive file delete can escape through symlink-swap races |
+| AUD-128 | High | Fixed | Agent/File Browser/Safety | Recursive file delete can escape through symlink-swap races |
 | AUD-129 | Medium/High | Confirmed | Gateway/Terminal/Resource Bounds | Terminal output forwarding bypasses the gateway RAM spool budget |
-| AUD-130 | High | Confirmed | Agent/File Browser/Safety | Copy, chmod, and chown can follow symlinks after validation races |
-| AUD-131 | High | Confirmed | Agent/File Read And Download/Safety | Read and download paths can dereference symlinks after validation |
+| AUD-130 | High | Fixed | Agent/File Browser/Safety | Copy, chmod, and chown can follow symlinks after validation races |
+| AUD-131 | High | Fixed | Agent/File Read And Download/Safety | Read and download paths can dereference symlinks after validation |
 | AUD-132 | High | Fixed | API/Jobs/State Machine | Precompleted skipped targets are not atomic with job creation |
-| AUD-133 | High | Confirmed | Agent/File Upload/Safety | Upload staging pathnames can be swapped into symlinks before chmod, chown, chunk writes, or commit |
-| AUD-134 | High | Confirmed | Agent/Restore/Safety | Restore staging pathnames can be precreated or swapped into symlinks |
-| AUD-135 | High | Confirmed | Agent/File Browser/Safety | Text-write and copy staging pathnames can be swapped before chmod or commit |
-| AUD-136 | Medium/High | Confirmed | Agent/File Browser/Safety | Directory creation can chmod a swapped symlink target after mkdir |
+| AUD-133 | High | Fixed | Agent/File Upload/Safety | Upload staging pathnames can be swapped into symlinks before chmod, chown, chunk writes, or commit |
+| AUD-134 | High | Fixed | Agent/Restore/Safety | Restore staging pathnames can be precreated or swapped into symlinks |
+| AUD-135 | High | Fixed | Agent/File Browser/Safety | Text-write and copy staging pathnames can be swapped before chmod or commit |
+| AUD-136 | Medium/High | Fixed | Agent/File Browser/Safety | Directory creation can chmod a swapped symlink target after mkdir |
 | AUD-137 | Medium/High | Confirmed | API/Command Templates/Confirmation | Command-template delete route lacks backend confirmation |
 | AUD-138 | Medium/High | Confirmed | API/CLI/Data Sources/Confirmation | Data-source preset updates can bypass confirmation for one assigned VPS |
 | AUD-139 | Medium/High | Confirmed | CLI/VTY/Fleet Tags | CLI tag create and single-VPS assignment auto-confirm tag mutations |
@@ -201,7 +201,7 @@ of the same root cause.
 | AUD-185 | High | Confirmed | Agent/API/Terminal | Terminal input sequencing can drop out-of-order or conflicting input |
 | AUD-186 | Medium/High | Confirmed | Agent/Gateway/Terminal/Lifecycle | Terminal PTYs can survive disconnect or access revocation without reconciliation |
 | AUD-187 | Medium/High | Confirmed | API/Frontend/History Retention | History retention policy saves ignore the confirmation contract |
-| AUD-188 | High | Confirmed | Agent/File Browser/Safety | File rename and move can follow path races outside the reviewed source or destination |
+| AUD-188 | High | Fixed | Agent/File Browser/Safety | File rename and move can follow path races outside the reviewed source or destination |
 | AUD-189 | Medium/High | Confirmed | Deploy/Agent Install/Docs | Official agent install examples do not start the service they claim to start |
 | AUD-190 | Medium/High | Confirmed | Deploy/Compose/Database | Secure compose password edits leave API and worker using the wrong Postgres credentials |
 | AUD-191 | High | Confirmed | API/Gateway/Dispatch | Backup gateway endpoints cannot receive API dispatch, cancel, or lifecycle disconnect control |
@@ -237,10 +237,10 @@ of the same root cause.
 | AUD-221 | Medium/High | Confirmed | API/Frontend/System Dashboard | System dashboard omits agent-lost lifecycle failures |
 | AUD-222 | Medium | Confirmed | Frontend/System Config/Security | Suite config editor still presents the private API bind as a public API setting |
 | AUD-223 | High | Confirmed | API/Gateway/Client Lifecycle | Lifecycle disconnect can report success while older queued commands still deliver |
-| AUD-224 | Medium/High | Confirmed | Agent/CLI/Frontend/File Pull | File pull byte caps can be bypassed when a file grows after stat |
-| AUD-225 | Medium/High | Confirmed | Agent/File Browser/Resource Bounds | Text save hash checks read the whole destination file into memory |
+| AUD-224 | Medium/High | Fixed | Agent/CLI/Frontend/File Pull | File pull byte caps can be bypassed when a file grows after stat |
+| AUD-225 | Medium/High | Fixed | Agent/File Browser/Resource Bounds | Text save hash checks read the whole destination file into memory |
 | AUD-226 | High | Fixed | API/Job Outputs/State Machine | Final output insertion is not atomic with target terminalization |
-| AUD-227 | Medium/High | Confirmed | Agent/Frontend/File Browser/Resource Bounds | Directory listing reads and sorts every entry before applying the page limit |
+| AUD-227 | Medium/High | Fixed | Agent/Frontend/File Browser/Resource Bounds | Directory listing reads and sorts every entry before applying the page limit |
 | AUD-228 | Medium/High | Fixed | Agent/API/Network Speed Tests | Network speed-test server accepts the first TCP peer without verifying the expected tunnel peer |
 | AUD-229 | High | Confirmed | API/Frontend/Network Topology | Topology evidence and OSPF recommendations are keyed by mutable tunnel-plan names |
 | AUD-230 | Medium/High | Confirmed | Agent/Telemetry/Network Probes | Autonomous latency monitoring captures custom probe output without a byte limit |
@@ -983,7 +983,7 @@ of the same root cause.
 ### AUD-037: Audit History Prune Confirmation Uses Mutable Prune Domain And Mode After Review
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Audit Retention
 - Context: History retention prune can delete retained audit/history rows and,
   when not metadata-only, retained object files for the selected domain.
@@ -2676,7 +2676,7 @@ of the same root cause.
 ### AUD-083: Agent File-Upload Staging Exposes Payloads Before Final Modes Are Applied
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/File Transfer/Security
 - Context: Operators use file push and resumable file-transfer jobs to place
   configuration files, credentials, scripts, backup material, or other sensitive
@@ -2711,6 +2711,10 @@ of the same root cause.
   commit if the operator requested a broader final mode. The resumable metadata
   file under `std::env::temp_dir` also exposes destination path, size, hash, and
   temp path and should receive the same local-permission review.
+- Resolution: Fixed by creating file-push and resumable upload staging files
+  with owner-only modes from the first byte, applying final mode and ownership
+  through opened descriptors, and storing resumable metadata in a private
+  agent-owned directory.
 
 ### AUD-084: Agent Updater Cannot Follow The Official GitHub Release Redirects
 
@@ -2797,7 +2801,7 @@ of the same root cause.
 ### AUD-086: Agent Restore Staging Exposes Restored Payloads Before Archive Modes Are Applied
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Restore/Security
 - Context: Operators restore selected files and agent config from encrypted
   backup artifacts. Restored files can include private service configs, keys,
@@ -2832,11 +2836,14 @@ of the same root cause.
   archive mode intentionally allows broader access. Existing rollback snapshots
   should also be reviewed so private original contents are never staged with
   weaker default permissions.
+- Resolution: Fixed by creating restore, rollback snapshot, and explicit
+  rollback temp files with owner-only modes before writing bytes, then applying
+  the archived/original mode on the opened descriptor before final rename.
 
 ### AUD-087: Restore Destination Roots Can Be Escaped Through Symlinked Parent Components
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Restore/Safety
 - Context: Restore jobs can map backed-up absolute paths under a reviewed
   `destination_root`, for example restoring `/etc/app.conf` into
@@ -2872,6 +2879,9 @@ of the same root cause.
   equivalent `openat`/directory-fd semantics, reject symlink components below a
   `destination_root`, and verify any final canonical path remains contained in
   the reviewed root before writing rollback snapshots or restored bytes.
+- Resolution: Fixed by resolving and creating restore destination parents with
+  no-follow directory traversal. Existing symlink components below a reviewed
+  restore root now fail closed before restored or rollback bytes are written.
 
 ### AUD-088: Backup Jobs Follow Selected-Path Symlinks Without An Explicit Operator Choice
 
@@ -2911,7 +2921,7 @@ of the same root cause.
 ### AUD-089: Text-File Edit Staging Exposes Payloads Before Final Modes Are Applied
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/File Browser/Security
 - Context: Operators can edit a single VPS text file from the file browser, or
   dispatch bulk text writes from the multi-file panel. These workflows are used
@@ -2944,11 +2954,14 @@ of the same root cause.
   file-transfer upload staging. `file_write_text` should create its staging file
   owner-only from the start, then widen only immediately before final commit if
   the operator requested a broader final mode.
+- Resolution: Fixed by routing text writes through owner-only descriptor-held
+  temp files, applying the final mode with `fchmod`, syncing, and committing by
+  fd-relative rename.
 
 ### AUD-090: Chown On A Symlink Reports Success While Changing Nothing
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/File Browser/Ownership
 - Context: Operators can run single-VPS or bulk `file_chown` jobs to repair
   ownership on files and directories before service restarts, deployments, or
@@ -2980,6 +2993,9 @@ of the same root cause.
   symlink operands by default, or add a deliberate symlink policy and return a
   skipped result when nothing was changed. A successful `changed` result should
   mean at least one path was actually mutated.
+- Resolution: Fixed by routing chown through no-follow descriptor traversal and
+  reporting `unchanged` when the selected path resolves to no actual ownership
+  mutation, including top-level symlink operands.
 
 ### AUD-091: Agent-Local Restore Archives Are Not Required To Be Hash-Bound
 
@@ -4531,7 +4547,7 @@ of the same root cause.
 ### AUD-128: Recursive File Delete Can Escape Through Symlink-Swap Races
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/File Browser/Safety
 - Context: File delete is exposed as a destructive single-VPS and bulk
   operator workflow. When recursive delete is enabled, operators expect the
@@ -4569,6 +4585,9 @@ of the same root cause.
   rechecks before descending. A symlink encountered at any point should be
   unlinked as the symlink itself or rejected according to an explicit operator
   policy; it should never redirect recursive deletion.
+- Resolution: Fixed by moving recursive delete to descriptor-anchored
+  traversal with no-follow directory opens and fd-relative child removal. Parent
+  components are resolved as real directories before mutation.
 
 ### AUD-129: Terminal Output Forwarding Bypasses The Gateway RAM Spool Budget
 
@@ -4615,7 +4634,7 @@ of the same root cause.
 ### AUD-130: Copy, Chmod, And Chown Can Follow Symlinks After Validation Races
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/File Browser/Safety
 - Context: File copy, chmod, and chown are exposed as single-VPS and bulk
   operator workflows. Operators can run them with elevated agent privileges
@@ -4658,6 +4677,10 @@ of the same root cause.
   not to follow symlinks, and identity rechecks before mutating or reading a
   path. Explicit `follow_symlinks` should be reflected in audit/status output
   and should not be the accidental result of a race.
+- Resolution: Fixed by routing copy, chmod, and chown through the shared
+  no-follow parent resolver, fd-relative traversal, opened-descriptor
+  mutation, and source identity checks. Explicit final symlink following remains
+  opt-in where already supported.
 
 ### AUD-131: Read And Download Paths Can Dereference Symlinks After Validation
 
@@ -4706,6 +4729,14 @@ of the same root cause.
   and re-check identity before each chunk in resumable downloads if descriptors
   cannot be retained across jobs. Literal symlink following should require an
   explicit operator choice and must be represented in status/audit output.
+- Resolution: Fixed by adding a shared agent no-follow regular-file opener for
+  read/hash/chunk paths, using it for text reads, direct file downloads, file
+  pull, and resumable download start/chunk reads. Resumable downloads now store
+  the started file identity and reject chunks if the source path changes.
+  `file_pull` and resumable download payloads now require explicit
+  `follow_symlinks`, default false in CLI/VTY/frontend, with the choice shown in
+  review/status surfaces. Regression tests cover default symlink rejection,
+  explicit follow opt-in, and resumable source replacement rejection.
 
 ### AUD-132: Precompleted Skipped Targets Are Not Atomic With Job Creation
 
@@ -4759,7 +4790,7 @@ of the same root cause.
 ### AUD-133: Upload Staging Pathnames Can Be Swapped Into Symlinks Before Chmod, Chown, Chunk Writes, Or Commit
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/File Upload/Safety
 - Context: Operators can push inline/chunked files and resumable file-transfer
   uploads into arbitrary VPS paths. These workflows are commonly used for
@@ -4806,11 +4837,15 @@ of the same root cause.
   no-follow opens and identity checks before each phase, and protected
   per-agent metadata storage. Writable destination directories need the same
   race-safe treatment as other privileged filesystem operations.
+- Resolution: Fixed by creating upload staging files with owner-only no-follow
+  create-new opens, applying final mode and ownership through the open
+  descriptor, identity-checking resumable temp files, and moving resumable
+  metadata to a private agent-owned directory.
 
 ### AUD-134: Restore Staging Pathnames Can Be Precreated Or Swapped Into Symlinks
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Restore/Safety
 - Context: Restore and restore-rollback jobs write recovered file contents or
   rollback snapshots into operator-selected VPS paths. These paths can be live
@@ -4851,11 +4886,14 @@ of the same root cause.
   owner-only create-new no-follow files, descriptor-based permission changes,
   and identity checks before final rename. Rollback snapshots should use the
   same race-safe staging model.
+- Resolution: Fixed by creating restore and rollback staging files with
+  no-follow create-new opens, keeping descriptors through chmod/copy/sync, and
+  committing with fd-relative rename.
 
 ### AUD-135: Text-Write And Copy Staging Pathnames Can Be Swapped Before Chmod Or Commit
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/File Browser/Safety
 - Context: Operators can edit text files and copy files through the frontend,
   CLI, or bulk job dispatch. These workflows are used for production
@@ -4892,11 +4930,14 @@ of the same root cause.
   staging pathname itself being substituted before chmod or commit. The fix
   should apply descriptor-based permissions, no-follow/identity checks, and
   final commit validation for text-write and copy staging files.
+- Resolution: Fixed by creating text-write and copy staging files owner-only
+  with no-follow create-new opens, applying permissions through descriptors,
+  syncing, and committing with fd-relative rename.
 
 ### AUD-136: Directory Creation Can Chmod A Swapped Symlink Target After Mkdir
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/File Browser/Safety
 - Context: Operators can create directories from the file browser, CLI, and
   bulk file workflows to prepare deployment paths, restore roots, service data
@@ -4928,6 +4969,9 @@ of the same root cause.
   creation and needs the same descriptor-anchored or no-follow identity model.
   Recursive mkdir should either reject symlinked parent components by default
   or make symlink following an explicit, audited operator choice.
+- Resolution: Fixed by resolving mkdir parents with no-follow directory
+  traversal, creating directories with `mkdirat`, and applying modes through
+  the opened directory descriptor.
 
 ### AUD-137: Command-Template Delete Route Lacks Backend Confirmation
 
@@ -7118,7 +7162,7 @@ of the same root cause.
 ### AUD-188: File Rename And Move Can Follow Path Races Outside The Reviewed Source Or Destination
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/File Browser/Safety
 - Context: Operators can move or rename files and directories from the
   single-VPS file browser and the multi-file bulk panel. These are privileged
@@ -7160,6 +7204,9 @@ of the same root cause.
   identities at commit time, use no-follow semantics unless an explicit
   operator policy allows symlink following, and report skipped/conflict status
   if the reviewed identities changed.
+- Resolution: Fixed by resolving source and destination parents with no-follow
+  directory descriptors, rechecking source identity immediately before commit,
+  and performing the move with fd-relative rename/no-replace semantics.
 
 ### AUD-189: Official Agent Install Examples Do Not Start The Service They Claim To Start
 
@@ -8748,11 +8795,16 @@ of the same root cause.
   enforce the cap during reads and streaming sends, abort before emitting any
   chunk beyond the configured limit, and make the final status reflect a
   capped/changed file without persisting oversized output.
+- Resolution: Fixed by moving `file_pull` to bounded read/open helpers. The
+  non-streaming path enforces the 1 MiB cap while reading, and the streaming
+  path aborts before sending a chunk that would exceed the 64 MiB cap. The
+  command now carries explicit `follow_symlinks` through API/CLI/VTY/frontend
+  so the reviewed path semantics are part of the job intent.
 
 ### AUD-225: Text Save Hash Checks Read The Whole Destination File Into Memory
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/File Browser/Resource Bounds
 - Context: Operators edit small text files from the single-VPS file browser or
   dispatch text-write jobs from bulk file workflows. The frontend caps the new
@@ -8783,6 +8835,12 @@ of the same root cause.
   clean fix is to stream-hash the current destination under a clear maximum,
   reject files above that maximum before allocating their full content, and
   keep unchanged/idempotent checks bounded.
+- Resolution: Fixed by replacing whole-file destination reads in
+  `file_write_text` with a no-follow streaming hash bounded by the existing 1
+  MiB text-read limit. Strict policies fail closed when verification would
+  exceed the bound, while ignore policy returns a skipped
+  `verification_failed` status without modifying the file. Regression tests
+  cover oversized current files for both policies.
 
 ### AUD-226: Final Output Insertion Is Not Atomic With Target Terminalization
 
@@ -8842,7 +8900,7 @@ of the same root cause.
 ### AUD-227: Directory Listing Reads And Sorts Every Entry Before Applying The Page Limit
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Frontend/File Browser/Resource Bounds
 - Context: Operators use the single-VPS file browser to inspect directories on
   managed VPSs. Real production paths such as log directories, spool
@@ -8874,6 +8932,12 @@ of the same root cause.
   window plus enough ordering state for deterministic pagination, or introduce
   a separate hard scan cap with an explicit `truncated_by_scan_cap` status so
   operators know the directory is too large for the browser path.
+- Resolution: Fixed with a hard 10,000-entry scan cap for file-browser
+  directory listings. Capped responses return the requested page from scanned
+  entries, set `total_entries` to null, and include `scanned_entries`,
+  `visible_entries_scanned`, `scan_cap_entries`, and
+  `truncated_by_scan_cap` so the frontend can present the bounded result
+  honestly. Regression tests cover the capped status shape.
 
 ### AUD-228: Network Speed-Test Server Accepts The First TCP Peer Without Verifying The Expected Tunnel Peer
 

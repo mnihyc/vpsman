@@ -289,6 +289,7 @@ pub(crate) fn parse_vty_file_transfer_download(
     let mut privilege_ttl_secs = 300_u64;
     let mut session_id = None;
     let mut resume_token = None;
+    let mut follow_symlinks = false;
     let mut chunk_size_bytes = FILE_TRANSFER_CHUNK_BYTES as u32;
     let mut rate_limit_kbps = 0_u32;
     let mut poll_interval_ms = 250_u64;
@@ -321,6 +322,10 @@ pub(crate) fn parse_vty_file_transfer_download(
             }
             value if value.starts_with("--path=") => {
                 path = Some(value.trim_start_matches("--path=").to_string());
+                index += 1;
+            }
+            "--follow-symlinks" => {
+                follow_symlinks = true;
                 index += 1;
             }
             "--timeout" => {
@@ -484,6 +489,7 @@ pub(crate) fn parse_vty_file_transfer_download(
     Ok(FileTransferDownloadPlan {
         destination,
         path,
+        follow_symlinks,
         clients: selection.clients,
         tags: selection.tags,
         privilege_ttl_secs,
@@ -670,6 +676,7 @@ mod tests {
         let request = parse_vty_file_transfer_download(&[
             "--path",
             "/tmp/remote.bin",
+            "--follow-symlinks",
             "--destination",
             "/tmp/local.bin",
             "--chunk-size-bytes",
@@ -689,6 +696,7 @@ mod tests {
 
         assert_eq!(request.destination, PathBuf::from("/tmp/local.bin"));
         assert_eq!(request.path, "/tmp/remote.bin");
+        assert!(request.follow_symlinks);
         assert_eq!(request.chunk_size_bytes, 4096);
         assert_eq!(request.rate_limit_kbps, 1000);
         assert_eq!(
@@ -698,6 +706,21 @@ mod tests {
         assert!(request.clients.is_empty());
         assert_eq!(request.tags, vec!["id:edge-a"]);
         assert!(request.confirmed);
+    }
+
+    #[test]
+    fn parses_vty_resumable_file_download_default_no_follow_symlinks() {
+        let request = parse_vty_file_transfer_download(&[
+            "--path",
+            "/tmp/remote.bin",
+            "--destination",
+            "/tmp/local.bin",
+            "id:edge-a",
+            "--confirmed",
+        ])
+        .unwrap();
+
+        assert!(!request.follow_symlinks);
     }
 
     #[test]

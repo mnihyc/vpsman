@@ -1,16 +1,13 @@
 use std::{
-    ffi::CString,
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+    fs::File,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    time::{sleep, Duration},
-};
+use tokio::time::{sleep, Duration};
 use uuid::Uuid;
 use vpsman_common::{
     decode_chunked_file_payload, decode_file_transfer_chunk, decode_inline_file_payload,
@@ -19,9 +16,13 @@ use vpsman_common::{
     FilePushChunk, OutputStream, FILE_TRANSFER_CHUNK_BYTES,
 };
 
-use crate::command_worker::CommandCancelToken;
-use crate::platform_accounts::{
-    chown_path, metadata_gid, metadata_mode, metadata_uid, NameIdResolution, PlatformAccounts,
+use crate::{
+    command_worker::CommandCancelToken,
+    platform_accounts::{
+        current_effective_uid, metadata_gid, metadata_mode, metadata_uid,
+        normalize_ownership_tokens, NameIdResolution, PlatformAccounts,
+    },
+    safe_fs,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -37,6 +38,7 @@ struct FileTransferSessionMetadata {
     #[serde(default)]
     existing_policy: FileExistingPolicy,
     resume_token_hash: String,
+    temp_identity: safe_fs::NodeIdentity,
 }
 
 pub(crate) async fn execute_file_push(
@@ -145,7 +147,8 @@ pub(crate) async fn execute_file_transfer_start(
             existing_policy,
             resume_token_hash,
         )?;
-        let next_offset = current_transfer_offset(&paths.temp, size_bytes).await?;
+        let next_offset =
+            current_transfer_offset(&paths.temp, size_bytes, &metadata.temp_identity).await?;
         return transfer_status(
             job_id,
             "file_transfer_start",
@@ -162,7 +165,7 @@ pub(crate) async fn execute_file_transfer_start(
         );
     }
 
-    if paths.temp.exists() {
+    if transfer_temp_exists(&paths.temp).await? {
         anyhow::bail!("file transfer temporary file exists without session metadata");
     }
     if let Ok(metadata) = tokio::fs::symlink_metadata(&paths.destination).await {
@@ -188,14 +191,7 @@ pub(crate) async fn execute_file_transfer_start(
         }
     }
     cancel_token.check("file_transfer_start")?;
-    tokio::fs::File::create(&paths.temp)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to create transfer temp file {}",
-                paths.temp.display()
-            )
-        })?;
+    let temp_identity = create_transfer_temp_file(&paths.temp).await?;
     let metadata = FileTransferSessionMetadata {
         session_id,
         path: path.to_string(),
@@ -207,6 +203,7 @@ pub(crate) async fn execute_file_transfer_start(
         rate_limit_kbps,
         existing_policy,
         resume_token_hash: resume_token_hash.to_ascii_lowercase(),
+        temp_identity,
     };
     write_transfer_metadata(&paths.metadata, &metadata).await?;
     transfer_status(
@@ -247,16 +244,17 @@ pub(crate) async fn execute_file_transfer_chunk(
     if offset.saturating_add(decoded.len() as u64) > metadata.size_bytes {
         anyhow::bail!("file transfer chunk exceeds declared size");
     }
-    let current_offset = current_transfer_offset(&paths.temp, metadata.size_bytes).await?;
+    let current_offset =
+        current_transfer_offset(&paths.temp, metadata.size_bytes, &metadata.temp_identity).await?;
     let next_offset = if offset == current_offset {
         cancel_token.check("file_transfer_chunk")?;
-        write_transfer_chunk(&paths.temp, offset, &decoded).await?;
+        write_transfer_chunk(&paths.temp, &metadata.temp_identity, offset, &decoded).await?;
         maybe_throttle_complete_on_cancel(metadata.rate_limit_kbps, decoded.len(), &cancel_token)
             .await;
         offset + decoded.len() as u64
     } else if offset < current_offset && offset + decoded.len() as u64 <= current_offset {
         cancel_token.check("file_transfer_chunk")?;
-        verify_existing_chunk(&paths.temp, offset, &decoded).await?;
+        verify_existing_chunk(&paths.temp, &metadata.temp_identity, offset, &decoded).await?;
         current_offset
     } else {
         anyhow::bail!("file transfer chunk offset is not resumable from current state");
@@ -288,32 +286,25 @@ pub(crate) async fn execute_file_transfer_commit(
     let metadata = read_metadata_by_session(session_id).await?;
     ensure_resume_token(&metadata, resume_token_hash)?;
     let paths = transfer_session_paths(&metadata.path, session_id)?;
-    let current_offset = current_transfer_offset(&paths.temp, metadata.size_bytes).await?;
+    let current_offset =
+        current_transfer_offset(&paths.temp, metadata.size_bytes, &metadata.temp_identity).await?;
     if current_offset != metadata.size_bytes {
         anyhow::bail!("file transfer commit before all bytes are received");
     }
-    let actual_hash = hash_file(&paths.temp, &cancel_token, "file_transfer_commit").await?;
+    let actual_hash = hash_file(
+        &paths.temp,
+        &metadata.temp_identity,
+        &cancel_token,
+        "file_transfer_commit",
+    )
+    .await?;
     if actual_hash != metadata.sha256_hex {
         anyhow::bail!("file transfer final hash mismatch");
     }
     cancel_token.check("file_transfer_commit")?;
-    tokio::fs::set_permissions(&paths.temp, std::fs::Permissions::from_mode(metadata.mode))
-        .await
-        .with_context(|| format!("failed to set file mode on {}", paths.temp.display()))?;
+    chmod_transfer_temp(&paths.temp, &metadata.temp_identity, metadata.mode).await?;
     cancel_token.check("file_transfer_commit")?;
-    let move_result = match metadata.existing_policy {
-        FileExistingPolicy::Replace => tokio::fs::rename(&paths.temp, &paths.destination).await,
-        FileExistingPolicy::Skip => rename_no_replace(&paths.temp, &paths.destination).await,
-    };
-    if let Err(error) = move_result {
-        let _ = tokio::fs::remove_file(&paths.temp).await;
-        return Err(error).with_context(|| {
-            format!(
-                "failed to move file into place at {}",
-                paths.destination.display()
-            )
-        });
-    }
+    commit_transfer_temp(&paths, &metadata).await?;
     let _ = tokio::fs::remove_file(&paths.metadata).await;
     transfer_status(
         job_id,
@@ -373,18 +364,6 @@ async fn write_file_push(
     ownership_policy: FileOwnershipPolicy,
 ) -> Result<Vec<CommandOutput>> {
     let destination = Path::new(path);
-    let parent = destination
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .context("file push destination has no parent directory")?;
-    let file_name = destination
-        .file_name()
-        .context("file push destination has no file name")?
-        .to_string_lossy();
-    let temp_path = parent.join(format!(
-        ".vpsman-upload-{file_name}-{}",
-        uuid::Uuid::new_v4()
-    ));
     let ownership_plan = resolve_ownership(owner, group, uid, gid, ownership_policy)?;
 
     if let Ok(metadata) = tokio::fs::symlink_metadata(destination).await {
@@ -407,65 +386,38 @@ async fn write_file_push(
             );
         }
     }
-    tokio::fs::write(&temp_path, data)
-        .await
-        .with_context(|| format!("failed to write temporary file {}", temp_path.display()))?;
-    tokio::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode))
-        .await
-        .with_context(|| format!("failed to set file mode on {}", temp_path.display()))?;
-    if let Err(error) = apply_ownership_plan(&temp_path, &ownership_plan).await {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(error);
-    }
-    match existing_policy {
-        FileExistingPolicy::Replace => {
-            if let Err(error) = tokio::fs::rename(&temp_path, destination).await {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to move file into place at {}",
-                        destination.display()
-                    )
-                });
-            }
-        }
-        FileExistingPolicy::Skip => {
-            if let Err(error) = rename_no_replace(&temp_path, destination).await {
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    let metadata = tokio::fs::symlink_metadata(destination)
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "failed to stat existing destination {}",
-                                destination.display()
-                            )
-                        })?;
-                    return file_push_status(
-                        job_id,
-                        status_type,
-                        path,
-                        mode,
-                        data,
-                        chunk_count,
-                        existing_policy,
-                        "skipped",
-                        Some("destination_exists"),
-                        &metadata,
-                        &ownership_plan,
-                    );
-                }
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to move file into place at {}",
-                        destination.display()
-                    )
-                });
-            }
-        }
+    let destination = destination.to_path_buf();
+    let destination_for_worker = destination.clone();
+    let payload = data.to_vec();
+    let ownership_for_worker = ownership_plan.clone();
+    let commit = tokio::task::spawn_blocking(move || {
+        write_file_push_blocking(
+            &destination_for_worker,
+            mode,
+            &payload,
+            existing_policy,
+            &ownership_for_worker,
+        )
+    })
+    .await
+    .context("file push worker failed")??;
+    if let FilePushCommit::Skipped(metadata) = commit {
+        return file_push_status(
+            job_id,
+            status_type,
+            path,
+            mode,
+            data,
+            chunk_count,
+            existing_policy,
+            "skipped",
+            Some("destination_exists"),
+            &metadata,
+            &ownership_plan,
+        );
     }
 
-    let metadata = tokio::fs::symlink_metadata(destination)
+    let metadata = tokio::fs::symlink_metadata(&destination)
         .await
         .with_context(|| format!("failed to stat uploaded file {}", destination.display()))?;
     file_push_status(
@@ -481,6 +433,74 @@ async fn write_file_push(
         &metadata,
         &ownership_plan,
     )
+}
+
+enum FilePushCommit {
+    Completed,
+    Skipped(std::fs::Metadata),
+}
+
+fn write_file_push_blocking(
+    destination: &Path,
+    mode: u32,
+    data: &[u8],
+    existing_policy: FileExistingPolicy,
+    ownership_plan: &OwnershipPlan,
+) -> Result<FilePushCommit> {
+    let parent = safe_fs::resolve_parent(destination)?;
+    let (mut temp_file, temp_name) =
+        safe_fs::create_private_temp_file(parent.dir(), parent.name(), "upload")?;
+    let result = (|| -> Result<FilePushCommit> {
+        temp_file.write_all(data).with_context(|| {
+            format!(
+                "failed to write temporary file for {}",
+                destination.display()
+            )
+        })?;
+        safe_fs::fchmod_file(&temp_file, mode)?;
+        apply_ownership_plan_to_file(&temp_file, ownership_plan)?;
+        temp_file.sync_all().with_context(|| {
+            format!(
+                "failed to sync temporary file for {}",
+                destination.display()
+            )
+        })?;
+        let replace = existing_policy == FileExistingPolicy::Replace;
+        match safe_fs::rename_child(
+            parent.dir(),
+            &temp_name,
+            parent.dir(),
+            parent.name(),
+            replace,
+        ) {
+            Ok(()) => {
+                safe_fs::sync_dir_best_effort(parent.dir());
+                Ok(FilePushCommit::Completed)
+            }
+            Err(error)
+                if existing_policy == FileExistingPolicy::Skip
+                    && error.kind() == std::io::ErrorKind::AlreadyExists =>
+            {
+                let metadata = std::fs::symlink_metadata(destination).with_context(|| {
+                    format!(
+                        "failed to stat existing destination {}",
+                        destination.display()
+                    )
+                })?;
+                Ok(FilePushCommit::Skipped(metadata))
+            }
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "failed to move file into place at {}",
+                    destination.display()
+                )
+            }),
+        }
+    })();
+    if !matches!(result, Ok(FilePushCommit::Completed)) {
+        let _ = safe_fs::remove_child_file(parent.dir(), &temp_name);
+    }
+    result
 }
 
 fn file_push_status(
@@ -574,6 +594,9 @@ fn resolve_ownership(
     gid: Option<u32>,
     ownership_policy: FileOwnershipPolicy,
 ) -> Result<OwnershipPlan> {
+    let tokens = normalize_ownership_tokens(owner, group, uid, gid)?;
+    let owner = tokens.owner.as_deref();
+    let group = tokens.group.as_deref();
     if owner.is_none() && group.is_none() && uid.is_none() && gid.is_none() {
         return Ok(OwnershipPlan::unchanged());
     }
@@ -673,51 +696,11 @@ fn merge_optional_id(
     }
 }
 
-async fn apply_ownership_plan(path: &Path, ownership: &OwnershipPlan) -> Result<()> {
+fn apply_ownership_plan_to_file(file: &File, ownership: &OwnershipPlan) -> Result<()> {
     if !matches!(ownership.status, OwnershipPlanStatus::Planned) {
         return Ok(());
     }
-    let path = path.to_path_buf();
-    let uid = ownership.uid;
-    let gid = ownership.gid;
-    tokio::task::spawn_blocking(move || chown_path(&path, uid, gid))
-        .await
-        .context("chown worker failed")?
-}
-
-async fn rename_no_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
-    let source = source.to_path_buf();
-    let destination = destination.to_path_buf();
-    tokio::task::spawn_blocking(move || rename_no_replace_blocking(&source, &destination))
-        .await
-        .map_err(std::io::Error::other)?
-}
-
-fn rename_no_replace_blocking(source: &Path, destination: &Path) -> std::io::Result<()> {
-    const RENAME_NOREPLACE: libc::c_uint = 1;
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "source path contains nul")
-    })?;
-    let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "destination path contains nul",
-        )
-    })?;
-    let result = unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            destination.as_ptr(),
-            RENAME_NOREPLACE,
-        )
-    };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
+    safe_fs::fchown_file(file, ownership.uid, ownership.gid)
 }
 
 fn file_existing_policy_label(policy: FileExistingPolicy) -> &'static str {
@@ -762,6 +745,98 @@ struct TransferSessionPaths {
     metadata: PathBuf,
 }
 
+async fn transfer_temp_exists(path: &Path) -> Result<bool> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let parent = safe_fs::resolve_parent(&path)?;
+        Ok(parent.child_stat_nofollow()?.is_some())
+    })
+    .await
+    .context("file transfer temp stat worker failed")?
+}
+
+async fn create_transfer_temp_file(path: &Path) -> Result<safe_fs::NodeIdentity> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let parent = safe_fs::resolve_parent(&path)?;
+        let file = safe_fs::create_private_child_file(parent.dir(), parent.name())
+            .with_context(|| format!("failed to create transfer temp file {}", path.display()))?;
+        let identity = safe_fs::stat_file(&file)?.identity;
+        file.sync_all()
+            .with_context(|| format!("failed to sync transfer temp file {}", path.display()))?;
+        safe_fs::sync_dir_best_effort(parent.dir());
+        Ok(identity)
+    })
+    .await
+    .context("file transfer temp create worker failed")?
+}
+
+async fn chmod_transfer_temp(
+    path: &Path,
+    expected_identity: &safe_fs::NodeIdentity,
+    mode: u32,
+) -> Result<()> {
+    let path = path.to_path_buf();
+    let expected_identity = expected_identity.clone();
+    tokio::task::spawn_blocking(move || {
+        let parent = safe_fs::resolve_parent(&path)?;
+        let file = parent.open_child_readwrite_nofollow()?;
+        safe_fs::ensure_identity(
+            &file,
+            &expected_identity,
+            "file transfer temporary file changed",
+        )?;
+        safe_fs::fchmod_file(&file, mode)
+            .with_context(|| format!("failed to set file mode on {}", path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync transfer temp file {}", path.display()))?;
+        Ok(())
+    })
+    .await
+    .context("file transfer chmod worker failed")?
+}
+
+async fn commit_transfer_temp(
+    paths: &TransferSessionPaths,
+    metadata: &FileTransferSessionMetadata,
+) -> Result<()> {
+    let temp = paths.temp.clone();
+    let destination = paths.destination.clone();
+    let expected_identity = metadata.temp_identity.clone();
+    let replace = metadata.existing_policy == FileExistingPolicy::Replace;
+    tokio::task::spawn_blocking(move || {
+        let temp_parent = safe_fs::resolve_parent(&temp)?;
+        let destination_parent = safe_fs::resolve_parent(&destination)?;
+        let temp_file = temp_parent.open_child_readwrite_nofollow()?;
+        safe_fs::ensure_identity(
+            &temp_file,
+            &expected_identity,
+            "file transfer temporary file changed",
+        )?;
+        temp_file
+            .sync_all()
+            .with_context(|| format!("failed to sync transfer temp file {}", temp.display()))?;
+        safe_fs::rename_child(
+            temp_parent.dir(),
+            temp_parent.name(),
+            destination_parent.dir(),
+            destination_parent.name(),
+            replace,
+        )
+        .with_context(|| {
+            format!(
+                "failed to move file into place at {}",
+                destination.display()
+            )
+        })?;
+        safe_fs::sync_dir_best_effort(temp_parent.dir());
+        safe_fs::sync_dir_best_effort(destination_parent.dir());
+        Ok(())
+    })
+    .await
+    .context("file transfer commit worker failed")?
+}
+
 fn transfer_session_paths(path: &str, session_id: Uuid) -> Result<TransferSessionPaths> {
     validate_absolute_file_path(path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     if path == "/" {
@@ -777,7 +852,7 @@ fn transfer_session_paths(path: &str, session_id: Uuid) -> Result<TransferSessio
         .context("file transfer destination has no file name")?
         .to_string_lossy();
     let temp = parent.join(format!(".vpsman-transfer-{file_name}-{session_id}.part"));
-    let metadata = std::env::temp_dir().join(format!("vpsman-transfer-{session_id}.json"));
+    let metadata = transfer_metadata_path(session_id)?;
     Ok(TransferSessionPaths {
         destination,
         temp,
@@ -785,18 +860,63 @@ fn transfer_session_paths(path: &str, session_id: Uuid) -> Result<TransferSessio
     })
 }
 
+fn transfer_metadata_path(session_id: Uuid) -> Result<PathBuf> {
+    let root = std::env::temp_dir().join("vpsman-agent-transfer-sessions");
+    let (dir, _) = safe_fs::ensure_dir_all_no_symlinks_with_mode(&root, 0o700)?;
+    let metadata = safe_fs::stat_file(&dir)?;
+    if metadata.uid != current_effective_uid() {
+        anyhow::bail!("file transfer metadata directory is not owned by the agent user");
+    }
+    safe_fs::fchmod_file(&dir, 0o700)?;
+    safe_fs::sync_dir_best_effort(&dir);
+    Ok(root.join(format!("{session_id}.json")))
+}
+
 async fn read_metadata_by_session(session_id: Uuid) -> Result<FileTransferSessionMetadata> {
     if session_id.is_nil() {
         anyhow::bail!("file transfer session id is invalid");
     }
-    let path = std::env::temp_dir().join(format!("vpsman-transfer-{session_id}.json"));
+    let path = transfer_metadata_path(session_id)?;
     read_transfer_metadata(&path).await
 }
 
+fn read_private_file_no_symlink(path: &Path) -> Result<Vec<u8>> {
+    let parent = safe_fs::resolve_parent(path)?;
+    let mut file = parent.open_child_file_read(false)?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(data)
+}
+
+fn write_private_file_no_replace(path: &Path, data: &[u8]) -> Result<()> {
+    let parent = safe_fs::resolve_parent(path)?;
+    let (mut temp_file, temp_name) =
+        safe_fs::create_private_temp_file(parent.dir(), parent.name(), "metadata")?;
+    let result = (|| -> Result<()> {
+        temp_file
+            .write_all(data)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        safe_fs::fchmod_file(&temp_file, 0o600)?;
+        temp_file
+            .sync_all()
+            .with_context(|| format!("failed to sync {}", path.display()))?;
+        safe_fs::rename_child(parent.dir(), &temp_name, parent.dir(), parent.name(), false)
+            .with_context(|| format!("failed to publish {}", path.display()))?;
+        safe_fs::sync_dir_best_effort(parent.dir());
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = safe_fs::remove_child_file(parent.dir(), &temp_name);
+    }
+    result
+}
+
 async fn read_transfer_metadata(path: &Path) -> Result<FileTransferSessionMetadata> {
-    let data = tokio::fs::read(path)
+    let path = path.to_path_buf();
+    let data = tokio::task::spawn_blocking(move || read_private_file_no_symlink(&path))
         .await
-        .with_context(|| format!("failed to read transfer metadata {}", path.display()))?;
+        .context("file transfer metadata read worker failed")??;
     serde_json::from_slice(&data).context("file transfer metadata is invalid")
 }
 
@@ -805,9 +925,10 @@ async fn write_transfer_metadata(
     metadata: &FileTransferSessionMetadata,
 ) -> Result<()> {
     let data = serde_json::to_vec(metadata)?;
-    tokio::fs::write(path, data)
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || write_private_file_no_replace(&path, &data))
         .await
-        .with_context(|| format!("failed to write transfer metadata {}", path.display()))
+        .context("file transfer metadata write worker failed")?
 }
 
 fn ensure_metadata_matches(
@@ -845,64 +966,120 @@ fn ensure_resume_token(
     Ok(())
 }
 
-async fn current_transfer_offset(path: &Path, declared_size: u64) -> Result<u64> {
-    let len = tokio::fs::metadata(path)
-        .await
-        .with_context(|| format!("failed to stat transfer temp file {}", path.display()))?
-        .len();
-    if len > declared_size {
-        anyhow::bail!("file transfer temporary file is larger than declared size");
-    }
-    Ok(len)
+async fn current_transfer_offset(
+    path: &Path,
+    declared_size: u64,
+    expected_identity: &safe_fs::NodeIdentity,
+) -> Result<u64> {
+    let path = path.to_path_buf();
+    let expected_identity = expected_identity.clone();
+    tokio::task::spawn_blocking(move || {
+        let parent = safe_fs::resolve_parent(&path)?;
+        let file = parent.open_child_file_read(false)?;
+        safe_fs::ensure_identity(
+            &file,
+            &expected_identity,
+            "file transfer temporary file changed",
+        )?;
+        let len = file
+            .metadata()
+            .with_context(|| format!("failed to stat transfer temp file {}", path.display()))?
+            .len();
+        if len > declared_size {
+            anyhow::bail!("file transfer temporary file is larger than declared size");
+        }
+        Ok(len)
+    })
+    .await
+    .context("file transfer offset worker failed")?
 }
 
-async fn write_transfer_chunk(path: &Path, offset: u64, data: &[u8]) -> Result<()> {
-    let mut file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .await
-        .with_context(|| format!("failed to open transfer temp file {}", path.display()))?;
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
-    file.write_all(data).await?;
-    file.flush().await?;
-    Ok(())
+async fn write_transfer_chunk(
+    path: &Path,
+    expected_identity: &safe_fs::NodeIdentity,
+    offset: u64,
+    data: &[u8],
+) -> Result<()> {
+    let path = path.to_path_buf();
+    let expected_identity = expected_identity.clone();
+    let data = data.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let parent = safe_fs::resolve_parent(&path)?;
+        let mut file = parent.open_child_readwrite_nofollow()?;
+        safe_fs::ensure_identity(
+            &file,
+            &expected_identity,
+            "file transfer temporary file changed",
+        )?;
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(&data)?;
+        file.flush()?;
+        Ok(())
+    })
+    .await
+    .context("file transfer chunk worker failed")?
 }
 
-async fn verify_existing_chunk(path: &Path, offset: u64, data: &[u8]) -> Result<()> {
-    let mut file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .open(path)
-        .await
-        .with_context(|| format!("failed to open transfer temp file {}", path.display()))?;
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
-    let mut existing = vec![0_u8; data.len()];
-    file.read_exact(&mut existing).await?;
-    if existing != data {
-        anyhow::bail!("duplicate file transfer chunk does not match existing bytes");
-    }
-    Ok(())
+async fn verify_existing_chunk(
+    path: &Path,
+    expected_identity: &safe_fs::NodeIdentity,
+    offset: u64,
+    data: &[u8],
+) -> Result<()> {
+    let path = path.to_path_buf();
+    let expected_identity = expected_identity.clone();
+    let data = data.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let parent = safe_fs::resolve_parent(&path)?;
+        let mut file = parent.open_child_file_read(false)?;
+        safe_fs::ensure_identity(
+            &file,
+            &expected_identity,
+            "file transfer temporary file changed",
+        )?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut existing = vec![0_u8; data.len()];
+        file.read_exact(&mut existing)?;
+        if existing != data {
+            anyhow::bail!("duplicate file transfer chunk does not match existing bytes");
+        }
+        Ok(())
+    })
+    .await
+    .context("file transfer duplicate chunk worker failed")?
 }
 
 async fn hash_file(
     path: &Path,
+    expected_identity: &safe_fs::NodeIdentity,
     cancel_token: &CommandCancelToken,
     operation_type: &'static str,
 ) -> Result<String> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("failed to open transfer temp file {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; FILE_TRANSFER_CHUNK_BYTES];
-    loop {
-        cancel_token.check(operation_type)?;
-        let read = file.read(&mut buffer).await?;
-        if read == 0 {
-            break;
+    let path = path.to_path_buf();
+    let expected_identity = expected_identity.clone();
+    let cancel_token = cancel_token.clone();
+    tokio::task::spawn_blocking(move || {
+        let parent = safe_fs::resolve_parent(&path)?;
+        let mut file = parent.open_child_file_read(false)?;
+        safe_fs::ensure_identity(
+            &file,
+            &expected_identity,
+            "file transfer temporary file changed",
+        )?;
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; FILE_TRANSFER_CHUNK_BYTES];
+        loop {
+            cancel_token.check(operation_type)?;
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
         }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hasher.finalize()))
+        Ok(hex::encode(hasher.finalize()))
+    })
+    .await
+    .context("file transfer hash worker failed")?
 }
 
 async fn maybe_throttle_complete_on_cancel(
@@ -947,4 +1124,184 @@ fn transfer_status(
         exit_code: Some(0),
         done: true,
     }])
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        os::unix::fs::{symlink, MetadataExt, PermissionsExt},
+        path::PathBuf,
+    };
+
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+    use uuid::Uuid;
+    use vpsman_common::{payload_hash, FileExistingPolicy, FileOwnershipPolicy, FilePushChunk};
+
+    use super::*;
+
+    #[test]
+    fn resolves_combined_numeric_owner_group_for_file_push() {
+        let ownership = resolve_ownership(
+            Some("1000:1001"),
+            None,
+            None,
+            None,
+            FileOwnershipPolicy::Fail,
+        )
+        .unwrap();
+
+        assert_eq!(ownership.uid, Some(1000));
+        assert_eq!(ownership.gid, Some(1001));
+        assert!(matches!(ownership.status, OwnershipPlanStatus::Planned));
+    }
+
+    #[test]
+    fn rejects_ambiguous_combined_owner_group_for_file_push() {
+        let error = resolve_ownership(
+            Some("1000:1001"),
+            Some("1002"),
+            None,
+            None,
+            FileOwnershipPolicy::Fail,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("must not be combined with separate owner/group ids"));
+    }
+
+    #[tokio::test]
+    async fn file_push_commits_requested_mode_and_agent_owner() {
+        let root = test_root("push-mode-owner");
+        let destination = root.join("app.conf");
+        fs::create_dir_all(&root).unwrap();
+        let payload = b"config";
+
+        execute_file_push(
+            Uuid::new_v4(),
+            destination.to_str().unwrap(),
+            0o644,
+            payload.len() as u64,
+            &payload_hash(payload),
+            &BASE64_STANDARD.encode(payload),
+            FileExistingPolicy::Replace,
+            None,
+            None,
+            None,
+            None,
+            FileOwnershipPolicy::Fail,
+        )
+        .await
+        .unwrap();
+
+        let metadata = fs::metadata(&destination).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o644);
+        assert_eq!(metadata.uid(), current_effective_uid());
+        assert_eq!(fs::read(&destination).unwrap(), payload);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn file_push_rejects_symlinked_parent_component() {
+        let root = test_root("push-parent-symlink");
+        let real = root.join("real");
+        let link = root.join("link");
+        fs::create_dir_all(&real).unwrap();
+        symlink(&real, &link).unwrap();
+        let payload = b"secret";
+
+        let result = execute_file_push(
+            Uuid::new_v4(),
+            link.join("app.conf").to_str().unwrap(),
+            0o644,
+            payload.len() as u64,
+            &payload_hash(payload),
+            &BASE64_STANDARD.encode(payload),
+            FileExistingPolicy::Replace,
+            None,
+            None,
+            None,
+            None,
+            FileOwnershipPolicy::Fail,
+        )
+        .await;
+
+        assert!(result.unwrap_err().to_string().contains("real directory"));
+        assert!(!real.join("app.conf").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn resumable_upload_temp_is_private_and_identity_bound() {
+        let root = test_root("transfer-temp-identity");
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("archive.bin");
+        let session_id = Uuid::new_v4();
+        let payload = b"payload";
+        let resume_token_hash = payload_hash(b"resume-token");
+
+        execute_file_transfer_start(
+            Uuid::new_v4(),
+            session_id,
+            destination.to_str().unwrap(),
+            0o644,
+            payload.len() as u64,
+            &payload_hash(payload),
+            FILE_TRANSFER_CHUNK_BYTES as u32,
+            0,
+            FileExistingPolicy::Replace,
+            &resume_token_hash,
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+
+        let paths = transfer_session_paths(destination.to_str().unwrap(), session_id).unwrap();
+        assert_eq!(
+            fs::metadata(&paths.temp).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(paths.metadata.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        fs::remove_file(&paths.temp).unwrap();
+        let symlink_target = root.join("outside.bin");
+        fs::write(&symlink_target, b"outside").unwrap();
+        symlink(&symlink_target, &paths.temp).unwrap();
+
+        let chunk = FilePushChunk {
+            offset: 0,
+            size_bytes: payload.len() as u32,
+            sha256_hex: payload_hash(payload),
+            data_base64: BASE64_STANDARD.encode(payload),
+        };
+        let error = execute_file_transfer_chunk(
+            Uuid::new_v4(),
+            session_id,
+            0,
+            &chunk,
+            &resume_token_hash,
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.chain().any(|cause| {
+            let message = cause.to_string();
+            message.contains("temporary file changed") || message.contains("failed to open file")
+        }));
+        let _ = fs::remove_file(&paths.metadata);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("vpsman-file-push-{name}-{}", Uuid::new_v4()))
+    }
 }

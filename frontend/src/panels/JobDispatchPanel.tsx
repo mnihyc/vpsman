@@ -169,6 +169,7 @@ type DispatchConfirmationSnapshot = {
       chunkSizeBytes: number;
       downloadName: string;
       downloadSink: BrowserDownloadSinkMode;
+      followSymlinks: boolean;
       path: string;
       privilegeMaterial: PrivilegeMaterial;
       rateLimitKbps: number;
@@ -260,6 +261,7 @@ export function JobDispatchPanel({
   const [terminalInputText, setTerminalInputText] = useState("");
   const [terminalCloseReason, setTerminalCloseReason] = useState("");
   const [filePath, setFilePath] = useState("");
+  const [fileFollowSymlinks, setFileFollowSymlinks] = useState(false);
   const [filePushPath, setFilePushPath] = useState("");
   const [filePushMode, setFilePushMode] = useState("0644");
   const [filePushSource, setFilePushSource] = useState<File | null>(null);
@@ -404,6 +406,7 @@ export function JobDispatchPanel({
     backupIncludeConfig,
     backupPathsText,
     commandText,
+    fileFollowSymlinks,
     filePath,
     filePushMode,
     filePushPath,
@@ -572,6 +575,13 @@ export function JobDispatchPanel({
     activeDispatchConfirmation?.kind === "job"
       ? activeDispatchConfirmation.destructive
       : operationNeedsConfirmation;
+  const dispatchConfirmationFollowSymlinks =
+    activeDispatchConfirmation?.kind === "transfer_download"
+      ? activeDispatchConfirmation.followSymlinks
+      : activeDispatchConfirmation?.kind === "job" &&
+          activeDispatchConfirmation.operation?.type === "file_pull"
+        ? activeDispatchConfirmation.operation.follow_symlinks
+        : null;
   const selectedTemplate = commandTemplates.find((template) => template.id === selectedTemplateId) ?? null;
   const builtinTemplates = useMemo(
     () => commandTemplates.filter((template) => template.built_in),
@@ -584,6 +594,14 @@ export function JobDispatchPanel({
   const visibleDispatchProgress = dispatchProgress ?? lastDispatchProgress;
   const dispatchConfirmationItems = [
     { label: "Operation", value: dispatchConfirmationOperationLabel },
+    ...(dispatchConfirmationFollowSymlinks === null
+      ? []
+      : [
+          {
+            label: "Symlinks",
+            value: dispatchConfirmationFollowSymlinks ? "Follow targets" : "Do not follow",
+          },
+        ]),
     { label: "Selector", value: dispatchConfirmationSelector || "-" },
     {
       label: "Targets",
@@ -749,6 +767,7 @@ export function JobDispatchPanel({
         chunkSizeBytes: fileTransferChunkSize,
         downloadName: fileTransferDownloadName,
         downloadSink: fileTransferDownloadSink,
+        followSymlinks: fileFollowSymlinks,
         kind: "transfer_download",
         path: filePath,
         privilegeMaterial,
@@ -778,6 +797,7 @@ export function JobDispatchPanel({
       terminalInputText,
       terminalCloseReason,
       filePath,
+      fileFollowSymlinks,
       processLimit,
       supervisorAction,
       supervisorName,
@@ -884,6 +904,11 @@ export function JobDispatchPanel({
         setBackupPathsText(operation.paths.join("\n"));
         setBackupIncludeConfig(operation.include_config);
         return;
+      case "file_pull":
+        setMode("file_pull");
+        setFilePath(operation.path);
+        setFileFollowSymlinks(operation.follow_symlinks);
+        return;
       case "user_sessions":
         setMode("user_sessions");
         return;
@@ -950,6 +975,7 @@ export function JobDispatchPanel({
         terminalInputText,
         terminalCloseReason,
         filePath,
+        fileFollowSymlinks,
         processLimit,
         supervisorAction,
         supervisorName,
@@ -1055,6 +1081,7 @@ export function JobDispatchPanel({
           downloadName: confirmed.downloadName,
           downloadSink: confirmed.downloadSink,
           downloadOutputChunk: onDownloadOutputChunk,
+          followSymlinks: confirmed.followSymlinks,
           loadJob: onLoadJob,
           loadOutputs: onLoadOutputs,
           path: confirmed.path,
@@ -1276,6 +1303,7 @@ export function JobDispatchPanel({
         <JobOperationEditor
           commandText={commandText}
           shellPty={shellPty}
+          fileFollowSymlinks={fileFollowSymlinks}
           filePath={filePath}
           terminalAction={terminalAction}
           terminalArgv={terminalArgv}
@@ -1324,6 +1352,7 @@ export function JobDispatchPanel({
           setTerminalReplayFromSeq={setTerminalReplayFromSeq}
           setTerminalRows={setTerminalRows}
           setTerminalSessionId={setTerminalSessionId}
+          setFileFollowSymlinks={setFileFollowSymlinks}
           setFilePath={setFilePath}
           setFilePushMode={setFilePushMode}
           setFilePushPath={setFilePushPath}

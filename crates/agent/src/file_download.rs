@@ -8,22 +8,19 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt},
-    sync::mpsc,
-    time::sleep,
-};
+use tokio::{io::AsyncReadExt, sync::mpsc, time::sleep};
 use uuid::Uuid;
 use vpsman_common::{
     payload_hash, validate_absolute_file_path, validate_file_transfer_download_chunk_request,
     validate_file_transfer_download_session, CommandOutput, OutputStream,
-    FILE_TRANSFER_CHUNK_BYTES, MAX_DIRECT_FILE_DOWNLOAD_BYTES, MAX_RESUMABLE_FILE_DOWNLOAD_BYTES,
+    MAX_DIRECT_FILE_DOWNLOAD_BYTES, MAX_RESUMABLE_FILE_DOWNLOAD_BYTES,
 };
 
 use crate::command_worker::{CommandCancelToken, CommandCanceled};
 use crate::file_pull::{
     chunked_output, stream_buffered_payload_output, COMMAND_OUTPUT_CHUNK_BYTES,
 };
+use crate::safe_file::{self, FileIdentity};
 
 const FILE_DOWNLOAD_MANIFEST_ENTRY_LIMIT: usize = 4096;
 
@@ -70,6 +67,8 @@ struct FileDownloadSessionMetadata {
     sha256_hex: String,
     chunk_size_bytes: u32,
     rate_limit_kbps: u32,
+    follow_symlinks: bool,
+    identity: FileIdentity,
     resume_token_hash: String,
 }
 
@@ -134,6 +133,7 @@ pub(crate) async fn execute_file_download(
             path,
             metadata.len(),
             max_bytes,
+            follow_symlinks,
             output_tx,
             cancel_token,
         )
@@ -169,37 +169,12 @@ fn path_metadata_for_follow(path: &Path, follow_symlinks: bool) -> Result<std::f
     Ok(metadata)
 }
 
-fn read_file_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("failed to open download source {}", path.display()))?;
-    let mut data = Vec::with_capacity((max_bytes.min(16 * 1024)) as usize);
-    let mut buffer = vec![0_u8; 16 * 1024];
-    let mut total = 0_u64;
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .with_context(|| format!("failed to read download source {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        total = total
-            .checked_add(read as u64)
-            .context("file download size overflow")?;
-        if total > max_bytes {
-            anyhow::bail!(
-                "file download source exceeds limit while reading: {total} > {max_bytes} bytes"
-            );
-        }
-        data.extend_from_slice(&buffer[..read]);
-    }
-    Ok(data)
-}
-
 async fn execute_regular_file_download(
     job_id: uuid::Uuid,
     path: &str,
     size_bytes: u64,
     max_bytes: u64,
+    follow_symlinks: bool,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
@@ -209,7 +184,15 @@ async fn execute_regular_file_download(
     }
     let filename = download_filename(path, false);
     if let Some(sender) = output_tx {
-        let summary = stream_file_payload(job_id, path, max_bytes, sender, cancel_token).await?;
+        let summary = stream_file_payload(
+            job_id,
+            path,
+            max_bytes,
+            follow_symlinks,
+            sender,
+            cancel_token,
+        )
+        .await?;
         return file_download_status(
             job_id,
             path,
@@ -227,7 +210,16 @@ async fn execute_regular_file_download(
     cancel_token.check("file_download")?;
     let data = tokio::task::spawn_blocking({
         let path = PathBuf::from(path);
-        move || read_file_bounded(&path, max_bytes)
+        move || {
+            safe_file::read_regular_file_bounded(
+                &path,
+                max_bytes,
+                follow_symlinks,
+                "file download source exceeds limit while reading",
+                "download source is a symlink; set follow_symlinks to use the target",
+            )
+            .map(|read| read.data)
+        }
     })
     .await
     .context("file download read worker failed")??;
@@ -310,12 +302,24 @@ async fn stream_file_payload(
     job_id: uuid::Uuid,
     path: &str,
     max_bytes: u64,
+    follow_symlinks: bool,
     output_tx: mpsc::Sender<CommandOutput>,
     cancel_token: CommandCancelToken,
 ) -> Result<crate::file_pull::StreamedPayloadSummary> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("failed to open download source {path}"))?;
+    let opened = tokio::task::spawn_blocking({
+        let path = PathBuf::from(path);
+        move || {
+            safe_file::open_regular_file_for_read(
+                &path,
+                follow_symlinks,
+                "download source is a symlink; set follow_symlinks to use the target",
+            )
+        }
+    })
+    .await
+    .context("file download open worker failed")?
+    .with_context(|| format!("failed to open download source {path}"))?;
+    let mut file = tokio::fs::File::from_std(opened.file);
     let mut buffer = vec![0_u8; COMMAND_OUTPUT_CHUNK_BYTES];
     let mut hasher = Sha256::new();
     let mut size_bytes = 0_u64;
@@ -752,6 +756,7 @@ pub(crate) async fn execute_file_transfer_download_start(
     path: &str,
     chunk_size_bytes: u32,
     rate_limit_kbps: u32,
+    follow_symlinks: bool,
     resume_token_hash: &str,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
@@ -765,27 +770,23 @@ pub(crate) async fn execute_file_transfer_download_start(
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let metadata_path = download_metadata_path(session_id);
-    let file_metadata = tokio::fs::metadata(path)
-        .await
-        .with_context(|| format!("failed to stat download source {path}"))?;
-    if !file_metadata.is_file() {
-        anyhow::bail!("file transfer download source is not a regular file");
-    }
+    let (sha256_hex, file_metadata, identity) = tokio::task::spawn_blocking({
+        let path = PathBuf::from(path);
+        move || {
+            safe_file::hash_regular_file_bounded(
+                &path,
+                MAX_RESUMABLE_FILE_DOWNLOAD_BYTES,
+                follow_symlinks,
+                "file transfer download source exceeds limit while hashing",
+                "file transfer download source is a symlink; set follow_symlinks to use the target",
+            )
+        }
+    })
+    .await
+    .context("file transfer download hash worker failed")?
+    .with_context(|| format!("failed to hash download source {path}"))?;
     let size_bytes = file_metadata.len();
-    if size_bytes > MAX_RESUMABLE_FILE_DOWNLOAD_BYTES {
-        anyhow::bail!(
-            "file transfer download source exceeds limit: {} > {} bytes",
-            size_bytes,
-            MAX_RESUMABLE_FILE_DOWNLOAD_BYTES
-        );
-    }
-    let sha256_hex = hash_file(
-        Path::new(path),
-        MAX_RESUMABLE_FILE_DOWNLOAD_BYTES,
-        &cancel_token,
-        "file_transfer_download_start",
-    )
-    .await?;
+    cancel_token.check("file_transfer_download_start")?;
     let resumed = if let Ok(existing) = read_download_metadata(&metadata_path).await {
         ensure_download_metadata_matches(
             &existing,
@@ -794,6 +795,8 @@ pub(crate) async fn execute_file_transfer_download_start(
             &sha256_hex,
             chunk_size_bytes,
             rate_limit_kbps,
+            follow_symlinks,
+            &identity,
             resume_token_hash,
         )?;
         true
@@ -807,6 +810,8 @@ pub(crate) async fn execute_file_transfer_download_start(
         sha256_hex: sha256_hex.clone(),
         chunk_size_bytes,
         rate_limit_kbps,
+        follow_symlinks,
+        identity,
         resume_token_hash: resume_token_hash.to_ascii_lowercase(),
     };
     cancel_token.check("file_transfer_download_start")?;
@@ -823,6 +828,7 @@ pub(crate) async fn execute_file_transfer_download_start(
             "sha256_hex": sha256_hex,
             "chunk_size_bytes": chunk_size_bytes,
             "rate_limit_kbps": rate_limit_kbps,
+            "follow_symlinks": follow_symlinks,
         }),
     )
 }
@@ -846,7 +852,14 @@ pub(crate) async fn execute_file_transfer_download_chunk(
     let read_size = (metadata.size_bytes - offset)
         .min(u64::from(max_bytes))
         .min(u64::from(metadata.chunk_size_bytes)) as usize;
-    let chunk = read_file_chunk(Path::new(&metadata.path), offset, read_size).await?;
+    let chunk = read_file_chunk(
+        Path::new(&metadata.path),
+        offset,
+        read_size,
+        metadata.follow_symlinks,
+        metadata.identity.clone(),
+    )
+    .await?;
     cancel_token.check("file_transfer_download_chunk")?;
     maybe_throttle_cancelable(
         "file_transfer_download_chunk",
@@ -894,6 +907,8 @@ fn ensure_download_metadata_matches(
     sha256_hex: &str,
     chunk_size_bytes: u32,
     rate_limit_kbps: u32,
+    follow_symlinks: bool,
+    identity: &FileIdentity,
     resume_token_hash: &str,
 ) -> Result<()> {
     if metadata.path != path
@@ -901,6 +916,8 @@ fn ensure_download_metadata_matches(
         || metadata.sha256_hex != sha256_hex.to_ascii_lowercase()
         || metadata.chunk_size_bytes != chunk_size_bytes
         || metadata.rate_limit_kbps != rate_limit_kbps
+        || metadata.follow_symlinks != follow_symlinks
+        || &metadata.identity != identity
         || metadata.resume_token_hash != resume_token_hash.to_ascii_lowercase()
     {
         anyhow::bail!("file transfer download session metadata does not match start request");
@@ -918,46 +935,26 @@ fn ensure_resume_token(
     Ok(())
 }
 
-async fn read_file_chunk(path: &Path, offset: u64, size: usize) -> Result<Vec<u8>> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("failed to open download source {}", path.display()))?;
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
-    let mut chunk = vec![0_u8; size];
-    let read = file.read(&mut chunk).await?;
-    chunk.truncate(read);
-    Ok(chunk)
-}
-
-async fn hash_file(
+async fn read_file_chunk(
     path: &Path,
-    max_bytes: u64,
-    cancel_token: &CommandCancelToken,
-    operation_type: &'static str,
-) -> Result<String> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("failed to open download source {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; FILE_TRANSFER_CHUNK_BYTES];
-    let mut total = 0_u64;
-    loop {
-        cancel_token.check(operation_type)?;
-        let read = file.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        total = total
-            .checked_add(read as u64)
-            .context("file transfer download hash size overflow")?;
-        if total > max_bytes {
-            anyhow::bail!(
-                "file transfer download source exceeds limit while hashing: {total} > {max_bytes}"
-            );
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hasher.finalize()))
+    offset: u64,
+    size: usize,
+    follow_symlinks: bool,
+    expected_identity: FileIdentity,
+) -> Result<Vec<u8>> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        safe_file::read_regular_file_chunk_checked(
+            &path,
+            offset,
+            size,
+            follow_symlinks,
+            &expected_identity,
+            "file transfer download source is a symlink; set follow_symlinks to use the target",
+        )
+    })
+    .await
+    .context("file transfer download chunk read worker failed")?
 }
 
 async fn read_download_metadata(path: &Path) -> Result<FileDownloadSessionMetadata> {

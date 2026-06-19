@@ -304,6 +304,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
         }
         Command::FilePull {
             path,
+            follow_symlinks,
             clients,
             tags,
             password_env,
@@ -316,6 +317,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 api_url,
                 token,
                 path,
+                follow_symlinks,
                 clients,
                 tags,
                 password_env,
@@ -420,6 +422,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
         }
         Command::FileTransferDownload {
             path,
+            follow_symlinks,
             destination,
             clients,
             tags,
@@ -447,6 +450,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     plan: commands_file_transfer_download::FileTransferDownloadPlan {
                         destination,
                         path,
+                        follow_symlinks,
                         clients,
                         tags,
                         privilege_ttl_secs,

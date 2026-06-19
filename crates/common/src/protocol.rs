@@ -2382,6 +2382,7 @@ pub enum JobCommand {
     },
     FilePull {
         path: String,
+        follow_symlinks: bool,
     },
     FilePush {
         path: String,
@@ -2453,6 +2454,7 @@ pub enum JobCommand {
         path: String,
         chunk_size_bytes: u32,
         rate_limit_kbps: u32,
+        follow_symlinks: bool,
         resume_token_hash: String,
     },
     FileTransferDownloadChunk {

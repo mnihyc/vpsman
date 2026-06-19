@@ -179,6 +179,8 @@ pub(crate) enum Command {
     FilePull {
         #[arg(long)]
         path: String,
+        #[arg(long, default_value_t = false)]
+        follow_symlinks: bool,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
@@ -306,6 +308,8 @@ pub(crate) enum Command {
     FileTransferDownload {
         #[arg(long)]
         path: String,
+        #[arg(long, default_value_t = false)]
+        follow_symlinks: bool,
         #[arg(long)]
         destination: PathBuf,
         #[arg(long, value_delimiter = ',')]

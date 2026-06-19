@@ -25,7 +25,11 @@ export type FileListStatus = {
   type: "file_list_dir";
   path: string;
   entries: FileBrowserEntry[];
-  total_entries: number;
+  total_entries: number | null;
+  scanned_entries?: number;
+  visible_entries_scanned?: number;
+  scan_cap_entries?: number;
+  truncated_by_scan_cap?: boolean;
   truncated: boolean;
   offset: number;
   limit: number;

@@ -51,6 +51,7 @@ export function buildOperation(
   terminalInputText: string,
   terminalCloseReason: string,
   filePath: string,
+  fileFollowSymlinks: boolean,
   processLimit: number,
   supervisorAction: SupervisorAction,
   supervisorName: string,
@@ -108,7 +109,7 @@ export function buildOperation(
     if (!filePath.startsWith("/")) {
       throw new Error("File pull path must be absolute");
     }
-    return { type: "file_pull", path: filePath };
+    return { type: "file_pull", path: filePath, follow_symlinks: fileFollowSymlinks };
   }
   if (mode === "file_push") {
     if (!filePushPath.startsWith("/")) {

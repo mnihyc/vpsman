@@ -394,6 +394,43 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .commandComposer .segmented {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .commandComposer .segmented button {
+    min-width: 0;
+    padding-left: 4px;
+    padding-right: 4px;
+  }
+
+  .fileTransferDownloadOperation {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dispatchActions {
+    justify-content: stretch;
+  }
+
+  .dispatchActions button {
+    flex: 1 1 min(100%, 150px);
+    min-width: 0;
+  }
+
+  .targetSelectorHeader {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .targetSelectorHeader span {
+    white-space: normal;
+  }
+
+  .targetExpressionBar {
+    overflow: hidden;
+  }
+
   .tagOrderRow,
   .preferenceControls label.tagVisibilityLine {
     grid-template-columns: 30px minmax(0, 1fr);

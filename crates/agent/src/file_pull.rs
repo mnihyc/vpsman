@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
+use std::path::PathBuf;
 use tokio::{
     io::AsyncReadExt,
     sync::mpsc,
     time::{self, Duration},
 };
 use vpsman_common::{payload_hash, validate_absolute_file_path, CommandOutput, OutputStream};
+
+use crate::safe_file;
 
 pub(crate) const COMMAND_OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_FILE_PULL_BYTES: u64 = 1024 * 1024;
@@ -22,12 +25,13 @@ pub(crate) struct StreamedPayloadSummary {
 pub(crate) async fn execute_file_pull_with_timeout(
     job_id: uuid::Uuid,
     path: &str,
+    follow_symlinks: bool,
     timeout_secs: u64,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
     time::timeout(
         Duration::from_secs(timeout_secs.max(1)),
-        execute_file_pull(job_id, path, output_tx),
+        execute_file_pull(job_id, path, follow_symlinks, output_tx),
     )
     .await
     .context("file pull timed out")?
@@ -36,29 +40,29 @@ pub(crate) async fn execute_file_pull_with_timeout(
 async fn execute_file_pull(
     job_id: uuid::Uuid,
     path: &str,
+    follow_symlinks: bool,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
     validate_file_pull_path(path)?;
-    let metadata = tokio::fs::metadata(path)
-        .await
-        .with_context(|| format!("failed to stat file {path}"))?;
-    if !metadata.is_file() {
-        anyhow::bail!("file pull path is not a regular file");
-    }
     if let Some(sender) = output_tx {
-        return execute_streaming_file_pull(job_id, path, metadata.len(), sender).await;
+        return execute_streaming_file_pull(job_id, path, follow_symlinks, sender).await;
     }
-    if metadata.len() > MAX_FILE_PULL_BYTES {
-        anyhow::bail!(
-            "file exceeds pull limit: {} > {} bytes",
-            metadata.len(),
-            MAX_FILE_PULL_BYTES
-        );
-    }
-
-    let data = tokio::fs::read(path)
-        .await
-        .with_context(|| format!("failed to read file {path}"))?;
+    let read = tokio::task::spawn_blocking({
+        let path = PathBuf::from(path);
+        move || {
+            safe_file::read_regular_file_bounded(
+                &path,
+                MAX_FILE_PULL_BYTES,
+                follow_symlinks,
+                "file exceeds pull limit while reading",
+                "file pull path is a symlink; set follow_symlinks to use the target",
+            )
+        }
+    })
+    .await
+    .context("file pull read worker failed")?
+    .with_context(|| format!("failed to read file {path}"))?;
+    let data = read.data;
     let mut outputs = chunked_output(job_id, OutputStream::Stdout, &data);
     let status = serde_json::json!({
         "type": "file_pull",
@@ -81,9 +85,23 @@ async fn execute_file_pull(
 async fn execute_streaming_file_pull(
     job_id: uuid::Uuid,
     path: &str,
-    size_bytes: u64,
+    follow_symlinks: bool,
     output_tx: mpsc::Sender<CommandOutput>,
 ) -> Result<Vec<CommandOutput>> {
+    let opened = tokio::task::spawn_blocking({
+        let path = PathBuf::from(path);
+        move || {
+            safe_file::open_regular_file_for_read(
+                &path,
+                follow_symlinks,
+                "file pull path is a symlink; set follow_symlinks to use the target",
+            )
+        }
+    })
+    .await
+    .context("file pull open worker failed")?
+    .with_context(|| format!("failed to open file {path}"))?;
+    let size_bytes = opened.metadata.len();
     if size_bytes > MAX_STREAMING_FILE_PULL_BYTES {
         anyhow::bail!(
             "file exceeds streaming pull limit: {} > {} bytes",
@@ -91,9 +109,7 @@ async fn execute_streaming_file_pull(
             MAX_STREAMING_FILE_PULL_BYTES
         );
     }
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("failed to open file {path}"))?;
+    let mut file = tokio::fs::File::from_std(opened.file);
     let mut buffer = vec![0_u8; COMMAND_OUTPUT_CHUNK_BYTES];
     let mut hasher = Sha256::new();
     let mut actual_size = 0_u64;
@@ -107,7 +123,16 @@ async fn execute_streaming_file_pull(
         if read == 0 {
             break;
         }
-        actual_size += read as u64;
+        actual_size = actual_size
+            .checked_add(read as u64)
+            .context("file pull size overflow")?;
+        if actual_size > MAX_STREAMING_FILE_PULL_BYTES {
+            anyhow::bail!(
+                "file exceeds streaming pull limit while reading: {} > {} bytes",
+                actual_size,
+                MAX_STREAMING_FILE_PULL_BYTES
+            );
+        }
         hasher.update(&buffer[..read]);
         chunk_count += 1;
         output_tx

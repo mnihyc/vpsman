@@ -1524,7 +1524,7 @@ export type JobOperation =
   | { type: "terminal_poll"; session_id: string; replay_from_seq?: number }
   | { type: "terminal_resize"; session_id: string; cols: number; rows: number }
   | { type: "terminal_close"; session_id: string; reason?: string }
-  | { type: "file_pull"; path: string }
+  | { type: "file_pull"; path: string; follow_symlinks: boolean }
   | { type: "config_read" }
   | {
       type: "hot_config";
@@ -1624,6 +1624,7 @@ export type JobOperation =
       path: string;
       chunk_size_bytes: number;
       rate_limit_kbps: number;
+      follow_symlinks: boolean;
       resume_token_hash: string;
     }
   | {

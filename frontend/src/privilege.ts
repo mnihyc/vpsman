@@ -353,6 +353,11 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
     case "terminal_close":
       return ordered([["type", operation.type], ["session_id", operation.session_id], ["reason", optional(operation.reason)]]);
     case "file_pull":
+      return ordered([
+        ["type", operation.type],
+        ["path", operation.path],
+        ["follow_symlinks", operation.follow_symlinks],
+      ]);
     case "file_stat":
       return ordered([["type", operation.type], ["path", operation.path]]);
     case "config_read":
@@ -453,6 +458,7 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["path", operation.path],
         ["chunk_size_bytes", operation.chunk_size_bytes],
         ["rate_limit_kbps", operation.rate_limit_kbps],
+        ["follow_symlinks", operation.follow_symlinks],
         ["resume_token_hash", operation.resume_token_hash],
       ]);
     case "file_transfer_download_chunk":
@@ -472,7 +478,12 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["show_hidden", operation.show_hidden ?? false],
       ]);
     case "file_read_text":
-      return ordered([["type", operation.type], ["path", operation.path], ["max_bytes", operation.max_bytes ?? 1024 * 1024]]);
+      return ordered([
+        ["type", operation.type],
+        ["path", operation.path],
+        ["max_bytes", operation.max_bytes ?? 1024 * 1024],
+        ["follow_symlinks", operation.follow_symlinks ?? false],
+      ]);
     case "file_write_text":
       return ordered([
         ["type", operation.type],
@@ -492,7 +503,14 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
     case "file_delete":
       return ordered([["type", operation.type], ["path", operation.path], ["recursive", operation.recursive ?? false], ["policy", operation.policy ?? "fail"]]);
     case "file_chmod":
-      return ordered([["type", operation.type], ["path", operation.path], ["mode", operation.mode], ["recursive", operation.recursive ?? false], ["policy", operation.policy ?? "fail"]]);
+      return ordered([
+        ["type", operation.type],
+        ["path", operation.path],
+        ["mode", operation.mode],
+        ["recursive", operation.recursive ?? false],
+        ["follow_symlinks", operation.follow_symlinks ?? false],
+        ["policy", operation.policy ?? "fail"],
+      ]);
     case "file_chown":
       return ordered([
         ["type", operation.type],
@@ -512,12 +530,23 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["new_path", operation.new_path],
         ["overwrite", operation.overwrite ?? false],
         ["recursive", operation.recursive ?? false],
+        ["follow_symlinks", operation.follow_symlinks ?? false],
         ["policy", operation.policy ?? "fail"],
       ]);
     case "file_download":
-      return ordered([["type", operation.type], ["path", operation.path], ["max_bytes", operation.max_bytes ?? FILE_BROWSER_ARCHIVE_LIMIT_BYTES]]);
+      return ordered([
+        ["type", operation.type],
+        ["path", operation.path],
+        ["max_bytes", operation.max_bytes ?? FILE_BROWSER_ARCHIVE_LIMIT_BYTES],
+        ["follow_symlinks", operation.follow_symlinks ?? false],
+      ]);
     case "file_archive_tar":
-      return ordered([["type", operation.type], ["path", operation.path], ["max_bytes", operation.max_bytes ?? FILE_BROWSER_ARCHIVE_LIMIT_BYTES]]);
+      return ordered([
+        ["type", operation.type],
+        ["path", operation.path],
+        ["max_bytes", operation.max_bytes ?? FILE_BROWSER_ARCHIVE_LIMIT_BYTES],
+        ["follow_symlinks", operation.follow_symlinks ?? false],
+      ]);
     case "user_sessions":
       return ordered([["type", operation.type]]);
     case "process_list":

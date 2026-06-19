@@ -27,6 +27,7 @@ use crate::{
 pub(crate) struct FileTransferDownloadPlan {
     pub(crate) destination: PathBuf,
     pub(crate) path: String,
+    pub(crate) follow_symlinks: bool,
     pub(crate) clients: Vec<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) privilege_ttl_secs: u64,
@@ -193,7 +194,8 @@ fn execute_file_transfer_download_for_target(input: DownloadTargetInput<'_>) -> 
         serde_json::json!({
             "event": "file_transfer_download_ready",
             "session_id": input.session_id,
-            "path": &input.plan.path,
+        "path": &input.plan.path,
+        "follow_symlinks": input.plan.follow_symlinks,
             "destination": input.destination.display().to_string(),
             "chunk_size_bytes": input.plan.chunk_size_bytes,
             "rate_limit_kbps": input.plan.rate_limit_kbps,
@@ -211,6 +213,7 @@ fn execute_file_transfer_download_for_target(input: DownloadTargetInput<'_>) -> 
             path: input.plan.path.clone(),
             chunk_size_bytes: input.plan.chunk_size_bytes,
             rate_limit_kbps: input.plan.rate_limit_kbps,
+            follow_symlinks: input.plan.follow_symlinks,
             resume_token_hash: input.resume_token_hash.to_string(),
         },
     )?;

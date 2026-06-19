@@ -99,6 +99,7 @@ export function MultiFileActionsPanel({
   const [mode, setMode] = useState("0644");
   const [content, setContent] = useState("");
   const [recursive, setRecursive] = useState(false);
+  const [followSymlinks, setFollowSymlinks] = useState(false);
   const [overwrite, setOverwrite] = useState(false);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadMode, setUploadMode] = useState("0644");
@@ -211,7 +212,7 @@ export function MultiFileActionsPanel({
         type: "file_download",
         path: normalizedPath,
         max_bytes: FILE_BROWSER_ARCHIVE_LIMIT_BYTES,
-        follow_symlinks: false,
+        follow_symlinks: followSymlinks,
       };
     }
     if (action === "upload_file") {
@@ -242,7 +243,7 @@ export function MultiFileActionsPanel({
         path: normalizedPath,
         mode: parseMode(mode),
         recursive,
-        follow_symlinks: false,
+        follow_symlinks: followSymlinks,
         policy,
       };
     }
@@ -259,7 +260,7 @@ export function MultiFileActionsPanel({
         new_path: normalizeAbsolutePath(newPath),
         overwrite,
         recursive,
-        follow_symlinks: false,
+        follow_symlinks: followSymlinks,
         policy,
       };
     }
@@ -629,7 +630,7 @@ export function MultiFileActionsPanel({
               />
             </label>
           )}
-          {(action === "copy" || action === "chmod" || action === "chown" || action === "delete" || action === "mkdir" || action === "rename") && (
+          {(action === "download_files" || action === "copy" || action === "chmod" || action === "chown" || action === "delete" || action === "mkdir" || action === "rename") && (
             <div className="multiFileGrid">
               {(action === "copy" || action === "chmod" || action === "chown" || action === "delete" || action === "mkdir") && (
                 <label className="inlineCheck actionCheck">
@@ -655,6 +656,22 @@ export function MultiFileActionsPanel({
                     type="checkbox"
                   />
                   <span>Overwrite destination</span>
+                </label>
+              )}
+              {(action === "download_files" || action === "copy" || action === "chmod") && (
+                <label
+                  className="inlineCheck actionCheck"
+                  title="Disabled by default. Enable only when selected paths are intentionally symlinks and operations should use their targets."
+                >
+                  <input
+                    checked={followSymlinks}
+                    onChange={(event) => {
+                      setFollowSymlinks(event.target.checked);
+                      invalidateBulkReview();
+                    }}
+                    type="checkbox"
+                  />
+                  <span>Follow symlinks</span>
                 </label>
               )}
             </div>
@@ -1351,6 +1368,9 @@ function confirmationItems(confirmation: PendingBulkConfirmation): Array<{ label
   }
   if ("recursive" in operation) {
     items.push({ label: "Recursive", value: operation.recursive ? "yes" : "no" });
+  }
+  if ("follow_symlinks" in operation) {
+    items.push({ label: "Symlinks", value: operation.follow_symlinks ? "Follow targets" : "Do not follow" });
   }
   if ("overwrite" in operation) {
     items.push({ label: "Overwrite", value: operation.overwrite ? "yes" : "no" });

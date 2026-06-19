@@ -133,6 +133,7 @@ export function FileBrowserPanel({
   const [createContent, setCreateContent] = useState("");
   const [renamePathValue, setRenamePathValue] = useState("");
   const [recursive, setRecursive] = useState(false);
+  const [followSymlinks, setFollowSymlinks] = useState(false);
   const [chmodMode, setChmodMode] = useState(DEFAULT_MODE);
   const [chownOwner, setChownOwner] = useState("");
   const [chownGroup, setChownGroup] = useState("");
@@ -183,6 +184,7 @@ export function FileBrowserPanel({
     editorContent,
     editorMode,
     editorPath,
+    followSymlinks,
     newName,
     pathInput,
     recursive,
@@ -281,7 +283,10 @@ export function FileBrowserPanel({
     });
     setStaleDirectoryPath((current) => (current === status.path ? null : current));
     if (announce) {
-      setActionMessage(`Loaded ${status.entries.length}/${status.total_entries} entries from ${status.path}`);
+      const totalText = status.truncated_by_scan_cap
+        ? `${status.visible_entries_scanned ?? status.scanned_entries ?? status.entries.length}+ scanned`
+        : String(status.total_entries ?? status.entries.length);
+      setActionMessage(`Loaded ${status.entries.length}/${totalText} entries from ${status.path}`);
     }
   }
 
@@ -293,7 +298,7 @@ export function FileBrowserPanel({
           type: "file_read_text",
           path: normalized,
           max_bytes: FILE_BROWSER_TEXT_LIMIT_BYTES,
-          follow_symlinks: false,
+          follow_symlinks: followSymlinks,
         },
         { expectedType: "file_read_text" },
       );
@@ -464,7 +469,7 @@ export function FileBrowserPanel({
           path: selectedPath,
           mode: parseMode(chmodMode),
           recursive,
-          follow_symlinks: false,
+          follow_symlinks: followSymlinks,
           policy: "fail",
         },
         "Change mode",
@@ -516,7 +521,7 @@ export function FileBrowserPanel({
             path: browserClipboard.path,
             new_path: destination,
             recursive: true,
-            follow_symlinks: false,
+            follow_symlinks: followSymlinks,
             overwrite: false,
             policy: "fail",
           }
@@ -570,7 +575,7 @@ export function FileBrowserPanel({
         type: "file_download",
         path,
         max_bytes: FILE_BROWSER_ARCHIVE_LIMIT_BYTES,
-        follow_symlinks: false,
+        follow_symlinks: followSymlinks,
       };
       const { outputs } = await runFileJob(operation, {
         expectedType: operation.type,
@@ -793,6 +798,17 @@ export function FileBrowserPanel({
                 <Trash2 size={15} />
               </button>
             </div>
+            <label
+              className="inlineCheck actionCheck"
+              title="Disabled by default. Enable only when selected paths are intentionally symlinks and operations should use their targets."
+            >
+              <input
+                checked={followSymlinks}
+                onChange={(event) => setFollowSymlinks(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Follow symlinks</span>
+            </label>
 
             {activeCommand === "upload" && (
               <section className="fileCommandPopover">
@@ -1318,6 +1334,9 @@ function fileConfirmationItems(confirmation: PendingConfirmation): Array<{ label
   }
   if ("recursive" in operation) {
     items.push({ label: "Recursive", value: operation.recursive ? "yes" : "no" });
+  }
+  if ("follow_symlinks" in operation) {
+    items.push({ label: "Symlinks", value: operation.follow_symlinks ? "Follow targets" : "Do not follow" });
   }
   if ("overwrite" in operation) {
     items.push({ label: "Overwrite", value: operation.overwrite ? "yes" : "no" });

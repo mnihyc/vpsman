@@ -710,6 +710,7 @@ mod tests {
             job_id,
             &JobCommand::FilePull {
                 path: path.to_string_lossy().to_string(),
+                follow_symlinks: false,
             },
             5,
         )
@@ -731,6 +732,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_file_pull_rejects_symlink_by_default() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-pull-link-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let target = dir.join("target.txt");
+        let link = dir.join("source-link.txt");
+        tokio::fs::write(&target, b"target contents").await.unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let error = execute_job_command(
+            job_id,
+            &JobCommand::FilePull {
+                path: link.to_string_lossy().to_string(),
+                follow_symlinks: false,
+            },
+            5,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error_chain_contains(&error, "file pull path is a symlink"));
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn execute_file_pull_allows_explicit_symlink_follow() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-pull-follow-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let target = dir.join("target.txt");
+        let link = dir.join("source-link.txt");
+        tokio::fs::write(&target, b"target contents").await.unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let outputs = execute_job_command(
+            job_id,
+            &JobCommand::FilePull {
+                path: link.to_string_lossy().to_string(),
+                follow_symlinks: true,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stdout_bytes(&outputs), b"target contents");
+        let status = status_payload(&outputs);
+        assert_eq!(status["sha256_hex"], payload_hash(b"target contents"));
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
     async fn execute_file_pull_streams_chunks_when_sink_is_available() {
         let job_id = uuid::Uuid::new_v4();
         let path = std::env::temp_dir().join(format!("vpsman-agent-stream-pull-{job_id}"));
@@ -742,6 +795,7 @@ mod tests {
             job_id,
             &JobCommand::FilePull {
                 path: path.to_string_lossy().to_string(),
+                follow_symlinks: false,
             },
             5,
             Some(tx),
@@ -774,6 +828,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             &JobCommand::FilePull {
                 path: "relative/path".to_string(),
+                follow_symlinks: false,
             },
             5,
         )
@@ -1532,6 +1587,7 @@ mod tests {
                 path: path.to_string_lossy().to_string(),
                 chunk_size_bytes: 64,
                 rate_limit_kbps: 0,
+                follow_symlinks: false,
                 resume_token_hash: token_hash.clone(),
             },
             5,
@@ -1586,6 +1642,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_resumable_file_download_rejects_symlink_by_default() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-download-link-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let target = dir.join("source.txt");
+        let link = dir.join("source-link.txt");
+        tokio::fs::write(&target, b"download target").await.unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let session_id = uuid::Uuid::new_v4();
+        let token_hash = payload_hash(b"download-token");
+
+        let error = execute_job_command(
+            job_id,
+            &JobCommand::FileTransferDownloadStart {
+                session_id,
+                path: link.to_string_lossy().to_string(),
+                chunk_size_bytes: 64,
+                rate_limit_kbps: 0,
+                follow_symlinks: false,
+                resume_token_hash: token_hash,
+            },
+            5,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error_chain_contains(
+            &error,
+            "file transfer download source is a symlink"
+        ));
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn execute_resumable_file_download_allows_explicit_symlink_follow() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-download-follow-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let target = dir.join("source.txt");
+        let link = dir.join("source-link.txt");
+        let data = b"download target";
+        tokio::fs::write(&target, data).await.unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let session_id = uuid::Uuid::new_v4();
+        let token_hash = payload_hash(b"download-token");
+
+        let start_outputs = execute_job_command(
+            job_id,
+            &JobCommand::FileTransferDownloadStart {
+                session_id,
+                path: link.to_string_lossy().to_string(),
+                chunk_size_bytes: 64,
+                rate_limit_kbps: 0,
+                follow_symlinks: true,
+                resume_token_hash: token_hash.clone(),
+            },
+            5,
+        )
+        .await
+        .unwrap();
+        let start_status = status_payload(&start_outputs);
+        assert_eq!(start_status["extra"]["follow_symlinks"], true);
+        assert_eq!(start_status["extra"]["sha256_hex"], payload_hash(data));
+
+        let chunk_outputs = execute_job_command(
+            job_id,
+            &JobCommand::FileTransferDownloadChunk {
+                session_id,
+                offset: 0,
+                max_bytes: 64,
+                resume_token_hash: token_hash,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(stdout_bytes(&chunk_outputs), data);
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn execute_resumable_file_download_chunk_rejects_changed_source_identity() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-download-change-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("source.txt");
+        let old_path = dir.join("source-old.txt");
+        tokio::fs::write(&path, b"original download contents")
+            .await
+            .unwrap();
+        let session_id = uuid::Uuid::new_v4();
+        let token_hash = payload_hash(b"download-token");
+
+        execute_file_transfer_download_start(
+            job_id,
+            session_id,
+            path.to_str().unwrap(),
+            64,
+            0,
+            false,
+            &token_hash,
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+        tokio::fs::rename(&path, &old_path).await.unwrap();
+        tokio::fs::write(&path, b"replacement").await.unwrap();
+
+        let error = execute_file_transfer_download_chunk(
+            job_id,
+            session_id,
+            0,
+            64,
+            &token_hash,
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error_chain_contains(
+            &error,
+            "download source changed since session start"
+        ));
+        let _ = tokio::fs::remove_file(
+            std::env::temp_dir().join(format!("vpsman-download-{session_id}.json")),
+        )
+        .await;
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
     async fn execute_resumable_file_download_chunk_observes_cancel_before_output() {
         let job_id = uuid::Uuid::new_v4();
         let dir = std::env::temp_dir().join(format!("vpsman-agent-file-download-cancel-{job_id}"));
@@ -1602,6 +1790,7 @@ mod tests {
             path.to_str().unwrap(),
             data.len() as u32,
             1,
+            false,
             &token_hash,
             CommandCancelToken::default(),
         )
@@ -1708,6 +1897,12 @@ mod tests {
             .filter(|output| output.stream == OutputStream::Stdout)
             .flat_map(|output| output.data.clone())
             .collect()
+    }
+
+    fn error_chain_contains(error: &anyhow::Error, needle: &str) -> bool {
+        error
+            .chain()
+            .any(|cause| cause.to_string().contains(needle))
     }
 
     fn stderr_bytes(outputs: &[vpsman_common::CommandOutput]) -> Vec<u8> {

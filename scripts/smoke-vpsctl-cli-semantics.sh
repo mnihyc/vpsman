@@ -100,6 +100,7 @@ if "$bin" tunnel-speed-test \
   --plan-file "$tmp_dir/missing-plan.json" \
   --server-side left \
   --duration-secs 0 \
+  --confirmed \
   >"$tmp_dir/bad-speed.out" 2>"$tmp_dir/bad-speed.err"; then
   fail "tunnel-speed-test accepted duration below bound"
 fi

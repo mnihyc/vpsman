@@ -19,6 +19,7 @@ pub(crate) struct VtyFileOperation {
 
 pub(crate) fn parse_vty_file_pull(tokens: &[&str]) -> Result<VtyFileOperation> {
     let mut path = None;
+    let mut follow_symlinks = false;
     let mut timeout_secs = 30_u64;
     let mut target_tokens = Vec::new();
     let mut index = 0;
@@ -35,6 +36,10 @@ pub(crate) fn parse_vty_file_pull(tokens: &[&str]) -> Result<VtyFileOperation> {
             }
             value if value.starts_with("--path=") => {
                 path = Some(value.trim_start_matches("--path=").to_string());
+                index += 1;
+            }
+            "--follow-symlinks" => {
+                follow_symlinks = true;
                 index += 1;
             }
             "--timeout" => {
@@ -55,7 +60,10 @@ pub(crate) fn parse_vty_file_pull(tokens: &[&str]) -> Result<VtyFileOperation> {
     validate_absolute_file_path(&path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     Ok(VtyFileOperation {
         command_label: "file_pull",
-        operation: JobCommand::FilePull { path },
+        operation: JobCommand::FilePull {
+            path,
+            follow_symlinks,
+        },
         selection: VtyJobSelection::parse(&target_tokens)?,
         timeout_secs,
     })
@@ -235,7 +243,37 @@ mod tests {
         assert_eq!(request.command_label, "file_pull");
         assert!(request.selection.clients.is_empty());
         assert_eq!(request.selection.tags, vec!["id:edge-a"]);
-        assert!(matches!(request.operation, JobCommand::FilePull { .. }));
+        match request.operation {
+            JobCommand::FilePull {
+                path,
+                follow_symlinks,
+            } => {
+                assert_eq!(path, TEST_FILE_PULL_PATH);
+                assert!(!follow_symlinks);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_vty_file_pull_follow_symlinks() {
+        let request = parse_vty_file_pull(&[
+            "--path",
+            TEST_FILE_PULL_PATH,
+            "--follow-symlinks",
+            "id:edge-a",
+        ])
+        .unwrap();
+        match request.operation {
+            JobCommand::FilePull {
+                path,
+                follow_symlinks,
+            } => {
+                assert_eq!(path, TEST_FILE_PULL_PATH);
+                assert!(follow_symlinks);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

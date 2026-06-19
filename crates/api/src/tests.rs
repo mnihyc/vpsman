@@ -682,6 +682,7 @@ fn file_pull_job_command_uses_operation_payload_and_type() {
         argv: Vec::new(),
         operation: Some(JobCommand::FilePull {
             path: "/etc/hostname".to_string(),
+            follow_symlinks: false,
         }),
         timeout_secs: Some(5),
         force_unprivileged: false,
@@ -691,7 +692,13 @@ fn file_pull_job_command_uses_operation_payload_and_type() {
 
     assert_eq!(request.command_type_label(), "file_pull");
     match request.job_command().unwrap() {
-        JobCommand::FilePull { path } => assert_eq!(path, "/etc/hostname"),
+        JobCommand::FilePull {
+            path,
+            follow_symlinks,
+        } => {
+            assert_eq!(path, "/etc/hostname");
+            assert!(!follow_symlinks);
+        }
         other => panic!("unexpected command: {other:?}"),
     }
 }
@@ -739,6 +746,7 @@ fn file_pull_job_command_requires_absolute_path() {
         argv: Vec::new(),
         operation: Some(JobCommand::FilePull {
             path: "relative/path".to_string(),
+            follow_symlinks: false,
         }),
         timeout_secs: Some(5),
         force_unprivileged: false,

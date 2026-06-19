@@ -58,6 +58,64 @@ fn validates_file_push_job_document() {
 }
 
 #[test]
+fn validates_combined_owner_group_file_commands() {
+    let data = b"file contents";
+    validate_job_command(&JobCommand::FilePush {
+        path: "/tmp/vpsman-upload.txt".to_string(),
+        mode: 0o640,
+        size_bytes: data.len() as u64,
+        sha256_hex: payload_hash(data),
+        data_base64: encode_inline_file_payload(data).unwrap(),
+        existing_policy: FileExistingPolicy::Replace,
+        owner: Some("1000:1001".to_string()),
+        group: None,
+        uid: None,
+        gid: None,
+        ownership_policy: FileOwnershipPolicy::Fail,
+    })
+    .unwrap();
+
+    validate_job_command(&JobCommand::FileChown {
+        path: "/tmp/vpsman-upload.txt".to_string(),
+        owner: Some("operator:ops".to_string()),
+        group: None,
+        uid: None,
+        gid: None,
+        recursive: false,
+        ownership_policy: FileOwnershipPolicy::Fail,
+        policy: FileActionPolicy::Fail,
+    })
+    .unwrap();
+}
+
+#[test]
+fn rejects_ambiguous_combined_owner_group_file_command() {
+    let command = JobCommand::FileChown {
+        path: "/tmp/vpsman-upload.txt".to_string(),
+        owner: Some("1000:1001".to_string()),
+        group: Some("wheel".to_string()),
+        uid: None,
+        gid: None,
+        recursive: false,
+        ownership_policy: FileOwnershipPolicy::Fail,
+        policy: FileActionPolicy::Fail,
+    };
+    assert!(validate_job_command(&command).is_err());
+
+    let command = JobCommand::FileChown {
+        path: "/tmp/vpsman-upload.txt".to_string(),
+        owner: Some("1000:1001:1002".to_string()),
+        group: None,
+        uid: None,
+        gid: None,
+        recursive: false,
+        ownership_policy: FileOwnershipPolicy::Fail,
+        policy: FileActionPolicy::Fail,
+    };
+    assert!(validate_job_command(&command).is_err());
+}
+
+#[test]
 fn rejects_invalid_file_push_job_document() {
     let data = b"file contents";
     let valid_data_base64 = encode_inline_file_payload(data).unwrap();
@@ -1664,6 +1722,7 @@ fn validates_resumable_file_download_job_documents() {
             path: "/tmp/download.bin".to_string(),
             chunk_size_bytes: 64 * 1024,
             rate_limit_kbps: 0,
+            follow_symlinks: false,
             resume_token_hash: token_hash.clone(),
         },
         JobCommand::FileTransferDownloadChunk {
@@ -1688,6 +1747,7 @@ fn rejects_invalid_resumable_file_download_job_documents() {
             path: "/tmp/download.bin".to_string(),
             chunk_size_bytes: 64 * 1024,
             rate_limit_kbps: 0,
+            follow_symlinks: false,
             resume_token_hash: token_hash.clone(),
         },
         JobCommand::FileTransferDownloadStart {
@@ -1695,6 +1755,7 @@ fn rejects_invalid_resumable_file_download_job_documents() {
             path: "relative.bin".to_string(),
             chunk_size_bytes: 64 * 1024,
             rate_limit_kbps: 0,
+            follow_symlinks: false,
             resume_token_hash: token_hash.clone(),
         },
         JobCommand::FileTransferDownloadStart {
@@ -1702,6 +1763,7 @@ fn rejects_invalid_resumable_file_download_job_documents() {
             path: "/tmp/download.bin".to_string(),
             chunk_size_bytes: 0,
             rate_limit_kbps: 0,
+            follow_symlinks: false,
             resume_token_hash: token_hash.clone(),
         },
         JobCommand::FileTransferDownloadChunk {

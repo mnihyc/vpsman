@@ -13,6 +13,7 @@ pub(crate) fn file_pull(
     api_url: &str,
     token: Option<&str>,
     path: String,
+    follow_symlinks: bool,
     clients: Vec<String>,
     tags: Vec<String>,
     password_env: String,
@@ -22,7 +23,10 @@ pub(crate) fn file_pull(
     confirmed: bool,
 ) -> Result<()> {
     anyhow::ensure!(path.starts_with('/'), "file pull path must be absolute");
-    let operation = JobCommand::FilePull { path: path.clone() };
+    let operation = JobCommand::FilePull {
+        path: path.clone(),
+        follow_symlinks,
+    };
     println!(
         "{}",
         submit_privileged_operation(PrivilegedOperationRequest {

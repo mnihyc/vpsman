@@ -91,7 +91,10 @@ pub(crate) fn validate_resumable_file_transfer_token(
 
 pub(crate) fn validate_file_command(command: &JobCommand) -> Option<Result<(), ApiError>> {
     Some(match command {
-        JobCommand::FilePull { path } => validate_file_path(path),
+        JobCommand::FilePull {
+            path,
+            follow_symlinks: _,
+        } => validate_file_path(path),
         JobCommand::FilePush {
             path,
             mode,
@@ -175,6 +178,7 @@ pub(crate) fn validate_file_command(command: &JobCommand) -> Option<Result<(), A
             path,
             chunk_size_bytes,
             rate_limit_kbps,
+            follow_symlinks: _,
             resume_token_hash,
         } => validate_resumable_file_transfer_download_start(
             *session_id,
@@ -340,15 +344,37 @@ fn validate_ownership_request(
     gid: Option<u32>,
     _ownership_policy: FileOwnershipPolicy,
 ) -> Result<(), ApiError> {
-    if owner.map(invalid_owner_group_token).unwrap_or(false)
-        || group.map(invalid_owner_group_token).unwrap_or(false)
-    {
+    if !valid_owner_group_request(owner, group, uid, gid) {
         return Err(ApiError::bad_request("invalid_owner_group"));
     }
     if owner.is_none() && group.is_none() && uid.is_none() && gid.is_none() {
         return Ok(());
     }
     Ok(())
+}
+
+fn valid_owner_group_request(
+    owner: Option<&str>,
+    group: Option<&str>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> bool {
+    let owner = owner.map(str::trim);
+    let group = group.map(str::trim);
+    if group.map(invalid_owner_group_token).unwrap_or(false) {
+        return false;
+    }
+    let Some(owner) = owner else {
+        return true;
+    };
+    if let Some((owner_part, group_part)) = owner.split_once(':') {
+        return group.is_none()
+            && uid.is_none()
+            && gid.is_none()
+            && !invalid_owner_group_token(owner_part)
+            && !invalid_owner_group_token(group_part);
+    }
+    !invalid_owner_group_token(owner)
 }
 
 fn invalid_owner_group_token(value: &str) -> bool {

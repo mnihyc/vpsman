@@ -1,5 +1,3 @@
-use anyhow::{Context, Result};
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AccountIdentity {
     pub(crate) uid: u32,
@@ -10,6 +8,12 @@ pub(crate) struct AccountIdentity {
 pub(crate) struct NameIdResolution {
     pub(crate) id: u32,
     pub(crate) name: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OwnershipTokens {
+    pub(crate) owner: Option<String>,
+    pub(crate) group: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -58,6 +62,40 @@ fn resolve_name_or_id(value: &str, entries: &NameIdEntries) -> Option<NameIdReso
         id,
         name: Some(value.to_string()),
     })
+}
+
+pub(crate) fn normalize_ownership_tokens(
+    owner: Option<&str>,
+    group: Option<&str>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> anyhow::Result<OwnershipTokens> {
+    let owner = trimmed_nonempty(owner);
+    let group = trimmed_nonempty(group);
+    if let Some(owner_value) = owner {
+        if let Some((owner_part, group_part)) = owner_value.split_once(':') {
+            if group.is_some() || uid.is_some() || gid.is_some() {
+                anyhow::bail!("owner:group must not be combined with separate owner/group ids");
+            }
+            let owner_part = owner_part.trim();
+            let group_part = group_part.trim();
+            if owner_part.is_empty() || group_part.is_empty() || group_part.contains(':') {
+                anyhow::bail!("owner:group requires exactly one owner and one group");
+            }
+            return Ok(OwnershipTokens {
+                owner: Some(owner_part.to_string()),
+                group: Some(group_part.to_string()),
+            });
+        }
+    }
+    Ok(OwnershipTokens {
+        owner: owner.map(str::to_string),
+        group: group.map(str::to_string),
+    })
+}
+
+fn trimmed_nonempty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -229,35 +267,6 @@ fn metadata_mtime_unix_impl(metadata: &std::fs::Metadata) -> Option<i64> {
 #[cfg(not(unix))]
 fn metadata_mtime_unix_impl(_metadata: &std::fs::Metadata) -> Option<i64> {
     None
-}
-
-pub(crate) fn chown_path(path: &std::path::Path, uid: Option<u32>, gid: Option<u32>) -> Result<()> {
-    chown_path_impl(path, uid, gid)
-}
-
-#[cfg(unix)]
-fn chown_path_impl(path: &std::path::Path, uid: Option<u32>, gid: Option<u32>) -> Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let path =
-        CString::new(path.as_os_str().as_bytes()).context("path contains an interior nul byte")?;
-    let uid = uid
-        .map(|value| value as libc::uid_t)
-        .unwrap_or(!0 as libc::uid_t);
-    let gid = gid
-        .map(|value| value as libc::gid_t)
-        .unwrap_or(!0 as libc::gid_t);
-    let result = unsafe { libc::chown(path.as_ptr(), uid, gid) };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error()).context("failed to change file ownership");
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn chown_path_impl(_path: &std::path::Path, _uid: Option<u32>, _gid: Option<u32>) -> Result<()> {
-    anyhow::bail!("file ownership changes are not supported on this platform")
 }
 
 #[cfg(test)]

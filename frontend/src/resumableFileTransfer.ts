@@ -77,6 +77,7 @@ export type ResumableDownloadRequest = {
   downloadName: string;
   downloadSink?: BrowserDownloadSinkMode;
   downloadOutputChunk: (jobId: string, clientId: string, seq: number) => Promise<Blob>;
+  followSymlinks: boolean;
   loadJob: (jobId: string) => Promise<JobHistoryRecord>;
   loadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   path: string;
@@ -391,6 +392,7 @@ export async function runBrowserResumableDownload(request: ResumableDownloadRequ
     path: remotePath,
     chunk_size_bytes: chunkSizeBytes,
     rate_limit_kbps: rateLimitKbps,
+    follow_symlinks: request.followSymlinks,
     resume_token_hash: resumeTokenHash,
   });
   const startStatuses = await waitForTransferStatus(request, start.job_id, sessionId, "file_transfer_download_start", start.target_count);

@@ -92,6 +92,7 @@ export function JobOperationEditor({
   terminalRows,
   terminalSessionId,
   filePath,
+  fileFollowSymlinks,
   filePushMode,
   filePushPath,
   fileTransferDownloadSink,
@@ -128,6 +129,7 @@ export function JobOperationEditor({
   setTerminalRows,
   setTerminalSessionId,
   setFilePath,
+  setFileFollowSymlinks,
   setFilePushMode,
   setFilePushPath,
   setFilePushSource,
@@ -192,6 +194,7 @@ export function JobOperationEditor({
   terminalRows: number;
   terminalSessionId: string;
   filePath: string;
+  fileFollowSymlinks: boolean;
   filePushMode: string;
   filePushPath: string;
   fileTransferDownloadSink: BrowserDownloadSinkMode;
@@ -228,6 +231,7 @@ export function JobOperationEditor({
   setTerminalRows: (value: number) => void;
   setTerminalSessionId: (value: string) => void;
   setFilePath: (value: string) => void;
+  setFileFollowSymlinks: (value: boolean) => void;
   setFilePushMode: (value: string) => void;
   setFilePushPath: (value: string) => void;
   setFilePushSource: (value: File | null) => void;
@@ -350,15 +354,28 @@ export function JobOperationEditor({
 
   if (mode === "file_pull") {
     return (
-      <label>
-        <span>Absolute path</span>
-        <input
-          aria-label="File pull path"
-          onChange={(event) => setFilePath(event.target.value)}
-          placeholder={FILE_PULL_PATH_PLACEHOLDER}
-          value={filePath}
-        />
-      </label>
+      <div className="compactOperation filePathOperation">
+        <label className="wideField">
+          <span>Absolute path</span>
+          <input
+            aria-label="File pull path"
+            onChange={(event) => setFilePath(event.target.value)}
+            placeholder={FILE_PULL_PATH_PLACEHOLDER}
+            value={filePath}
+          />
+        </label>
+        <label
+          className="checkLine inlineCheck fileOptionCheck"
+          title="Disabled by default. Enable only when the reviewed path is intentionally a symlink and the target should be read."
+        >
+          <input
+            checked={fileFollowSymlinks}
+            onChange={(event) => setFileFollowSymlinks(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Follow symlinks</span>
+        </label>
+      </div>
     );
   }
 
@@ -524,14 +541,16 @@ export function JobOperationEditor({
 
   if (mode === "file_transfer_download") {
     return (
-      <div className="operationNote compactOperation">
-        <Download size={18} />
-        <div>
-          <strong>Resumable download</strong>
-          <span>
-            Browser download up to {formatBytes(MAX_BROWSER_RESUMABLE_DOWNLOAD_BYTES)}; stream-to-file up to{" "}
-            {formatBytes(MAX_BROWSER_STREAMING_RESUMABLE_DOWNLOAD_BYTES)}
-          </span>
+      <div className="operationNote compactOperation fileTransferDownloadOperation">
+        <div className="fileTransferOperationHeader">
+          <Download size={18} />
+          <div>
+            <strong>Resumable download</strong>
+            <span>
+              Browser download up to {formatBytes(MAX_BROWSER_RESUMABLE_DOWNLOAD_BYTES)}; stream-to-file up to{" "}
+              {formatBytes(MAX_BROWSER_STREAMING_RESUMABLE_DOWNLOAD_BYTES)}
+            </span>
+          </div>
         </div>
         <label className="wideField">
           <span>Remote path</span>
@@ -541,6 +560,17 @@ export function JobOperationEditor({
             placeholder="/tmp/vpsman-large-download.bin"
             value={filePath}
           />
+        </label>
+        <label
+          className="checkLine inlineCheck fileOptionCheck"
+          title="Disabled by default. Enable only when the reviewed remote path is intentionally a symlink and the download should read its target."
+        >
+          <input
+            checked={fileFollowSymlinks}
+            onChange={(event) => setFileFollowSymlinks(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Follow symlinks</span>
         </label>
         <label className="wideField">
           <span>Browser filename</span>
@@ -572,7 +602,7 @@ export function JobOperationEditor({
             value={fileTransferRateLimit}
           />
         </label>
-        <label>
+        <label className="wideField">
           <span>Save method</span>
           <select
             aria-label="Resumable download save method"
