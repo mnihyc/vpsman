@@ -19,7 +19,6 @@ croner.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 hmac.workspace = true
-lz4_flex.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -37,4 +36,3 @@ vpsman-common = { path = "../common" }
 vpsman-object-store = { path = "../object-store" }
 vpsman-server-core = { path = "../server-core" }
 vpsman-server-build-info = { path = "../server-build-info" }
-x25519-dalek.workspace = true

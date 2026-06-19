@@ -6,21 +6,19 @@ type RestoreRunFormProps = {
   confirmationOpen: boolean;
   forceUnprivileged: boolean;
   onForceUnprivilegedChange: (value: boolean) => void;
-  onArtifactFileChange: (value: File | null) => void;
   onArchivePathChange: (value: string) => void;
+  onArchiveSizeBytesChange: (value: string) => void;
   onArchiveSha256HexChange: (value: string) => void;
   onDryRunChange: (value: boolean) => void;
-  onPrivateKeyHexChange: (value: string) => void;
   onPostRestoreArgvChange: (value: string) => void;
   onRestoreTimeoutSecsChange: (value: number) => void;
   onRunRestore: () => void;
   pending: boolean;
   privilegeReady: boolean;
   restoreArchivePath: string;
+  restoreArchiveSizeBytes: string;
   restoreArchiveSha256Hex: string;
-  restoreArtifactFile: File | null;
   restoreDryRun: boolean;
-  restorePrivateKeyHex: string;
   restorePostRestoreArgv: string;
   restoreSourceId: string;
   restoreTarget: AgentView | null;
@@ -32,38 +30,37 @@ export function RestoreRunForm({
   confirmationOpen,
   forceUnprivileged,
   onForceUnprivilegedChange,
-  onArtifactFileChange,
   onArchivePathChange,
+  onArchiveSizeBytesChange,
   onArchiveSha256HexChange,
   onDryRunChange,
-  onPrivateKeyHexChange,
   onPostRestoreArgvChange,
   onRestoreTimeoutSecsChange,
   onRunRestore,
   pending,
   privilegeReady,
   restoreArchivePath,
+  restoreArchiveSizeBytes,
   restoreArchiveSha256Hex,
-  restoreArtifactFile,
   restoreDryRun,
-  restorePrivateKeyHex,
   restorePostRestoreArgv,
   restoreSourceId,
   restoreTarget,
   restoreTargetId,
   restoreTimeoutSecs,
 }: RestoreRunFormProps) {
+  const archiveReady = Boolean(
+    restoreArchivePath.trim() &&
+      restoreArchiveSizeBytes.trim() &&
+      /^[0-9a-fA-F]{64}$/.test(restoreArchiveSha256Hex.trim()),
+  );
   return (
     <>
       <div className="sectionHeader compact restoreFormHeader">
         <h2>Run restore</h2>
-        <span>Runs browser-decrypted or agent-local archive restores with rehearsal support</span>
+        <span>Runs agent-local archive restores with rehearsal support</span>
       </div>
       <form className="dispatchForm" onSubmit={(event) => event.preventDefault()}>
-        <label>
-          <span>Artifact file (optional)</span>
-          <input aria-label="Restore artifact file" onChange={(event) => onArtifactFileChange(event.target.files?.[0] ?? null)} type="file" />
-        </label>
         <label>
           <span>Agent-local archive path</span>
           <input
@@ -74,22 +71,23 @@ export function RestoreRunForm({
           />
         </label>
         <label>
+          <span>Archive size bytes</span>
+          <input
+            aria-label="Agent-local restore archive size bytes"
+            min={1}
+            onChange={(event) => onArchiveSizeBytesChange(event.target.value)}
+            placeholder="1048576"
+            type="number"
+            value={restoreArchiveSizeBytes}
+          />
+        </label>
+        <label>
           <span>Archive SHA-256</span>
           <input
             aria-label="Agent-local restore archive SHA-256"
             onChange={(event) => onArchiveSha256HexChange(event.target.value)}
-            placeholder="optional 64 hex characters"
+            placeholder="64 hex characters"
             value={restoreArchiveSha256Hex}
-          />
-        </label>
-        <label>
-          <span>Backup private key hex</span>
-          <input
-            aria-label="Backup private key hex"
-            onChange={(event) => onPrivateKeyHexChange(event.target.value)}
-            placeholder={restoreArchivePath ? "not needed for agent-local archive" : "64 hex characters"}
-            type="password"
-            value={restorePrivateKeyHex}
           />
         </label>
         <label>
@@ -134,7 +132,13 @@ export function RestoreRunForm({
         {!confirmationOpen && (
           <button
             className="primaryAction dangerPrimary"
-            disabled={pending || !privilegeReady || !restoreSourceId || !restoreTargetId}
+            disabled={
+              pending ||
+              !privilegeReady ||
+              !restoreSourceId ||
+              !restoreTargetId ||
+              !archiveReady
+            }
             onClick={onRunRestore}
             type="button"
           >

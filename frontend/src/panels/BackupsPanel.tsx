@@ -52,7 +52,6 @@ import type {
   JobOutputRecord,
   JobTargetSelection,
   MigrationLinkRecord,
-  PreparedBackupArtifactRestoreRecord,
   RestorePlanRecord,
   UploadBackupArtifactRequest,
 } from "../types";
@@ -93,10 +92,6 @@ type BackupsPanelProps = {
     request: BackupArtifactHandoffRequest,
   ) => Promise<BackupArtifactHandoffRecord>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
-  onPrepareBackupArtifactRestore: (
-    backupRequestId: string,
-    request: { private_key_hex: string; artifact_base64?: string | null },
-  ) => Promise<PreparedBackupArtifactRestoreRecord>;
   onPruneBackupPolicies: (
     request: BackupPolicyPruneRequest,
   ) => Promise<BackupPolicyPruneResponse>;
@@ -124,10 +119,9 @@ type RestoreRunInput = {
   includeConfig: boolean;
   destinationRoot: string;
   archivePath: string;
+  archiveSizeBytes: string;
   archiveSha256Hex: string;
-  artifactFile: File | null;
   dryRun: boolean;
-  privateKeyHex: string;
   postRestoreArgv: string;
   timeoutSecs: number;
   forceUnprivileged: boolean;
@@ -256,7 +250,6 @@ export function BackupsPanel({
   onDownloadBackupArtifact,
   onHandoffBackupArtifact,
   onLoadJobOutputs,
-  onPrepareBackupArtifactRestore,
   onPruneBackupPolicies,
   onResolveTargets,
   onOpenPrivilegeUnlock,
@@ -314,14 +307,11 @@ export function BackupsPanel({
   const [restoreIncludeConfig, setRestoreIncludeConfig] = useState(false);
   const [restoreDestinationRoot, setRestoreDestinationRoot] = useState("");
   const [restoreNote, setRestoreNote] = useState("");
-  const [restoreArtifactFile, setRestoreArtifactFile] = useState<File | null>(
-    null,
-  );
   const [restoreArchivePath, setRestoreArchivePath] = useState("");
+  const [restoreArchiveSizeBytes, setRestoreArchiveSizeBytes] = useState("");
   const [restoreArchiveSha256Hex, setRestoreArchiveSha256Hex] = useState("");
   const [restoreDryRun, setRestoreDryRun] = useState(false);
   const [restorePostRestoreArgv, setRestorePostRestoreArgv] = useState("");
-  const [restorePrivateKeyHex, setRestorePrivateKeyHex] = useState("");
   const [restoreTimeoutSecs, setRestoreTimeoutSecs] = useState(60);
   const [restoreForceUnprivileged, setRestoreForceUnprivileged] =
     useState(false);
@@ -381,12 +371,6 @@ export function BackupsPanel({
     agents.find((agent) => agent.id === rollbackTargetId) ?? null;
   const selectedMigrationRestorePlan =
     restorePlans.find((plan) => plan.id === migrationRestorePlanId) ?? null;
-  const selectedMigrationSourceBackup = selectedMigrationRestorePlan
-    ? (backups.find(
-        (backup) =>
-          backup.id === selectedMigrationRestorePlan.source_backup_request_id,
-      ) ?? null)
-    : null;
   const clientLabel = (clientId: string) =>
     clientDisplayNameFromMap(clientId, agentNameById);
   const backupSubpage = [
@@ -757,7 +741,6 @@ export function BackupsPanel({
         paths: restorePaths,
         include_config: restoreIncludeConfig,
         destination_root: restoreDestinationRoot.trim() || null,
-        archive_base64: null,
         archive_size_bytes: null,
         archive_sha256_hex: null,
       };
@@ -823,78 +806,42 @@ export function BackupsPanel({
       throw new Error("Config restore requires a destination root");
     }
     const archivePath = input.archivePath.trim();
+    const archiveSizeText = input.archiveSizeBytes.trim();
     const archiveSha256Hex = input.archiveSha256Hex.trim().toLowerCase();
-    if (archivePath && !archivePath.startsWith("/")) {
+    if (!archivePath) {
+      throw new Error("Agent-local restore archive path is required");
+    }
+    if (!archivePath.startsWith("/")) {
       throw new Error("Agent-local restore archive path must be absolute");
     }
-    if (archiveSha256Hex && !/^[0-9a-f]{64}$/.test(archiveSha256Hex)) {
-      throw new Error("Restore archive SHA-256 must be 64 hex characters");
+    if (!archiveSizeText) {
+      throw new Error("Restore archive size is required");
     }
-    if (!archivePath && !input.privateKeyHex.trim()) {
-      throw new Error("Backup private key hex is required");
-    }
-    const sourceBackup =
-      backups.find((backup) => backup.id === input.sourceBackupRequestId) ??
-      null;
+    const archiveSizeBytes = Number(archiveSizeText);
     if (
-      !archivePath &&
-      !input.artifactFile &&
-      sourceBackup &&
-      !sourceBackup.artifact_id
+      !Number.isSafeInteger(archiveSizeBytes) ||
+      archiveSizeBytes <= 0
     ) {
-      throw new Error("Selected backup request has no stored artifact");
+      throw new Error("Restore archive size must be a positive integer");
+    }
+    if (!/^[0-9a-f]{64}$/.test(archiveSha256Hex)) {
+      throw new Error("Restore archive SHA-256 must be 64 hex characters");
     }
     const postRestoreArgv = input.postRestoreArgv.trim()
       ? parseCommandArgv(input.postRestoreArgv)
       : [];
-    let operation: JobOperation;
-    if (archivePath) {
-      operation = {
-        type: "restore",
-        source_backup_request_id: input.sourceBackupRequestId,
-        paths: input.paths,
-        include_config: input.includeConfig,
-        destination_root: input.destinationRoot.trim() || null,
-        archive_base64: null,
-        archive_path: archivePath,
-        archive_size_bytes: null,
-        archive_sha256_hex: archiveSha256Hex || null,
-        dry_run: input.dryRun,
-        post_restore_argv: postRestoreArgv,
-      };
-    } else {
-      const artifactBase64 = input.artifactFile
-        ? bytesToBase64(new Uint8Array(await input.artifactFile.arrayBuffer()))
-        : null;
-      const artifact = await onPrepareBackupArtifactRestore(
-        input.sourceBackupRequestId,
-        {
-          private_key_hex: input.privateKeyHex,
-          artifact_base64: artifactBase64,
-        },
-      );
-      if (
-        sourceBackup &&
-        artifact.artifact_client_id !== sourceBackup.client_id
-      ) {
-        throw new Error(
-          "Artifact client does not match selected source backup",
-        );
-      }
-      operation = {
-        type: "restore",
-        source_backup_request_id: input.sourceBackupRequestId,
-        paths: input.paths,
-        include_config: input.includeConfig,
-        destination_root: input.destinationRoot.trim() || null,
-        archive_base64: artifact.archive_base64,
-        archive_path: null,
-        archive_size_bytes: artifact.archive_size_bytes,
-        archive_sha256_hex: artifact.archive_sha256_hex,
-        dry_run: input.dryRun,
-        post_restore_argv: postRestoreArgv,
-      };
-    }
+    const operation: JobOperation = {
+      type: "restore",
+      source_backup_request_id: input.sourceBackupRequestId,
+      paths: input.paths,
+      include_config: input.includeConfig,
+      destination_root: input.destinationRoot.trim() || null,
+      archive_path: archivePath,
+      archive_size_bytes: archiveSizeBytes,
+      archive_sha256_hex: archiveSha256Hex,
+      dry_run: input.dryRun,
+      post_restore_argv: postRestoreArgv,
+    };
     const selectorExpression = selectorExpressionForClientIds([
       input.targetClientId,
     ]);
@@ -930,7 +877,6 @@ export function BackupsPanel({
   async function executeRestoreRunSnapshot(snapshot: Extract<BackupActionSnapshot, { action: "restore-run" }>) {
     await runPanelAction(setPending, setActionError, async () => {
       const nextJob = await onCreateJob(snapshot.run.request);
-      setRestorePrivateKeyHex("");
       setLastPayloadHash(snapshot.run.payloadHashHex);
       setLastRestoreJob(nextJob);
       setRollbackRestoreJobId(nextJob.job_id);
@@ -956,10 +902,9 @@ export function BackupsPanel({
       includeConfig: restoreIncludeConfig,
       destinationRoot: restoreDestinationRoot,
       archivePath: restoreArchivePath,
+      archiveSizeBytes: restoreArchiveSizeBytes,
       archiveSha256Hex: restoreArchiveSha256Hex,
-      artifactFile: restoreArtifactFile,
       dryRun: restoreDryRun,
-      privateKeyHex: restorePrivateKeyHex,
       postRestoreArgv: restorePostRestoreArgv,
       timeoutSecs: restoreTimeoutSecs,
       forceUnprivileged: restoreForceUnprivileged,
@@ -1098,10 +1043,9 @@ export function BackupsPanel({
         includeConfig: restorePlan.include_config,
         destinationRoot: restorePlan.destination_root ?? "",
         archivePath: restoreArchivePath,
+        archiveSizeBytes: restoreArchiveSizeBytes,
         archiveSha256Hex: restoreArchiveSha256Hex,
-        artifactFile: restoreArtifactFile,
         dryRun: restoreDryRun,
-        privateKeyHex: restorePrivateKeyHex,
         postRestoreArgv: restorePostRestoreArgv,
         timeoutSecs: restoreTimeoutSecs,
         forceUnprivileged: restoreForceUnprivileged,
@@ -1132,7 +1076,6 @@ export function BackupsPanel({
       setRestorePathsText(snapshot.restorePlan.paths.join("\n"));
       setRestoreIncludeConfig(snapshot.restorePlan.include_config);
       setRestoreDestinationRoot(snapshot.restorePlan.destination_root ?? "");
-      setRestorePrivateKeyHex("");
       setLastMigrationLink(link);
       setLastPayloadHash(snapshot.run.payloadHashHex);
       setLastRestoreJob(nextJob);
@@ -1898,12 +1841,12 @@ export function BackupsPanel({
                   setRestoreForceUnprivileged(value);
                   clearBackupConfirmations(["restore-run", "migration-run"]);
                 }}
-                onArtifactFileChange={(value) => {
-                  setRestoreArtifactFile(value);
-                  clearBackupConfirmations(["restore-run", "migration-run"]);
-                }}
                 onArchivePathChange={(value) => {
                   setRestoreArchivePath(value);
+                  clearBackupConfirmations(["restore-run", "migration-run"]);
+                }}
+                onArchiveSizeBytesChange={(value) => {
+                  setRestoreArchiveSizeBytes(value);
                   clearBackupConfirmations(["restore-run", "migration-run"]);
                 }}
                 onArchiveSha256HexChange={(value) => {
@@ -1912,10 +1855,6 @@ export function BackupsPanel({
                 }}
                 onDryRunChange={(value) => {
                   setRestoreDryRun(value);
-                  clearBackupConfirmations(["restore-run", "migration-run"]);
-                }}
-                onPrivateKeyHexChange={(value) => {
-                  setRestorePrivateKeyHex(value);
                   clearBackupConfirmations(["restore-run", "migration-run"]);
                 }}
                 onPostRestoreArgvChange={(value) => {
@@ -1930,10 +1869,9 @@ export function BackupsPanel({
                 pending={pending}
                 privilegeReady={Boolean(privilegeMaterial)}
                 restoreArchivePath={restoreArchivePath}
+                restoreArchiveSizeBytes={restoreArchiveSizeBytes}
                 restoreArchiveSha256Hex={restoreArchiveSha256Hex}
-                restoreArtifactFile={restoreArtifactFile}
                 restoreDryRun={restoreDryRun}
-                restorePrivateKeyHex={restorePrivateKeyHex}
                 restorePostRestoreArgv={restorePostRestoreArgv}
                 restoreSourceId={restoreSourceId}
                 restoreTarget={restoreTarget}
@@ -1987,6 +1925,8 @@ export function BackupsPanel({
             <>
               <MigrationLinkForm
                 archivePath={restoreArchivePath}
+                archiveSha256Hex={restoreArchiveSha256Hex}
+                archiveSizeBytes={restoreArchiveSizeBytes}
                 clientLabel={clientLabel}
                 forceUnprivileged={restoreForceUnprivileged}
                 lastMigrationLink={lastMigrationLink}
@@ -2005,13 +1945,11 @@ export function BackupsPanel({
                 onSubmit={submitMigrationLink}
                 pending={pending}
                 postRestoreArgv={restorePostRestoreArgv}
-                privateKeyReady={Boolean(restorePrivateKeyHex.trim())}
                 privilegeReady={Boolean(privilegeMaterial)}
                 restoreDryRun={restoreDryRun}
                 restorePlans={restorePlans}
                 runConfirmationOpen={pendingConfirmation === "migration-run"}
                 selectedPlan={selectedMigrationRestorePlan}
-                sourceBackup={selectedMigrationSourceBackup}
               />
               <PrivilegeVaultBox
                 lastPayloadHash={lastPayloadHash}

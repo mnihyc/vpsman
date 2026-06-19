@@ -29,7 +29,6 @@ gateway_keys="$(target/debug/vpsctl noise-keygen)"
 gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
 gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
 backup_keys="$(target/debug/vpsctl noise-keygen)"
-backup_private_hex="$(jq -r '.private_key_hex' <<<"$backup_keys")"
 backup_public_hex="$(jq -r '.public_key_hex' <<<"$backup_keys")"
 
 api_log="$SMOKE_TMPDIR/api.log"
@@ -243,6 +242,63 @@ fi
 jq -e '[.[].action] | index("backup.requested_metadata_only") and index("backup.artifact_metadata_recorded")' \
   <<<"$audits_json" >/dev/null
 
+restore_archive="$SMOKE_TMPDIR/staged-restore.tar"
+python3 - "$client_id" "$selected_file" "$agent_config" "$restore_archive" <<'PY'
+import hashlib
+import io
+import json
+import os
+import stat
+import sys
+import tarfile
+import time
+
+client_id, selected_file, agent_config, archive_path = sys.argv[1:]
+created_unix = int(time.time())
+
+def read_entry(path, source, tar_path):
+    with open(path, "rb") as handle:
+        data = handle.read()
+    mode = stat.S_IMODE(os.stat(path).st_mode) or 0o600
+    entry = {
+        "path": path if source == "selected_path" else "vpsman:agent_config",
+        "source": source,
+        "tar_path": tar_path,
+        "mode": mode,
+        "size_bytes": len(data),
+        "sha256_hex": hashlib.sha256(data).hexdigest(),
+        "mtime_unix": created_unix,
+    }
+    return entry, data
+
+entries = [
+    read_entry(selected_file, "selected_path", "vpsman-backup/files/0000.bin"),
+    read_entry(agent_config, "agent_config", "vpsman-backup/files/0001.bin"),
+]
+manifest = {
+    "format": "vpsman.backup_tar.v1",
+    "client_id": client_id,
+    "created_unix": created_unix,
+    "files": [entry for entry, _ in entries],
+}
+
+with tarfile.open(archive_path, "w") as archive:
+    manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+    manifest_info = tarfile.TarInfo("vpsman-backup/manifest.json")
+    manifest_info.size = len(manifest_bytes)
+    manifest_info.mode = 0o600
+    manifest_info.mtime = created_unix
+    archive.addfile(manifest_info, fileobj=io.BytesIO(manifest_bytes))
+    for entry, data in entries:
+        info = tarfile.TarInfo(entry["tar_path"])
+        info.size = len(data)
+        info.mode = entry["mode"]
+        info.mtime = created_unix
+        archive.addfile(info, fileobj=io.BytesIO(data))
+PY
+restore_archive_size="$(python3 -c 'import os, sys; print(os.path.getsize(sys.argv[1]))' "$restore_archive")"
+restore_archive_sha="$(sha256sum "$restore_archive" | awk '{print $1}')"
+
 restore_root="$SMOKE_TMPDIR/restore-root"
 restored_selected="$restore_root${selected_file}"
 restored_config="$restore_root/vpsman/agent_config.toml"
@@ -250,10 +306,12 @@ restore_preexisting_payload="restore preexisting payload $(date +%s%N)"
 mkdir -p "${restored_selected%/*}"
 printf '%s\n' "$restore_preexisting_payload" >"$restored_selected"
 restore_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
-  VPSMAN_BACKUP_PRIVATE_KEY_HEX="$backup_private_hex" \
   target/debug/vpsctl --api-url "$api_url" restore-run \
     --source-backup-request-id "$backup_request_id" \
     --target-client-id "$client_id" \
+    --archive-path "$restore_archive" \
+    --archive-size-bytes "$restore_archive_size" \
+    --archive-sha256-hex "$restore_archive_sha" \
     --paths "$selected_file" \
     --include-config \
     --destination-root "$restore_root" \
@@ -308,12 +366,11 @@ vty_restore_root="$SMOKE_TMPDIR/vty-restore-root"
 vty_restore_log="$SMOKE_TMPDIR/vty-restore.log"
 {
   printf 'enable\n'
-  printf 'restore-run %s %s --path %s --include-config --destination-root %s --timeout 30 --force-unprivileged --confirmed\n' \
-    "$backup_request_id" "$client_id" "$selected_file" "$vty_restore_root"
+  printf 'restore-run %s %s --archive-path %s --archive-size-bytes %s --archive-sha256-hex %s --path %s --include-config --destination-root %s --timeout 30 --force-unprivileged --confirmed\n' \
+    "$backup_request_id" "$client_id" "$restore_archive" "$restore_archive_size" "$restore_archive_sha" "$selected_file" "$vty_restore_root"
   printf 'exit\n'
 } | VPSMAN_SUPER_PASSWORD="$super_password" \
   VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
-  VPSMAN_BACKUP_PRIVATE_KEY_HEX="$backup_private_hex" \
   target/debug/vpsctl --api-url "$api_url" vty >"$vty_restore_log" 2>&1
 vty_restore_job_id="$(grep -Eo '"job_id":"[^"]+"' "$vty_restore_log" | head -1 | cut -d'"' -f4)"
 if [[ -z "$vty_restore_job_id" ]]; then
@@ -344,9 +401,11 @@ jq -e --arg id "$backup_request_id" --arg target "$client_id" '
 ' <<<"$migration_plan_json" >/dev/null
 
 migration_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
-  VPSMAN_BACKUP_PRIVATE_KEY_HEX="$backup_private_hex" \
   target/debug/vpsctl --api-url "$api_url" migration-run \
     --restore-plan-id "$migration_restore_plan_id" \
+    --archive-path "$restore_archive" \
+    --archive-size-bytes "$restore_archive_size" \
+    --archive-sha256-hex "$restore_archive_sha" \
     --super-salt-hex "$super_salt_hex" \
     --timeout-secs 30 \
     --force-unprivileged \
@@ -383,6 +442,7 @@ jq -n \
   --arg restored_selected "$restored_selected" \
   --arg vty_restored_selected "$vty_restored_selected" \
   --arg migration_restored_selected "$migration_restored_selected" \
+  --arg restore_archive "$restore_archive" \
   '{
     live_backup_smoke: "ok",
     no_privilege_unlock_rejected: true,
@@ -399,6 +459,7 @@ jq -n \
     restored_selected_file: $restored_selected,
     vty_restored_selected_file: $vty_restored_selected,
     migration_restored_selected_file: $migration_restored_selected,
+    staged_restore_archive: $restore_archive,
     selected_sha256_hex: $selected_sha,
     checks: ["agent_encrypted_backup", "no_plaintext_in_artifact", "auto_object_store_link", "artifact_metadata_link", "restore_run", "restore_rollback", "vty_restore_run", "migration_run_restore", "job_output_status", "audit"]
   }'

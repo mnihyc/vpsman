@@ -167,7 +167,6 @@ fn restore_command(request: &CreateRestorePlanRequest) -> JobCommand {
         include_config: request.include_config,
         destination_root: request.destination_root.clone(),
         archive_path: None,
-        archive_base64: None,
         archive_size_bytes: None,
         archive_sha256_hex: None,
         dry_run: false,

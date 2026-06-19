@@ -1,7 +1,6 @@
 import { expect, test, type Locator } from "@playwright/test";
 import {
   backupId,
-  buildEncryptedBackupArtifactFixture,
   installConsoleApiMock,
   ospfUpdatePlans,
   sha256Hex,
@@ -2242,7 +2241,7 @@ test("previews degraded update targets and sends explicit force override", async
   });
 });
 
-test("prepares backup artifacts server-side before dispatching executable restores", async ({
+test("dispatches executable restores with agent-local archive metadata only", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -2250,11 +2249,10 @@ test("prepares backup artifacts server-side before dispatching executable restor
     "restore artifact dispatch is covered in the desktop console layout",
   );
 
-  const privateKeyHex = "07".repeat(32);
-  const fixture = buildEncryptedBackupArtifactFixture(
-    privateKeyHex,
-    "agent-sfo-01",
-  );
+  const archivePath = "/var/lib/vpsman/restores/agent-sfo-01.tar";
+  const archiveSizeBytes = 4096;
+  const archiveSha256Hex =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
   await page.goto("/");
   await openConsoleSubpage(page, "Backups", "Restore");
@@ -2298,14 +2296,15 @@ test("prepares backup artifacts server-side before dispatching executable restor
     target_client_id: "agent-fra-02",
   });
   expectPrivilegeAssertion(restorePlanRequest);
-  await restoreWorkflow.getByLabel("Restore artifact file").setInputFiles({
-    buffer: Buffer.from(JSON.stringify(fixture.artifact)),
-    mimeType: "application/json",
-    name: "backup-artifact.json",
-  });
   await restoreWorkflow
-    .getByLabel("Backup private key hex")
-    .fill(privateKeyHex);
+    .getByLabel("Agent-local restore archive path")
+    .fill(archivePath);
+  await restoreWorkflow
+    .getByLabel("Agent-local restore archive size bytes")
+    .fill(String(archiveSizeBytes));
+  await restoreWorkflow
+    .getByLabel("Agent-local restore archive SHA-256")
+    .fill(archiveSha256Hex);
   await restoreWorkflow.getByLabel("Restore timeout seconds").fill("120");
   await activate(restoreWorkflow.getByRole("button", { name: "Review restore" }));
   await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
@@ -2316,28 +2315,14 @@ test("prepares backup artifacts server-side before dispatching executable restor
   );
 
   await expect(page.getByText(/Restore job 11111111 running/)).toBeVisible();
-  const prepareRequest = await page.evaluate(() => {
-    const requests = (
-      window as unknown as {
-        __vpsmanTestRequests: { backupArtifactRestorePreparations: unknown[] };
-      }
-    ).__vpsmanTestRequests;
-    return requests.backupArtifactRestorePreparations.at(-1);
-  });
-  expect(prepareRequest).toMatchObject({
-    artifact_base64: Buffer.from(JSON.stringify(fixture.artifact)).toString(
-      "base64",
-    ),
-    private_key_hex: privateKeyHex,
-  });
   const request = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
     ).__vpsmanTestRequests;
     return requests.jobs.at(-1);
   });
-  expect(JSON.stringify(request)).not.toContain(privateKeyHex);
   expect(JSON.stringify(request)).not.toContain("local-super-password");
+  expect(JSON.stringify(request)).not.toContain("archive_base64");
   expect(request).toMatchObject({
     argv: [],
     selector_expression: "id:agent-fra-02",
@@ -2345,8 +2330,9 @@ test("prepares backup artifacts server-side before dispatching executable restor
     confirmed: true,
     destructive: true,
     operation: {
-      archive_sha256_hex: fixture.archiveSha256Hex,
-      archive_size_bytes: fixture.archiveBytes.length,
+      archive_path: archivePath,
+      archive_sha256_hex: archiveSha256Hex,
+      archive_size_bytes: archiveSizeBytes,
       destination_root: "/restore",
       include_config: false,
       paths: ["/etc/hostname"],
@@ -2356,11 +2342,6 @@ test("prepares backup artifacts server-side before dispatching executable restor
     privileged: true,
     timeout_secs: 120,
   });
-  const operation = (request as { operation: { archive_base64: string } })
-    .operation;
-  expect(operation.archive_base64).toBe(
-    Buffer.from(fixture.archiveBytes).toString("base64"),
-  );
   expectPrivilegeAssertion(request);
 
   const restoreJobId = "11111111-2222-4333-8444-555555555555";

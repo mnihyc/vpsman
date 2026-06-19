@@ -13,6 +13,8 @@ use vpsman_common::{
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
 };
 
+use crate::actor_authority::actor_authorized;
+
 const DEFAULT_WEBHOOK_TIMEOUT_SECS: u64 = 5;
 const MAX_ERROR_BYTES: usize = 1024;
 const MAX_AUDIT_DELIVERY_ROWS: usize = 100;
@@ -70,6 +72,7 @@ pub(crate) struct WebhookRuleWorkerRun {
 #[derive(Clone, Debug)]
 struct RuleRow {
     id: Uuid,
+    actor_id: Option<Uuid>,
     name: String,
     expression: String,
     target: String,
@@ -96,6 +99,7 @@ struct VpsRow {
 struct DeliveryCandidate {
     id: Uuid,
     rule_id: Uuid,
+    actor_id: Option<Uuid>,
     rule_name: String,
     event_kind: String,
     event_id: String,
@@ -111,6 +115,7 @@ struct DeliveryCandidate {
 struct DeliveryRow {
     id: Uuid,
     rule_id: Uuid,
+    actor_id: Option<Uuid>,
     rule_name: String,
     event_kind: String,
     event_id: String,
@@ -122,6 +127,7 @@ struct DeliveryRow {
 #[derive(Clone, Debug)]
 struct EventRow {
     id: Uuid,
+    actor_id: Option<Uuid>,
     kind: String,
     event_id: String,
     event_predicates: Vec<String>,
@@ -215,6 +221,7 @@ async fn list_enabled_rules(pool: &PgPool, limit: i64) -> Result<Vec<RuleRow>> {
         r#"
         SELECT
             id,
+            actor_id,
             name,
             expression,
             target,
@@ -233,6 +240,7 @@ async fn list_enabled_rules(pool: &PgPool, limit: i64) -> Result<Vec<RuleRow>> {
         .map(|row| {
             Ok(RuleRow {
                 id: row.try_get("id")?,
+                actor_id: row.try_get("actor_id")?,
                 name: row.try_get("name")?,
                 expression: row.try_get("expression")?,
                 target: row.try_get("target")?,
@@ -328,13 +336,14 @@ pub(crate) async fn insert_webhook_event(
         r#"
         INSERT INTO webhook_events (
             id,
+            actor_id,
             kind,
             event_id,
             event_predicates,
             subject_client_ids,
             payload
         )
-        SELECT $1, $2, $3, $4, $5, $6
+        SELECT $1, NULL, $2, $3, $4, $5, $6
         WHERE NOT EXISTS (
             SELECT 1 FROM webhook_events WHERE kind = $2 AND event_id = $3
         )
@@ -411,6 +420,7 @@ async fn process_webhook_events(pool: &PgPool, config: WebhookRuleWorkerConfig) 
         r#"
         SELECT
             id,
+            actor_id,
             kind,
             event_id,
             event_predicates,
@@ -472,6 +482,7 @@ fn delivery_candidate_for_rule(
             subject_client_ids: Vec::new(),
             payload: Value::Null,
             occurred_at_unix: now,
+            actor_id: None,
         },
         vps_rows,
     )
@@ -541,6 +552,7 @@ fn event_candidate_for_rule(
     Ok(Some(DeliveryCandidate {
         id: Uuid::new_v4(),
         rule_id: rule.id,
+        actor_id: event.actor_id.or(rule.actor_id),
         rule_name: rule.name.clone(),
         event_kind: event.kind.clone(),
         event_id: event.event_id.clone(),
@@ -605,6 +617,7 @@ fn event_from_row(row: sqlx::postgres::PgRow) -> Result<EventRow> {
     let payload: SqlJson<Value> = row.try_get("payload")?;
     Ok(EventRow {
         id: row.try_get("id")?,
+        actor_id: row.try_get("actor_id")?,
         kind: row.try_get("kind")?,
         event_id: row.try_get("event_id")?,
         event_predicates: row.try_get("event_predicates")?,
@@ -672,7 +685,7 @@ async fn insert_delivery_candidate(
             actor_id,
             delivered_at
         )
-        VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7, $8, $9, $10, NULL, $11, 0, NULL, NULL, NULL, NULL)
+        VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7, $8, $9, $10, NULL, $11, 0, NULL, NULL, $12, NULL)
         "#,
     )
     .bind(candidate.id)
@@ -686,6 +699,7 @@ async fn insert_delivery_candidate(
     .bind(SqlJson(&candidate.matched_vps))
     .bind(&candidate.message)
     .bind(candidate.cooldown_until_unix)
+    .bind(candidate.actor_id)
     .execute(&mut **tx)
     .await?;
     Ok(inserted.rows_affected() > 0)
@@ -720,6 +734,7 @@ async fn process_queued_deliveries(
         RETURNING
             delivery.id,
             delivery.rule_id,
+            delivery.actor_id,
             delivery.rule_name,
             delivery.event_kind,
             delivery.event_id,
@@ -738,10 +753,20 @@ async fn process_queued_deliveries(
     let mut outcomes = Vec::new();
     for row in rows {
         let delivery = delivery_from_row(row)?;
-        let result = deliver_webhook(&client, &delivery).await;
+        let result =
+            if actor_authorized(pool, delivery.actor_id, "operator", &["inventory:write"]).await? {
+                deliver_webhook(&client, &delivery).await
+            } else {
+                Err(anyhow::anyhow!("actor_authority_revoked"))
+            };
         let next_attempt_count = delivery.attempt_count.saturating_add(1);
         let (status, error, next_attempt_after_secs) = match result {
             Ok(()) => (WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, None, None),
+            Err(error) if error.to_string() == "actor_authority_revoked" => (
+                WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
+                Some("actor_authority_revoked".to_string()),
+                None,
+            ),
             Err(error) if next_attempt_count >= MAX_DELIVERY_ATTEMPTS => (
                 WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
                 Some(truncate_error(&error.to_string())),
@@ -1078,6 +1103,7 @@ fn delivery_from_row(row: sqlx::postgres::PgRow) -> Result<DeliveryRow> {
     Ok(DeliveryRow {
         id: row.try_get("id")?,
         rule_id: row.try_get("rule_id")?,
+        actor_id: row.try_get("actor_id")?,
         rule_name: row.try_get("rule_name")?,
         event_kind: row.try_get("event_kind")?,
         event_id: row.try_get("event_id")?,
@@ -1179,6 +1205,7 @@ mod tests {
     fn candidate_uses_interval_predicate_and_aggregates_matches() {
         let rule = RuleRow {
             id: Uuid::nil(),
+            actor_id: None,
             name: "edge interval".to_string(),
             expression: "interval.30sec && tag:edge".to_string(),
             target: "https://hooks.example/vpsman".to_string(),

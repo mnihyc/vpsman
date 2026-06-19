@@ -9,6 +9,8 @@ use vpsman_common::{
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
 };
 
+use crate::actor_authority::actor_authorized;
+
 const DEFAULT_WEBHOOK_TIMEOUT_SECS: u64 = 5;
 const MAX_ERROR_BYTES: usize = 1024;
 const MAX_AUDIT_DELIVERY_ROWS: usize = 100;
@@ -54,6 +56,7 @@ pub(crate) struct AlertNotificationWorkerRun {
 #[derive(Clone, Debug)]
 struct DeliveryRow {
     id: Uuid,
+    actor_id: Option<Uuid>,
     channel_id: Uuid,
     channel_name: String,
     alert_id: String,
@@ -125,6 +128,7 @@ async fn process_queued_deliveries(
         WHERE delivery.id = claim.id
         RETURNING
             delivery.id,
+            delivery.actor_id,
             delivery.channel_id,
             delivery.channel_name,
             delivery.alert_id,
@@ -148,9 +152,18 @@ async fn process_queued_deliveries(
     let mut outcomes = Vec::new();
     for row in rows {
         let delivery = delivery_from_row(row)?;
-        let result = deliver_notification(&client, &delivery).await;
+        let result =
+            if actor_authorized(pool, delivery.actor_id, "operator", &["inventory:write"]).await? {
+                deliver_notification(&client, &delivery).await
+            } else {
+                Err(anyhow::anyhow!("actor_authority_revoked"))
+            };
         let (status, error) = match result {
             Ok(()) => (FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED, None),
+            Err(error) if error.to_string() == "actor_authority_revoked" => (
+                FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+                Some("actor_authority_revoked".to_string()),
+            ),
             Err(error) => (
                 FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
                 Some(truncate_error(&error.to_string())),
@@ -375,6 +388,7 @@ fn delivery_from_row(row: sqlx::postgres::PgRow) -> Result<DeliveryRow> {
     let payload: SqlJson<Value> = row.try_get("payload")?;
     Ok(DeliveryRow {
         id: row.try_get("id")?,
+        actor_id: row.try_get("actor_id")?,
         channel_id: row.try_get("channel_id")?,
         channel_name: row.try_get("channel_name")?,
         alert_id: row.try_get("alert_id")?,

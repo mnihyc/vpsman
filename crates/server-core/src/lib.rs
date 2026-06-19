@@ -18,6 +18,15 @@ pub use vpsman_common::{
 pub const STATUS_OUTPUT_MAX_BYTES: usize = 32 * 1024;
 pub const INLINE_OUTPUT_PREVIEW_BYTES: usize = 32 * 1024;
 pub const DIRECT_STDOUT_MAX_BYTES: u64 = MAX_DIRECT_FILE_DOWNLOAD_BYTES;
+pub const SCOPE_FLEET_READ: &str = "fleet:read";
+pub const SCOPE_JOBS_READ: &str = "jobs:read";
+pub const SCOPE_BACKUPS_READ: &str = "backups:read";
+pub const SCOPE_TERMINAL_READ: &str = "terminal:read";
+pub const SCOPE_INTEGRATIONS_READ: &str = "integrations:read";
+pub const SCOPE_TEMPLATES_READ: &str = "templates:read";
+pub const SCOPE_SCHEDULES_READ: &str = "schedules:read";
+pub const SCOPE_CONFIG_READ: &str = "config:read";
+pub const SCOPE_NETWORK_READ: &str = "network:read";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NetworkTargetValidationError {
@@ -59,6 +68,72 @@ pub fn job_command_type_label(command: &JobCommand) -> &'static str {
 
 pub fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> String {
     vpsman_common::scheduled_command_type_label(command, fallback)
+}
+
+pub fn default_operator_scopes(role: &str) -> Vec<String> {
+    match role.trim() {
+        "admin" => vec!["*".to_string()],
+        "operator" => vec![
+            SCOPE_FLEET_READ.to_string(),
+            SCOPE_JOBS_READ.to_string(),
+            SCOPE_BACKUPS_READ.to_string(),
+            SCOPE_TERMINAL_READ.to_string(),
+            SCOPE_INTEGRATIONS_READ.to_string(),
+            SCOPE_TEMPLATES_READ.to_string(),
+            SCOPE_SCHEDULES_READ.to_string(),
+            SCOPE_CONFIG_READ.to_string(),
+            SCOPE_NETWORK_READ.to_string(),
+            "jobs:write".to_string(),
+            "inventory:write".to_string(),
+            "schedules:write".to_string(),
+            "backups:write".to_string(),
+            "network:write".to_string(),
+        ],
+        "viewer" => vec![SCOPE_FLEET_READ.to_string()],
+        _ => Vec::new(),
+    }
+}
+
+pub fn operator_has_scope(scopes: &[String], required: &str) -> bool {
+    scopes.iter().any(|scope| scope == "*" || scope == required)
+}
+
+pub fn role_allows(actual: &str, required: &str) -> bool {
+    match (operator_role_rank(actual), operator_role_rank(required)) {
+        (Some(actual), Some(required)) => actual >= required,
+        _ => false,
+    }
+}
+
+pub fn operator_role_rank(role: &str) -> Option<u8> {
+    match role.trim() {
+        "viewer" => Some(0),
+        "operator" => Some(1),
+        "admin" => Some(2),
+        _ => None,
+    }
+}
+
+pub fn operator_is_active_authorized(
+    status: &str,
+    role: &str,
+    scopes: &[String],
+    required_role: &str,
+    required_scopes: &[&str],
+) -> bool {
+    if status.trim() != "active" || !role_allows(role, required_role) {
+        return false;
+    }
+    let defaulted_scopes;
+    let effective_scopes = if scopes.is_empty() {
+        defaulted_scopes = default_operator_scopes(role);
+        &defaulted_scopes
+    } else {
+        scopes
+    };
+    required_scopes
+        .iter()
+        .all(|scope| operator_has_scope(effective_scopes, scope))
 }
 
 pub fn validate_network_apply_target(
@@ -225,6 +300,44 @@ pub fn target_lacks_restore_capability(
         return false;
     }
     target_lacks_privileged_host_mutation_capability(capabilities)
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::{default_operator_scopes, operator_is_active_authorized};
+
+    #[test]
+    fn active_operator_authority_requires_status_role_and_all_scopes() {
+        let scopes = default_operator_scopes("operator");
+        assert!(operator_is_active_authorized(
+            "active",
+            "operator",
+            &scopes,
+            "operator",
+            &["jobs:write", "schedules:write"],
+        ));
+        assert!(!operator_is_active_authorized(
+            "disabled",
+            "operator",
+            &scopes,
+            "operator",
+            &["jobs:write"],
+        ));
+        assert!(!operator_is_active_authorized(
+            "active",
+            "viewer",
+            &default_operator_scopes("viewer"),
+            "operator",
+            &["jobs:write"],
+        ));
+        assert!(!operator_is_active_authorized(
+            "active",
+            "operator",
+            &["jobs:write".to_string()],
+            "operator",
+            &["jobs:write", "schedules:write"],
+        ));
+    }
 }
 
 pub fn target_lacks_privileged_host_mutation_capability(

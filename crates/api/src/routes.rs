@@ -24,10 +24,9 @@ use crate::{
         abort_backup_artifact_upload_session, commit_backup_artifact_upload_session,
         create_backup_artifact_handoff, create_backup_artifact_upload_session,
         create_backup_policy, create_backup_request, download_backup_artifact,
-        list_backup_artifacts, list_backup_policies, list_backup_requests,
-        prepare_backup_artifact_restore, prune_backup_policies, record_backup_artifact_metadata,
-        upload_backup_artifact, upload_backup_artifact_session_chunk,
-        MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES,
+        list_backup_artifacts, list_backup_policies, list_backup_requests, prune_backup_policies,
+        record_backup_artifact_metadata, upload_backup_artifact,
+        upload_backup_artifact_session_chunk, MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES,
     },
     routes_command_templates::{
         delete_command_template, list_command_templates, upsert_command_template,
@@ -492,11 +491,6 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/backups/{backup_request_id}/artifact",
             get(download_backup_artifact)
                 .post(upload_backup_artifact)
-                .layer(DefaultBodyLimit::max(MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES)),
-        )
-        .route(
-            "/api/v1/backups/{backup_request_id}/artifact/prepare-restore",
-            post(prepare_backup_artifact_restore)
                 .layer(DefaultBodyLimit::max(MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES)),
         )
         .route(

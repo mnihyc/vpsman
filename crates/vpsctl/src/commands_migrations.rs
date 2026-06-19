@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::json;
@@ -59,8 +57,9 @@ pub(crate) fn migration_run(
     api_url: &str,
     token: Option<&str>,
     restore_plan_id: String,
-    artifact_file: Option<PathBuf>,
-    private_key_env: String,
+    archive_path: String,
+    archive_size_bytes: u64,
+    archive_sha256_hex: String,
     note: Option<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -76,8 +75,9 @@ pub(crate) fn migration_run(
         api_url,
         token,
         restore_plan_id,
-        artifact_file,
-        private_key_env,
+        archive_path,
+        archive_size_bytes,
+        archive_sha256_hex,
         note,
         &password,
         &salt_hex,
@@ -94,8 +94,9 @@ pub(crate) fn migration_run_with_credentials(
     api_url: &str,
     token: Option<&str>,
     restore_plan_id: Uuid,
-    artifact_file: Option<PathBuf>,
-    private_key_env: String,
+    archive_path: String,
+    archive_size_bytes: u64,
+    archive_sha256_hex: String,
     note: Option<String>,
     password: &str,
     salt_hex: &str,
@@ -127,8 +128,9 @@ pub(crate) fn migration_run_with_credentials(
         RestoreRunWithCredentials {
             source_backup_request_id: plan.source_backup_request_id,
             target_client_id: plan.target_client_id,
-            artifact_file,
-            private_key_env,
+            archive_path,
+            archive_size_bytes,
+            archive_sha256_hex,
             paths: plan.paths,
             include_config: plan.include_config,
             destination_root: plan.destination_root,

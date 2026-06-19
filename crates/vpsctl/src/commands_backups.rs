@@ -9,12 +9,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use vpsman_common::{encode_inline_file_payload, payload_hash, JobCommand, RestoreRollbackFile};
+use vpsman_common::{JobCommand, RestoreRollbackFile};
 
 use crate::{
     backup_artifact_crypto::{
-        decrypt_backup_artifact, validate_artifact_metadata, validate_artifact_object_key,
-        MAX_BACKUP_ARTIFACT_UPLOAD_BYTES,
+        validate_artifact_metadata, validate_artifact_object_key, MAX_BACKUP_ARTIFACT_UPLOAD_BYTES,
     },
     commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
     http::{http_get, http_post_json},
@@ -24,8 +23,6 @@ use crate::{
         load_super_salt_hex, SchedulePrivilegeRequest,
     },
 };
-
-pub(crate) use crate::backup_artifact_crypto::restore_artifact_bytes;
 
 const DEFAULT_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
@@ -51,8 +48,9 @@ pub(crate) struct BackupPolicyUpsertOptions {
 pub(crate) struct RestoreRunOptions {
     pub(crate) source_backup_request_id: String,
     pub(crate) target_client_id: String,
-    pub(crate) artifact_file: Option<PathBuf>,
-    pub(crate) private_key_env: String,
+    pub(crate) archive_path: String,
+    pub(crate) archive_size_bytes: u64,
+    pub(crate) archive_sha256_hex: String,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) destination_root: Option<String>,
@@ -67,8 +65,9 @@ pub(crate) struct RestoreRunOptions {
 pub(crate) struct RestoreRunWithCredentials<'a> {
     pub(crate) source_backup_request_id: Uuid,
     pub(crate) target_client_id: String,
-    pub(crate) artifact_file: Option<PathBuf>,
-    pub(crate) private_key_env: String,
+    pub(crate) archive_path: String,
+    pub(crate) archive_size_bytes: u64,
+    pub(crate) archive_sha256_hex: String,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) destination_root: Option<String>,
@@ -672,7 +671,6 @@ pub(crate) fn restore_plan(
         include_config,
         destination_root: destination_root.clone(),
         archive_path: None,
-        archive_base64: None,
         archive_size_bytes: None,
         archive_sha256_hex: None,
         dry_run: false,
@@ -732,8 +730,9 @@ pub(crate) fn restore_run(
             RestoreRunWithCredentials {
                 source_backup_request_id,
                 target_client_id: options.target_client_id,
-                artifact_file: options.artifact_file,
-                private_key_env: options.private_key_env,
+                archive_path: options.archive_path,
+                archive_size_bytes: options.archive_size_bytes,
+                archive_sha256_hex: options.archive_sha256_hex,
                 paths: options.paths,
                 include_config: options.include_config,
                 destination_root: options.destination_root,
@@ -755,16 +754,11 @@ pub(crate) fn restore_run_with_credentials(
     request: RestoreRunWithCredentials<'_>,
 ) -> Result<String> {
     anyhow::ensure!(request.confirmed, "restore-run requires --confirmed");
-    let artifact_bytes = restore_artifact_bytes(
-        api_url,
-        token,
-        request.source_backup_request_id,
-        request.artifact_file.as_ref(),
-    )?;
     let operation = restore_run_operation(
         request.source_backup_request_id,
-        &artifact_bytes,
-        &request.private_key_env,
+        request.archive_path,
+        request.archive_size_bytes,
+        request.archive_sha256_hex,
         request.paths,
         request.include_config,
         request.destination_root,
@@ -929,8 +923,9 @@ fn restore_rollback_operation_from_outputs(
 
 pub(crate) fn restore_run_operation(
     source_backup_request_id: Uuid,
-    artifact_bytes: &[u8],
-    private_key_env: &str,
+    archive_path: String,
+    archive_size_bytes: u64,
+    archive_sha256_hex: String,
     paths: Vec<String>,
     include_config: bool,
     destination_root: Option<String>,
@@ -964,20 +959,36 @@ pub(crate) fn restore_run_operation(
         !include_config || destination_root.is_some(),
         "restore-run --include-config requires --destination-root for safety"
     );
-    let private_key_hex = std::env::var(private_key_env)
-        .with_context(|| format!("environment variable {private_key_env} is not set"))?;
-    let archive_bytes = decrypt_backup_artifact(artifact_bytes, &private_key_hex)?;
-    let archive_base64 = encode_inline_file_payload(&archive_bytes)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let archive_sha256_hex = payload_hash(&archive_bytes);
+    anyhow::ensure!(
+        archive_path.starts_with('/'),
+        "restore archive path must be absolute"
+    );
+    anyhow::ensure!(
+        !archive_path
+            .split('/')
+            .any(|segment| segment == "." || segment == ".."),
+        "restore archive path must not contain . or .. segments"
+    );
+    anyhow::ensure!(
+        archive_size_bytes > 0,
+        "restore archive size must be positive"
+    );
+    let archive_sha256_hex = archive_sha256_hex.trim().to_ascii_lowercase();
+    anyhow::ensure!(
+        archive_sha256_hex.len() == 64
+            && archive_sha256_hex
+                .as_bytes()
+                .iter()
+                .all(u8::is_ascii_hexdigit),
+        "restore archive SHA-256 must be 64 hex characters"
+    );
     Ok(JobCommand::Restore {
         source_backup_request_id,
         paths,
         include_config,
         destination_root,
-        archive_path: None,
-        archive_base64: Some(archive_base64),
-        archive_size_bytes: Some(archive_bytes.len() as u64),
+        archive_path: Some(archive_path),
+        archive_size_bytes: Some(archive_size_bytes),
         archive_sha256_hex: Some(archive_sha256_hex),
         dry_run: false,
         post_restore_argv: Vec::new(),

@@ -163,6 +163,9 @@ restore job are created together:
 ```sh
 cargo run -p vpsctl -- migration-run \
   --restore-plan-id <restore_plan_uuid> \
+  --archive-path /var/lib/vpsman/restores/backup.tar \
+  --archive-size-bytes <archive_size_bytes> \
+  --archive-sha256-hex <archive_sha256_hex> \
   --confirmed
 ```
 

@@ -2,7 +2,6 @@ use std::{net::SocketAddr, path::PathBuf};
 
 mod auth_model;
 mod auth_totp;
-mod backup_artifact_crypto;
 mod backup_auto_artifacts;
 mod backup_handoff;
 mod backup_upload_sessions;

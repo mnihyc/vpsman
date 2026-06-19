@@ -1,11 +1,12 @@
 # Tutorial 07: Backup, Restore, And Migration
 
 Backups and restores are privilege-gated workflows. Backup private key material
-stays local to the operator or browser. The API stores encrypted artifact
-metadata and local-disk object-store bytes by default. S3/MinIO-compatible
-object storage is implemented as an optional adapter for deployments that need
-remote backup or update artifact storage, and is covered by adapter-specific
-smokes.
+stays outside the API restore path; operators stage a verified archive on the
+target agent before dispatching restore or migration restore jobs. The API
+stores encrypted artifact metadata and local-disk object-store bytes by default.
+S3/MinIO-compatible object storage is implemented as an optional adapter for
+deployments that need remote backup or update artifact storage, and is covered
+by adapter-specific smokes.
 
 ## Schedule Backup Policies
 
@@ -152,8 +153,8 @@ cargo run -p vpsctl -- backup-artifact-upload-chunked \
   --confirmed
 ```
 
-Stored artifact upload, download, and restore-preparation paths share the same
-configured API artifact envelope. The default maximum is 128 MiB; set
+Stored artifact upload and download paths share the same configured API
+artifact envelope. The default maximum is 128 MiB; set
 `api.artifact_max_bytes` in the suite config or `VPSMAN_ARTIFACT_MAX_BYTES` in
 the API environment to change it. Values are clamped between 1 MiB and 4 GiB.
 `api.job_output_artifact_min_bytes` remains only the threshold for externalizing
@@ -180,24 +181,17 @@ cargo run -p vpsctl -- restore-plan \
   --confirmed
 ```
 
-Restore from a local encrypted artifact:
+Restore from an operator-staged archive file that already exists on the target
+agent. The restore request sends only the archive path, exact byte length, and
+SHA-256; the API and dashboard do not accept a private key or restore payload:
 
 ```sh
 cargo run -p vpsctl -- restore-run \
   --source-backup-request-id <backup_request_uuid> \
   --target-client-id edge-b \
-  --artifact-file ./artifact.json \
-  --paths /etc/hostname \
-  --destination-root /restore \
-  --confirmed
-```
-
-Restore from the linked stored artifact:
-
-```sh
-cargo run -p vpsctl -- restore-run \
-  --source-backup-request-id <backup_request_uuid> \
-  --target-client-id edge-b \
+  --archive-path /var/lib/vpsman/restores/backup.tar \
+  --archive-size-bytes <archive_size_bytes> \
+  --archive-sha256-hex <archive_sha256_hex> \
   --paths /etc/hostname \
   --destination-root /restore \
   --confirmed
@@ -226,24 +220,16 @@ restore plan:
 ```sh
 cargo run -p vpsctl -- migration-run \
   --restore-plan-id <restore_plan_uuid> \
+  --archive-path /var/lib/vpsman/restores/backup.tar \
+  --archive-size-bytes <archive_size_bytes> \
+  --archive-sha256-hex <archive_sha256_hex> \
   --confirmed
 ```
 
-Use `--artifact-file` when the encrypted artifact is local instead of linked
-from the backup object store:
-
-```sh
-cargo run -p vpsctl -- migration-run \
-  --restore-plan-id <restore_plan_uuid> \
-  --artifact-file ./artifact.json \
-  --private-key-env VPSMAN_BACKUP_PRIVATE_KEY_HEX \
-  --confirmed
-```
-
-The command loads the restore plan, creates the migration link, decrypts the
-artifact locally, and dispatches the restore command with a request-bound
-privilege assertion. The API does not receive the backup private key or
-plaintext super password.
+The command loads the restore plan, creates the migration link, and dispatches
+the restore command with a request-bound privilege assertion. The API does not
+receive the backup private key, plaintext archive bytes, or plaintext super
+password.
 
 Use `migration-link` only when you need metadata linkage without running a
 restore:

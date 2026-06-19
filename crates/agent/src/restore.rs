@@ -10,8 +10,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Serialize;
 use tokio::time::{self, Duration};
 use vpsman_common::{
-    decode_inline_file_payload, payload_hash, validate_absolute_file_path, validate_file_mode,
-    CommandOutput, OutputStream,
+    payload_hash, validate_absolute_file_path, validate_file_mode, CommandOutput, OutputStream,
 };
 
 use crate::backup::{
@@ -81,7 +80,6 @@ pub(crate) struct RestoreCommandInput<'a> {
     pub(crate) include_config: bool,
     pub(crate) destination_root: Option<&'a str>,
     pub(crate) archive_path: Option<&'a str>,
-    pub(crate) archive_base64: Option<&'a str>,
     pub(crate) archive_size_bytes: Option<u64>,
     pub(crate) archive_sha256_hex: Option<&'a str>,
     pub(crate) dry_run: bool,
@@ -109,7 +107,6 @@ async fn restore_archive(
         include_config,
         destination_root,
         archive_path,
-        archive_base64,
         archive_size_bytes,
         archive_sha256_hex,
         dry_run,
@@ -122,13 +119,8 @@ async fn restore_archive(
     validate_post_restore_argv(post_restore_argv)?;
     ensure_restore_deadline(deadline)?;
     cancel_token.check("restore")?;
-    let archive_bytes = archive_bytes_from_source(
-        archive_path,
-        archive_base64,
-        archive_size_bytes,
-        archive_sha256_hex,
-    )
-    .await?;
+    let archive_bytes =
+        archive_bytes_from_source(archive_path, archive_size_bytes, archive_sha256_hex).await?;
     cancel_token.check("restore")?;
     let archive = decode_backup_archive(&archive_bytes)?;
     cancel_token.check("restore")?;
@@ -259,40 +251,25 @@ fn ensure_restore_deadline(deadline: time::Instant) -> Result<()> {
 
 async fn archive_bytes_from_source(
     archive_path: Option<&str>,
-    archive_base64: Option<&str>,
     archive_size_bytes: Option<u64>,
     archive_sha256_hex: Option<&str>,
 ) -> Result<Vec<u8>> {
-    match archive_path {
-        Some(path) => {
-            validate_safe_absolute_path(path)?;
-            let bytes = tokio::fs::read(path)
-                .await
-                .with_context(|| format!("failed to read restore archive {path}"))?;
-            if let Some(expected_size) = archive_size_bytes {
-                anyhow::ensure!(
-                    bytes.len() as u64 == expected_size,
-                    "restore archive size mismatch"
-                );
-            }
-            if let Some(expected_sha256_hex) = archive_sha256_hex {
-                anyhow::ensure!(
-                    payload_hash(&bytes) == expected_sha256_hex,
-                    "restore archive sha256 mismatch"
-                );
-            }
-            Ok(bytes)
-        }
-        None => {
-            let archive_base64 = archive_base64.context("restore archive is required")?;
-            let archive_size_bytes =
-                archive_size_bytes.context("restore archive size is required")?;
-            let archive_sha256_hex =
-                archive_sha256_hex.context("restore archive sha256 is required")?;
-            decode_inline_file_payload(archive_base64, archive_size_bytes, archive_sha256_hex)
-                .map_err(|error| anyhow::anyhow!(error.to_string()))
-        }
-    }
+    let path = archive_path.context("restore archive path is required")?;
+    validate_safe_absolute_path(path)?;
+    let expected_size = archive_size_bytes.context("restore archive size is required")?;
+    let expected_sha256_hex = archive_sha256_hex.context("restore archive sha256 is required")?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("failed to read restore archive {path}"))?;
+    anyhow::ensure!(
+        bytes.len() as u64 == expected_size,
+        "restore archive size mismatch"
+    );
+    anyhow::ensure!(
+        payload_hash(&bytes) == expected_sha256_hex,
+        "restore archive sha256 mismatch"
+    );
+    Ok(bytes)
 }
 
 fn decode_backup_archive(bytes: &[u8]) -> Result<DecodedBackupArchive> {
@@ -720,7 +697,6 @@ fn relative_from_absolute(path: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
     #[tokio::test]
     async fn restores_selected_path_and_config_under_destination_root_with_rollback() {
@@ -750,7 +726,10 @@ mod tests {
             ),
         ]);
         let paths = vec!["/tmp/source.txt".to_string()];
-        let archive_base64 = BASE64_STANDARD.encode(&archive_bytes);
+        let archive_path = root.join("archive.tar");
+        tokio::fs::write(&archive_path, &archive_bytes)
+            .await
+            .unwrap();
         let archive_sha256_hex = payload_hash(&archive_bytes);
         let outputs = execute_restore_command(RestoreCommandInput {
             job_id,
@@ -758,8 +737,7 @@ mod tests {
             paths: &paths,
             include_config: true,
             destination_root: Some(destination_root.to_str().unwrap()),
-            archive_path: None,
-            archive_base64: Some(&archive_base64),
+            archive_path: Some(archive_path.to_str().unwrap()),
             archive_size_bytes: Some(archive_bytes.len() as u64),
             archive_sha256_hex: Some(&archive_sha256_hex),
             dry_run: false,
@@ -801,7 +779,6 @@ mod tests {
             include_config: false,
             destination_root: Some("/tmp/restore"),
             archive_path: None,
-            archive_base64: None,
             archive_size_bytes: None,
             archive_sha256_hex: None,
             dry_run: false,
@@ -811,7 +788,9 @@ mod tests {
         })
         .await
         .unwrap_err();
-        assert!(missing.to_string().contains("restore archive is required"));
+        assert!(missing
+            .to_string()
+            .contains("restore archive path is required"));
 
         let unsafe_paths = vec!["/tmp/../source.txt".to_string()];
         let bad_hash = "0".repeat(64);
@@ -822,7 +801,6 @@ mod tests {
             include_config: false,
             destination_root: Some("/tmp/restore"),
             archive_path: None,
-            archive_base64: Some(""),
             archive_size_bytes: Some(0),
             archive_sha256_hex: Some(&bad_hash),
             dry_run: false,
@@ -881,7 +859,10 @@ mod tests {
             "/tmp/created.txt".to_string(),
             "/tmp/broken.txt".to_string(),
         ];
-        let archive_base64 = BASE64_STANDARD.encode(&archive_bytes);
+        let archive_path = root.join("archive.tar");
+        tokio::fs::write(&archive_path, &archive_bytes)
+            .await
+            .unwrap();
         let archive_sha256_hex = payload_hash(&archive_bytes);
         let error = execute_restore_command(RestoreCommandInput {
             job_id,
@@ -889,8 +870,7 @@ mod tests {
             paths: &paths,
             include_config: false,
             destination_root: Some(destination_root.to_str().unwrap()),
-            archive_path: None,
-            archive_base64: Some(&archive_base64),
+            archive_path: Some(archive_path.to_str().unwrap()),
             archive_size_bytes: Some(archive_bytes.len() as u64),
             archive_sha256_hex: Some(&archive_sha256_hex),
             dry_run: false,

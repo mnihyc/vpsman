@@ -15,8 +15,6 @@ import type {
   CreateMigrationLinkRequest,
   CreateRestorePlanRequest,
   MigrationLinkRecord,
-  PrepareBackupArtifactRestoreRequest,
-  PreparedBackupArtifactRestoreRecord,
   RestorePlanRecord,
   UploadBackupArtifactRequest,
 } from "../types";
@@ -217,24 +215,6 @@ export function useBackupsData(
     [apiToken, onUnauthorized],
   );
 
-  const prepareBackupArtifactRestore = useCallback(
-    async (backupRequestId: string, request: PrepareBackupArtifactRestoreRequest) => {
-      try {
-        return await apiPost<PreparedBackupArtifactRestoreRecord>(
-          `/api/v1/backups/${backupRequestId}/artifact/prepare-restore`,
-          apiToken,
-          request,
-        );
-      } catch (error) {
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-        }
-        throw error;
-      }
-    },
-    [apiToken, onUnauthorized],
-  );
-
   return {
     backups,
     backupPolicies,
@@ -249,7 +229,6 @@ export function useBackupsData(
     createRestorePlan,
     downloadBackupArtifact,
     handoffBackupArtifact,
-    prepareBackupArtifactRestore,
     pruneBackupPolicies,
     uploadBackupArtifact,
     uploadBackupArtifactChunked,

@@ -3,8 +3,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 use vpsman_common::{
-    encode_inline_file_payload, payload_hash, AgentCapabilitySnapshot, AgentHello,
-    AgentPrivilegeMode, JobCommand, RestoreRollbackFile,
+    AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, JobCommand, RestoreRollbackFile,
 };
 
 use crate::{
@@ -38,7 +37,7 @@ async fn wait_for_job_status(
 }
 
 #[test]
-fn restore_job_validation_requires_safe_inline_archive() {
+fn restore_job_validation_requires_safe_agent_local_archive() {
     let source_backup_request_id = Uuid::new_v4();
     let missing_archive = JobCommand::Restore {
         source_backup_request_id,
@@ -46,7 +45,6 @@ fn restore_job_validation_requires_safe_inline_archive() {
         include_config: false,
         destination_root: Some("/restore".to_string()),
         archive_path: None,
-        archive_base64: None,
         archive_size_bytes: None,
         archive_sha256_hex: None,
         dry_run: false,
@@ -54,19 +52,19 @@ fn restore_job_validation_requires_safe_inline_archive() {
     };
     assert_eq!(
         validate_job_command(&missing_archive).unwrap_err().code,
-        "restore_archive_required"
+        "restore_archive_path_required"
     );
 
-    let archive_bytes = br#"{"format":"vpsman.backup_archive.v1","files":[]}"#;
     let valid = JobCommand::Restore {
         source_backup_request_id,
         paths: vec!["/tmp/source.txt".to_string()],
         include_config: false,
         destination_root: Some("/restore".to_string()),
-        archive_path: None,
-        archive_base64: Some(encode_inline_file_payload(archive_bytes).unwrap()),
-        archive_size_bytes: Some(archive_bytes.len() as u64),
-        archive_sha256_hex: Some(payload_hash(archive_bytes)),
+        archive_path: Some("/var/lib/vpsman/restore/archive.tar".to_string()),
+        archive_size_bytes: Some(42),
+        archive_sha256_hex: Some(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        ),
         dry_run: false,
         post_restore_argv: Vec::new(),
     };
@@ -77,10 +75,11 @@ fn restore_job_validation_requires_safe_inline_archive() {
         paths: vec!["/tmp/../source.txt".to_string()],
         include_config: false,
         destination_root: Some("/restore".to_string()),
-        archive_path: None,
-        archive_base64: Some(encode_inline_file_payload(archive_bytes).unwrap()),
-        archive_size_bytes: Some(archive_bytes.len() as u64),
-        archive_sha256_hex: Some(payload_hash(archive_bytes)),
+        archive_path: Some("/var/lib/vpsman/restore/archive.tar".to_string()),
+        archive_size_bytes: Some(42),
+        archive_sha256_hex: Some(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        ),
         dry_run: false,
         post_restore_argv: Vec::new(),
     };

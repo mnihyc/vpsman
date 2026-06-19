@@ -1787,7 +1787,6 @@ export type JobOperation =
       paths: string[];
       include_config: boolean;
       destination_root: string | null;
-      archive_base64?: string | null;
       archive_path?: string | null;
       archive_size_bytes?: number | null;
       archive_sha256_hex?: string | null;
@@ -2048,20 +2047,6 @@ export type BackupArtifactHandoffRecord = {
   source_job_id: string;
   source_chunk_count: number;
   source: string;
-};
-
-export type PrepareBackupArtifactRestoreRequest = {
-  private_key_hex: string;
-  artifact_base64?: string | null;
-};
-
-export type PreparedBackupArtifactRestoreRecord = {
-  archive_base64: string;
-  archive_sha256_hex: string;
-  archive_size_bytes: number;
-  artifact_client_id: string;
-  file_count: number;
-  archive_format: string;
 };
 
 export type RestorePlanRecord = {

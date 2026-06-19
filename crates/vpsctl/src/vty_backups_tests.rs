@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use uuid::Uuid;
 
 use crate::vty_backups::{
@@ -153,9 +151,11 @@ fn parses_vty_restore_run_for_single_target_execution() {
     let request = parse_vty_restore_run(&[
         &source,
         "client-b",
-        "--artifact-file",
-        "./artifact.json",
-        "--private-key-env=BACKUP_KEY",
+        "--archive-path",
+        "/var/lib/vpsman/restores/archive.tar",
+        "--archive-size-bytes=2048",
+        "--archive-sha256-hex",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "--path",
         "/etc/hostname",
         "--include-config",
@@ -168,11 +168,12 @@ fn parses_vty_restore_run_for_single_target_execution() {
 
     assert_eq!(request.source_backup_request_id.to_string(), source);
     assert_eq!(request.target_client_id, "client-b");
+    assert_eq!(request.archive_path, "/var/lib/vpsman/restores/archive.tar");
+    assert_eq!(request.archive_size_bytes, 2048);
     assert_eq!(
-        request.artifact_file,
-        Some(PathBuf::from("./artifact.json"))
+        request.archive_sha256_hex,
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     );
-    assert_eq!(request.private_key_env, "BACKUP_KEY");
     assert_eq!(request.paths, vec!["/etc/hostname"]);
     assert!(request.include_config);
     assert_eq!(request.destination_root.as_deref(), Some("/restore"));
@@ -182,9 +183,9 @@ fn parses_vty_restore_run_for_single_target_execution() {
 }
 
 #[test]
-fn parses_vty_restore_run_without_local_artifact_file() {
+fn rejects_vty_restore_run_without_agent_archive_metadata() {
     let source = Uuid::new_v4().to_string();
-    let request = parse_vty_restore_run(&[
+    assert!(parse_vty_restore_run(&[
         &source,
         "client-b",
         "--path",
@@ -193,14 +194,7 @@ fn parses_vty_restore_run_without_local_artifact_file() {
         "/restore",
         "--confirmed",
     ])
-    .unwrap();
-
-    assert_eq!(request.source_backup_request_id.to_string(), source);
-    assert_eq!(request.target_client_id, "client-b");
-    assert_eq!(request.artifact_file, None);
-    assert_eq!(request.paths, vec!["/etc/hostname"]);
-    assert_eq!(request.destination_root.as_deref(), Some("/restore"));
-    assert!(request.confirmed);
+    .is_err());
 }
 
 #[test]

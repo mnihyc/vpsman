@@ -1,6 +1,6 @@
 import { CheckCircle2, CircleDashed, TriangleAlert } from "lucide-react";
 import { restorePlanStatusBadgeClass } from "../../jobStatusPresentation";
-import type { BackupRequestRecord, MigrationLinkRecord, RestorePlanRecord } from "../../types";
+import type { MigrationLinkRecord, RestorePlanRecord } from "../../types";
 import { shortId } from "../../utils";
 
 type MigrationLinkFormProps = {
@@ -11,15 +11,15 @@ type MigrationLinkFormProps = {
   pending: boolean;
   privilegeReady: boolean;
   archivePath: string;
+  archiveSizeBytes: string;
+  archiveSha256Hex: string;
   clientLabel: (clientId: string) => string;
   forceUnprivileged: boolean;
   lastMigrationLink: MigrationLinkRecord | null;
   postRestoreArgv: string;
-  privateKeyReady: boolean;
   restoreDryRun: boolean;
   restorePlans: RestorePlanRecord[];
   selectedPlan: RestorePlanRecord | null;
-  sourceBackup: BackupRequestRecord | null;
   onMigrationNoteChange: (value: string) => void;
   onMigrationRestorePlanIdChange: (value: string) => void;
   onRunMigrationRestore: () => void;
@@ -34,22 +34,25 @@ export function MigrationLinkForm({
   pending,
   privilegeReady,
   archivePath,
+  archiveSizeBytes,
+  archiveSha256Hex,
   clientLabel,
   forceUnprivileged,
   lastMigrationLink,
   postRestoreArgv,
-  privateKeyReady,
   restoreDryRun,
   restorePlans,
   selectedPlan,
-  sourceBackup,
   onMigrationNoteChange,
   onMigrationRestorePlanIdChange,
   onRunMigrationRestore,
   onSubmit,
 }: MigrationLinkFormProps) {
-  const artifactReady = Boolean(sourceBackup?.artifact_id || archivePath.trim());
-  const decryptReady = Boolean(archivePath.trim() || privateKeyReady);
+  const archiveReady = Boolean(
+    archivePath.trim() &&
+      archiveSizeBytes.trim() &&
+      /^[0-9a-fA-F]{64}$/.test(archiveSha256Hex.trim()),
+  );
   const checklist = [
     {
       label: "Restore plan",
@@ -60,23 +63,11 @@ export function MigrationLinkForm({
       required: true,
     },
     {
-      label: "Artifact source",
-      detail: archivePath.trim()
-        ? "Agent-local archive path selected"
-        : sourceBackup?.artifact_id
-        ? `Recorded artifact ${shortId(sourceBackup.artifact_id)}`
-        : "Upload or hand off an artifact, or use an agent-local archive path",
-      ready: artifactReady,
-      required: true,
-    },
-    {
-      label: "Decrypt key",
-      detail: archivePath.trim()
-        ? "Not needed for agent-local archive path"
-        : privateKeyReady
-        ? "Private key present in browser memory"
-        : "Enter the backup private key before restoring a stored artifact",
-      ready: decryptReady,
+      label: "Archive metadata",
+      detail: archiveReady
+        ? "Agent-local archive path, size, and SHA-256 ready"
+        : "Set the agent-local archive path, size, and SHA-256",
+      ready: archiveReady,
       required: true,
     },
     {
@@ -190,7 +181,7 @@ export function MigrationLinkForm({
         {!runConfirmationOpen && (
           <button
             className="secondaryAction"
-            disabled={pending || !migrationRestorePlanId || !privilegeReady || !artifactReady || !decryptReady}
+            disabled={pending || !migrationRestorePlanId || !privilegeReady || !archiveReady}
             onClick={onRunMigrationRestore}
             type="button"
           >

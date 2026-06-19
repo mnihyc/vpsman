@@ -12,6 +12,7 @@ use vpsman_common::{
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_MATCHED_DRY_RUN,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED,
 };
+use vpsman_server_core::operator_is_active_authorized;
 
 use crate::{
     fleet_alerts::{build_agent_alert_scopes, AgentAlertScope},
@@ -105,9 +106,20 @@ impl AppState {
                 processed.push(dry_run_process_delivery(&delivery));
                 continue;
             }
-            let result = deliver_notification(&client, &delivery).await;
+            let result = if self
+                .fleet_alert_delivery_actor_authorized(delivery.actor_id)
+                .await?
+            {
+                deliver_notification(&client, &delivery).await
+            } else {
+                Err(anyhow::anyhow!("actor_authority_revoked"))
+            };
             let (status, error) = match result {
                 Ok(()) => (FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED, None),
+                Err(error) if error.to_string() == "actor_authority_revoked" => (
+                    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+                    Some("actor_authority_revoked".to_string()),
+                ),
                 Err(error) => (
                     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
                     Some(error.to_string()),
@@ -129,6 +141,22 @@ impl AppState {
                 .await?;
         }
         Ok(processed)
+    }
+
+    async fn fleet_alert_delivery_actor_authorized(&self, actor_id: Option<Uuid>) -> Result<bool> {
+        let Some(actor_id) = actor_id.filter(|id| !id.is_nil()) else {
+            return Ok(false);
+        };
+        let Some(operator) = self.repo.operator_by_id(actor_id).await? else {
+            return Ok(false);
+        };
+        Ok(operator_is_active_authorized(
+            &operator.status,
+            &operator.role,
+            &operator.scopes,
+            "operator",
+            &["inventory:write"],
+        ))
     }
 }
 

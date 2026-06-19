@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use serde_json::json;
 use uuid::Uuid;
@@ -17,8 +15,9 @@ pub(crate) struct VtyMigrationLinkRequest {
 
 pub(crate) struct VtyMigrationRunRequest {
     pub(crate) restore_plan_id: Uuid,
-    pub(crate) artifact_file: Option<PathBuf>,
-    pub(crate) private_key_env: String,
+    pub(crate) archive_path: String,
+    pub(crate) archive_size_bytes: u64,
+    pub(crate) archive_sha256_hex: String,
     pub(crate) note: Option<String>,
     pub(crate) timeout_secs: u64,
     pub(crate) confirmed: bool,
@@ -60,11 +59,12 @@ pub(crate) fn parse_vty_migration_link(tokens: &[&str]) -> Result<VtyMigrationLi
 pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRunRequest> {
     let restore_plan_id = tokens
         .first()
-        .context("usage: migration-run <restore_plan_uuid> [--artifact-file <path>] [--private-key-env <env>] [--note <text>] [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
+        .context("usage: migration-run <restore_plan_uuid> --archive-path <abs> --archive-size-bytes <bytes> --archive-sha256-hex <sha256> [--note <text>] [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
     let mut request = VtyMigrationRunRequest {
         restore_plan_id: Uuid::parse_str(restore_plan_id).context("invalid restore plan UUID")?,
-        artifact_file: None,
-        private_key_env: "VPSMAN_BACKUP_PRIVATE_KEY_HEX".to_string(),
+        archive_path: String::new(),
+        archive_size_bytes: 0,
+        archive_sha256_hex: String::new(),
         note: None,
         timeout_secs: 60,
         confirmed: false,
@@ -73,18 +73,25 @@ pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRun
     let mut index = 1;
     while index < tokens.len() {
         match tokens[index] {
-            "--artifact-file" => {
-                request.artifact_file = Some(PathBuf::from(
-                    tokens
-                        .get(index + 1)
-                        .context("migration-run --artifact-file requires a value")?,
-                ));
+            "--archive-path" => {
+                request.archive_path = tokens
+                    .get(index + 1)
+                    .context("migration-run --archive-path requires a value")?
+                    .to_string();
                 index += 2;
             }
-            "--private-key-env" => {
-                request.private_key_env = tokens
+            "--archive-size-bytes" => {
+                request.archive_size_bytes = tokens
                     .get(index + 1)
-                    .context("migration-run --private-key-env requires a value")?
+                    .context("migration-run --archive-size-bytes requires a value")?
+                    .parse()
+                    .context("invalid migration-run --archive-size-bytes")?;
+                index += 2;
+            }
+            "--archive-sha256-hex" => {
+                request.archive_sha256_hex = tokens
+                    .get(index + 1)
+                    .context("migration-run --archive-sha256-hex requires a value")?
                     .to_string();
                 index += 2;
             }
@@ -120,6 +127,18 @@ pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRun
         (1..=3600).contains(&request.timeout_secs),
         "migration-run timeout out of range"
     );
+    anyhow::ensure!(
+        !request.archive_path.trim().is_empty(),
+        "migration-run requires --archive-path"
+    );
+    anyhow::ensure!(
+        request.archive_size_bytes > 0,
+        "migration-run requires --archive-size-bytes"
+    );
+    anyhow::ensure!(
+        !request.archive_sha256_hex.trim().is_empty(),
+        "migration-run requires --archive-sha256-hex"
+    );
     anyhow::ensure!(request.confirmed, "migration-run requires --confirmed");
     Ok(request)
 }
@@ -147,8 +166,9 @@ pub(crate) fn submit_vty_migration_run(
         api_url,
         token,
         request.restore_plan_id,
-        request.artifact_file,
-        request.private_key_env,
+        request.archive_path,
+        request.archive_size_bytes,
+        request.archive_sha256_hex,
         request.note,
         &privilege_context.password,
         &privilege_context.salt_hex,
@@ -161,8 +181,6 @@ pub(crate) fn submit_vty_migration_run(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::{parse_vty_migration_link, parse_vty_migration_run};
 
     #[test]
@@ -191,10 +209,12 @@ mod tests {
     fn parses_vty_migration_run() {
         let request = parse_vty_migration_run(&[
             "49c7c3ea-0da8-40b6-b380-5543b1eb3adb",
-            "--artifact-file",
-            "/tmp/backup.json",
-            "--private-key-env",
-            "RESTORE_KEY",
+            "--archive-path",
+            "/var/lib/vpsman/restores/backup.tar",
+            "--archive-size-bytes",
+            "2048",
+            "--archive-sha256-hex",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "--note",
             "cutover",
             "--timeout",
@@ -207,11 +227,12 @@ mod tests {
             request.restore_plan_id.to_string(),
             "49c7c3ea-0da8-40b6-b380-5543b1eb3adb"
         );
+        assert_eq!(request.archive_path, "/var/lib/vpsman/restores/backup.tar");
+        assert_eq!(request.archive_size_bytes, 2048);
         assert_eq!(
-            request.artifact_file.unwrap(),
-            PathBuf::from("/tmp/backup.json")
+            request.archive_sha256_hex,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
-        assert_eq!(request.private_key_env, "RESTORE_KEY");
         assert_eq!(request.note.as_deref(), Some("cutover"));
         assert_eq!(request.timeout_secs, 120);
         assert!(request.force_unprivileged);

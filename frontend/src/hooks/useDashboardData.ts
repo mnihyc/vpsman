@@ -364,7 +364,6 @@ export function useDashboardData(activeView: ActiveView) {
     createRestorePlan: backups.createRestorePlan,
     downloadBackupArtifact: backups.downloadBackupArtifact,
     handoffBackupArtifact: backups.handoffBackupArtifact,
-    prepareBackupArtifactRestore: backups.prepareBackupArtifactRestore,
     pruneBackupPolicies: backups.pruneBackupPolicies,
     uploadBackupArtifact: backups.uploadBackupArtifact,
     uploadBackupArtifactChunked: backups.uploadBackupArtifactChunked,

@@ -2609,7 +2609,6 @@ pub enum JobCommand {
         destination_root: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         archive_path: Option<String>,
-        archive_base64: Option<String>,
         archive_size_bytes: Option<u64>,
         archive_sha256_hex: Option<String>,
         #[serde(default, skip_serializing_if = "is_false")]

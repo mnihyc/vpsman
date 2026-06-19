@@ -1,7 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   backupId,
-  buildEncryptedBackupArtifactFixture,
   installConsoleApiMock,
 } from "./support/consoleLayoutFixtures";
 import {
@@ -556,11 +555,10 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     testInfo.project.name.includes("mobile"),
     "backup restore consistency is covered in desktop workflow tests",
   );
-  const privateKeyHex = "07".repeat(32);
-  const fixture = buildEncryptedBackupArtifactFixture(
-    privateKeyHex,
-    "agent-sfo-01",
-  );
+  const archivePath = "/var/lib/vpsman/restores/agent-sfo-01.tar";
+  const archiveSizeBytes = 4096;
+  const archiveSha256Hex =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
   await installConsoleApiMock(page);
   await page.goto("/");
@@ -613,14 +611,15 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     target_client_id: "agent-fra-02",
   });
 
-  await restoreWorkflow.getByLabel("Restore artifact file").setInputFiles({
-    buffer: Buffer.from(JSON.stringify(fixture.artifact)),
-    mimeType: "application/json",
-    name: "backup-artifact.json",
-  });
   await restoreWorkflow
-    .getByLabel("Backup private key hex")
-    .fill(privateKeyHex);
+    .getByLabel("Agent-local restore archive path")
+    .fill(archivePath);
+  await restoreWorkflow
+    .getByLabel("Agent-local restore archive size bytes")
+    .fill(String(archiveSizeBytes));
+  await restoreWorkflow
+    .getByLabel("Agent-local restore archive SHA-256")
+    .fill(archiveSha256Hex);
   await restoreWorkflow.getByLabel("Restore timeout seconds").fill("120");
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review restore" }),
@@ -644,20 +643,6 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
       .getByRole("button", { name: "Run restore" }),
   );
 
-  const prepareRequest = await page.evaluate(() => {
-    const requests = (
-      window as unknown as {
-        __vpsmanTestRequests: { backupArtifactRestorePreparations: unknown[] };
-      }
-    ).__vpsmanTestRequests;
-    return requests.backupArtifactRestorePreparations.at(-1);
-  });
-  expect(prepareRequest).toMatchObject({
-    artifact_base64: Buffer.from(JSON.stringify(fixture.artifact)).toString(
-      "base64",
-    ),
-    private_key_hex: privateKeyHex,
-  });
   const request = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
@@ -670,7 +655,9 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     target_client_ids: ["agent-fra-02"],
     timeout_secs: 45,
     operation: {
-      archive_sha256_hex: fixture.archiveSha256Hex,
+      archive_path: archivePath,
+      archive_sha256_hex: archiveSha256Hex,
+      archive_size_bytes: archiveSizeBytes,
       destination_root: "/restore-b",
       source_backup_request_id: backupId,
       type: "restore",

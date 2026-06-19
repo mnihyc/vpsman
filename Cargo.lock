@@ -3053,11 +3053,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
- "chacha20poly1305",
  "clap",
  "hex",
  "libc",
- "lz4_flex",
  "rand 0.8.6",
  "rustls",
  "rustls-pki-types",
@@ -3065,13 +3063,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tar",
  "toml",
  "uuid",
  "vpsman-build-support",
  "vpsman-common",
  "webpki-roots 1.0.7",
- "x25519-dalek",
 ]
 
 [[package]]
@@ -3118,7 +3114,6 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
- "lz4_flex",
  "rand 0.8.6",
  "reqwest",
  "serde",
@@ -3136,7 +3131,6 @@ dependencies = [
  "vpsman-object-store",
  "vpsman-server-build-info",
  "vpsman-server-core",
- "x25519-dalek",
 ]
 
 [[package]]

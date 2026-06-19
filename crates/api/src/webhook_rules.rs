@@ -7,6 +7,7 @@ use vpsman_common::{
     render_template_with_limit, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
 };
+use vpsman_server_core::operator_is_active_authorized;
 
 use crate::{
     model::{AgentView, AuthContext},
@@ -177,9 +178,20 @@ impl AppState {
                 processed.push(delivery);
                 continue;
             }
-            let result = deliver_webhook_rule(&client, &delivery).await;
+            let result = if self
+                .webhook_delivery_actor_authorized(delivery.actor_id)
+                .await?
+            {
+                deliver_webhook_rule(&client, &delivery).await
+            } else {
+                Err(anyhow::anyhow!("actor_authority_revoked"))
+            };
             let (status, error) = match result {
                 Ok(()) => (WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, None),
+                Err(error) if error.to_string() == "actor_authority_revoked" => (
+                    vpsman_common::WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
+                    Some("actor_authority_revoked".to_string()),
+                ),
                 Err(error) => (WEBHOOK_RULE_DELIVERY_STATUS_FAILED, Some(error.to_string())),
             };
             processed.push(
@@ -194,6 +206,22 @@ impl AppState {
                 .await?;
         }
         Ok(processed)
+    }
+
+    async fn webhook_delivery_actor_authorized(&self, actor_id: Option<Uuid>) -> Result<bool> {
+        let Some(actor_id) = actor_id.filter(|id| !id.is_nil()) else {
+            return Ok(false);
+        };
+        let Some(operator) = self.repo.operator_by_id(actor_id).await? else {
+            return Ok(false);
+        };
+        Ok(operator_is_active_authorized(
+            &operator.status,
+            &operator.role,
+            &operator.scopes,
+            "operator",
+            &["inventory:write"],
+        ))
     }
 }
 

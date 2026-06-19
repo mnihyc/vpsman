@@ -227,23 +227,6 @@ pub(crate) struct BackupArtifactHandoffView {
     pub(crate) source: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct PrepareBackupArtifactRestoreRequest {
-    pub(crate) private_key_hex: String,
-    #[serde(default)]
-    pub(crate) artifact_base64: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub(crate) struct PreparedBackupArtifactRestoreView {
-    pub(crate) archive_base64: String,
-    pub(crate) archive_sha256_hex: String,
-    pub(crate) archive_size_bytes: u64,
-    pub(crate) artifact_client_id: String,
-    pub(crate) file_count: usize,
-    pub(crate) archive_format: String,
-}
-
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct RestorePlanView {
     pub(crate) id: Uuid,

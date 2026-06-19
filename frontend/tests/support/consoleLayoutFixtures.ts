@@ -24,10 +24,7 @@ type FixtureJobOutput = {
   stream: string;
 };
 
-export {
-  buildEncryptedBackupArtifactFixture,
-  sha256Hex,
-} from "./backupArtifactFixture";
+export { sha256Hex } from "./backupArtifactFixture";
 
 const statusOutput = (value: unknown) =>
   Buffer.from(JSON.stringify(value)).toString("base64");
@@ -2076,7 +2073,6 @@ export async function installConsoleApiMock(
         );
       const requests = {
         backupArtifactHandoffs: [] as unknown[],
-        backupArtifactRestorePreparations: [] as unknown[],
         backupPolicies: [] as unknown[],
         agentDeletes: [] as unknown[],
         bulkTagMutations: [] as unknown[],
@@ -2408,13 +2404,6 @@ export async function installConsoleApiMock(
         return Array.from(new Uint8Array(digest), (byte) =>
           byte.toString(16).padStart(2, "0"),
         ).join("");
-      };
-      const bytesToBase64 = (bytes: Uint8Array) => {
-        let binary = "";
-        for (const byte of bytes) {
-          binary += String.fromCharCode(byte);
-        }
-        return btoa(binary);
       };
       const valueMatches = (
         value: string,
@@ -4267,42 +4256,6 @@ export async function installConsoleApiMock(
             source_chunk_count: 2,
             source_job_id:
               body.job_id ?? "99999999-2222-4333-8444-555555555555",
-          });
-        }
-        const backupArtifactPrepareRestoreMatch = pathname.match(
-          /^\/api\/v1\/backups\/([^/]+)\/artifact\/prepare-restore$/,
-        );
-        if (backupArtifactPrepareRestoreMatch && method === "POST") {
-          const body = (await readJsonBody(input, init)) as {
-            artifact_base64?: string | null;
-            private_key_hex?: string | null;
-          };
-          requests.backupArtifactRestorePreparations.push(body);
-          const fileBody = "edge-sfo-01\n";
-          const archive = {
-            client_id: "agent-sfo-01",
-            created_unix: 1_780_000_000,
-            files: [
-              {
-                data_base64: btoa(fileBody),
-                mode: 0o644,
-                path: "/etc/hostname",
-                sha256_hex: await sha256HexForText(fileBody),
-                size_bytes: new TextEncoder().encode(fileBody).byteLength,
-                source: "selected_path",
-              },
-            ],
-            format: "vpsman.backup_archive.v1",
-          };
-          const archiveText = JSON.stringify(archive);
-          const archiveBytes = new TextEncoder().encode(archiveText);
-          return jsonResponse({
-            archive_base64: bytesToBase64(archiveBytes),
-            archive_sha256_hex: await sha256HexForText(archiveText),
-            archive_size_bytes: archiveBytes.byteLength,
-            artifact_client_id: "agent-sfo-01",
-            archive_format: "vpsman.backup_archive.v1",
-            file_count: 1,
           });
         }
         if (pathname === "/api/v1/restore-plans" && method === "GET") {

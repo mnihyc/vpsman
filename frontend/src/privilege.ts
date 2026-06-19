@@ -554,7 +554,6 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["include_config", operation.include_config],
         ["destination_root", operation.destination_root ?? null],
         ["archive_path", optional(operation.archive_path)],
-        ["archive_base64", operation.archive_base64 ?? null],
         ["archive_size_bytes", operation.archive_size_bytes ?? null],
         ["archive_sha256_hex", operation.archive_sha256_hex ?? null],
         ["dry_run", skipFalse(operation.dry_run)],

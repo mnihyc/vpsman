@@ -3,6 +3,9 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use axum::http::HeaderMap;
 use rand::RngCore;
 use vpsman_common::payload_hash;
+pub(crate) use vpsman_server_core::{
+    default_operator_scopes, operator_has_scope, operator_role_rank, role_allows,
+};
 
 use crate::error::ApiError;
 
@@ -45,34 +48,10 @@ pub(crate) fn validate_operator_credentials(
 }
 
 pub(crate) fn validate_operator_role(role: &str) -> Result<(), ApiError> {
-    if role_rank(role.trim()).is_some() {
+    if operator_role_rank(role.trim()).is_some() {
         Ok(())
     } else {
         Err(ApiError::bad_request("invalid_operator_role"))
-    }
-}
-
-pub(crate) fn default_operator_scopes(role: &str) -> Vec<String> {
-    match role.trim() {
-        "admin" => vec!["*".to_string()],
-        "operator" => vec![
-            SCOPE_FLEET_READ.to_string(),
-            SCOPE_JOBS_READ.to_string(),
-            SCOPE_BACKUPS_READ.to_string(),
-            SCOPE_TERMINAL_READ.to_string(),
-            SCOPE_INTEGRATIONS_READ.to_string(),
-            SCOPE_TEMPLATES_READ.to_string(),
-            SCOPE_SCHEDULES_READ.to_string(),
-            SCOPE_CONFIG_READ.to_string(),
-            SCOPE_NETWORK_READ.to_string(),
-            "jobs:write".to_string(),
-            "inventory:write".to_string(),
-            "schedules:write".to_string(),
-            "backups:write".to_string(),
-            "network:write".to_string(),
-        ],
-        "viewer" => vec![SCOPE_FLEET_READ.to_string()],
-        _ => Vec::new(),
     }
 }
 
@@ -100,17 +79,6 @@ pub(crate) fn normalize_operator_scopes(
     Ok(scopes)
 }
 
-pub(crate) fn operator_has_scope(scopes: &[String], required: &str) -> bool {
-    scopes.iter().any(|scope| scope == "*" || scope == required)
-}
-
-pub(crate) fn role_allows(actual: &str, required: &str) -> bool {
-    match (role_rank(actual), role_rank(required)) {
-        (Some(actual), Some(required)) => actual >= required,
-        _ => false,
-    }
-}
-
 fn validate_operator_scope(role: &str, scope: &str) -> Result<(), ApiError> {
     if scope.len() > 64
         || !scope.bytes().all(|byte| {
@@ -123,15 +91,6 @@ fn validate_operator_scope(role: &str, scope: &str) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("wildcard_scope_requires_admin"));
     }
     Ok(())
-}
-
-fn role_rank(role: &str) -> Option<u8> {
-    match role {
-        "viewer" => Some(0),
-        "operator" => Some(1),
-        "admin" => Some(2),
-        _ => None,
-    }
 }
 
 pub(crate) fn hash_operator_password(password: &str) -> Result<String> {

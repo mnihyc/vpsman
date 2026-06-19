@@ -967,9 +967,11 @@ pub(crate) enum Command {
         #[arg(long)]
         restore_plan_id: String,
         #[arg(long)]
-        artifact_file: Option<PathBuf>,
-        #[arg(long, default_value = "VPSMAN_BACKUP_PRIVATE_KEY_HEX")]
-        private_key_env: String,
+        archive_path: String,
+        #[arg(long)]
+        archive_size_bytes: u64,
+        #[arg(long)]
+        archive_sha256_hex: String,
         #[arg(long)]
         note: Option<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -991,9 +993,11 @@ pub(crate) enum Command {
         #[arg(long)]
         target_client_id: String,
         #[arg(long)]
-        artifact_file: Option<PathBuf>,
-        #[arg(long, default_value = "VPSMAN_BACKUP_PRIVATE_KEY_HEX")]
-        private_key_env: String,
+        archive_path: String,
+        #[arg(long)]
+        archive_size_bytes: u64,
+        #[arg(long)]
+        archive_sha256_hex: String,
         #[arg(long, value_delimiter = ',')]
         paths: Vec<String>,
         #[arg(long, default_value_t = false)]

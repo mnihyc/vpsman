@@ -282,6 +282,7 @@ auth_json="$(curl -fsS \
   -d '{"username":"postgres-smoke","password":"postgres-smoke-password"}' \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
+operator_id="$(jq -r '.operator.id' <<<"$auth_json")"
 jq -e '.operator.username == "postgres-smoke" and .token_type == "Bearer"' <<<"$auth_json" >/dev/null
 
 first_public_key_hex="$(printf '11%.0s' {1..32})"
@@ -504,7 +505,8 @@ INSERT INTO fleet_alert_notification_deliveries (
   attempt_count,
   last_attempt_at,
   created_at,
-  delivered_at
+  delivered_at,
+  actor_id
 )
 VALUES (
   '$queued_notification_id',
@@ -523,7 +525,8 @@ VALUES (
   0,
   NULL,
   now(),
-  NULL
+  NULL,
+  '$operator_id'
 );
 
 INSERT INTO fleet_alert_notification_deliveries (
@@ -543,7 +546,8 @@ INSERT INTO fleet_alert_notification_deliveries (
   attempt_count,
   last_attempt_at,
   created_at,
-  delivered_at
+  delivered_at,
+  actor_id
 )
 VALUES (
   '$old_notification_id',
@@ -562,7 +566,8 @@ VALUES (
   1,
   now() - interval '120 days',
   now() - interval '120 days',
-  now() - interval '120 days'
+  now() - interval '120 days',
+  '$operator_id'
 );
 SQL
 VPSMAN_POSTGRES_URL="$postgres_url" \
@@ -644,7 +649,8 @@ INSERT INTO fleet_alert_notification_deliveries (
   attempt_count,
   last_attempt_at,
   created_at,
-  delivered_at
+  delivered_at,
+  actor_id
 )
 VALUES (
   '$contended_notification_id',
@@ -663,7 +669,8 @@ VALUES (
   0,
   NULL,
   now(),
-  NULL
+  NULL,
+  '$operator_id'
 );
 SQL
 VPSMAN_POSTGRES_URL="$postgres_url" \

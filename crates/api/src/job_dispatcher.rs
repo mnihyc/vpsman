@@ -13,8 +13,8 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 use vpsman_common::{CommandOutput, JobCommand, JobRequest, OutputStream};
 use vpsman_server_core::{
-    JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT,
-    TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED,
+    operator_is_active_authorized, JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_COMPLETED,
+    TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED,
 };
 
 use crate::{
@@ -222,6 +222,15 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
             "backup request pre-record failed"
         );
         let outcome = dispatch_error_outcome(claimed.job_id, "backup request pre-record failed");
+        return finish_claimed_target(state, &claimed, outcome).await;
+    }
+    if auth_context_for_claim(state, &claimed).await?.is_none() {
+        warn!(
+            job_id = %claimed.job_id,
+            client_id = %claimed.client_id,
+            "job actor authority revoked before dispatch"
+        );
+        let outcome = dispatch_rejected_outcome(claimed.job_id, "actor_authority_revoked");
         return finish_claimed_target(state, &claimed, outcome).await;
     }
 
@@ -529,10 +538,43 @@ async fn auth_context_for_claim(
     let Some(operator) = state.repo.operator_by_id(actor_id).await? else {
         return Ok(None);
     };
+    if !operator_is_active_authorized(
+        &operator.status,
+        &operator.role,
+        &operator.scopes,
+        "operator",
+        &["jobs:write"],
+    ) {
+        return Ok(None);
+    }
     Ok(Some(AuthContext {
         operator: operator.view(),
         session_id: Uuid::nil(),
     }))
+}
+
+fn dispatch_rejected_outcome(job_id: Uuid, message: &str) -> TargetDispatchOutcome {
+    let status = serde_json::json!({
+        "type": "dispatch_error",
+        "status": TARGET_STATUS_REJECTED,
+        "message": message,
+    });
+    TargetDispatchOutcome {
+        status: TARGET_STATUS_REJECTED.to_string(),
+        exit_code: None,
+        #[cfg(test)]
+        command_version: None,
+        accepted: false,
+        message: message.to_string(),
+        received_at: None,
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&status).unwrap_or_else(|_| message.as_bytes().to_vec()),
+            exit_code: None,
+            done: true,
+        }],
+    }
 }
 
 fn dispatch_error_outcome(job_id: Uuid, message: &str) -> TargetDispatchOutcome {

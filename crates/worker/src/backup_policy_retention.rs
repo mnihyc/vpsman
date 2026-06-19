@@ -4,6 +4,8 @@ use sqlx::{types::Json as SqlJson, PgPool, Row};
 use uuid::Uuid;
 use vpsman_object_store::BackupObjectStore;
 
+use crate::actor_authority::actor_authorized;
+
 #[derive(Clone, Debug)]
 pub(crate) struct BackupPolicyRetentionPruneConfig {
     pub(crate) enabled: bool,
@@ -44,6 +46,7 @@ pub(crate) struct BackupPolicyRetentionPruneRun {
 #[derive(Debug)]
 struct BackupPolicyRetentionPolicy {
     schedule_id: Uuid,
+    actor_id: Option<Uuid>,
     name: String,
     enabled: bool,
     retention_days: i32,
@@ -84,6 +87,17 @@ pub(crate) async fn process_backup_policy_retention_prune(
     let policies = list_backup_policy_retention_candidates(pool, &config).await?;
     let mut outcomes = Vec::new();
     for policy in &policies {
+        if !actor_authorized(
+            pool,
+            policy.actor_id,
+            "operator",
+            &["backups:write", "schedules:write"],
+        )
+        .await?
+        {
+            insert_retention_actor_revoked_audit(pool, policy).await?;
+            continue;
+        }
         let outcome = prune_backup_policy(pool, policy, &config).await?;
         if outcome.matched_rows > 0 || outcome.pruned_rows > 0 {
             outcomes.push(outcome);
@@ -108,6 +122,7 @@ async fn list_backup_policy_retention_candidates(
         r#"
         SELECT
             schedule.id AS schedule_id,
+            schedule.actor_id,
             schedule.name,
             schedule.enabled,
             policy.retention_days,
@@ -129,6 +144,7 @@ async fn list_backup_policy_retention_candidates(
         .map(|row| {
             Ok(BackupPolicyRetentionPolicy {
                 schedule_id: row.try_get("schedule_id")?,
+                actor_id: row.try_get("actor_id")?,
                 name: row.try_get("name")?,
                 enabled: row.try_get("enabled")?,
                 retention_days: row.try_get("retention_days")?,
@@ -279,6 +295,33 @@ async fn prune_backup_policy_rows(
     .fetch_one(pool)
     .await?;
     Ok(pruned_rows)
+}
+
+async fn insert_retention_actor_revoked_audit(
+    pool: &PgPool,
+    policy: &BackupPolicyRetentionPolicy,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        VALUES ($1, $2, $3, $4, NULL, $5)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(policy.actor_id)
+    .bind("backup_policy.retention_actor_authority_revoked")
+    .bind(format!("schedule:{}", policy.schedule_id))
+    .bind(SqlJson(json!({
+        "worker": "backup_policy_retention_worker",
+        "schedule_id": policy.schedule_id,
+        "name": &policy.name,
+        "reason": "actor_authority_revoked",
+    })))
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn insert_prune_audit(

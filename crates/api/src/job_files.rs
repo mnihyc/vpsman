@@ -89,16 +89,6 @@ pub(crate) fn validate_resumable_file_transfer_token(
     validate_file_transfer_session_token(session_id, resume_token_hash).map_err(file_transfer_error)
 }
 
-pub(crate) fn validate_inline_file_payload(
-    data_base64: &str,
-    size_bytes: u64,
-    sha256_hex: &str,
-) -> Result<(), ApiError> {
-    decode_inline_file_payload(data_base64, size_bytes, sha256_hex)
-        .map(|_| ())
-        .map_err(file_transfer_error)
-}
-
 pub(crate) fn validate_file_command(command: &JobCommand) -> Option<Result<(), ApiError>> {
     Some(match command {
         JobCommand::FilePull { path } => validate_file_path(path),

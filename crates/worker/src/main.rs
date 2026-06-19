@@ -28,12 +28,14 @@ use vpsman_server_core::{
 };
 
 const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "deploy/runtime/data/objects/backups";
+mod actor_authority;
 mod alert_notifications;
 mod backup_policy_retention;
 mod build_info;
 mod webhook_rules;
 mod worker_leases;
 
+use actor_authority::{actor_authorized, actor_authorized_in_tx};
 use alert_notifications::{
     process_alert_notifications, AlertNotificationWorkerConfig, AlertNotificationWorkerRun,
 };
@@ -1063,6 +1065,7 @@ struct ArtifactCleanupRun {
 
 struct ArtifactCleanupJob {
     id: Uuid,
+    created_by: Option<Uuid>,
 }
 
 struct ArtifactCleanupCandidate {
@@ -1098,6 +1101,13 @@ async fn process_artifact_cleanup_jobs(
     let Some(job) = claim_artifact_cleanup_job(pool).await? else {
         return Ok(ArtifactCleanupRun::default());
     };
+    if !actor_authorized(pool, job.created_by, "operator", &["jobs:write"]).await? {
+        mark_artifact_cleanup_job_failed(pool, job.id, "actor_authority_revoked").await?;
+        return Ok(ArtifactCleanupRun {
+            jobs: 1,
+            ..ArtifactCleanupRun::default()
+        });
+    }
     let result = run_artifact_cleanup_job(pool, object_stores, &job).await;
     match result {
         Ok(run) => {
@@ -1150,6 +1160,25 @@ async fn process_artifact_cleanup_jobs(
     }
 }
 
+async fn mark_artifact_cleanup_job_failed(pool: &PgPool, job_id: Uuid, error: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE server_jobs
+        SET
+            status = $2,
+            error = $3,
+            completed_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .bind(SERVER_JOB_STATUS_FAILED)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactCleanupJob>> {
     let row = sqlx::query(
         r#"
@@ -1166,7 +1195,7 @@ async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactClea
         SET status = $3, started_at = now()
         FROM claimed
         WHERE job.id = claimed.id
-        RETURNING job.id
+        RETURNING job.id, job.created_by
         "#,
     )
     .bind(SERVER_JOB_TYPE_ARTIFACT_CLEANUP)
@@ -1177,6 +1206,7 @@ async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactClea
     row.map(|row| {
         Ok(ArtifactCleanupJob {
             id: row.try_get("id")?,
+            created_by: row.try_get("created_by")?,
         })
     })
     .transpose()
@@ -1647,6 +1677,18 @@ async fn process_due_schedule(
             failure_count: row.try_get("failure_count")?,
             last_error: row.try_get("last_error")?,
         };
+        if !actor_authorized_in_tx(
+            &mut tx,
+            schedule.actor_id,
+            "operator",
+            &["jobs:write", "schedules:write"],
+        )
+        .await?
+        {
+            disable_schedule_for_revoked_actor(&mut tx, &schedule).await?;
+            tx.commit().await?;
+            return Ok(0);
+        }
         let due_occurrences = calculate_due_occurrences(&schedule, Utc::now())?;
         let run_count = catch_up_run_count(&schedule, due_occurrences);
         for run_index in 0..run_count {
@@ -2637,6 +2679,46 @@ async fn record_schedule_failure(pool: &PgPool, schedule_id: Uuid, error: &str) 
     Ok(())
 }
 
+async fn disable_schedule_for_revoked_actor(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    schedule: &DueSchedule,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE schedules
+        SET enabled = FALSE,
+            last_error = 'actor_authority_revoked',
+            updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(schedule.id)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        VALUES ($1, $2, $3, $4, NULL, $5)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(schedule.actor_id)
+    .bind("schedule.disabled_actor_authority_revoked")
+    .bind(format!("schedule:{}", schedule.id))
+    .bind(serde_json::json!({
+        "worker": "schedule_dispatch_worker",
+        "schedule_id": schedule.id,
+        "schedule_name": &schedule.name,
+        "reason": "actor_authority_revoked",
+    }))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 fn catch_up_run_count(schedule: &DueSchedule, due_occurrences: i64) -> i64 {
     let due_occurrences = due_occurrences.max(1);
     match schedule.catch_up_policy.as_str() {
@@ -3363,6 +3445,13 @@ mod schedule_tests {
         operation: serde_json::Value,
         targets: &[&str],
     ) -> Uuid {
+        let actor_id = insert_worker_operator(
+            pool,
+            "active",
+            "operator",
+            &["jobs:write", "schedules:write"],
+        )
+        .await;
         let schedule_id = Uuid::new_v4();
         let target_client_ids = targets
             .iter()
@@ -3371,13 +3460,14 @@ mod schedule_tests {
         sqlx::query(
             r#"
             INSERT INTO schedules (
-                id, name, operation, selector_expression, target_client_ids,
+                id, actor_id, name, operation, selector_expression, target_client_ids,
                 cron_expr, next_run_at, catch_up_policy, catch_up_limit
             )
-            VALUES ($1, $2, $3, 'id:*', $4, '* * * * *', now() - interval '60 seconds', 'skip_missed', 1)
+            VALUES ($1, $2, $3, $4, 'id:*', $5, '* * * * *', now() - interval '60 seconds', 'skip_missed', 1)
             "#,
         )
         .bind(schedule_id)
+        .bind(actor_id)
         .bind(name)
         .bind(SqlJson(operation))
         .bind(target_client_ids)
@@ -3385,6 +3475,30 @@ mod schedule_tests {
         .await
         .unwrap();
         schedule_id
+    }
+
+    async fn insert_worker_operator(
+        pool: &PgPool,
+        status: &str,
+        role: &str,
+        scopes: &[&str],
+    ) -> Uuid {
+        let operator_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO operators (id, username, password_hash, status, role, scopes)
+            VALUES ($1, $2, 'test-password-hash', $3, $4, $5)
+            "#,
+        )
+        .bind(operator_id)
+        .bind(format!("worker-operator-{operator_id}"))
+        .bind(status)
+        .bind(role)
+        .bind(serde_json::json!(scopes))
+        .execute(pool)
+        .await
+        .unwrap();
+        operator_id
     }
 
     async fn insert_active_worker_target(pool: &PgPool, client_id: &str) {

@@ -17,7 +17,7 @@ use vpsman_common::{
 };
 
 use crate::{
-    job_files::{validate_file_command, validate_inline_file_payload},
+    job_files::validate_file_command,
     job_terminal::{
         validate_terminal_close, validate_terminal_input, validate_terminal_open,
         validate_terminal_poll, validate_terminal_resize, TerminalOpenValidation,
@@ -280,7 +280,6 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             paths,
             include_config,
             destination_root,
-            archive_base64,
             archive_path,
             archive_size_bytes,
             archive_sha256_hex,
@@ -292,7 +291,6 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             include_config: *include_config,
             destination_root: destination_root.as_deref(),
             archive_path: archive_path.as_deref(),
-            archive_base64: archive_base64.as_deref(),
             archive_size_bytes: *archive_size_bytes,
             archive_sha256_hex: archive_sha256_hex.as_deref(),
             post_restore_argv,
@@ -454,7 +452,6 @@ struct RestoreOperationValidation<'a> {
     include_config: bool,
     destination_root: Option<&'a str>,
     archive_path: Option<&'a str>,
-    archive_base64: Option<&'a str>,
     archive_size_bytes: Option<u64>,
     archive_sha256_hex: Option<&'a str>,
     post_restore_argv: &'a [String],
@@ -466,7 +463,6 @@ fn validate_restore_operation(input: RestoreOperationValidation<'_>) -> Result<(
         include_config,
         destination_root,
         archive_path,
-        archive_base64,
         archive_size_bytes,
         archive_sha256_hex,
         post_restore_argv,
@@ -497,31 +493,20 @@ fn validate_restore_operation(input: RestoreOperationValidation<'_>) -> Result<(
     let archive_path = archive_path
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if archive_path.is_some() && archive_base64.is_some() {
-        return Err(ApiError::bad_request("restore_archive_source_ambiguous"));
+    let archive_path =
+        archive_path.ok_or_else(|| ApiError::bad_request("restore_archive_path_required"))?;
+    if path_contains_dot_segment(archive_path) {
+        return Err(ApiError::bad_request("restore_archive_path_invalid"));
     }
-    if let Some(archive_path) = archive_path {
-        if path_contains_dot_segment(archive_path) {
-            return Err(ApiError::bad_request("restore_archive_path_invalid"));
-        }
-        validate_file_path(archive_path)?;
-        if let Some(archive_size_bytes) = archive_size_bytes {
-            if archive_size_bytes == 0 {
-                return Err(ApiError::bad_request("restore_archive_size_invalid"));
-            }
-        }
-        if let Some(archive_sha256_hex) = archive_sha256_hex {
-            validate_sha256_hex(archive_sha256_hex, "restore_archive_sha256_invalid")?;
-        }
-    } else {
-        let archive_base64 =
-            archive_base64.ok_or_else(|| ApiError::bad_request("restore_archive_required"))?;
-        let archive_size_bytes = archive_size_bytes
-            .ok_or_else(|| ApiError::bad_request("restore_archive_size_required"))?;
-        let archive_sha256_hex = archive_sha256_hex
-            .ok_or_else(|| ApiError::bad_request("restore_archive_sha256_required"))?;
-        validate_inline_file_payload(archive_base64, archive_size_bytes, archive_sha256_hex)?;
+    validate_file_path(archive_path)?;
+    let archive_size_bytes =
+        archive_size_bytes.ok_or_else(|| ApiError::bad_request("restore_archive_size_required"))?;
+    if archive_size_bytes == 0 {
+        return Err(ApiError::bad_request("restore_archive_size_invalid"));
     }
+    let archive_sha256_hex = archive_sha256_hex
+        .ok_or_else(|| ApiError::bad_request("restore_archive_sha256_required"))?;
+    validate_sha256_hex(archive_sha256_hex, "restore_archive_sha256_invalid")?;
     validate_post_restore_argv(post_restore_argv)?;
     Ok(())
 }

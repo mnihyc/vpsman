@@ -1,13 +1,9 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::JobCommand;
 
 use crate::{
-    commands_backups::{
-        restore_artifact_bytes, restore_rollback_operation_from_api, restore_run_operation,
-    },
+    commands_backups::{restore_rollback_operation_from_api, restore_run_operation},
     commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
     http::http_post_json,
     privilege::{
@@ -44,8 +40,9 @@ pub(crate) struct VtyRestorePlanRequest {
 pub(crate) struct VtyRestoreRunRequest {
     pub(crate) source_backup_request_id: Uuid,
     pub(crate) target_client_id: String,
-    pub(crate) artifact_file: Option<PathBuf>,
-    pub(crate) private_key_env: String,
+    pub(crate) archive_path: String,
+    pub(crate) archive_size_bytes: u64,
+    pub(crate) archive_sha256_hex: String,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) destination_root: Option<String>,
@@ -562,16 +559,17 @@ pub(crate) fn parse_vty_restore_plan(tokens: &[&str]) -> Result<VtyRestorePlanRe
 pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequest> {
     let source_backup_request_id = tokens
         .first()
-        .context("usage: restore-run <source_backup_uuid> <target_client_id> [--artifact-file <path>] [--private-key-env <env>] [--path <abs>] [--include-config] [--destination-root <abs>] [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
+        .context("usage: restore-run <source_backup_uuid> <target_client_id> --archive-path <abs> --archive-size-bytes <bytes> --archive-sha256-hex <sha256> [--path <abs>] [--include-config] [--destination-root <abs>] [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
     let target_client_id = tokens.get(1).context(
-        "usage: restore-run <source_backup_uuid> <target_client_id> [--artifact-file <path>] [--private-key-env <env>] [--path <abs>] [--include-config] [--destination-root <abs>] [--timeout <1-3600>] [--force-unprivileged] --confirmed",
+        "usage: restore-run <source_backup_uuid> <target_client_id> --archive-path <abs> --archive-size-bytes <bytes> --archive-sha256-hex <sha256> [--path <abs>] [--include-config] [--destination-root <abs>] [--timeout <1-3600>] [--force-unprivileged] --confirmed",
     )?;
     let mut request = VtyRestoreRunRequest {
         source_backup_request_id: Uuid::parse_str(source_backup_request_id)
             .context("invalid source backup request UUID")?,
         target_client_id: (*target_client_id).to_string(),
-        artifact_file: None,
-        private_key_env: "VPSMAN_BACKUP_PRIVATE_KEY_HEX".to_string(),
+        archive_path: String::new(),
+        archive_size_bytes: 0,
+        archive_sha256_hex: String::new(),
         paths: Vec::new(),
         include_config: false,
         destination_root: None,
@@ -582,29 +580,43 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
     let mut index = 2;
     while index < tokens.len() {
         match tokens[index] {
-            "--artifact-file" => {
-                request.artifact_file = Some(PathBuf::from(
-                    tokens
-                        .get(index + 1)
-                        .context("--artifact-file requires a value")?,
-                ));
-                index += 2;
-            }
-            value if value.starts_with("--artifact-file=") => {
-                request.artifact_file =
-                    Some(PathBuf::from(value.trim_start_matches("--artifact-file=")));
-                index += 1;
-            }
-            "--private-key-env" => {
-                request.private_key_env = tokens
+            "--archive-path" => {
+                request.archive_path = tokens
                     .get(index + 1)
-                    .context("--private-key-env requires a value")?
+                    .context("--archive-path requires a value")?
                     .to_string();
                 index += 2;
             }
-            value if value.starts_with("--private-key-env=") => {
-                request.private_key_env =
-                    value.trim_start_matches("--private-key-env=").to_string();
+            value if value.starts_with("--archive-path=") => {
+                request.archive_path = value.trim_start_matches("--archive-path=").to_string();
+                index += 1;
+            }
+            "--archive-size-bytes" => {
+                request.archive_size_bytes = tokens
+                    .get(index + 1)
+                    .context("--archive-size-bytes requires a value")?
+                    .parse()
+                    .context("invalid --archive-size-bytes")?;
+                index += 2;
+            }
+            value if value.starts_with("--archive-size-bytes=") => {
+                request.archive_size_bytes = value
+                    .trim_start_matches("--archive-size-bytes=")
+                    .parse()
+                    .context("invalid --archive-size-bytes")?;
+                index += 1;
+            }
+            "--archive-sha256-hex" => {
+                request.archive_sha256_hex = tokens
+                    .get(index + 1)
+                    .context("--archive-sha256-hex requires a value")?
+                    .to_string();
+                index += 2;
+            }
+            value if value.starts_with("--archive-sha256-hex=") => {
+                request.archive_sha256_hex = value
+                    .trim_start_matches("--archive-sha256-hex=")
+                    .to_string();
                 index += 1;
             }
             "--include-config" => {
@@ -667,6 +679,18 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
         }
     }
     ensure_backup_scope(&request.paths, request.include_config, "restore-run")?;
+    anyhow::ensure!(
+        !request.archive_path.trim().is_empty(),
+        "restore-run requires --archive-path"
+    );
+    anyhow::ensure!(
+        request.archive_size_bytes > 0,
+        "restore-run requires --archive-size-bytes"
+    );
+    anyhow::ensure!(
+        !request.archive_sha256_hex.trim().is_empty(),
+        "restore-run requires --archive-sha256-hex"
+    );
     if let Some(destination_root) = &request.destination_root {
         anyhow::ensure!(
             destination_root.starts_with('/'),
@@ -890,7 +914,6 @@ pub(crate) fn submit_vty_restore_plan(
         include_config: request.include_config,
         destination_root: request.destination_root.clone(),
         archive_path: None,
-        archive_base64: None,
         archive_size_bytes: None,
         archive_sha256_hex: None,
         dry_run: false,
@@ -933,16 +956,11 @@ pub(crate) fn submit_vty_restore_run(
     privilege_context: &VtyPrivilegeContext,
     request: VtyRestoreRunRequest,
 ) -> Result<String> {
-    let artifact_bytes = restore_artifact_bytes(
-        api_url,
-        token,
-        request.source_backup_request_id,
-        request.artifact_file.as_ref(),
-    )?;
     let operation = restore_run_operation(
         request.source_backup_request_id,
-        &artifact_bytes,
-        &request.private_key_env,
+        request.archive_path,
+        request.archive_size_bytes,
+        request.archive_sha256_hex,
         request.paths,
         request.include_config,
         request.destination_root,

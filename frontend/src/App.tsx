@@ -535,9 +535,6 @@ export function App() {
                 onDownloadBackupArtifact={dashboard.downloadBackupArtifact}
                 onHandoffBackupArtifact={dashboard.handoffBackupArtifact}
                 onLoadJobOutputs={dashboard.loadJobOutputs}
-                onPrepareBackupArtifactRestore={
-                  dashboard.prepareBackupArtifactRestore
-                }
                 onPruneBackupPolicies={dashboard.pruneBackupPolicies}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
                 onRefresh={dashboard.loadBackups}
