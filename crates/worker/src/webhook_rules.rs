@@ -754,7 +754,9 @@ async fn process_queued_deliveries(
     for row in rows {
         let delivery = delivery_from_row(row)?;
         let result =
-            if actor_authorized(pool, delivery.actor_id, "operator", &["inventory:write"]).await? {
+            if actor_authorized(pool, delivery.actor_id, "operator", &["integrations:write"])
+                .await?
+            {
                 deliver_webhook(&client, &delivery).await
             } else {
                 Err(anyhow::anyhow!("actor_authority_revoked"))

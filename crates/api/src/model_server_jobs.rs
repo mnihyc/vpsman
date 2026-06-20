@@ -4,11 +4,14 @@ use uuid::Uuid;
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct ArtifactCleanupPreviewRequest {
     pub(crate) expression: String,
+    #[serde(default)]
+    pub(crate) domains: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ArtifactCleanupPreviewView {
     pub(crate) expression: String,
+    pub(crate) domains: Vec<String>,
     pub(crate) preview_hash: String,
     pub(crate) matched_count: i64,
     pub(crate) matched_bytes: i64,
@@ -17,6 +20,8 @@ pub(crate) struct ArtifactCleanupPreviewView {
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct ArtifactCleanupCreateRequest {
     pub(crate) expression: String,
+    #[serde(default)]
+    pub(crate) domains: Vec<String>,
     pub(crate) preview_hash: String,
     #[serde(default)]
     pub(crate) confirmed: bool,

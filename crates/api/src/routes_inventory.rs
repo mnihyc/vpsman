@@ -332,7 +332,7 @@ pub(crate) async fn create_data_source_preset(
     Json(request): Json<CreateDataSourcePresetRequest>,
 ) -> Result<Json<DataSourcePresetView>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
     validate_create_data_source_preset(&request)?;
     Ok(Json(
@@ -351,7 +351,7 @@ pub(crate) async fn clone_data_source_preset(
     Json(request): Json<CloneDataSourcePresetRequest>,
 ) -> Result<Json<DataSourcePresetView>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
     validate_clone_data_source_preset(&request)?;
     Ok(Json(
@@ -408,7 +408,7 @@ pub(crate) async fn update_data_source_preset(
     Json(request): Json<UpdateDataSourcePresetRequest>,
 ) -> Result<Json<UpdateDataSourcePresetResponse>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
     validate_data_source_preset_candidate(&request.description, &request.definition)?;
     Ok(Json(
@@ -486,7 +486,7 @@ pub(crate) async fn assign_data_source_preset(
     Json(mut request): Json<AssignDataSourcePresetRequest>,
 ) -> Result<Json<crate::model::AssignDataSourcePresetResponse>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
     validate_assign_data_source_preset(&request)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;

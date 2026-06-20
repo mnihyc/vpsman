@@ -11,13 +11,16 @@ role receives the scopes needed for normal daily operation. The default
 ## Read Scopes
 
 - `fleet:read`: fleet metadata, agent inventory, gateway sessions, telemetry,
-  job status, target status, audit metadata, alert state, data-source readiness,
-  topology summaries, and other non-payload operational status.
+  job status, target status, alert state, data-source readiness, topology
+  summaries, and other non-payload operational status.
 - `jobs:read`: durable job output payloads, output archives, file-download
-  payloads, output chunks, output comparison previews, file-transfer session
-  records, file-transfer source artifacts, and file-transfer handoff downloads.
+  payloads, output chunks, output comparison previews, process-supervisor
+  inventory, file-transfer session records, file-transfer source artifacts, and
+  file-transfer handoff downloads.
 - `backups:read`: backup requests, backup policies, restore plans, encrypted
-  backup artifact metadata/downloads, and backup-artifact history exports.
+  backup artifact metadata/downloads, migration-link listings, fleet alert
+  evidence views/exports that include backup evidence, and backup-artifact
+  history exports.
 - `terminal:read`: terminal session records and retained PTY replay bytes.
 - `integrations:read`: webhook rules, webhook dry runs, webhook deliveries,
   alert notification channels, and alert notification deliveries.
@@ -28,15 +31,29 @@ role receives the scopes needed for normal daily operation. The default
   diff/test output, rendered agent config, config rule templates, rendered
   incremental config patches, and private agent-update release metadata.
 - `network:read`: full tunnel plans, including saved input and generated
-  runtime plan details.
+  runtime plan details, OSPF update plans, raw network observations, and
+  topology history exports.
+- `audit:read`: audit logs and audit history exports.
 
 ## Write Scopes
 
 Existing write scopes remain separate from read scopes. Examples include
 `jobs:write`, `inventory:write`, `schedules:write`, `backups:write`,
-`network:write`, and `config:write`. A write scope does not automatically imply
-the corresponding sensitive read scope unless the operator record explicitly
-has both, or the operator is an admin with `*`.
+`network:write`, `config:write`, `integrations:write`, `templates:write`, and
+`history:write`. A write scope does not automatically imply the corresponding
+sensitive read scope unless the operator record explicitly has both, or the
+operator is an admin with `*`.
+
+History retention writes require `history:write` plus authority for the selected
+domain. Audit retention requires `audit:read`; job-output retention requires
+`jobs:write`; backup-artifact retention requires `backups:write`; network
+observation and topology retention require `network:write`; telemetry and
+system rollup retention require `inventory:write`.
+
+Server artifact cleanup requires explicit cleanup domains. `job_output` and
+`file_transfer` cleanup require `jobs:write`; `backup_artifact` cleanup requires
+`backups:write`. The preview hash binds the reviewed domains and matched
+artifacts.
 
 ## Practical Defaults
 

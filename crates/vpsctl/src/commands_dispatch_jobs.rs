@@ -197,12 +197,16 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_jobs::server_jobs(api_url, token, limit)?;
             Ok(None)
         }
-        Command::ArtifactCleanupPreview { expression } => {
-            commands_jobs::artifact_cleanup_preview(api_url, token, expression)?;
+        Command::ArtifactCleanupPreview {
+            expression,
+            domains,
+        } => {
+            commands_jobs::artifact_cleanup_preview(api_url, token, expression, domains)?;
             Ok(None)
         }
         Command::ArtifactCleanupCreate {
             expression,
+            domains,
             preview_hash,
             confirmed,
         } => {
@@ -210,6 +214,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 api_url,
                 token,
                 expression,
+                domains,
                 preview_hash,
                 confirmed,
             )?;

@@ -14,7 +14,10 @@ use crate::{
         HistoryRetentionPruneDomainView, HistoryRetentionPrunePlan, HistoryRetentionPruneRequest,
         HistoryRetentionPruneResponse, UpsertHistoryRetentionPolicyRequest,
     },
-    security::{operator_has_scope, SCOPE_BACKUPS_READ, SCOPE_FLEET_READ, SCOPE_JOBS_READ},
+    security::{
+        operator_has_scope, SCOPE_AUDIT_READ, SCOPE_BACKUPS_READ, SCOPE_FLEET_READ,
+        SCOPE_HISTORY_WRITE, SCOPE_JOBS_READ, SCOPE_NETWORK_READ,
+    },
     state::AppState,
     unix_now,
     util::limit_or_default,
@@ -36,8 +39,10 @@ pub(crate) async fn upsert_history_retention_policy(
     Json(request): Json<UpsertHistoryRetentionPolicyRequest>,
 ) -> Result<(StatusCode, Json<HistoryRetentionPolicyView>), ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_HISTORY_WRITE)
         .await?;
+    let domain = parse_history_domain(&request.domain)?;
+    ensure_history_retention_domain_authority(&operator.operator.scopes, &[domain])?;
     if !request.confirmed {
         return Err(ApiError::bad_request(
             "history_retention_policy_confirmation_required",
@@ -60,8 +65,10 @@ pub(crate) async fn prune_history_retention(
     Json(request): Json<HistoryRetentionPruneRequest>,
 ) -> Result<Json<HistoryRetentionPruneResponse>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_HISTORY_WRITE)
         .await?;
+    let selected_domains = selected_history_retention_prune_domains(request.domain.as_deref())?;
+    ensure_history_retention_domain_authority(&operator.operator.scopes, &selected_domains)?;
     if !request.dry_run && !request.confirmed {
         return Err(ApiError::bad_request(
             "history_retention_prune_requires_confirmation",
@@ -411,14 +418,43 @@ fn parse_history_domain(value: &str) -> Result<HistoryDomain, ApiError> {
     HistoryDomain::from_str(value).ok_or_else(|| ApiError::bad_request("invalid_history_domain"))
 }
 
+fn selected_history_retention_prune_domains(
+    value: Option<&str>,
+) -> Result<Vec<HistoryDomain>, ApiError> {
+    match value {
+        Some(value) => Ok(vec![parse_history_domain(value)?]),
+        None => Ok(HistoryDomain::ALL.to_vec()),
+    }
+}
+
+fn ensure_history_retention_domain_authority(
+    scopes: &[String],
+    domains: &[HistoryDomain],
+) -> Result<(), ApiError> {
+    for domain in domains {
+        if !operator_has_scope(scopes, history_retention_authority_scope(*domain)) {
+            return Err(ApiError::forbidden("operator_scope_insufficient"));
+        }
+    }
+    Ok(())
+}
+
+fn history_retention_authority_scope(domain: HistoryDomain) -> &'static str {
+    match domain {
+        HistoryDomain::AuditLogs => SCOPE_AUDIT_READ,
+        HistoryDomain::SystemMetricRollups | HistoryDomain::TelemetryRollups => "inventory:write",
+        HistoryDomain::JobOutputs => "jobs:write",
+        HistoryDomain::BackupArtifacts => "backups:write",
+        HistoryDomain::NetworkObservations | HistoryDomain::TopologyHistory => "network:write",
+    }
+}
+
 fn history_export_scope(domain: HistoryDomain) -> &'static str {
     match domain {
         HistoryDomain::JobOutputs => SCOPE_JOBS_READ,
         HistoryDomain::BackupArtifacts => SCOPE_BACKUPS_READ,
-        HistoryDomain::AuditLogs
-        | HistoryDomain::SystemMetricRollups
-        | HistoryDomain::TelemetryRollups
-        | HistoryDomain::NetworkObservations
-        | HistoryDomain::TopologyHistory => SCOPE_FLEET_READ,
+        HistoryDomain::AuditLogs => SCOPE_AUDIT_READ,
+        HistoryDomain::NetworkObservations | HistoryDomain::TopologyHistory => SCOPE_NETWORK_READ,
+        HistoryDomain::SystemMetricRollups | HistoryDomain::TelemetryRollups => SCOPE_FLEET_READ,
     }
 }

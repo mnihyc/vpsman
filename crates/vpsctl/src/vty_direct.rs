@@ -764,11 +764,14 @@ fn submit_artifact_cleanup_preview(
     let Some(expression) = collect_option_value(&parts, "--expression") else {
         return Ok(artifact_cleanup_preview_usage());
     };
+    let Some(domains) = option_value(&parts, "--domains") else {
+        return Ok(artifact_cleanup_preview_usage());
+    };
     http_post_json(
         api_url,
         "/api/v1/server-jobs/artifact-cleanup/preview",
         token,
-        &serde_json::json!({ "expression": expression }),
+        &serde_json::json!({ "expression": expression, "domains": split_csv(&domains) }),
     )
 }
 
@@ -781,6 +784,9 @@ fn submit_artifact_cleanup_create(
     let Some(expression) = collect_option_value(&parts, "--expression") else {
         return Ok(artifact_cleanup_create_usage());
     };
+    let Some(domains) = option_value(&parts, "--domains") else {
+        return Ok(artifact_cleanup_create_usage());
+    };
     let Some(preview_hash) = option_value(&parts, "--preview-hash") else {
         return Ok(artifact_cleanup_create_usage());
     };
@@ -790,6 +796,7 @@ fn submit_artifact_cleanup_create(
         token,
         &serde_json::json!({
             "expression": expression,
+            "domains": split_csv(&domains),
             "preview_hash": preview_hash,
             "confirmed": has_flag(&parts, "--confirmed"),
         }),
@@ -977,11 +984,11 @@ fn server_jobs_usage() -> String {
 }
 
 fn artifact_cleanup_preview_usage() -> String {
-    "usage: artifact-cleanup-preview --expression <expr>".to_string()
+    "usage: artifact-cleanup-preview --expression <expr> --domains <job_output,file_transfer,backup_artifact>".to_string()
 }
 
 fn artifact_cleanup_create_usage() -> String {
-    "usage: artifact-cleanup-create --expression <expr> --preview-hash <sha256> --confirmed"
+    "usage: artifact-cleanup-create --expression <expr> --domains <job_output,file_transfer,backup_artifact> --preview-hash <sha256> --confirmed"
         .to_string()
 }
 

@@ -313,9 +313,10 @@ scoped_alerts_response="$(curl -sS -w '\n%{http_code}' \
   "$api_url/api/v1/fleet-alerts?limit=5")"
 scoped_alerts_status="${scoped_alerts_response##*$'\n'}"
 scoped_alerts_body="${scoped_alerts_response%$'\n'*}"
-if [[ "$scoped_alerts_status" != "200" ]]; then
-  fail "fleet:read scoped fleet-alerts returned HTTP $scoped_alerts_status: $scoped_alerts_body"
+if [[ "$scoped_alerts_status" != "403" ]]; then
+  fail "fleet:read-only scoped fleet-alerts returned HTTP $scoped_alerts_status: $scoped_alerts_body"
 fi
+jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_alerts_body" >/dev/null
 scoped_tag_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $scoped_access_token" \
   -H "Content-Type: application/json" \
@@ -507,9 +508,10 @@ scoped_alert_export_response="$(curl -sS -w '\n%{http_code}' \
   "$api_url/api/v1/fleet-alerts/export?limit=5&include_muted=true")"
 scoped_alert_export_status="${scoped_alert_export_response##*$'\n'}"
 scoped_alert_export_body="${scoped_alert_export_response%$'\n'*}"
-if [[ "$scoped_alert_export_status" != "200" ]]; then
-  fail "fleet:read scoped fleet-alert export returned HTTP $scoped_alert_export_status: $scoped_alert_export_body"
+if [[ "$scoped_alert_export_status" != "403" ]]; then
+  fail "fleet:read-only scoped fleet-alert export returned HTTP $scoped_alert_export_status: $scoped_alert_export_body"
 fi
+jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_alert_export_body" >/dev/null
 scoped_alert_state_write_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $scoped_access_token" \
   -H "Content-Type: application/json" \

@@ -401,7 +401,7 @@ pub(crate) async fn list_network_ospf_update_plans(
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<NetworkOspfUpdatePlanView>>, ApiError> {
     let _operator = state
-        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
     Ok(Json(
         state

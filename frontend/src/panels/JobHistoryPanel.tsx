@@ -170,6 +170,7 @@ export function JobHistoryPanel({
   ) => Promise<AgentUpdateReleaseRecord>;
   onCreateArtifactCleanupJob: (
     expression: string,
+    domains: string[],
     previewHash: string,
   ) => Promise<ServerJobRecord>;
   onCreateFileTransferHandoff: (
@@ -209,6 +210,7 @@ export function JobHistoryPanel({
   onOpenPrivilegeUnlock: () => void;
   onPreviewArtifactCleanup: (
     expression: string,
+    domains: string[],
   ) => Promise<ArtifactCleanupPreviewRecord>;
   onRefresh: () => void;
   onResolveTargets: (

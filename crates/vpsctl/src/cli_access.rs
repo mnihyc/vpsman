@@ -35,7 +35,7 @@ pub(crate) struct OperatorCreateCommand {
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Comma-separated scopes, for example fleet:read,jobs:read,backups:read,terminal:read,integrations:read,templates:read,schedules:read,config:read,network:read,jobs:write"
+        help = "Comma-separated scopes, for example fleet:read,jobs:read,backups:read,terminal:read,integrations:read,templates:read,schedules:read,config:read,network:read,audit:read,jobs:write,config:write,integrations:write,templates:write,history:write"
     )]
     pub(crate) scopes: Vec<String>,
     #[arg(long, default_value = "VPSMAN_NEW_OPERATOR_PASSWORD")]

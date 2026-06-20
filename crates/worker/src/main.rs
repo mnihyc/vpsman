@@ -1070,6 +1070,7 @@ struct ArtifactCleanupRun {
 struct ArtifactCleanupJob {
     id: Uuid,
     created_by: Option<Uuid>,
+    metadata: Value,
 }
 
 struct ArtifactCleanupCandidate {
@@ -1105,12 +1106,14 @@ async fn process_artifact_cleanup_jobs(
     let Some(job) = claim_artifact_cleanup_job(pool).await? else {
         return Ok(ArtifactCleanupRun::default());
     };
-    if !actor_authorized(pool, job.created_by, "operator", &["jobs:write"]).await? {
-        mark_artifact_cleanup_job_failed(pool, job.id, "actor_authority_revoked").await?;
-        return Ok(ArtifactCleanupRun {
-            jobs: 1,
-            ..ArtifactCleanupRun::default()
-        });
+    for required_scope in artifact_cleanup_job_required_scopes(&job.metadata)? {
+        if !actor_authorized(pool, job.created_by, "operator", &[required_scope]).await? {
+            mark_artifact_cleanup_job_failed(pool, job.id, "actor_authority_revoked").await?;
+            return Ok(ArtifactCleanupRun {
+                jobs: 1,
+                ..ArtifactCleanupRun::default()
+            });
+        }
     }
     let result = run_artifact_cleanup_job(pool, object_stores, &job).await;
     match result {
@@ -1199,7 +1202,7 @@ async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactClea
         SET status = $3, started_at = now()
         FROM claimed
         WHERE job.id = claimed.id
-        RETURNING job.id, job.created_by
+        RETURNING job.id, job.created_by, job.metadata
         "#,
     )
     .bind(SERVER_JOB_TYPE_ARTIFACT_CLEANUP)
@@ -1211,9 +1214,33 @@ async fn claim_artifact_cleanup_job(pool: &PgPool) -> Result<Option<ArtifactClea
         Ok(ArtifactCleanupJob {
             id: row.try_get("id")?,
             created_by: row.try_get("created_by")?,
+            metadata: row.try_get("metadata")?,
         })
     })
     .transpose()
+}
+
+fn artifact_cleanup_job_required_scopes(metadata: &Value) -> Result<Vec<&'static str>> {
+    let domains = metadata
+        .get("domains")
+        .and_then(Value::as_array)
+        .context("artifact_cleanup_domains_required")?;
+    ensure!(!domains.is_empty(), "artifact_cleanup_domains_required");
+    let mut scopes = Vec::new();
+    for domain in domains {
+        let Some(domain) = domain.as_str() else {
+            bail!("artifact_cleanup_domain_invalid");
+        };
+        let scope = match domain {
+            "backup_artifact" => "backups:write",
+            "job_output" | "file_transfer" => "jobs:write",
+            _ => bail!("artifact_cleanup_domain_invalid"),
+        };
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
+        }
+    }
+    Ok(scopes)
 }
 
 async fn run_artifact_cleanup_job(

@@ -24,7 +24,7 @@ use crate::{
     },
     model_command_templates::{JobOutputComparisonQuery, JobOutputComparisonView},
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
-    security::{SCOPE_FLEET_READ, SCOPE_JOBS_READ},
+    security::{SCOPE_AUDIT_READ, SCOPE_FLEET_READ, SCOPE_JOBS_READ, SCOPE_NETWORK_READ},
     state::AppState,
     util::limit_or_default,
 };
@@ -996,7 +996,7 @@ pub(crate) async fn list_process_supervisor_inventory(
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<ProcessSupervisorInventoryView>>, ApiError> {
     let _operator = state
-        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
         .await?;
     Ok(Json(
         state
@@ -1012,7 +1012,7 @@ pub(crate) async fn list_audit_logs(
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<AuditLogView>>, ApiError> {
     let _operator = state
-        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .require_operator_scope(&headers, SCOPE_AUDIT_READ)
         .await?;
     Ok(Json(state.repo.query_audit_logs(&query).await?))
 }
@@ -1023,7 +1023,7 @@ pub(crate) async fn list_network_observations(
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Vec<NetworkObservationView>>, ApiError> {
     let _operator = state
-        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
     Ok(Json(
         state

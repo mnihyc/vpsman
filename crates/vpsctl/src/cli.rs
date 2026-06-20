@@ -708,10 +708,14 @@ pub(crate) enum Command {
     ArtifactCleanupPreview {
         #[arg(long)]
         expression: String,
+        #[arg(long, value_delimiter = ',', required = true)]
+        domains: Vec<String>,
     },
     ArtifactCleanupCreate {
         #[arg(long)]
         expression: String,
+        #[arg(long, value_delimiter = ',', required = true)]
+        domains: Vec<String>,
         #[arg(long)]
         preview_hash: String,
         #[arg(long, default_value_t = false)]

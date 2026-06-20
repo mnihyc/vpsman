@@ -993,6 +993,7 @@ export type ServerJobRecord = {
 
 export type ArtifactCleanupPreviewRecord = {
   expression: string;
+  domains: string[];
   preview_hash: string;
   matched_count: number;
   matched_bytes: number;

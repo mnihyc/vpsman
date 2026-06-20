@@ -141,11 +141,16 @@ const commonScopeOptions = [
   "schedules:read",
   "config:read",
   "network:read",
+  "audit:read",
   "jobs:write",
   "inventory:write",
   "schedules:write",
   "backups:write",
   "network:write",
+  "config:write",
+  "integrations:write",
+  "templates:write",
+  "history:write",
   "*",
 ];
 const defaultSessionTtlDays = 365;

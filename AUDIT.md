@@ -60,20 +60,20 @@ of the same root cause.
 | AUD-044 | Medium/High | Fixed | Frontend/File Transfers | Source and handoff artifact persistence bypasses operator review |
 | AUD-045 | Medium/High | Fixed | Frontend/Command Templates | Command template saves persist reusable operation payloads without review |
 | AUD-046 | High | Fixed | API/CLI/Auth | Operator access-management mutations bypass or auto-confirm the confirmation contract |
-| AUD-047 | Medium/High | Confirmed | API/Backups/Auth | Migration-link listings expose restore metadata with fleet-read scope |
-| AUD-048 | High | Confirmed | API/History/Auth | History retention prune can delete job and backup payload history with inventory-write only |
-| AUD-049 | High | Confirmed | API/Worker/Artifact Cleanup/Auth | Server artifact cleanup can delete backup artifacts with jobs-write only |
+| AUD-047 | Medium/High | Fixed | API/Backups/Auth | Migration-link listings expose restore metadata with fleet-read scope |
+| AUD-048 | High | Fixed | API/History/Auth | History retention prune can delete job and backup payload history with inventory-write only |
+| AUD-049 | High | Fixed | API/Worker/Artifact Cleanup/Auth | Server artifact cleanup can delete backup artifacts with jobs-write only |
 | AUD-050 | Critical | Fixed | API/Worker/Artifact Cleanup | Artifact cleanup jobs re-evaluate expressions instead of deleting the reviewed artifact set |
 | AUD-051 | Medium/High | Confirmed | API/History/Artifact Cleanup | History retention object prune drops metadata before object deletion succeeds |
-| AUD-052 | High | Confirmed | API/Data Sources/Auth | Data-source preset and assignment mutations use inventory-write instead of config-write |
+| AUD-052 | High | Fixed | API/Data Sources/Auth | Data-source preset and assignment mutations use inventory-write instead of config-write |
 | AUD-053 | High | Fixed | API/Frontend/Data Sources | Data-source preset create path silently updates existing presets without review |
 | AUD-054 | Medium/High | Fixed | API/Config/Hot Config | Hot-config rule-template mutations lack confirmation and audit records |
 | AUD-055 | Medium/High | Fixed | Frontend/File Browser | File save confirmation can mark unsent editor changes as saved |
 | AUD-056 | Medium/High | Confirmed | API/Worker/Backups/Retention | Backup policy retention prune drops backup metadata before object deletion succeeds |
 | AUD-057 | High | Fixed | API/Auth/User Management | User management can remove the last active admin |
-| AUD-058 | Medium/High | Confirmed | API/Integrations/Auth | Integration mutations use inventory-write instead of an integrations write boundary |
-| AUD-059 | Medium/High | Confirmed | API/Command Templates/Auth | Command-template mutations use jobs-write instead of a templates write boundary |
-| AUD-060 | Medium/High | Confirmed | API/Agent Updates/Auth | Update-release registry mutations use jobs-write instead of config-write |
+| AUD-058 | Medium/High | Fixed | API/Integrations/Auth | Integration mutations use inventory-write instead of an integrations write boundary |
+| AUD-059 | Medium/High | Fixed | API/Command Templates/Auth | Command-template mutations use jobs-write instead of a templates write boundary |
+| AUD-060 | Medium/High | Fixed | API/Agent Updates/Auth | Update-release registry mutations use jobs-write instead of config-write |
 | AUD-061 | High | Fixed | Frontend/System Users | User-management confirmations remain armed after editor or selection changes |
 | AUD-062 | High | Confirmed | API/Object Storage/Artifacts | Artifact creation can commit metadata or bytes without cleanup-registry consistency |
 | AUD-063 | High | Fixed | Frontend/Schedules | Schedule confirmations remain armed after form, defer, or table context changes |
@@ -88,11 +88,11 @@ of the same root cause.
 | AUD-072 | Medium/High | Confirmed | API/Frontend/CLI/Inventory/Selectors | Non-unique VPS display names make name selectors ambiguous for production jobs |
 | AUD-073 | High | Confirmed | API/Agent/Terminal/Storage | Live terminal output can grow API job-output storage without a retention ceiling |
 | AUD-074 | Medium/High | Confirmed | API/Object Storage/Job Outputs | Job-output object artifacts can be committed without cleanup-registry repair |
-| AUD-075 | Medium/High | Confirmed | API/History/Auth | Audit logs are readable and exportable with fleet-read scope |
+| AUD-075 | Medium/High | Fixed | API/History/Auth | Audit logs are readable and exportable with fleet-read scope |
 | AUD-076 | Medium/High | Confirmed | API/Gateway/Terminal/Reliability | Terminal stream output retries are not idempotent |
 | AUD-077 | Medium/High | Confirmed | Gateway/API/Terminal/Lifecycle | Terminal final stream status can expire as noncritical output |
-| AUD-078 | Medium/High | Confirmed | API/Network/Auth | OSPF update-plan reads expose generated Bird2 snippets with fleet-read scope |
-| AUD-079 | High | Confirmed | API/Network/Auth | Network observations expose runtime command reports with fleet-read scope |
+| AUD-078 | Medium/High | Fixed | API/Network/Auth | OSPF update-plan reads expose generated Bird2 snippets with fleet-read scope |
+| AUD-079 | High | Fixed | API/Network/Auth | Network observations expose runtime command reports with fleet-read scope |
 | AUD-080 | High | Confirmed | Gateway/Spool/Security | Gateway spool files persist the internal API bearer token |
 | AUD-081 | High | Confirmed | API/Object Storage/Security | Filesystem object-store artifacts rely on default filesystem permissions |
 | AUD-082 | Medium/High | Confirmed | API/Downloads/Security | Transient payload spool files in temp directories rely on default permissions |
@@ -136,9 +136,9 @@ of the same root cause.
 | AUD-120 | High | Fixed | API/Agent Updates/Lifecycle | Activation heartbeat completion trusts job ID without verifying the artifact hash |
 | AUD-121 | High | Fixed | API/Access/Privilege | Agent trust-root and client deletion mutations bypass request-bound privilege verification |
 | AUD-122 | Medium/High | Fixed | API/Gateway/Job Outputs | Late command output is durably accepted after the target is already terminal |
-| AUD-123 | Medium/High | Confirmed | API/Process Supervisor/Auth | Process-supervisor inventory exposes job-output-derived process details with fleet-read scope |
-| AUD-124 | Medium/High | Confirmed | API/Fleet Alerts/Auth | Fleet alert evidence exposes backup paths and artifact IDs with fleet-read scope |
-| AUD-125 | High | Confirmed | API/Fleet Alerts/Webhooks | Fleet alert read routes can enqueue webhook integration events |
+| AUD-123 | Medium/High | Fixed | API/Process Supervisor/Auth | Process-supervisor inventory exposes job-output-derived process details with fleet-read scope |
+| AUD-124 | Medium/High | Fixed | API/Fleet Alerts/Auth | Fleet alert evidence exposes backup paths and artifact IDs with fleet-read scope |
+| AUD-125 | High | Fixed | API/Fleet Alerts/Webhooks | Fleet alert read routes can enqueue webhook integration events |
 | AUD-126 | Medium/High | Confirmed | API/Data Sources/State | Data-source read paths persist default assignments for all clients, including hidden clients |
 | AUD-127 | High | Confirmed | Gateway/Forwarder/Shutdown | Controlled gateway shutdown can lose queued RAM forwarder events |
 | AUD-128 | High | Fixed | Agent/File Browser/Safety | Recursive file delete can escape through symlink-swap races |
@@ -1268,7 +1268,7 @@ of the same root cause.
 ### AUD-047: Migration-Link Listings Expose Restore Metadata With Fleet-Read Scope
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Backups/Auth
 - Context: Migration links connect metadata-only restore plans to later
   migration workflows. They expose backup request IDs, source and target VPSs,
@@ -1296,7 +1296,7 @@ of the same root cause.
 ### AUD-048: History Retention Prune Can Delete Job And Backup Payload History With Inventory-Write Only
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/History/Auth
 - Context: History retention policies and prune runs cover multiple domains,
   including `job_outputs` and `backup_artifacts`. For object-backed domains,
@@ -1328,7 +1328,7 @@ of the same root cause.
 ### AUD-049: Server Artifact Cleanup Can Delete Backup Artifacts With Jobs-Write Only
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Worker/Artifact Cleanup/Auth
 - Context: Server artifact cleanup is an operator-triggered server job that
   filters the shared `server_artifacts` registry by expression and deletes
@@ -1431,7 +1431,7 @@ of the same root cause.
 ### AUD-052: Data-Source Preset And Assignment Mutations Use Inventory-Write Instead Of Config-Write
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Data Sources/Auth
 - Context: Data-source presets define executable and config-generation inputs
   for telemetry, process inventory, command execution policy, tunnel adapters,
@@ -1643,7 +1643,7 @@ of the same root cause.
 ### AUD-058: Integration Mutations Use Inventory-Write Instead Of An Integrations Write Boundary
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Integrations/Auth
 - Context: Webhook rules, webhook delivery processing, alert notification
   channels, alert notification delivery processing, and alert policies are
@@ -1677,7 +1677,7 @@ of the same root cause.
 ### AUD-059: Command-Template Mutations Use Jobs-Write Instead Of A Templates Write Boundary
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Command Templates/Auth
 - Context: Command templates are shared saved operation payloads shown to
   operators during dispatch. They can encode privileged job parameters,
@@ -1704,7 +1704,7 @@ of the same root cause.
 ### AUD-060: Update-Release Registry Mutations Use Jobs-Write Instead Of Config-Write
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Agent Updates/Auth
 - Context: The agent update release registry stores shared external release
   metadata: release name, version, channel, artifact SHA-256, artifact URL hash,
@@ -2335,7 +2335,7 @@ of the same root cause.
 ### AUD-075: Audit Logs Are Readable And Exportable With Fleet-Read Scope
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/History/Auth
 - Context: Audit logs are the operator forensic record for privileged and
   destructive activity. They include who did the action, session identity,
@@ -2472,7 +2472,7 @@ of the same root cause.
 ### AUD-078: OSPF Update-Plan Reads Expose Generated Bird2 Snippets With Fleet-Read Scope
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Network/Auth
 - Context: OSPF update plans are used to review network-cost changes before
   privileged `network_ospf_cost_update` jobs. They are not just telemetry
@@ -2504,7 +2504,7 @@ of the same root cause.
 ### AUD-079: Network Observations Expose Runtime Command Reports With Fleet-Read Scope
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Network/Auth
 - Context: Network observations are exposed as historical telemetry. Operators
   with ordinary fleet visibility need health summaries, trends, and high-level
@@ -4373,7 +4373,7 @@ of the same root cause.
 ### AUD-123: Process-Supervisor Inventory Exposes Job-Output-Derived Process Details With Fleet-Read Scope
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Process Supervisor/Auth
 - Context: Process supervisor jobs can start, stop, restart, inspect, and tail
   managed processes on VPS agents. The inventory endpoint summarizes the latest
@@ -4413,7 +4413,7 @@ of the same root cause.
 ### AUD-124: Fleet Alert Evidence Exposes Backup Paths And Artifact IDs With Fleet-Read Scope
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Fleet Alerts/Auth
 - Context: Fleet alert list/export is a broad operational health surface. Backup
   request paths, include-config choices, artifact IDs, and restore-adjacent
@@ -4440,7 +4440,7 @@ of the same root cause.
 ### AUD-125: Fleet Alert Read Routes Can Enqueue Webhook Integration Events
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Fleet Alerts/Webhooks
 - Context: Listing or exporting fleet alerts is a read-only operator workflow.
   Webhook event creation is an integration side effect that can later produce

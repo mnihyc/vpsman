@@ -175,7 +175,7 @@ impl AppState {
             &operator.role,
             &operator.scopes,
             "operator",
-            &["inventory:write"],
+            &["integrations:write"],
         ))
     }
 }

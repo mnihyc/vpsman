@@ -11,7 +11,9 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("captures reviewed confirmation prompts in operator workflows", async ({ page }, testInfo) => {
-  const outputDir = testInfo.outputPath("confirmation-prompts-visual-audit");
+  const outputDir = process.env.VPSMAN_VISUAL_AUDIT_DIR
+    ? join(process.env.VPSMAN_VISUAL_AUDIT_DIR, testInfo.project.name)
+    : testInfo.outputPath("confirmation-prompts-visual-audit");
   mkdirSync(outputDir, { recursive: true });
   const manifest: Array<Record<string, unknown>> = [];
 
@@ -118,6 +120,7 @@ async function captureServerJobCancelPrompt(
   await expect(cleanupPanel.getByLabel("Preview hash")).toHaveValue(/^[0-9a-f]{64}$/);
   await cleanupPanel.getByRole("button", { name: "Queue cleanup" }).click();
   await expect(page.getByLabel("Confirm artifact cleanup")).toBeVisible();
+  await capture(page, page.locator("main.content"), outputDir, manifest, "artifact-cleanup-confirm");
   await activate(page.getByLabel("Confirm artifact cleanup").getByRole("button", { name: "Queue cleanup" }));
 
   const serverJobsPanel = page.locator(".fleetPanel").filter({

@@ -403,6 +403,7 @@ test("artifact cleanup async preview ignores stale expression edits", async ({
     return requests.artifactCleanupJobs.at(-1);
   });
   expect(request).toMatchObject({
+    domains: ["job_output", "file_transfer"],
     expression: 'artifact.domain = "file_transfer_source"',
     preview_hash:
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

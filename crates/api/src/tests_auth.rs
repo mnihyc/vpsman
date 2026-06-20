@@ -5,9 +5,10 @@ use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 
 use crate::model_command_templates::{CommandTemplateQuery, JobOutputComparisonQuery};
 use crate::security::{
-    default_operator_scopes, SCOPE_BACKUPS_READ, SCOPE_CONFIG_READ, SCOPE_FLEET_READ,
-    SCOPE_INTEGRATIONS_READ, SCOPE_JOBS_READ, SCOPE_NETWORK_READ, SCOPE_SCHEDULES_READ,
-    SCOPE_TEMPLATES_READ, SCOPE_TERMINAL_READ,
+    default_operator_scopes, SCOPE_AUDIT_READ, SCOPE_BACKUPS_READ, SCOPE_CONFIG_READ,
+    SCOPE_FLEET_READ, SCOPE_HISTORY_WRITE, SCOPE_INTEGRATIONS_READ, SCOPE_INTEGRATIONS_WRITE,
+    SCOPE_JOBS_READ, SCOPE_NETWORK_READ, SCOPE_SCHEDULES_READ, SCOPE_TEMPLATES_READ,
+    SCOPE_TEMPLATES_WRITE, SCOPE_TERMINAL_READ,
 };
 
 #[test]
@@ -438,11 +439,16 @@ fn default_operator_scopes_keep_viewers_out_of_sensitive_reads() {
         SCOPE_SCHEDULES_READ,
         SCOPE_CONFIG_READ,
         SCOPE_NETWORK_READ,
+        SCOPE_AUDIT_READ,
         "jobs:write",
         "inventory:write",
         "schedules:write",
         "backups:write",
         "network:write",
+        "config:write",
+        SCOPE_INTEGRATIONS_WRITE,
+        SCOPE_TEMPLATES_WRITE,
+        SCOPE_HISTORY_WRITE,
     ] {
         assert!(
             operator_scopes.iter().any(|scope| scope == expected),
@@ -531,11 +537,92 @@ async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
         .await,
     );
     assert_scope_forbidden(
+        routes_job_history::list_process_supervisor_inventory(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(HistoryQuery { limit: None }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_job_history::list_audit_logs(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(ListQuery::default()),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_job_history::list_network_observations(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(HistoryQuery { limit: None }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_network::list_network_ospf_update_plans(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(HistoryQuery { limit: None }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_migrations::list_migration_links(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(ListQuery::default()),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_alerts::list_fleet_alerts(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(FleetAlertQuery {
+                limit: None,
+                client_id: None,
+                severity: None,
+                category: None,
+                operator_state: None,
+                include_muted: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
         routes_history::export_history(
             axum::extract::State(state.clone()),
             viewer_headers.clone(),
             axum::extract::Query(crate::model_history::HistoryExportQuery {
                 domains: None,
+                limit: None,
+                client_id: None,
+                job_id: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_history::export_history(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(crate::model_history::HistoryExportQuery {
+                domains: Some("audit_logs".to_string()),
+                limit: None,
+                client_id: None,
+                job_id: None,
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_history::export_history(
+            axum::extract::State(state.clone()),
+            viewer_headers.clone(),
+            axum::extract::Query(crate::model_history::HistoryExportQuery {
+                domains: Some("network_observations".to_string()),
                 limit: None,
                 client_id: None,
                 job_id: None,
@@ -831,6 +918,8 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
         issue_test_operator_headers(&state, "operator", &[SCOPE_CONFIG_READ]).await;
     let (_, network_headers) =
         issue_test_operator_headers(&state, "operator", &[SCOPE_NETWORK_READ]).await;
+    let (_, audit_headers) =
+        issue_test_operator_headers(&state, "operator", &[SCOPE_AUDIT_READ]).await;
 
     assert!(routes_ws::authenticate_socket_token(&state, &fleet_token).await);
     assert_not_scope_forbidden(
@@ -870,22 +959,21 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
     assert_not_scope_forbidden(
         routes_history::export_history(
             axum::extract::State(state.clone()),
-            {
-                let mut fleet_headers = HeaderMap::new();
-                fleet_headers.insert(
-                    AUTHORIZATION,
-                    format!("Bearer {fleet_token}")
-                        .parse()
-                        .expect("test bearer header"),
-                );
-                fleet_headers
-            },
+            audit_headers.clone(),
             axum::extract::Query(crate::model_history::HistoryExportQuery {
                 domains: Some("audit_logs".to_string()),
                 limit: None,
                 client_id: None,
                 job_id: None,
             }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_job_history::list_audit_logs(
+            axum::extract::State(state.clone()),
+            audit_headers,
+            axum::extract::Query(ListQuery::default()),
         )
         .await,
     );
@@ -1051,7 +1139,119 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
         .await,
     );
     assert_not_scope_forbidden(
+        routes_job_history::list_network_observations(
+            axum::extract::State(state.clone()),
+            network_headers.clone(),
+            axum::extract::Query(HistoryQuery { limit: None }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_network::list_network_ospf_update_plans(
+            axum::extract::State(state.clone()),
+            network_headers.clone(),
+            axum::extract::Query(HistoryQuery { limit: None }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_history::export_history(
+            axum::extract::State(state.clone()),
+            network_headers.clone(),
+            axum::extract::Query(crate::model_history::HistoryExportQuery {
+                domains: Some("topology_history".to_string()),
+                limit: None,
+                client_id: None,
+                job_id: None,
+            }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
         routes_network::list_tunnel_plans(axum::extract::State(state), network_headers).await,
+    );
+}
+
+#[tokio::test]
+async fn domain_write_surfaces_require_domain_authority() {
+    let state = memory_test_state();
+    let (_, history_only_headers) =
+        issue_test_operator_headers(&state, "operator", &[SCOPE_HISTORY_WRITE]).await;
+    let (_, history_jobs_headers) =
+        issue_test_operator_headers(&state, "operator", &[SCOPE_HISTORY_WRITE, "jobs:write"]).await;
+    let (_, jobs_write_headers) =
+        issue_test_operator_headers(&state, "operator", &["jobs:write"]).await;
+    let (_, backups_write_headers) =
+        issue_test_operator_headers(&state, "operator", &["backups:write"]).await;
+
+    assert_scope_forbidden(
+        routes_history::upsert_history_retention_policy(
+            axum::extract::State(state.clone()),
+            history_only_headers,
+            axum::Json(crate::model_history::UpsertHistoryRetentionPolicyRequest {
+                domain: "job_outputs".to_string(),
+                retention_days: Some(30),
+                prune_limit: Some(100),
+                enabled: Some(true),
+                metadata_only: Some(true),
+                export_enabled: Some(true),
+                notes: None,
+                clear_notes: false,
+                confirmed: true,
+            }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_history::upsert_history_retention_policy(
+            axum::extract::State(state.clone()),
+            history_jobs_headers,
+            axum::Json(crate::model_history::UpsertHistoryRetentionPolicyRequest {
+                domain: "job_outputs".to_string(),
+                retention_days: Some(30),
+                prune_limit: Some(100),
+                enabled: Some(true),
+                metadata_only: Some(true),
+                export_enabled: Some(true),
+                notes: None,
+                clear_notes: false,
+                confirmed: true,
+            }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_server_jobs::preview_artifact_cleanup(
+            axum::extract::State(state.clone()),
+            jobs_write_headers.clone(),
+            axum::Json(crate::model::ArtifactCleanupPreviewRequest {
+                expression: "artifact.domain = \"file_transfer_source\"".to_string(),
+                domains: vec!["file_transfer".to_string()],
+            }),
+        )
+        .await,
+    );
+    assert_scope_forbidden(
+        routes_server_jobs::preview_artifact_cleanup(
+            axum::extract::State(state.clone()),
+            jobs_write_headers,
+            axum::Json(crate::model::ArtifactCleanupPreviewRequest {
+                expression: "artifact.domain = \"backup_artifact\"".to_string(),
+                domains: vec!["backup_artifact".to_string()],
+            }),
+        )
+        .await,
+    );
+    assert_not_scope_forbidden(
+        routes_server_jobs::preview_artifact_cleanup(
+            axum::extract::State(state),
+            backups_write_headers,
+            axum::Json(crate::model::ArtifactCleanupPreviewRequest {
+                expression: "artifact.domain = \"backup_artifact\"".to_string(),
+                domains: vec!["backup_artifact".to_string()],
+            }),
+        )
+        .await,
     );
 }
 

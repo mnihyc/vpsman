@@ -670,9 +670,10 @@ jq -e '
   (.object_key | startswith("file-transfer-sources/")) and
   (.sha256_hex | length) == 64
 ' <<<"$cleanup_source_json" >/dev/null
-cleanup_preview_json="$(vpsctl_json artifact-cleanup-preview --expression "$cleanup_expression")"
+cleanup_preview_json="$(vpsctl_json artifact-cleanup-preview --expression "$cleanup_expression" --domains file_transfer)"
 jq -e --arg expression "$cleanup_expression" '
   .expression == $expression and
+  (.domains == ["file_transfer"]) and
   .matched_count >= 1 and
   .matched_bytes > 0 and
   (.preview_hash | length) == 64

@@ -13,7 +13,7 @@ use crate::{
         WebhookRuleProcessRequest, WebhookRuleQuery, WebhookRuleView,
     },
     repository_webhook_rules::validate_webhook_rule_target,
-    security::SCOPE_INTEGRATIONS_READ,
+    security::{SCOPE_INTEGRATIONS_READ, SCOPE_INTEGRATIONS_WRITE},
     selector_expression::parse_selector_expression,
     state::AppState,
     util::limit_or_default,
@@ -46,7 +46,7 @@ pub(crate) async fn upsert_webhook_rule(
     Json(request): Json<CreateWebhookRuleRequest>,
 ) -> Result<Json<WebhookRuleView>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     validate_webhook_rule_request(&request)?;
     Ok(Json(
@@ -61,7 +61,7 @@ pub(crate) async fn delete_webhook_rule(
     Json(request): Json<DeleteWebhookRuleRequest>,
 ) -> Result<StatusCode, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     if !request.confirmed {
         return Err(ApiError::bad_request(
@@ -105,7 +105,7 @@ pub(crate) async fn dispatch_webhook_rules(
     Json(request): Json<WebhookRuleDispatchRequest>,
 ) -> Result<Json<Vec<WebhookRuleDeliveryView>>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     validate_webhook_rule_dispatch_request(&request)?;
     Ok(Json(
@@ -122,7 +122,7 @@ pub(crate) async fn rotate_webhook_delivery_history(
     Json(request): Json<WebhookDeliveryRotationRequest>,
 ) -> Result<Json<WebhookDeliveryRotationResponse>, ApiError> {
     let _operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     validate_webhook_delivery_rotation_request(&request)?;
     Ok(Json(
@@ -162,7 +162,7 @@ pub(crate) async fn process_webhook_rule_deliveries(
     Json(request): Json<WebhookRuleProcessRequest>,
 ) -> Result<Json<Vec<WebhookRuleDeliveryView>>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     validate_webhook_rule_process_request(&request)?;
     Ok(Json(

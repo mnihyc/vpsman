@@ -535,13 +535,21 @@ async fn postgres_artifact_cleanup_job_persists_reviewed_artifact_identity() {
 
     let preview = db
         .repo
-        .preview_artifact_cleanup(r#"artifact.domain = "job_output""#)
+        .preview_artifact_cleanup(
+            r#"artifact.domain = "job_output""#,
+            &["job_output".to_string()],
+        )
         .await
         .unwrap();
     assert_eq!(preview.matched_count, 1);
     let job = db
         .repo
-        .create_artifact_cleanup_job(&preview.expression, &preview.preview_hash, &operator)
+        .create_artifact_cleanup_job(
+            &preview.expression,
+            &preview.domains,
+            &preview.preview_hash,
+            &operator,
+        )
         .await
         .unwrap();
 

@@ -10,6 +10,30 @@ import type {
 } from "../../types";
 import { formatTime, shortHash, shortId } from "../../utils";
 
+type ArtifactCleanupDomain = "job_output" | "file_transfer" | "backup_artifact";
+
+const artifactCleanupDomainOptions: Array<{
+  description: string;
+  label: string;
+  value: ArtifactCleanupDomain;
+}> = [
+  {
+    description: "Retained command output objects and downloadable job payloads.",
+    label: "Job output",
+    value: "job_output",
+  },
+  {
+    description: "Uploaded transfer source files and promoted download handoff objects.",
+    label: "File transfer",
+    value: "file_transfer",
+  },
+  {
+    description: "Encrypted backup artifact objects and metadata.",
+    label: "Backup artifacts",
+    value: "backup_artifact",
+  },
+];
+
 export function ServerJobsPanel({
   jobs,
   loading,
@@ -23,14 +47,20 @@ export function ServerJobsPanel({
   onCancelJob: (jobId: string) => Promise<ServerJobRecord>;
   onCreateCleanupJob: (
     expression: string,
+    domains: string[],
     previewHash: string,
   ) => Promise<ServerJobRecord>;
   onPreviewCleanup: (
     expression: string,
+    domains: string[],
   ) => Promise<ArtifactCleanupPreviewRecord>;
   onRefresh: () => void;
 }) {
   const [expression, setExpression] = useState('artifact.domain = "job_output"');
+  const [domains, setDomains] = useState<ArtifactCleanupDomain[]>([
+    "job_output",
+    "file_transfer",
+  ]);
   const [preview, setPreview] = useState<ArtifactCleanupPreviewRecord | null>(
     null,
   );
@@ -55,12 +85,13 @@ export function ServerJobsPanel({
   async function previewCleanup() {
     const reviewGeneration = captureReviewGeneration();
     const frozenExpression = expression;
+    const frozenDomains = [...domains];
     setPending(true);
     setError(null);
     setPreviewStatus("Preparing cleanup preview");
     try {
       await waitForReviewRender();
-      const nextPreview = await onPreviewCleanup(frozenExpression);
+      const nextPreview = await onPreviewCleanup(frozenExpression, frozenDomains);
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
       }
@@ -91,7 +122,11 @@ export function ServerJobsPanel({
     setPending(true);
     setError(null);
     try {
-      await onCreateCleanupJob(preview.expression, preview.preview_hash);
+      await onCreateCleanupJob(
+        preview.expression,
+        preview.domains,
+        preview.preview_hash,
+      );
       setConfirmOpen(false);
       setPreview(null);
     } catch (createError) {
@@ -108,6 +143,19 @@ export function ServerJobsPanel({
   function reviewCancelJob(job: ServerJobRecord) {
     setError(null);
     setCancelJobSnapshot(job);
+  }
+
+  function updateDomain(domain: ArtifactCleanupDomain, checked: boolean) {
+    invalidateReviewGeneration();
+    setDomains((current) => {
+      if (checked) {
+        return current.includes(domain) ? current : [...current, domain];
+      }
+      return current.filter((value) => value !== domain);
+    });
+    setPreview(null);
+    setConfirmOpen(false);
+    setPreviewStatus(null);
   }
 
   async function cancelJob(job: ServerJobRecord) {
@@ -146,10 +194,11 @@ export function ServerJobsPanel({
           </button>
         </div>
         <div className="historyRetentionGrid">
-          <label>
+          <label className="artifactCleanupExpression">
             <span>Expression</span>
             <textarea
               rows={3}
+              title="Expression filters artifacts inside the selected domains. Domain authority is selected separately."
               value={expression}
               onChange={(event) => {
                 invalidateReviewGeneration();
@@ -160,14 +209,45 @@ export function ServerJobsPanel({
               }}
             />
           </label>
+          <div className="artifactCleanupDomains">
+            <span>Domains</span>
+            <div className="artifactDomainOptions">
+              {artifactCleanupDomainOptions.map((option) => (
+                <label
+                  className="artifactDomainOption"
+                  key={option.value}
+                  title={option.description}
+                >
+                  <input
+                    checked={domains.includes(option.value)}
+                    onChange={(event) => updateDomain(option.value, event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>
+                    <strong>{option.label}</strong>
+                    <small>{option.description}</small>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
           <label>
             <span>Preview hash</span>
-            <input readOnly value={preview?.preview_hash ?? ""} />
+            <input
+              readOnly
+              title={preview?.preview_hash ?? "Preview before queueing cleanup"}
+              value={preview?.preview_hash ?? ""}
+            />
           </label>
           <label>
             <span>Matched</span>
             <input
               readOnly
+              title={
+                preview
+                  ? `${preview.matched_count} artifacts, ${formatBytes(preview.matched_bytes)}`
+                  : "Preview before queueing cleanup"
+              }
               value={
                 preview
                   ? `${preview.matched_count} / ${formatBytes(preview.matched_bytes)}`
@@ -178,8 +258,9 @@ export function ServerJobsPanel({
           <div className="retentionActions">
             <button
               className="secondaryAction"
-              disabled={pending || !expression.trim()}
+              disabled={pending || !expression.trim() || domains.length === 0}
               onClick={() => void previewCleanup()}
+              title="Build a reviewed cleanup snapshot for the selected domains"
               type="button"
             >
               <ShieldCheck size={16} />
@@ -189,6 +270,7 @@ export function ServerJobsPanel({
               className="dangerAction"
               disabled={pending || !preview}
               onClick={() => setConfirmOpen(true)}
+              title="Queue cleanup using the reviewed expression, domains, and preview hash"
               type="button"
             >
               <Trash2 size={16} />
@@ -202,6 +284,11 @@ export function ServerJobsPanel({
           error={error}
           items={[
             { label: "Expression", value: preview?.expression ?? expression },
+            {
+              label: "Domains",
+              title: formatCleanupDomains(preview?.domains ?? domains),
+              value: formatCleanupDomains(preview?.domains ?? domains),
+            },
             { label: "Artifacts", value: preview?.matched_count ?? 0 },
             {
               label: "Bytes",
@@ -332,6 +419,13 @@ export function ServerJobsPanel({
 
 function displayToken(value: string): string {
   return value.replace(/_/g, " ");
+}
+
+function formatCleanupDomains(domains: string[]): string {
+  const labels = new Map(
+    artifactCleanupDomainOptions.map((option) => [option.value, option.label]),
+  );
+  return domains.map((domain) => labels.get(domain as ArtifactCleanupDomain) ?? domain).join(", ");
 }
 
 function formatBytes(value: number): string {

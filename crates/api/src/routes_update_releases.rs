@@ -77,7 +77,7 @@ pub(crate) async fn create_agent_update_release(
     Json(request): Json<CreateAgentUpdateReleaseRequest>,
 ) -> Result<(StatusCode, Json<AgentUpdateReleaseView>), ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "jobs:write")
+        .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
     validate_agent_update_release_request(&state, &request)?;
     let release = state

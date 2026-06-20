@@ -3680,12 +3680,13 @@ export async function installConsoleApiMock(
           method === "POST"
         ) {
           const body = await readJsonBody(input, init);
-          const request = body as { expression?: string };
+          const request = body as { domains?: string[]; expression?: string };
           requests.artifactCleanupPreviews.push(body);
           const matchedBytes = (
             fileTransferSourceArtifactsFixture as Array<{ size_bytes?: number }>
           ).reduce((sum, artifact) => sum + (artifact.size_bytes ?? 0), 0);
           return jsonResponse({
+            domains: request.domains ?? [],
             expression: request.expression ?? "",
             matched_count: (
               fileTransferSourceArtifactsFixture as Array<unknown>
@@ -3701,6 +3702,7 @@ export async function installConsoleApiMock(
         ) {
           const body = await readJsonBody(input, init);
           const request = body as {
+            domains?: string[];
             expression?: string;
             preview_hash?: string;
           };
@@ -3723,7 +3725,7 @@ export async function installConsoleApiMock(
             matched_count: (
               fileTransferSourceArtifactsFixture as Array<unknown>
             ).length,
-            metadata: {},
+            metadata: { domains: request.domains ?? [] },
             preview_hash: request.preview_hash ?? null,
             started_at: null,
             status: "queued",

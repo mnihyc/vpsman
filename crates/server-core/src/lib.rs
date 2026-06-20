@@ -23,10 +23,14 @@ pub const SCOPE_JOBS_READ: &str = "jobs:read";
 pub const SCOPE_BACKUPS_READ: &str = "backups:read";
 pub const SCOPE_TERMINAL_READ: &str = "terminal:read";
 pub const SCOPE_INTEGRATIONS_READ: &str = "integrations:read";
+pub const SCOPE_INTEGRATIONS_WRITE: &str = "integrations:write";
 pub const SCOPE_TEMPLATES_READ: &str = "templates:read";
+pub const SCOPE_TEMPLATES_WRITE: &str = "templates:write";
 pub const SCOPE_SCHEDULES_READ: &str = "schedules:read";
 pub const SCOPE_CONFIG_READ: &str = "config:read";
 pub const SCOPE_NETWORK_READ: &str = "network:read";
+pub const SCOPE_AUDIT_READ: &str = "audit:read";
+pub const SCOPE_HISTORY_WRITE: &str = "history:write";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NetworkTargetValidationError {
@@ -83,11 +87,16 @@ pub fn default_operator_scopes(role: &str) -> Vec<String> {
             SCOPE_SCHEDULES_READ.to_string(),
             SCOPE_CONFIG_READ.to_string(),
             SCOPE_NETWORK_READ.to_string(),
+            SCOPE_AUDIT_READ.to_string(),
             "jobs:write".to_string(),
             "inventory:write".to_string(),
             "schedules:write".to_string(),
             "backups:write".to_string(),
             "network:write".to_string(),
+            "config:write".to_string(),
+            SCOPE_INTEGRATIONS_WRITE.to_string(),
+            SCOPE_TEMPLATES_WRITE.to_string(),
+            SCOPE_HISTORY_WRITE.to_string(),
         ],
         "viewer" => vec![SCOPE_FLEET_READ.to_string()],
         _ => Vec::new(),

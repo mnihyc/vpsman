@@ -25,7 +25,10 @@ use crate::{
         FleetAlertExportView, FleetAlertStateQuery, FleetAlertStateView,
         UpdateFleetAlertStateRequest,
     },
-    security::{SCOPE_FLEET_READ, SCOPE_INTEGRATIONS_READ},
+    security::{
+        operator_has_scope, SCOPE_BACKUPS_READ, SCOPE_FLEET_READ, SCOPE_INTEGRATIONS_READ,
+        SCOPE_INTEGRATIONS_WRITE,
+    },
     state::AppState,
     unix_now,
     util::limit_or_default,
@@ -36,9 +39,12 @@ pub(crate) async fn list_fleet_alerts(
     headers: HeaderMap,
     Query(query): Query<FleetAlertQuery>,
 ) -> Result<Json<Vec<FleetAlertView>>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
+    if !operator_has_scope(&operator.operator.scopes, SCOPE_BACKUPS_READ) {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
     validate_alert_query(&query)?;
     Ok(Json(state.list_fleet_alerts(query).await?))
 }
@@ -48,9 +54,12 @@ pub(crate) async fn export_fleet_alerts(
     headers: HeaderMap,
     Query(query): Query<FleetAlertQuery>,
 ) -> Result<Json<FleetAlertExportView>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
+    if !operator_has_scope(&operator.operator.scopes, SCOPE_BACKUPS_READ) {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
     validate_alert_query(&query)?;
     let query_summary = serde_json::json!({
         "limit": query.limit,
@@ -94,7 +103,7 @@ pub(crate) async fn update_fleet_alert_state(
     Json(request): Json<UpdateFleetAlertStateRequest>,
 ) -> Result<Json<FleetAlertStateView>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     validate_alert_state_request(&request)?;
     Ok(Json(
@@ -133,7 +142,7 @@ pub(crate) async fn upsert_fleet_alert_policy(
     Json(request): Json<CreateFleetAlertPolicyRequest>,
 ) -> Result<Json<FleetAlertPolicyOverrideView>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     validate_alert_policy_request(&request)?;
     Ok(Json(
@@ -151,7 +160,7 @@ pub(crate) async fn delete_fleet_alert_policy(
     Json(request): Json<DeleteFleetAlertPolicyRequest>,
 ) -> Result<StatusCode, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     validate_delete_confirmation(
         request.confirmed,
@@ -205,7 +214,7 @@ pub(crate) async fn upsert_fleet_alert_notification_channel(
     Json(request): Json<CreateFleetAlertNotificationChannelRequest>,
 ) -> Result<Json<FleetAlertNotificationChannelView>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     validate_alert_notification_channel_request(&request)?;
     Ok(Json(
@@ -223,7 +232,7 @@ pub(crate) async fn delete_fleet_alert_notification_channel(
     Json(request): Json<DeleteFleetAlertNotificationChannelRequest>,
 ) -> Result<StatusCode, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     validate_delete_confirmation(
         request.confirmed,
@@ -278,7 +287,7 @@ pub(crate) async fn dispatch_fleet_alert_notifications(
     Json(request): Json<FleetAlertNotificationDispatchRequest>,
 ) -> Result<Json<Vec<FleetAlertNotificationDeliveryView>>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     validate_alert_notification_dispatch_request(&request)?;
     Ok(Json(
@@ -295,7 +304,7 @@ pub(crate) async fn process_fleet_alert_notifications(
     Json(request): Json<FleetAlertNotificationProcessRequest>,
 ) -> Result<Json<Vec<FleetAlertNotificationDeliveryView>>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "inventory:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     validate_alert_notification_process_request(&request)?;
     Ok(Json(

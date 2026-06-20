@@ -79,37 +79,43 @@ impl Repository {
     pub(crate) async fn preview_artifact_cleanup(
         &self,
         expression: &str,
+        domains: &[String],
     ) -> Result<ArtifactCleanupPreviewView> {
-        let (preview, _) = self.artifact_cleanup_preview_matches(expression).await?;
+        let (preview, _) = self
+            .artifact_cleanup_preview_matches(expression, domains)
+            .await?;
         Ok(preview)
     }
 
     async fn artifact_cleanup_preview_matches(
         &self,
         expression: &str,
+        domains: &[String],
     ) -> Result<(
         ArtifactCleanupPreviewView,
         Vec<ServerArtifactCleanupCandidate>,
     )> {
         let expression = normalize_cleanup_expression(expression)?;
         let parsed = parse_cleanup_expression(&expression)?;
-        let candidates = self.artifact_cleanup_candidates(&expression).await?;
+        let candidates = self.artifact_cleanup_candidates(domains).await?;
         let matched = candidates
             .into_iter()
             .filter(|candidate| artifact_matches_cleanup_expression(candidate, parsed.as_ref()))
             .collect::<Vec<_>>();
-        let preview = cleanup_preview_from_matches(expression, &matched);
+        let preview = cleanup_preview_from_matches(expression, domains, &matched);
         Ok((preview, matched))
     }
 
     pub(crate) async fn create_artifact_cleanup_job(
         &self,
         expression: &str,
+        domains: &[String],
         preview_hash: &str,
         operator: &AuthContext,
     ) -> Result<ServerJobView> {
-        let (preview, matched_artifacts) =
-            self.artifact_cleanup_preview_matches(expression).await?;
+        let (preview, matched_artifacts) = self
+            .artifact_cleanup_preview_matches(expression, domains)
+            .await?;
         ensure!(
             preview.preview_hash == preview_hash,
             "artifact_cleanup_preview_hash_mismatch"
@@ -130,7 +136,7 @@ impl Repository {
                     deleted_bytes: 0,
                     error: None,
                     created_by: Some(operator.operator.id),
-                    metadata: json!({}),
+                    metadata: json!({ "domains": preview.domains }),
                     created_at: now,
                     started_at: None,
                     completed_at: None,
@@ -154,7 +160,7 @@ impl Repository {
                         created_by,
                         metadata
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     RETURNING
                         id,
                         job_type,
@@ -182,6 +188,7 @@ impl Repository {
                 .bind(preview.matched_count)
                 .bind(preview.matched_bytes)
                 .bind(operator.operator.id)
+                .bind(json!({ "domains": preview.domains }))
                 .fetch_one(&mut *tx)
                 .await?;
                 for artifact in &matched_artifacts {
@@ -316,11 +323,12 @@ impl Repository {
 
     async fn artifact_cleanup_candidates(
         &self,
-        _expression: &str,
+        domains: &[String],
     ) -> Result<Vec<ServerArtifactCleanupCandidate>> {
         match self {
             Self::Memory(_) => Ok(Vec::new()),
             Self::Postgres(pool) => {
+                let internal_domains = artifact_cleanup_internal_domains(domains);
                 let rows = sqlx::query(
                     r#"
                     SELECT
@@ -337,10 +345,12 @@ impl Repository {
                         created_at::text AS created_at
                     FROM server_artifacts
                     WHERE status IN ('active', 'deleting')
+                      AND domain = ANY($1)
                     ORDER BY created_at DESC, object_key ASC
                     LIMIT 10000
                     "#,
                 )
+                .bind(internal_domains)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -402,6 +412,7 @@ fn artifact_matches_cleanup_expression(
 
 fn cleanup_preview_from_matches(
     expression: String,
+    domains: &[String],
     matched: &[ServerArtifactCleanupCandidate],
 ) -> ArtifactCleanupPreviewView {
     let matched_count = matched.len() as i64;
@@ -416,13 +427,31 @@ fn cleanup_preview_from_matches(
         })
         .collect::<Vec<_>>();
     identity.sort();
+    identity.insert(0, format!("domains:{}", domains.join(",")));
     let preview_hash = payload_hash(identity.join("\n").as_bytes());
     ArtifactCleanupPreviewView {
         expression,
+        domains: domains.to_vec(),
         preview_hash,
         matched_count,
         matched_bytes,
     }
+}
+
+fn artifact_cleanup_internal_domains(domains: &[String]) -> Vec<String> {
+    let mut internal = Vec::new();
+    for domain in domains {
+        match domain.as_str() {
+            "job_output" => internal.push("job_output".to_string()),
+            "file_transfer" => {
+                internal.push("file_transfer_handoff".to_string());
+                internal.push("file_transfer_source".to_string());
+            }
+            "backup_artifact" => internal.push("backup_artifact".to_string()),
+            _ => {}
+        }
+    }
+    internal
 }
 
 fn server_artifact_candidate_from_row(

@@ -338,6 +338,7 @@ pub(crate) fn artifact_cleanup_preview(
     api_url: &str,
     token: Option<&str>,
     expression: String,
+    domains: Vec<String>,
 ) -> Result<()> {
     println!(
         "{}",
@@ -347,6 +348,7 @@ pub(crate) fn artifact_cleanup_preview(
             token,
             &serde_json::json!({
                 "expression": expression,
+                "domains": domains,
             }),
         )?
     );
@@ -357,6 +359,7 @@ pub(crate) fn artifact_cleanup_create(
     api_url: &str,
     token: Option<&str>,
     expression: String,
+    domains: Vec<String>,
     preview_hash: String,
     confirmed: bool,
 ) -> Result<()> {
@@ -368,6 +371,7 @@ pub(crate) fn artifact_cleanup_create(
             token,
             &serde_json::json!({
                 "expression": expression,
+                "domains": domains,
                 "preview_hash": preview_hash,
                 "confirmed": confirmed,
             }),

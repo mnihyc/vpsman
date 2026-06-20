@@ -15,7 +15,7 @@ use crate::{
         command_template_id_is_builtin, command_template_name_scope_is_builtin,
         validate_command_template_request,
     },
-    security::SCOPE_TEMPLATES_READ,
+    security::{SCOPE_TEMPLATES_READ, SCOPE_TEMPLATES_WRITE},
     state::AppState,
     util::limit_or_default,
 };
@@ -49,7 +49,7 @@ pub(crate) async fn upsert_command_template(
     Json(request): Json<UpsertCommandTemplateRequest>,
 ) -> Result<Json<CommandTemplateView>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "jobs:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_TEMPLATES_WRITE)
         .await?;
     if !request.confirmed {
         return Err(ApiError::conflict("command_template_confirmation_required"));
@@ -78,7 +78,7 @@ pub(crate) async fn delete_command_template(
     Json(request): Json<DeleteCommandTemplateRequest>,
 ) -> Result<Json<CommandTemplateView>, ApiError> {
     let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "jobs:write")
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_TEMPLATES_WRITE)
         .await?;
     if !request.confirmed {
         return Err(ApiError::conflict(

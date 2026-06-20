@@ -13,7 +13,7 @@ use crate::{
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     routes_jobs::create_job_with_operator,
-    security::operator_has_scope,
+    security::{operator_has_scope, SCOPE_BACKUPS_READ},
     state::AppState,
 };
 
@@ -24,7 +24,9 @@ pub(crate) async fn list_migration_links(
     headers: HeaderMap,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<MigrationLinkView>>, ApiError> {
-    let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
+        .await?;
     Ok(Json(state.repo.query_migration_links(&query).await?))
 }
 

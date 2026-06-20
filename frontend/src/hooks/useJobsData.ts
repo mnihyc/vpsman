@@ -483,10 +483,11 @@ export function useJobsData(
   );
 
   const previewArtifactCleanup = useCallback(
-    async (expression: string) => {
+    async (expression: string, domains: string[]) => {
       try {
         return await apiPost<ArtifactCleanupPreviewRecord>("/api/v1/server-jobs/artifact-cleanup/preview", apiToken, {
           expression,
+          domains,
         });
       } catch (error) {
         if (isApiUnauthorized(error)) {
@@ -500,10 +501,11 @@ export function useJobsData(
   );
 
   const createArtifactCleanupJob = useCallback(
-    async (expression: string, previewHash: string) => {
+    async (expression: string, domains: string[], previewHash: string) => {
       try {
         const response = await apiPost<ServerJobRecord>("/api/v1/server-jobs/artifact-cleanup", apiToken, {
           expression,
+          domains,
           preview_hash: previewHash,
           confirmed: true,
         });

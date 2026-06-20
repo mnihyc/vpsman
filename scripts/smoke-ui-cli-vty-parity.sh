@@ -65,7 +65,7 @@ workflows=(
   'file transfer upload dispatch|file-transfer-upload|file-transfer-upload|Resumable upload|frontend/src/panels/jobs/JobOperationControls.tsx frontend/src/resumableFileTransfer.ts'
   'file transfer download dispatch|file-transfer-download|file-transfer-download|Resumable download|frontend/src/panels/jobs/JobOperationControls.tsx frontend/src/resumableFileTransfer.ts'
   'file transfer session inventory|file-transfers|file-transfers|File transfer sessions|frontend/src/panels/jobs/FileTransferSessionsPanel.tsx'
-  'file transfer object handoff|file-transfer-handoff|file-transfer-handoff|Create server-side transfer handoff|frontend/src/panels/jobs/FileTransferSessionsPanel.tsx'
+  'file transfer object handoff|file-transfer-handoff|file-transfer-handoff|Review server-side transfer handoff download|frontend/src/panels/jobs/FileTransferSessionsPanel.tsx'
   'file transfer source artifacts|file-transfer-sources|file-transfer-sources|Source artifacts|frontend/src/panels/jobs/FileTransferSessionsPanel.tsx'
   'file transfer source upload|file-transfer-source-upload|file-transfer-source-upload|Upload source artifact|frontend/src/panels/jobs/FileTransferSessionsPanel.tsx'
   'file transfer source download|file-transfer-source-download|file-transfer-source-download|downloadFileTransferSource|frontend/src/hooks/useJobsData.ts frontend/src/panels/jobs/FileTransferSessionsPanel.tsx'
