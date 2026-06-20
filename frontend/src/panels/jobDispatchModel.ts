@@ -70,6 +70,7 @@ export function buildOperation(
   updateRollbackSha256Hex: string,
   backupPathsText: string,
   backupIncludeConfig: boolean,
+  backupFollowSymlinks: boolean,
   filePushPath: string,
   filePushMode: string,
   filePushPayload: FilePushPayload | null,
@@ -209,7 +210,12 @@ export function buildOperation(
     if (!backupIncludeConfig && paths.length === 0) {
       throw new Error("Backup needs selected paths or config");
     }
-    return { type: "backup", paths, include_config: backupIncludeConfig };
+    return {
+      type: "backup",
+      paths,
+      include_config: backupIncludeConfig,
+      follow_symlinks: backupFollowSymlinks,
+    };
   }
   if (mode === "process_supervisor") {
     return buildSupervisorOperation(

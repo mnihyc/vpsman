@@ -33,6 +33,7 @@ pub(crate) struct BackupPolicyUpsertOptions {
     pub(crate) name: String,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
+    pub(crate) follow_symlinks: bool,
     pub(crate) clients: Vec<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) cron_expr: String,
@@ -240,6 +241,7 @@ pub(crate) fn backup_policy_upsert(
     let operation = JobCommand::Backup {
         paths: options.paths.clone(),
         include_config: options.include_config,
+        follow_symlinks: options.follow_symlinks,
     };
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
@@ -276,6 +278,7 @@ pub(crate) fn backup_policy_upsert(
                 "name": options.name,
                 "paths": options.paths,
                 "include_config": options.include_config,
+                "follow_symlinks": options.follow_symlinks,
                 "selector_expression": selector_expression,
                 "target_client_ids": target_ids,
                 "cron_expr": options.cron_expr,
@@ -545,6 +548,7 @@ pub(crate) fn backup_run(
     token: Option<&str>,
     paths: Vec<String>,
     include_config: bool,
+    follow_symlinks: bool,
     clients: Vec<String>,
     tags: Vec<String>,
     password_env: String,
@@ -562,6 +566,7 @@ pub(crate) fn backup_run(
     let operation = JobCommand::Backup {
         paths: paths.clone(),
         include_config,
+        follow_symlinks,
     };
     let privilege = build_privilege_for_job_command(
         &target_ids,
@@ -605,6 +610,7 @@ pub(crate) fn backup_request(
     client_id: String,
     paths: Vec<String>,
     include_config: bool,
+    follow_symlinks: bool,
     note: Option<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -617,6 +623,7 @@ pub(crate) fn backup_request(
     let operation = JobCommand::Backup {
         paths: paths.clone(),
         include_config,
+        follow_symlinks,
     };
     let target_ids = vec![client_id.clone()];
     let selector_expression = selector_expression_from_targets(&target_ids, &[]);
@@ -643,6 +650,7 @@ pub(crate) fn backup_request(
                 "client_id": client_id,
                 "paths": paths,
                 "include_config": include_config,
+                "follow_symlinks": follow_symlinks,
                 "confirmed": confirmed,
                 "note": note,
                 "privilege_assertion": privilege.privilege_assertion,
@@ -790,6 +798,7 @@ pub(crate) fn restore_plan(
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
     let operation = JobCommand::Restore {
         source_backup_request_id,
+        archive_transfer_session_id: Uuid::nil(),
         paths: scope.paths.clone(),
         include_config: scope.include_config,
         destination_root: scope.destination_root.clone(),
@@ -901,6 +910,7 @@ pub(crate) fn restore_run_request_with_credentials(
     )?;
     let operation = restore_run_operation(
         request.source_backup_request_id,
+        request.archive_transfer_session_id,
         archive.path,
         archive.size_bytes,
         archive.sha256_hex,
@@ -1182,6 +1192,7 @@ fn restore_rollback_operation_from_outputs(
 
 pub(crate) fn restore_run_operation(
     source_backup_request_id: Uuid,
+    archive_transfer_session_id: Uuid,
     archive_path: String,
     archive_size_bytes: u64,
     archive_sha256_hex: String,
@@ -1243,6 +1254,7 @@ pub(crate) fn restore_run_operation(
     );
     Ok(JobCommand::Restore {
         source_backup_request_id,
+        archive_transfer_session_id,
         paths,
         include_config,
         destination_root,

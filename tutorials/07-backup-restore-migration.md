@@ -111,6 +111,11 @@ job terminal state are durable. Auto-linking is best-effort; if object storage
 or artifact validation fails, the backup job still reaches a terminal state and
 the retained output can be handed off manually.
 
+Selected backup paths do not follow symlinks by default. Use
+`--follow-symlinks` only when the reviewed backup scope intentionally includes
+the symlink target bytes; the choice is recorded with the backup request,
+policy, job, and artifact metadata.
+
 Inspect artifacts:
 
 ```sh
@@ -184,7 +189,9 @@ cargo run -p vpsctl -- restore-plan \
 Restore from an archive staged through a completed file-transfer upload on the
 target agent. The restore request selects that transfer record; restore scope is
 derived from the backup request, while path, size, and SHA-256 are derived from
-the recorded transfer and matching backup artifact:
+the recorded transfer and matching backup artifact. Operators do not type
+restore archive paths or hashes into restore-run; those values come from the
+selected upload record.
 
 The CLI and VTY generate restore destinations under
 `/var/lib/vpsman/restores` by default. For sandbox agents, set

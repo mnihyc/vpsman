@@ -626,12 +626,16 @@ export const FILE_TRANSFER_SESSION_STATUS_CLASS_BY_STATUS = {
 export const BACKUP_REQUEST_STATUSES = [
   "requested_metadata_only",
   "artifact_metadata_recorded",
+  "execution_failed",
+  "execution_canceled",
 ] as const;
 export type GeneratedBackupRequestStatus = typeof BACKUP_REQUEST_STATUSES[number];
 
 export const BACKUP_REQUEST_STATUS_CLASS_BY_STATUS = {
   "requested_metadata_only": "in_progress",
   "artifact_metadata_recorded": "successful",
+  "execution_failed": "warning",
+  "execution_canceled": "warning",
 } as const satisfies Record<GeneratedBackupRequestStatus, GeneratedWorkflowStatusClass>;
 
 export const RESTORE_PLAN_STATUSES = [
@@ -959,5 +963,5 @@ export const PRIVILEGE_OPERATION_GOLDEN_VECTORS = [
   { command_type: "shell_argv", canonical_json: "{\"type\":\"shell\",\"argv\":[\"/bin/true\"],\"pty\":false}" },
   { command_type: "terminal_open", canonical_json: "{\"type\":\"terminal_open\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"argv\":[\"/bin/sh\",\"-l\"],\"user_policy\":\"fail\",\"cols\":120,\"rows\":30,\"idle_timeout_secs\":1800,\"flow_window_bytes\":65536}" },
   { command_type: "file_transfer_start", canonical_json: "{\"type\":\"file_transfer_start\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"path\":\"/tmp/upload.bin\",\"mode\":416,\"size_bytes\":4,\"sha256_hex\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"chunk_size_bytes\":65536,\"rate_limit_kbps\":0,\"resume_token_hash\":\"2222222222222222222222222222222222222222222222222222222222222222\"}" },
-  { command_type: "backup", canonical_json: "{\"type\":\"backup\",\"paths\":[\"/etc/app.conf\"],\"include_config\":false}" },
+  { command_type: "backup", canonical_json: "{\"type\":\"backup\",\"paths\":[\"/etc/app.conf\"],\"include_config\":false,\"follow_symlinks\":false}" },
 ] as const satisfies readonly { command_type: string; canonical_json: string }[];

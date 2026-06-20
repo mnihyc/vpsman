@@ -1756,6 +1756,7 @@ export type JobOperation =
       type: "backup";
       paths: string[];
       include_config: boolean;
+      follow_symlinks: boolean;
     }
   | {
       type: "network_apply";
@@ -1805,6 +1806,7 @@ export type JobOperation =
   | {
       type: "restore";
       source_backup_request_id: string;
+      archive_transfer_session_id: string;
       paths: string[];
       include_config: boolean;
       destination_root: string | null;
@@ -1911,6 +1913,7 @@ export type BackupPolicyRecord = {
   target_client_ids: string[];
   paths: string[];
   include_config: boolean;
+  follow_symlinks: boolean;
   retention_days: number;
   keep_last: number;
   rotation_generation: string | null;
@@ -1935,6 +1938,7 @@ export type CreateBackupPolicyRequest = {
   target_client_ids: string[];
   paths: string[];
   include_config: boolean;
+  follow_symlinks: boolean;
   retention_days?: number | null;
   keep_last?: number | null;
   rotation_generation?: string | null;
@@ -1974,6 +1978,7 @@ export type BackupRequestRecord = {
   client_id: string;
   paths: string[];
   include_config: boolean;
+  follow_symlinks: boolean;
   status: BackupRequestStatus;
   payload_hash: string;
   command_scope: string;
@@ -2029,6 +2034,7 @@ export type CreateBackupRequest = {
   client_id: string;
   paths: string[];
   include_config: boolean;
+  follow_symlinks: boolean;
   confirmed: boolean;
   note: string | null;
   privilege_assertion?: PrivilegeAssertion | null;

@@ -453,6 +453,33 @@ test("backup policy review submits a frozen target list and privilege assertion"
   ).toMatch(/^[0-9a-f]+$/);
 });
 
+test("backup workflow confirmations clear when switching backup subpages", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "backup confirmation lifecycle is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page);
+  await page.goto("/");
+  await openConsoleSubpage(page, "Backups", "Requests");
+  await unlockPrivilegeFor(page, "Backups", "Requests");
+
+  await activate(page.getByRole("button", { name: "Open backup request", exact: true }));
+  const requestWorkflow = page.getByLabel("Open backup request");
+  await chooseVpsBySearch(
+    requestWorkflow,
+    "Backup client",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+  await activate(requestWorkflow.getByRole("button", { name: "Review backup" }));
+  await expect(requestWorkflow.getByLabel("Confirm backup request")).toBeVisible();
+
+  await openConsoleSubpage(page, "Backups", "Policies");
+  await expect(page.getByLabel("Confirm backup request")).toBeHidden();
+});
+
 test("data-source apply confirmation closes on edit and submits a fresh snapshot", async ({
   page,
 }, testInfo) => {
@@ -1189,7 +1216,7 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     restoreRunConfirmation.locator("dd", { hasText: archivePath }),
   ).toHaveAttribute("title", archivePath);
   await expect(
-    restoreRunConfirmation.locator("dd", { hasText: archiveSha256Hex }),
+    restoreRunConfirmation.locator("dd", { hasText: archiveSha256Hex.slice(0, 12) }),
   ).toHaveAttribute("title", archiveSha256Hex);
   await activate(
     restoreWorkflow
@@ -1212,6 +1239,7 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
       archive_path: archivePath,
       archive_sha256_hex: archiveSha256Hex,
       archive_size_bytes: archiveSizeBytes,
+      archive_transfer_session_id: "50505050-2222-4333-8444-555555555555",
       destination_root: destinationRoot,
       source_backup_request_id: backupId,
       type: "restore",

@@ -967,6 +967,7 @@ pub(crate) fn validate_create_backup_policy_request(
         operation: JobCommand::Backup {
             paths: request.paths.clone(),
             include_config: request.include_config,
+            follow_symlinks: request.follow_symlinks,
         },
         selector_expression: request.selector_expression.clone(),
         target_client_ids: request.target_client_ids.clone(),
@@ -1156,6 +1157,7 @@ fn backup_command(request: &CreateBackupRequest) -> JobCommand {
     JobCommand::Backup {
         paths: request.paths.clone(),
         include_config: request.include_config,
+        follow_symlinks: request.follow_symlinks,
     }
 }
 
@@ -1163,6 +1165,7 @@ fn backup_policy_command(request: &CreateBackupPolicyRequest) -> JobCommand {
     JobCommand::Backup {
         paths: request.paths.clone(),
         include_config: request.include_config,
+        follow_symlinks: request.follow_symlinks,
     }
 }
 

@@ -122,6 +122,7 @@ impl Repository {
                         client_id,
                         paths,
                         include_config,
+                        follow_symlinks,
                         status,
                         payload_hash,
                         command_scope,
@@ -193,6 +194,7 @@ impl Repository {
                         client_id,
                         paths,
                         include_config,
+                        follow_symlinks,
                         status,
                         payload_hash,
                         command_scope,
@@ -265,6 +267,7 @@ impl Repository {
             client_id: request.client_id.clone(),
             paths: request.paths.clone(),
             include_config: request.include_config,
+            follow_symlinks: request.follow_symlinks,
             status: status.as_str().to_string(),
             payload_hash: payload_hash.to_string(),
             command_scope: command_scope.to_string(),
@@ -294,6 +297,7 @@ impl Repository {
                         client_id,
                         paths,
                         include_config,
+                        follow_symlinks,
                         status,
                         payload_hash,
                         command_scope,
@@ -302,7 +306,7 @@ impl Repository {
                         source_schedule_id,
                         note
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, $10, $11)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11, $12)
                     RETURNING created_at::text AS created_at
                     "#,
                 )
@@ -311,6 +315,7 @@ impl Repository {
                 .bind(&view.client_id)
                 .bind(&view.paths)
                 .bind(view.include_config)
+                .bind(view.follow_symlinks)
                 .bind(&view.status)
                 .bind(&view.payload_hash)
                 .bind(&view.command_scope)
@@ -398,6 +403,7 @@ impl Repository {
                         client_id,
                         paths,
                         include_config,
+                        follow_symlinks,
                         status,
                         payload_hash,
                         command_scope,
@@ -498,6 +504,7 @@ impl Repository {
                     request.client_id == client_id
                         && request.payload_hash == payload_hash
                         && request.artifact_id.is_none()
+                        && request.status == BackupRequestStatus::RequestedMetadataOnly.as_str()
                 })
                 .cloned()),
             Self::Postgres(pool) => {
@@ -509,6 +516,7 @@ impl Repository {
                         client_id,
                         paths,
                         include_config,
+                        follow_symlinks,
                         status,
                         payload_hash,
                         command_scope,
@@ -521,6 +529,7 @@ impl Repository {
                     WHERE client_id = $1
                       AND payload_hash = $2
                       AND artifact_id IS NULL
+                      AND status = 'requested_metadata_only'
                     ORDER BY created_at DESC, id DESC
                     LIMIT 1
                     "#,
@@ -530,6 +539,103 @@ impl Repository {
                 .fetch_optional(pool)
                 .await?;
                 row.map(backup_request_from_row).transpose()
+            }
+        }
+    }
+
+    pub(crate) async fn mark_open_backup_request_execution_terminal(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        status: BackupRequestStatus,
+        operator: Option<&AuthContext>,
+    ) -> Result<Option<BackupRequestView>> {
+        if !matches!(
+            status,
+            BackupRequestStatus::ExecutionFailed | BackupRequestStatus::ExecutionCanceled
+        ) {
+            anyhow::bail!("invalid backup request terminal execution status");
+        }
+        match self {
+            Self::Memory(memory) => {
+                let mut requests = memory.backup_requests.write().await;
+                let Some(request) = requests.iter_mut().rev().find(|request| {
+                    request.client_id == client_id
+                        && request.source_job_id == Some(job_id)
+                        && request.artifact_id.is_none()
+                        && request.status == BackupRequestStatus::RequestedMetadataOnly.as_str()
+                }) else {
+                    return Ok(None);
+                };
+                request.status = status.as_str().to_string();
+                let view = request.clone();
+                drop(requests);
+                memory
+                    .audits
+                    .write()
+                    .await
+                    .push(backup_request_execution_audit(
+                        &view,
+                        operator,
+                        unix_now().to_string(),
+                    ));
+                Ok(Some(view))
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let Some(row) = sqlx::query(
+                    r#"
+                    UPDATE backup_requests
+                    SET status = $3
+                    WHERE source_job_id = $1
+                      AND client_id = $2
+                      AND artifact_id IS NULL
+                      AND status = 'requested_metadata_only'
+                    RETURNING
+                        id,
+                        actor_id,
+                        client_id,
+                        paths,
+                        include_config,
+                        follow_symlinks,
+                        status,
+                        payload_hash,
+                        command_scope,
+                        artifact_id,
+                        source_job_id,
+                        source_schedule_id,
+                        note,
+                        created_at::text AS created_at
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(status.as_str())
+                .fetch_optional(&mut *tx)
+                .await?
+                else {
+                    tx.commit().await?;
+                    return Ok(None);
+                };
+                let view = backup_request_from_row(row)?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.map(|operator| operator.operator.id))
+                .bind(backup_request_execution_action(&view.status))
+                .bind(format!("backup_request:{}", view.id))
+                .bind(&view.payload_hash)
+                .bind(backup_request_execution_metadata(&view, operator))
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(Some(view))
             }
         }
     }
@@ -684,6 +790,7 @@ pub(crate) fn backup_request_from_row(row: sqlx::postgres::PgRow) -> Result<Back
         client_id: row.try_get("client_id")?,
         paths: row.try_get("paths")?,
         include_config: row.try_get("include_config")?,
+        follow_symlinks: row.try_get("follow_symlinks")?,
         status: BackupRequestStatus::from_storage(&status)
             .map(|status| status.as_str().to_string())
             .unwrap_or(status),
@@ -723,6 +830,7 @@ fn backup_request_metadata(
         "client_id": &view.client_id,
         "paths": &view.paths,
         "include_config": view.include_config,
+        "follow_symlinks": view.follow_symlinks,
         "status": &view.status,
         "payload_hash": &view.payload_hash,
         "command_scope": &view.command_scope,
@@ -760,11 +868,57 @@ fn backup_request_source_metadata(
     json!({
         "client_id": &view.client_id,
         "payload_hash": &view.payload_hash,
+        "follow_symlinks": view.follow_symlinks,
         "source_job_id": view.source_job_id,
         "source_schedule_id": view.source_schedule_id,
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,
         "session_id": operator.session_id,
+        "metadata_only": true,
+    })
+}
+
+fn backup_request_execution_audit(
+    view: &BackupRequestView,
+    operator: Option<&AuthContext>,
+    created_at: String,
+) -> AuditLogView {
+    AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: operator.map(|operator| operator.operator.id),
+        action: backup_request_execution_action(&view.status).to_string(),
+        target: format!("backup_request:{}", view.id),
+        command_hash: Some(view.payload_hash.clone()),
+        metadata: backup_request_execution_metadata(view, operator),
+        created_at,
+    }
+}
+
+fn backup_request_execution_action(status: &str) -> &'static str {
+    match status {
+        "execution_canceled" => "backup.execution_canceled",
+        _ => "backup.execution_failed",
+    }
+}
+
+fn backup_request_execution_metadata(
+    view: &BackupRequestView,
+    operator: Option<&AuthContext>,
+) -> serde_json::Value {
+    json!({
+        "client_id": &view.client_id,
+        "paths": &view.paths,
+        "include_config": view.include_config,
+        "follow_symlinks": view.follow_symlinks,
+        "status": &view.status,
+        "payload_hash": &view.payload_hash,
+        "command_scope": &view.command_scope,
+        "artifact_id": view.artifact_id,
+        "source_job_id": view.source_job_id,
+        "source_schedule_id": view.source_schedule_id,
+        "operator_username": operator.map(|operator| operator.operator.username.as_str()),
+        "operator_role": operator.map(|operator| operator.operator.role.as_str()),
+        "session_id": operator.map(|operator| operator.session_id),
         "metadata_only": true,
     })
 }
@@ -779,6 +933,7 @@ fn backup_rejection_metadata(
         "client_id": &request.client_id,
         "paths": &request.paths,
         "include_config": request.include_config,
+        "follow_symlinks": request.follow_symlinks,
         "confirmed": request.confirmed,
         "payload_hash": payload_hash,
         "reason": reason,

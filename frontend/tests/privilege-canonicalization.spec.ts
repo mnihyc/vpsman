@@ -35,6 +35,7 @@ const goldenOperations: Record<string, JobOperation> = {
     type: "backup",
     paths: ["/etc/app.conf"],
     include_config: false,
+    follow_symlinks: false,
   },
 };
 
@@ -97,6 +98,7 @@ test("canonical restore payload keeps non-skipped null archive fields", () => {
   const restore: JobOperation = {
     type: "restore",
     source_backup_request_id: "11111111-2222-4333-8444-555555555555",
+    archive_transfer_session_id: "22222222-3333-4444-8555-666666666666",
     paths: ["/etc/app.conf"],
     include_config: false,
     destination_root: null,
@@ -107,7 +109,7 @@ test("canonical restore payload keeps non-skipped null archive fields", () => {
     post_restore_argv: [],
   };
   expect(canonicalOperationJson(restore)).toBe(
-    '{"type":"restore","source_backup_request_id":"11111111-2222-4333-8444-555555555555","paths":["/etc/app.conf"],"include_config":false,"destination_root":null,"archive_path":"/var/lib/vpsman/restores/app.tar","archive_size_bytes":null,"archive_sha256_hex":null}',
+    '{"type":"restore","source_backup_request_id":"11111111-2222-4333-8444-555555555555","archive_transfer_session_id":"22222222-3333-4444-8555-666666666666","paths":["/etc/app.conf"],"include_config":false,"destination_root":null,"archive_path":"/var/lib/vpsman/restores/app.tar","archive_size_bytes":null,"archive_sha256_hex":null}',
   );
 });
 

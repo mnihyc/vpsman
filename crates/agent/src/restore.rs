@@ -7,7 +7,11 @@ use std::{
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Serialize;
-use tokio::time::{self, Duration};
+use sha2::Digest;
+use tokio::{
+    io::AsyncReadExt,
+    time::{self, Duration},
+};
 use vpsman_common::{
     payload_hash, validate_absolute_file_path, validate_file_mode, CommandOutput, OutputStream,
 };
@@ -18,7 +22,7 @@ use crate::backup::{
 };
 use crate::{
     child_process::{run_child_with_bounded_output_cancelable, ChildCleanupPolicy, ChildRunResult},
-    command_worker::{run_cancelable, CommandCancelToken, CommandCanceled},
+    command_worker::{run_cancelable, CommandCancelToken},
     safe_fs,
 };
 
@@ -82,6 +86,7 @@ pub(crate) struct RestoreCommandInput<'a> {
     pub(crate) archive_path: Option<&'a str>,
     pub(crate) archive_size_bytes: Option<u64>,
     pub(crate) archive_sha256_hex: Option<&'a str>,
+    pub(crate) max_archive_bytes: u64,
     pub(crate) dry_run: bool,
     pub(crate) post_restore_argv: &'a [String],
     pub(crate) timeout_secs: u64,
@@ -109,6 +114,7 @@ async fn restore_archive(
         archive_path,
         archive_size_bytes,
         archive_sha256_hex,
+        max_archive_bytes,
         dry_run,
         post_restore_argv,
         cancel_token,
@@ -119,8 +125,13 @@ async fn restore_archive(
     validate_post_restore_argv(post_restore_argv)?;
     ensure_restore_deadline(deadline)?;
     cancel_token.check("restore")?;
-    let archive_bytes =
-        archive_bytes_from_source(archive_path, archive_size_bytes, archive_sha256_hex).await?;
+    let archive_bytes = archive_bytes_from_source(
+        archive_path,
+        archive_size_bytes,
+        archive_sha256_hex,
+        max_archive_bytes,
+    )
+    .await?;
     cancel_token.check("restore")?;
     let archive = decode_backup_archive(&archive_bytes)?;
     cancel_token.check("restore")?;
@@ -215,10 +226,12 @@ async fn restore_archive(
         .max(1);
     let post_restore =
         run_post_restore_argv(post_restore_argv, post_restore_timeout_secs, cancel_token).await?;
+    let post_restore_passed = post_restore_success(&post_restore);
 
     let status = serde_json::json!({
         "type": "restore",
-        "status": "restored",
+        "status": if post_restore_passed { "restored" } else { "post_restore_failed" },
+        "message": if post_restore_passed { "restore completed" } else { "restore post-hook failed after files were restored" },
         "source_backup_request_id": source_backup_request_id,
         "source_client_id": archive.client_id,
         "archive_source": archive_source_label(archive_path),
@@ -237,7 +250,7 @@ async fn restore_archive(
         job_id,
         stream: OutputStream::Status,
         data: serde_json::to_vec(&status)?,
-        exit_code: Some(0),
+        exit_code: Some(if post_restore_passed { 0 } else { 1 }),
         done: true,
     }])
 }
@@ -253,20 +266,50 @@ async fn archive_bytes_from_source(
     archive_path: Option<&str>,
     archive_size_bytes: Option<u64>,
     archive_sha256_hex: Option<&str>,
+    max_archive_bytes: u64,
 ) -> Result<Vec<u8>> {
     let path = archive_path.context("restore archive path is required")?;
     validate_safe_absolute_path(path)?;
     let expected_size = archive_size_bytes.context("restore archive size is required")?;
     let expected_sha256_hex = archive_sha256_hex.context("restore archive sha256 is required")?;
-    let bytes = tokio::fs::read(path)
-        .await
-        .with_context(|| format!("failed to read restore archive {path}"))?;
+    anyhow::ensure!(expected_size > 0, "restore archive size must be positive");
     anyhow::ensure!(
-        bytes.len() as u64 == expected_size,
+        expected_size <= max_archive_bytes,
+        "restore archive exceeds configured limit: {expected_size} > {max_archive_bytes} bytes"
+    );
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("failed to stat restore archive {path}"))?;
+    anyhow::ensure!(
+        metadata.len() == expected_size,
         "restore archive size mismatch"
     );
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("failed to open restore archive {path}"))?;
+    let mut bytes = Vec::with_capacity(expected_size.min(64 * 1024) as usize);
+    let mut hasher = sha2::Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .with_context(|| format!("failed to read restore archive {path}"))?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .context("restore archive size overflow")?;
+        anyhow::ensure!(total <= expected_size, "restore archive size mismatch");
+        hasher.update(&buffer[..read]);
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    anyhow::ensure!(total == expected_size, "restore archive size mismatch");
+    let actual_sha256_hex = hex::encode(hasher.finalize());
     anyhow::ensure!(
-        payload_hash(&bytes) == expected_sha256_hex,
+        actual_sha256_hex == expected_sha256_hex,
         "restore archive sha256 mismatch"
     );
     Ok(bytes)
@@ -490,11 +533,16 @@ async fn run_post_restore_argv(
             &output.stdout,
             &output.stderr,
         )),
-        ChildRunResult::TimedOut(_) => anyhow::bail!("post-restore command timed out"),
-        ChildRunResult::Canceled { reason, .. } => {
-            Err(CommandCanceled::new("restore", reason).into())
-        }
+        ChildRunResult::TimedOut(_) => Ok(post_restore_timed_out_status(argv)),
+        ChildRunResult::Canceled { reason, .. } => Ok(post_restore_canceled_status(argv, &reason)),
     }
+}
+
+fn post_restore_success(value: &serde_json::Value) -> bool {
+    matches!(
+        value.get("status").and_then(serde_json::Value::as_str),
+        Some("not_configured" | "skipped_dry_run" | "passed")
+    )
 }
 
 fn post_restore_status(
@@ -532,6 +580,29 @@ fn post_restore_output_status(
         "exit_code": exit_code,
         "stdout_preview": String::from_utf8_lossy(stdout).chars().take(4096).collect::<String>(),
         "stderr_preview": String::from_utf8_lossy(stderr).chars().take(4096).collect::<String>(),
+    })
+}
+
+fn post_restore_timed_out_status(argv: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "configured": true,
+        "status": "timed_out",
+        "argv": argv,
+        "exit_code": 124,
+        "stdout_preview": "",
+        "stderr_preview": "",
+    })
+}
+
+fn post_restore_canceled_status(argv: &[String], reason: &str) -> serde_json::Value {
+    serde_json::json!({
+        "configured": true,
+        "status": "canceled",
+        "argv": argv,
+        "reason": reason,
+        "exit_code": null,
+        "stdout_preview": "",
+        "stderr_preview": "",
     })
 }
 
@@ -843,6 +914,7 @@ mod tests {
             archive_path: Some(archive_path.to_str().unwrap()),
             archive_size_bytes: Some(archive_bytes.len() as u64),
             archive_sha256_hex: Some(&archive_sha256_hex),
+            max_archive_bytes: archive_bytes.len() as u64,
             dry_run: false,
             post_restore_argv: &[],
             timeout_secs: 5,
@@ -884,6 +956,7 @@ mod tests {
             archive_path: None,
             archive_size_bytes: None,
             archive_sha256_hex: None,
+            max_archive_bytes: 1024,
             dry_run: false,
             post_restore_argv: &[],
             timeout_secs: 5,
@@ -906,6 +979,7 @@ mod tests {
             archive_path: None,
             archive_size_bytes: Some(0),
             archive_sha256_hex: Some(&bad_hash),
+            max_archive_bytes: 1024,
             dry_run: false,
             post_restore_argv: &[],
             timeout_secs: 5,
@@ -914,6 +988,48 @@ mod tests {
         .await
         .unwrap_err();
         assert!(unsafe_path.to_string().contains("unsafe path segment"));
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_archive_above_configured_size_limit() {
+        let job_id = uuid::Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("vpsman-restore-archive-cap-{job_id}"));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let archive_bytes = backup_archive_bytes(vec![backup_entry(
+            0,
+            "/tmp/source.txt",
+            BackupFileSource::SelectedPath,
+            b"new-data",
+        )]);
+        let archive_path = root.join("archive.tar");
+        tokio::fs::write(&archive_path, &archive_bytes)
+            .await
+            .unwrap();
+        let archive_sha256_hex = payload_hash(&archive_bytes);
+        let paths = vec!["/tmp/source.txt".to_string()];
+
+        let error = execute_restore_command(RestoreCommandInput {
+            job_id,
+            source_backup_request_id: uuid::Uuid::new_v4(),
+            paths: &paths,
+            include_config: false,
+            destination_root: Some(root.join("restore").to_str().unwrap()),
+            archive_path: Some(archive_path.to_str().unwrap()),
+            archive_size_bytes: Some(archive_bytes.len() as u64),
+            archive_sha256_hex: Some(&archive_sha256_hex),
+            max_archive_bytes: archive_bytes.len() as u64 - 1,
+            dry_run: false,
+            post_restore_argv: &[],
+            timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("restore archive exceeds configured limit"));
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[tokio::test]
@@ -948,6 +1064,7 @@ mod tests {
             archive_path: Some(archive_path.to_str().unwrap()),
             archive_size_bytes: Some(archive_bytes.len() as u64),
             archive_sha256_hex: Some(&archive_sha256_hex),
+            max_archive_bytes: archive_bytes.len() as u64,
             dry_run: false,
             post_restore_argv: &[],
             timeout_secs: 5,
@@ -1023,6 +1140,7 @@ mod tests {
             archive_path: Some(archive_path.to_str().unwrap()),
             archive_size_bytes: Some(archive_bytes.len() as u64),
             archive_sha256_hex: Some(&archive_sha256_hex),
+            max_archive_bytes: archive_bytes.len() as u64,
             dry_run: false,
             post_restore_argv: &[],
             timeout_secs: 5,
@@ -1046,6 +1164,69 @@ mod tests {
             0o640
         );
         assert!(!created_destination.exists());
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn restore_reports_post_restore_failure_as_terminal_failure() {
+        let job_id = uuid::Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("vpsman-restore-post-hook-{job_id}"));
+        let destination_root = root.join("restore-root");
+        tokio::fs::create_dir_all(&destination_root).await.unwrap();
+        let archive_bytes = backup_archive_bytes(vec![backup_entry(
+            0,
+            "/tmp/source.txt",
+            BackupFileSource::SelectedPath,
+            b"new-data",
+        )]);
+        let archive_path = root.join("archive.tar");
+        tokio::fs::write(&archive_path, &archive_bytes)
+            .await
+            .unwrap();
+        let archive_sha256_hex = payload_hash(&archive_bytes);
+        let paths = vec!["/tmp/source.txt".to_string()];
+        let post_restore_argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf post-hook-failed >&2; exit 7".to_string(),
+        ];
+
+        let outputs = execute_restore_command(RestoreCommandInput {
+            job_id,
+            source_backup_request_id: uuid::Uuid::new_v4(),
+            paths: &paths,
+            include_config: false,
+            destination_root: Some(destination_root.to_str().unwrap()),
+            archive_path: Some(archive_path.to_str().unwrap()),
+            archive_size_bytes: Some(archive_bytes.len() as u64),
+            archive_sha256_hex: Some(&archive_sha256_hex),
+            max_archive_bytes: archive_bytes.len() as u64,
+            dry_run: false,
+            post_restore_argv: &post_restore_argv,
+            timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            tokio::fs::read(destination_root.join("tmp/source.txt"))
+                .await
+                .unwrap(),
+            b"new-data"
+        );
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].exit_code, Some(1));
+        let status: serde_json::Value = serde_json::from_slice(&outputs[0].data).unwrap();
+        assert_eq!(status["status"], "post_restore_failed");
+        assert_eq!(status["post_restore"]["status"], "failed");
+        assert_eq!(status["post_restore"]["exit_code"], 7);
+        assert!(status["post_restore"]["stderr_preview"]
+            .as_str()
+            .unwrap()
+            .contains("post-hook-failed"));
+        assert_eq!(status["rollback_available"], true);
 
         let _ = tokio::fs::remove_dir_all(root).await;
     }

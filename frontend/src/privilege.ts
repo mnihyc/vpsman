@@ -599,11 +599,13 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["type", operation.type],
         ["paths", operation.paths],
         ["include_config", operation.include_config],
+        ["follow_symlinks", operation.follow_symlinks],
       ]);
     case "restore":
       return ordered([
         ["type", operation.type],
         ["source_backup_request_id", operation.source_backup_request_id],
+        ["archive_transfer_session_id", operation.archive_transfer_session_id],
         ["paths", operation.paths],
         ["include_config", operation.include_config],
         ["destination_root", operation.destination_root ?? null],

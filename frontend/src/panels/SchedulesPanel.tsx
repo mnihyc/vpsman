@@ -1530,7 +1530,9 @@ function operationSummary(operation: JobOperation | null): string {
     case "terminal_open":
       return `terminal ${operation.argv.join(" ") || "session"}`;
     case "backup":
-      return `backup ${operation.include_config ? "config" : "paths"}`;
+      return `backup ${operation.include_config ? "config" : "paths"}${
+        operation.follow_symlinks ? ", follows symlinks" : ""
+      }`;
     default:
       return operation.type;
   }

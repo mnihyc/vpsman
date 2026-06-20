@@ -1,4 +1,5 @@
 use anyhow::Result;
+use uuid::Uuid;
 use vpsman_common::{
     backend_config_signature_payload,
     job_command_min_supported_protocol_version as common_job_command_min_supported_protocol_version,
@@ -274,8 +275,10 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
         JobCommand::Backup {
             paths,
             include_config,
+            follow_symlinks: _,
         } => validate_backup_operation(paths, *include_config),
         JobCommand::Restore {
+            archive_transfer_session_id,
             paths,
             include_config,
             destination_root,
@@ -292,6 +295,7 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             archive_path: archive_path.as_deref(),
             archive_size_bytes: *archive_size_bytes,
             archive_sha256_hex: archive_sha256_hex.as_deref(),
+            archive_transfer_session_id: *archive_transfer_session_id,
             post_restore_argv,
         }),
         JobCommand::RestoreRollback { restored_files, .. } => {
@@ -443,6 +447,7 @@ struct RestoreOperationValidation<'a> {
     archive_path: Option<&'a str>,
     archive_size_bytes: Option<u64>,
     archive_sha256_hex: Option<&'a str>,
+    archive_transfer_session_id: Uuid,
     post_restore_argv: &'a [String],
 }
 
@@ -454,6 +459,7 @@ fn validate_restore_operation(input: RestoreOperationValidation<'_>) -> Result<(
         archive_path,
         archive_size_bytes,
         archive_sha256_hex,
+        archive_transfer_session_id,
         post_restore_argv,
     } = input;
     if !include_config && paths.is_empty() {
@@ -477,6 +483,11 @@ fn validate_restore_operation(input: RestoreOperationValidation<'_>) -> Result<(
     if include_config && destination_root.is_none() {
         return Err(ApiError::bad_request(
             "restore_config_requires_destination_root",
+        ));
+    }
+    if archive_transfer_session_id.is_nil() {
+        return Err(ApiError::bad_request(
+            "restore_archive_transfer_session_required",
         ));
     }
     let archive_path = archive_path

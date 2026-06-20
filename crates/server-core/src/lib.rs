@@ -510,6 +510,7 @@ mod tests {
         let command = JobCommand::Backup {
             paths: vec!["/etc".to_string()],
             include_config: true,
+            follow_symlinks: false,
         };
         assert_eq!(scheduled_command_type_label(&command, "unknown"), "backup");
     }

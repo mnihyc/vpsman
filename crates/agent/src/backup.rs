@@ -101,6 +101,7 @@ pub(crate) struct BackupCommandInput<'a> {
     pub(crate) config_path: &'a Path,
     pub(crate) paths: &'a [String],
     pub(crate) include_config: bool,
+    pub(crate) follow_symlinks: bool,
     pub(crate) output_tx: Option<mpsc::Sender<CommandOutput>>,
     pub(crate) timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
@@ -115,6 +116,7 @@ pub(crate) async fn execute_backup_command(
         config_path,
         paths,
         include_config,
+        follow_symlinks,
         output_tx,
         timeout_secs,
         cancel_token,
@@ -128,6 +130,7 @@ pub(crate) async fn execute_backup_command(
                 config_path,
                 paths,
                 include_config,
+                follow_symlinks,
                 output_tx,
                 cancel_token,
             ),
@@ -144,6 +147,7 @@ async fn create_backup_archive_artifact(
     config_path: &Path,
     paths: &[String],
     include_config: bool,
+    follow_symlinks: bool,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
@@ -153,6 +157,7 @@ async fn create_backup_archive_artifact(
         config_path,
         paths,
         include_config,
+        follow_symlinks,
         config.backup.max_plaintext_bytes,
         &cancel_token,
     )
@@ -212,6 +217,7 @@ async fn create_backup_archive_artifact(
         "archive_format": BACKUP_ARCHIVE_FORMAT,
         "paths": paths,
         "include_config": include_config,
+        "follow_symlinks": follow_symlinks,
         "file_count": file_count,
         "artifact_size_bytes": artifact_bytes.len(),
         "artifact_sha256_hex": artifact_sha256_hex,
@@ -233,6 +239,7 @@ async fn collect_backup_files(
     config_path: &Path,
     paths: &[String],
     include_config: bool,
+    follow_symlinks: bool,
     max_plaintext_bytes: u64,
     cancel_token: &CommandCancelToken,
 ) -> Result<Vec<BackupFilePayload>> {
@@ -246,6 +253,7 @@ async fn collect_backup_files(
                 path,
                 BackupFileSource::SelectedPath,
                 index,
+                follow_symlinks,
                 &mut total_bytes,
                 max_plaintext_bytes,
                 cancel_token,
@@ -261,6 +269,7 @@ async fn collect_backup_files(
                 "vpsman:agent_config",
                 BackupFileSource::AgentConfig,
                 files.len(),
+                true,
                 &mut total_bytes,
                 max_plaintext_bytes,
                 cancel_token,
@@ -276,6 +285,7 @@ async fn read_backup_file(
     archive_path: &str,
     source: BackupFileSource,
     tar_index: usize,
+    follow_symlinks: bool,
     total_bytes: &mut u64,
     max_plaintext_bytes: u64,
     cancel_token: &CommandCancelToken,
@@ -285,7 +295,7 @@ async fn read_backup_file(
         validate_absolute_file_path(archive_path)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     }
-    let metadata = tokio::fs::metadata(path)
+    let metadata = backup_path_metadata(path, follow_symlinks)
         .await
         .with_context(|| format!("failed to stat backup path {}", path.display()))?;
     cancel_token.check("backup")?;
@@ -300,7 +310,7 @@ async fn read_backup_file(
             max_plaintext_bytes
         );
     }
-    let data = read_backup_file_bounded(path, remaining).await?;
+    let data = read_backup_file_bounded(path, remaining, follow_symlinks).await?;
     *total_bytes = total_bytes
         .checked_add(data.len() as u64)
         .context("backup size overflow")?;
@@ -357,10 +367,38 @@ fn encode_backup_tar_archive(
         .into_inner())
 }
 
-async fn read_backup_file_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
-    let mut file = tokio::fs::File::open(path)
+async fn backup_path_metadata(path: &Path, follow_symlinks: bool) -> Result<std::fs::Metadata> {
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if metadata.file_type().is_symlink() {
+        if !follow_symlinks {
+            anyhow::bail!("backup path is a symlink; set follow_symlinks to use the target");
+        }
+        return tokio::fs::metadata(path).await.map_err(Into::into);
+    }
+    Ok(metadata)
+}
+
+async fn read_backup_file_bounded(
+    path: &Path,
+    max_bytes: u64,
+    follow_symlinks: bool,
+) -> Result<Vec<u8>> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true);
+    if !follow_symlinks {
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
         .await
         .with_context(|| format!("failed to open backup path {}", path.display()))?;
+    let opened_metadata = file
+        .metadata()
+        .await
+        .with_context(|| format!("failed to stat opened backup path {}", path.display()))?;
+    if !opened_metadata.is_file() {
+        anyhow::bail!("backup path is not a regular file: {}", path.display());
+    }
     let mut data = Vec::with_capacity((max_bytes.min(16 * 1024)) as usize);
     let mut buffer = vec![0_u8; 16 * 1024];
     let mut total = 0_u64;
@@ -415,6 +453,8 @@ fn validate_backup_scope(paths: &[String], include_config: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
+
     use super::*;
     use vpsman_common::AgentBackupConfig;
 
@@ -447,6 +487,7 @@ mod tests {
             config_path: &config_path,
             paths: &paths,
             include_config: true,
+            follow_symlinks: false,
             output_tx: None,
             timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -472,6 +513,76 @@ mod tests {
         assert_eq!(status["type"], "backup");
         assert_eq!(status["file_count"], 2);
         assert_eq!(status["artifact_sha256_hex"], payload_hash(&artifact_bytes));
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn backup_rejects_symlink_paths_by_default() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-backup-symlink-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let target_path = dir.join("target.txt");
+        let symlink_path = dir.join("linked.txt");
+        let config_path = dir.join("agent.toml");
+        tokio::fs::write(&target_path, b"target contents")
+            .await
+            .unwrap();
+        tokio::fs::write(&config_path, b"client_id = \"client-a\"")
+            .await
+            .unwrap();
+        symlink(&target_path, &symlink_path).unwrap();
+        let config = AgentConfig {
+            client_id: "client-a".to_string(),
+            backup: AgentBackupConfig {
+                max_plaintext_bytes: 8192,
+            },
+            ..AgentConfig::default()
+        };
+        let paths = vec![symlink_path.to_string_lossy().to_string()];
+
+        let error = execute_backup_command(BackupCommandInput {
+            job_id,
+            config: &config,
+            config_path: &config_path,
+            paths: &paths,
+            include_config: false,
+            follow_symlinks: false,
+            output_tx: None,
+            timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
+        })
+        .await
+        .unwrap_err();
+        assert!(error
+            .chain()
+            .any(|cause| cause.to_string().contains("backup path is a symlink")));
+
+        let outputs = execute_backup_command(BackupCommandInput {
+            job_id,
+            config: &config,
+            config_path: &config_path,
+            paths: &paths,
+            include_config: false,
+            follow_symlinks: true,
+            output_tx: None,
+            timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
+        })
+        .await
+        .unwrap();
+        let artifact_bytes = outputs
+            .iter()
+            .filter(|output| output.stream == OutputStream::Stdout)
+            .flat_map(|output| output.data.clone())
+            .collect::<Vec<_>>();
+        let archive = manifest_from_tar(&artifact_bytes);
+        assert_eq!(archive.files.len(), 1);
+        assert_eq!(archive.files[0].path, symlink_path.to_string_lossy());
+        assert_eq!(
+            archive.files[0].sha256_hex,
+            payload_hash(b"target contents")
+        );
 
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
@@ -509,6 +620,7 @@ mod tests {
             config_path: &config_path,
             paths: &paths,
             include_config: true,
+            follow_symlinks: false,
             output_tx: Some(tx),
             timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -561,6 +673,7 @@ mod tests {
             config_path: &file_path,
             paths: &relative_paths,
             include_config: false,
+            follow_symlinks: false,
             output_tx: None,
             timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -575,6 +688,7 @@ mod tests {
             config_path: &file_path,
             paths: &paths,
             include_config: false,
+            follow_symlinks: false,
             output_tx: None,
             timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),

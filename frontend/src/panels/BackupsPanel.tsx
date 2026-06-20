@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
 import { buildRestoreRollbackOperation } from "../backups/restoreRollback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
@@ -66,6 +66,7 @@ import {
   clientDisplayNameMap,
   formatVpsName,
   runPanelAction,
+  shortHash,
   shortId,
 } from "../utils";
 
@@ -140,6 +141,8 @@ type RestoreRunJobSnapshot = {
   request: CreateJobRequest;
   targetClientId: string;
 };
+
+type ConfirmationItem = { label: string; title?: string; value: ReactNode };
 
 type BackupConfirmationAction =
   | "policy"
@@ -233,6 +236,7 @@ type BackupActionSnapshot =
     };
 
 const INLINE_BACKUP_ARTIFACT_UPLOAD_LIMIT_BYTES = 16 * 1024 * 1024;
+const NIL_UUID = "00000000-0000-0000-0000-000000000000";
 const backupSubpageSummaries: Record<
   string,
   { loading: string; title: string }
@@ -282,6 +286,7 @@ export function BackupsPanel({
   const [clientId, setClientId] = useState("");
   const [pathsText, setPathsText] = useState(DEFAULT_BACKUP_SELECTED_PATHS);
   const [includeConfig, setIncludeConfig] = useState(true);
+  const [followSymlinks, setFollowSymlinks] = useState(false);
   const [note, setNote] = useState("");
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [policyName, setPolicyName] = useState("nightly-backup");
@@ -292,6 +297,7 @@ export function BackupsPanel({
     DEFAULT_BACKUP_SELECTED_PATHS,
   );
   const [policyIncludeConfig, setPolicyIncludeConfig] = useState(true);
+  const [policyFollowSymlinks, setPolicyFollowSymlinks] = useState(false);
   const [policyCronExpr, setPolicyCronExpr] = useState("0 3 * * *");
   const [policyRetentionDays, setPolicyRetentionDays] = useState(30);
   const [policyKeepLast, setPolicyKeepLast] = useState(7);
@@ -462,6 +468,14 @@ export function BackupsPanel({
   ].includes(activeSubpage)
     ? activeSubpage
     : "requests";
+  useEffect(() => {
+    invalidateReviewGeneration();
+    setActionError(null);
+    setReviewStatus(null);
+    setPendingConfirmation(null);
+    setPendingPolicySnapshot(null);
+    setPendingActionSnapshot(null);
+  }, [backupSubpage, invalidateReviewGeneration]);
   const backupSubpageMeta = backupSubpageSummaries[backupSubpage];
   const status =
     actionError ??
@@ -535,6 +549,7 @@ export function BackupsPanel({
         type: "backup",
         paths: policyPaths,
         include_config: policyIncludeConfig,
+        follow_symlinks: policyFollowSymlinks,
       };
       const operationPayloadHash = await operationPayloadHashHex(operation);
       const request: CreateBackupPolicyRequest = {
@@ -543,6 +558,7 @@ export function BackupsPanel({
         target_client_ids: targetClientIds,
         paths: policyPaths,
         include_config: policyIncludeConfig,
+        follow_symlinks: policyFollowSymlinks,
         retention_days: clampInteger(policyRetentionDays, 1, 3650),
         keep_last: clampInteger(policyKeepLast, 1, 1000),
         rotation_generation: policyRotationGeneration.trim() || null,
@@ -697,6 +713,7 @@ export function BackupsPanel({
         type: "backup",
         paths,
         include_config: includeConfig,
+        follow_symlinks: followSymlinks,
       };
       const selectorExpression = selectorExpressionForClientIds([clientId]);
       const built = await buildPrivilegeForJobOperation({
@@ -720,11 +737,14 @@ export function BackupsPanel({
           client_id: clientId,
           paths,
           include_config: includeConfig,
+          follow_symlinks: followSymlinks,
           confirmed: true,
           note: note.trim() || null,
           privilege_assertion: built.privilegeAssertion,
         },
-        scopeLabel: `${includeConfig ? "config, " : ""}${paths.length} paths`,
+        scopeLabel: `${includeConfig ? "config, " : ""}${paths.length} paths, ${
+          followSymlinks ? "follow symlinks" : "no symlink follow"
+        }`,
       });
       setPendingConfirmation("backup-request");
     });
@@ -860,6 +880,7 @@ export function BackupsPanel({
       const operation: JobOperation = {
         type: "restore",
         source_backup_request_id: restoreSourceId,
+        archive_transfer_session_id: NIL_UUID,
         paths: restorePaths,
         include_config: restoreIncludeConfig,
         destination_root: restoreDestinationRoot.trim() || null,
@@ -952,6 +973,7 @@ export function BackupsPanel({
     const operation: JobOperation = {
       type: "restore",
       source_backup_request_id: input.sourceBackupRequestId,
+      archive_transfer_session_id: archiveTransfer.sessionId,
       paths: input.paths,
       include_config: input.includeConfig,
       destination_root: input.destinationRoot.trim() || null,
@@ -1252,7 +1274,7 @@ export function BackupsPanel({
 
   function restoreArchiveConfirmationItems(
     run: RestoreRunJobSnapshot | null,
-  ): Array<{ label: string; value: ReactNode }> {
+  ): ConfirmationItem[] {
     const operation = run?.request.operation;
     const restoreOperation = operation?.type === "restore" ? operation : null;
     const fallbackArchive =
@@ -1265,16 +1287,27 @@ export function BackupsPanel({
       restoreOperation?.archive_size_bytes ?? fallbackArchive?.sizeBytes;
     const archiveSha256Hex =
       restoreOperation?.archive_sha256_hex ?? fallbackArchive?.sha256Hex;
+    const archiveTransferSessionId =
+      restoreOperation?.archive_transfer_session_id ?? fallbackArchive?.sessionId;
     return [
+      {
+        label: "Archive transfer",
+        value: archiveTransferSessionId ? shortId(archiveTransferSessionId) : "missing",
+        title: archiveTransferSessionId ?? "missing",
+      },
       { label: "Archive path", value: archivePath || "missing" },
       { label: "Archive size", value: archiveSizeBytes || "missing" },
-      { label: "Archive SHA-256", value: archiveSha256Hex || "missing" },
+      {
+        label: "Archive SHA-256",
+        value: archiveSha256Hex ? shortHash(archiveSha256Hex) : "missing",
+        title: archiveSha256Hex ?? "missing",
+      },
     ];
   }
 
   function buildBackupConfirmationItems(
     action: BackupConfirmationAction,
-  ): Array<{ label: string; value: ReactNode }> {
+  ): ConfirmationItem[] {
     switch (action) {
       case "policy": {
         const policySnapshot = pendingPolicySnapshot;
@@ -1292,8 +1325,12 @@ export function BackupsPanel({
           {
             label: "Scope",
             value: policySnapshot
-              ? `${policySnapshot.request.include_config ? "config, " : ""}${policySnapshot.request.paths.length} paths`
-              : `${policyIncludeConfig ? "config, " : ""}${policyPaths.length} paths`,
+              ? `${policySnapshot.request.include_config ? "config, " : ""}${policySnapshot.request.paths.length} paths, ${
+                  policySnapshot.request.follow_symlinks ? "follow symlinks" : "no symlink follow"
+                }`
+              : `${policyIncludeConfig ? "config, " : ""}${policyPaths.length} paths, ${
+                  policyFollowSymlinks ? "follow symlinks" : "no symlink follow"
+                }`,
           },
           {
             label: "Schedule",
@@ -1820,6 +1857,7 @@ export function BackupsPanel({
                 agents={agents}
                 confirmationOpen={pendingConfirmation === "policy"}
                 cronExpr={policyCronExpr}
+                followSymlinks={policyFollowSymlinks}
                 includeConfig={policyIncludeConfig}
                 keepLast={policyKeepLast}
                 name={policyName}
@@ -1829,6 +1867,10 @@ export function BackupsPanel({
                 }}
                 onEnabledChange={(value) => {
                   setPolicyEnabled(value);
+                  clearPolicyConfirmation();
+                }}
+                onFollowSymlinksChange={(value) => {
+                  setPolicyFollowSymlinks(value);
                   clearPolicyConfirmation();
                 }}
                 onIncludeConfigChange={(value) => {
@@ -1903,10 +1945,15 @@ export function BackupsPanel({
               agents={agents}
               clientId={clientId}
               confirmationOpen={pendingConfirmation === "backup-request"}
+              followSymlinks={followSymlinks}
               includeConfig={includeConfig}
               note={note}
               onClientIdChange={(value) => {
                 setClientId(value);
+                clearBackupConfirmations(["backup-request"]);
+              }}
+              onFollowSymlinksChange={(value) => {
+                setFollowSymlinks(value);
                 clearBackupConfirmations(["backup-request"]);
               }}
               onIncludeConfigChange={(value) => {

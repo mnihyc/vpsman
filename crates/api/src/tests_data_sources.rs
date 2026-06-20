@@ -1026,6 +1026,7 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
                 client_id: "edge-a".to_string(),
                 paths: vec!["/srv/app".to_string()],
                 include_config: true,
+                follow_symlinks: false,
                 status: "artifact_metadata_recorded".to_string(),
                 payload_hash: "6".repeat(64),
                 command_scope: "backup".to_string(),

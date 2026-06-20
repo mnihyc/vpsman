@@ -74,6 +74,7 @@ function formatBytes(value: number): string {
 
 export function JobOperationEditor({
   backupIncludeConfig,
+  backupFollowSymlinks,
   backupPathsText,
   commandText,
   shellPty,
@@ -110,6 +111,7 @@ export function JobOperationEditor({
   mode,
   processLimit,
   setBackupIncludeConfig,
+  setBackupFollowSymlinks,
   setBackupPathsText,
   setCommandText,
   setShellPty,
@@ -176,6 +178,7 @@ export function JobOperationEditor({
   updateSha256Hex,
 }: {
   backupIncludeConfig: boolean;
+  backupFollowSymlinks: boolean;
   backupPathsText: string;
   commandText: string;
   shellPty: boolean;
@@ -212,6 +215,7 @@ export function JobOperationEditor({
   mode: DispatchMode;
   processLimit: number;
   setBackupIncludeConfig: (value: boolean) => void;
+  setBackupFollowSymlinks: (value: boolean) => void;
   setBackupPathsText: (value: string) => void;
   setCommandText: (value: string) => void;
   setShellPty: (value: boolean) => void;
@@ -714,6 +718,17 @@ export function JobOperationEditor({
             type="checkbox"
           />
           <span>Include agent config</span>
+        </label>
+        <label
+          className="checkLine inlineCheck"
+          title="Default is off. Enable only when the backup should archive symlink target contents."
+        >
+          <input
+            checked={backupFollowSymlinks}
+            onChange={(event) => setBackupFollowSymlinks(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Follow symlink targets</span>
         </label>
       </div>
     );

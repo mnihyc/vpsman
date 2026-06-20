@@ -55,6 +55,7 @@ impl Repository {
             operation: JobCommand::Backup {
                 paths: request.paths,
                 include_config: request.include_config,
+                follow_symlinks: request.follow_symlinks,
             },
             selector_expression: request.selector_expression,
             target_client_ids: request.target_client_ids,
@@ -729,6 +730,7 @@ fn backup_policy_view(
     let JobCommand::Backup {
         paths,
         include_config,
+        follow_symlinks,
     } = schedule.operation.clone()
     else {
         return None;
@@ -741,6 +743,7 @@ fn backup_policy_view(
         target_client_ids: schedule.target_client_ids,
         paths,
         include_config,
+        follow_symlinks,
         retention_days: metadata.retention_days,
         keep_last: metadata.keep_last,
         rotation_generation: metadata.rotation_generation,

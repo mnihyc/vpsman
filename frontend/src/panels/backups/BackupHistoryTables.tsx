@@ -756,6 +756,7 @@ function backupScopeLabel(backup: BackupRequestRecord): string {
       `${backup.paths.length} path${backup.paths.length === 1 ? "" : "s"}`,
     );
   }
+  scopes.push(backup.follow_symlinks ? "follows symlinks" : "no symlink follow");
   return scopes.length > 0 ? scopes.join(" + ") : "empty";
 }
 
@@ -780,6 +781,7 @@ function policyScopeLabel(policy: BackupPolicyRecord): string {
       `${policy.paths.length} path${policy.paths.length === 1 ? "" : "s"}`,
     );
   }
+  scopes.push(policy.follow_symlinks ? "follows symlinks" : "no symlink follow");
   return scopes.length > 0 ? scopes.join(" + ") : "empty";
 }
 

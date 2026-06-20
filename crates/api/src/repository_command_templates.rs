@@ -533,6 +533,7 @@ fn builtin_command_templates() -> Vec<CommandTemplateView> {
             JobCommand::Backup {
                 paths: vec!["/etc/hostname".to_string()],
                 include_config: true,
+                follow_symlinks: false,
             },
             30,
         ),

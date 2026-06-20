@@ -101,11 +101,11 @@ of the same root cause.
 | AUD-085 | Medium/High | Confirmed | CLI/Downloads/Security | vpsctl local download staging uses default-readable named temp files |
 | AUD-086 | High | Fixed | Agent/Restore/Security | Agent restore staging exposes restored payloads before archive modes are applied |
 | AUD-087 | High | Fixed | Agent/Restore/Safety | Restore destination roots can be escaped through symlinked parent components |
-| AUD-088 | High | Confirmed | Agent/Backup/Safety | Backup jobs follow selected-path symlinks without an explicit operator choice |
+| AUD-088 | High | Fixed | Agent/Backup/Safety | Backup jobs follow selected-path symlinks without an explicit operator choice |
 | AUD-089 | Medium/High | Fixed | Agent/File Browser/Security | Text-file edit staging exposes payloads before final modes are applied |
 | AUD-090 | Medium/High | Fixed | Agent/File Browser/Ownership | Chown on a symlink reports success while changing nothing |
-| AUD-091 | High | Confirmed | Agent/Restore/Safety | Agent-local restore archives are not required to be hash-bound |
-| AUD-092 | High | Confirmed | Agent/Restore/Reliability | Agent-local restore reads the entire archive into memory without a cap |
+| AUD-091 | High | Fixed | Agent/Restore/Safety | Agent-local restore archives are not required to be hash-bound |
+| AUD-092 | High | Fixed | Agent/Restore/Reliability | Agent-local restore reads the entire archive into memory without a cap |
 | AUD-093 | Medium/High | Confirmed | Agent/Config/Security | Hot config rewrites can lose restrictive config-file permissions |
 | AUD-094 | High | Confirmed | API/Suite Config/Security | Suite config saves can widen secret-bearing config-file permissions |
 | AUD-095 | High | Confirmed | API/Suite Config/Audit | Suite config audit redaction leaves database URLs visible |
@@ -124,7 +124,7 @@ of the same root cause.
 | AUD-108 | High | Fixed | API/Jobs/State Machine | Terminal targets can leave the parent job active after a crash or side-effect error |
 | AUD-109 | Medium/High | Fixed | Gateway/API/Job Outputs | Gateway spool replay treats sequence existence as full output acknowledgement |
 | AUD-110 | High | Fixed | Frontend/CLI/Backups/Migrations | Bundled migration-run can persist a migration link before restore dispatch succeeds |
-| AUD-111 | Medium/High | Confirmed | API/CLI/Backups/Restore Plans | Restore plans can record config-restore intent that later restore-run rejects |
+| AUD-111 | Medium/High | Fixed | API/CLI/Backups/Restore Plans | Restore plans can record config-restore intent that later restore-run rejects |
 | AUD-112 | High | Fixed | API/Jobs/Client Lifecycle | Deleting or revoking a client can leave already-created queued targets unclaimable forever |
 | AUD-113 | High | Fixed | API/Gateway/Key Lifecycle | Replacing a client public key does not invalidate the old live gateway session |
 | AUD-114 | High | Fixed | API/Gateway/Client Lifecycle | Delete and key-revoke mark sessions ended without disconnecting the live gateway session |
@@ -218,15 +218,15 @@ of the same root cause.
 | AUD-202 | Medium/High | Fixed | API/Backups/Resource Cleanup | Retained backup handoff leaks staging files when assembly fails |
 | AUD-203 | Medium/High | Fixed | API/Backups/Resource Bounds | Retained backup handoff rehydrates the whole artifact in API memory after streaming |
 | AUD-204 | Medium/High | Fixed | API/Frontend/CLI/Backups/Resource Cleanup | Abandoned chunked backup upload sessions can leave staging files indefinitely |
-| AUD-205 | High | Confirmed | Agent/Backups/Restore | Restore post-hooks can fail without making the restore target fail safely |
+| AUD-205 | High | Fixed | Agent/Backups/Restore | Restore post-hooks can fail without making the restore target fail safely |
 | AUD-206 | Medium/High | Confirmed | API/Worker/Frontend/Alerts | Alert notification delivery kinds can be saved but cannot be delivered by the shipped worker |
 | AUD-207 | High | Fixed | API/Worker/Schedules/Auth | Schedules keep dispatching privileged jobs after owner disable/delete or scope loss |
 | AUD-208 | High | Fixed | Worker/Backups/Retention/Auth | Backup-policy retention prune can delete backups after policy owner loses authority |
 | AUD-209 | High | Fixed | API/Worker/Server Jobs/Auth | Queued artifact cleanup can delete artifacts after creator disable/delete or scope loss |
 | AUD-210 | Medium/High | Confirmed | CLI/Output/Security | vpsctl structured-output capture writes sensitive stdout to default-permission temp files |
-| AUD-211 | High | Confirmed | API/CLI/Agent/Backups/Restore | Restore jobs do not bind the declared source backup to the submitted archive bytes |
+| AUD-211 | High | Fixed | API/CLI/Agent/Backups/Restore | Restore jobs do not bind the declared source backup to the submitted archive bytes |
 | AUD-212 | Medium/High | Confirmed | Agent/API/User Sessions/Job Status | User-session inventory timeouts are reported as generic failures |
-| AUD-213 | Medium/High | Confirmed | API/Frontend/Backups/Job Lifecycle | Failed backup jobs leave auto-created backup requests permanently in progress |
+| AUD-213 | Medium/High | Fixed | API/Frontend/Backups/Job Lifecycle | Failed backup jobs leave auto-created backup requests permanently in progress |
 | AUD-214 | High | Fixed | API/Dispatcher/Auth/Job Lifecycle | Queued jobs keep dispatching after actor disable/delete or scope loss |
 | AUD-215 | High | Confirmed | API/Frontend/CLI/Terminal/Resource Bounds | Terminal replay loads full session output history before applying replay bounds |
 | AUD-216 | High | Confirmed | Gateway/Spool/Replay | Gateway spool replay can strand valid events after per-target queue saturation |
@@ -2917,7 +2917,7 @@ of the same root cause.
 ### AUD-088: Backup Jobs Follow Selected-Path Symlinks Without An Explicit Operator Choice
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Backup/Safety
 - Context: Manual and scheduled backup jobs capture operator-selected absolute
   file paths from managed VPSs. These backups often run with the agent's
@@ -2948,6 +2948,11 @@ of the same root cause.
   `follow_symlinks` choice with clear manifest/audit evidence. The default
   should match the safer file-operation behavior already used elsewhere in the
   agent.
+- Resolution: Fixed by adding explicit `follow_symlinks` to backup command,
+  request, policy, CLI, VTY, schedule, and dashboard flows. The default is
+  false everywhere; selected symlink paths are rejected with no-follow file
+  opens unless an operator deliberately enables symlink following, and the
+  choice is shown in status, audit metadata, confirmations, and backup history.
 
 ### AUD-089: Text-File Edit Staging Exposes Payloads Before Final Modes Are Applied
 
@@ -3031,7 +3036,7 @@ of the same root cause.
 ### AUD-091: Agent-Local Restore Archives Are Not Required To Be Hash-Bound
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Restore/Safety
 - Context: Operators can run a destructive restore by giving the agent an
   absolute path to a restore archive already present on the target VPS. This is
@@ -3062,11 +3067,16 @@ of the same root cause.
   binding, and preferably size plus hash, before dispatch. The reviewed
   confirmation should show those immutable values, and the agent should refuse
   to restore path-based archives when the digest is missing.
+- Resolution: Fixed by removing free-form restore archive path/hash entry from
+  operator workflows. Restore now selects one completed file-transfer upload
+  record on the target agent; the API binds that transfer session to the source
+  backup artifact by target client, path, size, and SHA-256, and the agent
+  rejects missing or mismatched size/hash before restoring.
 
 ### AUD-092: Agent-Local Restore Reads The Entire Archive Into Memory Without A Cap
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Restore/Reliability
 - Context: Agent-local restore archives are the practical path for artifacts
   too large to inline through the API. These restores can run on small VPSs and
@@ -3092,6 +3102,10 @@ of the same root cause.
   and size accounting, or enforce a configured maximum before reading. Hash
   validation should be performed incrementally so large artifacts do not require
   a whole-file allocation.
+- Resolution: Fixed by enforcing the configured backup archive byte cap for
+  restores before reading, verifying the staged file metadata size, reading the
+  archive incrementally with bounded chunks, and computing SHA-256 during the
+  read instead of using an unbounded whole-file `read`.
 
 ### AUD-093: Hot Config Rewrites Can Lose Restrictive Config-File Permissions
 
@@ -3835,7 +3849,7 @@ of the same root cause.
 ### AUD-111: Restore Plans Can Record Config-Restore Intent That Later Restore-Run Rejects
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/CLI/Backups/Restore Plans
 - Context: Restore plans are durable operator metadata used by migration links
   and migration-run workflows. A plan with `include_config = true` represents
@@ -3868,6 +3882,9 @@ of the same root cause.
 - Notes: Restore-plan validation should use the same safety invariants as a
   future executable restore for fields it records. Config-restore plans should
   require an absolute destination root before being persisted or linked.
+- Resolution: Fixed by making restore-plan validation require an absolute
+  destination root whenever `include_config` is true, matching executable
+  restore-run validation across API, CLI, VTY, and dashboard flows.
 
 ### AUD-112: Deleting Or Revoking A Client Can Leave Already-Created Queued Targets Unclaimable Forever
 
@@ -7988,7 +8005,7 @@ of the same root cause.
 ### AUD-205: Restore Post-Hooks Can Fail Without Making The Restore Target Fail Safely
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Backups/Restore
 - Context: Restore and migration-restore jobs can run an operator-supplied
   post-restore command after restored files have already been written. In
@@ -8027,6 +8044,9 @@ of the same root cause.
   not rely on them for restore success. Timeout/error handling should preserve
   enough restored-file evidence for safe rollback after files have already been
   changed.
+- Resolution: Fixed by treating nonzero, timeout, and canceled post-restore
+  hooks as failed restore targets while preserving the normal restore status
+  payload, restored-file evidence, and rollback metadata in the terminal output.
 
 ### AUD-206: Alert Notification Delivery Kinds Can Be Saved But Cannot Be Delivered By The Shipped Worker
 
@@ -8243,7 +8263,7 @@ of the same root cause.
 ### AUD-211: Restore Jobs Do Not Bind The Declared Source Backup To The Submitted Archive Bytes
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/CLI/Agent/Backups/Restore
 - Context: Operators can restore a backup through the CLI or direct job API by
   naming a `source_backup_request_id` and pointing the target agent at an
@@ -8286,6 +8306,11 @@ of the same root cause.
   prove the archive artifact client and hash match the selected backup request,
   and reject direct restore jobs whose source-backup metadata and archive
   identity cannot be reconciled.
+- Resolution: Fixed by requiring restore jobs to reference a completed
+  file-transfer upload session and by validating that the selected session is on
+  the restore target and matches the declared source backup artifact path,
+  size, and SHA-256 before dispatch. Restore operations no longer accept
+  operator-typed paths or manually typed hashes as the authority.
 
 ### AUD-212: User-Session Inventory Timeouts Are Reported As Generic Failures
 
@@ -8335,7 +8360,7 @@ of the same root cause.
 ### AUD-213: Failed Backup Jobs Leave Auto-Created Backup Requests Permanently In Progress
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/Backups/Job Lifecycle
 - Context: Operators can run backup jobs directly or through schedules. The
   dispatcher auto-creates or attaches a backup request record for each claimed
@@ -8381,6 +8406,11 @@ of the same root cause.
   for auto-created backup requests, update it when the linked backup job target
   terminalizes unsuccessfully, and keep intentionally manual metadata-only
   requests distinguishable from failed execution-backed requests.
+- Resolution: Fixed by adding terminal `execution_failed` and
+  `execution_canceled` backup-request statuses and updating open auto-created
+  requests when their source-linked backup job target terminalizes without a
+  recorded artifact. Manual metadata-only requests remain distinguishable as
+  `requested_metadata_only`.
 
 ### AUD-214: Queued Jobs Keep Dispatching After Actor Disable/Delete Or Scope Loss
 

@@ -16,6 +16,7 @@ CREATE TABLE backup_requests (
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     paths TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
     include_config BOOLEAN NOT NULL DEFAULT FALSE,
+    follow_symlinks BOOLEAN NOT NULL DEFAULT FALSE,
     status TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
     command_scope TEXT NOT NULL,
@@ -25,7 +26,12 @@ CREATE TABLE backup_requests (
     note TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT backup_requests_status_check
-        CHECK (status IN ('requested_metadata_only', 'artifact_metadata_recorded'))
+        CHECK (status IN (
+            'requested_metadata_only',
+            'artifact_metadata_recorded',
+            'execution_failed',
+            'execution_canceled'
+        ))
 );
 
 CREATE INDEX backup_requests_client_created_idx

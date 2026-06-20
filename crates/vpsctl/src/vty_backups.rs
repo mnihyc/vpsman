@@ -23,6 +23,7 @@ pub(crate) struct VtyBackupRequest {
     pub(crate) client_id: String,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
+    pub(crate) follow_symlinks: bool,
     pub(crate) confirmed: bool,
     pub(crate) note: Option<String>,
 }
@@ -58,6 +59,7 @@ pub(crate) struct VtyRestoreRollbackRequest {
 pub(crate) struct VtyBackupRunRequest {
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
+    pub(crate) follow_symlinks: bool,
     pub(crate) selection: VtyJobSelection,
     pub(crate) timeout_secs: u64,
 }
@@ -67,6 +69,7 @@ pub(crate) struct VtyBackupPolicyUpsert {
     pub(crate) name: String,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
+    pub(crate) follow_symlinks: bool,
     pub(crate) selection: VtyJobSelection,
     pub(crate) cron_expr: String,
     pub(crate) enabled: bool,
@@ -88,6 +91,7 @@ pub(crate) fn parse_vty_backup_request(tokens: &[&str]) -> Result<VtyBackupReque
         client_id,
         paths: Vec::new(),
         include_config: false,
+        follow_symlinks: false,
         confirmed: false,
         note: None,
     };
@@ -96,6 +100,10 @@ pub(crate) fn parse_vty_backup_request(tokens: &[&str]) -> Result<VtyBackupReque
         match tokens[index] {
             "--include-config" => {
                 request.include_config = true;
+                index += 1;
+            }
+            "--follow-symlinks" => {
+                request.follow_symlinks = true;
                 index += 1;
             }
             "--confirmed" => {
@@ -140,6 +148,7 @@ pub(crate) fn parse_vty_backup_request(tokens: &[&str]) -> Result<VtyBackupReque
 pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunRequest> {
     let mut paths = Vec::new();
     let mut include_config = false;
+    let mut follow_symlinks = false;
     let mut timeout_secs = 60_u64;
     let mut target_tokens = Vec::new();
     let mut index = 0;
@@ -147,6 +156,10 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
         match tokens[index] {
             "--include-config" => {
                 include_config = true;
+                index += 1;
+            }
+            "--follow-symlinks" => {
+                follow_symlinks = true;
                 index += 1;
             }
             "--path" => {
@@ -200,6 +213,7 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
     Ok(VtyBackupRunRequest {
         paths,
         include_config,
+        follow_symlinks,
         selection: VtyJobSelection::parse(&target_tokens)?,
         timeout_secs,
     })
@@ -212,6 +226,7 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
         .to_string();
     let mut paths = Vec::new();
     let mut include_config = false;
+    let mut follow_symlinks = false;
     let mut cron_expr = "0 3 * * *".to_string();
     let mut enabled = true;
     let mut catch_up_policy = "skip_missed".to_string();
@@ -227,6 +242,10 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
         match tokens[index] {
             "--include-config" => {
                 include_config = true;
+                index += 1;
+            }
+            "--follow-symlinks" => {
+                follow_symlinks = true;
                 index += 1;
             }
             "--disabled" => {
@@ -407,6 +426,7 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
         name,
         paths,
         include_config,
+        follow_symlinks,
         selection,
         cron_expr,
         enabled,
@@ -634,6 +654,7 @@ pub(crate) fn submit_vty_backup_request(
     let operation = JobCommand::Backup {
         paths: request.paths.clone(),
         include_config: request.include_config,
+        follow_symlinks: request.follow_symlinks,
     };
     let target_ids = vec![request.client_id.clone()];
     let selector_expression = selector_expression_from_targets(&target_ids, &[]);
@@ -657,6 +678,7 @@ pub(crate) fn submit_vty_backup_request(
             "client_id": request.client_id,
             "paths": request.paths,
             "include_config": request.include_config,
+            "follow_symlinks": request.follow_symlinks,
             "confirmed": request.confirmed,
             "note": request.note,
             "privilege_assertion": privilege.privilege_assertion,
@@ -673,6 +695,7 @@ pub(crate) fn submit_vty_backup_run(
     let operation = JobCommand::Backup {
         paths: request.paths,
         include_config: request.include_config,
+        follow_symlinks: request.follow_symlinks,
     };
     anyhow::ensure!(
         request.selection.confirmed,
@@ -700,6 +723,7 @@ pub(crate) fn submit_vty_backup_policy_upsert(
     let operation = JobCommand::Backup {
         paths: request.paths.clone(),
         include_config: request.include_config,
+        follow_symlinks: request.follow_symlinks,
     };
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
@@ -734,6 +758,7 @@ pub(crate) fn submit_vty_backup_policy_upsert(
             "name": request.name,
             "paths": request.paths,
             "include_config": request.include_config,
+            "follow_symlinks": request.follow_symlinks,
             "selector_expression": selector_expression,
             "target_client_ids": target_client_ids,
             "cron_expr": request.cron_expr,
@@ -767,6 +792,7 @@ pub(crate) fn submit_vty_restore_plan(
     )?;
     let operation = JobCommand::Restore {
         source_backup_request_id: request.source_backup_request_id,
+        archive_transfer_session_id: Uuid::nil(),
         paths: scope.paths.clone(),
         include_config: scope.include_config,
         destination_root: scope.destination_root.clone(),

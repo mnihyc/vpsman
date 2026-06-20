@@ -125,6 +125,7 @@ async fn create_source_backup(repo: &Repository) -> Uuid {
         client_id: "source-client".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
+        follow_symlinks: false,
         confirmed: true,
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,

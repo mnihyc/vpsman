@@ -2369,6 +2369,7 @@ test("dispatches executable restores with agent-local archive metadata only", as
       archive_path: archivePath,
       archive_sha256_hex: archiveSha256Hex,
       archive_size_bytes: archiveSizeBytes,
+      archive_transfer_session_id: "50505050-2222-4333-8444-555555555555",
       destination_root: destinationRoot,
       include_config: false,
       paths: ["/etc/hostname"],

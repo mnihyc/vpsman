@@ -640,6 +640,7 @@ fn write_contract_golden_vectors(output: &mut Vec<u8>) -> io::Result<()> {
             JobCommand::Backup {
                 paths: vec!["/etc/app.conf".to_string()],
                 include_config: false,
+                follow_symlinks: false,
             },
         ),
     ];

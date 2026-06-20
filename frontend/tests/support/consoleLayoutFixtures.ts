@@ -1321,6 +1321,7 @@ const backupRequests = [
     created_at: "2026-05-31T10:00:00Z",
     id: backupId,
     include_config: false,
+    follow_symlinks: false,
     note: "fixture backup",
     paths: ["/etc/hostname"],
     payload_hash: "a".repeat(64),
@@ -4249,6 +4250,7 @@ export async function installConsoleApiMock(
             catch_up_policy?: string;
             cron_expr?: string;
             enabled?: boolean;
+            follow_symlinks?: boolean;
             include_config?: boolean;
             keep_last?: number | null;
             max_failures?: number;
@@ -4268,6 +4270,7 @@ export async function installConsoleApiMock(
             cron_expr: request.cron_expr ?? "0 3 * * *",
             enabled: request.enabled ?? true,
             failure_count: 0,
+            follow_symlinks: request.follow_symlinks ?? false,
             include_config: request.include_config ?? true,
             keep_last: request.keep_last ?? 7,
             last_error: null,

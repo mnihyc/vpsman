@@ -13,8 +13,9 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 use vpsman_common::{CommandOutput, JobCommand, JobRequest, OutputStream};
 use vpsman_server_core::{
-    operator_is_active_authorized, JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_COMPLETED,
-    TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED,
+    operator_is_active_authorized, JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_CANCELED,
+    TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_FAILED,
+    TARGET_STATUS_REJECTED,
 };
 
 use crate::{
@@ -450,6 +451,29 @@ async fn finish_claimed_target(
             }
         }
     }
+    if target_terminalized
+        && matches!(&claimed.operation, JobCommand::Backup { .. })
+        && outcome.status != TARGET_STATUS_COMPLETED
+    {
+        let status = if outcome.status == TARGET_STATUS_CANCELED {
+            BackupRequestStatus::ExecutionCanceled
+        } else {
+            BackupRequestStatus::ExecutionFailed
+        };
+        let operator = auth_context_for_claim(state, claimed).await?;
+        if let Err(error) = state
+            .repo
+            .mark_open_backup_request_execution_terminal(
+                claimed.job_id,
+                &claimed.client_id,
+                status,
+                operator.as_ref(),
+            )
+            .await
+        {
+            warn!(%error, job_id = %claimed.job_id, client_id = %claimed.client_id, "backup request terminal status update failed");
+        }
+    }
     if target_terminalized {
         let refreshed = state
             .repo
@@ -469,6 +493,7 @@ async fn record_backup_request_for_claim(
     let JobCommand::Backup {
         paths,
         include_config,
+        follow_symlinks,
     } = &claimed.operation
     else {
         return Ok(());
@@ -501,6 +526,7 @@ async fn record_backup_request_for_claim(
         client_id: claimed.client_id.clone(),
         paths: paths.clone(),
         include_config: *include_config,
+        follow_symlinks: *follow_symlinks,
         confirmed: true,
         note: Some(format!("auto-linked from backup job {}", claimed.job_id)),
         privilege_assertion: None,

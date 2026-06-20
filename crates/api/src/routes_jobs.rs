@@ -220,6 +220,7 @@ async fn create_job_inner(
     if matches!(job_command, JobCommand::ConfigRead) && resolved_targets.len() != 1 {
         return Err(ApiError::conflict("config_read_requires_single_target"));
     }
+    validate_restore_archive_binding(state, &job_command, &resolved_targets).await?;
     let source_schedule_id = match &privilege_source {
         JobPrivilegeSource::RequestAssertion => None,
         JobPrivilegeSource::SavedSchedule(schedule_id) => Some(*schedule_id),
@@ -450,6 +451,115 @@ fn is_update_lifecycle_command(command: &JobCommand) -> bool {
             | JobCommand::AgentUpdateRollback { .. }
             | JobCommand::AgentUpdateCheck { .. }
     )
+}
+
+async fn validate_restore_archive_binding(
+    state: &AppState,
+    command: &JobCommand,
+    resolved_targets: &[String],
+) -> Result<(), ApiError> {
+    let JobCommand::Restore {
+        source_backup_request_id,
+        archive_transfer_session_id,
+        archive_path,
+        archive_size_bytes,
+        archive_sha256_hex,
+        ..
+    } = command
+    else {
+        return Ok(());
+    };
+    if resolved_targets.len() != 1 {
+        return Err(ApiError::conflict("restore_requires_single_target"));
+    }
+    if archive_transfer_session_id.is_nil() {
+        return Err(ApiError::bad_request(
+            "restore_archive_transfer_session_required",
+        ));
+    }
+    let target_client_id = &resolved_targets[0];
+    let source_backup = state
+        .repo
+        .find_backup_request(*source_backup_request_id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("restore_source_backup_not_found"))?;
+    let artifact_id = source_backup
+        .artifact_id
+        .ok_or_else(|| ApiError::conflict("restore_source_backup_artifact_required"))?;
+    let artifact = state
+        .repo
+        .find_backup_artifact(artifact_id)
+        .await?
+        .ok_or_else(|| ApiError::conflict("restore_source_backup_artifact_not_found"))?;
+    if artifact.client_id != source_backup.client_id {
+        return Err(ApiError::conflict(
+            "restore_source_backup_artifact_client_mismatch",
+        ));
+    }
+    if artifact.status != "active" {
+        return Err(ApiError::conflict(
+            "restore_source_backup_artifact_not_active",
+        ));
+    }
+    let transfers = state
+        .repo
+        .list_file_transfer_sessions(
+            1,
+            Some(target_client_id),
+            Some(*archive_transfer_session_id),
+        )
+        .await?;
+    let transfer = transfers
+        .into_iter()
+        .next()
+        .ok_or_else(|| ApiError::conflict("restore_archive_transfer_not_found"))?;
+    if transfer.client_id != *target_client_id
+        || transfer.direction != "upload"
+        || transfer.status != "completed"
+    {
+        return Err(ApiError::conflict("restore_archive_transfer_invalid"));
+    }
+    let transfer_size = transfer
+        .size_bytes
+        .ok_or_else(|| ApiError::conflict("restore_archive_transfer_size_missing"))?;
+    let transfer_sha = transfer
+        .sha256_hex
+        .as_deref()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::conflict("restore_archive_transfer_sha256_missing"))?;
+    let archive_path = archive_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::bad_request("restore_archive_path_required"))?;
+    let archive_size_bytes =
+        archive_size_bytes.ok_or_else(|| ApiError::bad_request("restore_archive_size_required"))?;
+    let archive_sha256_hex = archive_sha256_hex
+        .as_deref()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .ok_or_else(|| ApiError::bad_request("restore_archive_sha256_required"))?;
+    if transfer.path != archive_path {
+        return Err(ApiError::conflict("restore_archive_transfer_path_mismatch"));
+    }
+    if transfer_size <= 0 || transfer_size != artifact.size_bytes {
+        return Err(ApiError::conflict("restore_archive_transfer_size_mismatch"));
+    }
+    if archive_size_bytes != transfer_size as u64 {
+        return Err(ApiError::conflict("restore_archive_size_transfer_mismatch"));
+    }
+    let artifact_sha = artifact.sha256_hex.to_ascii_lowercase();
+    if transfer_sha != artifact_sha {
+        return Err(ApiError::conflict(
+            "restore_archive_transfer_sha256_mismatch",
+        ));
+    }
+    if archive_sha256_hex != transfer_sha {
+        return Err(ApiError::conflict(
+            "restore_archive_sha256_transfer_mismatch",
+        ));
+    }
+    Ok(())
 }
 
 fn never_connected_target_skips(

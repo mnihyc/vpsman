@@ -57,6 +57,7 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
         client_id: "client-a".to_string(),
         paths: Vec::new(),
         include_config: false,
+        follow_symlinks: false,
         confirmed: true,
         note: None,
         privilege_assertion: None,
@@ -72,6 +73,7 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
         client_id: "client-a".to_string(),
         paths: vec!["relative".to_string()],
         include_config: false,
+        follow_symlinks: false,
         confirmed: true,
         note: None,
         privilege_assertion: None,
@@ -87,6 +89,7 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: false,
+        follow_symlinks: false,
         confirmed: false,
         note: None,
         privilege_assertion: None,
@@ -107,6 +110,7 @@ fn backup_policy_validation_requires_targets_retention_and_confirmation() {
         target_client_ids: vec!["client-a".to_string()],
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
+        follow_symlinks: false,
         retention_days: Some(30),
         keep_last: Some(7),
         rotation_generation: Some("keyring/v2".to_string()),
@@ -194,12 +198,14 @@ fn backup_job_command_validates_executable_scope() {
     validate_job_command(&JobCommand::Backup {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
+        follow_symlinks: false,
     })
     .unwrap();
     assert_eq!(
         validate_job_command(&JobCommand::Backup {
             paths: Vec::new(),
             include_config: false,
+            follow_symlinks: false,
         })
         .unwrap_err()
         .code,
@@ -209,6 +215,7 @@ fn backup_job_command_validates_executable_scope() {
         validate_job_command(&JobCommand::Backup {
             paths: vec!["relative".to_string()],
             include_config: false,
+            follow_symlinks: false,
         })
         .unwrap_err()
         .code,
@@ -229,6 +236,7 @@ async fn backup_job_dispatch_requires_confirmation() {
         operation: Some(JobCommand::Backup {
             paths: vec!["/etc/hostname".to_string()],
             include_config: true,
+            follow_symlinks: false,
         }),
         timeout_secs: Some(30),
         force_unprivileged: false,
@@ -265,6 +273,7 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
     let operation = JobCommand::Backup {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
+        follow_symlinks: false,
     };
     let request = CreateJobRequest {
         job_id: Some(Uuid::new_v4()),
@@ -332,6 +341,62 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
 }
 
 #[tokio::test]
+async fn backup_job_dispatch_terminal_failure_marks_backup_request_failed() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let source_job_id = Uuid::new_v4();
+    let operator = backup_test_operator();
+    let request = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        follow_symlinks: false,
+        confirmed: true,
+        note: Some("source job request".to_string()),
+        privilege_assertion: None,
+    };
+    let operation = JobCommand::Backup {
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        follow_symlinks: false,
+    };
+    let command_hash = payload_hash(&encode_json(&operation).unwrap());
+    let backup = repo
+        .record_backup_request_with_source(
+            &request,
+            &command_hash,
+            "client:client-a",
+            &operator,
+            BackupRequestStatus::RequestedMetadataOnly,
+            BackupRequestSourceLink {
+                job_id: Some(source_job_id),
+                schedule_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    let terminal = repo
+        .mark_open_backup_request_execution_terminal(
+            source_job_id,
+            "client-a",
+            BackupRequestStatus::ExecutionFailed,
+            Some(&operator),
+        )
+        .await
+        .unwrap();
+    let backups = repo.list_backup_requests(10).await.unwrap();
+    let audits = repo.list_audit_logs(10).await.unwrap();
+
+    assert_eq!(terminal.as_ref().map(|view| view.id), Some(backup.id));
+    assert_eq!(backups.len(), 1);
+    assert_eq!(backups[0].status, "execution_failed");
+    assert!(backups[0].artifact_id.is_none());
+    assert!(audits
+        .iter()
+        .any(|audit| audit.action == "backup.execution_failed"));
+}
+
+#[tokio::test]
 async fn backup_job_dispatch_reuses_existing_open_backup_request() {
     let repo = Repository::Memory(MemoryState::default());
     seed_backup_agent(&repo).await;
@@ -341,6 +406,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
+        follow_symlinks: false,
         confirmed: true,
         note: Some("operator-requested".to_string()),
         privilege_assertion: None,
@@ -352,6 +418,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
     let operation = JobCommand::Backup {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
+        follow_symlinks: false,
     };
     let (gateway_url, gateway_task) =
         spawn_backup_gateway_once(plain_backup_artifact_bytes("client-a")).await;
@@ -423,6 +490,7 @@ async fn backup_request_records_metadata_and_audit_after_privilege_unlock() {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
+        follow_symlinks: false,
         confirmed: true,
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,
@@ -467,6 +535,7 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
         target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
+        follow_symlinks: false,
         retention_days: Some(45),
         keep_last: Some(12),
         rotation_generation: Some("keyring/v2".to_string()),
@@ -540,6 +609,7 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
             target_client_ids: vec!["client-a".to_string()],
             paths: vec!["/etc/hostname".to_string()],
             include_config: true,
+            follow_symlinks: false,
             retention_days: Some(1),
             keep_last: Some(1),
             rotation_generation: None,
@@ -665,6 +735,7 @@ async fn backup_policy_prune_partial_error_preserves_metadata_after_delete_failu
             target_client_ids: vec!["client-a".to_string()],
             paths: vec!["/etc/hostname".to_string()],
             include_config: true,
+            follow_symlinks: false,
             retention_days: Some(1),
             keep_last: Some(1),
             rotation_generation: None,
@@ -800,6 +871,7 @@ async fn backup_artifact_metadata_links_request_and_audits() {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
+        follow_symlinks: false,
         confirmed: true,
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,
@@ -1263,6 +1335,7 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
             JobCommand::Backup {
                 paths: backup.paths.clone(),
                 include_config: backup.include_config,
+                follow_symlinks: backup.follow_symlinks,
             },
         );
         memory.job_targets.write().await.push(JobTargetView {
@@ -1364,6 +1437,7 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
             JobCommand::Backup {
                 paths: backup.paths.clone(),
                 include_config: backup.include_config,
+                follow_symlinks: backup.follow_symlinks,
             },
         );
         memory.job_targets.write().await.push(JobTargetView {
@@ -1493,6 +1567,7 @@ async fn backup_request_requires_privilege_gateway_verification() {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: false,
+        follow_symlinks: false,
         confirmed: true,
         note: None,
         privilege_assertion: None,
@@ -1569,6 +1644,7 @@ async fn create_test_backup_request(
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
+        follow_symlinks: false,
         confirmed: true,
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,
@@ -1593,6 +1669,7 @@ async fn seed_policy_backup_artifact(
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
+        follow_symlinks: false,
         confirmed: true,
         note: Some(format!("policy artifact {label}")),
         privilege_assertion: None,
@@ -1600,6 +1677,7 @@ async fn seed_policy_backup_artifact(
     let command = JobCommand::Backup {
         paths: request.paths.clone(),
         include_config: request.include_config,
+        follow_symlinks: request.follow_symlinks,
     };
     let command_hash = payload_hash(&encode_json(&command).unwrap());
     let command_scope = format!("client:{}", request.client_id);

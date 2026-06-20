@@ -125,6 +125,11 @@ pub(crate) fn validate_create_restore_plan(
         }
         validate_file_path(destination_root)?;
     }
+    if request.include_config && request.destination_root.is_none() {
+        return Err(ApiError::bad_request(
+            "restore_config_requires_destination_root",
+        ));
+    }
     if request
         .note
         .as_ref()
@@ -163,6 +168,7 @@ async fn ensure_single_restore_target(
 fn restore_command(request: &CreateRestorePlanRequest) -> JobCommand {
     JobCommand::Restore {
         source_backup_request_id: request.source_backup_request_id,
+        archive_transfer_session_id: uuid::Uuid::nil(),
         paths: request.paths.clone(),
         include_config: request.include_config,
         destination_root: request.destination_root.clone(),

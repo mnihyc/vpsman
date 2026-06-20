@@ -146,6 +146,9 @@ cargo run -p vpsctl -- backup-run --paths /etc/hostname --clients "$EDGE_CLIENT_
 cargo run -p vpsctl -- backup-artifacts
 ```
 
+Backup selected paths reject symlinks by default. Add `--follow-symlinks` only
+when the symlink target bytes are intentionally part of the reviewed backup.
+
 Create a restore plan before changing a rebuilt VPS:
 
 ```sh
@@ -157,7 +160,8 @@ cargo run -p vpsctl -- restore-plan \
 
 For rebuilt-client migration, use `migration-run` so the migration link and
 restore job are created together. Stage the restore archive with
-`file-transfer-upload` first, then use the completed upload session id:
+`file-transfer-upload` first, then use the completed upload session id. Restore
+paths, size, and SHA-256 come from that selected upload record:
 
 ```sh
 cargo run -p vpsctl -- file-transfer-upload \

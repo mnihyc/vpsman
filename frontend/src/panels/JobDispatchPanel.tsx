@@ -305,6 +305,7 @@ export function JobDispatchPanel({
   const [updateRollbackSha256Hex, setUpdateRollbackSha256Hex] = useState("");
   const [backupPathsText, setBackupPathsText] = useState(DEFAULT_JOB_BACKUP_PATHS);
   const [backupIncludeConfig, setBackupIncludeConfig] = useState(true);
+  const [backupFollowSymlinks, setBackupFollowSymlinks] = useState(false);
   const [processLimit, setProcessLimit] = useState(50);
   const [supervisorAction, setSupervisorAction] = useState<SupervisorAction>("status");
   const [supervisorName, setSupervisorName] = useState("");
@@ -428,6 +429,7 @@ export function JobDispatchPanel({
     );
   }, [
     backupIncludeConfig,
+    backupFollowSymlinks,
     backupPathsText,
     commandText,
     fileFollowSymlinks,
@@ -840,6 +842,7 @@ export function JobDispatchPanel({
       updateRollbackSha256Hex,
       backupPathsText,
       backupIncludeConfig,
+      backupFollowSymlinks,
       filePushPath,
       filePushMode,
       filePushPayload,
@@ -927,6 +930,7 @@ export function JobDispatchPanel({
         setMode("backup");
         setBackupPathsText(operation.paths.join("\n"));
         setBackupIncludeConfig(operation.include_config);
+        setBackupFollowSymlinks(operation.follow_symlinks);
         return;
       case "file_pull":
         setMode("file_pull");
@@ -1013,6 +1017,7 @@ export function JobDispatchPanel({
       updateRollbackSha256Hex,
       backupPathsText,
       backupIncludeConfig,
+      backupFollowSymlinks,
       filePushPath,
       filePushMode,
       null,
@@ -1455,6 +1460,7 @@ export function JobDispatchPanel({
           setUpdateRollbackSha256Hex={setUpdateRollbackSha256Hex}
           setUpdateSha256Hex={setUpdateSha256Hex}
           setBackupIncludeConfig={setBackupIncludeConfig}
+          setBackupFollowSymlinks={setBackupFollowSymlinks}
           setBackupPathsText={setBackupPathsText}
           supervisorAction={supervisorAction}
           supervisorArgv={supervisorArgv}
@@ -1471,6 +1477,7 @@ export function JobDispatchPanel({
           updateRollbackSha256Hex={updateRollbackSha256Hex}
           updateSha256Hex={updateSha256Hex}
           backupIncludeConfig={backupIncludeConfig}
+          backupFollowSymlinks={backupFollowSymlinks}
           backupPathsText={backupPathsText}
           shellScript={shellScript}
         />

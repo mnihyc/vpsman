@@ -11,12 +11,14 @@ import type { AgentView } from "../../types";
 type BackupPolicyFormProps = {
   agents: AgentView[];
   cronExpr: string;
+  followSymlinks: boolean;
   includeConfig: boolean;
   keepLast: number;
   name: string;
   confirmationOpen: boolean;
   onCronExprChange: (value: string) => void;
   onEnabledChange: (value: boolean) => void;
+  onFollowSymlinksChange: (value: boolean) => void;
   onIncludeConfigChange: (value: boolean) => void;
   onKeepLastChange: (value: number) => void;
   onNameChange: (value: string) => void;
@@ -40,12 +42,14 @@ type BackupPolicyFormProps = {
 export function BackupPolicyForm({
   agents,
   cronExpr,
+  followSymlinks,
   includeConfig,
   keepLast,
   name,
   confirmationOpen,
   onCronExprChange,
   onEnabledChange,
+  onFollowSymlinksChange,
   onIncludeConfigChange,
   onKeepLastChange,
   onNameChange,
@@ -160,26 +164,40 @@ export function BackupPolicyForm({
             value={rotationGeneration}
           />
         </label>
-        <label className="checkLine inlineCheck">
-          <input
-            checked={includeConfig}
-            onChange={(event) => onIncludeConfigChange(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Include agent config</span>
-        </label>
-        <label className="checkLine inlineCheck">
-          <input
-            checked={policyEnabled}
-            onChange={(event) => onEnabledChange(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Enabled</span>
-        </label>
+        <div className="dispatchControls">
+          <label className="checkLine inlineCheck">
+            <input
+              checked={includeConfig}
+              onChange={(event) => onIncludeConfigChange(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Include agent config</span>
+          </label>
+          <label
+            className="checkLine inlineCheck"
+            title="Default is off. Enable only when scheduled backups should archive symlink target contents."
+          >
+            <input
+              checked={followSymlinks}
+              onChange={(event) => onFollowSymlinksChange(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Follow symlink targets</span>
+          </label>
+          <label className="checkLine inlineCheck">
+            <input
+              checked={policyEnabled}
+              onChange={(event) => onEnabledChange(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Enabled</span>
+          </label>
+        </div>
         <div className="backupScopeList">
           <CalendarClock size={18} />
           <span>{cronExpr.trim() || "cron required"}</span>
           <span>{includeConfig ? "config" : "no config"}</span>
+          <span>{followSymlinks ? "follows symlinks" : "no symlink follow"}</span>
           <span>
             {pathsCount} path{pathsCount === 1 ? "" : "s"}
           </span>

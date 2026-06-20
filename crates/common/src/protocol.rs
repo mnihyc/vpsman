@@ -41,8 +41,8 @@ pub const DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH: &str = "incremental_p
 pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const USER_SESSIONS_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const PROCESS_COMMAND_PROTOCOL_VERSION: u16 = 1;
-pub const BACKUP_COMMAND_PROTOCOL_VERSION: u16 = 1;
-pub const RESTORE_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const BACKUP_COMMAND_PROTOCOL_VERSION: u16 = 2;
+pub const RESTORE_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const NETWORK_COMMAND_PROTOCOL_VERSION: u16 = 1;
 
 pub const JOB_STATUS_QUEUED: &str = "queued";
@@ -227,12 +227,14 @@ pub const FILE_TRANSFER_SESSION_STATUS_CLASS_BY_STATUS: [(&str, &str); 5] = [
     ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
 ];
 
-pub const BACKUP_REQUEST_STATUS_CLASS_BY_STATUS: [(&str, &str); 2] = [
+pub const BACKUP_REQUEST_STATUS_CLASS_BY_STATUS: [(&str, &str); 4] = [
     ("requested_metadata_only", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     (
         "artifact_metadata_recorded",
         WORKFLOW_STATUS_CLASS_SUCCESSFUL,
     ),
+    ("execution_failed", WORKFLOW_STATUS_CLASS_WARNING),
+    ("execution_canceled", WORKFLOW_STATUS_CLASS_WARNING),
 ];
 
 pub const RESTORE_PLAN_STATUS_CLASS_BY_STATUS: [(&str, &str); 1] =
@@ -1811,8 +1813,12 @@ pub const FILE_TRANSFER_SESSION_EVENTS: &[&str] = &[
 pub const FILE_TRANSFER_SESSION_STATUSES: &[&str] =
     &["started", "transferring", "completed", "aborted", "unknown"];
 
-pub const BACKUP_REQUEST_STATUSES: &[&str] =
-    &["requested_metadata_only", "artifact_metadata_recorded"];
+pub const BACKUP_REQUEST_STATUSES: &[&str] = &[
+    "requested_metadata_only",
+    "artifact_metadata_recorded",
+    "execution_failed",
+    "execution_canceled",
+];
 pub const RESTORE_PLAN_STATUSES: &[&str] = &["planned_metadata_only"];
 pub const MIGRATION_LINK_STATUSES: &[&str] = &["linked_metadata_only"];
 pub const TUNNEL_PLAN_STATUSES: &[&str] = &[
@@ -2256,6 +2262,8 @@ pub fn aggregate_topology_probe_state(current: &str, next: &str) -> &'static str
 pub enum BackupRequestStatus {
     RequestedMetadataOnly,
     ArtifactMetadataRecorded,
+    ExecutionFailed,
+    ExecutionCanceled,
 }
 
 impl BackupRequestStatus {
@@ -2263,6 +2271,8 @@ impl BackupRequestStatus {
         match self {
             Self::RequestedMetadataOnly => "requested_metadata_only",
             Self::ArtifactMetadataRecorded => "artifact_metadata_recorded",
+            Self::ExecutionFailed => "execution_failed",
+            Self::ExecutionCanceled => "execution_canceled",
         }
     }
 
@@ -2270,6 +2280,8 @@ impl BackupRequestStatus {
         match value {
             "requested_metadata_only" => Some(Self::RequestedMetadataOnly),
             "artifact_metadata_recorded" => Some(Self::ArtifactMetadataRecorded),
+            "execution_failed" => Some(Self::ExecutionFailed),
+            "execution_canceled" => Some(Self::ExecutionCanceled),
             _ => None,
         }
     }
@@ -2646,9 +2658,11 @@ pub enum JobCommand {
     Backup {
         paths: Vec<String>,
         include_config: bool,
+        follow_symlinks: bool,
     },
     Restore {
         source_backup_request_id: Uuid,
+        archive_transfer_session_id: Uuid,
         paths: Vec<String>,
         include_config: bool,
         destination_root: Option<String>,

@@ -12,9 +12,11 @@ type BackupRequestFormProps = {
   agents: AgentView[];
   clientId: string;
   confirmationOpen: boolean;
+  followSymlinks: boolean;
   includeConfig: boolean;
   note: string;
   onClientIdChange: (value: string) => void;
+  onFollowSymlinksChange: (value: boolean) => void;
   onIncludeConfigChange: (value: boolean) => void;
   onNoteChange: (value: string) => void;
   onPathsTextChange: (value: string) => void;
@@ -30,9 +32,11 @@ export function BackupRequestForm({
   agents,
   clientId,
   confirmationOpen,
+  followSymlinks,
   includeConfig,
   note,
   onClientIdChange,
+  onFollowSymlinksChange,
   onIncludeConfigChange,
   onNoteChange,
   onPathsTextChange,
@@ -92,10 +96,22 @@ export function BackupRequestForm({
             />
             <span>Include agent config</span>
           </label>
+          <label
+            className="checkLine inlineCheck"
+            title="Default is off. Enable only when the backup should archive symlink target contents."
+          >
+            <input
+              checked={followSymlinks}
+              onChange={(event) => onFollowSymlinksChange(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Follow symlink targets</span>
+          </label>
         </div>
         <div className="backupScopeList">
           <DatabaseBackup size={18} />
           <span>{includeConfig ? "config" : "no config"}</span>
+          <span>{followSymlinks ? "follows symlinks" : "no symlink follow"}</span>
           <span>
             {pathsCount} path{pathsCount === 1 ? "" : "s"}
           </span>
