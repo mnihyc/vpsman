@@ -1,5 +1,5 @@
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
@@ -9,8 +9,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use uuid::Uuid;
 use vpsman_common::{
-    payload_hash, validate_file_transfer_download_session, JobCommand,
-    MAX_FILE_TRANSFER_RESUME_TOKEN_BYTES, MAX_RESUMABLE_FILE_DOWNLOAD_BYTES,
+    open_private_file_read_write, payload_hash, validate_file_transfer_download_session,
+    JobCommand, MAX_FILE_TRANSFER_RESUME_TOKEN_BYTES, MAX_RESUMABLE_FILE_DOWNLOAD_BYTES,
 };
 
 use crate::{
@@ -482,12 +482,7 @@ fn open_download_temp_file(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let temp_path = local_download_temp_path(destination, session_id)?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&temp_path)
+    let mut file = open_private_file_read_write(&temp_path, true)
         .with_context(|| format!("failed to open {}", temp_path.display()))?;
     let existing_len = file.metadata()?.len();
     let resume_offset = if can_resume && existing_len <= size_bytes {
@@ -645,6 +640,7 @@ fn sanitize_download_file_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn builds_stable_local_download_temp_path() {
@@ -656,6 +652,25 @@ mod tests {
                 "/tmp/.vpsman-download-result.bin-2e241391-63b4-4deb-b7d2-5df42a55241a.part"
             )
         );
+    }
+
+    #[test]
+    fn resumable_download_temp_file_is_private() {
+        let root = std::env::temp_dir().join(format!("vpsman-download-private-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("result.bin");
+        let session_id = Uuid::new_v4();
+        let temp_path = local_download_temp_path(&destination, session_id).unwrap();
+        fs::write(&temp_path, b"partial").unwrap();
+        fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let (_file, opened_path, offset) =
+            open_download_temp_file(&destination, session_id, 128, true).unwrap();
+
+        assert_eq!(opened_path, temp_path);
+        assert_eq!(offset, b"partial".len() as u64);
+        assert_eq!(mode(&opened_path), 0o600);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -696,5 +711,9 @@ mod tests {
             FileTransferDownloadMultiTargetPolicy::SingleTarget,
         )
         .is_err());
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 }

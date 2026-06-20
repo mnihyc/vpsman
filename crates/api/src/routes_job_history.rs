@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
+use vpsman_common::{create_private_file_new, create_private_file_new_async, ensure_private_dir};
 
 use crate::{
     error::ApiError,
@@ -134,7 +135,7 @@ pub(crate) async fn download_job_target_statuses(
     let mut targets = state.repo.list_job_targets(job_id).await?;
     targets.sort_by(|left, right| left.client_id.cmp(&right.client_id));
 
-    let archive_temp = TempDownloadFile::new("vpsman-job-target-status", "tar");
+    let archive_temp = TempDownloadFile::new("vpsman-job-target-status", "tar")?;
     let archive_path = archive_temp.path().to_path_buf();
     let archive_size = tokio::task::spawn_blocking(move || {
         write_job_target_status_archive(&archive_path, targets)
@@ -295,7 +296,7 @@ pub(crate) async fn download_file_download_bundle(
         return Err(ApiError::not_found("file_download_outputs_not_found"));
     }
 
-    let archive_temp = TempDownloadFile::new("vpsman-file-download-bundle", "tar");
+    let archive_temp = TempDownloadFile::new("vpsman-file-download-bundle", "tar")?;
     let archive_path = archive_temp.path().to_path_buf();
     let archive_size = tokio::task::spawn_blocking(move || {
         write_file_download_bundle_archive(&archive_path, entries)
@@ -413,7 +414,7 @@ pub(crate) async fn download_job_output_archive(
         return Err(ApiError::not_found("job_output_archive_not_found"));
     }
 
-    let archive_temp = TempDownloadFile::new("vpsman-job-output-archive", "tar");
+    let archive_temp = TempDownloadFile::new("vpsman-job-output-archive", "tar")?;
     let archive_path = archive_temp.path().to_path_buf();
     let archive_size =
         tokio::task::spawn_blocking(move || write_job_output_archive(&archive_path, entries))
@@ -577,10 +578,12 @@ struct TempDownloadFile {
 }
 
 impl TempDownloadFile {
-    fn new(prefix: &str, extension: &str) -> Self {
-        Self {
-            path: std::env::temp_dir().join(format!("{prefix}-{}.{}", Uuid::new_v4(), extension)),
-        }
+    fn new(prefix: &str, extension: &str) -> Result<Self, ApiError> {
+        let root = std::env::temp_dir().join("vpsman-api-download-spool");
+        ensure_private_dir(&root).map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+        Ok(Self {
+            path: root.join(format!("{prefix}-{}.{}", Uuid::new_v4(), extension)),
+        })
     }
 
     fn path(&self) -> &FsPath {
@@ -664,11 +667,8 @@ async fn spool_selected_job_outputs(
     outputs: &[&JobOutputView],
     too_large_code: &'static str,
 ) -> Result<SpooledFileDownloadPayload, ApiError> {
-    let temp = TempDownloadFile::new("vpsman-job-output-stream", "bin");
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(temp.path())
+    let temp = TempDownloadFile::new("vpsman-job-output-stream", "bin")?;
+    let mut file = create_private_file_new_async(temp.path())
         .await
         .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
     let mut hasher = Sha256::new();
@@ -701,11 +701,8 @@ async fn spool_file_download_payload(
     state: &AppState,
     outputs: &[JobOutputView],
 ) -> Result<SpooledFileDownloadPayload, ApiError> {
-    let temp = TempDownloadFile::new("vpsman-file-download-entry", "bin");
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(temp.path())
+    let temp = TempDownloadFile::new("vpsman-file-download-entry", "bin")?;
+    let mut file = create_private_file_new_async(temp.path())
         .await
         .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
     let mut hasher = Sha256::new();
@@ -772,10 +769,7 @@ fn write_file_download_bundle_archive(
     archive_path: &FsPath,
     entries: Vec<SpooledFileDownloadBundleEntry>,
 ) -> anyhow::Result<u64> {
-    let archive_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(archive_path)?;
+    let archive_file = create_private_file_new(archive_path)?;
     let mut builder = tar::Builder::new(archive_file);
     for entry in entries {
         append_file_download_bundle_entry(&mut builder, &entry)?;
@@ -814,10 +808,7 @@ fn write_job_target_status_archive(
     archive_path: &FsPath,
     targets: Vec<JobTargetView>,
 ) -> anyhow::Result<u64> {
-    let archive_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(archive_path)?;
+    let archive_file = create_private_file_new(archive_path)?;
     let mut builder = tar::Builder::new(archive_file);
     append_json_archive_entry(&mut builder, "targets.json", &targets)?;
     for target in &targets {
@@ -851,10 +842,7 @@ fn write_job_output_archive(
     archive_path: &FsPath,
     entries: Vec<SpooledJobOutputArchiveEntry>,
 ) -> anyhow::Result<u64> {
-    let archive_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(archive_path)?;
+    let archive_file = create_private_file_new(archive_path)?;
     let mut builder = tar::Builder::new(archive_file);
     for entry in entries {
         append_job_output_archive_entry(&mut builder, &entry)?;
@@ -1369,4 +1357,21 @@ pub(crate) async fn list_network_observation_trends(
             .list_network_observation_trends(limit_or_default(query.limit))
             .await?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn temp_download_file_uses_private_spool_directory() {
+        let temp = TempDownloadFile::new("vpsman-test-download", "bin").unwrap();
+        let parent = temp.path().parent().unwrap();
+
+        assert_eq!(
+            std::fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
 }

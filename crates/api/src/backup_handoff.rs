@@ -3,7 +3,7 @@ use std::{env, path::PathBuf};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use vpsman_common::payload_hash;
+use vpsman_common::{create_private_file_new_async, ensure_private_dir_async, payload_hash};
 
 use crate::{error::ApiError, model::JobOutputView, state::AppState};
 
@@ -23,15 +23,12 @@ pub(crate) async fn stage_retained_backup_artifact_stdout(
     outputs: &[JobOutputView],
 ) -> Result<StagedRetainedBackupArtifact, ApiError> {
     let root = backup_artifact_handoff_staging_dir();
-    tokio::fs::create_dir_all(&root)
+    ensure_private_dir_async(&root)
         .await
         .map_err(|_| ApiError::conflict("backup_artifact_handoff_staging_unavailable"))?;
     let staging_path = root.join(format!("{}.part", uuid::Uuid::new_v4()));
     let result = async {
-        let mut staging = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staging_path)
+        let mut staging = create_private_file_new_async(&staging_path)
             .await
             .map_err(|_| ApiError::conflict("backup_artifact_handoff_staging_unavailable"))?;
         let mut hasher = Sha256::new();

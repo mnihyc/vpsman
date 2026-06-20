@@ -10,6 +10,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use rustls_pki_types::ServerName;
+use vpsman_common::create_private_file_new;
 
 const API_HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const API_BINARY_HTTP_TIMEOUT: Duration = Duration::from_secs(300);
@@ -346,7 +347,7 @@ fn write_request_and_stream_response_to_file(
     }
 
     let temp_path = download_temp_path(output_file);
-    let mut file = File::create(&temp_path)
+    let mut file = create_private_file_new(&temp_path)
         .with_context(|| format!("failed to create {}", temp_path.display()))?;
     let transfer_encoding = header_value(head, "transfer-encoding").unwrap_or_default();
     let result = if transfer_encoding
@@ -372,6 +373,7 @@ fn write_request_and_stream_response_to_file(
         }
     };
     file.flush()?;
+    file.sync_all()?;
     drop(file);
     if let Err(error) = std::fs::rename(&temp_path, output_file) {
         let _ = std::fs::remove_file(&temp_path);
@@ -611,6 +613,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn parses_http_and_https_api_urls() {
@@ -682,6 +685,7 @@ mod tests {
 
         assert_eq!(written, 11);
         assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+        assert_eq!(mode(&path), 0o600);
         let _ = std::fs::remove_file(path);
     }
 
@@ -701,6 +705,7 @@ mod tests {
 
         assert_eq!(written, 11);
         assert_eq!(std::fs::read(&path).unwrap(), b"hello world");
+        assert_eq!(mode(&path), 0o600);
         let _ = std::fs::remove_file(path);
     }
 
@@ -740,5 +745,9 @@ mod tests {
             "vpsctl-http-download-{label}-{}",
             uuid::Uuid::new_v4()
         ))
+    }
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 }

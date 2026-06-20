@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
+use vpsman_common::{
+    create_private_file_new_async, ensure_private_dir_async, open_private_file_read_async,
+    open_private_file_read_write_async, write_private_file_atomically_async,
+};
 
 use crate::{
     backup_handoff::backup_artifact_streaming_max_bytes,
@@ -98,7 +102,7 @@ impl BackupArtifactUploadSessions {
         request: BackupArtifactUploadSessionCreateRequest,
     ) -> Result<BackupArtifactUploadSessionView, ApiError> {
         validate_backup_artifact_upload_session_create_request(&request)?;
-        tokio::fs::create_dir_all(self.root.as_ref())
+        ensure_private_dir_async(self.root.as_ref())
             .await
             .map_err(internal_error)?;
         self.cleanup_expired().await;
@@ -106,10 +110,7 @@ impl BackupArtifactUploadSessions {
         let now = unix_now();
         let upload_id = Uuid::new_v4();
         let staging_path = self.staging_path(upload_id);
-        let file = tokio::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&staging_path)
+        let file = create_private_file_new_async(&staging_path)
             .await
             .map_err(internal_error)?;
         drop(file);
@@ -171,9 +172,7 @@ impl BackupArtifactUploadSessions {
             return Err(ApiError::conflict("backup_artifact_upload_offset_mismatch"));
         }
 
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(&session.staging_path)
+        let mut file = open_private_file_read_write_async(&session.staging_path, false)
             .await
             .map_err(internal_error)?;
         file.seek(SeekFrom::Start(offset_bytes as u64))
@@ -213,9 +212,11 @@ impl BackupArtifactUploadSessions {
             return Err(ApiError::conflict("backup_artifact_upload_incomplete"));
         }
 
-        let metadata = tokio::fs::metadata(&session.staging_path)
+        let staging = open_private_file_read_async(&session.staging_path)
             .await
             .map_err(internal_error)?;
+        let metadata = staging.metadata().await.map_err(internal_error)?;
+        drop(staging);
         if !metadata.is_file()
             || i64::try_from(metadata.len()).ok() != Some(session.expected_size_bytes)
         {
@@ -279,7 +280,7 @@ impl BackupArtifactUploadSessions {
 
     async fn load_session(&self, upload_id: Uuid) -> Result<BackupArtifactUploadSession, ApiError> {
         let manifest_path = self.manifest_path(upload_id);
-        let bytes = tokio::fs::read(&manifest_path)
+        let mut file = open_private_file_read_async(&manifest_path)
             .await
             .map_err(|error| match error.kind() {
                 std::io::ErrorKind::NotFound => {
@@ -287,18 +288,16 @@ impl BackupArtifactUploadSessions {
                 }
                 _ => internal_error(error),
             })?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).await.map_err(internal_error)?;
         serde_json::from_slice(&bytes)
             .map_err(|_| ApiError::conflict("backup_artifact_upload_session_manifest_invalid"))
     }
 
     async fn save_session(&self, session: &BackupArtifactUploadSession) -> Result<(), ApiError> {
         let manifest_path = self.manifest_path(session.upload_id);
-        let temp_path = manifest_path.with_extension(format!("json.tmp-{}", Uuid::new_v4()));
         let bytes = serde_json::to_vec(session).map_err(internal_error)?;
-        tokio::fs::write(&temp_path, bytes)
-            .await
-            .map_err(internal_error)?;
-        tokio::fs::rename(&temp_path, &manifest_path)
+        write_private_file_atomically_async(&manifest_path, &bytes)
             .await
             .map_err(internal_error)?;
         Ok(())
@@ -468,9 +467,7 @@ async fn ensure_retry_chunk_matches(
     chunk: &[u8],
 ) -> Result<(), ApiError> {
     let mut existing = vec![0_u8; chunk.len()];
-    let mut file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .open(path)
+    let mut file = open_private_file_read_async(path)
         .await
         .map_err(internal_error)?;
     file.seek(SeekFrom::Start(offset_bytes as u64))
@@ -489,7 +486,9 @@ async fn ensure_retry_chunk_matches(
 }
 
 async fn sha256_file_hex(path: &Path) -> Result<String, ApiError> {
-    let mut file = tokio::fs::File::open(path).await.map_err(internal_error)?;
+    let mut file = open_private_file_read_async(path)
+        .await
+        .map_err(internal_error)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
@@ -535,6 +534,32 @@ fn internal_error(error: impl Into<anyhow::Error>) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn create_session_uses_private_staging_files() {
+        let root =
+            std::env::temp_dir().join(format!("vpsman-backup-upload-private-{}", Uuid::new_v4()));
+        let sessions = BackupArtifactUploadSessions::new(root.clone());
+        let view = sessions
+            .create(
+                Uuid::new_v4(),
+                "edge-a".to_string(),
+                BackupArtifactUploadSessionCreateRequest {
+                    object_key: "backups/edge-a/private.tar".to_string(),
+                    expected_sha256_hex: "a".repeat(64),
+                    expected_size_bytes: 8,
+                    confirmed: true,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(mode(&root), 0o700);
+        assert_eq!(mode(&sessions.staging_path(view.upload_id)), 0o600);
+        assert_eq!(mode(&sessions.manifest_path(view.upload_id)), 0o600);
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
 
     #[tokio::test]
     async fn cleanup_removes_expired_orphaned_and_temp_upload_files() {
@@ -603,5 +628,9 @@ mod tests {
         assert!(!temp_manifest.exists());
 
         let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 }

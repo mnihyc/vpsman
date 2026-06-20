@@ -13,8 +13,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::time;
 use vpsman_common::{
-    CommandOutput, JobCommand, OutputStream, ProcessResourceLimits, ProcessRestartPolicy,
-    ProcessRunPolicy,
+    create_private_file_new, ensure_private_dir, ensure_private_dir_tree, open_private_file_append,
+    open_private_file_read, open_private_file_read_write, CommandOutput, JobCommand, OutputStream,
+    ProcessResourceLimits, ProcessRestartPolicy, ProcessRunPolicy,
 };
 
 use crate::process_cleanup::{
@@ -90,8 +91,7 @@ pub(crate) async fn reconcile_supervised_processes_on_start() -> Result<serde_js
 }
 
 pub(crate) fn reconcile_supervisor_records_at_root(root: &Path) -> Result<serde_json::Value> {
-    fs::create_dir_all(records_dir(root))?;
-    fs::create_dir_all(logs_dir(root))?;
+    ensure_supervisor_dirs(root)?;
     rotate_supervisor_logs(root)?;
     let mut records = Vec::new();
     let mut running = 0_u64;
@@ -161,8 +161,7 @@ pub(crate) fn execute_blocking(
     command: &JobCommand,
     root: &Path,
 ) -> Result<Vec<CommandOutput>> {
-    fs::create_dir_all(records_dir(root))?;
-    fs::create_dir_all(logs_dir(root))?;
+    ensure_supervisor_dirs(root)?;
     rotate_supervisor_logs(root)?;
     match command {
         JobCommand::ProcessStart {
@@ -302,15 +301,10 @@ fn start_process(
     let stderr_log = logs_dir(root).join(format!("{name}.stderr.log"));
     rotate_log_file(&stdout_log)?;
     rotate_log_file(&stderr_log)?;
-    let stdout = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stdout_log)
+    ensure_supervisor_dirs(root)?;
+    let stdout = open_private_file_append(&stdout_log)
         .with_context(|| format!("failed to open {}", stdout_log.display()))?;
-    let stderr = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stderr_log)
+    let stderr = open_private_file_append(&stderr_log)
         .with_context(|| format!("failed to open {}", stderr_log.display()))?;
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
@@ -705,7 +699,7 @@ fn push_tail_output(
 }
 
 fn tail_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
-    let mut file = match fs::File::open(path) {
+    let mut file = match open_private_file_read(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
@@ -772,7 +766,7 @@ fn load_all_records(root: &Path) -> Result<Vec<ProcessRecord>> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         if entry.path().extension().and_then(|ext| ext.to_str()) == Some("json") {
-            records.push(serde_json::from_slice(&fs::read(entry.path())?)?);
+            records.push(read_process_record_file(&entry.path())?);
         }
     }
     records.sort_by(|left: &ProcessRecord, right| left.name.cmp(&right.name));
@@ -784,13 +778,13 @@ fn load_record(root: &Path, name: &str) -> Result<Option<ProcessRecord>> {
     if !path.exists() {
         return Ok(None);
     }
-    Ok(Some(serde_json::from_slice(&fs::read(path)?)?))
+    Ok(Some(read_process_record_file(&path)?))
 }
 
 fn save_record(root: &Path, record: &ProcessRecord) -> Result<()> {
     let path = record_path(root, &record.name);
     let parent = records_dir(root);
-    fs::create_dir_all(&parent)?;
+    ensure_private_dir_tree(root, &parent)?;
     let tmp_path = path.with_file_name(format!(
         "{}.json.tmp.{}.{}",
         record.name,
@@ -799,10 +793,7 @@ fn save_record(root: &Path, record: &ProcessRecord) -> Result<()> {
     ));
     let bytes = serde_json::to_vec_pretty(record)?;
     {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp_path)
+        let mut file = create_private_file_new(&tmp_path)
             .with_context(|| format!("failed to create {}", tmp_path.display()))?;
         file.write_all(&bytes)
             .with_context(|| format!("failed to write {}", tmp_path.display()))?;
@@ -835,13 +826,22 @@ fn rotate_supervisor_logs(root: &Path) -> Result<()> {
 }
 
 fn rotate_log_file(path: &Path) -> Result<()> {
-    let metadata = match fs::metadata(path) {
+    let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(error).with_context(|| format!("failed to stat {}", path.display()))
         }
     };
+    anyhow::ensure!(
+        !metadata.file_type().is_symlink() && metadata.is_file(),
+        "supervisor log {} is not a regular file",
+        path.display()
+    );
+    let _ = open_private_file_read(path)
+        .with_context(|| format!("failed to secure {}", path.display()))?;
+    let metadata =
+        fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
     if metadata.len() <= SUPERVISOR_LOG_ROTATE_BYTES {
         return Ok(());
     }
@@ -852,6 +852,8 @@ fn rotate_log_file(path: &Path) -> Result<()> {
         if index == SUPERVISOR_LOG_ROTATE_FILES {
             let _ = fs::remove_file(&source);
         } else if source.exists() {
+            let _ = open_private_file_read(&source)
+                .with_context(|| format!("failed to secure {}", source.display()))?;
             if target.exists() {
                 fs::remove_file(&target).with_context(|| {
                     format!("failed to remove old rotated log {}", target.display())
@@ -867,10 +869,7 @@ fn rotate_log_file(path: &Path) -> Result<()> {
         }
     }
 
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
+    let mut file = open_private_file_read_write(path, false)
         .with_context(|| format!("failed to open {}", path.display()))?;
     let file_len = file.metadata()?.len();
     let keep_bytes = SUPERVISOR_LOG_ROTATE_BYTES.min(file_len);
@@ -890,10 +889,7 @@ fn rotate_log_file(path: &Path) -> Result<()> {
         unique_time_suffix()
     ));
     {
-        let mut rotated = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp_rotation)
+        let mut rotated = create_private_file_new(&tmp_rotation)
             .with_context(|| format!("failed to create {}", tmp_rotation.display()))?;
         rotated
             .write_all(&tail)
@@ -921,6 +917,34 @@ fn rotate_log_file(path: &Path) -> Result<()> {
 
 fn rotated_log_path(path: &Path, index: usize) -> PathBuf {
     PathBuf::from(format!("{}.{}", path.to_string_lossy(), index))
+}
+
+fn ensure_supervisor_dirs(root: &Path) -> Result<()> {
+    ensure_private_dir(root)
+        .with_context(|| format!("failed to create supervisor root {}", root.display()))?;
+    ensure_private_dir_tree(root, &records_dir(root)).with_context(|| {
+        format!(
+            "failed to create supervisor records dir {}",
+            records_dir(root).display()
+        )
+    })?;
+    ensure_private_dir_tree(root, &logs_dir(root)).with_context(|| {
+        format!(
+            "failed to create supervisor logs dir {}",
+            logs_dir(root).display()
+        )
+    })?;
+    Ok(())
+}
+
+fn read_process_record_file(path: &Path) -> Result<ProcessRecord> {
+    let mut file = open_private_file_read(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("failed to decode process record {}", path.display()))
 }
 
 fn sync_parent_dir(path: &Path) -> Result<()> {
@@ -967,6 +991,7 @@ fn unique_time_suffix() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn tail_file_reads_only_requested_suffix() {
@@ -982,6 +1007,88 @@ mod tests {
         let tail = tail_file(&path, 37).unwrap();
 
         assert_eq!(tail, data[data.len() - 37..]);
+        assert_eq!(mode(&path), 0o600);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn process_records_are_written_private() {
+        let root = temp_supervisor_root("record");
+        let record = test_record(&root, "private-record", 12345);
+
+        save_record(&root, &record).unwrap();
+
+        assert_eq!(mode(&root), 0o700);
+        assert_eq!(mode(&records_dir(&root)), 0o700);
+        assert_eq!(mode(&record_path(&root, "private-record")), 0o600);
+        let loaded = load_record(&root, "private-record").unwrap().unwrap();
+        assert_eq!(loaded.name, "private-record");
+        assert_eq!(mode(&record_path(&root, "private-record")), 0o600);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn process_logs_are_created_private() {
+        let root = temp_supervisor_root("logs");
+        let argv = vec!["/bin/true".to_string()];
+        let record = start_process(
+            &root,
+            "private-logs",
+            &argv,
+            &None,
+            &BTreeMap::new(),
+            &ProcessRunPolicy::default(),
+            &ProcessResourceLimits::default(),
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = collect_child_exit_code(record.pid);
+
+        assert_eq!(mode(&root), 0o700);
+        assert_eq!(mode(&logs_dir(&root)), 0o700);
+        assert_eq!(mode(Path::new(&record.stdout_log)), 0o600);
+        assert_eq!(mode(Path::new(&record.stderr_log)), 0o600);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn test_record(root: &Path, name: &str, pid: u32) -> ProcessRecord {
+        ProcessRecord {
+            name: name.to_string(),
+            argv: vec!["/bin/true".to_string()],
+            cwd: None,
+            env: BTreeMap::new(),
+            policy: ProcessRunPolicy::default(),
+            limits: ProcessResourceLimits::default(),
+            pid,
+            process_group_id: Some(pid),
+            started_unix: 1,
+            stdout_log: logs_dir(root)
+                .join(format!("{name}.stdout.log"))
+                .to_string_lossy()
+                .to_string(),
+            stderr_log: logs_dir(root)
+                .join(format!("{name}.stderr.log"))
+                .to_string_lossy()
+                .to_string(),
+            status: "running".to_string(),
+            exit_code: None,
+            restart_attempts: 0,
+            last_exit_code: None,
+            last_exit_unix: None,
+            last_restart_unix: None,
+            cgroup_path: None,
+            limit_evidence: ProcessLimitEvidence::default(),
+        }
+    }
+
+    fn temp_supervisor_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "vpsman-supervisor-{label}-{}",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 }

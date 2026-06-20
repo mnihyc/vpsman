@@ -93,12 +93,12 @@ of the same root cause.
 | AUD-077 | Medium/High | Fixed | Gateway/API/Terminal/Lifecycle | Terminal final stream status can expire as noncritical output |
 | AUD-078 | Medium/High | Fixed | API/Network/Auth | OSPF update-plan reads expose generated Bird2 snippets with fleet-read scope |
 | AUD-079 | High | Fixed | API/Network/Auth | Network observations expose runtime command reports with fleet-read scope |
-| AUD-080 | High | Confirmed | Gateway/Spool/Security | Gateway spool files persist the internal API bearer token |
-| AUD-081 | High | Confirmed | API/Object Storage/Security | Filesystem object-store artifacts rely on default filesystem permissions |
-| AUD-082 | Medium/High | Confirmed | API/Downloads/Security | Transient payload spool files in temp directories rely on default permissions |
+| AUD-080 | High | Fixed | Gateway/Spool/Security | Gateway spool files persist the internal API bearer token |
+| AUD-081 | High | Fixed | API/Object Storage/Security | Filesystem object-store artifacts rely on default filesystem permissions |
+| AUD-082 | Medium/High | Fixed | API/Downloads/Security | Transient payload spool files in temp directories rely on default permissions |
 | AUD-083 | High | Fixed | Agent/File Transfer/Security | Agent file-upload staging exposes payloads before final modes are applied |
 | AUD-084 | High | Fixed | Agent/Updates/Reliability | Agent updater cannot follow the official GitHub release redirects |
-| AUD-085 | Medium/High | Confirmed | CLI/Downloads/Security | vpsctl local download staging uses default-readable named temp files |
+| AUD-085 | Medium/High | Fixed | CLI/Downloads/Security | vpsctl local download staging uses default-readable named temp files |
 | AUD-086 | High | Fixed | Agent/Restore/Security | Agent restore staging exposes restored payloads before archive modes are applied |
 | AUD-087 | High | Fixed | Agent/Restore/Safety | Restore destination roots can be escaped through symlinked parent components |
 | AUD-088 | High | Fixed | Agent/Backup/Safety | Backup jobs follow selected-path symlinks without an explicit operator choice |
@@ -155,7 +155,7 @@ of the same root cause.
 | AUD-139 | Medium/High | Fixed | CLI/VTY/Fleet Tags | CLI tag create and single-VPS assignment auto-confirm tag mutations |
 | AUD-140 | Medium/High | Fixed | Frontend/File Browser | Single-file browser confirmations remain armed after operation edits |
 | AUD-141 | High | Confirmed | Agent/Process Supervisor/Safety | Supervisor PID records can target reused host processes after agent restart |
-| AUD-142 | High | Confirmed | Agent/Process Supervisor/Security | Supervisor records and logs are written with default-readable permissions |
+| AUD-142 | High | Fixed | Agent/Process Supervisor/Security | Supervisor records and logs are written with default-readable permissions |
 | AUD-143 | Medium/High | Confirmed | Docs/Deployment/API Boundary | Headless CLI tutorial presents the public panel URL as the operator API endpoint |
 | AUD-144 | High | Confirmed | API/Worker/Agent Updates | Strict registered-update policy only gates direct staging jobs |
 | AUD-145 | High | Confirmed | API/Gateway/Key Lifecycle | Key rotation, revoke, and delete disconnect before DB invalidation, leaving a reconnect race |
@@ -223,7 +223,7 @@ of the same root cause.
 | AUD-207 | High | Fixed | API/Worker/Schedules/Auth | Schedules keep dispatching privileged jobs after owner disable/delete or scope loss |
 | AUD-208 | High | Fixed | Worker/Backups/Retention/Auth | Backup-policy retention prune can delete backups after policy owner loses authority |
 | AUD-209 | High | Fixed | API/Worker/Server Jobs/Auth | Queued artifact cleanup can delete artifacts after creator disable/delete or scope loss |
-| AUD-210 | Medium/High | Confirmed | CLI/Output/Security | vpsctl structured-output capture writes sensitive stdout to default-permission temp files |
+| AUD-210 | Medium/High | Fixed | CLI/Output/Security | vpsctl structured-output capture writes sensitive stdout to default-permission temp files |
 | AUD-211 | High | Fixed | API/CLI/Agent/Backups/Restore | Restore jobs do not bind the declared source backup to the submitted archive bytes |
 | AUD-212 | Medium/High | Confirmed | Agent/API/User Sessions/Job Status | User-session inventory timeouts are reported as generic failures |
 | AUD-213 | Medium/High | Fixed | API/Frontend/Backups/Job Lifecycle | Failed backup jobs leave auto-created backup requests permanently in progress |
@@ -2626,11 +2626,14 @@ of the same root cause.
   current runtime secret on replay, or persist cache files only under explicit
   owner-only permissions. The file body also needs the same sensitivity
   treatment as job output and terminal replay data.
+- Resolution: Fixed by keeping the existing replay payload shape while making
+  gateway spool roots, pending/corrupt directories, temp files, final spool
+  files, replay reads, and corrupt quarantine owner-only.
 
 ### AUD-081: Filesystem Object-Store Artifacts Rely On Default Filesystem Permissions
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Object Storage/Security
 - Context: The filesystem object store is the default object-store mode. It is
   used for backup artifacts, file-transfer source and handoff artifacts, large
@@ -2670,11 +2673,14 @@ of the same root cause.
 - Notes: The filesystem object store should create and verify owner-only
   directories and files, or fail closed when the configured root is not private.
   This issue is independent of object-store cleanup registry correctness.
+- Resolution: Fixed by creating object-store roots and nested directories as
+  `0700`, writing/importing object temp files as `0600`, committing private
+  inodes, and repairing regular existing object files/directories when touched.
 
 ### AUD-082: Transient Payload Spool Files In Temp Directories Rely On Default Permissions
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Downloads/Security
 - Context: The API materializes job-output downloads, file-download bundles,
   job-output archives, file-transfer handoff reassembly, and S3 object streaming
@@ -2717,6 +2723,9 @@ of the same root cause.
 - Notes: Use private temp directories and owner-only temp files for payload
   spooling, or use anonymous/unlinked temp files where available. This is
   distinct from AUD-081, which covers persistent filesystem object-store files.
+- Resolution: Fixed by moving API download/archive, file-transfer handoff,
+  backup handoff, backup upload-session, and S3 streaming spools into private
+  local roots and creating all payload/manifests as owner-only files.
 
 ### AUD-083: Agent File-Upload Staging Exposes Payloads Before Final Modes Are Applied
 
@@ -2806,7 +2815,7 @@ of the same root cause.
 ### AUD-085: vpsctl Local Download Staging Uses Default-Readable Named Temp Files
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: CLI/Downloads/Security
 - Context: Operators use `vpsctl` to download job-output payloads, target
   status bundles, file-transfer source artifacts, handoff artifacts, and
@@ -2842,6 +2851,10 @@ of the same root cause.
   place. If a destination should intentionally be group/world-readable, that
   should be an explicit post-download operator action rather than the staging
   default.
+- Resolution: Fixed by creating generic vpsctl streamed download temps as
+  owner-only files, preserving that mode through final rename, and opening
+  resumable `.part` files through no-follow regular-file checks that clamp
+  reused partials to `0600`.
 
 ### AUD-086: Agent Restore Staging Exposes Restored Payloads Before Archive Modes Are Applied
 
@@ -3408,7 +3421,7 @@ of the same root cause.
 ### AUD-100: Locked Login Attempts Can Still Flood Durable Audit Logs
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Auth/Audit
 - Context: Operator login and TOTP failures are now throttled with durable
   username and IP buckets. The audit log is used for security review, operator
@@ -5265,7 +5278,7 @@ of the same root cause.
 ### AUD-142: Supervisor Records And Logs Are Written With Default-Readable Permissions
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Process Supervisor/Security
 - Context: Process-supervisor jobs start long-running commands on a VPS agent,
   persist restart state under the supervisor root, and append stdout/stderr to
@@ -5304,6 +5317,9 @@ of the same root cause.
   record temp files, final record files, and log files owner-only before
   writing, and should repair permissions on existing supervisor state during
   startup reconciliation.
+- Resolution: Fixed by creating/repairing the supervisor root, records
+  directory, logs directory, record temp/final files, stdout/stderr logs, log
+  rotation files, and tail reads through owner-only regular-file handling.
 
 ### AUD-143: Headless CLI Tutorial Presents The Public Panel URL As The Operator API Endpoint
 
@@ -8322,6 +8338,9 @@ of the same root cause.
   creation, preferably by using a private temp directory or anonymous/unlinked
   temp file, and add a regression that verifies the capture file is not
   group/world readable while a command is running.
+- Resolution: Fixed by moving vpsctl structured-output capture under a private
+  temp directory and creating the capture file as an owner-only private file
+  before stdout redirection.
 
 ### AUD-211: Restore Jobs Do Not Bind The Declared Source Backup To The Submitted Archive Bytes
 

@@ -12,6 +12,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
+use vpsman_common::{create_private_file_new_async, ensure_private_dir};
 
 use crate::{
     error::ApiError,
@@ -262,10 +263,7 @@ pub(crate) async fn create_file_transfer_handoff(
         "file_transfer_handoff_object_exists",
     )
     .await?;
-    let temp_path = std::env::temp_dir().join(format!(
-        "vpsman-transfer-handoff-{session_id}-{}.tmp",
-        Uuid::new_v4()
-    ));
+    let temp_path = file_transfer_handoff_temp_path(session_id)?;
     let chunk_count = match write_handoff_temp_file(
         &state, &client_id, session_id, &temp_path, sha256_hex, size_bytes,
     )
@@ -547,10 +545,7 @@ async fn write_handoff_temp_file(
         return Err(ApiError::conflict("file_transfer_handoff_chunks_missing"));
     }
     let chunks = deduplicate_handoff_chunks(chunks)?;
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(temp_path)
+    let mut file = create_private_file_new_async(temp_path)
         .await
         .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
     let mut hasher = Sha256::new();
@@ -666,6 +661,15 @@ fn validate_handoff_client_id(client_id: &str) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("file_transfer_client_id_invalid"));
     }
     Ok(())
+}
+
+fn file_transfer_handoff_temp_path(session_id: Uuid) -> Result<PathBuf, ApiError> {
+    let root = std::env::temp_dir().join("vpsman-transfer-handoff");
+    ensure_private_dir(&root).map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    Ok(root.join(format!(
+        "vpsman-transfer-handoff-{session_id}-{}.tmp",
+        Uuid::new_v4()
+    )))
 }
 
 fn validate_file_transfer_source_upload_request(
@@ -805,5 +809,22 @@ fn safe_handoff_filename(path: &str) -> String {
         "vpsman-transfer.bin".to_string()
     } else {
         filename
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn file_transfer_handoff_temp_path_uses_private_directory() {
+        let path = file_transfer_handoff_temp_path(Uuid::new_v4()).unwrap();
+        let parent = path.parent().unwrap();
+
+        assert_eq!(
+            std::fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 }

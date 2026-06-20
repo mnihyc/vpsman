@@ -10,6 +10,10 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
+use vpsman_common::{
+    create_private_file_new_async, ensure_private_dir_async, ensure_private_dir_tree_async,
+    repair_private_file_permissions_async,
+};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -198,20 +202,13 @@ impl FilesystemBackupObjectStore {
     async fn put_new(&self, object_key: &str, bytes: &[u8]) -> Result<PathBuf> {
         validate_object_key(object_key)?;
         let path = self.path_for_key(object_key)?;
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("failed to create object parent {}", parent.display()))?;
-        }
+        self.ensure_private_object_parent(&path).await?;
         ensure!(
             !tokio::fs::try_exists(&path).await.unwrap_or(false),
             "object already exists"
         );
         let temp_path = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
+        let mut file = create_private_file_new_async(&temp_path)
             .await
             .with_context(|| format!("failed to create temp object {}", temp_path.display()))?;
         file.write_all(bytes)
@@ -253,7 +250,11 @@ impl FilesystemBackupObjectStore {
             "source object hash mismatch"
         );
         let path = self.path_for_key(object_key)?;
+        self.ensure_private_object_parent(&path).await?;
         if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            repair_private_file_permissions_async(&path)
+                .await
+                .with_context(|| format!("failed to secure object {}", path.display()))?;
             ensure!(
                 tokio::fs::metadata(&path).await?.len() == expected_size_bytes
                     && sha256_file_hex(&path).await? == expected_sha256_hex,
@@ -261,13 +262,14 @@ impl FilesystemBackupObjectStore {
             );
             return Ok(false);
         }
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("failed to create object parent {}", parent.display()))?;
-        }
         let temp_path = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
-        tokio::fs::copy(source_path, &temp_path)
+        let mut source = tokio::fs::File::open(source_path)
+            .await
+            .with_context(|| format!("failed to open source object {}", source_path.display()))?;
+        let mut file = create_private_file_new_async(&temp_path)
+            .await
+            .with_context(|| format!("failed to create temp object {}", temp_path.display()))?;
+        tokio::io::copy(&mut source, &mut file)
             .await
             .with_context(|| {
                 format!(
@@ -276,11 +278,6 @@ impl FilesystemBackupObjectStore {
                     temp_path.display()
                 )
             })?;
-        let file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(&temp_path)
-            .await
-            .with_context(|| format!("failed to open temp object {}", temp_path.display()))?;
         file.sync_data()
             .await
             .with_context(|| format!("failed to sync temp object {}", temp_path.display()))?;
@@ -302,10 +299,7 @@ impl FilesystemBackupObjectStore {
 
     async fn get_with_limit(&self, object_key: &str, max_bytes: usize) -> Result<Vec<u8>> {
         let path = self.path_for_key(object_key)?;
-        let metadata = tokio::fs::metadata(&path)
-            .await
-            .with_context(|| format!("failed to stat object {}", path.display()))?;
-        ensure!(metadata.is_file(), "object is not a file");
+        let metadata = self.secure_existing_object_file(&path).await?;
         ensure!(
             metadata.len() <= max_bytes as u64,
             "object exceeded {max_bytes} bytes"
@@ -322,10 +316,7 @@ impl FilesystemBackupObjectStore {
         expected_size_bytes: u64,
     ) -> Result<PathBuf> {
         let path = self.path_for_key(object_key)?;
-        let metadata = tokio::fs::metadata(&path)
-            .await
-            .with_context(|| format!("failed to stat object {}", path.display()))?;
-        ensure!(metadata.is_file(), "object is not a file");
+        let metadata = self.secure_existing_object_file(&path).await?;
         ensure!(
             metadata.len() == expected_size_bytes,
             "object size mismatch"
@@ -335,6 +326,32 @@ impl FilesystemBackupObjectStore {
             "object hash mismatch"
         );
         Ok(path)
+    }
+
+    async fn ensure_private_object_parent(&self, path: &Path) -> Result<()> {
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        ensure_private_dir_tree_async(self.root.as_ref(), parent)
+            .await
+            .with_context(|| format!("failed to create object parent {}", parent.display()))
+    }
+
+    async fn secure_existing_object_file(&self, path: &Path) -> Result<std::fs::Metadata> {
+        self.ensure_private_object_parent(path).await?;
+        let metadata = tokio::fs::symlink_metadata(path)
+            .await
+            .with_context(|| format!("failed to stat object {}", path.display()))?;
+        ensure!(
+            !metadata.file_type().is_symlink() && metadata.is_file(),
+            "object is not a regular file"
+        );
+        repair_private_file_permissions_async(path)
+            .await
+            .with_context(|| format!("failed to secure object {}", path.display()))?;
+        tokio::fs::metadata(path)
+            .await
+            .with_context(|| format!("failed to stat object {}", path.display()))
     }
 
     async fn delete_best_effort(&self, object_key: &str) {
@@ -486,7 +503,7 @@ impl S3BackupObjectStore {
         }
 
         let spool_root = std::env::temp_dir().join(S3_SPOOL_DIR);
-        tokio::fs::create_dir_all(&spool_root)
+        ensure_private_dir_async(&spool_root)
             .await
             .with_context(|| {
                 format!(
@@ -495,10 +512,7 @@ impl S3BackupObjectStore {
                 )
             })?;
         let temp_path = spool_root.join(format!("{}.part", Uuid::new_v4()));
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
+        let mut file = create_private_file_new_async(&temp_path)
             .await
             .with_context(|| format!("failed to create S3 spool file {}", temp_path.display()))?;
         let mut hasher = Sha256::new();
@@ -987,4 +1001,48 @@ fn percent_encode_segment(segment: &str) -> String {
         }
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn filesystem_object_store_writes_private_files_and_dirs() {
+        let root =
+            std::env::temp_dir().join(format!("vpsman-object-store-private-{}", Uuid::new_v4()));
+        let store = FilesystemBackupObjectStore::new(root.clone()).unwrap();
+
+        store
+            .put_new("backups/client-a/direct.tar", b"direct")
+            .await
+            .unwrap();
+
+        assert_eq!(mode(&root), 0o700);
+        assert_eq!(mode(&root.join("backups")), 0o700);
+        assert_eq!(mode(&root.join("backups/client-a")), 0o700);
+        assert_eq!(mode(&root.join("backups/client-a/direct.tar")), 0o600);
+
+        let source = std::env::temp_dir().join(format!("vpsman-object-source-{}", Uuid::new_v4()));
+        tokio::fs::write(&source, b"from-file").await.unwrap();
+        let expected_hash = sha256_hex(b"from-file");
+        store
+            .put_file_idempotent(
+                "backups/client-a/from-file.tar",
+                &source,
+                &expected_hash,
+                b"from-file".len() as u64,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(mode(&root.join("backups/client-a/from-file.tar")), 0o600);
+        let _ = tokio::fs::remove_file(source).await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
 }

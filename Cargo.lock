@@ -3143,6 +3143,7 @@ dependencies = [
  "chrono",
  "hex",
  "hmac",
+ "libc",
  "lz4_flex",
  "rand 0.8.6",
  "regex",

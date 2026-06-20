@@ -18,9 +18,11 @@ use tokio::{
 };
 use tracing::warn;
 use vpsman_common::{
-    payload_hash, GatewayCommandOutputIngest, GatewayForwardCriticalFailureCounters,
-    GatewayForwardDropReasonCounters, GatewayForwardEventKindCounters,
-    GatewayForwardMetricsSnapshot, GatewayTerminalOutputIngest, OutputStream,
+    create_private_file_new_async, ensure_private_dir_async, open_private_file_read_async,
+    payload_hash, repair_private_file_permissions_async, GatewayCommandOutputIngest,
+    GatewayForwardCriticalFailureCounters, GatewayForwardDropReasonCounters,
+    GatewayForwardEventKindCounters, GatewayForwardMetricsSnapshot, GatewayTerminalOutputIngest,
+    OutputStream,
 };
 
 type CriticalForwardingFailureHandler = Arc<dyn Fn(String, &'static str) + Send + Sync + 'static>;
@@ -936,7 +938,15 @@ impl GatewayForwardSpool {
     ) -> Result<GatewayForwardQueueItem> {
         anyhow::ensure!(self.config.enabled, "gateway spool is disabled");
         let pending_dir = self.pending_dir();
-        tokio::fs::create_dir_all(&pending_dir)
+        ensure_private_dir_async(&self.config.dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to create gateway spool root {}",
+                    self.config.dir.display()
+                )
+            })?;
+        ensure_private_dir_async(&pending_dir)
             .await
             .with_context(|| {
                 format!(
@@ -975,7 +985,7 @@ impl GatewayForwardSpool {
         let final_path =
             pending_dir.join(format!("{}-{target_hex}-{uuid}.spool", event.created_unix));
         let temp_path = pending_dir.join(format!(".{uuid}.tmp"));
-        let mut temp_file = match tokio::fs::File::create(&temp_path).await {
+        let mut temp_file = match create_private_file_new_async(&temp_path).await {
             Ok(file) => file,
             Err(error) => {
                 self.release_disk(disk_bytes);
@@ -1033,9 +1043,17 @@ impl GatewayForwardSpool {
             if path.extension().and_then(|value| value.to_str()) != Some("spool") {
                 continue;
             }
-            let Ok(metadata) = entry.metadata().await else {
+            let Ok(metadata) = tokio::fs::symlink_metadata(&path).await else {
                 continue;
             };
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                warn!(
+                    path = %path.display(),
+                    "removing unsafe gateway spool entry that is not a regular file"
+                );
+                let _ = tokio::fs::remove_file(&path).await;
+                continue;
+            }
             let Some((created_unix, target_key)) = parse_spool_filename(&path) else {
                 warn!(path = %path.display(), "ignoring malformed gateway spool filename");
                 continue;
@@ -1078,7 +1096,11 @@ impl GatewayForwardSpool {
     }
 
     async fn load_spooled_event(&self, path: &Path) -> Result<GatewayForwardEvent> {
-        let bytes = tokio::fs::read(path)
+        let mut file = open_private_file_read_async(path)
+            .await
+            .with_context(|| format!("failed to open gateway spool file {}", path.display()))?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
             .await
             .with_context(|| format!("failed to read gateway spool file {}", path.display()))?;
         decode_spooled_event(path, &bytes)
@@ -1086,7 +1108,7 @@ impl GatewayForwardSpool {
 
     #[cfg(test)]
     async fn load_spooled_header(&self, path: &Path) -> Result<SpooledGatewayForwardHeader> {
-        let mut file = tokio::fs::File::open(path)
+        let mut file = open_private_file_read_async(path)
             .await
             .with_context(|| format!("failed to open gateway spool file {}", path.display()))?;
         let mut magic = vec![0_u8; SPOOL_MAGIC.len()];
@@ -1162,7 +1184,15 @@ impl GatewayForwardSpool {
 
     async fn quarantine_spooled_file(&self, path: &Path) {
         let quarantine_dir = self.config.dir.join("corrupt");
-        if let Err(error) = tokio::fs::create_dir_all(&quarantine_dir).await {
+        if let Err(error) = ensure_private_dir_async(&self.config.dir).await {
+            warn!(
+                %error,
+                path = %path.display(),
+                "failed to create gateway spool root for quarantine"
+            );
+            return;
+        }
+        if let Err(error) = ensure_private_dir_async(&quarantine_dir).await {
             warn!(
                 %error,
                 path = %path.display(),
@@ -1182,6 +1212,13 @@ impl GatewayForwardSpool {
                 "failed to quarantine corrupt gateway spool file"
             );
             return;
+        }
+        if let Err(error) = repair_private_file_permissions_async(&quarantine_path).await {
+            warn!(
+                %error,
+                path = %quarantine_path.display(),
+                "failed to repair gateway spool quarantine file permissions"
+            );
         }
         fsync_dir_best_effort(&quarantine_dir, "gateway spool corrupt dir").await;
         if let Some(parent) = path.parent() {
@@ -1940,6 +1977,7 @@ pub(crate) struct GatewayIdentityValidationResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use tokio::sync::oneshot;
 
     fn test_event(path: &str, body: &[u8]) -> GatewayForwardEvent {
@@ -2162,6 +2200,9 @@ mod tests {
         };
         assert!(path.exists());
         assert!(disk_bytes > body.len() as u64);
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("pending")), 0o700);
+        assert_eq!(mode(&path), 0o600);
         let decoded = forwarder.spool.load_spooled_event(&path).await.unwrap();
         assert_eq!(decoded.body, body);
         assert_eq!(decoded.kind, GatewayForwardEventKind::CommandOutput);
@@ -2397,8 +2438,22 @@ mod tests {
 
         assert!(replay.is_empty());
         assert!(!corrupt_path.exists());
-        assert!(dir.join("corrupt").read_dir().unwrap().next().is_some());
+        let quarantined_path = dir
+            .join("corrupt")
+            .read_dir()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("corrupt")), 0o700);
+        assert_eq!(mode(&quarantined_path), 0o600);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
     fn test_timeouts() -> Arc<StdRwLock<GatewayHttpTimeouts>> {

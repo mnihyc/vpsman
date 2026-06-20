@@ -1,6 +1,5 @@
 use std::{
-    fmt,
-    fs::{self, OpenOptions},
+    fmt, fs,
     io::{self, Read, Seek, SeekFrom, Write},
     os::fd::AsRawFd,
     path::PathBuf,
@@ -11,6 +10,7 @@ use std::{
 use anyhow::{Context, Result};
 use clap::ValueEnum;
 use serde_json::{json, Value};
+use vpsman_common::{create_private_file_new, ensure_private_dir};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum OutputMode {
@@ -109,18 +109,13 @@ where
 {
     io::stdout().flush().context("failed to flush stdout")?;
 
-    let capture_path = capture_file_path();
-    let mut capture_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
-        .open(&capture_path)
-        .with_context(|| {
-            format!(
-                "failed to create stdout capture file {}",
-                capture_path.display()
-            )
-        })?;
+    let capture_path = capture_file_path()?;
+    let mut capture_file = create_private_file_new(&capture_path).with_context(|| {
+        format!(
+            "failed to create stdout capture file {}",
+            capture_path.display()
+        )
+    })?;
 
     // SAFETY: duplicating the process stdout file descriptor is valid on Unix.
     let saved_stdout = unsafe { libc::dup(libc::STDOUT_FILENO) };
@@ -178,17 +173,25 @@ fn close_fd(fd: libc::c_int) {
     }
 }
 
-fn capture_file_path() -> PathBuf {
+fn capture_file_path() -> Result<PathBuf> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    std::env::temp_dir().join(format!("vpsctl-output-{}-{nanos}.tmp", process::id()))
+    let root = std::env::temp_dir().join("vpsctl-output");
+    ensure_private_dir(&root).with_context(|| {
+        format!(
+            "failed to create stdout capture directory {}",
+            root.display()
+        )
+    })?;
+    Ok(root.join(format!("capture-{}-{nanos}.tmp", process::id())))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn normalize_single_json_value() {
@@ -215,5 +218,16 @@ mod tests {
         let value = normalize_stdout("").unwrap();
         assert_eq!(value["kind"], "empty");
         assert!(value["stdout"].is_null());
+    }
+
+    #[test]
+    fn capture_file_path_uses_private_directory() {
+        let path = capture_file_path().unwrap();
+        let parent = path.parent().unwrap();
+
+        assert_eq!(
+            fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 }
