@@ -30,6 +30,7 @@ pub struct SuiteApiConfig {
     pub alert_disk_available_critical_ratio: Option<f64>,
     pub alert_cpu_load_warning: Option<f64>,
     pub alert_cpu_load_critical: Option<f64>,
+    pub trusted_proxy_cidrs: Option<Vec<String>>,
     pub operator_auth_username_failed_attempt_limit: Option<i64>,
     pub operator_auth_ip_failed_attempt_limit: Option<i64>,
     pub operator_auth_failed_attempt_window_secs: Option<u64>,
@@ -302,6 +303,10 @@ impl SuiteConfig {
             30 * 24 * 60 * 60,
             "api.operator_auth_lockout_secs",
         )?;
+        validate_optional_ip_nets(
+            self.api.trusted_proxy_cidrs.as_deref(),
+            "api.trusted_proxy_cidrs",
+        )?;
         Ok(())
     }
 
@@ -349,6 +354,7 @@ impl SuiteConfig {
                 "api.job_output_artifact_min_bytes".to_string(),
                 "api.artifact_max_bytes".to_string(),
                 "api.require_registered_agent_updates".to_string(),
+                "api.trusted_proxy_cidrs".to_string(),
                 "api.operator_auth_*".to_string(),
                 "worker.schedule_command_timeout_secs".to_string(),
                 "worker.tick_secs".to_string(),
@@ -483,6 +489,22 @@ fn validate_optional_usize(
     Ok(())
 }
 
+fn validate_optional_ip_nets(values: Option<&[String]>, name: &str) -> Result<(), String> {
+    let Some(values) = values else {
+        return Ok(());
+    };
+    if values.len() > 64 {
+        return Err(format!("{name}_too_many_entries"));
+    }
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() || value.parse::<ipnet::IpNet>().is_err() {
+            return Err(format!("{name}_invalid"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_u32_range(value: u32, min: u32, max: u32, name: &str) -> Result<(), String> {
     if !(min..=max).contains(&value) {
         return Err(format!("{name}_out_of_range"));
@@ -501,7 +523,7 @@ fn validate_i64_range(value: i64, min: i64, max: i64, name: &str) -> Result<(), 
 mod tests {
     use serde_json::json;
 
-    use super::redact_suite_config_value;
+    use super::{redact_suite_config_value, SuiteConfig};
 
     #[test]
     fn suite_config_redaction_hides_credential_urls_and_sensitive_keys() {
@@ -555,5 +577,42 @@ mod tests {
             redacted["secrets"]["object_secret_key_file"],
             "/run/secrets/object_secret_key"
         );
+    }
+
+    #[test]
+    fn suite_config_accepts_ipv4_and_ipv6_trusted_proxy_cidrs() {
+        let config = SuiteConfig::parse(
+            r#"
+version = 1
+
+[api]
+trusted_proxy_cidrs = ["127.0.0.0/8", "::1/128", "2001:db8::/32"]
+"#,
+        )
+        .expect("valid CIDRs");
+
+        assert_eq!(
+            config.api.trusted_proxy_cidrs,
+            Some(vec![
+                "127.0.0.0/8".to_string(),
+                "::1/128".to_string(),
+                "2001:db8::/32".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn suite_config_rejects_invalid_trusted_proxy_cidr() {
+        let error = SuiteConfig::parse(
+            r#"
+version = 1
+
+[api]
+trusted_proxy_cidrs = ["localhost"]
+"#,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "api.trusted_proxy_cidrs_invalid");
     }
 }

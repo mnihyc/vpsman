@@ -113,11 +113,11 @@ of the same root cause.
 | AUD-097 | Medium/High | Fixed | API/Suite Config/Audit | Suite config changed-key detection runs after redaction |
 | AUD-098 | High | Fixed | Frontend/Suite Config | Suite config save review can use a stale validation result for a newer draft |
 | AUD-099 | Medium/High | Fixed | API/Suite Config/Durability | Suite config file replacement is rename-only without fsync durability |
-| AUD-100 | Medium/High | Confirmed | API/Auth/Audit | Locked login attempts can still flood durable audit logs |
+| AUD-100 | Medium/High | Fixed | API/Auth/Audit | Locked login attempts can still flood durable audit logs |
 | AUD-101 | Medium/High | Fixed | Deploy/API/Suite Config | Official compose mounts the dashboard-editable suite config read-only |
 | AUD-102 | High | Fixed | API/Frontend/Suite Config/Privilege | Suite config privilege assertion is not bound to the TOML payload |
-| AUD-103 | Medium/High | Confirmed | API/Auth/Deploy | Login throttling and auth history use proxy IP instead of the operator IP |
-| AUD-104 | Medium/High | Confirmed | API/Auth/TOTP | Authenticated TOTP management is an unthrottled password and code oracle |
+| AUD-103 | Medium/High | Fixed | API/Auth/Deploy | Login throttling and auth history use proxy IP instead of the operator IP |
+| AUD-104 | Medium/High | Fixed | API/Auth/TOTP | Authenticated TOTP management is an unthrottled password and code oracle |
 | AUD-105 | Medium/High | Confirmed | API/File Transfers/Terminal/Retention | Derived session records can outlive the job-output evidence they require |
 | AUD-106 | High | Fixed | API/Backups/Object Storage | Backup artifact metadata can be recorded without object-store verification |
 | AUD-107 | High | Confirmed | API/Schedules/Client Lifecycle | Stale fixed targets can block schedule management and apply-now |
@@ -128,7 +128,7 @@ of the same root cause.
 | AUD-112 | High | Fixed | API/Jobs/Client Lifecycle | Deleting or revoking a client can leave already-created queued targets unclaimable forever |
 | AUD-113 | High | Fixed | API/Gateway/Key Lifecycle | Replacing a client public key does not invalidate the old live gateway session |
 | AUD-114 | High | Fixed | API/Gateway/Client Lifecycle | Delete and key-revoke mark sessions ended without disconnecting the live gateway session |
-| AUD-115 | Medium/High | Confirmed | API/WebSocket/Auth | Fleet WebSocket streams continue after token expiry, session revocation, or scope removal |
+| AUD-115 | Medium/High | Fixed | API/WebSocket/Auth | Fleet WebSocket streams continue after token expiry, session revocation, or scope removal |
 | AUD-116 | High | Fixed | API/Integrations/Confirmation | Alert and webhook configuration delete routes lack backend confirmation |
 | AUD-117 | Medium/High | Confirmed | Worker/Alerts/Reliability | Alert notification webhooks are not retried automatically after transient failures |
 | AUD-118 | High | Confirmed | API/Integrations/Delivery State | Manual delivery processors can send in-progress webhooks before failing the state update |
@@ -3456,6 +3456,11 @@ of the same root cause.
   records. Coalesce or rate-limit repeated failed/throttled audit rows by
   username/IP/window, or store high-cardinality counters in the throttle table
   rather than appending one durable audit row per rejected request.
+- Resolution: Fixed by suppressing per-request durable
+  `operator_auth.login_throttled` audit rows once a username/IP bucket is
+  already locked. Failed attempts still update durable throttle counters,
+  lockout creation remains audited, and successful login after recent failures
+  still records recovery evidence.
 
 ### AUD-101: Official Compose Mounts The Dashboard-Editable Suite Config Read-Only
 
@@ -3561,7 +3566,7 @@ of the same root cause.
 ### AUD-103: Login Throttling And Auth History Use Proxy IP Instead Of The Operator IP
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Auth/Deploy
 - Context: Operator login and TOTP failures are throttled by username and IP,
   and authentication history displays `remote_ip` for incident review. In the
@@ -3594,11 +3599,16 @@ of the same root cause.
 - Notes: Do not blindly trust `X-Forwarded-For` from arbitrary clients. Use an
   explicit trusted-proxy allowlist or deployment-mode setting, then choose the
   validated original client IP for login throttle and auth-history records.
+- Resolution: Fixed by resolving operator client IPs through a shared API
+  helper that supports IPv4/IPv6 `X-Forwarded-For` chains. The private API
+  trusts forwarded addresses by default for the shipped proxy deployment, and
+  direct/custom deployments can restrict trusted peers with
+  `[api].trusted_proxy_cidrs` or `VPSMAN_TRUSTED_PROXY_CIDRS`.
 
 ### AUD-104: Authenticated TOTP Management Is An Unthrottled Password And Code Oracle
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Auth/TOTP
 - Context: Operator login failures are durably throttled, but an already
   authenticated operator session can manage its own TOTP settings. These routes
@@ -3637,11 +3647,16 @@ of the same root cause.
   on these authenticated routes, keyed by username and validated client IP.
   Keep responses generic enough that failure reason does not leak which factor
   was correct. Successful TOTP changes should continue to audit normally.
+- Resolution: Fixed by applying the existing durable operator auth throttle to
+  authenticated TOTP setup, confirm, and disable failures. Invalid
+  password/code results now share a generic `invalid_totp_credentials` response,
+  locked buckets return `operator_auth_throttled`, and successful TOTP
+  management clears the username bucket like successful login.
 
 ### AUD-105: Derived Session Records Can Outlive The Job-Output Evidence They Require
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/File Transfers/Terminal/Retention
 - Context: File-transfer sessions and terminal sessions are materialized from
   job-output status rows so operators can list resumable uploads/downloads,
@@ -4110,7 +4125,7 @@ of the same root cause.
 ### AUD-115: Fleet WebSocket Streams Continue After Token Expiry, Session Revocation, Or Scope Removal
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/WebSocket/Auth
 - Context: The dashboard opens a fleet WebSocket after operator login and keeps
   it connected for live fleet snapshots and events. Admins can revoke sessions,
@@ -4143,6 +4158,11 @@ of the same root cause.
   close affected sockets, or require periodic authenticated refresh messages.
   Scope changes and operator disable/delete should stop the stream just like
   they stop HTTP routes.
+- Resolution: Fixed by keeping the authenticated WebSocket token server-side
+  and revalidating it periodically through the same repository authority used
+  by HTTP routes. Expired tokens, revoked sessions, inactive operators, and
+  removed `fleet:read` scope close the stream; the frontend re-checks the
+  current operator when an authenticated socket closes.
 
 ### AUD-116: Alert And Webhook Configuration Delete Routes Lack Backend Confirmation
 

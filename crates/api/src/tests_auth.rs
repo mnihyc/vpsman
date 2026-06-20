@@ -228,12 +228,35 @@ async fn operator_login_throttle_locks_username_and_success_clears_username_buck
         .unwrap(),
         repository_auth::OperatorLoginAttempt::Throttled
     ));
+    let audit_count_before = repo.list_audit_logs(100).await.unwrap().len();
+    for _ in 0..3 {
+        assert!(matches!(
+            repo.login_operator_with_throttle(
+                &LoginRequest {
+                    username: "admin".to_string(),
+                    password: "wrong-password-123".to_string(),
+                    totp_code: None,
+                },
+                "203.0.113.10",
+                None,
+                &throttle,
+            )
+            .await
+            .unwrap(),
+            repository_auth::OperatorLoginAttempt::Throttled
+        ));
+    }
+    assert_eq!(
+        repo.list_audit_logs(100).await.unwrap().len(),
+        audit_count_before
+    );
 
     let audit_json = serde_json::to_string(&repo.list_audit_logs(10).await.unwrap()).unwrap();
     assert!(audit_json.contains("operator_auth.login_after_failures"));
     assert!(audit_json.contains("operator_auth.lockout_created"));
     assert!(audit_json.contains("\"scope_kind\":\"username\""));
     assert!(!audit_json.contains("\"scope_kind\":\"ip\""));
+    assert!(!audit_json.contains("operator_auth.login_throttled"));
 }
 
 #[tokio::test]
@@ -335,6 +358,62 @@ async fn login_route_ip_throttle_spans_unknown_usernames() {
 }
 
 #[tokio::test]
+async fn login_route_throttles_by_forwarded_ipv6_operator_ip() {
+    let state = memory_test_state();
+    let peer = "127.0.0.1:44321".parse::<std::net::SocketAddr>().unwrap();
+
+    for index in 0..8 {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "2001:db8::10".parse().unwrap());
+        let error = routes_auth::login_operator(
+            axum::extract::State(state.clone()),
+            axum::extract::ConnectInfo(peer),
+            headers,
+            axum::Json(LoginRequest {
+                username: format!("missing-operator-{index}"),
+                password: "valid-shaped-password-123".to_string(),
+                totp_code: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+    }
+
+    let mut locked_headers = HeaderMap::new();
+    locked_headers.insert("x-forwarded-for", "2001:db8::10".parse().unwrap());
+    let error = routes_auth::login_operator(
+        axum::extract::State(state.clone()),
+        axum::extract::ConnectInfo(peer),
+        locked_headers,
+        axum::Json(LoginRequest {
+            username: "different-missing-operator".to_string(),
+            password: "valid-shaped-password-123".to_string(),
+            totp_code: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
+
+    let mut other_headers = HeaderMap::new();
+    other_headers.insert("x-forwarded-for", "2001:db8::11".parse().unwrap());
+    let error = routes_auth::login_operator(
+        axum::extract::State(state),
+        axum::extract::ConnectInfo(peer),
+        other_headers,
+        axum::Json(LoginRequest {
+            username: "different-missing-operator".to_string(),
+            password: "valid-shaped-password-123".to_string(),
+            totp_code: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn missing_totp_counts_toward_login_throttle() {
     let repo = Repository::Memory(MemoryState::default());
     let password = "admin-password-123";
@@ -408,6 +487,56 @@ async fn missing_totp_counts_toward_login_throttle() {
         .unwrap(),
         repository_auth::OperatorLoginAttempt::Throttled
     ));
+}
+
+#[tokio::test]
+async fn totp_management_failures_use_operator_auth_throttle() {
+    let state = memory_test_state();
+    let password = "admin-password-123";
+    let auth = state
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: password.to_string(),
+        })
+        .await
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        format!("Bearer {}", auth.access_token).parse().unwrap(),
+    );
+    let peer = "203.0.113.40:44321"
+        .parse::<std::net::SocketAddr>()
+        .unwrap();
+
+    for _ in 0..8 {
+        let error = routes_auth::setup_operator_totp(
+            axum::extract::State(state.clone()),
+            axum::extract::ConnectInfo(peer),
+            headers.clone(),
+            axum::Json(TotpSetupRequest {
+                password: "wrong-password-123".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.code, "invalid_totp_credentials");
+    }
+
+    let error = routes_auth::setup_operator_totp(
+        axum::extract::State(state),
+        axum::extract::ConnectInfo(peer),
+        headers,
+        axum::Json(TotpSetupRequest {
+            password: password.to_string(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(error.code, "operator_auth_throttled");
 }
 
 #[test]
@@ -897,6 +1026,26 @@ async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
         routes_network::list_tunnel_plans(axum::extract::State(state.clone()), viewer_headers)
             .await,
     );
+}
+
+#[tokio::test]
+async fn fleet_websocket_auth_rejects_revoked_sessions() {
+    let state = memory_test_state();
+    let (fleet_token, _) = issue_test_operator_headers(&state, "viewer", &[SCOPE_FLEET_READ]).await;
+    let context = routes_ws::authenticate_socket_context(&state, &fleet_token)
+        .await
+        .expect("initial websocket auth");
+
+    state
+        .repo
+        .revoke_operator_session(context.session_id, &context)
+        .await
+        .unwrap();
+
+    assert!(!routes_ws::authenticate_socket_token(&state, &fleet_token).await);
+    assert!(routes_ws::authenticate_socket_context(&state, &fleet_token)
+        .await
+        .is_none());
 }
 
 #[tokio::test]

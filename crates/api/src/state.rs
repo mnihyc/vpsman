@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use anyhow::{ensure, Result};
 use axum::http::HeaderMap;
@@ -8,6 +8,7 @@ use vpsman_common::SuiteConfig;
 use vpsman_server_core::{JOB_STATUS_QUEUED, JOB_STATUS_RUNNING};
 
 use crate::{
+    client_ip::TrustedProxyConfig,
     error::ApiError,
     fleet_alerts::FleetAlertPolicy,
     gateway_client::GatewayDispatchClient,
@@ -265,6 +266,23 @@ impl AppState {
             .clamp(60, 30 * 24 * 60 * 60);
         config.lockout_secs = config.lockout_secs.clamp(60, 30 * 24 * 60 * 60);
         config
+    }
+
+    pub(crate) fn operator_client_ip(&self, peer: SocketAddr, headers: &HeaderMap) -> String {
+        self.trusted_proxy_config()
+            .resolve_client_ip(peer, headers)
+            .to_string()
+    }
+
+    fn trusted_proxy_config(&self) -> TrustedProxyConfig {
+        if let Ok(value) = std::env::var("VPSMAN_TRUSTED_PROXY_CIDRS") {
+            return TrustedProxyConfig::from_env_csv(&value)
+                .unwrap_or_else(|_| TrustedProxyConfig::trust_none());
+        }
+        let entries = self
+            .current_suite_config()
+            .and_then(|suite| suite.api.trusted_proxy_cidrs);
+        TrustedProxyConfig::from_optional_entries(entries.as_deref()).unwrap_or_default()
     }
 
     pub(crate) fn schedule_apply_now_timeout_secs(&self) -> u64 {

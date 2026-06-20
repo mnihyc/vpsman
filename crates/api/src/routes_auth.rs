@@ -10,11 +10,11 @@ use uuid::Uuid;
 use crate::{
     error::ApiError,
     model::{
-        is_valid_operator_timezone, AuthResponse, BootstrapOperatorRequest, CreateOperatorRequest,
-        HistoryQuery, LoginRequest, OperatorAuthEventQuery, OperatorAuthEventView,
-        OperatorLifecycleRequest, OperatorPasswordResetRequest, OperatorPreferences,
-        OperatorSessionRevokeRequest, OperatorSessionView, OperatorView, RefreshRequest,
-        TotpConfirmRequest, TotpDisableRequest, TotpSetupOutcome, TotpSetupRequest,
+        is_valid_operator_timezone, AuthContext, AuthResponse, BootstrapOperatorRequest,
+        CreateOperatorRequest, HistoryQuery, LoginRequest, OperatorAuthEventQuery,
+        OperatorAuthEventView, OperatorLifecycleRequest, OperatorPasswordResetRequest,
+        OperatorPreferences, OperatorSessionRevokeRequest, OperatorSessionView, OperatorView,
+        RefreshRequest, TotpConfirmRequest, TotpDisableRequest, TotpSetupOutcome, TotpSetupRequest,
         TotpSetupResponse, TotpUpdateOutcome, UpdateOperatorRequest,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
@@ -51,11 +51,12 @@ pub(crate) async fn login_operator(
     Json(request): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     validate_operator_credentials(&request.username, &request.password)?;
+    let remote_ip = state.operator_client_ip(peer, &headers);
     match state
         .repo
         .login_operator_with_throttle(
             &request,
-            &peer.ip().to_string(),
+            &remote_ip,
             headers
                 .get(USER_AGENT)
                 .and_then(|value| value.to_str().ok()),
@@ -87,6 +88,7 @@ pub(crate) async fn refresh_operator_session(
 
 pub(crate) async fn setup_operator_totp(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(request): Json<TotpSetupRequest>,
 ) -> Result<Json<TotpSetupResponse>, ApiError> {
@@ -94,15 +96,24 @@ pub(crate) async fn setup_operator_totp(
     if request.password.len() < 12 {
         return Err(ApiError::bad_request("password_too_short"));
     }
+    let remote_ip = state.operator_client_ip(peer, &headers);
+    ensure_totp_management_not_locked(&state, &operator, &remote_ip).await?;
     match state
         .repo
         .setup_operator_totp(&operator, &request.password)
         .await?
     {
-        TotpSetupOutcome::Created(response) => Ok(Json(response)),
+        TotpSetupOutcome::Created(response) => {
+            state
+                .repo
+                .clear_operator_auth_management_success(&operator.operator.username)
+                .await?;
+            Ok(Json(response))
+        }
         TotpSetupOutcome::AlreadyEnabled => Err(ApiError::conflict("totp_already_enabled")),
         TotpSetupOutcome::InvalidPassword => {
-            Err(ApiError::unauthorized("invalid_operator_credentials"))
+            record_totp_management_failure(&state, &operator, &remote_ip).await?;
+            Err(ApiError::unauthorized("invalid_totp_credentials"))
         }
         TotpSetupOutcome::OperatorMissing => Err(ApiError::not_found("operator_not_found")),
     }
@@ -110,18 +121,28 @@ pub(crate) async fn setup_operator_totp(
 
 pub(crate) async fn confirm_operator_totp(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(request): Json<TotpConfirmRequest>,
 ) -> Result<Json<OperatorView>, ApiError> {
     let operator = state.require_operator(&headers).await?;
     validate_totp_update_request(&request.password, &request.code)?;
+    let remote_ip = state.operator_client_ip(peer, &headers);
+    ensure_totp_management_not_locked(&state, &operator, &remote_ip).await?;
     match state
         .repo
         .confirm_operator_totp(&operator, &request.password, &request.code)
         .await?
     {
-        TotpUpdateOutcome::Updated(operator) => Ok(Json(*operator)),
+        TotpUpdateOutcome::Updated(updated) => {
+            state
+                .repo
+                .clear_operator_auth_management_success(&operator.operator.username)
+                .await?;
+            Ok(Json(*updated))
+        }
         TotpUpdateOutcome::InvalidCredentials => {
+            record_totp_management_failure(&state, &operator, &remote_ip).await?;
             Err(ApiError::unauthorized("invalid_totp_credentials"))
         }
         TotpUpdateOutcome::NotConfigured => Err(ApiError::conflict("totp_not_configured")),
@@ -131,18 +152,28 @@ pub(crate) async fn confirm_operator_totp(
 
 pub(crate) async fn disable_operator_totp(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(request): Json<TotpDisableRequest>,
 ) -> Result<Json<OperatorView>, ApiError> {
     let operator = state.require_operator(&headers).await?;
     validate_totp_update_request(&request.password, &request.code)?;
+    let remote_ip = state.operator_client_ip(peer, &headers);
+    ensure_totp_management_not_locked(&state, &operator, &remote_ip).await?;
     match state
         .repo
         .disable_operator_totp(&operator, &request.password, &request.code)
         .await?
     {
-        TotpUpdateOutcome::Updated(operator) => Ok(Json(*operator)),
+        TotpUpdateOutcome::Updated(updated) => {
+            state
+                .repo
+                .clear_operator_auth_management_success(&operator.operator.username)
+                .await?;
+            Ok(Json(*updated))
+        }
         TotpUpdateOutcome::InvalidCredentials => {
+            record_totp_management_failure(&state, &operator, &remote_ip).await?;
             Err(ApiError::unauthorized("invalid_totp_credentials"))
         }
         TotpUpdateOutcome::NotConfigured => Err(ApiError::conflict("totp_not_configured")),
@@ -155,6 +186,37 @@ pub(crate) async fn current_operator(
     headers: HeaderMap,
 ) -> Result<Json<OperatorView>, ApiError> {
     Ok(Json(state.require_operator(&headers).await?.operator))
+}
+
+async fn ensure_totp_management_not_locked(
+    state: &AppState,
+    operator: &AuthContext,
+    remote_ip: &str,
+) -> Result<(), ApiError> {
+    if state
+        .repo
+        .operator_auth_identity_locked(&operator.operator.username, remote_ip)
+        .await?
+    {
+        return Err(ApiError::too_many_requests("operator_auth_throttled"));
+    }
+    Ok(())
+}
+
+async fn record_totp_management_failure(
+    state: &AppState,
+    operator: &AuthContext,
+    remote_ip: &str,
+) -> Result<(), ApiError> {
+    state
+        .repo
+        .record_operator_totp_management_failure(
+            &operator.operator.username,
+            remote_ip,
+            &state.operator_auth_throttle_config(),
+        )
+        .await?;
+    Ok(())
 }
 
 pub(crate) async fn update_operator_preferences(

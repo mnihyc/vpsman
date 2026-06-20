@@ -16,10 +16,13 @@ use tokio::{
 };
 
 use crate::{
+    auth_model::AuthContext,
     model::WsEvent,
     security::{operator_has_scope, SCOPE_FLEET_READ},
     state::AppState,
 };
+
+const WS_AUTH_REVALIDATE_SECS: u64 = 30;
 
 #[derive(Debug, Deserialize)]
 struct WsClientAuth {
@@ -34,11 +37,13 @@ pub(crate) async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgra
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
-    if !authenticate_socket(&mut receiver, &state).await {
+    let Some(session) = authenticate_socket(&mut receiver, &state).await else {
         let _ = sender.send(Message::Close(None)).await;
         return;
-    }
+    };
     let mut events = state.events.subscribe();
+    let mut auth_revalidate = time::interval(Duration::from_secs(WS_AUTH_REVALIDATE_SECS));
+    auth_revalidate.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
     let hello = WsEvent::Hello {
         service: "vpsman-api".to_string(),
@@ -52,6 +57,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             return;
         }
     }
+    auth_revalidate.tick().await;
 
     loop {
         tokio::select! {
@@ -60,6 +66,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
                     Some(Err(_)) => break,
+                }
+            }
+            _ = auth_revalidate.tick() => {
+                if !session.revalidate(&state).await {
+                    let _ = sender.send(Message::Close(None)).await;
+                    break;
                 }
             }
             event = events.recv() => {
@@ -83,25 +95,53 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 }
 
-async fn authenticate_socket(receiver: &mut SplitStream<WebSocket>, state: &AppState) -> bool {
+#[derive(Clone, Debug)]
+struct WsAuthenticatedSession {
+    access_token: String,
+}
+
+impl WsAuthenticatedSession {
+    async fn revalidate(&self, state: &AppState) -> bool {
+        authenticate_socket_token(state, &self.access_token).await
+    }
+}
+
+async fn authenticate_socket(
+    receiver: &mut SplitStream<WebSocket>,
+    state: &AppState,
+) -> Option<WsAuthenticatedSession> {
     let Ok(Some(Ok(Message::Text(payload)))) =
         time::timeout(Duration::from_secs(10), receiver.next()).await
     else {
-        return false;
+        return None;
     };
     let Ok(auth) = serde_json::from_str::<WsClientAuth>(&payload) else {
-        return false;
+        return None;
     };
     if auth.r#type != "auth" || auth.access_token.trim().is_empty() {
-        return false;
+        return None;
     }
-    authenticate_socket_token(state, &auth.access_token).await
+    let session = WsAuthenticatedSession {
+        access_token: auth.access_token,
+    };
+    session.revalidate(state).await.then_some(session)
 }
 
 pub(crate) async fn authenticate_socket_token(state: &AppState, access_token: &str) -> bool {
+    authenticate_socket_context(state, access_token)
+        .await
+        .is_some()
+}
+
+pub(crate) async fn authenticate_socket_context(
+    state: &AppState,
+    access_token: &str,
+) -> Option<AuthContext> {
     match state.repo.authenticate_access_token(access_token).await {
-        Ok(Some(context)) => operator_has_scope(&context.operator.scopes, SCOPE_FLEET_READ),
-        _ => false,
+        Ok(Some(context)) if operator_has_scope(&context.operator.scopes, SCOPE_FLEET_READ) => {
+            Some(context)
+        }
+        _ => None,
     }
 }
 

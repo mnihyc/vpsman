@@ -84,3 +84,14 @@ Each operator has an explicit refresh/session TTL. The default is 365 days; the
 access token lifetime is one day. Admin-targeted changes and changes that grant
 the admin role require an explicit admin-risk acknowledgement in the dashboard,
 CLI, VTY, and API payload.
+
+Login throttling and auth history use the operator client IP resolved from
+`X-Forwarded-For` by default because the API is private behind the dashboard
+proxy. IPv4 and IPv6 forwarded addresses are supported, including IPv6 access
+terminated by an external TLS provider. Directly exposed or custom
+reverse-proxy deployments can narrow trusted peers with
+`[api].trusted_proxy_cidrs` or `VPSMAN_TRUSTED_PROXY_CIDRS`.
+
+Fleet WebSocket streams use the same bearer-session authority as HTTP routes.
+The server periodically revalidates token expiry, session revocation, operator
+status, and `fleet:read` scope, then closes streams that no longer have access.

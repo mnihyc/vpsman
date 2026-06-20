@@ -132,6 +132,11 @@ default through `VPSMAN_FRONTEND_BIND`. Gateway TCP also stays loopback-bound by
 default, and gateway control uses a shared Unix socket under
 `deploy/runtime/data`; expose agent TCP through your chosen public proxy,
 firewall, or tunnel when needed.
+Because the API is a private service behind the dashboard proxy, operator
+login throttling and auth history trust `X-Forwarded-For` by default, including
+IPv6 client addresses forwarded by an external TLS provider. Deployments that
+bind the API directly can restrict that trust with `[api].trusted_proxy_cidrs`
+or `VPSMAN_TRUSTED_PROXY_CIDRS`.
 
 Update an existing Docker deployment from GitHub Releases:
 

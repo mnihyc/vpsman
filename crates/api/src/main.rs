@@ -6,6 +6,7 @@ mod backup_auto_artifacts;
 mod backup_handoff;
 mod backup_upload_sessions;
 mod build_info;
+mod client_ip;
 mod data_source_builtin_presets;
 mod error;
 mod fleet_alert_notifications;

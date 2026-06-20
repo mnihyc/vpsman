@@ -37,7 +37,13 @@ export function useDashboardData(activeView: ActiveView) {
     useState<WsTerminalOutputEvent | null>(null);
   const dashboardOverviewReloadTimer = useRef<number | null>(null);
 
-  const requireAuth = useCallback(() => setAuthRequired(true), []);
+  const requireAuth = useCallback(() => {
+    window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+    window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+    setAuthVaultAvailable(hasAuthVault());
+    setApiToken("");
+    setAuthRequired(true);
+  }, []);
   const access = useAccessData(apiToken, requireAuth);
   const dashboardOverview = useDashboardOverviewData(apiToken, requireAuth);
   const fleet = useFleetData(apiToken, requireAuth);
@@ -191,6 +197,7 @@ export function useDashboardData(activeView: ActiveView) {
       setWsState("auth required");
       return;
     }
+    let disposed = false;
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
     socket.addEventListener("open", () => {
@@ -199,7 +206,12 @@ export function useDashboardData(activeView: ActiveView) {
       }
       setWsState("connected");
     });
-    socket.addEventListener("close", () => setWsState("closed"));
+    socket.addEventListener("close", () => {
+      setWsState("closed");
+      if (!disposed && apiToken) {
+        void access.loadCurrentOperator();
+      }
+    });
     socket.addEventListener("error", () => setWsState("error"));
     socket.addEventListener("message", (message) => {
       const event = parseWsEvent(message.data);
@@ -262,10 +274,14 @@ export function useDashboardData(activeView: ActiveView) {
         }
       }
     });
-    return () => socket.close();
+    return () => {
+      disposed = true;
+      socket.close();
+    };
   }, [
     apiToken,
     authRequired,
+    access.loadCurrentOperator,
     audit.loadAudits,
     fleet.loadFleet,
     fleet.replaceFleetSnapshot,

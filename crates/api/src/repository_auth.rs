@@ -29,6 +29,7 @@ enum OperatorLoginFailureReason {
     MissingTotpSecret,
     TotpDecryptFailed,
     BadTotp,
+    TotpManagement,
 }
 
 impl OperatorLoginFailureReason {
@@ -42,6 +43,7 @@ impl OperatorLoginFailureReason {
             Self::MissingTotpSecret => "missing_totp_secret",
             Self::TotpDecryptFailed => "totp_decrypt_failed",
             Self::BadTotp => "bad_totp",
+            Self::TotpManagement => "totp_management_invalid_credentials",
         }
     }
 }
@@ -183,16 +185,6 @@ impl Repository {
             .operator_auth_throttle_locked(&username_key, &ip_key)
             .await?
         {
-            self.record_operator_auth_event(
-                None,
-                request.username.trim(),
-                "throttled",
-                Some("operator_login_throttled"),
-                &ip_key,
-                user_agent,
-                None,
-            )
-            .await?;
             return Ok(OperatorLoginAttempt::Throttled);
         }
 
@@ -361,6 +353,42 @@ impl Repository {
         )
         .await?;
         Ok(OperatorLoginAttempt::Authenticated(Box::new(response)))
+    }
+
+    pub(crate) async fn operator_auth_identity_locked(
+        &self,
+        username: &str,
+        remote_ip: &str,
+    ) -> Result<bool> {
+        let username_key = normalize_auth_throttle_username(username);
+        let ip_key = normalize_auth_throttle_ip(remote_ip);
+        self.operator_auth_throttle_locked(&username_key, &ip_key)
+            .await
+    }
+
+    pub(crate) async fn record_operator_totp_management_failure(
+        &self,
+        username: &str,
+        remote_ip: &str,
+        throttle: &OperatorAuthThrottleConfig,
+    ) -> Result<()> {
+        let username_key = normalize_auth_throttle_username(username);
+        let ip_key = normalize_auth_throttle_ip(remote_ip);
+        self.record_operator_auth_failure(
+            &username_key,
+            &ip_key,
+            OperatorLoginFailureReason::TotpManagement,
+            throttle,
+        )
+        .await
+    }
+
+    pub(crate) async fn clear_operator_auth_management_success(
+        &self,
+        username: &str,
+    ) -> Result<()> {
+        let username_key = normalize_auth_throttle_username(username);
+        self.clear_operator_auth_success(&username_key).await
     }
 
     async fn operator_auth_throttle_locked(
