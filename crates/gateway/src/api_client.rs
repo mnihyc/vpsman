@@ -13,16 +13,16 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::{mpsc, Mutex},
+    sync::{mpsc, Mutex, Notify},
     time::{self, sleep, Duration},
 };
 use tracing::warn;
 use vpsman_common::{
     create_private_file_new_async, ensure_private_dir_async, open_private_file_read_async,
-    payload_hash, repair_private_file_permissions_async, GatewayCommandOutputIngest,
-    GatewayForwardCriticalFailureCounters, GatewayForwardDropReasonCounters,
-    GatewayForwardEventKindCounters, GatewayForwardMetricsSnapshot, GatewayTerminalOutputIngest,
-    OutputStream,
+    payload_hash, repair_private_file_permissions_async, GatewayAgentHelloIngest,
+    GatewayCommandOutputIngest, GatewayForwardCriticalFailureCounters,
+    GatewayForwardDropReasonCounters, GatewayForwardEventKindCounters,
+    GatewayForwardMetricsSnapshot, GatewayTerminalOutputIngest, OutputStream,
 };
 
 type CriticalForwardingFailureHandler = Arc<dyn Fn(String, &'static str) + Send + Sync + 'static>;
@@ -181,6 +181,24 @@ impl GatewayControlClient {
             .await
     }
 
+    pub(crate) async fn accept_agent_session(
+        &self,
+        value: &GatewayAgentHelloIngest,
+    ) -> Result<GatewayIngestResponse> {
+        let Some(api_url) = &self.api_url else {
+            anyhow::bail!("gateway API URL is required for agent session acceptance");
+        };
+        let body = post_json(
+            api_url,
+            "/internal/v1/gateway/agent-hello",
+            value,
+            self.internal_token.as_deref(),
+            self.timeouts(),
+        )
+        .await?;
+        serde_json::from_str(&body).context("failed to parse gateway ingest response")
+    }
+
     pub(crate) async fn validate_agent_identity(
         &self,
         client_id: &str,
@@ -265,6 +283,7 @@ struct GatewayForwardSpool {
     ram_bytes: AtomicU64,
     disk_bytes: AtomicU64,
     shutdown_requested: AtomicBool,
+    shutdown_notify: Notify,
 }
 
 #[derive(Default)]
@@ -883,15 +902,24 @@ impl GatewayForwardSpool {
             ram_bytes: AtomicU64::new(0),
             disk_bytes: AtomicU64::new(0),
             shutdown_requested: AtomicBool::new(false),
+            shutdown_notify: Notify::new(),
         }
     }
 
     fn request_shutdown(&self) {
         self.shutdown_requested.store(true, Ordering::Relaxed);
+        self.shutdown_notify.notify_waiters();
     }
 
     fn shutdown_requested(&self) -> bool {
         self.shutdown_requested.load(Ordering::Relaxed)
+    }
+
+    async fn notified_shutdown(&self) {
+        if self.shutdown_requested() {
+            return;
+        }
+        self.shutdown_notify.notified().await;
     }
 
     fn try_reserve_ram(&self, bytes: u64) -> bool {
@@ -1601,29 +1629,31 @@ async fn post_json_retry_until_expired(
             );
             return GatewayForwardOutcome::NotDelivered;
         }
-        match post_json_bytes(
-            &event.api_url,
-            &event.path,
-            &event.body,
-            event.internal_token.as_deref(),
-            current_gateway_http_timeouts(timeouts),
-        )
-        .await
-        {
+        let post_result = tokio::select! {
+            result = post_json_bytes(
+                &event.api_url,
+                &event.path,
+                &event.body,
+                event.internal_token.as_deref(),
+                current_gateway_http_timeouts(timeouts),
+            ) => result,
+            _ = spool.notified_shutdown() => {
+                return GatewayForwardOutcome::DeferredForShutdown;
+            }
+        };
+        match post_result {
             Ok(_) => return GatewayForwardOutcome::Delivered,
             Err(error) => {
                 metrics.retry_attempts.fetch_add(1, Ordering::Relaxed);
                 let error_message = error.to_string();
-                if event.kind == GatewayForwardEventKind::CommandOutput
-                    && command_output_error_is_non_retryable(&error_message)
-                {
+                if gateway_event_error_is_non_retryable(event.kind, &error_message) {
                     metrics.record_drop(event.kind, GatewayForwardDropReason::ProtocolConflict);
                     warn!(
                         error = %error_message,
                         path = %event.path,
                         target_key,
                         attempt,
-                        "dropping non-retryable command output"
+                        "dropping non-retryable gateway event"
                     );
                     return GatewayForwardOutcome::NotDelivered;
                 }
@@ -1678,8 +1708,17 @@ fn notify_critical_failure(
     }
 }
 
-fn command_output_error_is_non_retryable(error_message: &str) -> bool {
-    error_message.contains("409 Conflict")
+fn gateway_event_error_is_non_retryable(
+    kind: GatewayForwardEventKind,
+    error_message: &str,
+) -> bool {
+    if !error_message.contains("409 Conflict") {
+        return false;
+    }
+    if error_message.contains("gateway_session_not_active") {
+        return true;
+    }
+    kind == GatewayForwardEventKind::CommandOutput
         && (error_message.contains("job_output_sequence_conflict")
             || error_message.contains("job_target_not_active")
             || error_message.contains("job_output_payload_hash_mismatch"))
@@ -1974,6 +2013,12 @@ pub(crate) struct GatewayIdentityValidationResponse {
     pub(crate) message: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct GatewayIngestResponse {
+    pub(crate) accepted: bool,
+    pub(crate) message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2004,6 +2049,8 @@ mod tests {
     ) -> GatewayTerminalOutputIngest {
         GatewayTerminalOutputIngest {
             gateway_id: "gateway-a".to_string(),
+            gateway_session_id: uuid::Uuid::new_v4(),
+            process_incarnation_id: uuid::Uuid::new_v4(),
             client_id: "client-a".to_string(),
             output: vpsman_common::TerminalStreamOutput {
                 job_id,
@@ -2052,6 +2099,52 @@ mod tests {
 
         assert_eq!(outcome, GatewayForwardOutcome::DeferredForShutdown);
         assert_eq!(metrics.retry_attempts.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_blocked_api_forward_post() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = [0_u8; 1024];
+            let _ = socket.read(&mut buffer).await;
+            std::future::pending::<()>().await;
+        });
+
+        let mut event = test_event("/internal/v1/gateway/session-started", br#"{}"#);
+        event.api_url = format!("http://{addr}");
+        let metrics = GatewayForwardMetrics::default();
+        let critical_failure_handler = StdRwLock::new(None);
+        let telemetry_pending = Mutex::new(HashMap::new());
+        let spool = GatewayForwardSpool::new(GatewaySpoolConfig::default());
+        let runtime_config = GatewayForwardRuntimeConfig::default();
+        let timeouts = StdRwLock::new(GatewayHttpTimeouts {
+            connect: Duration::from_secs(1),
+            write: Duration::from_secs(1),
+            read: Duration::from_secs(60),
+            event_post: Duration::from_secs(60),
+        });
+        let forward = post_json_retry_until_expired(
+            &event,
+            "client-a",
+            &metrics,
+            &critical_failure_handler,
+            &telemetry_pending,
+            &spool,
+            &runtime_config,
+            &timeouts,
+        );
+        tokio::pin!(forward);
+        sleep(Duration::from_millis(50)).await;
+        spool.request_shutdown();
+
+        let outcome = time::timeout(Duration::from_secs(1), forward)
+            .await
+            .unwrap();
+        assert_eq!(outcome, GatewayForwardOutcome::DeferredForShutdown);
     }
 
     #[tokio::test]
@@ -2291,6 +2384,8 @@ mod tests {
         let job_id = uuid::Uuid::new_v4();
         let ingest = GatewayCommandOutputIngest {
             gateway_id: "gateway-a".to_string(),
+            gateway_session_id: uuid::Uuid::new_v4(),
+            process_incarnation_id: uuid::Uuid::new_v4(),
             client_id: "client-a".to_string(),
             job_id,
             payload_hash: "payload-a".to_string(),

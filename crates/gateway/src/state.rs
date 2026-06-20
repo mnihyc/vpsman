@@ -7,7 +7,7 @@ use std::{
     time::Instant,
 };
 
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
 use vpsman_common::{
     CommandOutput, GatewayCommandCancelResult, GatewayCommandDispatchResult, JobAck, JobCancelAck,
     JobCancelRequest, JobRequest, PrivilegeAssertionReplayCache,
@@ -64,12 +64,12 @@ pub(crate) struct GatewaySession {
     pub(crate) session_id: uuid::Uuid,
     pub(crate) process_incarnation_id: uuid::Uuid,
     pub(crate) sender: mpsc::Sender<GatewaySessionMessage>,
+    pub(crate) close_tx: watch::Sender<Option<String>>,
 }
 
 pub(crate) enum GatewaySessionMessage {
     Command(GatewayCommand),
     Cancel(GatewayCancelCommand),
-    Disconnect(String),
 }
 
 pub(crate) struct GatewayCommand {

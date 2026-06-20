@@ -8,7 +8,8 @@ use tracing::debug;
 use uuid::Uuid;
 use vpsman_common::{
     AgentHello, AgentMetrics, AgentUpdateHeartbeat, GatewayAgentHelloIngest,
-    GatewayTelemetryIngest, JobCommand, RuntimeTunnelAdapterHealthStat, RuntimeTunnelStat,
+    GatewaySessionLifecycleIngest, GatewayTelemetryIngest, JobCommand,
+    RuntimeTunnelAdapterHealthStat, RuntimeTunnelStat,
 };
 use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_COMPLETED, TARGET_STATUS_FAILED};
 
@@ -378,9 +379,10 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn upsert_agent_hello(&self, event: &GatewayAgentHelloIngest) -> Result<()> {
+    pub(crate) async fn upsert_agent_hello(&self, event: &GatewayAgentHelloIngest) -> Result<bool> {
         let update_heartbeat = event.hello.update_heartbeat.clone();
         let mut accepted_hello = true;
+        let session_event = agent_hello_session_event(event);
         match self {
             Self::Memory(memory) => {
                 if !memory
@@ -406,6 +408,19 @@ impl Repository {
                         &memory.agents,
                         &event.hello,
                         event.remote_ip.as_deref(),
+                    )
+                    .await;
+                    crate::repository_gateway_sessions::expire_memory_active_other_sessions(
+                        memory,
+                        &event.hello.client_id,
+                        event.gateway_session_id,
+                    )
+                    .await;
+                    crate::repository_gateway_sessions::upsert_memory_gateway_session(
+                        memory,
+                        &session_event,
+                        "active",
+                        None,
                     )
                     .await;
                     if let Some((prior_status, prior_build, stale_reason)) = prior {
@@ -602,6 +617,47 @@ impl Repository {
                         .await?;
                     }
                 }
+                if accepted_hello {
+                    sqlx::query(
+                        r#"
+                        UPDATE gateway_sessions
+                        SET
+                            status = 'expired',
+                            last_seen_at = now(),
+                            ended_at = COALESCE(ended_at, now()),
+                            end_reason = COALESCE(end_reason, 'replaced_by_new_session')
+                        WHERE client_id = $1
+                          AND id <> $2
+                          AND status = 'active'
+                        "#,
+                    )
+                    .bind(&event.hello.client_id)
+                    .bind(event.gateway_session_id)
+                    .execute(&mut *tx)
+                    .await?;
+                    sqlx::query(
+                        r#"
+                        INSERT INTO gateway_sessions (
+                            id, gateway_id, client_id, noise_public_key_hex, status
+                        )
+                        VALUES ($1, $2, $3, $4, 'active')
+                        ON CONFLICT (id) DO UPDATE SET
+                            gateway_id = EXCLUDED.gateway_id,
+                            client_id = EXCLUDED.client_id,
+                            noise_public_key_hex = EXCLUDED.noise_public_key_hex,
+                            status = 'active',
+                            last_seen_at = now(),
+                            ended_at = NULL,
+                            end_reason = NULL
+                        "#,
+                    )
+                    .bind(event.gateway_session_id)
+                    .bind(&event.gateway_id)
+                    .bind(&event.hello.client_id)
+                    .bind(&event.noise_public_key_hex)
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 if accepted_hello && clears_stale {
                     record_client_status_transition_in_tx(
                         &mut tx,
@@ -650,7 +706,7 @@ impl Repository {
                     .await?;
             }
         }
-        Ok(())
+        Ok(accepted_hello)
     }
 
     pub(crate) async fn record_telemetry(&self, event: &GatewayTelemetryIngest) -> Result<()> {
@@ -1445,6 +1501,17 @@ fn telemetry_tunnel_view(
         auto_ospf_recommended_cost: tunnel.auto_ospf_recommended_cost.map(i32::from),
         auto_ospf_updated_unix: tunnel.auto_ospf_updated_unix.map(u64_to_i64),
     })
+}
+
+fn agent_hello_session_event(event: &GatewayAgentHelloIngest) -> GatewaySessionLifecycleIngest {
+    GatewaySessionLifecycleIngest {
+        gateway_id: event.gateway_id.clone(),
+        client_id: event.hello.client_id.clone(),
+        session_id: event.gateway_session_id,
+        noise_public_key_hex: event.noise_public_key_hex.clone(),
+        remote_ip: event.remote_ip.clone(),
+        reason: None,
+    }
 }
 
 fn adapter_health_view(

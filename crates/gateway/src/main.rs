@@ -15,7 +15,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{mpsc, OwnedSemaphorePermit, Semaphore},
+    sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore},
     time,
 };
 use tracing::{debug, info, warn};
@@ -544,14 +544,27 @@ async fn handle_agent(
     let remote_ip = peer.ip().to_string();
     let session_id = uuid::Uuid::new_v4();
     let mut client_id = None::<String>;
+    let mut process_incarnation_id = None::<uuid::Uuid>;
     let (command_tx, mut command_rx) =
         mpsc::channel::<GatewaySessionMessage>(SESSION_COMMAND_QUEUE_CAPACITY);
+    let (close_tx, mut close_rx) = watch::channel(None::<String>);
     let mut outbound_seq = 2_u64;
     let mut pending_commands = HashMap::<uuid::Uuid, PendingCommand>::new();
     let mut pending_cancels = HashMap::new();
 
     let result: Result<()> = loop {
         tokio::select! {
+            biased;
+            changed = close_rx.changed(), if client_id.is_some() => {
+                if changed.is_err() {
+                    break Err(anyhow!("agent_session_close_channel_dropped"));
+                }
+                let reason = close_rx
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| "gateway_requested_disconnect".to_string());
+                break Err(anyhow!("agent_session_closed_by_gateway:{reason}"));
+            }
             frame = stream.read_frame() => {
                 let frame = match frame {
                     Ok(frame) => frame,
@@ -565,12 +578,14 @@ async fn handle_agent(
                     remote_ip: &remote_ip,
                     session_id,
                     command_tx: &command_tx,
+                    close_tx: &close_tx,
                 };
                 if let Err(error) =
                     handle_agent_frame(
                         &mut stream,
                         context,
                         &mut client_id,
+                        &mut process_incarnation_id,
                         &mut pending_commands,
                         &mut pending_cancels,
                         frame,
@@ -626,9 +641,6 @@ async fn handle_agent(
                         outbound_seq += 1;
                         pending_cancels.insert(job_id, cancel.response);
                     }
-                    GatewaySessionMessage::Disconnect(reason) => {
-                        break Err(anyhow!("agent_session_closed_by_gateway:{reason}"));
-                    }
                 }
             }
         }
@@ -669,26 +681,10 @@ async fn handle_agent(
 }
 
 async fn request_agent_disconnect(state: &GatewayState, client_id: &str, reason: &str) {
-    let sender = state
-        .sessions
-        .read()
-        .await
-        .get(client_id)
-        .map(|session| session.sender.clone());
-    let Some(sender) = sender else {
+    if !close_agent_session_now(state, client_id, reason).await {
         warn!(
             client_id,
             reason, "critical gateway forwarding failure had no active agent session to close"
-        );
-        return;
-    };
-    if sender
-        .try_send(GatewaySessionMessage::Disconnect(reason.to_string()))
-        .is_err()
-    {
-        warn!(
-            client_id,
-            reason, "critical gateway forwarding failure could not signal agent session close"
         );
     }
 }
@@ -704,6 +700,28 @@ async fn request_all_agent_disconnects(state: &GatewayState, reason: &str) {
     for client_id in client_ids {
         request_agent_disconnect(state, &client_id, reason).await;
     }
+}
+
+async fn register_session(state: &GatewayState, client_id: &str, session: GatewaySession) {
+    let previous = state
+        .sessions
+        .write()
+        .await
+        .insert(client_id.to_string(), session);
+    if let Some(previous) = previous {
+        let _ = previous
+            .close_tx
+            .send(Some("replaced_by_new_session".to_string()));
+    }
+}
+
+async fn close_agent_session_now(state: &GatewayState, client_id: &str, reason: &str) -> bool {
+    let previous = state.sessions.write().await.remove(client_id);
+    let Some(session) = previous else {
+        return false;
+    };
+    let _ = session.close_tx.send(Some(reason.to_string()));
+    true
 }
 
 async fn unregister_session_if_current(
@@ -750,12 +768,14 @@ struct AgentFrameContext<'a> {
     remote_ip: &'a str,
     session_id: uuid::Uuid,
     command_tx: &'a mpsc::Sender<GatewaySessionMessage>,
+    close_tx: &'a watch::Sender<Option<String>>,
 }
 
 async fn handle_agent_frame(
     stream: &mut NoiseFrameStream<TcpStream>,
     context: AgentFrameContext<'_>,
     client_id: &mut Option<String>,
+    process_incarnation_id: &mut Option<uuid::Uuid>,
     pending_commands: &mut HashMap<uuid::Uuid, PendingCommand>,
     pending_cancels: &mut HashMap<
         uuid::Uuid,
@@ -774,49 +794,38 @@ async fn handle_agent_frame(
             );
             let ingest = GatewayAgentHelloIngest {
                 gateway_id: context.args.gateway_id.clone(),
+                gateway_session_id: context.session_id,
                 noise_public_key_hex: context.noise_public_key_hex.clone(),
                 remote_ip: Some(context.remote_ip.to_string()),
                 hello: hello.clone(),
             };
-            context
-                .control
-                .post(
-                    &hello.client_id,
-                    "/internal/v1/gateway/agent-hello",
-                    &ingest,
-                )
-                .await?;
+            let acceptance = context.control.accept_agent_session(&ingest).await?;
+            if !acceptance.accepted {
+                anyhow::bail!(
+                    "agent session rejected for {}: {}",
+                    hello.client_id,
+                    acceptance.message
+                );
+            }
             *client_id = Some(hello.client_id.clone());
-            context.state.sessions.write().await.insert(
-                hello.client_id.clone(),
+            *process_incarnation_id = Some(hello.process_incarnation_id);
+            register_session(
+                context.state,
+                &hello.client_id,
                 GatewaySession {
                     session_id: context.session_id,
                     process_incarnation_id: hello.process_incarnation_id,
                     sender: context.command_tx.clone(),
+                    close_tx: context.close_tx.clone(),
                 },
-            );
+            )
+            .await;
             context
                 .state
                 .disconnected_at
                 .write()
                 .await
                 .remove(&hello.client_id);
-            let session_event = GatewaySessionLifecycleIngest {
-                gateway_id: context.args.gateway_id.clone(),
-                client_id: hello.client_id.clone(),
-                session_id: context.session_id,
-                noise_public_key_hex: context.noise_public_key_hex.clone(),
-                remote_ip: Some(context.remote_ip.to_string()),
-                reason: None,
-            };
-            context
-                .control
-                .post(
-                    &hello.client_id,
-                    "/internal/v1/gateway/session-started",
-                    &session_event,
-                )
-                .await?;
             let reply = ServerHello {
                 server_id: context.args.gateway_id.clone(),
                 server_version: crate::build_info::release_version().to_string(),
@@ -831,6 +840,10 @@ async fn handle_agent_frame(
         MessageKind::Telemetry => {
             let telemetry: TelemetryEnvelope = decode_json(&frame.decoded_payload()?)?;
             validate_telemetry_session_client_id(client_id.as_deref(), &telemetry.client_id)?;
+            let active_process_incarnation_id = process_incarnation_id
+                .as_ref()
+                .copied()
+                .context("telemetry_before_hello")?;
             info!(
                 client_id = %telemetry.client_id,
                 hostname = %telemetry.metrics.hostname,
@@ -839,6 +852,8 @@ async fn handle_agent_frame(
             );
             let ingest = GatewayTelemetryIngest {
                 gateway_id: context.args.gateway_id.clone(),
+                gateway_session_id: context.session_id,
+                process_incarnation_id: active_process_incarnation_id,
                 remote_ip: Some(context.remote_ip.to_string()),
                 telemetry,
             };
@@ -909,8 +924,14 @@ async fn handle_agent_frame(
             let mut remove_job_id = None;
             if let Some(pending) = pending_commands.get_mut(&output.job_id) {
                 let done = output.done;
+                let active_process_incarnation_id = process_incarnation_id
+                    .as_ref()
+                    .copied()
+                    .context("command_output_before_hello")?;
                 let ingest = GatewayCommandOutputIngest {
                     gateway_id: context.args.gateway_id.clone(),
+                    gateway_session_id: context.session_id,
+                    process_incarnation_id: active_process_incarnation_id,
                     client_id: pending.client_id.clone(),
                     job_id: output.job_id,
                     payload_hash: pending.payload_hash.clone(),
@@ -943,9 +964,15 @@ async fn handle_agent_frame(
             let Some(client_id) = client_id.clone() else {
                 return Ok(());
             };
+            let active_process_incarnation_id = process_incarnation_id
+                .as_ref()
+                .copied()
+                .context("terminal_output_before_hello")?;
             let target_key = client_id.clone();
             let ingest = GatewayTerminalOutputIngest {
                 gateway_id: context.args.gateway_id.clone(),
+                gateway_session_id: context.session_id,
+                process_incarnation_id: active_process_incarnation_id,
                 client_id,
                 output,
             };
@@ -1055,12 +1082,15 @@ mod tests {
         let newer_session_id = uuid::Uuid::new_v4();
         let (older_tx, _older_rx) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
         let (newer_tx, _newer_rx) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+        let (older_close_tx, _older_close_rx) = watch::channel(None::<String>);
+        let (newer_close_tx, _newer_close_rx) = watch::channel(None::<String>);
         state.sessions.write().await.insert(
             "client-a".to_string(),
             GatewaySession {
                 session_id: older_session_id,
                 process_incarnation_id: uuid::Uuid::new_v4(),
                 sender: older_tx,
+                close_tx: older_close_tx,
             },
         );
         let newer_process_incarnation_id = uuid::Uuid::new_v4();
@@ -1070,6 +1100,7 @@ mod tests {
                 session_id: newer_session_id,
                 process_incarnation_id: newer_process_incarnation_id,
                 sender: newer_tx,
+                close_tx: newer_close_tx,
             },
         );
 
@@ -1086,6 +1117,54 @@ mod tests {
 
         unregister_session_if_current(&state, "client-a", newer_session_id).await;
         assert!(!state.sessions.read().await.contains_key("client-a"));
+    }
+
+    #[tokio::test]
+    async fn registering_replacement_session_closes_displaced_session() {
+        let state = GatewayState::default();
+        let (older_tx, _older_rx) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+        let (newer_tx, _newer_rx) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+        let (older_close_tx, mut older_close_rx) = watch::channel(None::<String>);
+        let (newer_close_tx, _newer_close_rx) = watch::channel(None::<String>);
+        let newer_session_id = uuid::Uuid::new_v4();
+
+        register_session(
+            &state,
+            "client-a",
+            GatewaySession {
+                session_id: uuid::Uuid::new_v4(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                sender: older_tx,
+                close_tx: older_close_tx,
+            },
+        )
+        .await;
+        register_session(
+            &state,
+            "client-a",
+            GatewaySession {
+                session_id: newer_session_id,
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                sender: newer_tx,
+                close_tx: newer_close_tx,
+            },
+        )
+        .await;
+
+        older_close_rx.changed().await.unwrap();
+        assert_eq!(
+            older_close_rx.borrow().as_deref(),
+            Some("replaced_by_new_session")
+        );
+        assert_eq!(
+            state
+                .sessions
+                .read()
+                .await
+                .get("client-a")
+                .map(|session| session.session_id),
+            Some(newer_session_id)
+        );
     }
 
     #[test]

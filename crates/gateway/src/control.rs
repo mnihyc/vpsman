@@ -361,13 +361,8 @@ async fn disconnect_gateway_session(
     state: &GatewayState,
     disconnect: GatewaySessionDisconnect,
 ) -> Result<GatewaySessionDisconnectResult> {
-    let sender = state
-        .sessions
-        .read()
-        .await
-        .get(&disconnect.client_id)
-        .map(|session| session.sender.clone());
-    let Some(sender) = sender else {
+    let session = state.sessions.write().await.remove(&disconnect.client_id);
+    let Some(session) = session else {
         return Ok(GatewaySessionDisconnectResult {
             client_id: disconnect.client_id,
             accepted: true,
@@ -375,19 +370,7 @@ async fn disconnect_gateway_session(
             message: "agent_not_online".to_string(),
         });
     };
-    sender
-        .try_send(GatewaySessionMessage::Disconnect(disconnect.reason))
-        .map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => {
-                anyhow!(
-                    "agent_session_disconnect_queue_full:{}",
-                    disconnect.client_id
-                )
-            }
-            mpsc::error::TrySendError::Closed(_) => {
-                anyhow!("agent_session_closed:{}", disconnect.client_id)
-            }
-        })?;
+    let _ = session.close_tx.send(Some(disconnect.reason));
     Ok(GatewaySessionDisconnectResult {
         client_id: disconnect.client_id,
         accepted: true,
@@ -403,9 +386,7 @@ where
     let message = error.to_string();
     let status = if message.contains("agent_not_online") {
         "404 Not Found"
-    } else if message.contains("agent_session_command_queue_full")
-        || message.contains("agent_session_disconnect_queue_full")
-    {
+    } else if message.contains("agent_session_command_queue_full") {
         "503 Service Unavailable"
     } else if message.contains("timed out") {
         "504 Gateway Timeout"
@@ -584,12 +565,14 @@ mod tests {
                 }))
                 .unwrap();
         }
+        let (close_tx, _close_rx) = tokio::sync::watch::channel(None::<String>);
         state.sessions.write().await.insert(
             "client-a".to_string(),
             GatewaySession {
                 session_id: uuid::Uuid::new_v4(),
                 process_incarnation_id: uuid::Uuid::new_v4(),
                 sender,
+                close_tx,
             },
         );
 
@@ -613,6 +596,48 @@ mod tests {
         .to_string();
 
         assert!(error.contains("agent_session_command_queue_full:client-a"));
+    }
+
+    #[tokio::test]
+    async fn disconnect_bypasses_full_session_command_queue() {
+        let state = GatewayState::default();
+        let (sender, _receiver) = tokio::sync::mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+        for _ in 0..SESSION_COMMAND_QUEUE_CAPACITY {
+            let (response, _response_rx) = tokio::sync::oneshot::channel();
+            sender
+                .try_send(GatewaySessionMessage::Command(GatewayCommand {
+                    request: test_job_request(),
+                    payload_hash: "test-payload-hash".to_string(),
+                    response,
+                }))
+                .unwrap();
+        }
+        let (close_tx, mut close_rx) = tokio::sync::watch::channel(None::<String>);
+        state.sessions.write().await.insert(
+            "client-a".to_string(),
+            GatewaySession {
+                session_id: uuid::Uuid::new_v4(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                sender,
+                close_tx,
+            },
+        );
+
+        let result = disconnect_gateway_session(
+            &state,
+            GatewaySessionDisconnect {
+                client_id: "client-a".to_string(),
+                reason: "client_key_revoked".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(result.accepted);
+        assert!(result.disconnected);
+        assert!(!state.sessions.read().await.contains_key("client-a"));
+        close_rx.changed().await.unwrap();
+        assert_eq!(close_rx.borrow().as_deref(), Some("client_key_revoked"));
     }
 
     fn test_job_request() -> JobRequest {

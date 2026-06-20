@@ -14,6 +14,7 @@ use crate::{
     state::AppState,
     util::limit_or_default,
 };
+use tracing::warn;
 
 pub(crate) async fn upsert_agent_identity(
     State(state): State<AppState>,
@@ -39,15 +40,21 @@ pub(crate) async fn upsert_agent_identity(
     let intent = DbPrivilegeIntent::new(action, client_id, None, &targets, true, None);
     verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     state.repo.preflight_agent_identity_upsert(&request).await?;
-    if request.replace_existing_key {
-        state
-            .disconnect_gateway_session_for_lifecycle(client_id, "client_key_replaced")
-            .await?;
-    }
     let view = state
         .repo
         .upsert_agent_identity(&request, &operator)
         .await?;
+    if request.replace_existing_key {
+        if let Err(error) = state
+            .disconnect_gateway_session_for_lifecycle(client_id, "client_key_replaced")
+            .await
+        {
+            warn!(
+                ?error,
+                client_id, "post-commit gateway disconnect failed after client key replacement"
+            );
+        }
+    }
     state.publish(WsEvent::AgentUpdated {
         client_id: view.client_id.clone(),
         gateway_id: "identity".to_string(),
@@ -92,13 +99,19 @@ pub(crate) async fn revoke_current_client_key(
     let intent =
         DbPrivilegeIntent::new("client_key.revoke", &client_id, None, &targets, true, None);
     verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
-    state
-        .disconnect_gateway_session_for_lifecycle(&client_id, "client_key_revoked")
-        .await?;
     let record = state
         .repo
         .revoke_current_client_key(&client_id, &request, &operator)
         .await?;
+    if let Err(error) = state
+        .disconnect_gateway_session_for_lifecycle(&client_id, "client_key_revoked")
+        .await
+    {
+        warn!(
+            ?error,
+            client_id, "post-commit gateway disconnect failed after client key revocation"
+        );
+    }
     state.publish(WsEvent::AgentUpdated {
         client_id,
         gateway_id: "key_lifecycle".to_string(),

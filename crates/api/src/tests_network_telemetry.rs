@@ -429,6 +429,8 @@ fn runtime_observed_tunnel(
 async fn seed_tunnel_telemetry(repo: &Repository, client_id: &str, tunnel: RuntimeTunnelStat) {
     repo.record_telemetry(&GatewayTelemetryIngest {
         gateway_id: "gateway-a".to_string(),
+        gateway_session_id: uuid::Uuid::new_v4(),
+        process_incarnation_id: uuid::Uuid::new_v4(),
         remote_ip: None,
         telemetry: TelemetryEnvelope {
             client_id: client_id.to_string(),
@@ -447,6 +449,8 @@ async fn seed_tunnel_telemetry(repo: &Repository, client_id: &str, tunnel: Runti
 async fn seed_resource_telemetry(repo: &Repository, client_id: &str, metrics: AgentMetrics) {
     repo.record_telemetry(&GatewayTelemetryIngest {
         gateway_id: "gateway-a".to_string(),
+        gateway_session_id: uuid::Uuid::new_v4(),
+        process_incarnation_id: uuid::Uuid::new_v4(),
         remote_ip: None,
         telemetry: TelemetryEnvelope {
             client_id: client_id.to_string(),

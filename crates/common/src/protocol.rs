@@ -940,6 +940,7 @@ pub struct TelemetryEnvelope {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayAgentHelloIngest {
     pub gateway_id: String,
+    pub gateway_session_id: Uuid,
     pub noise_public_key_hex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_ip: Option<String>,
@@ -949,6 +950,8 @@ pub struct GatewayAgentHelloIngest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayTelemetryIngest {
     pub gateway_id: String,
+    pub gateway_session_id: Uuid,
+    pub process_incarnation_id: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_ip: Option<String>,
     pub telemetry: TelemetryEnvelope,
@@ -957,6 +960,8 @@ pub struct GatewayTelemetryIngest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayCommandOutputIngest {
     pub gateway_id: String,
+    pub gateway_session_id: Uuid,
+    pub process_incarnation_id: Uuid,
     pub client_id: String,
     pub job_id: Uuid,
     pub payload_hash: String,
@@ -969,6 +974,8 @@ pub struct GatewayCommandOutputIngest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayTerminalOutputIngest {
     pub gateway_id: String,
+    pub gateway_session_id: Uuid,
+    pub process_incarnation_id: Uuid,
     pub client_id: String,
     pub output: TerminalStreamOutput,
 }

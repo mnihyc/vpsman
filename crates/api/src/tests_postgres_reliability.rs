@@ -278,6 +278,7 @@ fn hello_event(
 ) -> GatewayAgentHelloIngest {
     GatewayAgentHelloIngest {
         gateway_id: "pg-test-gateway".to_string(),
+        gateway_session_id: Uuid::new_v4(),
         remote_ip: None,
         noise_public_key_hex: None,
         hello: AgentHello {
@@ -893,7 +894,19 @@ async fn postgres_command_output_ingest_rejects_late_new_output_after_terminal_t
     let job_id = Uuid::new_v4();
     let client_id = "pg-client-late-output";
     let incarnation = Uuid::new_v4();
+    let gateway_session_id = Uuid::new_v4();
     insert_client(&db.pool, client_id, Some(incarnation)).await;
+    sqlx::query(
+        r#"
+        INSERT INTO gateway_sessions (id, gateway_id, client_id, status)
+        VALUES ($1, 'gateway-a', $2, 'active')
+        "#,
+    )
+    .bind(gateway_session_id)
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
     insert_job_target(
         &db.pool,
         job_id,
@@ -914,6 +927,8 @@ async fn postgres_command_output_ingest_rejects_late_new_output_after_terminal_t
     };
     let final_event = vpsman_common::GatewayCommandOutputIngest {
         gateway_id: "gateway-a".to_string(),
+        gateway_session_id,
+        process_incarnation_id: incarnation,
         client_id: client_id.to_string(),
         job_id,
         payload_hash: payload_hash.clone(),
@@ -951,6 +966,8 @@ async fn postgres_command_output_ingest_rejects_late_new_output_after_terminal_t
     };
     let late_event = vpsman_common::GatewayCommandOutputIngest {
         gateway_id: "gateway-a".to_string(),
+        gateway_session_id,
+        process_incarnation_id: incarnation,
         client_id: client_id.to_string(),
         job_id,
         payload_hash,

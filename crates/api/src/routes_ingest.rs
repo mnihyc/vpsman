@@ -48,8 +48,14 @@ pub(crate) async fn ingest_agent_hello(
     Json(event): Json<GatewayAgentHelloIngest>,
 ) -> Result<Json<IngestResponse>, ApiError> {
     state.require_internal_gateway(&headers)?;
-    validate_gateway_remote_ip(event.remote_ip.as_deref())?;
-    state.repo.upsert_agent_hello(&event).await?;
+    validate_gateway_agent_hello(&event)?;
+    let accepted = state.repo.upsert_agent_hello(&event).await?;
+    if !accepted {
+        return Ok(Json(IngestResponse {
+            accepted: false,
+            message: "agent hello ignored".to_string(),
+        }));
+    }
     state.publish(WsEvent::AgentUpdated {
         client_id: event.hello.client_id,
         gateway_id: event.gateway_id,
@@ -102,10 +108,25 @@ pub(crate) async fn ingest_telemetry(
     Json(event): Json<GatewayTelemetryIngest>,
 ) -> Result<Json<IngestResponse>, ApiError> {
     state.require_internal_gateway(&headers)?;
-    validate_gateway_remote_ip(event.remote_ip.as_deref())?;
+    validate_gateway_telemetry_event(&event)?;
     let client_id = event.telemetry.client_id.clone();
     let observed_unix = event.telemetry.metrics.observed_unix;
     let gateway_id = event.gateway_id.clone();
+    if !state
+        .repo
+        .active_gateway_session_matches(
+            &event.gateway_id,
+            &event.telemetry.client_id,
+            event.gateway_session_id,
+            event.process_incarnation_id,
+        )
+        .await?
+    {
+        return Ok(Json(IngestResponse {
+            accepted: false,
+            message: "gateway session not active".to_string(),
+        }));
+    }
     state.repo.record_telemetry(&event).await?;
     state.publish(WsEvent::TelemetryUpdated {
         client_id,
@@ -125,6 +146,14 @@ pub(crate) async fn ingest_command_output(
 ) -> Result<Json<IngestResponse>, ApiError> {
     state.require_internal_gateway(&headers)?;
     validate_command_output_event(&event)?;
+    ensure_active_gateway_session(
+        &state,
+        &event.gateway_id,
+        &event.client_id,
+        event.gateway_session_id,
+        event.process_incarnation_id,
+    )
+    .await?;
     let Some(job) = state.repo.get_job(event.job_id).await? else {
         return Err(ApiError::not_found("job_not_found"));
     };
@@ -397,6 +426,14 @@ pub(crate) async fn ingest_terminal_output(
 ) -> Result<Json<IngestResponse>, ApiError> {
     state.require_internal_gateway(&headers)?;
     validate_terminal_output_event(&event)?;
+    ensure_active_gateway_session(
+        &state,
+        &event.gateway_id,
+        &event.client_id,
+        event.gateway_session_id,
+        event.process_incarnation_id,
+    )
+    .await?;
     let targets = state.repo.list_job_targets(event.output.job_id).await?;
     if !targets
         .iter()
@@ -443,6 +480,7 @@ fn validate_gateway_session_event(event: &GatewaySessionLifecycleIngest) -> Resu
         || event.gateway_id.len() > 128
         || event.client_id.is_empty()
         || event.client_id.len() > 128
+        || event.session_id == uuid::Uuid::nil()
         || event
             .reason
             .as_ref()
@@ -463,6 +501,37 @@ fn validate_gateway_session_event(event: &GatewaySessionLifecycleIngest) -> Resu
     Ok(())
 }
 
+fn validate_gateway_agent_hello(event: &GatewayAgentHelloIngest) -> Result<(), ApiError> {
+    if event.gateway_id.is_empty()
+        || event.gateway_id.len() > 128
+        || event.gateway_session_id == uuid::Uuid::nil()
+        || event.hello.client_id.is_empty()
+        || event.hello.client_id.len() > 128
+        || event.hello.process_incarnation_id == uuid::Uuid::nil()
+    {
+        return Err(ApiError::bad_request("invalid_gateway_agent_hello"));
+    }
+    validate_gateway_remote_ip(event.remote_ip.as_deref())?;
+    if let Some(key) = event.noise_public_key_hex.as_deref() {
+        validate_noise_public_key(key)?;
+    }
+    Ok(())
+}
+
+fn validate_gateway_telemetry_event(event: &GatewayTelemetryIngest) -> Result<(), ApiError> {
+    if event.gateway_id.is_empty()
+        || event.gateway_id.len() > 128
+        || event.gateway_session_id == uuid::Uuid::nil()
+        || event.process_incarnation_id == uuid::Uuid::nil()
+        || event.telemetry.client_id.is_empty()
+        || event.telemetry.client_id.len() > 128
+    {
+        return Err(ApiError::bad_request("invalid_gateway_telemetry_event"));
+    }
+    validate_gateway_remote_ip(event.remote_ip.as_deref())?;
+    Ok(())
+}
+
 fn validate_gateway_remote_ip(remote_ip: Option<&str>) -> Result<(), ApiError> {
     let Some(remote_ip) = remote_ip else {
         return Ok(());
@@ -476,6 +545,8 @@ fn validate_gateway_remote_ip(remote_ip: Option<&str>) -> Result<(), ApiError> {
 fn validate_command_output_event(event: &GatewayCommandOutputIngest) -> Result<(), ApiError> {
     if event.gateway_id.is_empty()
         || event.gateway_id.len() > 128
+        || event.gateway_session_id == uuid::Uuid::nil()
+        || event.process_incarnation_id == uuid::Uuid::nil()
         || event.client_id.is_empty()
         || event.client_id.len() > 128
         || event.payload_hash.len() != 64
@@ -494,6 +565,8 @@ fn validate_command_output_event(event: &GatewayCommandOutputIngest) -> Result<(
 fn validate_terminal_output_event(event: &GatewayTerminalOutputIngest) -> Result<(), ApiError> {
     if event.gateway_id.is_empty()
         || event.gateway_id.len() > 128
+        || event.gateway_session_id == uuid::Uuid::nil()
+        || event.process_incarnation_id == uuid::Uuid::nil()
         || event.client_id.is_empty()
         || event.client_id.len() > 128
         || event.output.output.job_id != event.output.job_id
@@ -516,6 +589,36 @@ fn validate_terminal_output_event(event: &GatewayTerminalOutputIngest) -> Result
         }
     }
     Ok(())
+}
+
+async fn ensure_active_gateway_session(
+    state: &AppState,
+    gateway_id: &str,
+    client_id: &str,
+    session_id: uuid::Uuid,
+    process_incarnation_id: uuid::Uuid,
+) -> Result<(), ApiError> {
+    if state
+        .repo
+        .active_gateway_session_matches(gateway_id, client_id, session_id, process_incarnation_id)
+        .await?
+    {
+        Ok(())
+    } else {
+        Err(ApiError::conflict("gateway_session_not_active"))
+    }
+}
+
+fn validate_noise_public_key(key: &str) -> Result<(), ApiError> {
+    if key.len() == 64
+        && hex::decode(key)
+            .map(|bytes| bytes.len() == 32)
+            .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request("invalid_gateway_session_key"))
+    }
 }
 
 #[derive(Debug, Serialize)]

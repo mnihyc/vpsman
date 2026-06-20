@@ -33,6 +33,7 @@ use crate::{
     state::AppState,
     util::limit_or_default,
 };
+use tracing::warn;
 
 const MAX_PRESET_NAME_BYTES: usize = 128;
 const MAX_PRESET_DESCRIPTION_BYTES: usize = 1024;
@@ -97,14 +98,20 @@ pub(crate) async fn delete_agent(
     let targets = vec![client_id.clone()];
     let intent = DbPrivilegeIntent::new("agent.delete", &client_id, None, &targets, true, None);
     verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
-    state
-        .disconnect_gateway_session_for_lifecycle(&client_id, "vps_deleted")
-        .await?;
     let response = state
         .repo
         .delete_agent(&client_id, &request, &operator)
         .await
         .map_err(agent_mutation_error)?;
+    if let Err(error) = state
+        .disconnect_gateway_session_for_lifecycle(&client_id, "vps_deleted")
+        .await
+    {
+        warn!(
+            ?error,
+            client_id, "post-commit gateway disconnect failed after agent delete"
+        );
+    }
     state.publish(WsEvent::AgentUpdated {
         client_id,
         gateway_id: "inventory_delete".to_string(),

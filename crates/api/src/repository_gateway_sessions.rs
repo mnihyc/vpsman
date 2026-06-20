@@ -10,6 +10,59 @@ use crate::{
 };
 
 impl Repository {
+    pub(crate) async fn active_gateway_session_matches(
+        &self,
+        gateway_id: &str,
+        client_id: &str,
+        session_id: uuid::Uuid,
+        process_incarnation_id: uuid::Uuid,
+    ) -> Result<bool> {
+        match self {
+            Self::Memory(memory) => {
+                if memory.hidden_clients.read().await.contains(client_id) {
+                    return Ok(false);
+                }
+                let session_matches = memory.gateway_sessions.read().await.iter().any(|session| {
+                    session.gateway_id == gateway_id
+                        && session.client_id == client_id
+                        && session.id == session_id
+                        && session.status == "active"
+                });
+                if !session_matches {
+                    return Ok(false);
+                }
+                Ok(memory.agents.read().await.iter().any(|agent| {
+                    agent.id == client_id
+                        && agent.process_incarnation_id == Some(process_incarnation_id)
+                }))
+            }
+            Self::Postgres(pool) => {
+                let matches: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM gateway_sessions session
+                        JOIN clients client ON client.id = session.client_id
+                        WHERE session.gateway_id = $1
+                          AND session.client_id = $2
+                          AND session.id = $3
+                          AND session.status = 'active'
+                          AND client.hidden_at IS NULL
+                          AND client.process_incarnation_id = $4
+                    )
+                    "#,
+                )
+                .bind(gateway_id)
+                .bind(client_id)
+                .bind(session_id)
+                .bind(process_incarnation_id)
+                .fetch_one(pool)
+                .await?;
+                Ok(matches)
+            }
+        }
+    }
+
     pub(crate) async fn record_gateway_session_started(
         &self,
         event: &GatewaySessionLifecycleIngest,
@@ -311,7 +364,7 @@ impl Repository {
     }
 }
 
-async fn upsert_memory_gateway_session(
+pub(crate) async fn upsert_memory_gateway_session(
     memory: &MemoryState,
     event: &GatewaySessionLifecycleIngest,
     status: &str,
@@ -350,7 +403,7 @@ async fn upsert_memory_gateway_session(
     });
 }
 
-async fn expire_memory_active_other_sessions(
+pub(crate) async fn expire_memory_active_other_sessions(
     memory: &MemoryState,
     client_id: &str,
     session_id: uuid::Uuid,
@@ -507,5 +560,49 @@ mod tests {
             memory.agents.read().await[0].status.as_str(),
             "disconnected"
         );
+    }
+
+    #[tokio::test]
+    async fn active_gateway_session_match_requires_current_session_and_incarnation() {
+        let repo = Repository::Memory(MemoryState::default());
+        let Repository::Memory(memory) = &repo else {
+            unreachable!();
+        };
+        let process_incarnation_id = uuid::Uuid::new_v4();
+        memory.agents.write().await.push(AgentView {
+            id: "client-a".to_string(),
+            display_name: "client-a".to_string(),
+            status: "online".to_string(),
+            tags: Vec::new(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            internal_build_number: 1,
+            process_incarnation_id: Some(process_incarnation_id),
+            stale_since: None,
+            stale_reason: None,
+            capabilities: Default::default(),
+        });
+        let older = uuid::Uuid::new_v4();
+        let newer = uuid::Uuid::new_v4();
+        repo.record_gateway_session_started(&session_event("client-a", older))
+            .await
+            .unwrap();
+        repo.record_gateway_session_started(&session_event("client-a", newer))
+            .await
+            .unwrap();
+
+        assert!(repo
+            .active_gateway_session_matches("gateway-a", "client-a", newer, process_incarnation_id)
+            .await
+            .unwrap());
+        assert!(!repo
+            .active_gateway_session_matches("gateway-a", "client-a", older, process_incarnation_id,)
+            .await
+            .unwrap());
+        assert!(!repo
+            .active_gateway_session_matches("gateway-a", "client-a", newer, uuid::Uuid::new_v4(),)
+            .await
+            .unwrap());
     }
 }

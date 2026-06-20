@@ -140,7 +140,7 @@ of the same root cause.
 | AUD-124 | Medium/High | Fixed | API/Fleet Alerts/Auth | Fleet alert evidence exposes backup paths and artifact IDs with fleet-read scope |
 | AUD-125 | High | Fixed | API/Fleet Alerts/Webhooks | Fleet alert read routes can enqueue webhook integration events |
 | AUD-126 | Medium/High | Confirmed | API/Data Sources/State | Data-source read paths persist default assignments for all clients, including hidden clients |
-| AUD-127 | High | Confirmed | Gateway/Forwarder/Shutdown | Controlled gateway shutdown can lose queued RAM forwarder events |
+| AUD-127 | High | Fixed | Gateway/Forwarder/Shutdown | Controlled gateway shutdown can lose queued RAM forwarder events |
 | AUD-128 | High | Fixed | Agent/File Browser/Safety | Recursive file delete can escape through symlink-swap races |
 | AUD-129 | Medium/High | Fixed | Gateway/Terminal/Resource Bounds | Terminal output forwarding bypasses the gateway RAM spool budget |
 | AUD-130 | High | Fixed | Agent/File Browser/Safety | Copy, chmod, and chown can follow symlinks after validation races |
@@ -158,12 +158,12 @@ of the same root cause.
 | AUD-142 | High | Fixed | Agent/Process Supervisor/Security | Supervisor records and logs are written with default-readable permissions |
 | AUD-143 | Medium/High | Skipped | Docs/Deployment/API Boundary | Headless CLI tutorial presents the public panel URL as the operator API endpoint |
 | AUD-144 | High | Fixed | API/Worker/Agent Updates | Strict registered-update policy only gates direct staging jobs |
-| AUD-145 | High | Confirmed | API/Gateway/Key Lifecycle | Key rotation, revoke, and delete disconnect before DB invalidation, leaving a reconnect race |
+| AUD-145 | High | Fixed | API/Gateway/Key Lifecycle | Key rotation, revoke, and delete disconnect before DB invalidation, leaving a reconnect race |
 | AUD-146 | High | Skipped | Deploy/Nginx/API Boundary | Publishing the dashboard frontend still publishes API and WebSocket routes |
 | AUD-147 | Medium/High | Fixed | Deploy/Agent Install/Supply Chain | Custom agent binary URL installs without a required SHA-256 pin |
 | AUD-148 | High | Fixed | API/Frontend/CLI/Backups/Retention | Backup policy prune confirms scope and mode but reselects live artifacts instead of the reviewed candidate set |
 | AUD-149 | High | Fixed | Deploy/Update/Rollback | Compose update and rollback swap release directories without forcing container recreation |
-| AUD-150 | High | Confirmed | Gateway/API/Telemetry/Lifecycle | Displaced gateway sessions can keep forwarding telemetry after replacement |
+| AUD-150 | High | Fixed | Gateway/API/Telemetry/Lifecycle | Displaced gateway sessions can keep forwarding telemetry after replacement |
 | AUD-151 | High | Fixed | API/Frontend/CLI/Auth/Privilege | Operator management mutations lack request-bound privilege verification |
 | AUD-152 | High | Fixed | Frontend/Backups/Migrations | Migration restore runs can use stale hidden restore options |
 | AUD-153 | Medium/High | Confirmed | API/Telemetry/Retention | Per-interface network-rate telemetry has no retention path |
@@ -204,9 +204,9 @@ of the same root cause.
 | AUD-188 | High | Fixed | Agent/File Browser/Safety | File rename and move can follow path races outside the reviewed source or destination |
 | AUD-189 | Medium/High | Fixed | Deploy/Agent Install/Docs | Official agent install examples do not start the service they claim to start |
 | AUD-190 | Medium/High | Confirmed | Deploy/Compose/Database | Secure compose password edits leave API and worker using the wrong Postgres credentials |
-| AUD-191 | High | Confirmed | API/Gateway/Dispatch | Backup gateway endpoints cannot receive API dispatch, cancel, or lifecycle disconnect control |
+| AUD-191 | High | Skipped | API/Gateway/Dispatch | Backup gateway endpoints cannot receive API dispatch, cancel, or lifecycle disconnect control |
 | AUD-192 | Medium/High | Fixed | Gateway/Deploy/Security | Gateway agent TCP listener still defaults to all-interface binding |
-| AUD-193 | High | Confirmed | Gateway/API/Lifecycle | Gateway lifecycle events can expire before API accepts a new process incarnation |
+| AUD-193 | High | Fixed | Gateway/API/Lifecycle | Gateway lifecycle events can expire before API accepts a new process incarnation |
 | AUD-194 | High | Fixed | Release/Updates/Supply Chain | Manual release workflow can publish tag-named update assets from the wrong commit |
 | AUD-195 | Medium/High | Fixed | API/Gateway/Security/Docs | Documented dev internal token bypasses placeholder startup validation |
 | AUD-196 | Medium | Confirmed | Docs/Local Control Plane | Manual quickstart no longer starts a usable Postgres-backed API |
@@ -236,7 +236,7 @@ of the same root cause.
 | AUD-220 | High | Fixed | API/Worker/Integrations/Auth | Queued integration deliveries are not bound to the originating actor authority |
 | AUD-221 | Medium/High | Confirmed | API/Frontend/System Dashboard | System dashboard omits agent-lost lifecycle failures |
 | AUD-222 | Medium | Fixed | Frontend/System Config/Security | Suite config editor still presents the private API bind as a public API setting |
-| AUD-223 | High | Confirmed | API/Gateway/Client Lifecycle | Lifecycle disconnect can report success while older queued commands still deliver |
+| AUD-223 | High | Fixed | API/Gateway/Client Lifecycle | Lifecycle disconnect can report success while older queued commands still deliver |
 | AUD-224 | Medium/High | Fixed | Agent/CLI/Frontend/File Pull | File pull byte caps can be bypassed when a file grows after stat |
 | AUD-225 | Medium/High | Fixed | Agent/File Browser/Resource Bounds | Text save hash checks read the whole destination file into memory |
 | AUD-226 | High | Fixed | API/Job Outputs/State Machine | Final output insertion is not atomic with target terminalization |
@@ -4645,7 +4645,7 @@ of the same root cause.
 ### AUD-127: Controlled Gateway Shutdown Can Lose Queued RAM Forwarder Events
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Gateway/Forwarder/Shutdown
 - Context: Gateway controlled restart is expected to preserve pending
   gateway-to-API forwarder events with a bounded wait. This matters for
@@ -4683,6 +4683,11 @@ of the same root cause.
   the gateway spool using the existing atomic file format before exit. The
   hard-crash window can remain documented out of scope; this issue is about the
   controlled restart promise.
+- Resolution: Fixed by making gateway shutdown notify in-flight forward posts
+  immediately, causing blocked API forwarding to defer to shutdown without
+  waiting for the HTTP read timeout. Queue workers now enter shutdown handling
+  promptly, spool the active RAM event, and drain remaining queued items through
+  the same spool path before `current_queue_depth` reaches zero.
 
 ### AUD-128: Recursive File Delete Can Escape Through Symlink-Swap Races
 
@@ -5421,7 +5426,7 @@ of the same root cause.
 ### AUD-145: Key Rotation, Revoke, And Delete Disconnect Before DB Invalidation, Leaving A Reconnect Race
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Gateway/Key Lifecycle
 - Context: Key rotation, current-key revocation, and client deletion are
   operator access-deactivation workflows. They are used during reinstall,
@@ -5478,6 +5483,10 @@ of the same root cause.
   Another model is a database-backed lifecycle fence that
   `validate_agent_public_key` rejects while key rotation/revoke/delete is in
   progress.
+- Resolution: Fixed by committing key replacement, key revocation, and client
+  deletion before gateway disconnect is attempted. The post-commit disconnect
+  is best-effort cleanup; the database state now wins first, and stale gateway
+  output/telemetry is blocked by active session/incarnation fencing.
 
 ### AUD-146: Publishing The Dashboard Frontend Still Publishes API And WebSocket Routes
 
@@ -5663,7 +5672,7 @@ of the same root cause.
 ### AUD-150: Displaced Gateway Sessions Can Keep Forwarding Telemetry After Replacement
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Gateway/API/Telemetry/Lifecycle
 - Context: The gateway accepts long-lived agent TCP/Noise sessions. In
   production, duplicate client identity use, VM image cloning, reconnect races,
@@ -5696,6 +5705,11 @@ of the same root cause.
   a new session is accepted and bind telemetry ingestion to the current
   gateway session/incarnation, rejecting or dropping telemetry from stale
   transports.
+- Resolution: Fixed by closing the displaced in-memory gateway session when a
+  replacement session is accepted and by requiring telemetry, command output,
+  and terminal output to carry the gateway session ID plus process incarnation.
+  The API accepts live-session ingest only when those fields match the active
+  gateway session row and current client incarnation.
 
 ### AUD-151: Operator Management Mutations Lack Request-Bound Privilege Verification
 
@@ -7509,7 +7523,7 @@ of the same root cause.
 ### AUD-191: Backup Gateway Endpoints Cannot Receive API Dispatch, Cancel, Or Lifecycle Disconnect Control
 
 - Severity: High
-- Status: Confirmed
+- Status: Skipped
 - Area: API/Gateway/Dispatch
 - Context: Agents support prioritized gateway endpoint lists and the official
   install/UI examples encourage operators to configure a primary and backup
@@ -7555,6 +7569,12 @@ of the same root cause.
   add a durable gateway-control registry and route/fan-out dispatch,
   cancellation, and lifecycle disconnect to the gateway that owns the current
   active session.
+- Resolution: Skipped. The supported product model remains one authoritative
+  gateway control endpoint. Splitting a backup control registry would add
+  operational complexity without a matching enterprise product requirement for
+  this pre-release deployment shape. Failover endpoints can still be agent-side
+  connection inputs, but API dispatch/cancel/lifecycle authority is explicitly
+  single-gateway for now.
 
 ### AUD-192: Gateway Agent TCP Listener Still Defaults To All-Interface Binding
 
@@ -7600,7 +7620,7 @@ of the same root cause.
 ### AUD-193: Gateway Lifecycle Events Can Expire Before API Accepts A New Process Incarnation
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Gateway/API/Lifecycle
 - Context: Agent hello is the authoritative event that lets the API store the
   agent process incarnation and reconcile active targets from the previous
@@ -7648,6 +7668,11 @@ of the same root cause.
   acceptance and lifecycle reconciliation durable before the session becomes
   dispatchable, or persist/retry lifecycle events with semantics appropriate
   for control-plane state rather than dropping them after a short TTL.
+- Resolution: Fixed by making agent hello/session-start acceptance synchronous:
+  the gateway sends `ServerHello accepted=true` only after the API records the
+  hello, process incarnation, and active gateway session. The gateway no
+  longer relies on queued lifecycle forwarding to make a new process
+  dispatchable.
 
 ### AUD-194: Manual Release Workflow Can Publish Tag-Named Update Assets From The Wrong Commit
 
@@ -9000,7 +9025,7 @@ of the same root cause.
 ### AUD-223: Lifecycle Disconnect Can Report Success While Older Queued Commands Still Deliver
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Gateway/Client Lifecycle
 - Context: Client delete, key revocation, and key replacement are access
   deactivation workflows. Operators use them when a VPS is retired, rebuilt, or
@@ -9045,6 +9070,11 @@ of the same root cause.
   in-memory session has actually been removed or proven absent. The API should
   not treat merely enqueued disconnect as proof that old work cannot still be
   delivered.
+- Resolution: Fixed by replacing the queued disconnect message with an
+  out-of-band close signal. Gateway control removes the active session from the
+  dispatch map immediately and signals the session loop through a prioritized
+  close channel, so queued commands cannot be delivered after lifecycle
+  disconnect succeeds.
 
 ### AUD-224: File Pull Byte Caps Can Be Bypassed When A File Grows After Stat
 

@@ -140,6 +140,7 @@ async fn stale_agent_clears_only_after_changed_internal_build_hello() {
     fn hello(build: u64) -> GatewayAgentHelloIngest {
         GatewayAgentHelloIngest {
             gateway_id: "gateway-a".to_string(),
+            gateway_session_id: uuid::Uuid::new_v4(),
             noise_public_key_hex: None,
             remote_ip: Some("203.0.113.10".to_string()),
             hello: AgentHello {
@@ -1823,6 +1824,35 @@ async fn seed_terminal_memory_job(repo: &Repository, job_id: Uuid, client_id: &s
     let Repository::Memory(memory) = repo else {
         panic!("seed_terminal_memory_job supports only memory repository tests");
     };
+    upsert_memory_agent(
+        &memory.agents,
+        &AgentHello {
+            client_id: client_id.to_string(),
+            process_incarnation_id: terminal_gateway_process_incarnation_id(),
+            agent_version: "test".to_string(),
+            internal_build_number: 1,
+            os_release: "test".to_string(),
+            arch: "x86_64".to_string(),
+            update_heartbeat: None,
+            capabilities: Default::default(),
+        },
+    )
+    .await;
+    memory
+        .gateway_sessions
+        .write()
+        .await
+        .push(GatewaySessionView {
+            id: terminal_gateway_session_id(),
+            gateway_id: "gateway-a".to_string(),
+            client_id: client_id.to_string(),
+            noise_public_key_hex: None,
+            status: "active".to_string(),
+            started_at: "2026-06-20T00:00:00Z".to_string(),
+            last_seen_at: "2026-06-20T00:00:00Z".to_string(),
+            ended_at: None,
+            end_reason: None,
+        });
     memory.jobs.write().await.push(JobHistoryView {
         id: job_id,
         actor_id: Some(test_operator().operator.id),
@@ -1842,8 +1872,16 @@ async fn seed_terminal_memory_job(repo: &Repository, job_id: Uuid, client_id: &s
         exit_code: Some(0),
         started_at: Some("2026-06-20T00:00:00Z".to_string()),
         completed_at: Some("2026-06-20T00:00:01Z".to_string()),
-        process_incarnation_id: None,
+        process_incarnation_id: Some(terminal_gateway_process_incarnation_id()),
     });
+}
+
+fn terminal_gateway_session_id() -> Uuid {
+    Uuid::from_u128(0x11111111111111111111111111111111)
+}
+
+fn terminal_gateway_process_incarnation_id() -> Uuid {
+    Uuid::from_u128(0x22222222222222222222222222222222)
 }
 
 fn terminal_stream_ingest(
@@ -1856,6 +1894,8 @@ fn terminal_stream_ingest(
 ) -> GatewayTerminalOutputIngest {
     GatewayTerminalOutputIngest {
         gateway_id: "gateway-a".to_string(),
+        gateway_session_id: terminal_gateway_session_id(),
+        process_incarnation_id: terminal_gateway_process_incarnation_id(),
         client_id: "client-a".to_string(),
         output: vpsman_common::TerminalStreamOutput {
             job_id,
