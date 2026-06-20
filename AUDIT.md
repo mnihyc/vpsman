@@ -154,7 +154,7 @@ of the same root cause.
 | AUD-138 | Medium/High | Fixed | API/CLI/Data Sources/Confirmation | Data-source preset updates can bypass confirmation for one assigned VPS |
 | AUD-139 | Medium/High | Fixed | CLI/VTY/Fleet Tags | CLI tag create and single-VPS assignment auto-confirm tag mutations |
 | AUD-140 | Medium/High | Fixed | Frontend/File Browser | Single-file browser confirmations remain armed after operation edits |
-| AUD-141 | High | Confirmed | Agent/Process Supervisor/Safety | Supervisor PID records can target reused host processes after agent restart |
+| AUD-141 | High | Fixed | Agent/Process Supervisor/Safety | Supervisor PID records can target reused host processes after agent restart |
 | AUD-142 | High | Fixed | Agent/Process Supervisor/Security | Supervisor records and logs are written with default-readable permissions |
 | AUD-143 | Medium/High | Skipped | Docs/Deployment/API Boundary | Headless CLI tutorial presents the public panel URL as the operator API endpoint |
 | AUD-144 | High | Fixed | API/Worker/Agent Updates | Strict registered-update policy only gates direct staging jobs |
@@ -169,16 +169,16 @@ of the same root cause.
 | AUD-153 | Medium/High | Confirmed | API/Telemetry/Retention | Per-interface network-rate telemetry has no retention path |
 | AUD-154 | High | Fixed | API/Frontend/CLI/History Retention | History retention prune reselects live rows instead of deleting the reviewed dry-run set |
 | AUD-155 | High | Fixed | Worker/Artifact Cleanup/Observability | Failed artifact cleanup jobs can hide already-deleted artifacts |
-| AUD-156 | High | Confirmed | Agent/Process Supervisor/Command Semantics | Process status and log reads can restart supervised processes |
+| AUD-156 | High | Fixed | Agent/Process Supervisor/Command Semantics | Process status and log reads can restart supervised processes |
 | AUD-157 | Medium/High | Confirmed | API/Gateway/Client Lifecycle/Retention | Client and gateway lifecycle histories have no retention path |
 | AUD-158 | Medium/High | Confirmed | API/Worker/Webhooks/Retention | Webhook events in the default partition bypass event retention |
 | AUD-159 | Medium/High | Confirmed | Worker/Webhooks/Retention/Alerts | Webhook permanent-failure deliveries bypass delivery retention and create unbounded alerts |
 | AUD-160 | Medium/High | Confirmed | Worker/Webhooks/Retention/Config | Webhook-rule retention silently clamps the shipped 90-day setting to 7 days |
 | AUD-161 | High | Confirmed | Worker/Server Jobs/Artifact Cleanup | Artifact cleanup server jobs can remain running forever after worker loss |
 | AUD-162 | High | Fixed | Agent/Updates/Safety | Update-check activation can downgrade agents from an older release manifest |
-| AUD-163 | High | Confirmed | Agent/Custom Runtime Commands/Reliability | Custom JSON command timeouts can be bypassed after stdout closes |
-| AUD-164 | High | Confirmed | Agent/Process Supervisor/Timeouts | Process supervisor stop and restart can mutate host state after command timeout |
-| AUD-165 | High | Confirmed | Agent/Network Apply/Rollback | Managed network rollback rewrites files non-atomically and drops original modes |
+| AUD-163 | High | Fixed | Agent/Custom Runtime Commands/Reliability | Custom JSON command timeouts can be bypassed after stdout closes |
+| AUD-164 | High | Fixed | Agent/Process Supervisor/Timeouts | Process supervisor stop and restart can mutate host state after command timeout |
+| AUD-165 | High | Fixed | Agent/Network Apply/Rollback | Managed network rollback rewrites files non-atomically and drops original modes |
 | AUD-166 | Medium/High | Confirmed | API/File Transfers/Reliability | Duplicate resumable download chunks can poison server-side handoff |
 | AUD-167 | Medium/High | Fixed | API/Backups/Migrations/Privilege | Migration-link creation bypasses request-bound privilege verification |
 | AUD-168 | Medium/High | Fixed | API/Backups/Resource Bounds | Chunked backup artifact commit rehydrates the whole artifact in API memory |
@@ -225,7 +225,7 @@ of the same root cause.
 | AUD-209 | High | Fixed | API/Worker/Server Jobs/Auth | Queued artifact cleanup can delete artifacts after creator disable/delete or scope loss |
 | AUD-210 | Medium/High | Fixed | CLI/Output/Security | vpsctl structured-output capture writes sensitive stdout to default-permission temp files |
 | AUD-211 | High | Fixed | API/CLI/Agent/Backups/Restore | Restore jobs do not bind the declared source backup to the submitted archive bytes |
-| AUD-212 | Medium/High | Confirmed | Agent/API/User Sessions/Job Status | User-session inventory timeouts are reported as generic failures |
+| AUD-212 | Medium/High | Fixed | Agent/API/User Sessions/Job Status | User-session inventory timeouts are reported as generic failures |
 | AUD-213 | Medium/High | Fixed | API/Frontend/Backups/Job Lifecycle | Failed backup jobs leave auto-created backup requests permanently in progress |
 | AUD-214 | High | Fixed | API/Dispatcher/Auth/Job Lifecycle | Queued jobs keep dispatching after actor disable/delete or scope loss |
 | AUD-215 | High | Fixed | API/Frontend/CLI/Terminal/Resource Bounds | Terminal replay loads full session output history before applying replay bounds |
@@ -243,7 +243,7 @@ of the same root cause.
 | AUD-227 | Medium/High | Fixed | Agent/Frontend/File Browser/Resource Bounds | Directory listing reads and sorts every entry before applying the page limit |
 | AUD-228 | Medium/High | Fixed | Agent/API/Network Speed Tests | Network speed-test server accepts the first TCP peer without verifying the expected tunnel peer |
 | AUD-229 | High | Confirmed | API/Frontend/Network Topology | Topology evidence and OSPF recommendations are keyed by mutable tunnel-plan names |
-| AUD-230 | Medium/High | Confirmed | Agent/Telemetry/Network Probes | Autonomous latency monitoring captures custom probe output without a byte limit |
+| AUD-230 | Medium/High | Fixed | Agent/Telemetry/Network Probes | Autonomous latency monitoring captures custom probe output without a byte limit |
 | AUD-231 | Medium/High | Fixed | API/CLI/Agent/Network Speed Tests | Network speed tests are treated as confirmation-free read-only jobs despite opening listeners and sending traffic |
 | AUD-232 | Medium/High | Fixed | API/Dispatcher/Agent/Network Speed Tests | Network speed tests bypass exclusive dispatch serialization and can overlap on the same tunnel endpoints |
 | AUD-233 | Medium/High | Fixed | API/Worker/Agent/Network Speed Tests | Network speed tests can dispatch one endpoint after the peer target is skipped |
@@ -5237,7 +5237,7 @@ of the same root cause.
 ### AUD-141: Supervisor PID Records Can Target Reused Host Processes After Agent Restart
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Process Supervisor/Safety
 - Context: Process-supervisor jobs start long-running commands on an agent and
   later stop, restart, reconcile, or report those managed processes after agent
@@ -5274,6 +5274,10 @@ of the same root cause.
   uptime. The clean fix should persist and verify a stable process identity
   before treating a stored PID/PGID as owned, and should fail closed rather
   than signaling a mismatched process.
+- Resolution: Fixed by persisting `/proc/<pid>/stat` start-time identity for
+  newly supervised processes and requiring that identity to match before any
+  PID or process-group signal. Legacy PID-only records now fail closed as
+  stale/not owned.
 
 ### AUD-142: Supervisor Records And Logs Are Written With Default-Readable Permissions
 
@@ -5893,7 +5897,7 @@ of the same root cause.
 ### AUD-156: Process Status And Log Reads Can Restart Supervised Processes
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Process Supervisor/Command Semantics
 - Context: Operators use process-supervisor status and log jobs as inspection
   commands while incident work, scheduled checks, or explicit start/stop/restart
@@ -5932,6 +5936,9 @@ of the same root cause.
   permissions. A clean fix should make status/log reads observational, move
   restart reconciliation into the background monitor or an explicit mutating
   command, and serialize supervisor mutations per process.
+- Resolution: Fixed by making `process_status` and `process_logs`
+  observational. They derive current state for output only and no longer save
+  records, start replacements, or ensure restart monitors.
 
 ### AUD-157: Client And Gateway Lifecycle Histories Have No Retention Path
 
@@ -6169,7 +6176,7 @@ of the same root cause.
 ### AUD-163: Custom JSON Command Timeouts Can Be Bypassed After Stdout Closes
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Custom Runtime Commands/Reliability
 - Context: Operators can configure custom JSON-producing commands for process
   inventory, custom telemetry metrics, and runtime tunnel traffic telemetry.
@@ -6219,11 +6226,14 @@ of the same root cause.
   cancellation budget, kill the child on timeout/cancel/output-limit, and
   return a visible failed telemetry sample or command output instead of
   blocking the agent task.
+- Resolution: Fixed by routing process inventory, custom metrics, and runtime
+  traffic JSON commands through the bounded child-process helper so timeout
+  covers spawn, output collection, and child exit even after stdout closes.
 
 ### AUD-164: Process Supervisor Stop And Restart Can Mutate Host State After Command Timeout
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Process Supervisor/Timeouts
 - Context: Operators can start supervised processes from the dashboard or CLI
   with a stored stop policy, then later issue `process_stop` or
@@ -6269,11 +6279,16 @@ of the same root cause.
   inside the command deadline, or the operation must run through a cancellable
   worker that cannot keep mutating process state after the target has timed
   out.
+- Resolution: Fixed by removing the abandoned outer async timeout from
+  supervisor execution and passing an authoritative deadline into the blocking
+  stop/restart worker. Cleanup clamps graceful waits, escalates before the
+  deadline, and refuses record writes or restarts once the deadline is
+  exhausted.
 
 ### AUD-165: Managed Network Rollback Rewrites Files Non-Atomically And Drops Original Modes
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Network Apply/Rollback
 - Context: Network apply, OSPF cost update, and operator rollback write
   managed ifupdown, netplan, systemd-networkd, and Bird2 snippets, then run
@@ -6310,6 +6325,10 @@ of the same root cause.
   AUD-078/AUD-079. A clean fix should preserve previous metadata for managed
   files and use an atomic restore/remove path for rollback, with tests that
   cover validation-hook failure, reload-hook failure, and deadline failure.
+- Resolution: Fixed by carrying prior managed-file contents, mode, uid, and
+  gid in the planned update, preserving existing modes on apply, and restoring
+  rollback contents through temp-file plus rename instead of direct writes.
+  Rollback mode preservation is covered by the validation-hook failure test.
 
 ### AUD-166: Duplicate Resumable Download Chunks Can Poison Server-Side Handoff
 
@@ -8445,7 +8464,7 @@ of the same root cause.
 ### AUD-212: User-Session Inventory Timeouts Are Reported As Generic Failures
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/API/User Sessions/Job Status
 - Context: Operators can run user-session inventory jobs from the dashboard,
   CLI, or VTY to inspect logged-in sessions across selected VPSs. The default
@@ -8486,6 +8505,9 @@ of the same root cause.
   should preserve timeout and cancellation final statuses from the inner shell
   runner, or annotate user-session metadata without replacing terminal status
   types that drive target classification.
+- Resolution: Fixed by preserving `command_timeout` and `command_canceled`
+  final statuses from the inner shell runner. Successful user-session commands
+  still replace the success status with user-session metadata.
 
 ### AUD-213: Failed Backup Jobs Leave Auto-Created Backup Requests Permanently In Progress
 
@@ -9289,7 +9311,7 @@ of the same root cause.
 ### AUD-230: Autonomous Latency Monitoring Captures Custom Probe Output Without A Byte Limit
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Telemetry/Network Probes
 - Context: Agents can run runtime tunnel telemetry and latency monitoring for
   managed tunnel plans. The default config enables latency monitoring, and
@@ -9326,6 +9348,10 @@ of the same root cause.
   output-collection API. A clean fix should route autonomous latency probes
   through the same bounded child-process helper used by on-demand network
   probes, with a small output cap and process-group cleanup.
+- Resolution: Fixed by routing autonomous latency probes through the bounded
+  child-process helper with a 16 KiB output cap, process-group cleanup, and
+  visible unhealthy probe reasons for timeout, cancellation, output-limit, or
+  nonzero exit cases.
 
 ### AUD-231: Network Speed Tests Are Treated As Confirmation-Free Read-Only Jobs Despite Opening Listeners And Sending Traffic
 

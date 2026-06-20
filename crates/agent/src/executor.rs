@@ -352,7 +352,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             execute_user_sessions(config, job_id, timeout_secs, cancel_token).await
         }
         JobCommand::ProcessList { limit } => {
-            execute_process_list(config, job_id, *limit, timeout_secs).await
+            execute_process_list(config, job_id, *limit, timeout_secs, cancel_token).await
         }
         JobCommand::NetworkInterfaces => {
             execute_network_interfaces_command(NetworkInterfacesInput {
@@ -829,6 +829,19 @@ async fn execute_user_sessions(
         .rev()
         .find(|output| output.done)
         .and_then(|output| output.exit_code);
+    let terminal_status = outputs
+        .iter()
+        .rev()
+        .find(|output| output.done && output.stream == OutputStream::Status)
+        .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.data).ok());
+    if terminal_status
+        .as_ref()
+        .and_then(|value| value.get("type"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| matches!(kind, "command_timeout" | "command_canceled"))
+    {
+        return Ok(outputs);
+    }
     outputs.retain(|output| !(output.done && output.stream == OutputStream::Status));
     let status = serde_json::json!({
         "type": "user_sessions",

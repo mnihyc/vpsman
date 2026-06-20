@@ -1,17 +1,15 @@
-use std::{process::Stdio, time::Duration};
+use std::process::Stdio;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
-    time,
-};
+use tokio::process::Command;
 use tracing::warn;
 use vpsman_common::{
     AgentConfig, AgentMetrics, AgentTelemetrySource, CpuStat, DiskStat, LoadAverage, MemoryStat,
     NetworkStat, RuntimeTunnelCommand, RuntimeTunnelStat,
 };
+
+use crate::child_process::{run_child_with_bounded_output, ChildCleanupPolicy, ChildRunResult};
 
 #[derive(Debug, Default, Deserialize)]
 struct CustomMetricsPatch {
@@ -63,30 +61,30 @@ async fn run_custom_metrics_command(
     let argv = render_custom_metrics_argv(config, command)?;
     let mut child = Command::new(&argv[0]);
     child.args(&argv[1..]);
-    child.kill_on_drop(true);
     child.stdin(Stdio::null());
-    child.stdout(Stdio::piped());
-    child.stderr(Stdio::null());
-    let mut child = child
-        .spawn()
-        .context("failed to spawn custom telemetry source")?;
-    let stdout = child
-        .stdout
-        .take()
-        .context("custom telemetry stdout pipe missing")?;
-    let output = time::timeout(
-        Duration::from_secs(command.timeout_secs.clamp(1, 30)),
-        read_limited_stdout(
-            stdout,
-            command.max_output_bytes.clamp(1024, 64 * 1024) as usize,
-        ),
+    let result = run_child_with_bounded_output(
+        child,
+        command.timeout_secs.clamp(1, 30),
+        command.max_output_bytes.clamp(1024, 64 * 1024) as usize,
+        ChildCleanupPolicy::ProcessGroup,
     )
     .await
-    .context("custom telemetry source timed out")??;
-    let status = child.wait().await.context("custom telemetry wait failed")?;
-    if !status.success() {
-        anyhow::bail!("custom telemetry source exited with {status}");
-    }
+    .context("failed to run custom telemetry source")?;
+    let output = match result {
+        ChildRunResult::Completed(output) => {
+            if output.stdout_truncated || output.stderr_truncated {
+                anyhow::bail!("custom telemetry output exceeded limit");
+            }
+            if output.exit_code != Some(0) {
+                anyhow::bail!("custom telemetry source exited with {:?}", output.exit_code);
+            }
+            output.stdout
+        }
+        ChildRunResult::TimedOut(_) => anyhow::bail!("custom telemetry source timed out"),
+        ChildRunResult::Canceled { reason, .. } => {
+            anyhow::bail!("custom telemetry source canceled: {reason}")
+        }
+    };
     serde_json::from_slice(&output).context("custom telemetry source returned invalid JSON")
 }
 
@@ -109,32 +107,6 @@ fn render_custom_metrics_argv(
                 .replace("{tags_csv}", &config.tags.join(","))
         })
         .collect())
-}
-
-async fn read_limited_stdout<R>(mut reader: R, limit: usize) -> std::io::Result<Vec<u8>>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut output = Vec::new();
-    let mut buffer = [0_u8; 1024];
-    while output.len() < limit {
-        let read = reader.read(&mut buffer).await?;
-        if read == 0 {
-            return Ok(output);
-        }
-        let take = read.min(limit.saturating_sub(output.len()));
-        output.extend_from_slice(&buffer[..take]);
-        if take < read {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "custom telemetry output exceeded limit",
-            ));
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        "custom telemetry output exceeded limit",
-    ))
 }
 
 fn apply_patch(metrics: &mut AgentMetrics, patch: CustomMetricsPatch) {

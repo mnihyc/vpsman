@@ -1984,6 +1984,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_user_sessions_preserves_command_timeout_status() {
+        let job_id = uuid::Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("vpsman-user-timeout-{job_id}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("users-timeout.sh");
+        std::fs::write(
+            &source,
+            "#!/bin/sh\nprintf 'custom-user tty1\\n'\nexec 1>&-\nsleep 10\n",
+        )
+        .unwrap();
+        make_executable(&source);
+        let config = AgentConfig {
+            execution: AgentExecutionConfig {
+                user_sessions_source: AgentUserSessionsSource::CustomCommand,
+                user_sessions_command: Some(RuntimeTunnelCommand {
+                    argv: vec![source.to_string_lossy().to_string()],
+                    timeout_secs: 1,
+                    max_output_bytes: 1024,
+                }),
+                ..AgentExecutionConfig::default()
+            },
+            ..AgentConfig::default()
+        };
+
+        let outputs = execute_job_command_with_config_and_output_sink(
+            &config,
+            job_id,
+            &JobCommand::UserSessions,
+            5,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let status = status_payload(&outputs);
+        assert_eq!(status["type"], "command_timeout");
+        assert_eq!(status["mode"], "shell_argv");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
     async fn execute_process_list_returns_bounded_snapshot() {
         let job_id = uuid::Uuid::new_v4();
         let outputs = execute_job_command(job_id, &JobCommand::ProcessList { limit: 8 }, 5)
@@ -2046,6 +2087,50 @@ mod tests {
         assert_eq!(snapshot["processes"][0]["name"], "large");
         assert_eq!(snapshot["truncated"], true);
         assert_eq!(status["source"], "custom_command");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn custom_process_inventory_timeout_covers_wait_after_stdout_closes() {
+        let job_id = uuid::Uuid::new_v4();
+        let root = std::env::temp_dir().join(format!("vpsman-process-timeout-{job_id}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("processes-timeout.sh");
+        std::fs::write(
+            &source,
+            "#!/bin/sh\nprintf '%s\\n' '{\"processes\":[]}'\nexec 1>&-\nsleep 10\n",
+        )
+        .unwrap();
+        make_executable(&source);
+        let config = AgentConfig {
+            execution: AgentExecutionConfig {
+                process_inventory_source: AgentProcessInventorySource::CustomCommand,
+                process_inventory_command: Some(RuntimeTunnelCommand {
+                    argv: vec![source.to_string_lossy().to_string()],
+                    timeout_secs: 1,
+                    max_output_bytes: 4096,
+                }),
+                ..AgentExecutionConfig::default()
+            },
+            ..AgentConfig::default()
+        };
+        let started = std::time::Instant::now();
+
+        let error = execute_job_command_with_config_and_output_sink(
+            &config,
+            job_id,
+            &JobCommand::ProcessList { limit: 1 },
+            5,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert!(error_chain_contains(
+            &error,
+            "process inventory source timed out"
+        ));
         std::fs::remove_dir_all(root).ok();
     }
 

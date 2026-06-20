@@ -11,7 +11,9 @@ use vpsman_common::{
     ProcessRunPolicy,
 };
 
-use crate::supervisor::{execute_blocking, reconcile_supervisor_records_at_root};
+use crate::supervisor::{
+    execute_blocking, execute_blocking_with_deadline, reconcile_supervisor_records_at_root,
+};
 
 const TEST_LOG_TAIL_BYTES: u32 = 64 * 1024;
 const TEST_SUPERVISOR_SHELL: &str = "/bin/sh";
@@ -173,6 +175,64 @@ fn stop_cleans_process_group_children() {
 }
 
 #[test]
+fn stop_deadline_clamps_long_graceful_policy() {
+    let root = test_root("deadline-stop");
+    let outputs = execute_blocking(
+        uuid::Uuid::new_v4(),
+        &JobCommand::ProcessStart {
+            name: "slow-stop".to_string(),
+            argv: vec![
+                TEST_SUPERVISOR_SHELL.to_string(),
+                "-c".to_string(),
+                "trap '' TERM; sleep 30".to_string(),
+            ],
+            cwd: None,
+            env: BTreeMap::new(),
+            policy: ProcessRunPolicy {
+                graceful_stop_secs: 300,
+                ..ProcessRunPolicy::default()
+            },
+            limits: ProcessResourceLimits::default(),
+        },
+        &root,
+    )
+    .unwrap();
+    let status = status_from_outputs(&outputs);
+    let pid = status["pid"].as_u64().unwrap() as u32;
+    let started = std::time::Instant::now();
+
+    let result = execute_blocking_with_deadline(
+        uuid::Uuid::new_v4(),
+        &JobCommand::ProcessStop {
+            name: "slow-stop".to_string(),
+        },
+        &root,
+        std::time::Instant::now() + Duration::from_secs(1),
+    );
+
+    assert!(started.elapsed() < Duration::from_secs(3));
+    match result {
+        Ok(outputs) => {
+            let status = status_from_outputs(&outputs);
+            assert_eq!(status["type"], "process_stop");
+            assert_eq!(status["cleanup"]["forced_signal"], "SIGKILL");
+        }
+        Err(error) => {
+            assert!(error
+                .to_string()
+                .contains("process supervisor command timed out"));
+        }
+    }
+    for _ in 0..20 {
+        if !process_running(pid) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(!process_running(pid), "pid {pid} survived deadline stop");
+}
+
+#[test]
 fn restart_monitor_restarts_failed_process_until_retry_budget() {
     let root = test_root("restart");
     let counter = root.join("counter");
@@ -243,7 +303,7 @@ fn restart_monitor_restarts_failed_process_until_retry_budget() {
 }
 
 #[test]
-fn startup_reconcile_restarts_persisted_process_with_restart_policy() {
+fn startup_reconcile_marks_legacy_pid_record_stale() {
     let root = test_root("startup-reconcile");
     let records = root.join("records");
     let logs = root.join("logs");
@@ -286,28 +346,74 @@ fn startup_reconcile_restarts_persisted_process_with_restart_policy() {
     let report = reconcile_supervisor_records_at_root(&root).unwrap();
 
     assert_eq!(report["total"], 1);
-    assert_eq!(report["restarted"], 1);
+    assert_eq!(report["restarted"], 0);
     assert_eq!(report["processes"][0]["name"], "daemon");
-    assert_eq!(report["processes"][0]["status"], "running");
-    for _ in 0..20 {
-        if fs::read_to_string(&marker).unwrap_or_default().trim() == "restarted" {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    assert_eq!(
-        fs::read_to_string(&marker).unwrap_or_default().trim(),
-        "restarted"
-    );
+    assert_eq!(report["processes"][0]["status"], "stale");
+    assert_eq!(fs::read_to_string(&marker).unwrap_or_default().trim(), "");
+}
 
-    let _ = execute_blocking(
+#[test]
+fn status_and_logs_do_not_restart_failed_process() {
+    let root = test_root("read-only-no-restart");
+    let counter = root.join("counter");
+    let script = format!(
+        "n=$(cat '{}' 2>/dev/null || echo 0); n=$((n + 1)); echo \"$n\" > '{}'; exit 7",
+        counter.display(),
+        counter.display()
+    );
+    execute_blocking(
         uuid::Uuid::new_v4(),
-        &JobCommand::ProcessStop {
-            name: "daemon".to_string(),
+        &JobCommand::ProcessStart {
+            name: "flap".to_string(),
+            argv: vec![TEST_SUPERVISOR_SHELL.to_string(), "-c".to_string(), script],
+            cwd: None,
+            env: BTreeMap::new(),
+            policy: ProcessRunPolicy {
+                restart: ProcessRestartPolicy::OnFailure,
+                restart_max_retries: 1,
+                restart_backoff_secs: 0,
+                graceful_stop_secs: 1,
+            },
+            limits: ProcessResourceLimits::default(),
         },
         &root,
     )
     .unwrap();
+    for _ in 0..20 {
+        if fs::read_to_string(&counter).unwrap_or_default().trim() == "1" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let status_outputs = execute_blocking(
+        uuid::Uuid::new_v4(),
+        &JobCommand::ProcessStatus {
+            name: Some("flap".to_string()),
+        },
+        &root,
+    )
+    .unwrap();
+    let stdout = status_outputs
+        .iter()
+        .find(|output| output.stream == OutputStream::Stdout)
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&stdout.data).unwrap();
+    assert_eq!(status["processes"][0]["status"], "failed");
+
+    execute_blocking(
+        uuid::Uuid::new_v4(),
+        &JobCommand::ProcessLogs {
+            name: "flap".to_string(),
+            max_bytes: TEST_LOG_TAIL_BYTES,
+        },
+        &root,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+
+    assert_eq!(fs::read_to_string(&counter).unwrap_or_default().trim(), "1");
+    fs::remove_dir_all(root).ok();
 }
 
 #[test]

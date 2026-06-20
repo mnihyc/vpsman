@@ -1,17 +1,16 @@
-use std::{process::Stdio, time::Duration};
+use std::process::Stdio;
 
 use anyhow::Result;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
-    time,
-};
+use tokio::process::Command;
 use vpsman_common::{
     render_tunnel_endpoint_config, AgentConfig, AgentRuntimeStatusTelemetryPlan,
     AgentRuntimeTrafficSource, NetworkStat, RuntimeTunnelCommand,
 };
 
-use crate::network_runtime::render_runtime_adapter_command;
+use crate::{
+    child_process::{run_child_with_bounded_output, ChildCleanupPolicy, ChildRunResult},
+    network_runtime::render_runtime_adapter_command,
+};
 
 pub(crate) struct TrafficAccumulation {
     pub(crate) rx_bytes: u64,
@@ -181,49 +180,33 @@ async fn run_traffic_command_json(
     }
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
-    command.kill_on_drop(true);
     command.stdin(Stdio::null());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::null());
-    let mut child = command.spawn()?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("traffic telemetry stdout pipe missing"))?;
-    let output = time::timeout(
-        Duration::from_secs(timeout_secs),
-        read_limited_json_stdout(stdout, max_output_bytes),
+    let result = run_child_with_bounded_output(
+        command,
+        timeout_secs,
+        max_output_bytes,
+        ChildCleanupPolicy::ProcessGroup,
     )
-    .await
-    .map_err(|_| anyhow::anyhow!("traffic telemetry timed out"))??;
-    let status = child.wait().await?;
-    if !status.success() {
-        anyhow::bail!("traffic telemetry command exited with {status}");
-    }
+    .await?;
+    let output = match result {
+        ChildRunResult::Completed(output) => {
+            if output.stdout_truncated || output.stderr_truncated {
+                anyhow::bail!("traffic telemetry output exceeded limit");
+            }
+            if output.exit_code != Some(0) {
+                anyhow::bail!(
+                    "traffic telemetry command exited with {:?}",
+                    output.exit_code
+                );
+            }
+            output.stdout
+        }
+        ChildRunResult::TimedOut(_) => anyhow::bail!("traffic telemetry timed out"),
+        ChildRunResult::Canceled { reason, .. } => {
+            anyhow::bail!("traffic telemetry canceled: {reason}")
+        }
+    };
     Ok(serde_json::from_slice(&output)?)
-}
-
-async fn read_limited_json_stdout<R>(mut reader: R, limit: usize) -> std::io::Result<Vec<u8>>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut output = Vec::new();
-    let mut buffer = [0_u8; 1024];
-    while output.len() < limit {
-        let read = reader.read(&mut buffer).await?;
-        if read == 0 {
-            return Ok(output);
-        }
-        let take = read.min(limit.saturating_sub(output.len()));
-        output.extend_from_slice(&buffer[..take]);
-        if take < read {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "traffic telemetry output exceeded limit",
-            ));
-        }
-    }
-    Ok(output)
 }
 
 fn parse_traffic_json_payload(payload: &serde_json::Value, source: &str) -> TrafficAccumulation {

@@ -1,5 +1,9 @@
 use std::{
-    os::unix::fs::PermissionsExt,
+    ffi::CString,
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, PermissionsExt},
+    },
     path::{Path, PathBuf},
 };
 
@@ -691,7 +695,9 @@ async fn apply_updates_with_rollback(
             return Err(error);
         }
         if update.changed {
-            if let Err(error) = write_file_atomic(&update.path, &update.next_contents).await {
+            if let Err(error) =
+                write_file_atomic(&update.path, &update.next_contents, update.next_mode).await
+            {
                 rollback_updates(&applied).await;
                 return Err(error);
             }
@@ -774,10 +780,19 @@ pub(crate) fn managed_block(
 struct PlannedFileUpdate {
     managed_path: &'static str,
     path: PathBuf,
-    previous_contents: Option<Vec<u8>>,
+    previous_file: Option<ExistingNetworkFile>,
     next_contents: Vec<u8>,
+    next_mode: u32,
     backup_path: Option<String>,
     changed: bool,
+}
+
+#[derive(Clone)]
+struct ExistingNetworkFile {
+    contents: Vec<u8>,
+    mode: u32,
+    uid: u32,
+    gid: u32,
 }
 
 async fn prepare_backend_file_update(
@@ -855,21 +870,29 @@ async fn prepare_file_transform<F>(
 where
     F: FnOnce(&str) -> Result<String>,
 {
-    let previous_contents = read_existing_regular_file(path).await?;
-    let previous_text = previous_contents
+    let previous_file = read_existing_regular_file_state(path).await?;
+    let previous_text = previous_file
         .as_ref()
-        .map(|contents| {
-            std::str::from_utf8(contents)
+        .map(|file| {
+            std::str::from_utf8(&file.contents)
                 .map(str::to_owned)
                 .context("managed network file must be UTF-8")
         })
         .transpose()?
         .unwrap_or_default();
     let next_contents = transform(&previous_text)?.into_bytes();
-    let changed = previous_contents.as_deref().unwrap_or_default() != next_contents.as_slice();
+    let changed = previous_file
+        .as_ref()
+        .map(|file| file.contents.as_slice())
+        .unwrap_or_default()
+        != next_contents.as_slice();
+    let next_mode = previous_file
+        .as_ref()
+        .map(|file| file.mode)
+        .unwrap_or(0o644);
     let backup_path = if changed {
-        if let Some(contents) = &previous_contents {
-            Some(write_backup(path, contents).await?)
+        if let Some(file) = &previous_file {
+            Some(write_backup(path, &file.contents).await?)
         } else {
             None
         }
@@ -879,14 +902,21 @@ where
     Ok(PlannedFileUpdate {
         managed_path,
         path: path.to_path_buf(),
-        previous_contents,
+        previous_file,
         next_contents,
+        next_mode,
         backup_path,
         changed,
     })
 }
 
 pub(crate) async fn read_existing_regular_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    Ok(read_existing_regular_file_state(path)
+        .await?
+        .map(|file| file.contents))
+}
+
+async fn read_existing_regular_file_state(path: &Path) -> Result<Option<ExistingNetworkFile>> {
     let Ok(metadata) = tokio::fs::metadata(path).await else {
         return Ok(None);
     };
@@ -902,7 +932,12 @@ pub(crate) async fn read_existing_regular_file(path: &Path) -> Result<Option<Vec
             path.display()
         );
     }
-    Ok(Some(tokio::fs::read(path).await?))
+    Ok(Some(ExistingNetworkFile {
+        contents: tokio::fs::read(path).await?,
+        mode: metadata.permissions().mode() & 0o777,
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+    }))
 }
 
 async fn write_backup(path: &Path, contents: &[u8]) -> Result<String> {
@@ -978,7 +1013,16 @@ pub(crate) fn managed_block_bounds(existing: &str, block: &str) -> Result<Option
     Ok(Some((start, end)))
 }
 
-async fn write_file_atomic(path: &Path, contents: &[u8]) -> Result<()> {
+async fn write_file_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
+    write_file_atomic_with_metadata(path, contents, mode, None).await
+}
+
+async fn write_file_atomic_with_metadata(
+    path: &Path,
+    contents: &[u8],
+    mode: u32,
+    owner: Option<(u32, u32)>,
+) -> Result<()> {
     if contents.len() as u64 > MAX_MANAGED_NETWORK_FILE_BYTES {
         anyhow::bail!(
             "managed network file exceeds size limit: {}",
@@ -996,7 +1040,10 @@ async fn write_file_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         uuid::Uuid::new_v4()
     ));
     tokio::fs::write(&temp_path, contents).await?;
-    tokio::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o644)).await?;
+    tokio::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode & 0o777)).await?;
+    if let Some((uid, gid)) = owner {
+        chown_if_root(&temp_path, uid, gid)?;
+    }
     if let Err(error) = tokio::fs::rename(&temp_path, path).await {
         let _ = tokio::fs::remove_file(&temp_path).await;
         return Err(error).with_context(|| format!("failed to replace {}", path.display()));
@@ -1006,11 +1053,31 @@ async fn write_file_atomic(path: &Path, contents: &[u8]) -> Result<()> {
 
 async fn rollback_updates(updates: &[PlannedFileUpdate]) {
     for update in updates.iter().rev() {
-        if let Some(contents) = &update.previous_contents {
-            let _ = tokio::fs::write(&update.path, contents).await;
+        if let Some(previous) = &update.previous_file {
+            let _ = write_file_atomic_with_metadata(
+                &update.path,
+                &previous.contents,
+                previous.mode,
+                Some((previous.uid, previous.gid)),
+            )
+            .await;
         } else {
             let _ = tokio::fs::remove_file(&update.path).await;
         }
+    }
+}
+
+fn chown_if_root(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(());
+    }
+    let path = CString::new(path.as_os_str().as_bytes())
+        .context("managed network path contains interior NUL")?;
+    let rc = unsafe { libc::chown(path.as_ptr(), uid, gid) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).context("failed to restore network file owner")
     }
 }
 

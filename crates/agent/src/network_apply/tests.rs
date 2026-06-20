@@ -23,6 +23,12 @@ async fn applies_managed_network_files_with_backups() {
     tokio::fs::write(&bird_path, "existing bird\n")
         .await
         .unwrap();
+    tokio::fs::set_permissions(&ifupdown_path, std::fs::Permissions::from_mode(0o640))
+        .await
+        .unwrap();
+    tokio::fs::set_permissions(&bird_path, std::fs::Permissions::from_mode(0o600))
+        .await
+        .unwrap();
     let plan = test_plan();
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let config = AgentConfig {
@@ -384,6 +390,12 @@ async fn rolls_back_files_when_validation_hook_fails() {
     tokio::fs::write(&bird_path, "existing bird\n")
         .await
         .unwrap();
+    tokio::fs::set_permissions(&ifupdown_path, std::fs::Permissions::from_mode(0o640))
+        .await
+        .unwrap();
+    tokio::fs::set_permissions(&bird_path, std::fs::Permissions::from_mode(0o600))
+        .await
+        .unwrap();
     let bad_hook = root.join("bad-hook");
     write_hook(&bad_hook, "#!/bin/sh\nexit 17\n").await;
     let plan = test_plan();
@@ -424,6 +436,8 @@ async fn rolls_back_files_when_validation_hook_fails() {
         tokio::fs::read_to_string(&bird_path).await.unwrap(),
         "existing bird\n"
     );
+    assert_eq!(mode(&ifupdown_path).await, 0o640);
+    assert_eq!(mode(&bird_path).await, 0o600);
 }
 
 #[tokio::test]
@@ -914,4 +928,13 @@ async fn write_hook(path: &Path, contents: &str) {
     tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
         .await
         .unwrap();
+}
+
+async fn mode(path: &Path) -> u32 {
+    tokio::fs::metadata(path)
+        .await
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777
 }

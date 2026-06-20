@@ -22,12 +22,15 @@ use vpsman_common::{
     TunnelAddressFamily, TunnelEndpointSide, TunnelKind, TunnelObservation,
 };
 
+use crate::child_process::{run_child_with_bounded_output, ChildCleanupPolicy, ChildRunResult};
 use crate::network_runtime::render_runtime_adapter_command;
 use crate::telemetry_custom::{
     apply_custom_metrics_if_configured, custom_metrics_replaces_linux,
     empty_custom_metrics_snapshot,
 };
 use crate::telemetry_traffic::traffic_accumulation_for_plan;
+
+const MAX_LATENCY_PROBE_OUTPUT_BYTES: usize = 16 * 1024;
 
 #[derive(Default)]
 pub(crate) struct TelemetryRuntimeState {
@@ -503,26 +506,55 @@ async fn run_latency_probe(
         target.to_string(),
     ]);
     let mut command = Command::new(&argv[0]);
-    command
-        .args(&argv[1..])
-        .kill_on_drop(true)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = time::timeout(Duration::from_secs(10), command.output())
-        .await
-        .context("latency probe timed out")??;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed = parse_latency_ping_output(&stdout);
-    Ok(LatencyProbeResult {
-        family,
-        target: target.to_string(),
-        healthy: parsed.healthy,
-        latency_avg_ms: parsed.latency_avg_ms,
-        packet_loss_ratio: parsed.packet_loss_ratio,
-        reason: (!output.status.success())
-            .then(|| format!("latency_probe_exit:{:?}:{}", output.status.code(), source)),
-    })
+    command.args(&argv[1..]).stdin(Stdio::null());
+    let result = run_child_with_bounded_output(
+        command,
+        10,
+        MAX_LATENCY_PROBE_OUTPUT_BYTES,
+        ChildCleanupPolicy::ProcessGroup,
+    )
+    .await
+    .context("failed to run latency probe")?;
+    match result {
+        ChildRunResult::Completed(output) => {
+            let output_limited = output.stdout_truncated || output.stderr_truncated;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let parsed = parse_latency_ping_output(&stdout);
+            Ok(LatencyProbeResult {
+                family,
+                target: target.to_string(),
+                healthy: parsed.healthy && !output_limited && output.exit_code == Some(0),
+                latency_avg_ms: parsed.latency_avg_ms,
+                packet_loss_ratio: parsed.packet_loss_ratio,
+                reason: if output_limited {
+                    Some(format!("latency_probe_output_limit:{source}"))
+                } else if output.exit_code != Some(0) {
+                    Some(format!(
+                        "latency_probe_exit:{:?}:{source}",
+                        output.exit_code
+                    ))
+                } else {
+                    None
+                },
+            })
+        }
+        ChildRunResult::TimedOut(_) => Ok(LatencyProbeResult {
+            family,
+            target: target.to_string(),
+            healthy: false,
+            latency_avg_ms: None,
+            packet_loss_ratio: None,
+            reason: Some(format!("latency_probe_timeout:{source}")),
+        }),
+        ChildRunResult::Canceled { reason, .. } => Ok(LatencyProbeResult {
+            family,
+            target: target.to_string(),
+            healthy: false,
+            latency_avg_ms: None,
+            packet_loss_ratio: None,
+            reason: Some(format!("latency_probe_canceled:{source}:{reason}")),
+        }),
+    }
 }
 
 fn latency_ping_base_argv(config: &AgentConfig) -> Result<(Vec<String>, &'static str)> {
@@ -1928,6 +1960,52 @@ printf '%s\n' 'RUN' >> "$1"
     }
 
     #[tokio::test]
+    async fn custom_traffic_timeout_covers_wait_after_stdout_closes() {
+        let root =
+            std::env::temp_dir().join(format!("vpsman-traffic-timeout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let traffic = root.join("traffic-timeout.sh");
+        write_test_script(
+            &traffic,
+            "#!/bin/sh\nprintf '{\"rx_bytes\":1234,\"tx_bytes\":5678}\\n'\nexec 1>&-\nsleep 10\n",
+        );
+        let mut config = AgentConfig::default();
+        config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
+            plan_id: Some("plan-a".to_string()),
+            endpoint_side: TunnelEndpointSide::Left,
+            plan: telemetry_dual_stack_plan(TunnelAddressFamily::Ipv4),
+            traffic_source: AgentRuntimeTrafficSource::CustomCommand,
+            traffic_command: Some(RuntimeTunnelCommand {
+                argv: vec![traffic.to_string_lossy().to_string()],
+                timeout_secs: 1,
+                max_output_bytes: 1024,
+            }),
+            latency_monitoring_enabled: false,
+            auto_ospf_enabled: false,
+            auto_ospf_updater: None,
+        }];
+        let mut runtime_state = TelemetryRuntimeState::default();
+        let started = std::time::Instant::now();
+
+        let metrics = collect_metrics_for_config(&config, &mut runtime_state)
+            .await
+            .unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        let tunnel = metrics
+            .tunnels
+            .iter()
+            .find(|tunnel| tunnel.interface == "tunab")
+            .unwrap();
+        assert_eq!(tunnel.traffic_status.as_deref(), Some("failed"));
+        assert!(tunnel
+            .traffic_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("traffic telemetry timed out")));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
     async fn custom_metrics_source_replaces_linux_snapshot() {
         let root =
             std::env::temp_dir().join(format!("vpsman-custom-metrics-{}", uuid::Uuid::new_v4()));
@@ -1962,6 +2040,42 @@ printf '%s\n' 'RUN' >> "$1"
         assert_eq!(metrics.networks.len(), 1);
         assert_eq!(metrics.networks[0].interface, "edge0");
 
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn custom_metrics_timeout_covers_wait_after_stdout_closes() {
+        let root = std::env::temp_dir().join(format!(
+            "vpsman-custom-metrics-timeout-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("metrics-timeout.sh");
+        write_test_script(
+            &source,
+            "#!/bin/sh\nprintf '{\"hostname\":\"late\"}\\n'\nexec 1>&-\nsleep 10\n",
+        );
+        let config = AgentConfig {
+            telemetry: AgentTelemetryConfig {
+                source: AgentTelemetrySource::CustomCommand,
+                custom_metrics_command: Some(RuntimeTunnelCommand {
+                    argv: vec![source.to_string_lossy().to_string()],
+                    timeout_secs: 1,
+                    max_output_bytes: 4096,
+                }),
+                ..AgentTelemetryConfig::default()
+            },
+            ..AgentConfig::default()
+        };
+        let mut runtime_state = TelemetryRuntimeState::default();
+        let started = std::time::Instant::now();
+
+        let metrics = collect_metrics_for_config(&config, &mut runtime_state)
+            .await
+            .unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert_eq!(metrics.hostname, "unknown");
         std::fs::remove_dir_all(root).ok();
     }
 }

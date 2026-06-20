@@ -6,12 +6,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Mutex, OnceLock},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::time;
 use vpsman_common::{
     create_private_file_new, ensure_private_dir, ensure_private_dir_tree, open_private_file_append,
     open_private_file_read, open_private_file_read_write, CommandOutput, JobCommand, OutputStream,
@@ -19,8 +18,9 @@ use vpsman_common::{
 };
 
 use crate::process_cleanup::{
-    process_is_running, set_current_process_group, terminate_process_blocking,
-    terminate_process_group_blocking, ProcessCleanupReport,
+    process_is_running, process_start_time_ticks, process_state, set_current_process_group,
+    terminate_process_blocking_before, terminate_process_group_blocking_before,
+    ProcessCleanupReport,
 };
 use crate::supervisor_cgroup::{
     apply_cpu_shares_cgroup_v2, cgroup_status, cleanup_process_cgroup, limit_effectiveness,
@@ -39,6 +39,11 @@ const MONITOR_IDLE_SLEEP_SECS: u64 = 1;
 
 static PROCESS_MONITORS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ProcessIdentity {
+    start_time_ticks: u64,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct ProcessRecord {
     name: String,
@@ -52,6 +57,8 @@ struct ProcessRecord {
     pid: u32,
     #[serde(default)]
     process_group_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process_identity: Option<ProcessIdentity>,
     started_unix: u64,
     stdout_log: String,
     stderr_log: String,
@@ -77,12 +84,9 @@ pub(crate) async fn execute_process_supervisor_command(
     timeout_secs: u64,
 ) -> Result<Vec<CommandOutput>> {
     let root = supervisor_root();
-    time::timeout(
-        Duration::from_secs(timeout_secs.clamp(1, 60)),
-        execute_at_root(job_id, command, &root),
-    )
-    .await
-    .context("process supervisor command timed out")?
+    let timeout = Duration::from_secs(timeout_secs.clamp(1, 60));
+    let deadline = Instant::now() + timeout;
+    execute_at_root(job_id, command, &root, deadline).await
 }
 
 pub(crate) async fn reconcile_supervised_processes_on_start() -> Result<serde_json::Value> {
@@ -147,19 +151,35 @@ async fn execute_at_root(
     job_id: uuid::Uuid,
     command: &JobCommand,
     root: &Path,
+    deadline: Instant,
 ) -> Result<Vec<CommandOutput>> {
     tokio::task::spawn_blocking({
         let command = command.clone();
         let root = root.to_path_buf();
-        move || execute_blocking(job_id, &command, &root)
+        move || execute_blocking_with_deadline(job_id, &command, &root, deadline)
     })
     .await?
 }
 
+#[cfg(test)]
 pub(crate) fn execute_blocking(
     job_id: uuid::Uuid,
     command: &JobCommand,
     root: &Path,
+) -> Result<Vec<CommandOutput>> {
+    execute_blocking_with_deadline(
+        job_id,
+        command,
+        root,
+        Instant::now() + Duration::from_secs(60),
+    )
+}
+
+pub(crate) fn execute_blocking_with_deadline(
+    job_id: uuid::Uuid,
+    command: &JobCommand,
+    root: &Path,
+    deadline: Instant,
 ) -> Result<Vec<CommandOutput>> {
     ensure_supervisor_dirs(root)?;
     rotate_supervisor_logs(root)?;
@@ -179,12 +199,15 @@ pub(crate) fn execute_blocking(
             validate_process_policy(policy)?;
             validate_process_limits(limits)?;
             if let Some(record) = load_record(root, name)? {
-                if process_is_running(record.pid) {
+                if process_identity_status(&record) == RecordIdentityStatus::Verified
+                    && process_is_running(record.pid)
+                {
                     anyhow::bail!("process {name} is already running with pid {}", record.pid);
                 }
             }
+            ensure_supervisor_deadline(deadline)?;
             let record = start_process(root, name, argv, cwd, env, policy, limits)?;
-            save_newly_started_record(root, &record)?;
+            save_newly_started_record(root, &record, deadline)?;
             ensure_restart_monitor(root, name);
             Ok(status_outputs(job_id, "process_start", &record))
         }
@@ -192,10 +215,10 @@ pub(crate) fn execute_blocking(
             validate_process_name(name)?;
             let mut record =
                 load_record(root, name)?.context("process is not managed by vpsman")?;
-            let cleanup = stop_record(&record);
-            let stopped = !process_is_running(record.pid);
-            record.status = if stopped { "stopped" } else { "stop_requested" }.to_string();
-            record.exit_code = if stopped { Some(0) } else { None };
+            ensure_supervisor_deadline(deadline)?;
+            let cleanup = stop_record(&record, deadline);
+            apply_stop_observation(&mut record);
+            ensure_supervisor_deadline(deadline)?;
             save_record(root, &record)?;
             Ok(status_outputs_with_cleanup(
                 job_id,
@@ -208,7 +231,16 @@ pub(crate) fn execute_blocking(
             validate_process_name(name)?;
             let mut record =
                 load_record(root, name)?.context("process is not managed by vpsman")?;
-            let cleanup = stop_record(&record);
+            ensure_supervisor_deadline(deadline)?;
+            let cleanup = stop_record(&record, deadline);
+            apply_stop_observation(&mut record);
+            if record.status == "stale" {
+                anyhow::bail!("process record identity is stale; refusing restart");
+            }
+            if record.status == "stop_requested" {
+                anyhow::bail!("process {name} did not stop before restart deadline");
+            }
+            ensure_supervisor_deadline(deadline)?;
             record = start_process(
                 root,
                 &record.name,
@@ -218,7 +250,8 @@ pub(crate) fn execute_blocking(
                 &record.policy,
                 &record.limits,
             )?;
-            save_newly_started_record(root, &record)?;
+            ensure_supervisor_deadline(deadline)?;
+            save_newly_started_record(root, &record, deadline)?;
             ensure_restart_monitor(root, name);
             Ok(status_outputs_with_cleanup(
                 job_id,
@@ -234,13 +267,13 @@ pub(crate) fn execute_blocking(
             let records = if let Some(name) = name {
                 load_record(root, name)?
                     .into_iter()
-                    .map(|record| reconcile_and_save_record(root, record))
-                    .collect::<Result<Vec<_>>>()?
+                    .map(observe_record)
+                    .collect::<Vec<_>>()
             } else {
                 load_all_records(root)?
                     .into_iter()
-                    .map(|record| reconcile_and_save_record(root, record))
-                    .collect::<Result<Vec<_>>>()?
+                    .map(observe_record)
+                    .collect::<Vec<_>>()
             };
             Ok(json_stdout_outputs(
                 job_id,
@@ -270,7 +303,7 @@ pub(crate) fn execute_blocking(
                 max_bytes,
                 &mut outputs,
             )?;
-            let refreshed = reconcile_and_save_record(root, record)?;
+            let refreshed = observe_record(record);
             outputs.push(CommandOutput {
                 job_id,
                 stream: OutputStream::Status,
@@ -325,6 +358,7 @@ fn start_process(
     let child = command
         .spawn()
         .with_context(|| format!("failed to start supervised process {name}"))?;
+    let process_identity = Some(capture_process_identity(child.id())?);
     let mut record = ProcessRecord {
         name: name.to_string(),
         argv: argv.to_vec(),
@@ -334,6 +368,7 @@ fn start_process(
         limits: limits.clone(),
         pid: child.id(),
         process_group_id: Some(child.id()),
+        process_identity,
         started_unix: unix_now(),
         stdout_log: stdout_log.to_string_lossy().to_string(),
         stderr_log: stderr_log.to_string_lossy().to_string(),
@@ -354,32 +389,173 @@ fn start_process(
     Ok(record)
 }
 
-fn stop_record(record: &ProcessRecord) -> ProcessCleanupReport {
+fn stop_record(record: &ProcessRecord, deadline: Instant) -> ProcessCleanupReport {
+    match process_identity_status(record) {
+        RecordIdentityStatus::Verified => {}
+        RecordIdentityStatus::NotRunning => return completed_cleanup_report(record),
+        RecordIdentityStatus::Missing | RecordIdentityStatus::Mismatched => {
+            return refused_cleanup_report(record)
+        }
+    }
     if collect_child_exit_code(record.pid).is_some() || !process_is_running(record.pid) {
-        return ProcessCleanupReport {
-            target_kind: "process",
-            target_id: record.pid as libc::pid_t,
-            graceful_signal: "SIGTERM",
-            graceful_wait_ms: 0,
-            graceful_signal_sent: false,
-            forced_signal: None,
-            forced_signal_sent: false,
-            exited_after_grace: true,
-            final_running: false,
-            fallback_used: false,
-            errors: Vec::new(),
-        };
+        return completed_cleanup_report(record);
     }
     let graceful_wait = Duration::from_secs(record.policy.graceful_stop_secs.clamp(1, 300));
     let process_group_id = record.process_group_id.unwrap_or(record.pid) as libc::pid_t;
-    let mut group_report = terminate_process_group_blocking(process_group_id, graceful_wait);
-    if collect_child_exit_code(record.pid).is_some() || !process_is_running(record.pid) {
+    let mut group_report =
+        terminate_process_group_blocking_before(process_group_id, graceful_wait, deadline);
+    if collect_child_exit_code(record.pid).is_some()
+        || process_identity_status(record) == RecordIdentityStatus::NotRunning
+        || !process_is_running(record.pid)
+    {
         group_report.final_running = false;
         return group_report;
     }
-    let mut fallback = terminate_process_blocking(record.pid as libc::pid_t, graceful_wait);
+    if Instant::now() >= deadline {
+        return group_report;
+    }
+    let mut fallback =
+        terminate_process_blocking_before(record.pid as libc::pid_t, graceful_wait, deadline);
     fallback.fallback_used = true;
     fallback
+}
+
+fn completed_cleanup_report(record: &ProcessRecord) -> ProcessCleanupReport {
+    ProcessCleanupReport {
+        target_kind: "process",
+        target_id: record.pid as libc::pid_t,
+        graceful_signal: "SIGTERM",
+        graceful_wait_ms: 0,
+        graceful_signal_sent: false,
+        forced_signal: None,
+        forced_signal_sent: false,
+        exited_after_grace: true,
+        final_running: false,
+        fallback_used: false,
+        errors: Vec::new(),
+    }
+}
+
+fn refused_cleanup_report(record: &ProcessRecord) -> ProcessCleanupReport {
+    let mut report = ProcessCleanupReport {
+        target_kind: "process",
+        target_id: record.pid as libc::pid_t,
+        graceful_signal: "SIGTERM",
+        graceful_wait_ms: 0,
+        graceful_signal_sent: false,
+        forced_signal: None,
+        forced_signal_sent: false,
+        exited_after_grace: false,
+        final_running: process_is_running(record.pid),
+        fallback_used: false,
+        errors: Vec::new(),
+    };
+    report
+        .errors
+        .push("process identity is not verified; refusing to signal".to_string());
+    report
+}
+
+fn capture_process_identity(pid: u32) -> Result<ProcessIdentity> {
+    Ok(ProcessIdentity {
+        start_time_ticks: process_start_time_ticks(pid)
+            .with_context(|| format!("failed to capture process identity for pid {pid}"))?,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecordIdentityStatus {
+    Verified,
+    NotRunning,
+    Missing,
+    Mismatched,
+}
+
+fn process_identity_status(record: &ProcessRecord) -> RecordIdentityStatus {
+    let Some(identity) = &record.process_identity else {
+        return RecordIdentityStatus::Missing;
+    };
+    match process_start_time_ticks(record.pid) {
+        Ok(start_time_ticks) if start_time_ticks == identity.start_time_ticks => {
+            RecordIdentityStatus::Verified
+        }
+        Ok(_) => RecordIdentityStatus::Mismatched,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => RecordIdentityStatus::NotRunning,
+        Err(_) => RecordIdentityStatus::Mismatched,
+    }
+}
+
+fn process_identity_status_label(status: RecordIdentityStatus) -> &'static str {
+    match status {
+        RecordIdentityStatus::Verified => "verified",
+        RecordIdentityStatus::NotRunning => "not_running",
+        RecordIdentityStatus::Missing => "missing",
+        RecordIdentityStatus::Mismatched => "mismatched",
+    }
+}
+
+fn observe_record(mut record: ProcessRecord) -> ProcessRecord {
+    if matches!(record.status.as_str(), "stopped" | "stop_requested") {
+        return record;
+    }
+    match process_identity_status(&record) {
+        RecordIdentityStatus::Verified => {
+            if process_state(record.pid).is_ok_and(|state| state == 'Z') {
+                mark_record_exited(&mut record, None);
+            } else if process_is_running(record.pid) {
+                record.status = "running".to_string();
+                record.exit_code = None;
+            } else if matches!(record.status.as_str(), "running" | "restart_pending")
+                && record.last_exit_unix.is_none()
+            {
+                mark_record_exited(&mut record, None);
+            }
+        }
+        RecordIdentityStatus::NotRunning => {
+            if matches!(record.status.as_str(), "running" | "restart_pending")
+                && record.last_exit_unix.is_none()
+            {
+                mark_record_exited(&mut record, None);
+            }
+        }
+        RecordIdentityStatus::Missing | RecordIdentityStatus::Mismatched => {
+            mark_record_stale(&mut record);
+        }
+    }
+    record
+}
+
+fn apply_stop_observation(record: &mut ProcessRecord) {
+    match process_identity_status(record) {
+        RecordIdentityStatus::Verified => {
+            if process_is_running(record.pid) {
+                record.status = "stop_requested".to_string();
+                record.exit_code = None;
+            } else {
+                record.status = "stopped".to_string();
+                record.exit_code = Some(0);
+            }
+        }
+        RecordIdentityStatus::NotRunning => {
+            record.status = "stopped".to_string();
+            record.exit_code = Some(0);
+        }
+        RecordIdentityStatus::Missing | RecordIdentityStatus::Mismatched => {
+            mark_record_stale(record);
+        }
+    }
+}
+
+fn mark_record_stale(record: &mut ProcessRecord) {
+    record.status = "stale".to_string();
+    record.exit_code = None;
+}
+
+fn ensure_supervisor_deadline(deadline: Instant) -> Result<()> {
+    if Instant::now() >= deadline {
+        anyhow::bail!("process supervisor command timed out");
+    }
+    Ok(())
 }
 
 fn collect_child_exit_code(pid: u32) -> Option<i32> {
@@ -415,16 +591,31 @@ fn reconcile_record(root: &Path, mut record: ProcessRecord) -> Result<ProcessRec
     if matches!(record.status.as_str(), "stopped" | "stop_requested") {
         return Ok(record);
     }
-    if let Some(exit_code) = collect_child_exit_code(record.pid) {
-        mark_record_exited(&mut record, Some(exit_code));
-    } else if process_is_running(record.pid) {
-        record.status = "running".to_string();
-        record.exit_code = None;
-        return Ok(record);
-    } else if matches!(record.status.as_str(), "running" | "restart_pending")
-        && record.last_exit_unix.is_none()
-    {
-        mark_record_exited(&mut record, None);
+    match process_identity_status(&record) {
+        RecordIdentityStatus::Verified => {
+            if let Some(exit_code) = collect_child_exit_code(record.pid) {
+                mark_record_exited(&mut record, Some(exit_code));
+            } else if process_is_running(record.pid) {
+                record.status = "running".to_string();
+                record.exit_code = None;
+                return Ok(record);
+            } else if matches!(record.status.as_str(), "running" | "restart_pending")
+                && record.last_exit_unix.is_none()
+            {
+                mark_record_exited(&mut record, None);
+            }
+        }
+        RecordIdentityStatus::NotRunning => {
+            if matches!(record.status.as_str(), "running" | "restart_pending")
+                && record.last_exit_unix.is_none()
+            {
+                mark_record_exited(&mut record, None);
+            }
+        }
+        RecordIdentityStatus::Missing | RecordIdentityStatus::Mismatched => {
+            mark_record_stale(&mut record);
+            return Ok(record);
+        }
     }
     maybe_restart_record(root, record)
 }
@@ -488,7 +679,11 @@ fn maybe_restart_record(root: &Path, mut record: ProcessRecord) -> Result<Proces
     restarted.last_exit_code = last_exit_code;
     restarted.last_exit_unix = last_exit_unix;
     restarted.last_restart_unix = Some(now);
-    save_newly_started_record(root, &restarted)?;
+    save_newly_started_record(
+        root,
+        &restarted,
+        Instant::now() + Duration::from_secs(record.policy.graceful_stop_secs.clamp(1, 300)),
+    )?;
     Ok(restarted)
 }
 
@@ -634,10 +829,12 @@ fn status_value(
 }
 
 fn process_record_status_value(record: &ProcessRecord) -> serde_json::Value {
+    let identity_status = process_identity_status(record);
     serde_json::json!({
         "name": record.name,
         "pid": record.pid,
         "process_group_id": record.process_group_id.unwrap_or(record.pid),
+        "process_identity_status": process_identity_status_label(identity_status),
         "status": record.status,
         "exit_code": record.exit_code,
         "started_unix": record.started_unix,
@@ -809,9 +1006,9 @@ fn save_record(root: &Path, record: &ProcessRecord) -> Result<()> {
     Ok(())
 }
 
-fn save_newly_started_record(root: &Path, record: &ProcessRecord) -> Result<()> {
+fn save_newly_started_record(root: &Path, record: &ProcessRecord, deadline: Instant) -> Result<()> {
     if let Err(error) = save_record(root, record) {
-        let _ = stop_record(record);
+        let _ = stop_record(record, deadline);
         return Err(error);
     }
     Ok(())
@@ -1061,6 +1258,7 @@ mod tests {
             limits: ProcessResourceLimits::default(),
             pid,
             process_group_id: Some(pid),
+            process_identity: None,
             started_unix: 1,
             stdout_log: logs_dir(root)
                 .join(format!("{name}.stdout.log"))
