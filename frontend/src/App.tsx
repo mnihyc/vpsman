@@ -417,6 +417,7 @@ export function App() {
                 onLoadOutputComparison={dashboard.loadJobOutputComparison}
                 onLoadTargets={dashboard.loadJobTargets}
                 onLoadTerminalReplay={dashboard.loadTerminalReplay}
+                onSubmitTerminalInput={dashboard.submitTerminalInput}
                 onCancelServerJob={dashboard.cancelServerJob}
                 onOpenDispatchPreset={openJobDispatchPreset}
                 onSelectedJobDetailsOpened={() => setPendingJobDetailId(null)}

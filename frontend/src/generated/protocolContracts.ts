@@ -509,6 +509,16 @@ export const DB_PRIVILEGE_INTENT_FIELDS = [
   "payload_hash",
 ] as const;
 
+export const TERMINAL_INPUT_PRIVILEGE_INTENT_FIELDS = [
+  "version",
+  "action",
+  "client_id",
+  "session_id",
+  "input_payload_hash",
+  "timeout_secs",
+  "confirmed",
+] as const;
+
 export const TERMINAL_COMMAND_TYPES = [
   "terminal_open",
   "terminal_input",
@@ -534,6 +544,8 @@ export const TERMINAL_SESSION_STATUSES = [
   "rejected",
   "accepted",
   "duplicate_ignored",
+  "duplicate_conflict",
+  "out_of_order",
   "polled",
   "resized",
   "closed",
@@ -541,6 +553,8 @@ export const TERMINAL_SESSION_STATUSES = [
   "streaming",
   "exited",
   "idle_timeout",
+  "disconnected_timeout",
+  "lifecycle_disconnected",
   "unknown",
 ] as const;
 export type GeneratedTerminalSessionStatus = typeof TERMINAL_SESSION_STATUSES[number];
@@ -551,6 +565,8 @@ export const TERMINAL_SESSION_STATUS_CLASS_BY_STATUS = {
   "rejected": "warning",
   "accepted": "successful",
   "duplicate_ignored": "successful",
+  "duplicate_conflict": "warning",
+  "out_of_order": "warning",
   "polled": "successful",
   "resized": "successful",
   "closed": "successful",
@@ -558,6 +574,8 @@ export const TERMINAL_SESSION_STATUS_CLASS_BY_STATUS = {
   "streaming": "in_progress",
   "exited": "successful",
   "idle_timeout": "warning",
+  "disconnected_timeout": "warning",
+  "lifecycle_disconnected": "warning",
   "unknown": "neutral",
 } as const satisfies Record<GeneratedTerminalSessionStatus, GeneratedWorkflowStatusClass>;
 
@@ -965,7 +983,7 @@ export type GeneratedTopologyDriftAction = typeof TOPOLOGY_DRIFT_ACTIONS[number]
 
 export const PRIVILEGE_OPERATION_GOLDEN_VECTORS = [
   { command_type: "shell_argv", canonical_json: "{\"type\":\"shell\",\"argv\":[\"/bin/true\"],\"pty\":false}" },
-  { command_type: "terminal_open", canonical_json: "{\"type\":\"terminal_open\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"argv\":[\"/bin/sh\",\"-l\"],\"user_policy\":\"fail\",\"cols\":120,\"rows\":30,\"idle_timeout_secs\":1800,\"flow_window_bytes\":65536}" },
+  { command_type: "terminal_open", canonical_json: "{\"type\":\"terminal_open\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"argv\":[\"/bin/sh\",\"-l\"],\"user_policy\":\"fail\",\"cols\":120,\"rows\":30,\"idle_timeout_secs\":3600,\"flow_window_bytes\":65536}" },
   { command_type: "file_transfer_start", canonical_json: "{\"type\":\"file_transfer_start\",\"session_id\":\"61616161-2222-4333-8444-555555555555\",\"path\":\"/tmp/upload.bin\",\"mode\":416,\"size_bytes\":4,\"sha256_hex\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"chunk_size_bytes\":65536,\"rate_limit_kbps\":0,\"resume_token_hash\":\"2222222222222222222222222222222222222222222222222222222222222222\"}" },
   { command_type: "backup", canonical_json: "{\"type\":\"backup\",\"paths\":[\"/etc/app.conf\"],\"include_config\":false,\"follow_symlinks\":false}" },
 ] as const satisfies readonly { command_type: string; canonical_json: string }[];

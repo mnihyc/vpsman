@@ -203,12 +203,14 @@ pub const TERMINAL_SESSION_STATE_CLASS_BY_STATE: [(&str, &str); 6] = [
     ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
 ];
 
-pub const TERMINAL_SESSION_STATUS_CLASS_BY_STATUS: [(&str, &str); 13] = [
+pub const TERMINAL_SESSION_STATUS_CLASS_BY_STATUS: [(&str, &str); 17] = [
     ("opened", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("attached", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("rejected", WORKFLOW_STATUS_CLASS_WARNING),
     ("accepted", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("duplicate_ignored", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
+    ("duplicate_conflict", WORKFLOW_STATUS_CLASS_WARNING),
+    ("out_of_order", WORKFLOW_STATUS_CLASS_WARNING),
     ("polled", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("resized", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("closed", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
@@ -216,6 +218,8 @@ pub const TERMINAL_SESSION_STATUS_CLASS_BY_STATUS: [(&str, &str); 13] = [
     ("streaming", WORKFLOW_STATUS_CLASS_IN_PROGRESS),
     ("exited", WORKFLOW_STATUS_CLASS_SUCCESSFUL),
     ("idle_timeout", WORKFLOW_STATUS_CLASS_WARNING),
+    ("disconnected_timeout", WORKFLOW_STATUS_CLASS_WARNING),
+    ("lifecycle_disconnected", WORKFLOW_STATUS_CLASS_WARNING),
     ("unknown", WORKFLOW_STATUS_CLASS_NEUTRAL),
 ];
 
@@ -829,7 +833,7 @@ pub fn default_process_graceful_stop_secs() -> u64 {
 }
 
 pub fn default_terminal_idle_timeout_secs() -> u32 {
-    1800
+    3600
 }
 
 pub fn default_terminal_flow_window_bytes() -> u32 {
@@ -1019,6 +1023,11 @@ pub struct GatewaySessionDisconnectResult {
     pub accepted: bool,
     pub disconnected: bool,
     pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AgentSessionDisconnect {
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1547,6 +1556,18 @@ pub fn db_privilege_intent_fields() -> &'static [&'static str] {
     ]
 }
 
+pub fn terminal_input_privilege_intent_fields() -> &'static [&'static str] {
+    &[
+        "version",
+        "action",
+        "client_id",
+        "session_id",
+        "input_payload_hash",
+        "timeout_secs",
+        "confirmed",
+    ]
+}
+
 #[derive(Serialize)]
 pub struct JobPrivilegeIntent<'a> {
     version: u8,
@@ -1682,6 +1703,39 @@ impl<'a> DbPrivilegeIntent<'a> {
     }
 }
 
+#[derive(Serialize)]
+pub struct TerminalInputPrivilegeIntent<'a> {
+    version: u8,
+    action: &'static str,
+    client_id: &'a str,
+    session_id: &'a str,
+    input_payload_hash: &'a str,
+    timeout_secs: u64,
+    confirmed: bool,
+}
+
+impl<'a> TerminalInputPrivilegeIntent<'a> {
+    pub fn new(input: TerminalInputPrivilegeIntentInput<'a>) -> Self {
+        Self {
+            version: 1,
+            action: "terminal_input.submit",
+            client_id: input.client_id.trim(),
+            session_id: input.session_id.trim(),
+            input_payload_hash: input.input_payload_hash.trim(),
+            timeout_secs: input.timeout_secs.clamp(1, 3600),
+            confirmed: input.confirmed,
+        }
+    }
+}
+
+pub struct TerminalInputPrivilegeIntentInput<'a> {
+    pub client_id: &'a str,
+    pub session_id: &'a str,
+    pub input_payload_hash: &'a str,
+    pub timeout_secs: u64,
+    pub confirmed: bool,
+}
+
 pub struct OperatorDbPayloadInput<'a> {
     pub action: &'a str,
     pub target: &'a str,
@@ -1752,6 +1806,12 @@ pub fn canonical_db_privilege_intent(
     ))
 }
 
+pub fn canonical_terminal_input_privilege_intent(
+    input: TerminalInputPrivilegeIntentInput<'_>,
+) -> serde_json::Result<String> {
+    serde_json::to_string(&TerminalInputPrivilegeIntent::new(input))
+}
+
 pub fn operator_db_payload_hash(input: OperatorDbPayloadInput<'_>) -> serde_json::Result<String> {
     let payload = serde_json::to_string(&OperatorDbPayload::new(input))?;
     Ok(crate::auth::payload_hash(payload.as_bytes()))
@@ -1786,6 +1846,8 @@ pub const TERMINAL_SESSION_STATUSES: &[&str] = &[
     "rejected",
     "accepted",
     "duplicate_ignored",
+    "duplicate_conflict",
+    "out_of_order",
     "polled",
     "resized",
     "closed",
@@ -1793,6 +1855,8 @@ pub const TERMINAL_SESSION_STATUSES: &[&str] = &[
     "streaming",
     "exited",
     "idle_timeout",
+    "disconnected_timeout",
+    "lifecycle_disconnected",
     "unknown",
 ];
 
@@ -2105,11 +2169,21 @@ pub fn terminal_session_state(
         ("terminal_open", "rejected") => "rejected",
         _ if session_exited => "exited",
         ("terminal_open", "opened" | "attached") => "open",
-        ("terminal_input", "accepted" | "duplicate_ignored") => "open",
+        (
+            "terminal_input",
+            "accepted" | "duplicate_ignored" | "duplicate_conflict" | "out_of_order",
+        ) => "open",
         ("terminal_poll", "polled") => "open",
         ("terminal_resize", "resized") => "open",
         ("terminal_stream", "streaming") => "open",
-        ("terminal_stream", "closed" | "exited" | "idle_timeout") => "closed",
+        (
+            "terminal_stream",
+            "closed"
+            | "exited"
+            | "idle_timeout"
+            | "disconnected_timeout"
+            | "lifecycle_disconnected",
+        ) => "closed",
         _ => "unknown",
     }
 }

@@ -25,7 +25,12 @@ import type {
   FileTransferSourceArtifactRecord,
   UploadFileTransferSourceArtifactRequest,
 } from "../typesFileTransfer";
-import type { TerminalReplayRecord, TerminalSessionRecord } from "../typesTerminal";
+import type {
+  TerminalInputSubmitRequest,
+  TerminalInputSubmitResponse,
+  TerminalReplayRecord,
+  TerminalSessionRecord,
+} from "../typesTerminal";
 
 export function useJobsData(
   apiToken: string,
@@ -494,6 +499,27 @@ export function useJobsData(
     [apiToken, onUnauthorized],
   );
 
+  const submitTerminalInput = useCallback(
+    async (clientId: string, sessionId: string, request: TerminalInputSubmitRequest) => {
+      try {
+        const response = await apiPost<TerminalInputSubmitResponse>(
+          `/api/v1/terminal-sessions/${encodeURIComponent(clientId)}/${encodeURIComponent(sessionId)}/input`,
+          apiToken,
+          request,
+        );
+        void Promise.allSettled([loadJobs(), onFleetChanged(), onAuditChanged()]);
+        return response;
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          throw new Error("Operator login required");
+        }
+        throw error;
+      }
+    },
+    [apiToken, loadJobs, onAuditChanged, onFleetChanged, onUnauthorized],
+  );
+
   const createJob = useCallback(
     async (request: CreateJobRequest) => {
       const response = await apiPost<CreateJobResponse>("/api/v1/jobs", apiToken, request);
@@ -611,6 +637,7 @@ export function useJobsData(
     loadAgentUpdateReleases,
     loadServerJobs,
     loadTerminalReplay,
+    submitTerminalInput,
     loadTerminalSessions,
     deleteCommandTemplate,
     upsertCommandTemplate,

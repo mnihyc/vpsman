@@ -1063,6 +1063,8 @@ impl Repository {
                     std::slice::from_ref(output),
                 )
                 .await?;
+                self.record_terminal_input_status_output(job_id, output)
+                    .await?;
                 if let Some(artifact) = self
                     .get_job_output_artifact_ref(job_id, client_id, seq)
                     .await?
@@ -1322,6 +1324,8 @@ impl Repository {
                 std::slice::from_ref(output),
             )
             .await?;
+            self.record_terminal_input_status_output(job_id, output)
+                .await?;
         }
         self.register_persisted_job_output_artifacts(client_id, &accepted_persisted)
             .await?;

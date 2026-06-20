@@ -21,10 +21,10 @@ use tokio::{
 use tracing::{debug, info, warn};
 use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, read_secret_file_ref, AgentHello,
-    CommandResume, Frame, GatewayAgentHelloIngest, GatewayCommandOutputIngest,
-    GatewaySessionLifecycleIngest, GatewayTelemetryIngest, GatewayTerminalOutputIngest, JobAck,
-    JobCancelAck, MessageKind, NoiseFrameStream, SequencedCommandOutput, ServerHello, SuiteConfig,
-    TelemetryEnvelope,
+    AgentSessionDisconnect, CommandResume, Frame, GatewayAgentHelloIngest,
+    GatewayCommandOutputIngest, GatewaySessionLifecycleIngest, GatewayTelemetryIngest,
+    GatewayTerminalOutputIngest, JobAck, JobCancelAck, MessageKind, NoiseFrameStream,
+    SequencedCommandOutput, ServerHello, SuiteConfig, TelemetryEnvelope,
 };
 
 use crate::{
@@ -551,17 +551,44 @@ async fn handle_agent(
     let mut outbound_seq = 2_u64;
     let mut pending_commands = HashMap::<uuid::Uuid, PendingCommand>::new();
     let mut pending_cancels = HashMap::new();
+    let mut lifecycle_disconnect_reason = None::<String>;
+    let lifecycle_close_deadline = time::sleep(Duration::from_secs(0));
+    tokio::pin!(lifecycle_close_deadline);
 
     let result: Result<()> = loop {
         tokio::select! {
             biased;
-            changed = close_rx.changed(), if client_id.is_some() => {
+            changed = close_rx.changed(), if client_id.is_some() && lifecycle_disconnect_reason.is_none() => {
                 if changed.is_err() {
                     break Err(anyhow!("agent_session_close_channel_dropped"));
                 }
                 let reason = close_rx
                     .borrow()
                     .clone()
+                    .unwrap_or_else(|| "gateway_requested_disconnect".to_string());
+                let frame = AgentSessionDisconnect {
+                    reason: reason.clone(),
+                };
+                if let Err(error) = write_json_frame(
+                    &mut stream,
+                    MessageKind::AgentSessionDisconnect,
+                    0,
+                    outbound_seq,
+                    &frame,
+                )
+                .await
+                {
+                    break Err(error);
+                }
+                outbound_seq += 1;
+                lifecycle_disconnect_reason = Some(reason);
+                lifecycle_close_deadline
+                    .as_mut()
+                    .reset(time::Instant::now() + Duration::from_secs(2));
+            }
+            _ = &mut lifecycle_close_deadline, if lifecycle_disconnect_reason.is_some() => {
+                let reason = lifecycle_disconnect_reason
+                    .take()
                     .unwrap_or_else(|| "gateway_requested_disconnect".to_string());
                 break Err(anyhow!("agent_session_closed_by_gateway:{reason}"));
             }
@@ -594,7 +621,7 @@ async fn handle_agent(
                     break Err(error);
                 }
             }
-            message = command_rx.recv(), if client_id.is_some() => {
+            message = command_rx.recv(), if client_id.is_some() && lifecycle_disconnect_reason.is_none() => {
                 let Some(message) = message else {
                     continue;
                 };

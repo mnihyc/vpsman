@@ -182,10 +182,9 @@ Send input and poll output:
 
 ```sh
 cargo run -p vpsctl -- terminal-input \
+  --client-id edge-01 \
   --session-id <session_uuid> \
-  --input-seq 1 \
   --text $'uptime\n' \
-  --clients edge-01 \
   --confirmed
 
 cargo run -p vpsctl -- terminal-poll \
@@ -194,6 +193,9 @@ cargo run -p vpsctl -- terminal-poll \
   --clients edge-01 \
   --confirmed
 ```
+
+Terminal input order is reserved by the server for the selected client and
+session; do not provide an input sequence.
 
 List durable sessions and replay persisted output:
 

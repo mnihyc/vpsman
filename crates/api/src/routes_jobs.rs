@@ -165,9 +165,24 @@ pub(crate) async fn create_job_from_saved_schedule(
     .await
 }
 
+pub(crate) async fn create_job_from_terminal_input_route(
+    state: &AppState,
+    operator: &AuthContext,
+    request: CreateJobRequest,
+) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
+    create_job_inner(
+        state,
+        operator,
+        request,
+        JobPrivilegeSource::TerminalInputRoute,
+    )
+    .await
+}
+
 enum JobPrivilegeSource {
     RequestAssertion,
     SavedSchedule(Uuid),
+    TerminalInputRoute,
 }
 
 async fn create_job_inner(
@@ -184,6 +199,11 @@ async fn create_job_inner(
         return Err(ApiError::conflict("destructive_confirmation_required"));
     }
     let job_command = request.job_command()?;
+    if matches!(job_command, JobCommand::TerminalInput { .. })
+        && !matches!(privilege_source, JobPrivilegeSource::TerminalInputRoute)
+    {
+        return Err(ApiError::bad_request("terminal_input_route_required"));
+    }
     if !request.confirmed && job_command_requires_confirmation(&job_command) {
         return Err(ApiError::conflict(confirmation_error_code(&job_command)));
     }
@@ -224,6 +244,7 @@ async fn create_job_inner(
     let source_schedule_id = match &privilege_source {
         JobPrivilegeSource::RequestAssertion => None,
         JobPrivilegeSource::SavedSchedule(schedule_id) => Some(*schedule_id),
+        JobPrivilegeSource::TerminalInputRoute => None,
     };
     let effective_timeout_secs = effective_job_timeout_secs(
         request.timeout_secs.unwrap_or(30),
@@ -1109,11 +1130,9 @@ fn effective_job_timeout_secs(
             )?;
             Ok(requested_timeout_secs)
         }
-        JobPrivilegeSource::SavedSchedule(_) => Ok(clamp_timeout_to_agent_caps(
-            requested_timeout_secs,
-            resolved_targets,
-            resolved_agents,
-        )),
+        JobPrivilegeSource::SavedSchedule(_) | JobPrivilegeSource::TerminalInputRoute => Ok(
+            clamp_timeout_to_agent_caps(requested_timeout_secs, resolved_targets, resolved_agents),
+        ),
     }
 }
 

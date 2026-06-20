@@ -277,6 +277,8 @@ CREATE TABLE terminal_sessions (
             'rejected',
             'accepted',
             'duplicate_ignored',
+            'duplicate_conflict',
+            'out_of_order',
             'polled',
             'resized',
             'closed',
@@ -284,6 +286,8 @@ CREATE TABLE terminal_sessions (
             'streaming',
             'exited',
             'idle_timeout',
+            'disconnected_timeout',
+            'lifecycle_disconnected',
             'unknown'
         )),
     CONSTRAINT terminal_sessions_last_event_check
@@ -322,6 +326,47 @@ CREATE TABLE terminal_output_chunks (
 
 CREATE INDEX terminal_output_chunks_session_idx
     ON terminal_output_chunks (client_id, session_id, terminal_seq ASC);
+
+CREATE TABLE terminal_input_requests (
+    job_id UUID PRIMARY KEY,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    session_id UUID NOT NULL,
+    input_seq BIGINT NOT NULL CHECK (input_seq > 0),
+    payload_sha256_hex TEXT NOT NULL,
+    payload_size_bytes BIGINT NOT NULL CHECK (payload_size_bytes > 0),
+    status TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at TIMESTAMPTZ,
+    UNIQUE (client_id, session_id, input_seq),
+    CONSTRAINT terminal_input_requests_status_check
+        CHECK (status IN (
+            'reserved',
+            'queued',
+            'dispatching',
+            'running',
+            'accepted',
+            'duplicate_ignored',
+            'duplicate_conflict',
+            'out_of_order',
+            'missing',
+            'completed',
+            'skipped',
+            'rejected',
+            'failed',
+            'agent_lost',
+            'agent_timeout',
+            'control_timeout',
+            'canceled'
+        ))
+);
+
+CREATE INDEX terminal_input_requests_session_idx
+    ON terminal_input_requests (client_id, session_id, input_seq ASC);
+
+CREATE INDEX terminal_input_requests_active_idx
+    ON terminal_input_requests (client_id, session_id, updated_at ASC)
+    WHERE status IN ('reserved', 'queued', 'dispatching', 'running');
 
 CREATE TABLE worker_leases (
     task_name TEXT PRIMARY KEY,

@@ -2109,6 +2109,7 @@ export async function installConsoleApiMock(
         scheduleActions: [] as unknown[],
         schedules: [] as unknown[],
         suiteConfigs: [] as unknown[],
+        terminalInputs: [] as unknown[],
         tunnelPlanAdapterPromotions: [] as unknown[],
         tunnelPlanAllocations: [] as unknown[],
         tunnelPlanEnabledMutations: [] as unknown[],
@@ -3910,6 +3911,42 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/terminal-sessions" && method === "GET") {
           return jsonResponse(terminalSessionsFixture);
+        }
+        if (
+          pathname ===
+            "/api/v1/terminal-sessions/agent-sfo-01/61616161-2222-4333-8444-555555555555/input" &&
+          method === "POST"
+        ) {
+          const body = await readJsonBody(input, init);
+          requests.terminalInputs.push(body);
+          return jsonResponse(
+            {
+              input_seq: 3,
+              request_status: "queued",
+              job: {
+                job_id:
+                  (body as { job_id?: string } | null)?.job_id ??
+                  "61616161-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                status: "queued",
+                target_count: 1,
+                target_counts: {
+                  total: 1,
+                  queued: 1,
+                  dispatching: 0,
+                  running: 0,
+                  completed: 0,
+                  skipped: 0,
+                  rejected: 0,
+                  failed: 0,
+                  agent_lost: 0,
+                  agent_timeout: 0,
+                  control_timeout: 0,
+                  canceled: 0,
+                },
+              },
+            },
+            { status: 202 },
+          );
         }
         if (
           pathname ===

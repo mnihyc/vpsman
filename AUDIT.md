@@ -198,8 +198,8 @@ of the same root cause.
 | AUD-182 | Medium/High | Fixed | API/Gateway/Terminal/Lifecycle | Terminal stream output can append after the terminal-open target is terminal |
 | AUD-183 | High | Fixed | Frontend/Fleet/Delete | VPS deletion confirmation can remain armed after fleet selection changes |
 | AUD-184 | Critical | Fixed | Frontend/Jobs/Multi-File | Bulk file review can open stale confirmations after selector or operation edits |
-| AUD-185 | High | Confirmed | Agent/API/Terminal | Terminal input sequencing can drop out-of-order or conflicting input |
-| AUD-186 | Medium/High | Confirmed | Agent/Gateway/Terminal/Lifecycle | Terminal PTYs can survive disconnect or access revocation without reconciliation |
+| AUD-185 | High | Fixed | Agent/API/Terminal | Terminal input sequencing can drop out-of-order or conflicting input |
+| AUD-186 | Medium/High | Fixed | Agent/Gateway/Terminal/Lifecycle | Terminal PTYs can survive disconnect or access revocation without reconciliation |
 | AUD-187 | Medium/High | Fixed | API/Frontend/History Retention | History retention policy saves ignore the confirmation contract |
 | AUD-188 | High | Fixed | Agent/File Browser/Safety | File rename and move can follow path races outside the reviewed source or destination |
 | AUD-189 | Medium/High | Fixed | Deploy/Agent Install/Docs | Official agent install examples do not start the service they claim to start |
@@ -7269,7 +7269,7 @@ of the same root cause.
 ### AUD-185: Terminal Input Sequencing Can Drop Out-Of-Order Or Conflicting Input
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/API/Terminal
 - Context: Operators can open interactive terminal sessions and then send
   terminal-input jobs from the dashboard, CLI, or VTY. The UI derives the next
@@ -7303,17 +7303,26 @@ of the same root cause.
   `crates/vpsctl/src/vty_terminal.rs` expose user-provided input sequences.
   `crates/api/src/repository_terminal_sessions.rs` stores only
   `last_input_seq`.
+- Fix: Terminal input is now submitted through the dedicated
+  `/api/v1/terminal-sessions/{client_id}/{session_id}/input` route. The route
+  requires `terminal:read` plus `jobs:write`, verifies a route-bound
+  `terminal_input.submit` privilege intent, resolves exactly one terminal
+  session, reserves the next `input_seq` server-side in the canonical
+  `terminal_input_requests` table, and creates the internal `terminal_input`
+  job. Generic job creation rejects externally submitted terminal input.
+  Dashboard, CLI, and VTY surfaces no longer expose or accept operator-managed
+  input sequences.
 - Notes: This is distinct from terminal output storage, replay, and
   late-output issues already tracked by AUD-073, AUD-076, AUD-077, AUD-129, and
-  AUD-182. A clean fix should make terminal input idempotency
-  sequence-and-payload aware: accept exactly the next sequence, accept
-  byte-identical duplicate replays as no-ops, reject conflicting duplicates,
-  and reject future gaps as out-of-order/retryable without writing to the PTY.
+  AUD-182. The agent now accepts only the exact next sequence, records the
+  input payload hash, treats byte-identical duplicate replays as
+  `duplicate_ignored`, rejects conflicting duplicates as `duplicate_conflict`,
+  and rejects future gaps as `out_of_order` without writing to the PTY.
 
 ### AUD-186: Terminal PTYs Can Survive Disconnect Or Access Revocation Without Reconciliation
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Gateway/Terminal/Lifecycle
 - Context: Operators can open interactive terminal sessions that intentionally
   keep a shell or command running after the `terminal_open` job target has
@@ -7354,14 +7363,22 @@ of the same root cause.
   Terminal idle timeout is operator-provided with a protocol default and max at
   `crates/common/src/protocol.rs:2321-2326`; frontend construction clamps it up
   to 86,400 seconds in `frontend/src/panels/jobDispatchModel.ts`.
+- Fix: Gateway lifecycle closes now send an `agent_session_disconnect` control
+  frame before the authoritative connection close. Agents immediately close all
+  open terminal PTY process groups for lifecycle disconnects such as delete,
+  key revoke, and key rotation, then emit terminal lifecycle status with the
+  `lifecycle_disconnected` reason. Ordinary gateway loss marks terminal
+  sessions disconnected and keeps them only for
+  `min(idle_timeout_secs, 3600)` seconds; if the agent does not reconnect or
+  receive terminal interaction before that deadline, the PTY is closed with
+  `disconnected_timeout`. Final lifecycle status now uses bounded async send
+  plus a bounded agent-local pending-event buffer for disconnected or saturated
+  gateway receivers instead of best-effort `try_send`.
 - Notes: This is distinct from AUD-077 and AUD-182. Those cover API/gateway
   handling of terminal stream output after it is emitted. This issue is
   agent-local lifecycle authority: terminal process groups and final session
-  evidence are not reconciled when the control-plane connection is lost or
-  access is revoked. A clean fix should define the intended policy explicitly,
-  such as closing or quarantining terminal sessions on authoritative
-  disconnect/revoke, replaying terminal lifecycle summaries after reconnect,
-  and making final terminal lifecycle events reliable rather than best-effort.
+  evidence are now reconciled when the control-plane connection is lost or
+  access is revoked.
 
 ### AUD-187: History Retention Policy Saves Ignore The Confirmation Contract
 

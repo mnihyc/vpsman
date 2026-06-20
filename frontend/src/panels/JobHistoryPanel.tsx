@@ -42,6 +42,8 @@ import type {
   UploadFileTransferSourceArtifactRequest,
 } from "../typesFileTransfer";
 import type {
+  TerminalInputSubmitRequest,
+  TerminalInputSubmitResponse,
   TerminalReplayRecord,
   TerminalSessionRecord,
 } from "../typesTerminal";
@@ -131,6 +133,7 @@ export function JobHistoryPanel({
   onLoadOutputComparison,
   onLoadTerminalReplay,
   onLoadTargets,
+  onSubmitTerminalInput,
   onOpenPrivilegeUnlock,
   onOpenDispatchPreset,
   onPreviewArtifactCleanup,
@@ -205,6 +208,11 @@ export function JobHistoryPanel({
     sessionId: string,
     fromSeq?: number,
   ) => Promise<TerminalReplayRecord>;
+  onSubmitTerminalInput: (
+    clientId: string,
+    sessionId: string,
+    request: TerminalInputSubmitRequest,
+  ) => Promise<TerminalInputSubmitResponse>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenDispatchPreset: (preset: JobDispatchPresetInput) => void;
   onOpenPrivilegeUnlock: () => void;
@@ -652,6 +660,7 @@ export function JobHistoryPanel({
           onLoadJob={onLoadJob}
           onLoadOutputs={onLoadOutputs}
           onLoadTargets={onLoadTargets}
+          onSubmitTerminalInput={onSubmitTerminalInput}
           onOpenJobDetails={openSubmittedJobDetails}
           onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
           onResolveTargets={onResolveTargets}
@@ -762,6 +771,7 @@ export function JobHistoryPanel({
             onLoadJob={onLoadJob}
             onLoadOutputs={onLoadOutputs}
             onLoadTargets={onLoadTargets}
+            onSubmitTerminalInput={onSubmitTerminalInput}
             onOpenJobDetails={openSubmittedJobDetails}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
             onResolveTargets={onResolveTargets}

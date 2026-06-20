@@ -250,6 +250,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_input_enforces_exact_sequence_and_payload_replay() {
+        let session_id = uuid::Uuid::new_v4();
+        let outputs = execute_job_command(
+            uuid::Uuid::new_v4(),
+            &JobCommand::TerminalOpen {
+                session_id,
+                argv: vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; done".to_string(),
+                ],
+                cwd: None,
+                user: None,
+                user_policy: vpsman_common::TerminalUserPolicy::Fail,
+                cols: 120,
+                rows: 40,
+                replay_from_seq: None,
+                idle_timeout_secs: 30,
+                flow_window_bytes: 65_536,
+            },
+            5,
+        )
+        .await
+        .unwrap();
+        assert_eq!(status_payload(&outputs)["status"], "opened");
+
+        let future = execute_job_command(
+            uuid::Uuid::new_v4(),
+            &JobCommand::TerminalInput {
+                session_id,
+                input_seq: 2,
+                data_base64: vpsman_common::encode_inline_file_payload(b"future\n").unwrap(),
+            },
+            5,
+        )
+        .await
+        .unwrap();
+        let future_status = status_payload(&future);
+        assert_eq!(future_status["status"], "out_of_order");
+        assert_eq!(future_status["written_bytes"], 0);
+        assert!(!pty_text(&future).contains("got:future"));
+
+        let accepted = execute_job_command(
+            uuid::Uuid::new_v4(),
+            &JobCommand::TerminalInput {
+                session_id,
+                input_seq: 1,
+                data_base64: vpsman_common::encode_inline_file_payload(b"hello\n").unwrap(),
+            },
+            5,
+        )
+        .await
+        .unwrap();
+        let accepted_status = status_payload(&accepted);
+        assert_eq!(accepted_status["status"], "accepted");
+        assert_eq!(accepted_status["written_bytes"], 6);
+        assert!(pty_text(&accepted).contains("got:hello"));
+
+        let duplicate = execute_job_command(
+            uuid::Uuid::new_v4(),
+            &JobCommand::TerminalInput {
+                session_id,
+                input_seq: 1,
+                data_base64: vpsman_common::encode_inline_file_payload(b"hello\n").unwrap(),
+            },
+            5,
+        )
+        .await
+        .unwrap();
+        let duplicate_status = status_payload(&duplicate);
+        assert_eq!(duplicate_status["status"], "duplicate_ignored");
+        assert_eq!(duplicate_status["written_bytes"], 0);
+
+        let conflict = execute_job_command(
+            uuid::Uuid::new_v4(),
+            &JobCommand::TerminalInput {
+                session_id,
+                input_seq: 1,
+                data_base64: vpsman_common::encode_inline_file_payload(b"different\n").unwrap(),
+            },
+            5,
+        )
+        .await
+        .unwrap();
+        let conflict_status = status_payload(&conflict);
+        assert_eq!(conflict_status["status"], "duplicate_conflict");
+        assert_eq!(conflict_status["written_bytes"], 0);
+        assert!(!pty_text(&conflict).contains("got:different"));
+
+        let _ = execute_job_command(
+            uuid::Uuid::new_v4(),
+            &JobCommand::TerminalClose {
+                session_id,
+                reason: Some("test cleanup".to_string()),
+            },
+            5,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn terminal_session_attach_replays_from_requested_cursor() {
         let session_id = uuid::Uuid::new_v4();
         let argv = vec![

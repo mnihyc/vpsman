@@ -15,10 +15,10 @@ use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
     job_command_protocol_version, job_command_safety, job_command_type_label,
     maybe_compress_payload, payload_hash, AgentCapabilitySnapshot, AgentConfig, AgentHello,
-    AgentPrivilegeMode, CommandOutput, CommandResume, Frame, JobAck, JobCancelAck,
-    JobCancelRequest, JobCommand, JobCommandSafety, JobRequest, MessageKind, NoiseFrameStream,
-    OutputStream, SequencedCommandOutput, ServerEndpoint, ServerHello, TelemetryEnvelope,
-    TerminalStreamOutput,
+    AgentPrivilegeMode, AgentSessionDisconnect, CommandOutput, CommandResume, Frame, JobAck,
+    JobCancelAck, JobCancelRequest, JobCommand, JobCommandSafety, JobRequest, MessageKind,
+    NoiseFrameStream, OutputStream, SequencedCommandOutput, ServerEndpoint, ServerHello,
+    TelemetryEnvelope, TerminalStreamOutput,
 };
 
 use crate::{
@@ -44,7 +44,11 @@ use crate::{
     restore_rollback::{execute_restore_rollback_command, RestoreRollbackCommandInput},
     supervisor::reconcile_supervised_processes_on_start,
     telemetry::{collect_metrics_for_config, read_optional, TelemetryRuntimeState},
-    terminal::execute_terminal_command_with_stream_sink,
+    terminal::{
+        close_all_terminal_sessions_for_lifecycle, drain_pending_terminal_final_events,
+        execute_terminal_command_with_stream_sink, mark_gateway_connected,
+        mark_gateway_disconnected,
+    },
     update::{execute_update_agent, execute_update_check, AgentUpdateCheckInput, AgentUpdateInput},
     update_activation::read_activation_heartbeat,
 };
@@ -87,8 +91,14 @@ pub(crate) async fn run_agent(
             )
             .await
             {
-                Ok(()) => warn!(label = %endpoint.label, "gateway session ended"),
-                Err(error) => warn!(%error, label = %endpoint.label, "gateway session failed"),
+                Ok(()) => {
+                    mark_gateway_disconnected().await;
+                    warn!(label = %endpoint.label, "gateway session ended");
+                }
+                Err(error) => {
+                    mark_gateway_disconnected().await;
+                    warn!(%error, label = %endpoint.label, "gateway session failed");
+                }
             }
         }
 
@@ -149,8 +159,20 @@ async fn connect_and_stream(
         server_build_number = server_hello.server_build_number,
         "gateway accepted agent"
     );
+    mark_gateway_connected().await;
 
     let mut seq = 2_u64;
+    for output in drain_pending_terminal_final_events().await {
+        send_json_frame(
+            &mut stream,
+            MessageKind::TerminalStreamOutput,
+            0,
+            seq,
+            &output,
+        )
+        .await?;
+        seq += 1;
+    }
     resume_active_commands(&mut stream, &mut seq, command_runtime).await?;
     let mut telemetry_runtime_state = TelemetryRuntimeState::default();
     let mut ticker = time::interval(Duration::from_secs(
@@ -202,6 +224,11 @@ async fn connect_and_stream(
                     }
                     MessageKind::Keepalive => {
                         debug!("gateway keepalive");
+                    }
+                    MessageKind::AgentSessionDisconnect => {
+                        let request: AgentSessionDisconnect =
+                            decode_json(&frame.decoded_payload()?)?;
+                        close_all_terminal_sessions_for_lifecycle(&request.reason).await;
                     }
                     other => {
                         debug!(?other, "unhandled agent frame");

@@ -87,7 +87,6 @@ export function JobOperationEditor({
   terminalUserPolicy,
   terminalFlowWindowBytes,
   terminalIdleTimeoutSecs,
-  terminalInputSeq,
   terminalInputText,
   terminalReplayFromSeq,
   terminalRows,
@@ -125,7 +124,6 @@ export function JobOperationEditor({
   setTerminalUserPolicy,
   setTerminalFlowWindowBytes,
   setTerminalIdleTimeoutSecs,
-  setTerminalInputSeq,
   setTerminalInputText,
   setTerminalReplayFromSeq,
   setTerminalRows,
@@ -191,7 +189,6 @@ export function JobOperationEditor({
   terminalUserPolicy: "fail" | "fallback";
   terminalFlowWindowBytes: number;
   terminalIdleTimeoutSecs: number;
-  terminalInputSeq: number;
   terminalInputText: string;
   terminalReplayFromSeq: string;
   terminalRows: number;
@@ -229,7 +226,6 @@ export function JobOperationEditor({
   setTerminalUserPolicy: (value: "fail" | "fallback") => void;
   setTerminalFlowWindowBytes: (value: number) => void;
   setTerminalIdleTimeoutSecs: (value: number) => void;
-  setTerminalInputSeq: (value: number) => void;
   setTerminalInputText: (value: string) => void;
   setTerminalReplayFromSeq: (value: string) => void;
   setTerminalRows: (value: number) => void;
@@ -333,7 +329,6 @@ export function JobOperationEditor({
         setTerminalUserPolicy={setTerminalUserPolicy}
         setTerminalFlowWindowBytes={setTerminalFlowWindowBytes}
         setTerminalIdleTimeoutSecs={setTerminalIdleTimeoutSecs}
-        setTerminalInputSeq={setTerminalInputSeq}
         setTerminalInputText={setTerminalInputText}
         setTerminalReplayFromSeq={setTerminalReplayFromSeq}
         setTerminalRows={setTerminalRows}
@@ -347,7 +342,6 @@ export function JobOperationEditor({
         terminalUserPolicy={terminalUserPolicy}
         terminalFlowWindowBytes={terminalFlowWindowBytes}
         terminalIdleTimeoutSecs={terminalIdleTimeoutSecs}
-        terminalInputSeq={terminalInputSeq}
         terminalInputText={terminalInputText}
         terminalReplayFromSeq={terminalReplayFromSeq}
         terminalRows={terminalRows}

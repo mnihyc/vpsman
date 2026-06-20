@@ -113,10 +113,9 @@ For interactive work:
 ```sh
 cargo run -p vpsctl -- terminal-open --argv /bin/sh --clients "$EDGE_CLIENT_ID" --confirmed
 cargo run -p vpsctl -- terminal-input \
+  --client-id "$EDGE_CLIENT_ID" \
   --session-id <session_uuid> \
-  --input-seq 1 \
   --text "uname -a\n" \
-  --clients "$EDGE_CLIENT_ID" \
   --confirmed
 cargo run -p vpsctl -- terminal-poll \
   --session-id <session_uuid> \
@@ -124,6 +123,9 @@ cargo run -p vpsctl -- terminal-poll \
   --clients "$EDGE_CLIENT_ID" \
   --confirmed
 ```
+
+Terminal input order is assigned by the server for the selected client and
+session; operators submit only the bytes to write.
 
 ## 6. Choose Data Sources
 

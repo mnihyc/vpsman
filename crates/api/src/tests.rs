@@ -448,6 +448,30 @@ async fn create_job_requires_client_supplied_job_id() {
 }
 
 #[tokio::test]
+async fn create_job_rejects_public_terminal_input_operation() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
+    let state = test_app_state(repo);
+    let operator = test_operator();
+    let mut request = route_job_request(Some(Uuid::new_v4()), "terminal_input");
+    request.destructive = true;
+    request.confirmed = true;
+    request.operation = Some(JobCommand::TerminalInput {
+        session_id: Uuid::new_v4(),
+        input_seq: 1,
+        data_base64: vpsman_common::encode_inline_file_payload(b"id\n").unwrap(),
+    });
+
+    let error = routes_jobs::create_job_with_operator(&state, &operator, request)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "terminal_input_route_required");
+    assert!(state.repo.list_jobs(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn create_job_retry_with_same_job_id_returns_existing_job() {
     let repo = Repository::Memory(MemoryState::default());
     seed_never_connected_memory_agent(&repo, "client-a").await;

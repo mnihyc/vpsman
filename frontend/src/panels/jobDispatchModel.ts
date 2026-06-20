@@ -47,7 +47,6 @@ export function buildOperation(
   terminalReplayFromSeq: string,
   terminalIdleTimeoutSecs: number,
   terminalFlowWindowBytes: number,
-  terminalInputSeq: number,
   terminalInputText: string,
   terminalCloseReason: string,
   filePath: string,
@@ -101,7 +100,6 @@ export function buildOperation(
       terminalReplayFromSeq,
       terminalIdleTimeoutSecs,
       terminalFlowWindowBytes,
-      terminalInputSeq,
       terminalInputText,
       terminalCloseReason,
     );
@@ -303,7 +301,6 @@ function buildTerminalOperation(
   replayFromSeqInput: string,
   idleTimeoutSecsInput: number,
   flowWindowBytesInput: number,
-  inputSeqInput: number,
   inputText: string,
   closeReasonInput: string,
 ): JobOperation {
@@ -337,12 +334,7 @@ function buildTerminalOperation(
     if (!inputText) {
       throw new Error("Terminal input is empty");
     }
-    return {
-      type: "terminal_input",
-      session_id: sessionId,
-      input_seq: clampInteger(inputSeqInput, 1, Number.MAX_SAFE_INTEGER),
-      data_base64: base64FromText(inputText),
-    };
+    throw new Error("Terminal input must be submitted from the live terminal input action");
   }
   if (action === "poll") {
     const replayFromSeq = replayFromSeqInput.trim();
@@ -364,14 +356,6 @@ function buildTerminalOperation(
   return reason
     ? { type: "terminal_close", session_id: sessionId, reason }
     : { type: "terminal_close", session_id: sessionId };
-}
-
-function base64FromText(value: string): string {
-  let binary = "";
-  for (const byte of new TextEncoder().encode(value)) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary);
 }
 
 export function supervisorReady(action: SupervisorAction, name: string, argv: string): boolean {

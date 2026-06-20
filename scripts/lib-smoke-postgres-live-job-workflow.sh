@@ -257,15 +257,16 @@ smoke_wait_api_job_status "$api_url" "$terminal_resize_job_id" completed 45 >/de
 terminal_input_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" terminal-input \
+    --client-id "$client_id" \
     --session-id "$terminal_session_id" \
-    --input-seq 1 \
     --data-base64 "$terminal_input_base64" \
-    --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
     --timeout-secs 10 \
     --confirmed)"
-terminal_input_job_id="$(jq -r '.job_id' <<<"$terminal_input_json")"
-smoke_assert_job_create_queued "$terminal_input_json" 1
+terminal_input_job_json="$(jq -c '.job' <<<"$terminal_input_json")"
+terminal_input_job_id="$(jq -r '.job_id' <<<"$terminal_input_job_json")"
+jq -e '.input_seq >= 1 and (.request_status | type == "string")' <<<"$terminal_input_json" >/dev/null
+smoke_assert_job_create_queued "$terminal_input_job_json" 1
 smoke_wait_api_job_status "$api_url" "$terminal_input_job_id" completed 45 >/dev/null
 
 terminal_attach_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \

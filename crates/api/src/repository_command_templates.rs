@@ -522,7 +522,7 @@ fn builtin_command_templates() -> Vec<CommandTemplateView> {
                 cols: 120,
                 rows: 40,
                 replay_from_seq: None,
-                idle_timeout_secs: 1800,
+                idle_timeout_secs: 3600,
                 flow_window_bytes: 64 * 1024,
             },
             30,

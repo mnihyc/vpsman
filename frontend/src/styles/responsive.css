@@ -413,6 +413,21 @@
     padding-right: 4px;
   }
 
+  .terminalOperation {
+    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .terminalOperation > svg {
+    display: none;
+  }
+
+  .terminalOperation > div,
+  .terminalOperation > label,
+  .terminalOperation .wideField {
+    grid-column: 1 / -1;
+  }
+
   .fileTransferDownloadOperation {
     grid-template-columns: minmax(0, 1fr);
   }

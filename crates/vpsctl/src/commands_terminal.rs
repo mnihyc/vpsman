@@ -4,11 +4,18 @@ use clap::Args;
 use serde_json::Value;
 use uuid::Uuid;
 use vpsman_common::{
-    default_terminal_flow_window_bytes, default_terminal_idle_timeout_secs, JobCommand,
-    TerminalUserPolicy,
+    default_terminal_flow_window_bytes, default_terminal_idle_timeout_secs, payload_hash,
+    JobCommand, TerminalUserPolicy,
 };
 
-use crate::jobs::{submit_privileged_operation, PrivilegedOperationRequest};
+use crate::{
+    http::http_post_json,
+    jobs::{submit_privileged_operation, PrivilegedOperationRequest},
+    privilege::{
+        build_privilege_for_terminal_input, load_super_password, load_super_salt_hex,
+        TerminalInputPrivilegeRequest,
+    },
+};
 
 #[derive(Debug, Args)]
 pub(crate) struct TerminalOpenCommand {
@@ -51,17 +58,13 @@ pub(crate) struct TerminalOpenCommand {
 #[derive(Debug, Args)]
 pub(crate) struct TerminalInputCommand {
     #[arg(long)]
+    pub(crate) client_id: String,
+    #[arg(long)]
     pub(crate) session_id: Uuid,
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
-    pub(crate) input_seq: u64,
     #[arg(long)]
     pub(crate) text: Option<String>,
     #[arg(long)]
     pub(crate) data_base64: Option<String>,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) clients: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) tags: Vec<String>,
     #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
     pub(crate) password_env: String,
     #[arg(long)]
@@ -182,26 +185,44 @@ pub(crate) fn terminal_input(
     token: Option<&str>,
     command: TerminalInputCommand,
 ) -> Result<()> {
+    validate_terminal_input_client_id(&command.client_id)?;
     let data_base64 = terminal_input_data(command.text, command.data_base64)?;
-    let operation = JobCommand::TerminalInput {
-        session_id: command.session_id,
-        input_seq: command.input_seq,
-        data_base64,
-    };
+    let data = BASE64
+        .decode(data_base64.as_bytes())
+        .context("terminal input data is not valid base64")?;
+    let password = load_super_password(&command.password_env)?;
+    let salt_hex = load_super_salt_hex(command.super_salt_hex.as_deref())?;
+    let job_id = Uuid::new_v4();
+    let session_id = command.session_id.to_string();
+    let input_payload_hash = payload_hash(&data);
+    let privilege_assertion = build_privilege_for_terminal_input(
+        TerminalInputPrivilegeRequest {
+            client_id: &command.client_id,
+            session_id: &session_id,
+            input_payload_hash: &input_payload_hash,
+            timeout_secs: command.timeout_secs,
+            confirmed: command.confirmed,
+        },
+        &password,
+        &salt_hex,
+        command.privilege_ttl_secs,
+    )?;
     println!(
         "{}",
-        submit_terminal_operation(
+        http_post_json(
             api_url,
+            &format!(
+                "/api/v1/terminal-sessions/{}/{}/input",
+                command.client_id, command.session_id
+            ),
             token,
-            &operation,
-            "terminal_input",
-            &command.clients,
-            &command.tags,
-            &command.password_env,
-            command.super_salt_hex.as_deref(),
-            command.privilege_ttl_secs,
-            command.timeout_secs,
-            command.confirmed,
+            &serde_json::json!({
+                "job_id": job_id,
+                "data_base64": data_base64,
+                "timeout_secs": command.timeout_secs,
+                "confirmed": command.confirmed,
+                "privilege_assertion": privilege_assertion,
+            }),
         )?
     );
     Ok(())
@@ -330,6 +351,17 @@ fn terminal_input_data(text: Option<String>, data_base64: Option<String>) -> Res
     }
 }
 
+fn validate_terminal_input_client_id(client_id: &str) -> Result<()> {
+    anyhow::ensure!(
+        !client_id.trim().is_empty()
+            && client_id.len() <= 128
+            && !client_id.contains('/')
+            && !client_id.chars().any(char::is_whitespace),
+        "terminal-input --client-id must be a path-safe client id"
+    );
+    Ok(())
+}
+
 fn enrich_terminal_open_response(session_id: Uuid, response: &str) -> Result<String> {
     let job: Value =
         serde_json::from_str(response).context("failed to parse terminal-open job response")?;
@@ -342,7 +374,7 @@ fn enrich_terminal_open_response(session_id: Uuid, response: &str) -> Result<Str
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_input_data;
+    use super::{terminal_input_data, validate_terminal_input_client_id};
 
     #[test]
     fn terminal_input_text_is_encoded_and_exclusive() {
@@ -352,5 +384,12 @@ mod tests {
         );
         assert!(terminal_input_data(Some("id".to_string()), Some("aWQ=".to_string())).is_err());
         assert!(terminal_input_data(None, None).is_err());
+    }
+
+    #[test]
+    fn terminal_input_client_id_is_path_safe() {
+        assert!(validate_terminal_input_client_id("edge-a").is_ok());
+        assert!(validate_terminal_input_client_id("edge/a").is_err());
+        assert!(validate_terminal_input_client_id("edge a").is_err());
     }
 }

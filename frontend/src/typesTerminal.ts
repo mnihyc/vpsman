@@ -4,6 +4,7 @@ import type {
   GeneratedTerminalSessionState,
   GeneratedTerminalSessionStatus,
 } from "./generated/protocolContracts";
+import type { CreateJobResponse, PrivilegeAssertion } from "./types";
 
 export type TerminalSessionRecord = {
   session_id: string;
@@ -53,4 +54,19 @@ export type TerminalReplayRecord = {
   truncated: boolean;
   source: string;
   chunks: TerminalReplayChunkRecord[];
+};
+
+export type TerminalInputSubmitRequest = {
+  job_id: string;
+  text?: string | null;
+  data_base64?: string | null;
+  timeout_secs?: number;
+  confirmed: boolean;
+  privilege_assertion?: PrivilegeAssertion | null;
+};
+
+export type TerminalInputSubmitResponse = {
+  job: CreateJobResponse;
+  input_seq: number;
+  request_status: string;
 };

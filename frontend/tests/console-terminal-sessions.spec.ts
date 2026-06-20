@@ -48,28 +48,24 @@ test("prepares terminal reconnect actions from retained session inventory", asyn
   await activate(page.getByRole("button", { name: "Input terminal session 61616161" }));
   await expect(composer.getByLabel("Terminal action")).toHaveValue("input");
   await expect(composer.getByLabel("Terminal session id")).toHaveValue("61616161-2222-4333-8444-555555555555");
-  await expect(composer.getByLabel("Terminal input sequence")).toHaveValue("3");
+  await expect(composer.getByLabel("Terminal input sequence")).toHaveCount(0);
   await expect(composer.getByLabel("Bulk target selector expression")).toContainText("id:agent-sfo-01");
 
   await composer.getByRole("textbox", { name: "Terminal input" }).fill("uptime\n");
   await dispatchWithPrompt(composer);
 
   const request = await page.evaluate(() => {
-    const requests = (window as unknown as { __vpsmanTestRequests: { jobs: Array<Record<string, unknown>> } })
-      .__vpsmanTestRequests.jobs;
+    const requests = (window as unknown as { __vpsmanTestRequests: { terminalInputs: Array<Record<string, unknown>> } })
+      .__vpsmanTestRequests.terminalInputs;
     return requests.at(-1);
   });
   expect(JSON.stringify(request)).not.toContain("local-super-password");
   expect(request).toMatchObject({
-    selector_expression: "id:agent-sfo-01",
-    command: "terminal_input",
-    operation: {
-      input_seq: 3,
-      session_id: "61616161-2222-4333-8444-555555555555",
-      type: "terminal_input",
-    },
-    privileged: true,
+    text: "uptime\n",
+    confirmed: true,
+    timeout_secs: 30,
   });
+  expect(JSON.stringify(request)).not.toContain("input_seq");
 });
 
 test("dispatches terminal poll from retained session inventory", async ({ page }, testInfo) => {

@@ -2,24 +2,277 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
 use serde_json::Value;
-use sqlx::{postgres::PgRow, types::Json as SqlJson, PgPool, Row};
+use sqlx::{postgres::PgRow, types::Json as SqlJson, PgPool, Postgres, Row, Transaction};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use uuid::Uuid;
 use vpsman_common::{
     is_terminal_command_type, is_terminal_session_event, payload_hash, terminal_session_state,
-    TerminalStreamOutput, MAX_TERMINAL_FLOW_WINDOW_BYTES,
+    CommandOutput, TerminalStreamOutput, MAX_TERMINAL_FLOW_WINDOW_BYTES,
 };
 
 use crate::{
     model::JobOutputView,
     model_terminal::{
-        TerminalOutputChunkRecord, TerminalReplayChunkView, TerminalReplayView, TerminalSessionView,
+        TerminalInputRequestRecord, TerminalOutputChunkRecord, TerminalReplayChunkView,
+        TerminalReplayView, TerminalSessionView,
     },
     repository::Repository,
     repository_job_outputs::JobOutputWriteResult,
+    ApiError,
 };
 
+const TERMINAL_INPUT_ACTIVE_STATUSES: &[&str] = &["reserved", "queued", "dispatching", "running"];
+
 impl Repository {
+    pub(crate) async fn reserve_terminal_input_request(
+        &self,
+        client_id: &str,
+        session_id: Uuid,
+        job_id: Uuid,
+        payload_sha256_hex: &str,
+        payload_size_bytes: i64,
+    ) -> std::result::Result<TerminalInputRequestRecord, ApiError> {
+        match self {
+            Self::Memory(memory) => {
+                let session = memory
+                    .terminal_sessions
+                    .read()
+                    .await
+                    .iter()
+                    .find(|session| {
+                        session.client_id == client_id && session.session_id == session_id
+                    })
+                    .cloned()
+                    .ok_or_else(|| ApiError::not_found("terminal_session_not_found"))?;
+                if session.state != "open" || session.session_exited {
+                    return Err(ApiError::conflict("terminal_session_not_open"));
+                }
+                let mut requests = memory.terminal_input_requests.write().await;
+                if let Some(existing) = requests.iter().find(|request| request.job_id == job_id) {
+                    if existing.client_id != client_id
+                        || existing.session_id != session_id
+                        || existing.payload_sha256_hex != payload_sha256_hex
+                    {
+                        return Err(ApiError::conflict("terminal_input_job_id_conflict"));
+                    }
+                    return Ok(existing.clone());
+                }
+                if requests.iter().any(|request| {
+                    request.client_id == client_id
+                        && request.session_id == session_id
+                        && TERMINAL_INPUT_ACTIVE_STATUSES.contains(&request.status.as_str())
+                }) {
+                    return Err(ApiError::conflict("terminal_input_request_pending"));
+                }
+                let last_session_seq = session.last_input_seq.unwrap_or(0);
+                let last_reserved_seq = requests
+                    .iter()
+                    .filter(|request| {
+                        request.client_id == client_id && request.session_id == session_id
+                    })
+                    .map(|request| request.input_seq)
+                    .max()
+                    .unwrap_or(0);
+                let now = now_rfc3339();
+                let record = TerminalInputRequestRecord {
+                    job_id,
+                    client_id: client_id.to_string(),
+                    session_id,
+                    input_seq: last_session_seq.max(last_reserved_seq).saturating_add(1),
+                    payload_sha256_hex: payload_sha256_hex.to_string(),
+                    status: "reserved".to_string(),
+                    updated_at: now,
+                    completed_at: None,
+                };
+                requests.push(record.clone());
+                Ok(record)
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool
+                    .begin()
+                    .await
+                    .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+                let session = sqlx::query(
+                    r#"
+                    SELECT state, session_exited, COALESCE(last_input_seq, 0) AS last_input_seq
+                    FROM terminal_sessions
+                    WHERE client_id = $1 AND session_id = $2
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(client_id)
+                .bind(session_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+                let Some(session) = session else {
+                    return Err(ApiError::not_found("terminal_session_not_found"));
+                };
+                let state: String = session
+                    .try_get("state")
+                    .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+                let session_exited: bool = session
+                    .try_get("session_exited")
+                    .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+                if state != "open" || session_exited {
+                    return Err(ApiError::conflict("terminal_session_not_open"));
+                }
+                if let Some(existing) =
+                    postgres_terminal_input_request_for_job(&mut tx, job_id).await?
+                {
+                    if existing.client_id != client_id
+                        || existing.session_id != session_id
+                        || existing.payload_sha256_hex != payload_sha256_hex
+                    {
+                        return Err(ApiError::conflict("terminal_input_job_id_conflict"));
+                    }
+                    tx.commit()
+                        .await
+                        .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+                    return Ok(existing);
+                }
+                let pending: Option<Uuid> = sqlx::query_scalar(
+                    r#"
+                    SELECT job_id
+                    FROM terminal_input_requests
+                    WHERE client_id = $1
+                      AND session_id = $2
+                      AND status IN ('reserved', 'queued', 'dispatching', 'running')
+                    ORDER BY input_seq ASC
+                    LIMIT 1
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(client_id)
+                .bind(session_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+                if pending.is_some() {
+                    return Err(ApiError::conflict("terminal_input_request_pending"));
+                }
+                let last_session_seq: i64 = session
+                    .try_get("last_input_seq")
+                    .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+                let last_reserved_seq: i64 = sqlx::query_scalar(
+                    r#"
+                    SELECT COALESCE(MAX(input_seq), 0)
+                    FROM terminal_input_requests
+                    WHERE client_id = $1 AND session_id = $2
+                    "#,
+                )
+                .bind(client_id)
+                .bind(session_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+                let input_seq = last_session_seq.max(last_reserved_seq).saturating_add(1);
+                let row = sqlx::query(
+                    r#"
+                    INSERT INTO terminal_input_requests (
+                        job_id,
+                        client_id,
+                        session_id,
+                        input_seq,
+                        payload_sha256_hex,
+                        payload_size_bytes,
+                        status
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, 'reserved')
+                    RETURNING
+                        job_id,
+                        client_id,
+                        session_id,
+                        input_seq,
+                        payload_sha256_hex,
+                        status,
+                        updated_at::text AS updated_at,
+                        completed_at::text AS completed_at
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(session_id)
+                .bind(input_seq)
+                .bind(payload_sha256_hex)
+                .bind(payload_size_bytes)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+                tx.commit()
+                    .await
+                    .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+                terminal_input_request_from_row(row)
+                    .map_err(|error| ApiError::from(anyhow::Error::from(error)))
+            }
+        }
+    }
+
+    pub(crate) async fn mark_terminal_input_request_status(
+        &self,
+        job_id: Uuid,
+        status: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                let now = now_rfc3339();
+                if let Some(request) = memory
+                    .terminal_input_requests
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|request| request.job_id == job_id)
+                {
+                    request.status = status.to_string();
+                    request.updated_at = now.clone();
+                    if !TERMINAL_INPUT_ACTIVE_STATUSES.contains(&status) {
+                        request.completed_at = Some(now);
+                    }
+                }
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                let completed = !TERMINAL_INPUT_ACTIVE_STATUSES.contains(&status);
+                sqlx::query(
+                    r#"
+                    UPDATE terminal_input_requests
+                    SET status = $2,
+                        updated_at = now(),
+                        completed_at = CASE WHEN $3 THEN COALESCE(completed_at, now()) ELSE completed_at END
+                    WHERE job_id = $1
+                    "#,
+                )
+                .bind(job_id)
+                .bind(status)
+                .bind(completed)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) async fn record_terminal_input_status_output(
+        &self,
+        job_id: Uuid,
+        output: &CommandOutput,
+    ) -> Result<()> {
+        if output.stream != vpsman_common::OutputStream::Status {
+            return Ok(());
+        }
+        let Ok(value) = serde_json::from_slice::<Value>(&output.data) else {
+            return Ok(());
+        };
+        if value.get("type").and_then(Value::as_str) != Some("terminal_input") {
+            return Ok(());
+        }
+        let Some(status) = value.get("status").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        self.mark_terminal_input_request_status(job_id, status)
+            .await
+    }
+
     pub(crate) async fn list_terminal_sessions(
         &self,
         limit: i64,
@@ -871,6 +1124,50 @@ fn terminal_output_chunk_from_row(
     })
 }
 
+async fn postgres_terminal_input_request_for_job(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+) -> std::result::Result<Option<TerminalInputRequestRecord>, ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            job_id,
+            client_id,
+            session_id,
+            input_seq,
+            payload_sha256_hex,
+            status,
+            updated_at::text AS updated_at,
+            completed_at::text AS completed_at
+        FROM terminal_input_requests
+        WHERE job_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    row.map(terminal_input_request_from_row)
+        .transpose()
+        .map_err(|error| ApiError::from(anyhow::Error::from(error)))
+}
+
+fn terminal_input_request_from_row(
+    row: PgRow,
+) -> std::result::Result<TerminalInputRequestRecord, sqlx::Error> {
+    Ok(TerminalInputRequestRecord {
+        job_id: row.try_get("job_id")?,
+        client_id: row.try_get("client_id")?,
+        session_id: row.try_get("session_id")?,
+        input_seq: row.try_get("input_seq")?,
+        payload_sha256_hex: row.try_get("payload_sha256_hex")?,
+        status: row.try_get("status")?,
+        updated_at: row.try_get("updated_at")?,
+        completed_at: row.try_get("completed_at")?,
+    })
+}
+
 #[derive(Clone, Debug)]
 struct TerminalStatusOutput {
     job_id: Uuid,
@@ -1611,8 +1908,163 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::{build_terminal_replay_from_chunks, build_terminal_sessions, TerminalStatusOutput};
-    use crate::model_terminal::TerminalOutputChunkRecord;
+    use crate::{
+        model_terminal::{TerminalOutputChunkRecord, TerminalSessionView},
+        repository::{MemoryState, Repository},
+    };
     use uuid::Uuid;
+    use vpsman_common::{CommandOutput, OutputStream};
+
+    #[tokio::test]
+    async fn memory_terminal_input_reservation_serializes_per_session() {
+        let repo = Repository::Memory(MemoryState::default());
+        let session_id = Uuid::new_v4();
+        insert_terminal_session(
+            &repo,
+            test_terminal_session("edge-a", session_id, Some(4), "open", false),
+        )
+        .await;
+
+        let payload_hash = vpsman_common::payload_hash(b"uptime\n");
+        let job_id = Uuid::new_v4();
+        let first = repo
+            .reserve_terminal_input_request("edge-a", session_id, job_id, &payload_hash, 7)
+            .await
+            .unwrap();
+        assert_eq!(first.input_seq, 5);
+        assert_eq!(first.status, "reserved");
+
+        let duplicate = repo
+            .reserve_terminal_input_request("edge-a", session_id, job_id, &payload_hash, 7)
+            .await
+            .unwrap();
+        assert_eq!(duplicate.input_seq, first.input_seq);
+
+        let conflict = repo
+            .reserve_terminal_input_request(
+                "edge-a",
+                session_id,
+                job_id,
+                &vpsman_common::payload_hash(b"whoami\n"),
+                7,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(conflict.code, "terminal_input_job_id_conflict");
+
+        let pending = repo
+            .reserve_terminal_input_request(
+                "edge-a",
+                session_id,
+                Uuid::new_v4(),
+                &vpsman_common::payload_hash(b"date\n"),
+                5,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(pending.code, "terminal_input_request_pending");
+
+        repo.mark_terminal_input_request_status(job_id, "accepted")
+            .await
+            .unwrap();
+        let next = repo
+            .reserve_terminal_input_request(
+                "edge-a",
+                session_id,
+                Uuid::new_v4(),
+                &vpsman_common::payload_hash(b"date\n"),
+                5,
+            )
+            .await
+            .unwrap();
+        assert_eq!(next.input_seq, 6);
+
+        let Repository::Memory(memory) = &repo else {
+            unreachable!("memory repository expected");
+        };
+        let requests = memory.terminal_input_requests.read().await;
+        let completed = requests
+            .iter()
+            .find(|request| request.job_id == job_id)
+            .unwrap();
+        assert_eq!(completed.status, "accepted");
+        assert!(completed.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn memory_terminal_input_reservation_rejects_missing_or_closed_sessions() {
+        let repo = Repository::Memory(MemoryState::default());
+        let session_id = Uuid::new_v4();
+        let payload_hash = vpsman_common::payload_hash(b"uptime\n");
+
+        let missing = repo
+            .reserve_terminal_input_request("edge-a", session_id, Uuid::new_v4(), &payload_hash, 7)
+            .await
+            .unwrap_err();
+        assert_eq!(missing.code, "terminal_session_not_found");
+
+        insert_terminal_session(
+            &repo,
+            test_terminal_session("edge-a", session_id, None, "closed", true),
+        )
+        .await;
+        let closed = repo
+            .reserve_terminal_input_request("edge-a", session_id, Uuid::new_v4(), &payload_hash, 7)
+            .await
+            .unwrap_err();
+        assert_eq!(closed.code, "terminal_session_not_open");
+    }
+
+    #[tokio::test]
+    async fn memory_terminal_input_status_output_updates_request_state() {
+        let repo = Repository::Memory(MemoryState::default());
+        let session_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        insert_terminal_session(
+            &repo,
+            test_terminal_session("edge-a", session_id, None, "open", false),
+        )
+        .await;
+        repo.reserve_terminal_input_request(
+            "edge-a",
+            session_id,
+            job_id,
+            &vpsman_common::payload_hash(b"uptime\n"),
+            7,
+        )
+        .await
+        .unwrap();
+
+        repo.record_terminal_input_status_output(
+            job_id,
+            &CommandOutput {
+                job_id,
+                stream: OutputStream::Status,
+                data: serde_json::to_vec(&serde_json::json!({
+                    "type": "terminal_input",
+                    "status": "duplicate_conflict",
+                    "session_id": session_id,
+                    "input_seq": 1
+                }))
+                .unwrap(),
+                exit_code: Some(31),
+                done: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let Repository::Memory(memory) = &repo else {
+            unreachable!("memory repository expected");
+        };
+        let requests = memory.terminal_input_requests.read().await;
+        let request = requests
+            .iter()
+            .find(|request| request.job_id == job_id)
+            .unwrap();
+        assert_eq!(request.status, "duplicate_conflict");
+        assert!(request.completed_at.is_some());
+    }
 
     #[test]
     fn builds_latest_open_terminal_session_with_start_metadata() {
@@ -1904,6 +2356,54 @@ mod tests {
             size_bytes: data.len() as i64,
             sha256_hex: vpsman_common::payload_hash(data),
             created_at: created_at.to_string(),
+        }
+    }
+
+    async fn insert_terminal_session(repo: &Repository, session: TerminalSessionView) {
+        let Repository::Memory(memory) = repo else {
+            unreachable!("memory repository expected");
+        };
+        memory.terminal_sessions.write().await.push(session);
+    }
+
+    fn test_terminal_session(
+        client_id: &str,
+        session_id: Uuid,
+        last_input_seq: Option<i64>,
+        state: &str,
+        session_exited: bool,
+    ) -> TerminalSessionView {
+        TerminalSessionView {
+            session_id,
+            client_id: client_id.to_string(),
+            state: state.to_string(),
+            last_status: if state == "open" {
+                "accepted"
+            } else {
+                "closed"
+            }
+            .to_string(),
+            argv: vec!["/bin/sh".to_string(), "-l".to_string()],
+            cwd: Some("/root".to_string()),
+            cols: Some(120),
+            rows: Some(40),
+            idle_timeout_secs: Some(3600),
+            flow_window_bytes: Some(65_536),
+            output_first_seq: Some(1),
+            output_next_seq: Some(1),
+            output_retained_first_seq: Some(1),
+            output_retained_bytes: Some(0),
+            output_dropped_bytes: Some(0),
+            output_dropped_chunks: Some(0),
+            output_replay_truncated: false,
+            last_input_seq,
+            session_exited,
+            close_reason: None,
+            last_event: state.to_string(),
+            last_job_id: Uuid::new_v4(),
+            last_command_type: "terminal_open".to_string(),
+            last_seq: 0,
+            observed_at: "2026-06-21T00:00:00Z".to_string(),
         }
     }
 }

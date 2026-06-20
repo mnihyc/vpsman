@@ -449,6 +449,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadJobs: jobs.loadJobs,
     loadServerJobs: jobs.loadServerJobs,
     loadTerminalReplay: jobs.loadTerminalReplay,
+    submitTerminalInput: jobs.submitTerminalInput,
     loadAgentUpdateReleases: jobs.loadAgentUpdateReleases,
     loadJobTargets: jobs.loadJobTargets,
     updateFleetAlertState: fleet.updateFleetAlertState,

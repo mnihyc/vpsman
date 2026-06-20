@@ -23,8 +23,8 @@ use vpsman_common::{
     job_target_terminal_statuses, job_terminal_statuses, migration_link_status_class_by_status,
     migration_link_statuses, restore_plan_status_class_by_status, restore_plan_statuses,
     schedule_privilege_intent_fields, server_job_status_class_by_status, server_job_statuses,
-    server_job_types, terminal_command_types, terminal_session_events,
-    terminal_session_state_class_by_state, terminal_session_states,
+    server_job_types, terminal_command_types, terminal_input_privilege_intent_fields,
+    terminal_session_events, terminal_session_state_class_by_state, terminal_session_states,
     terminal_session_status_class_by_status, terminal_session_statuses, topology_drift_actions,
     topology_drift_policies, topology_edge_health_status_class_by_status,
     topology_edge_health_statuses, topology_neighbor_state_class_by_state,
@@ -214,6 +214,11 @@ fn main() -> io::Result<()> {
         &mut output,
         "DB_PRIVILEGE_INTENT_FIELDS",
         db_privilege_intent_fields(),
+    )?;
+    write_string_array(
+        &mut output,
+        "TERMINAL_INPUT_PRIVILEGE_INTENT_FIELDS",
+        terminal_input_privilege_intent_fields(),
     )?;
     write_domain_array(
         &mut output,
@@ -617,7 +622,7 @@ fn write_contract_golden_vectors(output: &mut Vec<u8>) -> io::Result<()> {
                 cols: 120,
                 rows: 30,
                 replay_from_seq: None,
-                idle_timeout_secs: 1800,
+                idle_timeout_secs: 3600,
                 flow_window_bytes: 64 * 1024,
             },
         ),

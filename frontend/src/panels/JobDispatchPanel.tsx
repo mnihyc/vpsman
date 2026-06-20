@@ -25,9 +25,11 @@ import {
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import {
   buildPrivilegeAssertion,
+  canonicalTerminalInputPrivilegeIntent,
   canonicalJobPrivilegeIntent,
   operationPayloadHashHex,
   parseCommandArgv,
+  textPayloadHashHex,
   type PrivilegeAssertion,
   type PrivilegeMaterial,
 } from "../privilege";
@@ -66,7 +68,11 @@ import type {
   UpsertCommandTemplateRequest,
 } from "../types";
 import type { FileTransferSourceArtifactRecord } from "../typesFileTransfer";
-import type { TerminalSessionRecord } from "../typesTerminal";
+import type {
+  TerminalInputSubmitRequest,
+  TerminalInputSubmitResponse,
+  TerminalSessionRecord,
+} from "../typesTerminal";
 import { runPanelAction, shortId } from "../utils";
 import { DispatchOptions, JobTargetSelector } from "./JobDispatchControls";
 import { JobOperationEditor, OperationModeTabs } from "./jobs/JobOperationControls";
@@ -153,6 +159,15 @@ type DispatchConfirmationSnapshot = {
       privilegeAssertion: PrivilegeAssertion;
     }
   | {
+      kind: "terminal_input";
+      clientId: string;
+      jobId: string;
+      payloadHashHex: string;
+      privilegeAssertion: PrivilegeAssertion;
+      sessionId: string;
+      text: string;
+    }
+  | {
       kind: "transfer_upload";
       chunkSizeBytes: number;
       existingPolicy: FileExistingPolicy;
@@ -215,6 +230,7 @@ export function JobDispatchPanel({
   onLoadJob,
   onLoadOutputs,
   onLoadTargets,
+  onSubmitTerminalInput,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
   onResolveTargets,
@@ -235,6 +251,11 @@ export function JobDispatchPanel({
   onLoadJob: (jobId: string) => Promise<JobHistoryRecord>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
+  onSubmitTerminalInput: (
+    clientId: string,
+    sessionId: string,
+    request: TerminalInputSubmitRequest,
+  ) => Promise<TerminalInputSubmitResponse>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onResolveTargets: (selection: JobTargetSelection) => Promise<BulkResolveResponse>;
@@ -259,9 +280,8 @@ export function JobDispatchPanel({
   const [terminalCols, setTerminalCols] = useState(120);
   const [terminalRows, setTerminalRows] = useState(40);
   const [terminalReplayFromSeq, setTerminalReplayFromSeq] = useState("");
-  const [terminalIdleTimeoutSecs, setTerminalIdleTimeoutSecs] = useState(1800);
+  const [terminalIdleTimeoutSecs, setTerminalIdleTimeoutSecs] = useState(3600);
   const [terminalFlowWindowBytes, setTerminalFlowWindowBytes] = useState(65536);
-  const [terminalInputSeq, setTerminalInputSeq] = useState(1);
   const [terminalInputText, setTerminalInputText] = useState("");
   const [terminalCloseReason, setTerminalCloseReason] = useState("");
   const [filePath, setFilePath] = useState("");
@@ -388,14 +408,13 @@ export function JobDispatchPanel({
     setTerminalUserPolicy("fail");
     setTerminalCols(session.cols ?? 120);
     setTerminalRows(session.rows ?? 40);
-    setTerminalIdleTimeoutSecs(session.idle_timeout_secs ?? 1800);
+    setTerminalIdleTimeoutSecs(session.idle_timeout_secs ?? 3600);
     setTerminalFlowWindowBytes(session.flow_window_bytes ?? 65536);
     setTerminalReplayFromSeq(
       terminalComposerAction.action === "open" || terminalComposerAction.action === "poll"
         ? String(session.output_retained_first_seq ?? session.output_first_seq ?? 0)
         : "",
     );
-    setTerminalInputSeq((session.last_input_seq ?? 0) + 1);
     setTerminalInputText("");
     setTerminalCloseReason(session.close_reason ?? "operator");
     setSelectorExpression(`id:${session.client_id}`);
@@ -468,7 +487,6 @@ export function JobDispatchPanel({
     terminalCwd,
     terminalFlowWindowBytes,
     terminalIdleTimeoutSecs,
-    terminalInputSeq,
     terminalInputText,
     terminalReplayFromSeq,
     terminalRows,
@@ -583,7 +601,7 @@ export function JobDispatchPanel({
   );
   const impactMode = targetImpactModeForDispatch(mode);
   const supportsForceUnprivileged = impactMode !== "generic";
-  const operationNeedsConfirmation = generatedConfirmationRequiredForMode(mode, supervisorAction);
+  const operationNeedsConfirmation = generatedConfirmationRequiredForMode(mode, supervisorAction, terminalAction);
   const impactTargets = preview?.targets ?? expressionTargets;
   const activeDispatchConfirmation = dispatchPromptOpen ? dispatchConfirmation : null;
   const dispatchConfirmationSelector =
@@ -802,6 +820,41 @@ export function JobDispatchPanel({
         sessionId: fileTransferSessionId,
       };
     }
+    if (mode === "terminal_session" && terminalAction === "input") {
+      if (targets.length !== 1) {
+        throw new Error("Terminal input requires exactly one resolved VPS");
+      }
+      const sessionId = terminalSessionId.trim();
+      if (!/^[0-9a-fA-F-]{36}$/.test(sessionId)) {
+        throw new Error("Terminal session id must be a UUID");
+      }
+      if (!terminalInputText) {
+        throw new Error("Terminal input is empty");
+      }
+      const clientId = targets[0].id;
+      const payloadHashHex = await textPayloadHashHex(terminalInputText);
+      const privilegeAssertion = await buildPrivilegeAssertion({
+        intent: canonicalTerminalInputPrivilegeIntent({
+          clientId,
+          sessionId,
+          inputPayloadHash: payloadHashHex,
+          timeoutSecs: timeout,
+          confirmed: true,
+        }),
+        privilegeMaterial,
+      });
+      return {
+        ...base,
+        clientId,
+        jobId: crypto.randomUUID(),
+        kind: "terminal_input",
+        operationLabel: "terminal_input",
+        payloadHashHex,
+        privilegeAssertion,
+        sessionId,
+        text: terminalInputText,
+      };
+    }
     const filePushPayload = mode === "file_push" ? await readFilePushPayload(filePushSource) : null;
     const operation = buildOperation(
       mode,
@@ -819,7 +872,6 @@ export function JobDispatchPanel({
       terminalReplayFromSeq,
       terminalIdleTimeoutSecs,
       terminalFlowWindowBytes,
-      terminalInputSeq,
       terminalInputText,
       terminalCloseReason,
       filePath,
@@ -994,7 +1046,6 @@ export function JobDispatchPanel({
       terminalReplayFromSeq,
       terminalIdleTimeoutSecs,
       terminalFlowWindowBytes,
-      terminalInputSeq,
       terminalInputText,
       terminalCloseReason,
       filePath,
@@ -1152,6 +1203,19 @@ export function JobDispatchPanel({
         setLastJob(startJob);
         setLastPayloadHash(null);
         await trackDispatchProgress(startJob, confirmed.targets, confirmed.timeoutSecs);
+        return;
+      }
+      if (confirmed.kind === "terminal_input") {
+        const response = await onSubmitTerminalInput(confirmed.clientId, confirmed.sessionId, {
+          job_id: confirmed.jobId,
+          text: confirmed.text,
+          timeout_secs: confirmed.timeoutSecs,
+          confirmed: true,
+          privilege_assertion: confirmed.privilegeAssertion,
+        });
+        setLastJob(response.job);
+        setLastPayloadHash(confirmed.payloadHashHex);
+        await trackDispatchProgress(response.job, confirmed.targets, confirmed.timeoutSecs);
         return;
       }
       const clientIds = confirmed.targets.map((target) => target.id);
@@ -1390,7 +1454,6 @@ export function JobDispatchPanel({
           terminalUserPolicy={terminalUserPolicy}
           terminalFlowWindowBytes={terminalFlowWindowBytes}
           terminalIdleTimeoutSecs={terminalIdleTimeoutSecs}
-          terminalInputSeq={terminalInputSeq}
           terminalInputText={terminalInputText}
           terminalReplayFromSeq={terminalReplayFromSeq}
           terminalRows={terminalRows}
@@ -1423,7 +1486,6 @@ export function JobDispatchPanel({
           setTerminalUserPolicy={setTerminalUserPolicy}
           setTerminalFlowWindowBytes={setTerminalFlowWindowBytes}
           setTerminalIdleTimeoutSecs={setTerminalIdleTimeoutSecs}
-          setTerminalInputSeq={setTerminalInputSeq}
           setTerminalInputText={setTerminalInputText}
           setTerminalReplayFromSeq={setTerminalReplayFromSeq}
           setTerminalRows={setTerminalRows}
@@ -1593,10 +1655,21 @@ function vpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
 }
 
-function generatedConfirmationRequiredForMode(mode: DispatchMode, supervisorAction: SupervisorAction): boolean {
+function generatedConfirmationRequiredForMode(
+  mode: DispatchMode,
+  supervisorAction: SupervisorAction,
+  terminalAction: TerminalAction,
+): boolean {
+  const terminalOperationType = {
+    close: "terminal_close",
+    input: "terminal_input",
+    open: "terminal_open",
+    poll: "terminal_poll",
+    resize: "terminal_resize",
+  } satisfies Record<TerminalAction, keyof typeof JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE>;
   const operationType =
     mode === "terminal_session"
-      ? "terminal_open"
+      ? terminalOperationType[terminalAction]
       : mode === "file_transfer_upload"
         ? "file_transfer_start"
         : mode === "file_transfer_download"

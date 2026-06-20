@@ -4,6 +4,7 @@ import {
   DB_PRIVILEGE_INTENT_FIELDS,
   JOB_PRIVILEGE_INTENT_FIELDS,
   SCHEDULE_PRIVILEGE_INTENT_FIELDS,
+  TERMINAL_INPUT_PRIVILEGE_INTENT_FIELDS,
 } from "./generated/protocolContracts";
 
 const encoder = new TextEncoder();
@@ -63,6 +64,14 @@ export type DbPrivilegeIntentInput = {
   resolvedTargets?: string[];
   confirmed: boolean;
   payloadHash?: string | null;
+};
+
+export type TerminalInputPrivilegeIntentInput = {
+  clientId: string;
+  sessionId: string;
+  inputPayloadHash: string;
+  timeoutSecs: number;
+  confirmed: boolean;
 };
 
 export type OperatorDbPayloadInput = {
@@ -335,6 +344,20 @@ export function canonicalDbPrivilegeIntent(input: DbPrivilegeIntentInput): strin
   return JSON.stringify(ordered(entries));
 }
 
+export function canonicalTerminalInputPrivilegeIntent(input: TerminalInputPrivilegeIntentInput): string {
+  const entries: Array<[string, JsonValue]> = [
+    ["version", 1],
+    ["action", "terminal_input.submit"],
+    ["client_id", input.clientId.trim()],
+    ["session_id", input.sessionId.trim()],
+    ["input_payload_hash", normalizeSha256Hex(input.inputPayloadHash)],
+    ["timeout_secs", clampInteger(input.timeoutSecs, 1, 3600)],
+    ["confirmed", input.confirmed],
+  ];
+  assertGeneratedFieldOrder("terminal input privilege", entries, TERMINAL_INPUT_PRIVILEGE_INTENT_FIELDS);
+  return JSON.stringify(ordered(entries));
+}
+
 function operationPayloadBytes(operation: JobOperation): Uint8Array {
   return encoder.encode(canonicalOperationJson(operation));
 }
@@ -362,7 +385,7 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["cols", operation.cols],
         ["rows", operation.rows],
         ["replay_from_seq", optional(operation.replay_from_seq)],
-        ["idle_timeout_secs", operation.idle_timeout_secs ?? 1800],
+        ["idle_timeout_secs", operation.idle_timeout_secs ?? 3600],
         ["flow_window_bytes", operation.flow_window_bytes ?? 64 * 1024],
       ]);
     case "terminal_input":

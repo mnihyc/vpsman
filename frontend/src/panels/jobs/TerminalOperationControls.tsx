@@ -11,7 +11,6 @@ export function TerminalOperationControls({
   terminalUserPolicy,
   terminalFlowWindowBytes,
   terminalIdleTimeoutSecs,
-  terminalInputSeq,
   terminalInputText,
   terminalReplayFromSeq,
   terminalRows,
@@ -25,7 +24,6 @@ export function TerminalOperationControls({
   setTerminalUserPolicy,
   setTerminalFlowWindowBytes,
   setTerminalIdleTimeoutSecs,
-  setTerminalInputSeq,
   setTerminalInputText,
   setTerminalReplayFromSeq,
   setTerminalRows,
@@ -40,7 +38,6 @@ export function TerminalOperationControls({
   terminalUserPolicy: "fail" | "fallback";
   terminalFlowWindowBytes: number;
   terminalIdleTimeoutSecs: number;
-  terminalInputSeq: number;
   terminalInputText: string;
   terminalReplayFromSeq: string;
   terminalRows: number;
@@ -54,7 +51,6 @@ export function TerminalOperationControls({
   setTerminalUserPolicy: (value: "fail" | "fallback") => void;
   setTerminalFlowWindowBytes: (value: number) => void;
   setTerminalIdleTimeoutSecs: (value: number) => void;
-  setTerminalInputSeq: (value: number) => void;
   setTerminalInputText: (value: string) => void;
   setTerminalReplayFromSeq: (value: string) => void;
   setTerminalRows: (value: number) => void;
@@ -165,27 +161,18 @@ export function TerminalOperationControls({
         </label>
       )}
       {terminalAction === "input" && (
-        <>
-          <label>
-            <span>Input seq</span>
-            <input
-              aria-label="Terminal input sequence"
-              min={0}
-              onChange={(event) => setTerminalInputSeq(Number(event.target.value))}
-              type="number"
-              value={terminalInputSeq}
-            />
-          </label>
-          <label className="wideField">
-            <span>Input</span>
-            <textarea
-              aria-label="Terminal input"
-              onChange={(event) => setTerminalInputText(event.target.value)}
-              rows={3}
-              value={terminalInputText}
-            />
-          </label>
-        </>
+        <label
+          className="wideField"
+          title="Input order is assigned by the server for this terminal session; submit only the bytes to write."
+        >
+          <span>Input</span>
+          <textarea
+            aria-label="Terminal input"
+            onChange={(event) => setTerminalInputText(event.target.value)}
+            rows={3}
+            value={terminalInputText}
+          />
+        </label>
       )}
       {(terminalAction === "open" || terminalAction === "resize") && (
         <>

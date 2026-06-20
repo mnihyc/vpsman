@@ -17,9 +17,9 @@ use tokio::{
 };
 use tracing::warn;
 use vpsman_common::{
-    AgentConfig, AgentExecutionEnvironmentPolicy, AgentExecutionPtyPolicy, CommandOutput,
-    JobCommand, OutputStream, TerminalStreamOutput, TerminalUserPolicy, MAX_TERMINAL_INPUT_BYTES,
-    MAX_TERMINAL_REASON_BYTES,
+    payload_hash, AgentConfig, AgentExecutionEnvironmentPolicy, AgentExecutionPtyPolicy,
+    CommandOutput, JobCommand, OutputStream, TerminalStreamOutput, TerminalUserPolicy,
+    MAX_TERMINAL_INPUT_BYTES, MAX_TERMINAL_REASON_BYTES,
 };
 
 use crate::{
@@ -35,8 +35,12 @@ const TERMINAL_OUTPUT_SETTLE_MS: u64 = 80;
 const TERMINAL_IDLE_SCAN_SECS: u64 = 30;
 const TERMINAL_CLOSE_GRACE_MS: u64 = 500;
 const TERMINAL_FINAL_EVENT_SEND_TIMEOUT_SECS: u64 = 5;
+const TERMINAL_DISCONNECTED_GRACE_SECS: u64 = 3600;
+const TERMINAL_PENDING_FINAL_EVENTS_MAX: usize = 256;
 
 static TERMINAL_REGISTRY: OnceLock<TerminalRegistry> = OnceLock::new();
+static TERMINAL_PENDING_FINAL_EVENTS: OnceLock<Mutex<VecDeque<TerminalStreamOutput>>> =
+    OnceLock::new();
 
 pub(crate) async fn execute_terminal_command(
     config: &AgentConfig,
@@ -60,6 +64,25 @@ pub(crate) async fn execute_terminal_command_with_stream_sink(
     )
     .await
     .context("terminal command timed out")?
+}
+
+pub(crate) async fn mark_gateway_connected() {
+    registry().mark_connected().await;
+}
+
+pub(crate) async fn mark_gateway_disconnected() {
+    registry().mark_disconnected().await;
+}
+
+pub(crate) async fn close_all_terminal_sessions_for_lifecycle(reason: &str) {
+    let entries = registry().remove_all().await;
+    for entry in entries {
+        close_removed_terminal_entry(entry, "lifecycle_disconnected", reason).await;
+    }
+}
+
+pub(crate) async fn drain_pending_terminal_final_events() -> Vec<TerminalStreamOutput> {
+    pending_final_events().lock().await.drain(..).collect()
 }
 
 async fn execute_terminal_command_inner(
@@ -254,6 +277,9 @@ async fn open_terminal_session(input: TerminalOpenInput<'_>) -> Result<Vec<Comma
                 handle: handle.clone(),
                 last_delivered_seq: input.replay_from_seq.unwrap_or_default(),
                 last_input_seq: 0,
+                accepted_inputs: HashMap::new(),
+                disconnected_since: None,
+                idle_timeout_secs: input.idle_timeout_secs,
                 cols: input.cols,
                 rows: input.rows,
             },
@@ -384,17 +410,18 @@ async fn input_terminal_session(
     if data.is_empty() || data.len() > MAX_TERMINAL_INPUT_BYTES {
         anyhow::bail!("terminal input size is out of range");
     }
-    let Some(handle) = registry().accept_input(session_id, input_seq).await else {
+    let data_sha256_hex = payload_hash(&data);
+    let Some(handle) = registry()
+        .accept_input(session_id, input_seq, &data_sha256_hex)
+        .await
+    else {
         return Ok(vec![missing_session_status(
             job_id,
             session_id,
             "terminal_input",
         )]);
     };
-    let mut duplicate = false;
-    if handle.input_already_seen {
-        duplicate = true;
-    } else {
+    if handle.decision == TerminalInputDecision::Accepted {
         let mut writer = handle.session.writer.lock().await;
         writer.write_all(&data).await?;
         writer.flush().await?;
@@ -405,21 +432,22 @@ async fn input_terminal_session(
         time::sleep(Duration::from_millis(TERMINAL_OUTPUT_SETTLE_MS)).await;
     }
     let (outputs, range) = collect_session_output(job_id, session_id, None).await;
+    let status = handle.decision.status();
     Ok(with_status(
         outputs,
         job_id,
         status_with_output_range(
             serde_json::json!({
             "type": "terminal_input",
-            "status": if duplicate { "duplicate_ignored" } else { "accepted" },
+            "status": status,
             "session_id": session_id,
             "input_seq": input_seq,
-            "written_bytes": if duplicate { 0 } else { data.len() },
+            "written_bytes": if handle.decision == TerminalInputDecision::Accepted { data.len() } else { 0 },
             "session_exited": handle.session.session_exited().await,
             }),
             &range,
         ),
-        Some(0),
+        Some(handle.decision.exit_code()),
     ))
 }
 
@@ -573,16 +601,31 @@ impl TerminalSessionHandle {
         done: bool,
         exit_code: Option<i32>,
     ) {
+        self.emit_stream_status_with_reason(event_type, status, done, exit_code, None)
+            .await;
+    }
+
+    async fn emit_stream_status_with_reason(
+        &self,
+        event_type: &'static str,
+        status: &'static str,
+        done: bool,
+        exit_code: Option<i32>,
+        reason: Option<&str>,
+    ) {
         let range = self.output.lock().await.range_from(1);
-        let status = status_with_output_range(
-            serde_json::json!({
-                "type": event_type,
-                "status": status,
-                "session_id": self.session_id,
-                "session_exited": self.session_exited().await,
-            }),
-            &range,
-        );
+        let mut status_value = serde_json::json!({
+            "type": event_type,
+            "status": status,
+            "session_id": self.session_id,
+            "session_exited": self.session_exited().await,
+        });
+        if let Some(reason) = reason {
+            if let Some(object) = status_value.as_object_mut() {
+                object.insert("reason".to_string(), serde_json::json!(reason));
+            }
+        }
+        let status = status_with_output_range(status_value, &range);
         let output = CommandOutput {
             job_id: self.open_job_id,
             stream: OutputStream::Status,
@@ -600,9 +643,6 @@ impl TerminalSessionHandle {
         output: CommandOutput,
         reliable: bool,
     ) {
-        let Some(stream_tx) = self.stream_tx.lock().await.clone() else {
-            return;
-        };
         let event = TerminalStreamOutput {
             job_id: self.open_job_id,
             session_id: self.session_id,
@@ -616,21 +656,26 @@ impl TerminalSessionHandle {
             output_replay_truncated: range.replay_truncated,
             output,
         };
+        let Some(stream_tx) = self.stream_tx.lock().await.clone() else {
+            return;
+        };
         if reliable {
             match time::timeout(
                 Duration::from_secs(TERMINAL_FINAL_EVENT_SEND_TIMEOUT_SECS),
-                stream_tx.send(event),
+                stream_tx.send(event.clone()),
             )
             .await
             {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => {
+                    queue_pending_terminal_final_event(event).await;
                     warn!(
                         session_id = %self.session_id,
                         "terminal final stream status could not be queued because the stream receiver closed"
                     );
                 }
                 Err(_) => {
+                    queue_pending_terminal_final_event(event).await;
                     warn!(
                         session_id = %self.session_id,
                         "terminal final stream status timed out while waiting for queue capacity"
@@ -685,16 +730,37 @@ impl TerminalRegistry {
         &self,
         session_id: uuid::Uuid,
         input_seq: u64,
+        data_sha256_hex: &str,
     ) -> Option<TerminalInputHandle> {
         let mut sessions = self.sessions.lock().await;
         let entry = sessions.get_mut(&session_id)?;
-        let input_already_seen = input_seq <= entry.last_input_seq;
-        if !input_already_seen {
+        entry.disconnected_since = None;
+        let decision = if input_seq == entry.last_input_seq.saturating_add(1) {
             entry.last_input_seq = input_seq;
+            entry
+                .accepted_inputs
+                .insert(input_seq, data_sha256_hex.to_string());
+            TerminalInputDecision::Accepted
+        } else if input_seq <= entry.last_input_seq {
+            match entry.accepted_inputs.get(&input_seq) {
+                Some(stored_hash) if stored_hash == data_sha256_hex => {
+                    TerminalInputDecision::DuplicateIgnored
+                }
+                _ => TerminalInputDecision::DuplicateConflict,
+            }
+        } else {
+            TerminalInputDecision::OutOfOrder
+        };
+        while entry.accepted_inputs.len() > 128 {
+            if let Some(oldest) = entry.accepted_inputs.keys().next().copied() {
+                entry.accepted_inputs.remove(&oldest);
+            } else {
+                break;
+            }
         }
         Some(TerminalInputHandle {
             session: entry.handle.clone(),
-            input_already_seen,
+            decision,
         })
     }
 
@@ -706,6 +772,7 @@ impl TerminalRegistry {
     ) -> Option<TerminalSessionHandle> {
         let mut sessions = self.sessions.lock().await;
         let entry = sessions.get_mut(&session_id)?;
+        entry.disconnected_since = None;
         entry.cols = cols;
         entry.rows = rows;
         Some(entry.handle.clone())
@@ -713,8 +780,59 @@ impl TerminalRegistry {
 
     async fn update_delivered_seq(&self, session_id: uuid::Uuid, next_seq: u64) {
         if let Some(entry) = self.sessions.lock().await.get_mut(&session_id) {
+            entry.disconnected_since = None;
             entry.last_delivered_seq = entry.last_delivered_seq.max(next_seq);
         }
+    }
+
+    async fn mark_connected(&self) {
+        for entry in self.sessions.lock().await.values_mut() {
+            entry.disconnected_since = None;
+        }
+    }
+
+    async fn mark_disconnected(&self) {
+        let now = unix_now();
+        for entry in self.sessions.lock().await.values_mut() {
+            entry.disconnected_since.get_or_insert(now);
+        }
+    }
+
+    async fn disconnected_expired_sessions(&self) -> Vec<TerminalRegistryEntry> {
+        let now = unix_now();
+        let expired = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .iter()
+                .filter_map(|(session_id, entry)| {
+                    let disconnected_since = entry.disconnected_since?;
+                    let grace = u64::from(entry.idle_timeout_secs.max(1))
+                        .min(TERMINAL_DISCONNECTED_GRACE_SECS);
+                    if now.saturating_sub(disconnected_since) >= grace {
+                        Some(*session_id)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut removed = Vec::with_capacity(expired.len());
+        let mut sessions = self.sessions.lock().await;
+        for session_id in expired {
+            if let Some(entry) = sessions.remove(&session_id) {
+                removed.push(entry);
+            }
+        }
+        removed
+    }
+
+    async fn remove_all(&self) -> Vec<TerminalRegistryEntry> {
+        self.sessions
+            .lock()
+            .await
+            .drain()
+            .map(|(_, entry)| entry)
+            .collect()
     }
 }
 
@@ -722,13 +840,43 @@ struct TerminalRegistryEntry {
     handle: TerminalSessionHandle,
     last_delivered_seq: u64,
     last_input_seq: u64,
+    accepted_inputs: HashMap<u64, String>,
+    disconnected_since: Option<u64>,
+    idle_timeout_secs: u32,
     cols: u16,
     rows: u16,
 }
 
 struct TerminalInputHandle {
     session: TerminalSessionHandle,
-    input_already_seen: bool,
+    decision: TerminalInputDecision,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalInputDecision {
+    Accepted,
+    DuplicateIgnored,
+    DuplicateConflict,
+    OutOfOrder,
+}
+
+impl TerminalInputDecision {
+    fn status(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::DuplicateIgnored => "duplicate_ignored",
+            Self::DuplicateConflict => "duplicate_conflict",
+            Self::OutOfOrder => "out_of_order",
+        }
+    }
+
+    fn exit_code(self) -> i32 {
+        match self {
+            Self::Accepted | Self::DuplicateIgnored => 0,
+            Self::DuplicateConflict => 125,
+            Self::OutOfOrder => 126,
+        }
+    }
 }
 
 struct TerminalOutputBuffer {
@@ -973,6 +1121,14 @@ fn spawn_idle_reaper(
                 let _ = registry().remove(session_id).await;
                 break;
             }
+            for entry in registry().disconnected_expired_sessions().await {
+                close_removed_terminal_entry(
+                    entry,
+                    "disconnected_timeout",
+                    "gateway_disconnected_timeout",
+                )
+                .await;
+            }
             let idle_for = unix_now().saturating_sub(handle.last_activity.load(Ordering::Relaxed));
             if idle_for >= idle_timeout_secs {
                 let _ = terminate_terminal_process_group(handle.process_group_id).await;
@@ -984,6 +1140,25 @@ fn spawn_idle_reaper(
             }
         }
     });
+}
+
+async fn close_removed_terminal_entry(
+    entry: TerminalRegistryEntry,
+    status: &'static str,
+    reason: &str,
+) {
+    if let Err(error) = terminate_terminal_process_group(entry.handle.process_group_id).await {
+        warn!(
+            %error,
+            session_id = %entry.handle.session_id,
+            "terminal lifecycle process cleanup failed"
+        );
+    }
+    time::sleep(Duration::from_millis(TERMINAL_OUTPUT_SETTLE_MS)).await;
+    entry
+        .handle
+        .emit_stream_status_with_reason("terminal_stream", status, true, Some(0), Some(reason))
+        .await;
 }
 
 fn with_status(
@@ -1114,9 +1289,100 @@ fn registry() -> &'static TerminalRegistry {
     })
 }
 
+fn pending_final_events() -> &'static Mutex<VecDeque<TerminalStreamOutput>> {
+    TERMINAL_PENDING_FINAL_EVENTS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+async fn queue_pending_terminal_final_event(event: TerminalStreamOutput) {
+    let mut pending = pending_final_events().lock().await;
+    if pending.len() >= TERMINAL_PENDING_FINAL_EVENTS_MAX {
+        pending.pop_front();
+        warn!("terminal pending final event buffer full; dropped oldest final event");
+    }
+    pending.push_back(event);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_registry_expires_disconnected_sessions_by_capped_idle_timeout() {
+        let registry = TerminalRegistry {
+            sessions: Mutex::new(HashMap::new()),
+        };
+        let long_idle_session = uuid::Uuid::new_v4();
+        registry
+            .insert(
+                long_idle_session,
+                test_registry_entry(long_idle_session, 86_400).await,
+            )
+            .await;
+        registry.mark_disconnected().await;
+        set_disconnected_since(
+            &registry,
+            long_idle_session,
+            unix_now().saturating_sub(3_599),
+        )
+        .await;
+        assert!(registry.disconnected_expired_sessions().await.is_empty());
+
+        registry.mark_connected().await;
+        assert_disconnected_since(&registry, long_idle_session, None).await;
+        registry.mark_disconnected().await;
+        set_disconnected_since(
+            &registry,
+            long_idle_session,
+            unix_now().saturating_sub(3_600),
+        )
+        .await;
+        let expired = registry.disconnected_expired_sessions().await;
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].idle_timeout_secs, 86_400);
+        assert_eq!(registry.session_count().await, 0);
+
+        let short_idle_session = uuid::Uuid::new_v4();
+        registry
+            .insert(
+                short_idle_session,
+                test_registry_entry(short_idle_session, 30).await,
+            )
+            .await;
+        registry.mark_disconnected().await;
+        set_disconnected_since(&registry, short_idle_session, unix_now().saturating_sub(29)).await;
+        assert!(registry.disconnected_expired_sessions().await.is_empty());
+        set_disconnected_since(&registry, short_idle_session, unix_now().saturating_sub(30)).await;
+        assert_eq!(registry.disconnected_expired_sessions().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reliable_terminal_final_status_buffers_when_stream_receiver_closed() {
+        drain_pending_terminal_final_events().await;
+        let session_id = uuid::Uuid::new_v4();
+        let entry = test_registry_entry(session_id, 30).await;
+        let (stream_tx, stream_rx) = mpsc::channel(1);
+        drop(stream_rx);
+        *entry.handle.stream_tx.lock().await = Some(stream_tx);
+
+        entry
+            .handle
+            .emit_stream_status_with_reason(
+                "terminal_stream",
+                "disconnected_timeout",
+                true,
+                Some(0),
+                Some("gateway_disconnected_timeout"),
+            )
+            .await;
+
+        let pending = drain_pending_terminal_final_events().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].session_id, session_id);
+        assert!(pending[0].output.done);
+        let status: serde_json::Value = serde_json::from_slice(&pending[0].output.data).unwrap();
+        assert_eq!(status["status"], "disconnected_timeout");
+        assert_eq!(status["reason"], "gateway_disconnected_timeout");
+    }
 
     #[test]
     fn terminal_output_buffer_retains_tail_and_reports_truncation() {
@@ -1147,5 +1413,67 @@ mod tests {
 
         let current_snapshot = output.snapshot_from(3);
         assert!(!current_snapshot.range.replay_truncated);
+    }
+
+    async fn test_registry_entry(
+        session_id: uuid::Uuid,
+        idle_timeout_secs: u32,
+    ) -> TerminalRegistryEntry {
+        TerminalRegistryEntry {
+            handle: TerminalSessionHandle {
+                session_id,
+                open_job_id: uuid::Uuid::new_v4(),
+                writer: Arc::new(Mutex::new(
+                    tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .open("/dev/null")
+                        .await
+                        .unwrap(),
+                )),
+                output: Arc::new(Mutex::new(TerminalOutputBuffer::new(1024))),
+                exit_code: Arc::new(Mutex::new(None)),
+                process_group_id: 0,
+                last_activity: Arc::new(AtomicU64::new(unix_now())),
+                stream_tx: Arc::new(Mutex::new(None)),
+            },
+            last_delivered_seq: 1,
+            last_input_seq: 0,
+            accepted_inputs: HashMap::new(),
+            disconnected_since: None,
+            idle_timeout_secs,
+            cols: 120,
+            rows: 40,
+        }
+    }
+
+    async fn set_disconnected_since(
+        registry: &TerminalRegistry,
+        session_id: uuid::Uuid,
+        disconnected_since: u64,
+    ) {
+        registry
+            .sessions
+            .lock()
+            .await
+            .get_mut(&session_id)
+            .unwrap()
+            .disconnected_since = Some(disconnected_since);
+    }
+
+    async fn assert_disconnected_since(
+        registry: &TerminalRegistry,
+        session_id: uuid::Uuid,
+        expected: Option<u64>,
+    ) {
+        assert_eq!(
+            registry
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .unwrap()
+                .disconnected_since,
+            expected
+        );
     }
 }

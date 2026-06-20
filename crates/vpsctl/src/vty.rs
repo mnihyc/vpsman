@@ -190,8 +190,8 @@ const SCHEDULE_CREATE_USAGE: &str = concat!(
 const TERMINAL_COMMAND_USAGE: &str = concat!(
     "usage: terminal-open --argv </abs/bin,arg> <target ...> [--session-id <uuid>] ",
     "[--cols <20-240>] [--rows <5-120>] [--confirmed]\n",
-    "usage: terminal-input --session-id <uuid> --input-seq <n> ",
-    "(--text <text>|--data-base64 <b64>) <target ...>\n",
+    "usage: terminal-input --client-id <id> --session-id <uuid> ",
+    "(--text <text>|--data-base64 <b64>) --confirmed\n",
     "usage: terminal-poll --session-id <uuid> [--replay-from-seq <n>] <target ...>\n",
     "usage: terminal-resize --session-id <uuid> --cols <20-240> ",
     "--rows <5-120> <target ...>\n",

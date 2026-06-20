@@ -1,9 +1,10 @@
 use anyhow::{ensure, Context, Result};
 use vpsman_common::{
     canonical_db_privilege_intent, canonical_job_privilege_intent,
-    canonical_schedule_privilege_intent, derive_super_key, encode_json, payload_hash, random_nonce,
-    sign_privilege_assertion, JobCommand, JobPrivilegeIntentInput, PrivilegeAssertion,
-    SchedulePrivilegeIntentInput,
+    canonical_schedule_privilege_intent, canonical_terminal_input_privilege_intent,
+    derive_super_key, encode_json, payload_hash, random_nonce, sign_privilege_assertion,
+    JobCommand, JobPrivilegeIntentInput, PrivilegeAssertion, SchedulePrivilegeIntentInput,
+    TerminalInputPrivilegeIntentInput,
 };
 
 use crate::unix_now;
@@ -166,6 +167,30 @@ pub(crate) fn build_privilege_for_db(
         request.confirmed,
         request.payload_hash,
     )?;
+    build_privilege_assertion(&intent, password, salt_hex, ttl_secs)
+}
+
+pub(crate) struct TerminalInputPrivilegeRequest<'a> {
+    pub(crate) client_id: &'a str,
+    pub(crate) session_id: &'a str,
+    pub(crate) input_payload_hash: &'a str,
+    pub(crate) timeout_secs: u64,
+    pub(crate) confirmed: bool,
+}
+
+pub(crate) fn build_privilege_for_terminal_input(
+    request: TerminalInputPrivilegeRequest<'_>,
+    password: &str,
+    salt_hex: &str,
+    ttl_secs: u64,
+) -> Result<PrivilegeAssertion> {
+    let intent = canonical_terminal_input_privilege_intent(TerminalInputPrivilegeIntentInput {
+        client_id: request.client_id,
+        session_id: request.session_id,
+        input_payload_hash: request.input_payload_hash,
+        timeout_secs: request.timeout_secs,
+        confirmed: request.confirmed,
+    })?;
     build_privilege_assertion(&intent, password, salt_hex, ttl_secs)
 }
 
