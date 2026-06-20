@@ -157,12 +157,12 @@ of the same root cause.
 | AUD-141 | High | Confirmed | Agent/Process Supervisor/Safety | Supervisor PID records can target reused host processes after agent restart |
 | AUD-142 | High | Fixed | Agent/Process Supervisor/Security | Supervisor records and logs are written with default-readable permissions |
 | AUD-143 | Medium/High | Skipped | Docs/Deployment/API Boundary | Headless CLI tutorial presents the public panel URL as the operator API endpoint |
-| AUD-144 | High | Confirmed | API/Worker/Agent Updates | Strict registered-update policy only gates direct staging jobs |
+| AUD-144 | High | Fixed | API/Worker/Agent Updates | Strict registered-update policy only gates direct staging jobs |
 | AUD-145 | High | Confirmed | API/Gateway/Key Lifecycle | Key rotation, revoke, and delete disconnect before DB invalidation, leaving a reconnect race |
 | AUD-146 | High | Skipped | Deploy/Nginx/API Boundary | Publishing the dashboard frontend still publishes API and WebSocket routes |
-| AUD-147 | Medium/High | Confirmed | Deploy/Agent Install/Supply Chain | Custom agent binary URL installs without a required SHA-256 pin |
+| AUD-147 | Medium/High | Fixed | Deploy/Agent Install/Supply Chain | Custom agent binary URL installs without a required SHA-256 pin |
 | AUD-148 | High | Fixed | API/Frontend/CLI/Backups/Retention | Backup policy prune confirms scope and mode but reselects live artifacts instead of the reviewed candidate set |
-| AUD-149 | High | Confirmed | Deploy/Update/Rollback | Compose update and rollback swap release directories without forcing container recreation |
+| AUD-149 | High | Fixed | Deploy/Update/Rollback | Compose update and rollback swap release directories without forcing container recreation |
 | AUD-150 | High | Confirmed | Gateway/API/Telemetry/Lifecycle | Displaced gateway sessions can keep forwarding telemetry after replacement |
 | AUD-151 | High | Fixed | API/Frontend/CLI/Auth/Privilege | Operator management mutations lack request-bound privilege verification |
 | AUD-152 | High | Fixed | Frontend/Backups/Migrations | Migration restore runs can use stale hidden restore options |
@@ -175,7 +175,7 @@ of the same root cause.
 | AUD-159 | Medium/High | Confirmed | Worker/Webhooks/Retention/Alerts | Webhook permanent-failure deliveries bypass delivery retention and create unbounded alerts |
 | AUD-160 | Medium/High | Confirmed | Worker/Webhooks/Retention/Config | Webhook-rule retention silently clamps the shipped 90-day setting to 7 days |
 | AUD-161 | High | Confirmed | Worker/Server Jobs/Artifact Cleanup | Artifact cleanup server jobs can remain running forever after worker loss |
-| AUD-162 | High | Confirmed | Agent/Updates/Safety | Update-check activation can downgrade agents from an older release manifest |
+| AUD-162 | High | Fixed | Agent/Updates/Safety | Update-check activation can downgrade agents from an older release manifest |
 | AUD-163 | High | Confirmed | Agent/Custom Runtime Commands/Reliability | Custom JSON command timeouts can be bypassed after stdout closes |
 | AUD-164 | High | Confirmed | Agent/Process Supervisor/Timeouts | Process supervisor stop and restart can mutate host state after command timeout |
 | AUD-165 | High | Confirmed | Agent/Network Apply/Rollback | Managed network rollback rewrites files non-atomically and drops original modes |
@@ -202,12 +202,12 @@ of the same root cause.
 | AUD-186 | Medium/High | Confirmed | Agent/Gateway/Terminal/Lifecycle | Terminal PTYs can survive disconnect or access revocation without reconciliation |
 | AUD-187 | Medium/High | Fixed | API/Frontend/History Retention | History retention policy saves ignore the confirmation contract |
 | AUD-188 | High | Fixed | Agent/File Browser/Safety | File rename and move can follow path races outside the reviewed source or destination |
-| AUD-189 | Medium/High | Confirmed | Deploy/Agent Install/Docs | Official agent install examples do not start the service they claim to start |
+| AUD-189 | Medium/High | Fixed | Deploy/Agent Install/Docs | Official agent install examples do not start the service they claim to start |
 | AUD-190 | Medium/High | Confirmed | Deploy/Compose/Database | Secure compose password edits leave API and worker using the wrong Postgres credentials |
 | AUD-191 | High | Confirmed | API/Gateway/Dispatch | Backup gateway endpoints cannot receive API dispatch, cancel, or lifecycle disconnect control |
 | AUD-192 | Medium/High | Fixed | Gateway/Deploy/Security | Gateway agent TCP listener still defaults to all-interface binding |
 | AUD-193 | High | Confirmed | Gateway/API/Lifecycle | Gateway lifecycle events can expire before API accepts a new process incarnation |
-| AUD-194 | High | Confirmed | Release/Updates/Supply Chain | Manual release workflow can publish tag-named update assets from the wrong commit |
+| AUD-194 | High | Fixed | Release/Updates/Supply Chain | Manual release workflow can publish tag-named update assets from the wrong commit |
 | AUD-195 | Medium/High | Fixed | API/Gateway/Security/Docs | Documented dev internal token bypasses placeholder startup validation |
 | AUD-196 | Medium | Confirmed | Docs/Local Control Plane | Manual quickstart no longer starts a usable Postgres-backed API |
 | AUD-197 | High | Fixed | Deploy/API/Gateway/Secrets | API and worker containers can read gateway-only secret material |
@@ -5357,7 +5357,7 @@ of the same root cause.
 ### AUD-144: Strict Registered-Update Policy Only Gates Direct Staging Jobs
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Worker/Agent Updates
 - Context: Operators can enable `require_registered_agent_updates` to make
   production agent updates depend on the API release registry before replacing
@@ -5387,6 +5387,12 @@ of the same root cause.
   AUD-119/AUD-120, which covered activation heartbeat ordering and hash
   matching. This issue is specifically the server-side policy bypass when strict
   registered updates are enabled.
+- Resolution: Fixed by making strict registered update enforcement hash-bound
+  across API-created and worker-materialized jobs. Manual staging and activation
+  now require a registered primary artifact SHA, rollback requires a registered
+  rollback artifact SHA, rollback without a reviewed hash is rejected, and
+  manifest-check jobs are rejected under strict mode because the selected bytes
+  come from an external manifest.
 
 ### AUD-145: Key Rotation, Revoke, And Delete Disconnect Before DB Invalidation, Leaving A Reconnect Race
 
@@ -5495,7 +5501,7 @@ of the same root cause.
 ### AUD-147: Custom Agent Binary URL Installs Without A Required SHA-256 Pin
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Deploy/Agent Install/Supply Chain
 - Context: The documented one-line agent installer supports the default
   official GitHub release flow and also supports a custom
@@ -5534,6 +5540,11 @@ of the same root cause.
   enforce the same byte-pinning rule. If operators want no-hash local installs,
   they can use an explicit local file path such as `VPSMAN_AGENT_BINARY_PATH`,
   where the trusted filesystem boundary is different from a mutable URL.
+- Resolution: Fixed by requiring a 64-character
+  `VPSMAN_AGENT_BINARY_SHA256` for custom URL installs, verifying the download
+  before installation, documenting the requirement, and covering default,
+  staging-only, verified custom URL, and missing-hash rejection flows in a deploy
+  installer smoke test.
 
 ### AUD-148: Backup Policy Prune Reselects Live Artifacts Instead Of The Reviewed Candidate Set
 
@@ -5581,7 +5592,7 @@ of the same root cause.
 ### AUD-149: Compose Update And Rollback Swap Release Directories Without Forcing Container Recreation
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Deploy/Update/Rollback
 - Context: The official compose deployment runs released server binaries and
   frontend assets from `deploy/runtime/server/current` and
@@ -5621,6 +5632,9 @@ of the same root cause.
   controlled stop/up sequence. The script should verify the live
   server/frontend versions after recreation and fail loudly if the running
   services still report the old release.
+- Resolution: Fixed by routing both update and rollback through an explicit
+  `docker compose up -d --force-recreate --remove-orphans api gateway worker
+  frontend` step after the verified release-directory swap.
 
 ### AUD-150: Displaced Gateway Sessions Can Keep Forwarding Telemetry After Replacement
 
@@ -6111,7 +6125,7 @@ of the same root cause.
 ### AUD-162: Update-Check Activation Can Downgrade Agents From An Older Release Manifest
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Updates/Safety
 - Context: Operators can run manual `agent_update_check` jobs from the dashboard
   or CLI, and can enable the autonomous updater. These workflows normally point
@@ -6146,6 +6160,11 @@ of the same root cause.
   rollback/downgrade command is used. If non-semver release identifiers remain
   valid, define conservative behavior instead of treating every unequal string
   as newer.
+- Resolution: Fixed by parsing current and candidate release versions as
+  semver before staging. Equal versions report `current`, newer candidates are
+  staged, older candidates report `downgrade_blocked`, and non-orderable
+  versions report `version_not_orderable` without downloading or staging an
+  artifact.
 
 ### AUD-163: Custom JSON Command Timeouts Can Be Bypassed After Stdout Closes
 
@@ -7367,7 +7386,7 @@ of the same root cause.
 ### AUD-189: Official Agent Install Examples Do Not Start The Service They Claim To Start
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Deploy/Agent Install/Docs
 - Context: Operators onboard VPSs through the documented direct-gateway
   one-line installer. The README and `deploy/AGENT_GATEWAY_INSTALL.md` examples
@@ -7402,6 +7421,10 @@ of the same root cause.
   include the explicit service-enable flag in the official copy-paste examples,
   or clearly document that the default install only stages the unit and
   requires a separate start command.
+- Resolution: Fixed by making the direct-gateway installer enable and start the
+  systemd service by default, with `VPSMAN_AGENT_ENABLE_SERVICE=0` retained as
+  the explicit staging-only opt-out. Docs now describe the default-start
+  behavior and the opt-out.
 
 ### AUD-190: Secure Compose Password Edits Leave API And Worker Using The Wrong Postgres Credentials
 
@@ -7590,7 +7613,7 @@ of the same root cause.
 ### AUD-194: Manual Release Workflow Can Publish Tag-Named Update Assets From The Wrong Commit
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Release/Updates/Supply Chain
 - Context: The official agent updater uses the GitHub release `version.json`,
   `SHA256SUMS`, and tag-pinned asset URLs as the default update source. The
@@ -7630,6 +7653,10 @@ of the same root cause.
   production releases or require the workflow to fetch tags and prove
   `git rev-parse "$release_tag^{commit}" == "$GITHUB_SHA"` before building or
   uploading assets.
+- Resolution: Fixed by removing manual release dispatch from the release
+  workflow. Production release assets are now built and published only from
+  `v*` tag pushes, and release identity resolution fails unless the workflow ref
+  is a tag.
 
 ### AUD-195: Documented Dev Internal Token Bypasses Placeholder Startup Validation
 

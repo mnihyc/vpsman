@@ -20,7 +20,10 @@ Optional values:
 
 - `VPSMAN_AGENT_DISPLAY_NAME`: friendly name stored in `agent.toml`.
 - `VPSMAN_AGENT_BINARY_URL`: release artifact URL to download before installing.
-- `VPSMAN_AGENT_BINARY_SHA256`: expected SHA256 for the downloaded binary.
+- `VPSMAN_AGENT_BINARY_SHA256`: required 64-character SHA-256 hex when
+  `VPSMAN_AGENT_BINARY_URL` is set.
+- `VPSMAN_AGENT_ENABLE_SERVICE=0`: staging-only install that writes files but
+  does not enable or start the service. The default is to start the service.
 
 ## Register the public identity
 
@@ -70,7 +73,9 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
   bash
 ```
 
-The installer writes `agent.toml`, installs a systemd unit, and starts the agent.
+The installer writes `agent.toml`, installs a systemd unit, and starts the agent
+unless `VPSMAN_AGENT_ENABLE_SERVICE=0` is set for an intentional staging-only
+install.
 It does not call `/api`, `/.well-known`, or any panel-side lookup endpoint. The
 installer writes an `[update]` section with the official GitHub `version.json`
 release manifest, 24 hour interval, 24 hour jitter, activation enabled, and

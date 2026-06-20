@@ -194,6 +194,46 @@ impl Repository {
             }
         }
     }
+
+    pub(crate) async fn agent_update_release_exists_for_rollback_artifact(
+        &self,
+        artifact_sha256_hex: &str,
+    ) -> Result<bool> {
+        let artifact_sha256_hex = artifact_sha256_hex.trim().to_ascii_lowercase();
+        match self {
+            Self::Memory(memory) => {
+                Ok(memory
+                    .agent_update_releases
+                    .read()
+                    .await
+                    .iter()
+                    .any(|release| {
+                        matches!(
+                            AgentUpdateReleaseStatus::from_storage(&release.status),
+                            Some(AgentUpdateReleaseStatus::PublishedExternal)
+                        ) && release.rollback_artifact_sha256_hex.as_deref()
+                            == Some(artifact_sha256_hex.as_str())
+                    }))
+            }
+            Self::Postgres(pool) => {
+                let exists: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM agent_update_releases
+                        WHERE status = $1
+                          AND rollback_artifact_sha256_hex = $2
+                    )
+                    "#,
+                )
+                .bind(AgentUpdateReleaseStatus::PublishedExternal.as_str())
+                .bind(artifact_sha256_hex)
+                .fetch_one(pool)
+                .await?;
+                Ok(exists)
+            }
+        }
+    }
 }
 
 fn agent_update_release_from_row(row: sqlx::postgres::PgRow) -> Result<AgentUpdateReleaseView> {

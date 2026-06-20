@@ -734,14 +734,29 @@ async fn agent_update_release_policy_allows(
     if !state.require_registered_agent_updates() {
         return Ok(true);
     }
-    let JobCommand::UpdateAgent { sha256_hex, .. } = job_command else {
-        return Ok(true);
-    };
-    state
-        .repo
-        .agent_update_release_exists_for_artifact(sha256_hex)
-        .await
-        .map_err(ApiError::from)
+    match job_command {
+        JobCommand::UpdateAgent { sha256_hex, .. }
+        | JobCommand::AgentUpdateActivate {
+            staged_sha256_hex: sha256_hex,
+            ..
+        } => state
+            .repo
+            .agent_update_release_exists_for_artifact(sha256_hex)
+            .await
+            .map_err(ApiError::from),
+        JobCommand::AgentUpdateRollback {
+            rollback_sha256_hex: Some(sha256_hex),
+        } => state
+            .repo
+            .agent_update_release_exists_for_rollback_artifact(sha256_hex)
+            .await
+            .map_err(ApiError::from),
+        JobCommand::AgentUpdateRollback {
+            rollback_sha256_hex: None,
+        }
+        | JobCommand::AgentUpdateCheck { .. } => Ok(false),
+        _ => Ok(true),
+    }
 }
 
 fn precompleted_target_outcomes(

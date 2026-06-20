@@ -2,6 +2,7 @@ use std::{env, fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use reqwest::{redirect, Url};
+use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::time;
@@ -139,6 +140,14 @@ struct CheckStageResult {
     staged_sha256_hex: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CandidateVersionStatus {
+    Current,
+    Newer,
+    DowngradeBlocked,
+    NotOrderable,
+}
+
 #[derive(Debug, Deserialize)]
 struct VersionManifestHeader {
     schema_version: u16,
@@ -237,21 +246,56 @@ async fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStage
             staged_sha256_hex: None,
         });
     };
-    if manifest.version == current_version {
-        let status = serde_json::json!({
-            "type": "agent_update_check",
-            "status": "current",
-            "current_version": current_version,
-            "candidate_version": manifest.version,
-            "tag": manifest.tag,
-            "commit": manifest.commit,
-            "asset": asset_name,
-            "version_url": input.version_url,
-        });
-        return Ok(CheckStageResult {
-            outputs: vec![status_output(input.job_id, status, Some(0), true)?],
-            staged_sha256_hex: None,
-        });
+    match candidate_version_status(current_version, &manifest.version) {
+        CandidateVersionStatus::Current => {
+            let status = serde_json::json!({
+                "type": "agent_update_check",
+                "status": "current",
+                "current_version": current_version,
+                "candidate_version": manifest.version,
+                "tag": manifest.tag,
+                "commit": manifest.commit,
+                "asset": asset_name,
+                "version_url": input.version_url,
+            });
+            return Ok(CheckStageResult {
+                outputs: vec![status_output(input.job_id, status, Some(0), true)?],
+                staged_sha256_hex: None,
+            });
+        }
+        CandidateVersionStatus::DowngradeBlocked => {
+            let status = serde_json::json!({
+                "type": "agent_update_check",
+                "status": "downgrade_blocked",
+                "current_version": current_version,
+                "candidate_version": manifest.version,
+                "tag": manifest.tag,
+                "commit": manifest.commit,
+                "asset": asset_name,
+                "version_url": input.version_url,
+            });
+            return Ok(CheckStageResult {
+                outputs: vec![status_output(input.job_id, status, Some(2), true)?],
+                staged_sha256_hex: None,
+            });
+        }
+        CandidateVersionStatus::NotOrderable => {
+            let status = serde_json::json!({
+                "type": "agent_update_check",
+                "status": "version_not_orderable",
+                "current_version": current_version,
+                "candidate_version": manifest.version,
+                "tag": manifest.tag,
+                "commit": manifest.commit,
+                "asset": asset_name,
+                "version_url": input.version_url,
+            });
+            return Ok(CheckStageResult {
+                outputs: vec![status_output(input.job_id, status, Some(2), true)?],
+                staged_sha256_hex: None,
+            });
+        }
+        CandidateVersionStatus::Newer => {}
     }
     let Some(asset) = manifest
         .assets
@@ -317,6 +361,25 @@ async fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStage
         outputs,
         staged_sha256_hex: Some(expected_sha256_hex),
     })
+}
+
+fn candidate_version_status(
+    current_version: &str,
+    candidate_version: &str,
+) -> CandidateVersionStatus {
+    let Ok(current) = Version::parse(current_version.trim()) else {
+        return CandidateVersionStatus::NotOrderable;
+    };
+    let Ok(candidate) = Version::parse(candidate_version.trim()) else {
+        return CandidateVersionStatus::NotOrderable;
+    };
+    if candidate == current {
+        CandidateVersionStatus::Current
+    } else if candidate > current {
+        CandidateVersionStatus::Newer
+    } else {
+        CandidateVersionStatus::DowngradeBlocked
+    }
 }
 
 fn persist_staged_artifact(
@@ -692,9 +755,9 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
     use super::{
-        agent_asset_name, check_and_stage_update, normalize_sha256, parse_artifact_url, sha256_hex,
-        stage_update_artifact, update_http_url_allowed, update_redirect_url_allowed,
-        CheckStageInput, UpdateStageInput,
+        agent_asset_name, candidate_version_status, check_and_stage_update, normalize_sha256,
+        parse_artifact_url, sha256_hex, stage_update_artifact, update_http_url_allowed,
+        update_redirect_url_allowed, CandidateVersionStatus, CheckStageInput, UpdateStageInput,
     };
     use reqwest::Url;
 
@@ -710,6 +773,30 @@ mod tests {
     fn normalizes_sha256_hex() {
         assert_eq!(normalize_sha256(&"AA".repeat(32)).unwrap(), "aa".repeat(32));
         assert!(normalize_sha256("not-a-hash").is_err());
+    }
+
+    #[test]
+    fn classifies_candidate_update_versions_conservatively() {
+        assert_eq!(
+            candidate_version_status("1.2.3", "1.2.4"),
+            CandidateVersionStatus::Newer
+        );
+        assert_eq!(
+            candidate_version_status("1.2.3", "1.2.3"),
+            CandidateVersionStatus::Current
+        );
+        assert_eq!(
+            candidate_version_status("1.2.3", "1.2.2"),
+            CandidateVersionStatus::DowngradeBlocked
+        );
+        assert_eq!(
+            candidate_version_status("1.2.3", "dev-build"),
+            CandidateVersionStatus::NotOrderable
+        );
+        assert_eq!(
+            candidate_version_status("dev-build", "1.2.4"),
+            CandidateVersionStatus::NotOrderable
+        );
     }
 
     #[tokio::test]
@@ -789,6 +876,105 @@ mod tests {
         assert_eq!(status["status"], "current");
         assert_eq!(status["current_version"], current_version);
         assert_eq!(status["candidate_version"], current_version);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn update_check_blocks_older_manifest_without_staging() {
+        let Some(_) = agent_asset_name() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("vpsman-update-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("vpsman-agent");
+        let manifest_path = dir.join("version.json");
+        let current_version = semver::Version::parse(crate::build_info::agent_release_version())
+            .expect("test release version is semver");
+        let older_version = if current_version.minor > 0 {
+            format!("{}.{}.0", current_version.major, current_version.minor - 1)
+        } else if current_version.patch > 0 {
+            format!(
+                "{}.{}.{}",
+                current_version.major,
+                current_version.minor,
+                current_version.patch - 1
+            )
+        } else if current_version.major > 0 {
+            format!("{}.0.0", current_version.major - 1)
+        } else {
+            let _ = fs::remove_dir_all(dir);
+            return;
+        };
+        fs::write(&current, b"current-agent").unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "schema_version": 2,
+                "project": "vpsman",
+                "version": older_version,
+                "tag": format!("v{older_version}"),
+                "assets": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let result = check_and_stage_update(CheckStageInput {
+            job_id: uuid::Uuid::new_v4(),
+            version_url: &format!("file://{}", manifest_path.display()),
+            current_exe: &current,
+            cancel_token: &crate::command_worker::CommandCancelToken::default(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result.staged_sha256_hex, None);
+        assert!(!dir.join("vpsman-agent.next").exists());
+        let status: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+        assert_eq!(status["status"], "downgrade_blocked");
+        assert_eq!(status["candidate_version"], older_version);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn update_check_rejects_non_semver_manifest_without_staging() {
+        let Some(_) = agent_asset_name() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("vpsman-update-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("vpsman-agent");
+        let manifest_path = dir.join("version.json");
+        fs::write(&current, b"current-agent").unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::json!({
+                "schema_version": 2,
+                "project": "vpsman",
+                "version": "dev-build",
+                "tag": "dev-build",
+                "assets": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let result = check_and_stage_update(CheckStageInput {
+            job_id: uuid::Uuid::new_v4(),
+            version_url: &format!("file://{}", manifest_path.display()),
+            current_exe: &current,
+            cancel_token: &crate::command_worker::CommandCancelToken::default(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result.staged_sha256_hex, None);
+        assert!(!dir.join("vpsman-agent.next").exists());
+        let status: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+        assert_eq!(status["status"], "version_not_orderable");
+        assert_eq!(status["candidate_version"], "dev-build");
 
         let _ = fs::remove_dir_all(dir);
     }

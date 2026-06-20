@@ -62,7 +62,9 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
 
 `VPSMAN_GATEWAY_ENDPOINTS` accepts comma or newline separated
 `label=host:port=priority` entries. DNS names are supported; lower priority
-numbers are tried first. There is no separate panel-side endpoint lookup.
+numbers are tried first. The installer enables and starts the systemd service by
+default; set `VPSMAN_AGENT_ENABLE_SERVICE=0` only for a staging-only install.
+There is no separate panel-side endpoint lookup.
 
 ## 4. Verify connectivity
 

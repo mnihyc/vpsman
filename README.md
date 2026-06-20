@@ -186,8 +186,11 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
 ```
 
 Endpoint DNS names and priorities are part of the agent config; no separate
-panel-side endpoint lookup is used. Gateway Noise sessions protect agent traffic
-from tampering, so there is no extra server-side command-authentication key.
+panel-side endpoint lookup is used. The installer enables and starts the agent
+service by default; set `VPSMAN_AGENT_ENABLE_SERVICE=0` only when deliberately
+staging files without starting the service. Gateway Noise sessions protect
+agent traffic from tampering, so there is no extra server-side
+command-authentication key.
 Privilege for mutating work is still request-bound through the local
 super-password assertion verified by the private gateway. See
 `deploy/AGENT_GATEWAY_INSTALL.md` and `deploy/install-agent.sh`.

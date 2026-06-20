@@ -34,7 +34,7 @@ is_true() {
 }
 
 service_enable_requested() {
-  is_true "${VPSMAN_AGENT_ENABLE_SERVICE:-${VPSMAN_ENABLE_SERVICE:-0}}"
+  is_true "${VPSMAN_AGENT_ENABLE_SERVICE:-${VPSMAN_ENABLE_SERVICE:-1}}"
 }
 
 require_uint() {
@@ -181,11 +181,10 @@ elif [[ -n "${VPSMAN_AGENT_BINARY_URL:-}" ]]; then
   tmp_bin="$(mktemp)"
   register_cleanup_path "$tmp_bin"
   require_tool curl
+  require_tool sha256sum
+  require_hex32 VPSMAN_AGENT_BINARY_SHA256
   curl -fsSL "$VPSMAN_AGENT_BINARY_URL" -o "$tmp_bin"
-  if [[ -n "${VPSMAN_AGENT_BINARY_SHA256:-}" ]]; then
-    require_tool sha256sum
-    printf '%s  %s\n' "$VPSMAN_AGENT_BINARY_SHA256" "$tmp_bin" | sha256sum -c - >/dev/null
-  fi
+  printf '%s  %s\n' "$VPSMAN_AGENT_BINARY_SHA256" "$tmp_bin" | sha256sum -c - >/dev/null
   install -m 0755 "$tmp_bin" "$agent_bin"
 elif is_true "${VPSMAN_AGENT_USE_PATH:-0}" && command -v vpsman-agent >/dev/null 2>&1; then
   cp "$(command -v vpsman-agent)" "$agent_bin"
@@ -278,5 +277,5 @@ if service_enable_requested; then
   log "installed and enabled direct gateway agent $VPSMAN_AGENT_CLIENT_ID using $config_file"
 else
   log "installed direct gateway agent $VPSMAN_AGENT_CLIENT_ID using $config_file"
-  log "systemd unit written to $unit_path; set VPSMAN_AGENT_ENABLE_SERVICE=1 to link and enable it"
+  log "systemd unit written to $unit_path; set VPSMAN_AGENT_ENABLE_SERVICE=0 only for staging-only installs"
 fi

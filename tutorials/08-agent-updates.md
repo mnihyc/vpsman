@@ -89,8 +89,11 @@ cargo run -p vpsctl -- agent-update-releases --limit 10
 cargo run -p vpsctl -- agent-update-release-latest --name vpsman-agent --channel stable
 ```
 
-When `require_registered_agent_updates` is enabled, direct update jobs are
-accepted only when the requested artifact SHA exists in the release registry.
+When `require_registered_agent_updates` is enabled, every explicit update
+lifecycle job is hash-bound to the release registry: manual staging and
+activation require the registered primary artifact SHA, rollback requires the
+registered rollback artifact SHA, and manifest-check jobs are rejected because
+the agent chooses the downloaded bytes from an external manifest.
 
 ## Dispatch A Direct Update Job
 
@@ -101,7 +104,9 @@ VPSs prefilled and the default GitHub manifest URL selected.
 Manifest-check jobs are privileged mutating jobs when activation is enabled. They
 read the supplied external `version.json`, use the explicit release asset URLs in
 that manifest, verify `SHA256SUMS`, stage the binary, and can activate/restart
-the agent in the same reviewed job:
+the agent in the same reviewed job. Agents only stage semver-newer manifests;
+current versions report `current`, older versions report `downgrade_blocked`,
+and non-semver versions report `version_not_orderable`:
 
 ```sh
 cargo run -p vpsctl -- agent-update-check \

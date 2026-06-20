@@ -3081,6 +3081,7 @@ dependencies = [
  "hex",
  "libc",
  "reqwest",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

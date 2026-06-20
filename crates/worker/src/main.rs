@@ -2380,23 +2380,36 @@ async fn scheduled_agent_update_release_policy_allows(
     if !require_registered_agent_updates {
         return Ok(true);
     }
-    let JobCommand::UpdateAgent { sha256_hex, .. } = command else {
-        return Ok(true);
+    let (column, sha256_hex) = match command {
+        JobCommand::UpdateAgent { sha256_hex, .. }
+        | JobCommand::AgentUpdateActivate {
+            staged_sha256_hex: sha256_hex,
+            ..
+        } => ("artifact_sha256_hex", sha256_hex.as_str()),
+        JobCommand::AgentUpdateRollback {
+            rollback_sha256_hex: Some(sha256_hex),
+        } => ("rollback_artifact_sha256_hex", sha256_hex.as_str()),
+        JobCommand::AgentUpdateRollback {
+            rollback_sha256_hex: None,
+        }
+        | JobCommand::AgentUpdateCheck { .. } => return Ok(false),
+        _ => return Ok(true),
     };
     let artifact_sha256_hex = sha256_hex.to_ascii_lowercase();
-    let exists: bool = sqlx::query_scalar(
+    let query = format!(
         r#"
         SELECT EXISTS (
             SELECT 1
             FROM agent_update_releases
             WHERE status = 'published_external'
-              AND artifact_sha256_hex = $1
+              AND {column} = $1
         )
-        "#,
-    )
-    .bind(artifact_sha256_hex)
-    .fetch_one(&mut **tx)
-    .await?;
+        "#
+    );
+    let exists: bool = sqlx::query_scalar(&query)
+        .bind(artifact_sha256_hex)
+        .fetch_one(&mut **tx)
+        .await?;
     Ok(exists)
 }
 
@@ -3386,6 +3399,80 @@ mod schedule_tests {
         db.cleanup().await;
     }
 
+    #[tokio::test]
+    async fn postgres_strict_scheduled_update_policy_is_hash_bound() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        let artifact_sha = "12".repeat(32);
+        let rollback_sha = "34".repeat(32);
+        insert_worker_agent_update_release(&db.pool, &artifact_sha, Some(&rollback_sha)).await;
+        let mut tx = db.pool.begin().await.unwrap();
+
+        assert!(scheduled_agent_update_release_policy_allows(
+            &mut tx,
+            &JobCommand::UpdateAgent {
+                artifact_url: "https://updates.example/agent".to_string(),
+                sha256_hex: artifact_sha.clone(),
+            },
+            true,
+        )
+        .await
+        .unwrap());
+        assert!(scheduled_agent_update_release_policy_allows(
+            &mut tx,
+            &JobCommand::AgentUpdateActivate {
+                staged_sha256_hex: artifact_sha.clone(),
+                restart_agent: true,
+            },
+            true,
+        )
+        .await
+        .unwrap());
+        assert!(scheduled_agent_update_release_policy_allows(
+            &mut tx,
+            &JobCommand::AgentUpdateRollback {
+                rollback_sha256_hex: Some(rollback_sha.clone()),
+            },
+            true,
+        )
+        .await
+        .unwrap());
+        assert!(!scheduled_agent_update_release_policy_allows(
+            &mut tx,
+            &JobCommand::AgentUpdateCheck {
+                version_url: None,
+                activate: true,
+                restart_agent: true,
+            },
+            true,
+        )
+        .await
+        .unwrap());
+        assert!(!scheduled_agent_update_release_policy_allows(
+            &mut tx,
+            &JobCommand::AgentUpdateRollback {
+                rollback_sha256_hex: None,
+            },
+            true,
+        )
+        .await
+        .unwrap());
+        assert!(!scheduled_agent_update_release_policy_allows(
+            &mut tx,
+            &JobCommand::AgentUpdateActivate {
+                staged_sha256_hex: "56".repeat(32),
+                restart_agent: true,
+            },
+            true,
+        )
+        .await
+        .unwrap());
+
+        tx.rollback().await.unwrap();
+        db.cleanup().await;
+    }
+
     #[test]
     fn worker_runtime_config_reloads_suite_file_from_base_args() {
         with_cleared_worker_env(WORKER_HOT_RELOAD_ENV, || {
@@ -3685,6 +3772,31 @@ mod schedule_tests {
         .await
         .unwrap();
         schedule_id
+    }
+
+    async fn insert_worker_agent_update_release(
+        pool: &PgPool,
+        artifact_sha256_hex: &str,
+        rollback_artifact_sha256_hex: Option<&str>,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO agent_update_releases (
+                id, name, version, channel, status, artifact_sha256_hex,
+                artifact_url_sha256_hex, rollback_artifact_sha256_hex,
+                rollback_artifact_url_sha256_hex
+            )
+            VALUES ($1, 'vpsman-agent', '9.9.9', 'stable', 'published_external', $2, $3, $4, $5)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(artifact_sha256_hex)
+        .bind("aa".repeat(32))
+        .bind(rollback_artifact_sha256_hex)
+        .bind(rollback_artifact_sha256_hex.map(|_| "bb".repeat(32)))
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn insert_worker_operator(

@@ -45,6 +45,10 @@ compose() {
   fi
 }
 
+recreate_services() {
+  compose up -d --force-recreate --remove-orphans api gateway worker frontend
+}
+
 require_env() {
   if [[ ! -f "$script_dir/.env" ]]; then
     echo "deploy/.env is required; create it from deploy/.env.example and edit it first" >&2
@@ -133,7 +137,7 @@ rollback() {
   mv "$frontend_current" "$frontend_tmp"
   mv "$frontend_previous" "$frontend_current"
   mv "$frontend_tmp" "$frontend_previous"
-  compose up -d --remove-orphans
+  recreate_services
   echo "rollback complete"
 }
 
@@ -210,5 +214,5 @@ swap_release_dir "$server_staged" "$runtime_dir/server/current" "$runtime_dir/se
 swap_release_dir "$frontend_staged" "$runtime_dir/frontend/current" "$runtime_dir/frontend/previous"
 install_committed=1
 
-compose up -d --remove-orphans
+recreate_services
 echo "updated vpsman deployment to $resolved_tag"

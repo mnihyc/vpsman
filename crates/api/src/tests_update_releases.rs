@@ -121,6 +121,14 @@ async fn release_registry_records_sanitized_rollback_metadata() {
         release.rollback_artifact_sha256_hex.as_deref(),
         Some(rollback_sha256_hex.as_str())
     );
+    assert!(repo
+        .agent_update_release_exists_for_rollback_artifact(&rollback_sha256_hex)
+        .await
+        .unwrap());
+    assert!(!repo
+        .agent_update_release_exists_for_rollback_artifact(&"56".repeat(32))
+        .await
+        .unwrap());
     assert!(release.rollback_artifact_url_sha256_hex.is_some());
     assert_eq!(release.rollback_size_bytes, Some(2048));
     let serialized = serde_json::to_string(&release).unwrap();
@@ -175,6 +183,63 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
     assert_eq!(jobs[0].payload_hash, command_hash);
     let audits = repo.list_audit_logs(10).await.unwrap();
     assert!(audits.iter().any(|audit| audit.action == "job.failed"));
+}
+
+#[tokio::test]
+async fn strict_agent_update_release_policy_rejects_activation_rollback_and_manifest_check() {
+    let cases = [
+        (
+            "agent_update_activate",
+            JobCommand::AgentUpdateActivate {
+                staged_sha256_hex: "34".repeat(32),
+                restart_agent: true,
+            },
+        ),
+        (
+            "agent_update_rollback",
+            JobCommand::AgentUpdateRollback {
+                rollback_sha256_hex: Some("56".repeat(32)),
+            },
+        ),
+        (
+            "agent_update_rollback",
+            JobCommand::AgentUpdateRollback {
+                rollback_sha256_hex: None,
+            },
+        ),
+        (
+            "agent_update_check",
+            JobCommand::AgentUpdateCheck {
+                version_url: Some(
+                    "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"
+                        .to_string(),
+                ),
+                activate: true,
+                restart_agent: true,
+            },
+        ),
+    ];
+
+    for (command, operation) in cases {
+        let repo = Repository::Memory(MemoryState::default());
+        upsert_test_agent(&repo).await;
+        let command_hash = payload_hash(&encode_json(&operation).unwrap());
+        let request = update_job_request(command, operation);
+        let state = test_state(repo.clone(), Default::default(), true);
+        let headers = crate::test_auth_headers(&state).await;
+
+        let (status, Json(response)) =
+            routes_jobs::create_job(State(state), headers, Json(request))
+                .await
+                .unwrap();
+
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(response.status, "failed");
+        let jobs = repo.list_jobs(10).await.unwrap();
+        assert_eq!(jobs[0].payload_hash, command_hash);
+        let audits = repo.list_audit_logs(10).await.unwrap();
+        assert!(audits.iter().any(|audit| audit.action == "job.failed"));
+    }
 }
 
 #[tokio::test]
@@ -252,6 +317,23 @@ fn external_release_request(
         size_bytes: Some(1024),
         notes: Some("external release metadata".to_string()),
         confirmed: true,
+    }
+}
+
+fn update_job_request(command: &str, operation: JobCommand) -> CreateJobRequest {
+    CreateJobRequest {
+        job_id: Some(Uuid::new_v4()),
+        selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
+        destructive: false,
+        confirmed: true,
+        command: command.to_string(),
+        argv: Vec::new(),
+        operation: Some(operation),
+        timeout_secs: Some(30),
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: None,
     }
 }
 
