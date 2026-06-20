@@ -3,9 +3,11 @@ use std::{collections::BTreeSet, fs};
 use axum::{extract::State, http::HeaderMap, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    payload_hash, redact_suite_config_value, PrivilegeAssertion, SuiteConfig, SuiteConfigValidation,
+    payload_hash, redact_suite_config_value, write_private_file_atomically, PrivilegeAssertion,
+    SuiteConfig, SuiteConfigValidation,
 };
 
 use crate::{
@@ -56,6 +58,7 @@ pub(crate) struct UpdateSuiteConfigResponse {
     pub(crate) path: String,
     pub(crate) changed_keys: Vec<String>,
     pub(crate) validation: SuiteConfigValidation,
+    pub(crate) audit_status: String,
 }
 
 pub(crate) async fn get_suite_config(
@@ -108,24 +111,72 @@ pub(crate) async fn update_suite_config(
     )
     .await?;
     let (_exists, old_text) = read_suite_config_text(&state)?;
-    let old_redacted = redacted_toml_json(&old_text)?;
-    let new_redacted = redacted_toml_json(&request.toml)?;
-    let changed_keys = changed_json_paths(&old_redacted, &new_redacted);
-    write_suite_config_atomically(&state, &request.toml)?;
+    let old_raw = toml_json(&old_text)?;
+    let new_raw = toml_json(&request.toml)?;
+    let changed_keys = changed_json_paths(&old_raw, &new_raw);
+    let old_redacted = redact_suite_config_value(old_raw);
+    let new_redacted = redact_suite_config_value(new_raw);
+    let request_id = Uuid::new_v4();
     state
         .repo
-        .record_suite_config_audit(
+        .record_suite_config_update_requested(
+            &operator,
+            &state.suite_config_path.display().to_string(),
+            &changed_keys,
+            old_redacted.clone(),
+            new_redacted.clone(),
+            request_id,
+        )
+        .await?;
+    if let Err(write_error) = write_suite_config_atomically(&state, &request.toml) {
+        if let Err(audit_error) = state
+            .repo
+            .record_suite_config_update_failed(
+                &operator,
+                &state.suite_config_path.display().to_string(),
+                &changed_keys,
+                old_redacted.clone(),
+                new_redacted.clone(),
+                request_id,
+                write_error.code,
+            )
+            .await
+        {
+            warn!(
+                error = %audit_error,
+                request_id = %request_id,
+                "failed to record suite config write failure"
+            );
+        }
+        return Err(write_error);
+    }
+    let audit_status = match state
+        .repo
+        .record_suite_config_updated(
             &operator,
             &state.suite_config_path.display().to_string(),
             &changed_keys,
             old_redacted,
             new_redacted,
+            request_id,
         )
-        .await?;
+        .await
+    {
+        Ok(()) => "applied_recorded".to_string(),
+        Err(error) => {
+            warn!(
+                error = %error,
+                request_id = %request_id,
+                "failed to record suite config applied audit after successful write"
+            );
+            "intent_recorded_applied_audit_failed".to_string()
+        }
+    };
     Ok(Json(UpdateSuiteConfigResponse {
         path: state.suite_config_path.display().to_string(),
         changed_keys,
         validation: parsed.validation_summary(),
+        audit_status,
     }))
 }
 
@@ -141,12 +192,15 @@ pub(crate) async fn validate_suite_config(
     let parsed = SuiteConfig::parse(&request.toml)
         .map_err(|_| ApiError::bad_request("suite_config_invalid"))?;
     let (exists, old_text) = read_suite_config_text(&state)?;
-    let old_redacted = redacted_toml_json(&old_text)?;
-    let redacted = redacted_toml_json(&request.toml)?;
+    let old_raw = toml_json(&old_text)?;
+    let new_raw = toml_json(&request.toml)?;
+    let changed_keys = changed_json_paths(&old_raw, &new_raw);
+    let old_redacted = redact_suite_config_value(old_raw);
+    let redacted = redact_suite_config_value(new_raw);
     Ok(Json(ValidateSuiteConfigResponse {
         path: state.suite_config_path.display().to_string(),
         exists,
-        changed_keys: changed_json_paths(&old_redacted, &redacted),
+        changed_keys,
         old_redacted,
         redacted,
         validation: parsed.validation_summary(),
@@ -163,24 +217,18 @@ fn read_suite_config_text(state: &AppState) -> Result<(bool, String), ApiError> 
 }
 
 fn write_suite_config_atomically(state: &AppState, text: &str) -> Result<(), ApiError> {
-    if let Some(parent) = state.suite_config_path.parent() {
-        fs::create_dir_all(parent).map_err(|_| ApiError::conflict("suite_config_dir_failed"))?;
-    }
-    let tmp_path = state
-        .suite_config_path
-        .with_extension(format!("toml.tmp-{}", Uuid::new_v4()));
-    fs::write(&tmp_path, text).map_err(|_| ApiError::conflict("suite_config_write_failed"))?;
-    fs::rename(&tmp_path, &state.suite_config_path)
-        .map_err(|_| ApiError::conflict("suite_config_rename_failed"))?;
-    Ok(())
+    write_private_file_atomically(&state.suite_config_path, text.as_bytes())
+        .map_err(|_| ApiError::conflict("suite_config_write_failed"))
 }
 
 fn redacted_toml_json(text: &str) -> Result<Value, ApiError> {
+    Ok(redact_suite_config_value(toml_json(text)?))
+}
+
+fn toml_json(text: &str) -> Result<Value, ApiError> {
     let value = toml::from_str::<toml::Value>(text)
         .map_err(|_| ApiError::bad_request("suite_config_invalid_toml"))?;
-    let json =
-        serde_json::to_value(value).map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
-    Ok(redact_suite_config_value(json))
+    serde_json::to_value(value).map_err(|error| ApiError::from(anyhow::anyhow!(error)))
 }
 
 fn changed_json_paths(old: &Value, new: &Value) -> Vec<String> {
@@ -211,5 +259,75 @@ fn collect_changed_paths(prefix: &str, old: &Value, new: &Value, changed: &mut B
             changed.insert(prefix.to_string());
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{changed_json_paths, redacted_toml_json, toml_json};
+
+    #[test]
+    fn changed_paths_are_computed_before_redaction() {
+        let old = toml_json(
+            r#"
+version = 1
+
+[database]
+postgres_url = "postgres://vpsman:old@postgres:5432/vpsman"
+
+[gateway]
+expect_client_public_key_hex = "old"
+"#,
+        )
+        .unwrap();
+        let new = toml_json(
+            r#"
+version = 1
+
+[database]
+postgres_url = "postgres://vpsman:new@postgres:5432/vpsman"
+
+[gateway]
+expect_client_public_key_hex = "new"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            changed_json_paths(&old, &new),
+            vec![
+                "database.postgres_url".to_string(),
+                "gateway.expect_client_public_key_hex".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn redacted_toml_json_hides_postgres_url_but_keeps_secret_file_refs() {
+        let redacted = redacted_toml_json(
+            r#"
+version = 1
+
+[database]
+postgres_url = "postgres://vpsman:secret@postgres:5432/vpsman"
+
+[api]
+gateway_control_url = "http://gateway:9444"
+
+[secrets]
+internal_token_file = "/run/secrets/vpsman_internal_token"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(redacted["database"]["postgres_url"], "<redacted>");
+        assert_eq!(
+            redacted["api"]["gateway_control_url"],
+            "http://gateway:9444"
+        );
+        assert_eq!(
+            redacted["secrets"]["internal_token_file"],
+            "/run/secrets/vpsman_internal_token"
+        );
     }
 }

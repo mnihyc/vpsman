@@ -2472,6 +2472,7 @@ export type SuiteConfigUpdateResponse = {
   path: string;
   changed_keys: string[];
   validation: SuiteConfigValidationRecord;
+  audit_status: string;
 };
 
 export type ActiveView =

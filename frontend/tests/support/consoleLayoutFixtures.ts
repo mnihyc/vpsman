@@ -2904,6 +2904,7 @@ export async function installConsoleApiMock(
             requests.suiteConfigs.push(body);
             currentSuiteConfigToml = body.toml ?? currentSuiteConfigToml;
             return jsonResponse({
+              audit_status: "applied_recorded",
               changed_keys: ["capacity.api_db_pool"],
               path: "config/vpsman.toml",
               validation: suiteConfigValidationFixture,

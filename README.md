@@ -96,8 +96,11 @@ Persistent runtime data stays in checkout-local paths:
 In Docker, keep the `.env` object-store paths under `/var/lib/vpsman`
 unchanged; compose maps them to `deploy/runtime/data`.
 Compose also sets `VPSMAN_SUITE_CONFIG=/etc/vpsman/vpsman.toml` and mounts
-`deploy/config/vpsman.toml` there. Direct binary runs are independent of the
-compose layout; set `VPSMAN_SUITE_CONFIG` yourself when you want a specific
+`deploy/config` at `/etc/vpsman`. `deploy/config/vpsman.toml` remains the single
+authoritative compose suite config; the API receives that config directory as
+writable so dashboard saves can atomically replace the TOML, while gateway,
+worker, and secret mounts stay read-only. Direct binary runs are independent of
+the compose layout; set `VPSMAN_SUITE_CONFIG` yourself when you want a specific
 operator config file.
 
 Long-running job control uses `timeout_secs` as the agent execution budget.

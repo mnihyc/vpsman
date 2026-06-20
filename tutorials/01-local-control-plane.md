@@ -33,12 +33,15 @@ The default compose shape uses:
 - Gateway control API: private between API and gateway containers
 - PostgreSQL: `deploy/runtime/postgres/data`
 - Local object storage: `deploy/runtime/data`
-- Suite config: `deploy/config/vpsman.toml`, mounted as
-  `/etc/vpsman/vpsman.toml` through compose
+- Suite config: `deploy/config/vpsman.toml`, mounted through the authoritative
+  `/etc/vpsman` config directory in compose
 
 For production, replace placeholder secrets in `deploy/.env`, review
-`deploy/config/vpsman.toml`, and serve the panel/API through HTTPS. Local disk
-object storage is the default compose shape. Configure the S3/MinIO variables
+`deploy/config/vpsman.toml`, and serve the panel through HTTPS while keeping the
+operator API private behind the control-plane proxy. The API can atomically save
+that same authoritative TOML from the dashboard; runtime data stays under
+`deploy/runtime`, and secrets stay in read-only mounts. Local disk object
+storage is the default compose shape. Configure the S3/MinIO variables
 only when the deployment should use the implemented S3-compatible adapter for
 backup or update artifacts. To upgrade, replace the files under
 `deploy/runtime/server/current` and

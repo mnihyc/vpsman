@@ -6,8 +6,9 @@ use std::{
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use vpsman_common::{
-    validate_hot_config_update, validate_incremental_config_patch_section, AgentConfig,
-    CommandOutput, OutputStream, MAX_AGENT_HOT_CONFIG_BYTES,
+    validate_hot_config_update, validate_incremental_config_patch_section,
+    write_private_file_atomically, AgentConfig, CommandOutput, OutputStream,
+    MAX_AGENT_HOT_CONFIG_BYTES,
 };
 
 pub(crate) const REDACTED_PRESERVE: &str = "<redacted:preserve>";
@@ -284,37 +285,28 @@ fn persist_config_update(
     updated: &AgentConfig,
     config_path: &Path,
 ) -> Result<()> {
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
-    }
-
     let rollback = rollback_path(config_path);
-    if config_path.exists() {
-        fs::copy(config_path, &rollback).with_context(|| {
-            format!(
-                "failed to write config rollback copy {}",
-                rollback.display()
-            )
-        })?;
-    } else {
-        let current_document =
-            toml::to_string_pretty(current).context("failed to serialize current config")?;
-        fs::write(&rollback, current_document)
-            .with_context(|| format!("failed to write rollback config {}", rollback.display()))?;
-    }
+    let rollback_document = match fs::read(config_path) {
+        Ok(existing) => existing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            toml::to_string_pretty(current)
+                .context("failed to serialize current config")?
+                .into_bytes()
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read config {}", config_path.display()));
+        }
+    };
+    write_private_file_atomically(&rollback, &rollback_document)
+        .with_context(|| format!("failed to write rollback config {}", rollback.display()))?;
 
-    let temp = temp_config_path(config_path);
     let updated_document =
         toml::to_string_pretty(updated).context("failed to serialize updated config")?;
-    fs::write(&temp, updated_document)
-        .with_context(|| format!("failed to write temp config {}", temp.display()))?;
-    fs::rename(&temp, config_path).with_context(|| {
-        let _ = fs::remove_file(&temp);
+    write_private_file_atomically(config_path, updated_document.as_bytes()).with_context(|| {
         format!(
-            "failed to atomically replace config {} with {}",
-            config_path.display(),
-            temp.display()
+            "failed to atomically replace config {}",
+            config_path.display()
         )
     })?;
     Ok(())
@@ -328,17 +320,9 @@ fn rollback_path(config_path: &Path) -> PathBuf {
     config_path.with_file_name(format!("{file_name}.rollback"))
 }
 
-fn temp_config_path(config_path: &Path) -> PathBuf {
-    let file_name = config_path
-        .file_name()
-        .map(|name| name.to_string_lossy())
-        .unwrap_or_else(|| "agent.toml".into());
-    config_path.with_file_name(format!("{file_name}.tmp-{}", uuid::Uuid::new_v4()))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
     use vpsman_common::{
         plan_tunnel, AgentConfig, AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource,
@@ -357,6 +341,7 @@ mod tests {
         let mut current = AgentConfig::default();
         let path = temp_config_path("vpsman-hot-config-apply");
         fs::write(&path, toml::to_string_pretty(&current).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
 
         let mut updated = current.clone();
         updated.display_name = "edge-a".to_string();
@@ -382,17 +367,21 @@ mod tests {
         assert_eq!(current, updated);
         assert_eq!(saved, updated);
         assert_eq!(outputs.len(), 1);
-        assert!(path
-            .with_file_name(format!(
-                "{}.rollback",
-                path.file_name().unwrap().to_string_lossy()
-            ))
-            .exists());
-
-        let _ = fs::remove_file(path.with_file_name(format!(
+        let rollback = path.with_file_name(format!(
             "{}.rollback",
             path.file_name().unwrap().to_string_lossy()
-        )));
+        ));
+        assert!(rollback.exists());
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&rollback).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let _ = fs::remove_file(rollback);
         let _ = fs::remove_file(path);
     }
 

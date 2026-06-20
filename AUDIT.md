@@ -106,15 +106,15 @@ of the same root cause.
 | AUD-090 | Medium/High | Fixed | Agent/File Browser/Ownership | Chown on a symlink reports success while changing nothing |
 | AUD-091 | High | Fixed | Agent/Restore/Safety | Agent-local restore archives are not required to be hash-bound |
 | AUD-092 | High | Fixed | Agent/Restore/Reliability | Agent-local restore reads the entire archive into memory without a cap |
-| AUD-093 | Medium/High | Confirmed | Agent/Config/Security | Hot config rewrites can lose restrictive config-file permissions |
-| AUD-094 | High | Confirmed | API/Suite Config/Security | Suite config saves can widen secret-bearing config-file permissions |
-| AUD-095 | High | Confirmed | API/Suite Config/Audit | Suite config audit redaction leaves database URLs visible |
-| AUD-096 | Medium/High | Confirmed | API/Suite Config/Audit | Suite config can be applied without a durable audit record |
-| AUD-097 | Medium/High | Confirmed | API/Suite Config/Audit | Suite config changed-key detection runs after redaction |
+| AUD-093 | Medium/High | Fixed | Agent/Config/Security | Hot config rewrites can lose restrictive config-file permissions |
+| AUD-094 | High | Fixed | API/Suite Config/Security | Suite config saves can widen secret-bearing config-file permissions |
+| AUD-095 | High | Fixed | API/Suite Config/Audit | Suite config audit redaction leaves database URLs visible |
+| AUD-096 | Medium/High | Fixed | API/Suite Config/Audit | Suite config can be applied without a durable audit record |
+| AUD-097 | Medium/High | Fixed | API/Suite Config/Audit | Suite config changed-key detection runs after redaction |
 | AUD-098 | High | Fixed | Frontend/Suite Config | Suite config save review can use a stale validation result for a newer draft |
-| AUD-099 | Medium/High | Confirmed | API/Suite Config/Durability | Suite config file replacement is rename-only without fsync durability |
+| AUD-099 | Medium/High | Fixed | API/Suite Config/Durability | Suite config file replacement is rename-only without fsync durability |
 | AUD-100 | Medium/High | Confirmed | API/Auth/Audit | Locked login attempts can still flood durable audit logs |
-| AUD-101 | Medium/High | Confirmed | Deploy/API/Suite Config | Official compose mounts the dashboard-editable suite config read-only |
+| AUD-101 | Medium/High | Fixed | Deploy/API/Suite Config | Official compose mounts the dashboard-editable suite config read-only |
 | AUD-102 | High | Fixed | API/Frontend/Suite Config/Privilege | Suite config privilege assertion is not bound to the TOML payload |
 | AUD-103 | Medium/High | Confirmed | API/Auth/Deploy | Login throttling and auth history use proxy IP instead of the operator IP |
 | AUD-104 | Medium/High | Confirmed | API/Auth/TOTP | Authenticated TOTP management is an unthrottled password and code oracle |
@@ -235,7 +235,7 @@ of the same root cause.
 | AUD-219 | Medium/High | Confirmed | API/Worker/Integrations/Delivery State | Disabled integrations can still deliver already queued outbound work |
 | AUD-220 | High | Fixed | API/Worker/Integrations/Auth | Queued integration deliveries are not bound to the originating actor authority |
 | AUD-221 | Medium/High | Confirmed | API/Frontend/System Dashboard | System dashboard omits agent-lost lifecycle failures |
-| AUD-222 | Medium | Confirmed | Frontend/System Config/Security | Suite config editor still presents the private API bind as a public API setting |
+| AUD-222 | Medium | Fixed | Frontend/System Config/Security | Suite config editor still presents the private API bind as a public API setting |
 | AUD-223 | High | Confirmed | API/Gateway/Client Lifecycle | Lifecycle disconnect can report success while older queued commands still deliver |
 | AUD-224 | Medium/High | Fixed | Agent/CLI/Frontend/File Pull | File pull byte caps can be bypassed when a file grows after stat |
 | AUD-225 | Medium/High | Fixed | Agent/File Browser/Resource Bounds | Text save hash checks read the whole destination file into memory |
@@ -3124,7 +3124,7 @@ of the same root cause.
 ### AUD-093: Hot Config Rewrites Can Lose Restrictive Config-File Permissions
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/Config/Security
 - Context: Agent hot config and incremental config-patch jobs persist the
   agent's own TOML configuration. That file contains immutable identity
@@ -3152,11 +3152,18 @@ of the same root cause.
 - Notes: Config persistence should create rollback and temp files with explicit
   owner-only permissions, preserve the existing config mode when safe, and
   fsync/rename without widening access to secret-bearing TOML.
+- Resolution: Added a shared private atomic-write helper that creates
+  destination-adjacent temp files with owner-only permissions, fsyncs file and
+  parent directory, clamps unsafe existing modes to `0600`, and preserves safe
+  owner-only modes. Agent hot-config and data-source config patch persistence
+  now use it for both rollback and live config writes, with regression coverage
+  asserting that an input `0644` config is replaced by `0600` config and
+  rollback files.
 
 ### AUD-094: Suite Config Saves Can Widen Secret-Bearing Config-File Permissions
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Suite Config/Security
 - Context: Admin operators can edit the canonical suite TOML from the dashboard.
   That file is mounted into API, worker, and gateway services and contains
@@ -3191,11 +3198,16 @@ of the same root cause.
   fsync/rename without widening access. This should be handled separately from
   AUD-093 because it affects the central API/worker/gateway control-plane
   config rather than per-agent TOML.
+- Resolution: Suite-config saves now use the same shared private atomic-write
+  helper as agent config updates. The replacement path writes a private temp
+  file, fsyncs it, renames it over the authoritative suite TOML, fsyncs the
+  parent directory, preserves already safe owner-only modes, and clamps
+  group/world-readable targets to `0600`.
 
 ### AUD-095: Suite Config Audit Redaction Leaves Database URLs Visible
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Suite Config/Audit
 - Context: Admin operators can save suite TOML through the dashboard. The API
   records a `suite_config.updated` audit entry containing the old and new config
@@ -3229,11 +3241,17 @@ of the same root cause.
   `password` key names. Secret-file path references can remain visible if that
   is the intended operational model, but credential-bearing URLs should not be
   persisted into audit metadata.
+- Resolution: Suite-config redaction now hides credential-bearing connection
+  fields such as `postgres_url`, DSN/connection-string keys, and string URL
+  values with credentials in the authority component while still leaving
+  explicit `_file` secret references and plain internal service URLs visible.
+  Regression tests cover credential URLs, secret-key fields, secret-file refs,
+  and plain API/gateway URLs.
 
 ### AUD-096: Suite Config Can Be Applied Without A Durable Audit Record
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Suite Config/Audit
 - Context: Saving suite TOML is a privileged control-plane operation. It can
   change API, gateway, worker, database, storage, timeout, and secret-reference
@@ -3262,11 +3280,18 @@ of the same root cause.
   with the applied result, or make post-write audit failure non-ambiguous with a
   durable recovery marker. Returning a plain failure after replacing the config
   is the unsafe part.
+- Resolution: The suite-config update route now records a durable
+  `suite_config.update_requested` audit event with a shared request ID before
+  mutating the TOML. Write failures best-effort record
+  `suite_config.update_failed`; successful writes record `suite_config.updated`.
+  If the post-write applied audit fails, the API response explicitly reports
+  `intent_recorded_applied_audit_failed` instead of pretending the final audit
+  is complete. Repository tests cover intent/failure audit correlation.
 
 ### AUD-097: Suite Config Changed-Key Detection Runs After Redaction
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Suite Config/Audit
 - Context: Suite config validation and save responses show changed keys, and the
   save path records those changed keys in the `suite_config.updated` audit entry.
@@ -3298,6 +3323,11 @@ of the same root cause.
 - Notes: Compute changed key paths from parsed unredacted TOML, then use the
   redactor only for displayed and persisted values. The changed-key list should
   include field names even when the values themselves are hidden.
+- Resolution: Validation and save routes now parse old/new TOML into raw JSON
+  first, compute changed-key paths from the unredacted structures, and only then
+  redact values for the response and audit metadata. Route regression tests
+  verify that changes to `database.postgres_url` and
+  `gateway.expect_client_public_key_hex` remain visible in changed-key output.
 
 ### AUD-098: Suite Config Save Review Can Use A Stale Validation Result For A Newer Draft
 
@@ -3341,7 +3371,7 @@ of the same root cause.
 ### AUD-099: Suite Config File Replacement Is Rename-Only Without Fsync Durability
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Suite Config/Durability
 - Context: System Config can save the central suite TOML that controls API,
   gateway, worker, database, storage, timeout, capacity, auth-throttle, and
@@ -3370,6 +3400,10 @@ of the same root cause.
 - Notes: This is separate from AUD-094 and AUD-096. AUD-094 covers file mode
   widening; AUD-096 covers audit/file transaction ordering. This issue is the
   crash-durability of the replacement itself.
+- Resolution: Suite-config replacement now goes through the shared private
+  atomic-write helper, which writes and fsyncs a private temp file, renames it,
+  fsyncs the containing directory, and removes the temp file on replacement
+  error.
 
 ### AUD-100: Locked Login Attempts Can Still Flood Durable Audit Logs
 
@@ -3413,7 +3447,7 @@ of the same root cause.
 ### AUD-101: Official Compose Mounts The Dashboard-Editable Suite Config Read-Only
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Deploy/API/Suite Config
 - Context: The released Docker Compose deployment is the documented operator
   runtime path. The dashboard System Config panel exposes a privileged workflow
@@ -3451,6 +3485,13 @@ of the same root cause.
   API/gateway private while making the intended operator config workflow and
   deployment mounts agree, or explicitly make the compose dashboard config view
   read-only with a documented external edit/restart flow.
+- Resolution: Compose now keeps `deploy/config/vpsman.toml` as the single
+  authoritative suite config and mounts `deploy/config` at `/etc/vpsman`. The
+  API receives that config directory writable so atomic dashboard saves can
+  replace `/etc/vpsman/vpsman.toml`; gateway and worker mount the same config
+  directory read-only. Secret directories remain read-only through `/run/secrets`
+  and an API `/etc/vpsman/secrets` over-mount, and docs clarify that runtime
+  data stays under `deploy/runtime`.
 
 ### AUD-102: Suite Config Privilege Assertion Is Not Bound To The TOML Payload
 
@@ -8817,7 +8858,7 @@ of the same root cause.
 ### AUD-222: Suite Config Editor Still Presents The Private API Bind As A Public API Setting
 
 - Severity: Medium
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/System Config/Security
 - Context: The API is a private operator/control-plane service and must not be
   exposed publicly. Operators can edit suite runtime config from the System
@@ -8842,6 +8883,10 @@ of the same root cause.
 - Notes: Rename the group description to private-control-plane wording and keep
   public URLs limited to separately supplied external artifact/dashboard access
   paths. Do not reintroduce API-hosted public URLs.
+- Resolution: The System Config structured editor now describes the API section
+  as private operator/control-plane settings and labels `api.bind` as
+  `Private API bind`. Frontend layout coverage asserts that the private wording
+  is visible in the System Config panel.
 
 ### AUD-223: Lifecycle Disconnect Can Report Success While Older Queued Commands Still Deliver
 

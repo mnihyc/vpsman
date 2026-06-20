@@ -376,34 +376,81 @@ pub fn read_secret_file_ref(path: Option<&str>) -> Result<Option<String>, String
 }
 
 pub fn redact_suite_config_value(value: serde_json::Value) -> serde_json::Value {
-    redact_value(value)
+    redact_value(None, value)
 }
 
-fn redact_value(value: serde_json::Value) -> serde_json::Value {
+fn redact_value(parent_key: Option<&str>, value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => serde_json::Value::Object(
             map.into_iter()
                 .map(|(child_key, child_value)| {
                     let lowered = child_key.to_ascii_lowercase();
-                    let redact = lowered.contains("secret")
-                        || lowered.ends_with("_key")
-                        || lowered.ends_with("_key_hex")
-                        || lowered.contains("token")
-                        || lowered.contains("password");
-                    let next = if redact && !lowered.ends_with("_file") {
+                    let next = if should_redact_value(&lowered, &child_value) {
                         serde_json::Value::String("<redacted>".to_string())
                     } else {
-                        redact_value(child_value)
+                        redact_value(Some(&lowered), child_value)
                     };
                     (child_key, next)
                 })
                 .collect(),
         ),
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.into_iter().map(redact_value).collect())
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(|value| redact_value(parent_key, value))
+                .collect(),
+        ),
+        serde_json::Value::String(text)
+            if parent_key
+                .map(|key| !key.ends_with("_file") && string_contains_url_credentials(&text))
+                .unwrap_or(false) =>
+        {
+            serde_json::Value::String("<redacted>".to_string())
         }
         other => other,
     }
+}
+
+fn should_redact_value(lowered_key: &str, value: &serde_json::Value) -> bool {
+    if lowered_key.ends_with("_file") {
+        return false;
+    }
+    if lowered_key == "secrets" && value.is_object() {
+        return false;
+    }
+    lowered_key.contains("secret")
+        || lowered_key.ends_with("_key")
+        || lowered_key.ends_with("_key_hex")
+        || lowered_key.contains("token")
+        || lowered_key.contains("password")
+        || credential_url_key(lowered_key)
+        || value
+            .as_str()
+            .map(string_contains_url_credentials)
+            .unwrap_or(false)
+}
+
+fn credential_url_key(lowered_key: &str) -> bool {
+    matches!(
+        lowered_key,
+        "postgres_url"
+            | "database_url"
+            | "db_url"
+            | "connection_url"
+            | "connection_string"
+            | "postgres_dsn"
+            | "database_dsn"
+            | "db_dsn"
+    ) || lowered_key.contains("dsn")
+}
+
+fn string_contains_url_credentials(text: &str) -> bool {
+    let Some(scheme_end) = text.find("://") else {
+        return false;
+    };
+    let authority = &text[scheme_end + 3..];
+    let authority_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
+    authority[..authority_end].contains('@')
 }
 
 fn validate_optional_u64(value: Option<u64>, min: u64, max: u64, name: &str) -> Result<(), String> {
@@ -448,4 +495,65 @@ fn validate_i64_range(value: i64, min: i64, max: i64, name: &str) -> Result<(), 
         return Err(format!("{name}_out_of_range"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::redact_suite_config_value;
+
+    #[test]
+    fn suite_config_redaction_hides_credential_urls_and_sensitive_keys() {
+        let redacted = redact_suite_config_value(json!({
+            "database": {
+                "postgres_url": "postgres://vpsman:secret@postgres:5432/vpsman",
+                "migrations_dir": "migrations"
+            },
+            "webhooks": {
+                "callback": "https://token@example.test/hook"
+            },
+            "gateway": {
+                "expect_client_public_key_hex": "abcd"
+            }
+        }));
+
+        assert_eq!(redacted["database"]["postgres_url"], "<redacted>");
+        assert_eq!(redacted["webhooks"]["callback"], "<redacted>");
+        assert_eq!(
+            redacted["gateway"]["expect_client_public_key_hex"],
+            "<redacted>"
+        );
+        assert_eq!(redacted["database"]["migrations_dir"], "migrations");
+    }
+
+    #[test]
+    fn suite_config_redaction_keeps_secret_file_refs_and_plain_internal_urls() {
+        let redacted = redact_suite_config_value(json!({
+            "api": {
+                "gateway_control_url": "http://gateway:9444"
+            },
+            "gateway": {
+                "api_url": "http://api:8080"
+            },
+            "secrets": {
+                "internal_token_file": "/run/secrets/vpsman_internal_token",
+                "object_secret_key_file": "/run/secrets/object_secret_key"
+            }
+        }));
+
+        assert_eq!(
+            redacted["api"]["gateway_control_url"],
+            "http://gateway:9444"
+        );
+        assert_eq!(redacted["gateway"]["api_url"], "http://api:8080");
+        assert_eq!(
+            redacted["secrets"]["internal_token_file"],
+            "/run/secrets/vpsman_internal_token"
+        );
+        assert_eq!(
+            redacted["secrets"]["object_secret_key_file"],
+            "/run/secrets/object_secret_key"
+        );
+    }
 }

@@ -901,6 +901,7 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   await expect(
     page.getByRole("heading", { name: "System Config", exact: true }),
   ).toBeVisible();
+  await expect(page.getByLabel("Private API bind")).toBeVisible();
   await page.getByLabel("API DB pool").fill("40");
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.getByText(/Validation passed/)).toBeVisible();

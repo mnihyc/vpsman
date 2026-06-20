@@ -1830,7 +1830,8 @@ function SystemConfigPanel({
         privilegeMaterial,
       });
       const response = await onUpdate(draftToml, privilegeAssertion);
-      setConfigMessage(`Saved suite config; changed keys: ${response.changed_keys.join(", ") || "none"}.`);
+      const auditNote = response.audit_status === "applied_recorded" ? "" : ` Audit status: ${response.audit_status}.`;
+      setConfigMessage(`Saved suite config; changed keys: ${response.changed_keys.join(", ") || "none"}.${auditNote}`);
       setConfirmOpen(false);
       onLoad();
     } catch (saveError) {
@@ -1918,8 +1919,8 @@ function SystemConfigPanel({
             )}
             {editorMode === "form" ? (
               <div className="systemConfigGrid compactForm">
-                <ConfigGroup title="API" description="Public API bind and gateway control settings.">
-                  <ConfigText path="api.bind" label="Bind address" parsed={parsedDraft} onChange={updateField} />
+                <ConfigGroup title="API" description="Private operator API bind and gateway control settings.">
+                  <ConfigText path="api.bind" label="Private API bind" parsed={parsedDraft} onChange={updateField} />
                   <ConfigText path="api.gateway_control_url" label="Gateway control URL" parsed={parsedDraft} onChange={updateField} />
                   <ConfigNumber path="api.job_output_artifact_min_bytes" label="Output artifact threshold" parsed={parsedDraft} onChange={updateField} />
                   <ConfigNumber path="api.artifact_max_bytes" label="Artifact max bytes" parsed={parsedDraft} onChange={updateField} />
