@@ -1,4 +1,5 @@
 use super::*;
+use serde_json::json;
 use vpsman_common::{AgentCapabilitySnapshot, AgentPrivilegeMode};
 
 #[tokio::test]
@@ -473,14 +474,14 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
     repo.upsert_fleet_alert_notification_channel(
         &CreateFleetAlertNotificationChannelRequest {
             id: None,
-            name: "edge-audit".to_string(),
+            name: "edge-webhook".to_string(),
             scope_kind: "tag".to_string(),
             scope_value: Some("edge".to_string()),
             min_severity: Some("warning".to_string()),
             categories: Some(vec!["agent_status".to_string()]),
             operator_states: Some(vec!["open".to_string()]),
-            delivery_kind: "audit_log".to_string(),
-            target: "audit:fleet".to_string(),
+            delivery_kind: "webhook".to_string(),
+            target: "http://127.0.0.1:9/fleet".to_string(),
             cooldown_secs: Some(900),
             enabled: Some(true),
             notes: Some("page edge operators".to_string()),
@@ -500,7 +501,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
             categories: Some(vec!["agent_status".to_string()]),
             operator_states: Some(Vec::new()),
             delivery_kind: "webhook".to_string(),
-            target: "https://alerts.example.invalid/vpsman".to_string(),
+            target: "http://127.0.0.1:9/provider".to_string(),
             cooldown_secs: Some(900),
             enabled: Some(true),
             notes: None,
@@ -510,26 +511,27 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
     )
     .await
     .unwrap();
-    repo.upsert_fleet_alert_notification_channel(
-        &CreateFleetAlertNotificationChannelRequest {
-            id: None,
-            name: "provider-custom-adapter".to_string(),
-            scope_kind: "provider".to_string(),
-            scope_value: Some("provider-a".to_string()),
-            min_severity: Some("info".to_string()),
-            categories: Some(vec!["agent_status".to_string()]),
-            operator_states: Some(Vec::new()),
-            delivery_kind: "custom_pager".to_string(),
-            target: "adapter:custom-pager".to_string(),
-            cooldown_secs: Some(900),
-            enabled: Some(true),
-            notes: None,
-            confirmed: true,
-        },
-        &operator,
-    )
-    .await
-    .unwrap();
+    let unsupported_channel = repo
+        .upsert_fleet_alert_notification_channel(
+            &CreateFleetAlertNotificationChannelRequest {
+                id: None,
+                name: "provider-unsupported-adapter".to_string(),
+                scope_kind: "provider".to_string(),
+                scope_value: Some("provider-a".to_string()),
+                min_severity: Some("info".to_string()),
+                categories: Some(vec!["agent_status".to_string()]),
+                operator_states: Some(Vec::new()),
+                delivery_kind: "unsupported_adapter".to_string(),
+                target: "adapter:unsupported".to_string(),
+                cooldown_secs: Some(900),
+                enabled: Some(true),
+                notes: None,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await;
+    assert!(unsupported_channel.is_err());
 
     let state = alert_test_state(repo);
     let dry_run = state
@@ -549,7 +551,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
         )
         .await
         .unwrap();
-    assert_eq!(dry_run.len(), 3);
+    assert_eq!(dry_run.len(), 2);
     assert!(dry_run
         .iter()
         .all(|delivery| delivery.status == "matched_dry_run"));
@@ -572,16 +574,10 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
         )
         .await
         .unwrap();
-    assert_eq!(delivered.len(), 3);
-    assert!(delivered.iter().any(|row| row.status == "delivered"
-        && row.delivery_kind == "audit_log"
+    assert_eq!(delivered.len(), 2);
+    assert!(delivered.iter().all(|row| row.status == "queued"
+        && row.delivery_kind == "webhook"
         && row.payload["schema"] == "vpsman.fleet_alert.notification.v1"));
-    assert!(delivered
-        .iter()
-        .any(|row| row.status == "queued" && row.delivery_kind == "webhook"));
-    assert!(delivered
-        .iter()
-        .any(|row| row.status == "queued" && row.delivery_kind == "custom_pager"));
 
     let duplicate = state
         .dispatch_fleet_alert_notifications(
@@ -627,8 +623,10 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
         )
         .await
         .unwrap();
-    assert_eq!(process_dry_run.len(), 1);
-    assert_eq!(process_dry_run[0].status, "delivery_dry_run");
+    assert_eq!(process_dry_run.len(), 2);
+    assert!(process_dry_run
+        .iter()
+        .all(|delivery| delivery.status == "delivery_dry_run"));
     let after_dry_run = state
         .repo
         .list_fleet_alert_notification_deliveries(20, None, None, Some("queued"))
@@ -637,50 +635,200 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
     assert_eq!(after_dry_run.len(), 2);
     assert!(after_dry_run.iter().all(|row| row.attempt_count == 0));
 
-    let custom_process_dry_run = state
+    let process_preview_hash = process_dry_run[0].review_preview_hash.clone();
+    let failed_webhooks = state
         .process_fleet_alert_notifications(
             &FleetAlertNotificationProcessRequest {
                 limit: Some(20),
                 status: Some("queued".to_string()),
-                delivery_kind: Some("custom_pager".to_string()),
-                dry_run: Some(true),
-                preview_hash: None,
-                confirmed: false,
-            },
-            &operator,
-        )
-        .await
-        .unwrap();
-    assert_eq!(custom_process_dry_run.len(), 1);
-    let custom_process_preview_hash = custom_process_dry_run[0].review_preview_hash.clone();
-
-    let failed_custom = state
-        .process_fleet_alert_notifications(
-            &FleetAlertNotificationProcessRequest {
-                limit: Some(20),
-                status: Some("queued".to_string()),
-                delivery_kind: Some("custom_pager".to_string()),
+                delivery_kind: Some("webhook".to_string()),
                 dry_run: Some(false),
-                preview_hash: custom_process_preview_hash,
+                preview_hash: process_preview_hash,
                 confirmed: true,
             },
             &operator,
         )
         .await
         .unwrap();
-    assert_eq!(failed_custom.len(), 1);
-    assert_eq!(failed_custom[0].status, "failed");
-    assert_eq!(failed_custom[0].attempt_count, 1);
-    assert!(failed_custom[0]
-        .error
-        .as_deref()
-        .is_some_and(|error| error.contains("not configured")));
+    assert_eq!(failed_webhooks.len(), 2);
+    assert!(failed_webhooks.iter().all(|delivery| {
+        delivery.status == "failed"
+            && delivery.attempt_count == 1
+            && delivery.next_attempt_at.is_some()
+            && delivery
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("webhook request failed"))
+    }));
     if let Repository::Memory(memory) = &state.repo {
         let audits = memory.audits.read().await;
         assert!(audits
             .iter()
             .any(|audit| audit.action == "fleet.alert_notification_deliveries_processed"));
     }
+}
+
+#[tokio::test]
+async fn disabled_alert_notification_channel_cancels_retryable_deliveries() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let channel_id = Uuid::new_v4();
+    repo.upsert_fleet_alert_notification_channel(
+        &CreateFleetAlertNotificationChannelRequest {
+            id: Some(channel_id),
+            name: "edge-webhook".to_string(),
+            scope_kind: "tag".to_string(),
+            scope_value: Some("edge".to_string()),
+            min_severity: Some("warning".to_string()),
+            categories: Some(vec!["agent_status".to_string()]),
+            operator_states: Some(vec!["open".to_string()]),
+            delivery_kind: "webhook".to_string(),
+            target: "http://127.0.0.1:9/fleet".to_string(),
+            cooldown_secs: Some(900),
+            enabled: Some(true),
+            notes: None,
+            confirmed: true,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+    let deliveries = repo
+        .record_fleet_alert_notification_deliveries(
+            &[FleetAlertNotificationCandidate {
+                channel_id,
+                channel_name: "edge-webhook".to_string(),
+                alert_id: "agent_status:agent:edge-a".to_string(),
+                alert_severity: "critical".to_string(),
+                alert_category: "agent_status".to_string(),
+                status: "queued".to_string(),
+                delivery_kind: "webhook".to_string(),
+                target: "http://127.0.0.1:9/fleet".to_string(),
+                dedupe_key: "fleet-alert-notification:test".to_string(),
+                payload: json!({"schema": "test"}),
+                cooldown_until_unix: 0,
+            }],
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(deliveries.len(), 1);
+
+    repo.upsert_fleet_alert_notification_channel(
+        &CreateFleetAlertNotificationChannelRequest {
+            id: Some(channel_id),
+            name: "edge-webhook".to_string(),
+            scope_kind: "tag".to_string(),
+            scope_value: Some("edge".to_string()),
+            min_severity: Some("warning".to_string()),
+            categories: Some(vec!["agent_status".to_string()]),
+            operator_states: Some(vec!["open".to_string()]),
+            delivery_kind: "webhook".to_string(),
+            target: "http://127.0.0.1:9/fleet".to_string(),
+            cooldown_secs: Some(900),
+            enabled: Some(false),
+            notes: None,
+            confirmed: true,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let canceled = repo
+        .list_fleet_alert_notification_deliveries(20, None, None, Some("canceled_disabled"))
+        .await
+        .unwrap();
+    assert_eq!(canceled.len(), 1);
+    assert_eq!(canceled[0].id, deliveries[0].id);
+    assert!(canceled[0]
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("disabled")));
+    let claimed = repo
+        .claim_fleet_alert_notification_deliveries_for_process(
+            &[deliveries[0].id],
+            Uuid::new_v4(),
+            60,
+        )
+        .await
+        .unwrap();
+    assert!(claimed.is_empty());
+}
+
+#[tokio::test]
+async fn disabled_webhook_rule_cancels_retryable_deliveries() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let rule_id = Uuid::new_v4();
+    repo.upsert_webhook_rule(
+        &crate::model_webhook_rules::CreateWebhookRuleRequest {
+            id: Some(rule_id),
+            name: "edge-rule".to_string(),
+            enabled: true,
+            expression: "status = stale".to_string(),
+            target: "http://127.0.0.1:9/webhook".to_string(),
+            body_template: String::new(),
+            cooldown_secs: Some(60),
+            notes: None,
+            confirmed: true,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+    let deliveries = repo
+        .record_webhook_rule_deliveries(&[
+            crate::model_webhook_rules::WebhookRuleDeliveryCandidate {
+                rule_id,
+                rule_name: "edge-rule".to_string(),
+                event_kind: "manual.test".to_string(),
+                event_id: "event-1".to_string(),
+                target: "http://127.0.0.1:9/webhook".to_string(),
+                dedupe_key: "webhook-rule:test".to_string(),
+                payload: json!({"schema": "test"}),
+                matched_vps: Vec::new(),
+                message: "test".to_string(),
+                cooldown_until_unix: 0,
+                actor_id: Some(operator.operator.id),
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(deliveries.len(), 1);
+
+    repo.upsert_webhook_rule(
+        &crate::model_webhook_rules::CreateWebhookRuleRequest {
+            id: Some(rule_id),
+            name: "edge-rule".to_string(),
+            enabled: false,
+            expression: "status = stale".to_string(),
+            target: "http://127.0.0.1:9/webhook".to_string(),
+            body_template: String::new(),
+            cooldown_secs: Some(60),
+            notes: None,
+            confirmed: true,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let canceled = repo
+        .list_webhook_rule_deliveries(20, Some(rule_id), None, Some("canceled_disabled"))
+        .await
+        .unwrap();
+    assert_eq!(canceled.len(), 1);
+    assert_eq!(canceled[0].id, deliveries[0].id);
+    assert!(canceled[0]
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("disabled")));
+    let claimed = repo
+        .claim_webhook_rule_deliveries_for_process(&[deliveries[0].id], Uuid::new_v4(), 60)
+        .await
+        .unwrap();
+    assert!(claimed.is_empty());
 }
 
 fn alert_test_state(repo: Repository) -> AppState {

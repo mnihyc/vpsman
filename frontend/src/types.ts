@@ -560,6 +560,7 @@ export type FleetAlertNotificationDeliveryRecord = {
   payload: JsonValue;
   error: string | null;
   attempt_count: number;
+  next_attempt_at: string | null;
   last_attempt_at: string | null;
   cooldown_until_unix: number;
   actor_id: string | null;

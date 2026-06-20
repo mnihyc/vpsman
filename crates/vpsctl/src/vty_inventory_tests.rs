@@ -230,18 +230,18 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "fleet-alert-notification-channel-upsert --name edge-audit --scope-kind tag --scope-value edge --min-severity warning --categories agent_status,network --operator-states open,escalated --delivery-kind audit_log --target audit:fleet --cooldown-secs 600 --notes page-edge --confirmed"
+            "fleet-alert-notification-channel-upsert --name edge-webhook --scope-kind tag --scope-value edge --min-severity warning --categories agent_status,network --operator-states open,escalated --delivery-kind webhook --target https://hooks.example/vpsman --cooldown-secs 600 --notes page-edge --confirmed"
         )
         .unwrap(),
         VtyInventoryCommand::FleetAlertNotificationChannelUpsert {
-            name: "edge-audit".to_string(),
+            name: "edge-webhook".to_string(),
             scope_kind: "tag".to_string(),
             scope_value: Some("edge".to_string()),
             min_severity: Some("warning".to_string()),
             categories: vec!["agent_status".to_string(), "network".to_string()],
             operator_states: vec!["open".to_string(), "escalated".to_string()],
-            delivery_kind: "audit_log".to_string(),
-            target: "audit:fleet".to_string(),
+            delivery_kind: "webhook".to_string(),
+            target: "https://hooks.example/vpsman".to_string(),
             cooldown_secs: Some(600),
             enabled: true,
             notes: Some("page-edge".to_string()),
@@ -430,9 +430,9 @@ fn rejects_invalid_inventory_commands() {
             Some(true),
             Some("tag"),
             Some("edge/a"),
-            Some("audit_log")
+            Some("webhook")
         ),
-        "/api/v1/fleet-alert-notification-channels?limit=10&enabled=true&scope_kind=tag&scope_value=edge%2Fa&delivery_kind=audit_log"
+        "/api/v1/fleet-alert-notification-channels?limit=10&enabled=true&scope_kind=tag&scope_value=edge%2Fa&delivery_kind=webhook"
     );
     assert_eq!(
         super::fleet_alert_notifications_path(

@@ -1001,7 +1001,7 @@ fn fleet_alert_notification_channels_path(
         validate_scope_value(scope_value)?;
     }
     if let Some(delivery_kind) = delivery_kind {
-        validate_alert_token(delivery_kind, "--delivery-kind")?;
+        validate_alert_notification_delivery_kind(delivery_kind, "--delivery-kind")?;
     }
     let mut query = vec![format!("limit={limit}")];
     if let Some(enabled) = enabled {
@@ -1155,7 +1155,7 @@ fn validate_fleet_alert_notification_channel_upsert(
     for state in &options.operator_states {
         validate_alert_state(state, "--operator-states")?;
     }
-    validate_alert_token(&options.delivery_kind, "--delivery-kind")?;
+    validate_alert_notification_delivery_kind(&options.delivery_kind, "--delivery-kind")?;
     anyhow::ensure!(
         !options.target.trim().is_empty()
             && options.target.len() <= 512
@@ -1210,7 +1210,7 @@ fn validate_fleet_alert_notification_process(
         );
     }
     if let Some(delivery_kind) = options.delivery_kind.as_deref() {
-        validate_alert_token(delivery_kind, "--delivery-kind")?;
+        validate_alert_notification_delivery_kind(delivery_kind, "--delivery-kind")?;
     }
     Ok(())
 }
@@ -1255,6 +1255,11 @@ fn validate_alert_token(value: &str, flag: &str) -> Result<()> {
             }),
         "{flag} contains unsupported characters"
     );
+    Ok(())
+}
+
+fn validate_alert_notification_delivery_kind(value: &str, flag: &str) -> Result<()> {
+    anyhow::ensure!(value.trim() == "webhook", "{flag} must be webhook");
     Ok(())
 }
 

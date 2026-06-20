@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use uuid::Uuid;
 use vpsman_common::{
     default_webhook_message, expression_matches, expression_referenced_events,
     expression_referenced_roots, is_webhook_rule_delivery_process_status, payload_hash,
     render_template_with_limit, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
-    WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
+    WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
+    WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
 };
 use vpsman_server_core::operator_is_active_authorized;
 
@@ -23,6 +25,9 @@ use crate::{
 };
 
 const WEBHOOK_PROCESS_DRY_RUN_STATUS: &str = "delivery_dry_run";
+const WEBHOOK_DELIVERY_LEASE_SECS: i64 = 300;
+const MAX_WEBHOOK_DELIVERY_ATTEMPTS: i32 = 4;
+const WEBHOOK_RETRY_BACKOFF_SECS: [i64; 3] = [60, 300, 1800];
 
 impl AppState {
     pub(crate) async fn dry_run_webhook_rule(
@@ -183,18 +188,55 @@ impl AppState {
                 "webhook_rule_process_preview_hash_mismatch"
             );
         }
+        if dry_run {
+            return Ok(deliveries
+                .into_iter()
+                .map(|mut delivery| {
+                    delivery.status = WEBHOOK_PROCESS_DRY_RUN_STATUS.to_string();
+                    delivery.review_preview_hash = Some(preview_hash.clone());
+                    delivery
+                })
+                .collect());
+        }
+        let delivery_ids = deliveries
+            .iter()
+            .map(|delivery| delivery.id)
+            .collect::<Vec<_>>();
+        let expected_ids = delivery_ids.iter().copied().collect::<HashSet<_>>();
+        let lease_id = Uuid::new_v4();
+        let claimed_deliveries = self
+            .repo
+            .claim_webhook_rule_deliveries_for_process(
+                &delivery_ids,
+                lease_id,
+                WEBHOOK_DELIVERY_LEASE_SECS,
+            )
+            .await?;
+        let claimed_ids = claimed_deliveries
+            .iter()
+            .map(|delivery| delivery.id)
+            .collect::<HashSet<_>>();
+        anyhow::ensure!(
+            claimed_ids == expected_ids,
+            "webhook_rule_process_claim_mismatch"
+        );
         let client = reqwest::Client::builder()
             .timeout(tokio::time::Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("failed to build webhook rule client")?;
         let mut processed = Vec::new();
-        for delivery in deliveries {
-            if dry_run {
-                let mut delivery = delivery;
-                delivery.status = WEBHOOK_PROCESS_DRY_RUN_STATUS.to_string();
-                delivery.review_preview_hash = Some(preview_hash.clone());
-                processed.push(delivery);
+        for delivery in claimed_deliveries {
+            if !self.repo.webhook_rule_enabled(delivery.rule_id).await? {
+                processed.push(
+                    self.repo
+                        .cancel_claimed_webhook_rule_delivery(
+                            delivery.id,
+                            lease_id,
+                            "webhook rule disabled",
+                        )
+                        .await?,
+                );
                 continue;
             }
             let result = if self
@@ -208,14 +250,36 @@ impl AppState {
             let (status, error) = match result {
                 Ok(()) => (WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, None),
                 Err(error) if error.to_string() == "actor_authority_revoked" => (
-                    vpsman_common::WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
+                    WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
                     Some("actor_authority_revoked".to_string()),
                 ),
-                Err(error) => (WEBHOOK_RULE_DELIVERY_STATUS_FAILED, Some(error.to_string())),
+                Err(error) => {
+                    let next_attempt_after_secs =
+                        webhook_next_retry_after_secs(delivery.attempt_count);
+                    (
+                        if next_attempt_after_secs.is_some() {
+                            WEBHOOK_RULE_DELIVERY_STATUS_FAILED
+                        } else {
+                            WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED
+                        },
+                        Some(error.to_string()),
+                    )
+                }
+            };
+            let next_attempt_after_secs = if status == WEBHOOK_RULE_DELIVERY_STATUS_FAILED {
+                webhook_next_retry_after_secs(delivery.attempt_count)
+            } else {
+                None
             };
             processed.push(
                 self.repo
-                    .update_webhook_rule_delivery_attempt(delivery.id, status, error.as_deref())
+                    .complete_webhook_rule_delivery_attempt(
+                        delivery.id,
+                        lease_id,
+                        status,
+                        error.as_deref(),
+                        next_attempt_after_secs,
+                    )
                     .await?,
             );
         }
@@ -431,6 +495,20 @@ pub(crate) async fn deliver_webhook_rule(
         status.as_u16()
     );
     Ok(())
+}
+
+fn webhook_next_retry_after_secs(attempt_count: i32) -> Option<i64> {
+    let next_attempt_count = attempt_count.saturating_add(1);
+    if next_attempt_count >= MAX_WEBHOOK_DELIVERY_ATTEMPTS {
+        return None;
+    }
+    let index = next_attempt_count.saturating_sub(1) as usize;
+    Some(
+        WEBHOOK_RETRY_BACKOFF_SECS
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| *WEBHOOK_RETRY_BACKOFF_SECS.last().unwrap_or(&1800)),
+    )
 }
 
 fn render_message_from_payload(rule: &WebhookRuleView, payload: &Value) -> Result<String> {

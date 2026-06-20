@@ -5,8 +5,10 @@ use sqlx::{types::Json as SqlJson, PgPool, Row};
 use tokio::time::Duration;
 use uuid::Uuid;
 use vpsman_common::{
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED,
 };
 
 use crate::actor_authority::actor_authorized;
@@ -14,6 +16,8 @@ use crate::actor_authority::actor_authorized;
 const DEFAULT_WEBHOOK_TIMEOUT_SECS: u64 = 5;
 const MAX_ERROR_BYTES: usize = 1024;
 const MAX_AUDIT_DELIVERY_ROWS: usize = 100;
+const MAX_DELIVERY_ATTEMPTS: i32 = 4;
+const RETRY_BACKOFF_SECS: [i64; 3] = [60, 300, 1800];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct AlertNotificationWorkerConfig {
@@ -112,18 +116,33 @@ async fn process_queued_deliveries(
     let rows = sqlx::query(
         r#"
         WITH claim AS (
-            SELECT id
-            FROM fleet_alert_notification_deliveries
-            WHERE status = 'queued'
-               OR (status = 'in_progress' AND delivery_lease_until < now())
-            ORDER BY created_at ASC, id ASC
+            SELECT delivery.id
+            FROM fleet_alert_notification_deliveries delivery
+            JOIN fleet_alert_notification_channels channel
+              ON channel.id = delivery.channel_id
+             AND channel.enabled = TRUE
+            WHERE delivery.delivery_kind = 'webhook'
+              AND (
+                delivery.status = 'queued'
+                OR (
+                    delivery.status = 'failed'
+                    AND (delivery.next_attempt_at IS NULL OR delivery.next_attempt_at <= now())
+                )
+                OR (
+                    delivery.status = 'in_progress'
+                    AND delivery.delivery_lease_until < now()
+                )
+              )
+            ORDER BY delivery.created_at ASC, delivery.id ASC
             LIMIT $1
-            FOR UPDATE SKIP LOCKED
+            FOR UPDATE OF delivery SKIP LOCKED
         )
         UPDATE fleet_alert_notification_deliveries delivery
         SET status = 'in_progress',
+            error = NULL,
             delivery_lease_id = $2,
-            delivery_lease_until = now() + make_interval(secs => $3::integer)
+            delivery_lease_until = now() + make_interval(secs => $3::integer),
+            next_attempt_at = NULL
         FROM claim
         WHERE delivery.id = claim.id
         RETURNING
@@ -152,6 +171,43 @@ async fn process_queued_deliveries(
     let mut outcomes = Vec::new();
     for row in rows {
         let delivery = delivery_from_row(row)?;
+        if !alert_notification_channel_enabled(pool, delivery.channel_id).await? {
+            let updated = sqlx::query(
+                r#"
+                UPDATE fleet_alert_notification_deliveries
+                SET
+                    status = 'canceled_disabled',
+                    error = $3,
+                    delivery_lease_id = NULL,
+                    delivery_lease_until = NULL,
+                    next_attempt_at = NULL,
+                    delivered_at = NULL
+                WHERE id = $1
+                  AND status = 'in_progress'
+                  AND delivery_lease_id = $2
+                RETURNING attempt_count
+                "#,
+            )
+            .bind(delivery.id)
+            .bind(lease_id)
+            .bind("fleet alert notification channel disabled")
+            .fetch_optional(pool)
+            .await?;
+            let Some(updated) = updated else {
+                continue;
+            };
+            let recorded_attempt_count: i32 = updated.try_get("attempt_count")?;
+            outcomes.push(DeliveryOutcome {
+                id: delivery.id,
+                channel_id: delivery.channel_id,
+                alert_id: delivery.alert_id,
+                status: FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED.to_string(),
+                delivery_kind: delivery.delivery_kind,
+                attempt_count: recorded_attempt_count,
+                error: Some("fleet alert notification channel disabled".to_string()),
+            });
+            continue;
+        }
         let result =
             if actor_authorized(pool, delivery.actor_id, "operator", &["integrations:write"])
                 .await?
@@ -160,16 +216,29 @@ async fn process_queued_deliveries(
             } else {
                 Err(anyhow::anyhow!("actor_authority_revoked"))
             };
-        let (status, error) = match result {
-            Ok(()) => (FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED, None),
+        let (status, error, next_attempt_after_secs) = match result {
+            Ok(()) => (
+                FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
+                None,
+                None,
+            ),
             Err(error) if error.to_string() == "actor_authority_revoked" => (
-                FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+                FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED,
                 Some("actor_authority_revoked".to_string()),
+                None,
             ),
-            Err(error) => (
-                FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
-                Some(truncate_error(&error.to_string())),
-            ),
+            Err(error) => {
+                let next_attempt_after_secs = next_retry_after_secs(delivery.attempt_count);
+                (
+                    if next_attempt_after_secs.is_some() {
+                        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED
+                    } else {
+                        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED
+                    },
+                    Some(truncate_error(&error.to_string())),
+                    next_attempt_after_secs,
+                )
+            }
         };
         let updated = sqlx::query(
             r#"
@@ -178,8 +247,12 @@ async fn process_queued_deliveries(
                 status = $2,
                 error = $3,
                 attempt_count = attempt_count + 1,
+                next_attempt_at = CASE
+                    WHEN $5::bigint IS NULL THEN NULL
+                    ELSE now() + ($5::bigint * interval '1 second')
+                END,
                 last_attempt_at = now(),
-                delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE delivered_at END,
+                delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE NULL END,
                 delivery_lease_id = NULL,
                 delivery_lease_until = NULL
             WHERE id = $1
@@ -192,6 +265,7 @@ async fn process_queued_deliveries(
         .bind(status)
         .bind(error.as_deref())
         .bind(lease_id)
+        .bind(next_attempt_after_secs)
         .fetch_optional(pool)
         .await?;
         let Some(updated) = updated else {
@@ -232,15 +306,30 @@ fn delivery_lease_secs(limit: i64, webhook_timeout_secs: u64) -> i32 {
         .clamp(60, i32::MAX as i64) as i32
 }
 
-async fn deliver_notification(client: &reqwest::Client, delivery: &DeliveryRow) -> Result<()> {
-    match delivery.delivery_kind.as_str() {
-        "audit_log" => Ok(()),
-        "webhook" | "webhook_json" => deliver_webhook_json(client, delivery).await,
-        other => anyhow::bail!("notification delivery adapter '{other}' is not configured"),
-    }
+async fn alert_notification_channel_enabled(pool: &PgPool, channel_id: Uuid) -> Result<bool> {
+    let enabled = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT enabled
+        FROM fleet_alert_notification_channels
+        WHERE id = $1
+        "#,
+    )
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+    Ok(enabled)
 }
 
-async fn deliver_webhook_json(client: &reqwest::Client, delivery: &DeliveryRow) -> Result<()> {
+async fn deliver_notification(client: &reqwest::Client, delivery: &DeliveryRow) -> Result<()> {
+    anyhow::ensure!(
+        delivery.delivery_kind == "webhook",
+        "fleet alert notification delivery kind is invalid"
+    );
+    deliver_webhook_payload(client, delivery).await
+}
+
+async fn deliver_webhook_payload(client: &reqwest::Client, delivery: &DeliveryRow) -> Result<()> {
     let url = validate_webhook_url(&delivery.target)?;
     let body = json!({
         "schema": "vpsman.fleet_alert.webhook_delivery.v1",
@@ -278,7 +367,7 @@ async fn prune_deliveries(pool: &PgPool, config: AlertNotificationWorkerConfig) 
         WITH candidates AS (
             SELECT id
             FROM fleet_alert_notification_deliveries
-            WHERE status IN ('delivered', 'failed')
+            WHERE status IN ('delivered', 'failed', 'permanently_failed', 'canceled_disabled')
               AND created_at <= now() - ($1::bigint * interval '1 day')
             ORDER BY created_at ASC, id ASC
             LIMIT $2
@@ -436,6 +525,20 @@ fn is_local_http_webhook(url: &Url) -> bool {
 
 fn truncate_error(error: &str) -> String {
     error.chars().take(MAX_ERROR_BYTES).collect()
+}
+
+fn next_retry_after_secs(attempt_count: i32) -> Option<i64> {
+    let next_attempt_count = attempt_count.saturating_add(1);
+    if next_attempt_count >= MAX_DELIVERY_ATTEMPTS {
+        return None;
+    }
+    let index = next_attempt_count.saturating_sub(1) as usize;
+    Some(
+        RETRY_BACKOFF_SECS
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| *RETRY_BACKOFF_SECS.last().unwrap_or(&1800)),
+    )
 }
 
 #[cfg(test)]

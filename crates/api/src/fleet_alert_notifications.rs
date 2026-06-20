@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use reqwest::{redirect::Policy, Url};
@@ -10,6 +10,7 @@ use vpsman_common::{
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_MATCHED_DRY_RUN,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED,
 };
 use vpsman_server_core::operator_is_active_authorized;
@@ -29,6 +30,9 @@ use crate::{
 
 const NOTIFICATION_WEBHOOK_TIMEOUT_SECS: u64 = 5;
 const NOTIFICATION_PROCESS_DRY_RUN_STATUS: &str = "delivery_dry_run";
+const NOTIFICATION_DELIVERY_LEASE_SECS: i64 = 300;
+const MAX_NOTIFICATION_DELIVERY_ATTEMPTS: i32 = 4;
+const NOTIFICATION_RETRY_BACKOFF_SECS: [i64; 3] = [60, 300, 1800];
 
 impl AppState {
     pub(crate) async fn dispatch_fleet_alert_notifications(
@@ -96,6 +100,17 @@ impl AppState {
             is_fleet_alert_notification_delivery_process_status(status),
             "fleet alert notification process status must be queued or failed"
         );
+        let delivery_kind_filter = request
+            .delivery_kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(delivery_kind) = delivery_kind_filter {
+            anyhow::ensure!(
+                delivery_kind == "webhook",
+                "fleet alert notification delivery kind is invalid"
+            );
+        }
         let limit = request.limit.unwrap_or(50).clamp(1, 200);
         let deliveries = self
             .repo
@@ -104,10 +119,7 @@ impl AppState {
         let filtered_deliveries = deliveries
             .into_iter()
             .filter(|delivery| {
-                request
-                    .delivery_kind
-                    .as_deref()
-                    .is_none_or(|kind| delivery.delivery_kind == kind)
+                delivery_kind_filter.is_none_or(|kind| delivery.delivery_kind == kind)
             })
             .collect::<Vec<_>>();
         let preview_hash = notification_process_preview_hash(request, &filtered_deliveries)?;
@@ -117,13 +129,55 @@ impl AppState {
                 "fleet_alert_notification_process_preview_hash_mismatch"
             );
         }
+        if dry_run {
+            return Ok(filtered_deliveries
+                .iter()
+                .map(|delivery| {
+                    let mut delivery = dry_run_process_delivery(delivery);
+                    delivery.review_preview_hash = Some(preview_hash.clone());
+                    delivery
+                })
+                .collect());
+        }
+        let delivery_ids = filtered_deliveries
+            .iter()
+            .map(|delivery| delivery.id)
+            .collect::<Vec<_>>();
+        let expected_ids = delivery_ids.iter().copied().collect::<HashSet<_>>();
+        let lease_id = Uuid::new_v4();
+        let claimed_deliveries = self
+            .repo
+            .claim_fleet_alert_notification_deliveries_for_process(
+                &delivery_ids,
+                lease_id,
+                NOTIFICATION_DELIVERY_LEASE_SECS,
+            )
+            .await?;
+        let claimed_ids = claimed_deliveries
+            .iter()
+            .map(|delivery| delivery.id)
+            .collect::<HashSet<_>>();
+        anyhow::ensure!(
+            claimed_ids == expected_ids,
+            "fleet_alert_notification_process_claim_mismatch"
+        );
         let mut processed = Vec::new();
         let client = webhook_client()?;
-        for delivery in filtered_deliveries {
-            if dry_run {
-                let mut delivery = dry_run_process_delivery(&delivery);
-                delivery.review_preview_hash = Some(preview_hash.clone());
-                processed.push(delivery);
+        for delivery in claimed_deliveries {
+            if !self
+                .repo
+                .fleet_alert_notification_channel_enabled(delivery.channel_id)
+                .await?
+            {
+                processed.push(
+                    self.repo
+                        .cancel_claimed_fleet_alert_notification_delivery(
+                            delivery.id,
+                            lease_id,
+                            "fleet alert notification channel disabled",
+                        )
+                        .await?,
+                );
                 continue;
             }
             let result = if self
@@ -134,23 +188,39 @@ impl AppState {
             } else {
                 Err(anyhow::anyhow!("actor_authority_revoked"))
             };
-            let (status, error) = match result {
-                Ok(()) => (FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED, None),
+            let (status, error, next_attempt_after_secs) = match result {
+                Ok(()) => (
+                    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
+                    None,
+                    None,
+                ),
                 Err(error) if error.to_string() == "actor_authority_revoked" => (
-                    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+                    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED,
                     Some("actor_authority_revoked".to_string()),
+                    None,
                 ),
-                Err(error) => (
-                    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
-                    Some(error.to_string()),
-                ),
+                Err(error) => {
+                    let next_attempt_after_secs =
+                        notification_next_retry_after_secs(delivery.attempt_count);
+                    (
+                        if next_attempt_after_secs.is_some() {
+                            FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED
+                        } else {
+                            FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED
+                        },
+                        Some(error.to_string()),
+                        next_attempt_after_secs,
+                    )
+                }
             };
             processed.push(
                 self.repo
-                    .update_fleet_alert_notification_delivery_attempt(
+                    .complete_fleet_alert_notification_delivery_attempt(
                         delivery.id,
+                        lease_id,
                         status,
                         error.as_deref(),
+                        next_attempt_after_secs,
                     )
                     .await?,
             );
@@ -319,6 +389,7 @@ fn dry_run_delivery(
         payload: candidate.payload.clone(),
         error: None,
         attempt_count: 0,
+        next_attempt_at: None,
         last_attempt_at: None,
         cooldown_until_unix: candidate.cooldown_until_unix,
         actor_id: Some(operator.operator.id),
@@ -404,14 +475,28 @@ async fn deliver_notification(
     client: &reqwest::Client,
     delivery: &FleetAlertNotificationDeliveryView,
 ) -> Result<()> {
-    match delivery.delivery_kind.as_str() {
-        "webhook" | "webhook_json" => deliver_webhook_json(client, delivery).await,
-        "audit_log" => Ok(()),
-        other => anyhow::bail!("notification delivery adapter '{other}' is not configured"),
-    }
+    anyhow::ensure!(
+        delivery.delivery_kind == "webhook",
+        "fleet alert notification delivery kind is invalid"
+    );
+    deliver_webhook_payload(client, delivery).await
 }
 
-async fn deliver_webhook_json(
+fn notification_next_retry_after_secs(attempt_count: i32) -> Option<i64> {
+    let next_attempt_count = attempt_count.saturating_add(1);
+    if next_attempt_count >= MAX_NOTIFICATION_DELIVERY_ATTEMPTS {
+        return None;
+    }
+    let index = next_attempt_count.saturating_sub(1) as usize;
+    Some(
+        NOTIFICATION_RETRY_BACKOFF_SECS
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| *NOTIFICATION_RETRY_BACKOFF_SECS.last().unwrap_or(&1800)),
+    )
+}
+
+async fn deliver_webhook_payload(
     client: &reqwest::Client,
     delivery: &FleetAlertNotificationDeliveryView,
 ) -> Result<()> {

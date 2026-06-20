@@ -9,8 +9,9 @@ use uuid::Uuid;
 use vpsman_common::{
     default_webhook_message, expression_matches, expression_referenced_events,
     expression_referenced_roots, parse_expression, payload_hash, render_template_with_limit,
-    ExpressionContext, VpsMetadata, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
-    WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
+    ExpressionContext, VpsMetadata, WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED,
+    WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
+    WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
 };
 
 use crate::actor_authority::actor_authorized;
@@ -714,21 +715,29 @@ async fn process_queued_deliveries(
     let rows = sqlx::query(
         r#"
         WITH claim AS (
-            SELECT id
-            FROM webhook_rule_deliveries
+            SELECT delivery.id
+            FROM webhook_rule_deliveries delivery
+            JOIN webhook_rules rule
+              ON rule.id = delivery.rule_id
+             AND rule.enabled = TRUE
             WHERE (
-                    status IN ('queued', 'failed')
-                    AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+                    delivery.status IN ('queued', 'failed')
+                    AND (delivery.next_attempt_at IS NULL OR delivery.next_attempt_at <= now())
                   )
-               OR (status = 'in_progress' AND delivery_lease_until < now())
-            ORDER BY created_at ASC, id ASC
+               OR (
+                    delivery.status = 'in_progress'
+                    AND delivery.delivery_lease_until < now()
+                  )
+            ORDER BY delivery.created_at ASC, delivery.id ASC
             LIMIT $1
-            FOR UPDATE SKIP LOCKED
+            FOR UPDATE OF delivery SKIP LOCKED
         )
         UPDATE webhook_rule_deliveries delivery
         SET status = 'in_progress',
+            error = NULL,
             delivery_lease_id = $2,
-            delivery_lease_until = now() + make_interval(secs => $3::integer)
+            delivery_lease_until = now() + make_interval(secs => $3::integer),
+            next_attempt_at = NULL
         FROM claim
         WHERE delivery.id = claim.id
         RETURNING
@@ -753,6 +762,44 @@ async fn process_queued_deliveries(
     let mut outcomes = Vec::new();
     for row in rows {
         let delivery = delivery_from_row(row)?;
+        if !webhook_rule_enabled(pool, delivery.rule_id).await? {
+            let updated = sqlx::query(
+                r#"
+                UPDATE webhook_rule_deliveries
+                SET
+                    status = 'canceled_disabled',
+                    error = $3,
+                    delivery_lease_id = NULL,
+                    delivery_lease_until = NULL,
+                    next_attempt_at = NULL,
+                    delivered_at = NULL
+                WHERE id = $1
+                  AND status = 'in_progress'
+                  AND delivery_lease_id = $2
+                RETURNING attempt_count
+                "#,
+            )
+            .bind(delivery.id)
+            .bind(lease_id)
+            .bind("webhook rule disabled")
+            .fetch_optional(pool)
+            .await?;
+            let Some(updated) = updated else {
+                continue;
+            };
+            let recorded_attempt_count: i32 = updated.try_get("attempt_count")?;
+            outcomes.push(DeliveryOutcome {
+                id: delivery.id,
+                rule_id: delivery.rule_id,
+                rule_name: delivery.rule_name,
+                event_kind: delivery.event_kind,
+                event_id: delivery.event_id,
+                status: WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED.to_string(),
+                attempt_count: recorded_attempt_count,
+                error: Some("webhook rule disabled".to_string()),
+            });
+            continue;
+        }
         let result =
             if actor_authorized(pool, delivery.actor_id, "operator", &["integrations:write"])
                 .await?
@@ -793,7 +840,7 @@ async fn process_queued_deliveries(
                     ELSE now() + ($4::bigint * interval '1 second')
                 END,
                 last_attempt_at = now(),
-                delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE delivered_at END,
+                delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE NULL END,
                 delivery_lease_id = NULL,
                 delivery_lease_until = NULL
             WHERE id = $1
@@ -851,6 +898,21 @@ fn delivery_lease_secs(limit: i64, webhook_timeout_secs: u64) -> i32 {
         .saturating_mul(per_attempt.clamp(1, 60))
         .saturating_add(60)
         .clamp(60, i32::MAX as i64) as i32
+}
+
+async fn webhook_rule_enabled(pool: &PgPool, rule_id: Uuid) -> Result<bool> {
+    let enabled = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT enabled
+        FROM webhook_rules
+        WHERE id = $1
+        "#,
+    )
+    .bind(rule_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+    Ok(enabled)
 }
 
 async fn deliver_webhook(client: &reqwest::Client, delivery: &DeliveryRow) -> Result<()> {
@@ -936,7 +998,7 @@ async fn prune_deliveries(pool: &PgPool, config: WebhookRuleWorkerConfig) -> Res
         WITH candidates AS (
             SELECT id
             FROM webhook_rule_deliveries
-            WHERE status IN ('delivered', 'failed')
+            WHERE status IN ('delivered', 'failed', 'permanently_failed', 'canceled_disabled')
               AND created_at <= now() - ($1::bigint * interval '1 day')
             ORDER BY created_at ASC, id ASC
             LIMIT $2

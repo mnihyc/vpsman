@@ -76,7 +76,7 @@ fleet-alert-states --state muted
 fleet-alert-state-update --alert-id agent_status:agent:<hash> --action acknowledge --confirmed
 fleet-alert-export --include-muted --limit 200
 fleet-alert-policies --scope-kind tag --scope-value edge
-fleet-alert-notification-channels --delivery-kind audit_log
+fleet-alert-notification-channels --delivery-kind webhook
 fleet-alert-notification-dispatch --dry-run --include-muted
 terminal-sessions --limit 20
 job-create uptime tag:edge
@@ -114,11 +114,11 @@ operator-sessions --limit 50
 operator-session-revoke <session_uuid> --confirmed
 fleet-alert-state-update --alert-id agent_status:agent:<hash> --action mute --muted-for-secs 14400 --reason maintenance --confirmed
 fleet-alert-policy-upsert --name edge-resource-alerts --scope-kind tag --scope-value edge --memory-available-warning-ratio 0.35 --memory-available-critical-ratio 0.15 --cpu-load-warning 1.5 --cpu-load-critical 3.0 --priority 25 --confirmed
-fleet-alert-notification-channel-upsert --name edge-audit --scope-kind tag --scope-value edge --min-severity warning --categories agent_status,network --operator-states open,escalated --delivery-kind audit_log --target audit:fleet --cooldown-secs 3600 --confirmed
+fleet-alert-notification-channel-upsert --name edge-webhook --scope-kind tag --scope-value edge --min-severity warning --categories agent_status,network --operator-states open,escalated --delivery-kind webhook --target https://hooks.example/vpsman --cooldown-secs 3600 --confirmed
 fleet-alert-notification-dispatch --confirmed --include-muted
-fleet-alert-notifications --status delivered
-fleet-alert-notification-process --status queued --delivery-kind webhook_json --dry-run
-fleet-alert-notification-process --status queued --delivery-kind webhook_json --confirmed
+fleet-alert-notifications --status queued
+fleet-alert-notification-process --status queued --delivery-kind webhook --dry-run
+fleet-alert-notification-process --status queued --delivery-kind webhook --confirmed
 file-pull --path /etc/hostname tag:edge
 file-push --source ./payload.txt --path /tmp/payload.txt tag:edge --confirmed
 terminal-poll --session-id <uuid> --replay-from-seq 1 --client-id edge-01

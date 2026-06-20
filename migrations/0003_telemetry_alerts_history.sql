@@ -217,11 +217,12 @@ CREATE TABLE fleet_alert_notification_deliveries (
     attempt_count INTEGER NOT NULL DEFAULT 0,
     delivery_lease_id UUID,
     delivery_lease_until TIMESTAMPTZ,
+    next_attempt_at TIMESTAMPTZ,
     last_attempt_at TIMESTAMPTZ,
     actor_id UUID REFERENCES operators(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     delivered_at TIMESTAMPTZ,
-    CHECK (status IN ('queued', 'in_progress', 'failed', 'delivered', 'matched_dry_run')),
+    CHECK (status IN ('queued', 'in_progress', 'failed', 'permanently_failed', 'canceled_disabled', 'delivered', 'matched_dry_run')),
     CHECK (alert_severity IN ('info', 'warning', 'critical')),
     CHECK (cooldown_until_unix >= 0)
 );
@@ -238,8 +239,7 @@ CREATE INDEX fleet_alert_notification_deliveries_alert_idx
 CREATE INDEX fleet_alert_notification_deliveries_attempt_idx
     ON fleet_alert_notification_deliveries (
         status,
-        delivery_kind,
-        attempt_count,
+        next_attempt_at ASC,
         created_at ASC
     );
 
@@ -267,7 +267,7 @@ CREATE INDEX fleet_alert_notification_deliveries_lease_idx
     ON fleet_alert_notification_deliveries (
         status,
         delivery_lease_until,
-        delivery_kind,
+        next_attempt_at ASC,
         created_at ASC
     );
 
@@ -322,7 +322,7 @@ CREATE TABLE webhook_rule_deliveries (
     actor_id UUID REFERENCES operators(id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     delivered_at TIMESTAMPTZ,
-    CHECK (status IN ('queued', 'in_progress', 'failed', 'permanently_failed', 'delivered', 'matched_dry_run')),
+    CHECK (status IN ('queued', 'in_progress', 'failed', 'permanently_failed', 'canceled_disabled', 'delivered', 'matched_dry_run')),
     CHECK (length(trim(event_kind)) BETWEEN 1 AND 128),
     CHECK (length(trim(event_id)) BETWEEN 1 AND 256),
     CHECK (length(trim(target)) BETWEEN 1 AND 512),

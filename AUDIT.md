@@ -130,8 +130,8 @@ of the same root cause.
 | AUD-114 | High | Fixed | API/Gateway/Client Lifecycle | Delete and key-revoke mark sessions ended without disconnecting the live gateway session |
 | AUD-115 | Medium/High | Fixed | API/WebSocket/Auth | Fleet WebSocket streams continue after token expiry, session revocation, or scope removal |
 | AUD-116 | High | Fixed | API/Integrations/Confirmation | Alert and webhook configuration delete routes lack backend confirmation |
-| AUD-117 | Medium/High | Confirmed | Worker/Alerts/Reliability | Alert notification webhooks are not retried automatically after transient failures |
-| AUD-118 | High | Confirmed | API/Integrations/Delivery State | Manual delivery processors can send in-progress webhooks before failing the state update |
+| AUD-117 | Medium/High | Fixed | Worker/Alerts/Reliability | Alert notification webhooks are not retried automatically after transient failures |
+| AUD-118 | High | Fixed | API/Integrations/Delivery State | Manual delivery processors can send in-progress webhooks before failing the state update |
 | AUD-119 | High | Fixed | Agent/Updates/Lifecycle | Agent update activation can replace the binary before durable heartbeat evidence exists |
 | AUD-120 | High | Fixed | API/Agent Updates/Lifecycle | Activation heartbeat completion trusts job ID without verifying the artifact hash |
 | AUD-121 | High | Fixed | API/Access/Privilege | Agent trust-root and client deletion mutations bypass request-bound privilege verification |
@@ -219,7 +219,7 @@ of the same root cause.
 | AUD-203 | Medium/High | Fixed | API/Backups/Resource Bounds | Retained backup handoff rehydrates the whole artifact in API memory after streaming |
 | AUD-204 | Medium/High | Fixed | API/Frontend/CLI/Backups/Resource Cleanup | Abandoned chunked backup upload sessions can leave staging files indefinitely |
 | AUD-205 | High | Fixed | Agent/Backups/Restore | Restore post-hooks can fail without making the restore target fail safely |
-| AUD-206 | Medium/High | Confirmed | API/Worker/Frontend/Alerts | Alert notification delivery kinds can be saved but cannot be delivered by the shipped worker |
+| AUD-206 | Medium/High | Fixed | API/Worker/Frontend/Alerts | Alert notification delivery kinds can be saved but cannot be delivered by the shipped worker |
 | AUD-207 | High | Fixed | API/Worker/Schedules/Auth | Schedules keep dispatching privileged jobs after owner disable/delete or scope loss |
 | AUD-208 | High | Fixed | Worker/Backups/Retention/Auth | Backup-policy retention prune can delete backups after policy owner loses authority |
 | AUD-209 | High | Fixed | API/Worker/Server Jobs/Auth | Queued artifact cleanup can delete artifacts after creator disable/delete or scope loss |
@@ -232,7 +232,7 @@ of the same root cause.
 | AUD-216 | High | Fixed | Gateway/Spool/Replay | Gateway spool replay can strand valid events after per-target queue saturation |
 | AUD-217 | High | Fixed | API/Frontend/CLI/Backups | Chunked backup artifact upload defaults exceed the route body limit |
 | AUD-218 | High | Fixed | API/Frontend/CLI/File Operations | Chunked file-push jobs exceed the job-create route body limit |
-| AUD-219 | Medium/High | Confirmed | API/Worker/Integrations/Delivery State | Disabled integrations can still deliver already queued outbound work |
+| AUD-219 | Medium/High | Fixed | API/Worker/Integrations/Delivery State | Disabled integrations can still deliver already queued outbound work |
 | AUD-220 | High | Fixed | API/Worker/Integrations/Auth | Queued integration deliveries are not bound to the originating actor authority |
 | AUD-221 | Medium/High | Confirmed | API/Frontend/System Dashboard | System dashboard omits agent-lost lifecycle failures |
 | AUD-222 | Medium | Fixed | Frontend/System Config/Security | Suite config editor still presents the private API bind as a public API setting |
@@ -4209,7 +4209,7 @@ of the same root cause.
 ### AUD-117: Alert Notification Webhooks Are Not Retried Automatically After Transient Failures
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Worker/Alerts/Reliability
 - Context: Fleet alert notification channels can deliver alert payloads to
   webhook endpoints. Those endpoints are operational notification paths, so
@@ -4247,11 +4247,16 @@ of the same root cause.
   retry policy. The important invariant is that transient webhook failures
   should not require manual discovery before the system retries critical alert
   notifications.
+- Resolution: Fixed by adding `next_attempt_at`, `permanently_failed`, and
+  bounded retry scheduling to fleet alert notification deliveries. The worker
+  now claims queued, retry-due failed, and expired in-progress webhook rows,
+  schedules transient failures with backoff, and terminalizes exhausted or
+  authority-revoked attempts.
 
 ### AUD-118: Manual Delivery Processors Can Send In-Progress Webhooks Before Failing The State Update
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Integrations/Delivery State
 - Context: Operators and automation can manually process queued or failed
   alert notification deliveries and webhook-rule deliveries. These routes
@@ -4287,6 +4292,11 @@ of the same root cause.
   or add a claim/lease transition before HTTP so manual processors use the same
   single-owner delivery semantics as workers. The fix should happen before the
   outbound HTTP call, not only at the final update.
+- Resolution: Fixed by removing `in_progress` from manual process status
+  contracts and making both manual alert notification and webhook-rule
+  processors claim the exact reviewed delivery IDs under a lease before any
+  HTTP side effect. Completion is lease-bound, and claim mismatches fail before
+  delivery.
 
 ### AUD-119: Agent Update Activation Can Replace The Binary Before Durable Heartbeat Evidence Exists
 
@@ -8242,7 +8252,7 @@ of the same root cause.
 ### AUD-206: Alert Notification Delivery Kinds Can Be Saved But Cannot Be Delivered By The Shipped Worker
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Worker/Frontend/Alerts
 - Context: Operators can create fleet alert notification channels for critical
   alerts. The default worker then processes queued notification deliveries in
@@ -8284,6 +8294,12 @@ of the same root cause.
   with kind-specific target validation for webhook URLs, or introduce an
   explicit external-adapter ownership model so the default worker does not
   consume and fail custom delivery kinds.
+- Resolution: Fixed by making fleet alert notification delivery webhook-only
+  across repository validation, API route validation, CLI/VTY validation,
+  frontend controls, fixtures, tutorials, and worker/API delivery paths.
+  Webhook targets are validated on channel save with the same HTTPS/local HTTP
+  policy used by webhook rules, and `audit_log`, `webhook_json`, email, Slack,
+  and custom adapter names are no longer accepted as delivery kinds.
 
 ### AUD-207: Schedules Keep Dispatching Privileged Jobs After Owner Disable/Delete Or Scope Loss
 
@@ -8846,7 +8862,7 @@ of the same root cause.
 ### AUD-219: Disabled Integrations Can Still Deliver Already Queued Outbound Work
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Worker/Integrations/Delivery State
 - Context: Operators can disable webhook rules and fleet-alert notification
   channels to stop outbound HTTP delivery to integration endpoints. This is a
@@ -8890,6 +8906,10 @@ of the same root cause.
   deliveries with visible terminal states such as `canceled_disabled`, or make
   the worker re-check current rule/channel enablement under a delivery lease
   before any HTTP side effect.
+- Resolution: Fixed by adding `canceled_disabled`, canceling retryable delivery
+  rows when webhook rules or alert notification channels are disabled, claiming
+  only enabled parent integrations, and re-checking the parent enabled state
+  immediately before HTTP in both workers and manual processors.
 
 ### AUD-220: Queued Integration Deliveries Are Not Bound To The Originating Actor Authority
 

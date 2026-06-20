@@ -721,6 +721,8 @@ export const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUSES = [
   "queued",
   "in_progress",
   "failed",
+  "permanently_failed",
+  "canceled_disabled",
   "delivered",
   "matched_dry_run",
 ] as const;
@@ -730,20 +732,20 @@ export const FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CLASS_BY_STATUS = {
   "queued": "in_progress",
   "in_progress": "in_progress",
   "failed": "warning",
+  "permanently_failed": "warning",
+  "canceled_disabled": "neutral",
   "delivered": "successful",
   "matched_dry_run": "neutral",
 } as const satisfies Record<GeneratedFleetAlertNotificationDeliveryStatus, GeneratedWorkflowStatusClass>;
 
 export const FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUSES = [
   "queued",
-  "in_progress",
   "failed",
 ] as const;
 export type GeneratedFleetAlertNotificationDeliveryProcessStatus = typeof FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUSES[number];
 
 export const FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS = {
   "queued": "in_progress",
-  "in_progress": "in_progress",
   "failed": "warning",
 } as const satisfies Record<GeneratedFleetAlertNotificationDeliveryProcessStatus, GeneratedWorkflowStatusClass>;
 
@@ -752,6 +754,7 @@ export const WEBHOOK_RULE_DELIVERY_STATUSES = [
   "in_progress",
   "failed",
   "permanently_failed",
+  "canceled_disabled",
   "delivered",
   "matched_dry_run",
 ] as const;
@@ -762,6 +765,7 @@ export const WEBHOOK_RULE_DELIVERY_STATUS_CLASS_BY_STATUS = {
   "in_progress": "in_progress",
   "failed": "warning",
   "permanently_failed": "warning",
+  "canceled_disabled": "neutral",
   "delivered": "successful",
   "matched_dry_run": "neutral",
 } as const satisfies Record<GeneratedWebhookRuleDeliveryStatus, GeneratedWorkflowStatusClass>;
@@ -771,6 +775,7 @@ export const WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES = [
   "in_progress",
   "failed",
   "permanently_failed",
+  "canceled_disabled",
   "delivered",
 ] as const;
 export type GeneratedWebhookRuleDeliveryHistoryStatus = typeof WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES[number];
@@ -780,19 +785,18 @@ export const WEBHOOK_RULE_DELIVERY_HISTORY_STATUS_CLASS_BY_STATUS = {
   "in_progress": "in_progress",
   "failed": "warning",
   "permanently_failed": "warning",
+  "canceled_disabled": "neutral",
   "delivered": "successful",
 } as const satisfies Record<GeneratedWebhookRuleDeliveryHistoryStatus, GeneratedWorkflowStatusClass>;
 
 export const WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES = [
   "queued",
-  "in_progress",
   "failed",
 ] as const;
 export type GeneratedWebhookRuleDeliveryProcessStatus = typeof WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES[number];
 
 export const WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS = {
   "queued": "in_progress",
-  "in_progress": "in_progress",
   "failed": "warning",
 } as const satisfies Record<GeneratedWebhookRuleDeliveryProcessStatus, GeneratedWorkflowStatusClass>;
 

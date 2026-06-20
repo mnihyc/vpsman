@@ -1,10 +1,16 @@
 use anyhow::{Context, Result};
+use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::{types::Json as SqlJson, Row};
+use std::collections::HashSet;
 use uuid::Uuid;
 use vpsman_common::{
+    is_fleet_alert_notification_delivery_status,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_IN_PROGRESS,
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED,
     FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED,
 };
 
@@ -15,6 +21,7 @@ use crate::{
         FleetAlertNotificationChannelView, FleetAlertNotificationDeliveryView,
     },
     repository::Repository,
+    repository_webhook_rules::validate_webhook_rule_target,
     unix_now,
 };
 
@@ -27,9 +34,9 @@ const DEFAULT_COOLDOWN_SECS: i64 = 3600;
 const MAX_COOLDOWN_SECS: i64 = 30 * 24 * 60 * 60;
 const MAX_NAME_BYTES: usize = 128;
 const MAX_SCOPE_VALUE_BYTES: usize = 128;
-const MAX_DELIVERY_KIND_BYTES: usize = 64;
 const MAX_TARGET_BYTES: usize = 512;
 const MAX_NOTES_BYTES: usize = 1024;
+const DELIVERY_KIND_WEBHOOK: &str = "webhook";
 
 impl Repository {
     pub(crate) async fn list_fleet_alert_notification_channels(
@@ -151,6 +158,14 @@ impl Repository {
                     candidate
                 };
                 drop(channels);
+                if !channel.enabled {
+                    let mut deliveries = memory.fleet_alert_notification_deliveries.write().await;
+                    cancel_memory_fleet_alert_notification_deliveries(
+                        &mut deliveries,
+                        channel.id,
+                        "fleet alert notification channel disabled",
+                    );
+                }
                 memory
                     .audits
                     .write()
@@ -226,6 +241,26 @@ impl Repository {
                 .fetch_one(&mut *tx)
                 .await?;
                 let channel = channel_from_row(row)?;
+                if !channel.enabled {
+                    sqlx::query(
+                        r#"
+                        UPDATE fleet_alert_notification_deliveries
+                        SET
+                            status = 'canceled_disabled',
+                            error = $2,
+                            delivery_lease_id = NULL,
+                            delivery_lease_until = NULL,
+                            next_attempt_at = NULL,
+                            delivered_at = NULL
+                        WHERE channel_id = $1
+                          AND status IN ('queued', 'failed', 'in_progress')
+                        "#,
+                    )
+                    .bind(channel.id)
+                    .bind("fleet alert notification channel disabled")
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (
@@ -263,6 +298,11 @@ impl Repository {
                     })?;
                 let channel = channels.remove(index);
                 drop(channels);
+                memory
+                    .fleet_alert_notification_deliveries
+                    .write()
+                    .await
+                    .retain(|delivery| delivery.channel_id != channel_id);
                 let mut audit =
                     notification_channel_audit(&channel, operator, unix_now().to_string());
                 audit.action = "fleet.alert_notification_channel_deleted".to_string();
@@ -364,6 +404,7 @@ impl Repository {
                         payload,
                         error,
                         attempt_count,
+                        next_attempt_at::text AS next_attempt_at,
                         last_attempt_at::text AS last_attempt_at,
                         cooldown_until_unix,
                         actor_id,
@@ -461,12 +502,13 @@ impl Repository {
                             payload,
                             error,
                             attempt_count,
+                            next_attempt_at,
                             last_attempt_at,
                             cooldown_until_unix,
                             actor_id,
                             delivered_at
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0, NULL, $13, $14, CASE WHEN $7 = 'delivered' THEN now() ELSE NULL END)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0, NULL, NULL, $13, $14, CASE WHEN $7 = 'delivered' THEN now() ELSE NULL END)
                         RETURNING
                             id,
                             channel_id,
@@ -481,6 +523,7 @@ impl Repository {
                             payload,
                             error,
                             attempt_count,
+                            next_attempt_at::text AS next_attempt_at,
                             last_attempt_at::text AS last_attempt_at,
                             cooldown_until_unix,
                             actor_id,
@@ -529,11 +572,142 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn update_fleet_alert_notification_delivery_attempt(
+    pub(crate) async fn claim_fleet_alert_notification_deliveries_for_process(
+        &self,
+        delivery_ids: &[Uuid],
+        lease_id: Uuid,
+        lease_secs: i64,
+    ) -> Result<Vec<FleetAlertNotificationDeliveryView>> {
+        if delivery_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let id_set = delivery_ids.iter().copied().collect::<HashSet<_>>();
+        match self {
+            Self::Memory(memory) => {
+                let enabled_channel_ids = memory
+                    .fleet_alert_notification_channels
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|channel| channel.enabled)
+                    .map(|channel| channel.id)
+                    .collect::<HashSet<_>>();
+                let mut deliveries = memory.fleet_alert_notification_deliveries.write().await;
+                let mut claimed = Vec::new();
+                for delivery in deliveries.iter_mut() {
+                    if !id_set.contains(&delivery.id)
+                        || !enabled_channel_ids.contains(&delivery.channel_id)
+                        || delivery.delivery_kind != DELIVERY_KIND_WEBHOOK
+                        || !matches!(
+                            delivery.status.as_str(),
+                            FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED
+                                | FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED
+                        )
+                    {
+                        continue;
+                    }
+                    delivery.status =
+                        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_IN_PROGRESS.to_string();
+                    delivery.error = None;
+                    delivery.next_attempt_at = None;
+                    claimed.push(delivery.clone());
+                }
+                Ok(claimed)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    WITH requested AS (
+                        SELECT unnest($1::uuid[]) AS id
+                    ),
+                    claim AS (
+                        SELECT delivery.id
+                        FROM fleet_alert_notification_deliveries delivery
+                        JOIN requested ON requested.id = delivery.id
+                        JOIN fleet_alert_notification_channels channel
+                          ON channel.id = delivery.channel_id
+                         AND channel.enabled = TRUE
+                        WHERE delivery.status IN ('queued', 'failed')
+                          AND delivery.delivery_kind = 'webhook'
+                        ORDER BY delivery.created_at ASC, delivery.id ASC
+                        FOR UPDATE OF delivery SKIP LOCKED
+                    )
+                    UPDATE fleet_alert_notification_deliveries delivery
+                    SET
+                        status = 'in_progress',
+                        error = NULL,
+                        delivery_lease_id = $2,
+                        delivery_lease_until = now() + ($3::bigint * interval '1 second'),
+                        next_attempt_at = NULL
+                    FROM claim
+                    WHERE delivery.id = claim.id
+                    RETURNING
+                        delivery.id,
+                        delivery.channel_id,
+                        delivery.channel_name,
+                        delivery.alert_id,
+                        delivery.alert_severity,
+                        delivery.alert_category,
+                        delivery.status,
+                        delivery.delivery_kind,
+                        delivery.target,
+                        delivery.dedupe_key,
+                        delivery.payload,
+                        delivery.error,
+                        delivery.attempt_count,
+                        delivery.next_attempt_at::text AS next_attempt_at,
+                        delivery.last_attempt_at::text AS last_attempt_at,
+                        delivery.cooldown_until_unix,
+                        delivery.actor_id,
+                        delivery.created_at::text AS created_at,
+                        delivery.delivered_at::text AS delivered_at
+                    "#,
+                )
+                .bind(delivery_ids)
+                .bind(lease_id)
+                .bind(lease_secs.max(1))
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(delivery_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn fleet_alert_notification_channel_enabled(
+        &self,
+        channel_id: Uuid,
+    ) -> Result<bool> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .fleet_alert_notification_channels
+                .read()
+                .await
+                .iter()
+                .any(|channel| channel.id == channel_id && channel.enabled)),
+            Self::Postgres(pool) => {
+                let enabled = sqlx::query_scalar::<_, bool>(
+                    r#"
+                    SELECT enabled
+                    FROM fleet_alert_notification_channels
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(channel_id)
+                .fetch_optional(pool)
+                .await?
+                .unwrap_or(false);
+                Ok(enabled)
+            }
+        }
+    }
+
+    pub(crate) async fn complete_fleet_alert_notification_delivery_attempt(
         &self,
         delivery_id: Uuid,
+        lease_id: Uuid,
         status: &str,
         error: Option<&str>,
+        next_attempt_after_secs: Option<i64>,
     ) -> Result<FleetAlertNotificationDeliveryView> {
         let status = normalize_delivery_attempt_status(status)?;
         let error = error
@@ -549,16 +723,15 @@ impl Repository {
                     .find(|delivery| delivery.id == delivery_id)
                     .context("fleet alert notification delivery not found")?;
                 anyhow::ensure!(
-                    matches!(
-                        delivery.status.as_str(),
-                        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED
-                            | FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED
-                    ),
-                    "fleet alert notification delivery is not retryable"
+                    delivery.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_IN_PROGRESS,
+                    "fleet alert notification delivery is not claimed"
                 );
                 delivery.status = status.to_string();
                 delivery.error = error;
                 delivery.attempt_count = delivery.attempt_count.saturating_add(1);
+                delivery.next_attempt_at = next_attempt_after_secs
+                    .filter(|seconds| *seconds > 0)
+                    .map(|seconds| (Utc::now() + Duration::seconds(seconds)).to_rfc3339());
                 delivery.last_attempt_at = Some(now.clone());
                 delivery.delivered_at =
                     (status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED).then_some(now);
@@ -572,10 +745,17 @@ impl Repository {
                         status = $2,
                         error = $3,
                         attempt_count = attempt_count + 1,
+                        delivery_lease_id = NULL,
+                        delivery_lease_until = NULL,
+                        next_attempt_at = CASE
+                            WHEN $5::bigint IS NULL THEN NULL
+                            ELSE now() + ($5::bigint * interval '1 second')
+                        END,
                         last_attempt_at = now(),
-                        delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE delivered_at END
+                        delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE NULL END
                     WHERE id = $1
-                      AND status IN ('queued', 'failed')
+                      AND status = 'in_progress'
+                      AND delivery_lease_id = $4
                     RETURNING
                         id,
                         channel_id,
@@ -590,6 +770,7 @@ impl Repository {
                         payload,
                         error,
                         attempt_count,
+                        next_attempt_at::text AS next_attempt_at,
                         last_attempt_at::text AS last_attempt_at,
                         cooldown_until_unix,
                         actor_id,
@@ -600,9 +781,87 @@ impl Repository {
                 .bind(delivery_id)
                 .bind(status)
                 .bind(error.as_deref())
+                .bind(lease_id)
+                .bind(next_attempt_after_secs.filter(|seconds| *seconds > 0))
                 .fetch_optional(pool)
                 .await?
-                .context("fleet alert notification delivery not found or not retryable")?;
+                .context("fleet alert notification delivery not found or not claimed")?;
+                delivery_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn cancel_claimed_fleet_alert_notification_delivery(
+        &self,
+        delivery_id: Uuid,
+        lease_id: Uuid,
+        error: &str,
+    ) -> Result<FleetAlertNotificationDeliveryView> {
+        let error = error
+            .trim()
+            .chars()
+            .take(MAX_NOTES_BYTES)
+            .collect::<String>();
+        match self {
+            Self::Memory(memory) => {
+                let mut deliveries = memory.fleet_alert_notification_deliveries.write().await;
+                let delivery = deliveries
+                    .iter_mut()
+                    .find(|delivery| delivery.id == delivery_id)
+                    .context("fleet alert notification delivery not found")?;
+                anyhow::ensure!(
+                    delivery.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_IN_PROGRESS,
+                    "fleet alert notification delivery is not claimed"
+                );
+                delivery.status =
+                    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED.to_string();
+                delivery.error = Some(error);
+                delivery.next_attempt_at = None;
+                delivery.delivered_at = None;
+                Ok(delivery.clone())
+            }
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    UPDATE fleet_alert_notification_deliveries
+                    SET
+                        status = 'canceled_disabled',
+                        error = $3,
+                        delivery_lease_id = NULL,
+                        delivery_lease_until = NULL,
+                        next_attempt_at = NULL,
+                        delivered_at = NULL
+                    WHERE id = $1
+                      AND status = 'in_progress'
+                      AND delivery_lease_id = $2
+                    RETURNING
+                        id,
+                        channel_id,
+                        channel_name,
+                        alert_id,
+                        alert_severity,
+                        alert_category,
+                        status,
+                        delivery_kind,
+                        target,
+                        dedupe_key,
+                        payload,
+                        error,
+                        attempt_count,
+                        next_attempt_at::text AS next_attempt_at,
+                        last_attempt_at::text AS last_attempt_at,
+                        cooldown_until_unix,
+                        actor_id,
+                        created_at::text AS created_at,
+                        delivered_at::text AS delivered_at
+                    "#,
+                )
+                .bind(delivery_id)
+                .bind(lease_id)
+                .bind(&error)
+                .fetch_optional(pool)
+                .await?
+                .context("fleet alert notification delivery not found or not claimed")?;
                 delivery_from_row(row)
             }
         }
@@ -648,12 +907,8 @@ impl Repository {
     }
 }
 
-pub(crate) fn notification_status_for_kind(delivery_kind: &str) -> &'static str {
-    if delivery_kind == "audit_log" {
-        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED
-    } else {
-        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED
-    }
+pub(crate) fn notification_status_for_kind(_delivery_kind: &str) -> &'static str {
+    FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED
 }
 
 fn channel_from_request(
@@ -727,6 +982,7 @@ fn delivery_from_candidate(
         payload: candidate.payload.clone(),
         error: None,
         attempt_count: 0,
+        next_attempt_at: None,
         last_attempt_at: None,
         cooldown_until_unix: candidate.cooldown_until_unix,
         actor_id: Some(operator.operator.id),
@@ -775,6 +1031,7 @@ fn delivery_from_row(row: sqlx::postgres::PgRow) -> Result<FleetAlertNotificatio
         payload: payload.0,
         error: row.try_get("error")?,
         attempt_count: row.try_get("attempt_count")?,
+        next_attempt_at: row.try_get("next_attempt_at")?,
         last_attempt_at: row.try_get("last_attempt_at")?,
         cooldown_until_unix: row.try_get("cooldown_until_unix")?,
         actor_id: row.try_get("actor_id")?,
@@ -857,10 +1114,9 @@ fn normalize_severity(severity: &str) -> Result<String> {
 fn normalize_delivery_kind(delivery_kind: &str) -> Result<String> {
     let delivery_kind = delivery_kind.trim();
     anyhow::ensure!(
-        !delivery_kind.is_empty() && delivery_kind.len() <= MAX_DELIVERY_KIND_BYTES,
+        delivery_kind == DELIVERY_KIND_WEBHOOK,
         "fleet alert notification delivery kind is invalid"
     );
-    validate_token(delivery_kind, "fleet alert notification delivery kind")?;
     Ok(delivery_kind.to_string())
 }
 
@@ -878,6 +1134,7 @@ fn validate_target(target: &str) -> Result<()> {
         !target.is_empty() && target.len() <= MAX_TARGET_BYTES && !target.as_bytes().contains(&0),
         "fleet alert notification target is invalid"
     );
+    validate_webhook_rule_target(target)?;
     Ok(())
 }
 
@@ -961,7 +1218,10 @@ fn normalize_optional_status(status: Option<&str>) -> Result<Option<String>> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| {
-            validate_token(value, "fleet alert notification status")?;
+            anyhow::ensure!(
+                is_fleet_alert_notification_delivery_status(value),
+                "fleet alert notification status is invalid"
+            );
             Ok(value.to_string())
         })
         .transpose()
@@ -975,7 +1235,33 @@ fn normalize_delivery_attempt_status(status: &str) -> Result<&'static str> {
         FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED => {
             Ok(FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED)
         }
+        FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED => {
+            Ok(FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_PERMANENTLY_FAILED)
+        }
         _ => anyhow::bail!("fleet alert notification delivery attempt status is invalid"),
+    }
+}
+
+fn cancel_memory_fleet_alert_notification_deliveries(
+    deliveries: &mut [FleetAlertNotificationDeliveryView],
+    channel_id: Uuid,
+    reason: &str,
+) {
+    for delivery in deliveries.iter_mut() {
+        if delivery.channel_id != channel_id
+            || !matches!(
+                delivery.status.as_str(),
+                FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_QUEUED
+                    | FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_FAILED
+                    | FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_IN_PROGRESS
+            )
+        {
+            continue;
+        }
+        delivery.status = FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CANCELED_DISABLED.to_string();
+        delivery.error = Some(reason.to_string());
+        delivery.next_attempt_at = None;
+        delivery.delivered_at = None;
     }
 }
 

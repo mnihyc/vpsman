@@ -123,40 +123,42 @@ Route alert notifications through scoped channel presets:
 
 ```sh
 cargo run -p vpsctl -- fleet-alert-notification-channel-upsert \
-  --name edge-audit \
-  --scope-kind tag \
-  --scope-value edge \
-  --min-severity warning \
-  --categories agent_status,network \
-  --operator-states open,escalated \
-  --delivery-kind audit_log \
-  --target audit:fleet \
-  --cooldown-secs 3600 \
-  --confirmed
-cargo run -p vpsctl -- fleet-alert-notification-dispatch --dry-run --include-muted
-cargo run -p vpsctl -- fleet-alert-notification-dispatch --confirmed --include-muted
-cargo run -p vpsctl -- fleet-alert-notifications --status delivered
-```
-
-For webhook-style or custom delivery adapters, create a separate channel and
-process the queued outbox after reviewing matches:
-
-```sh
-cargo run -p vpsctl -- fleet-alert-notification-channel-upsert \
   --name edge-webhook \
   --scope-kind tag \
   --scope-value edge \
   --min-severity warning \
   --categories agent_status,network \
   --operator-states open,escalated \
-  --delivery-kind webhook_json \
+  --delivery-kind webhook \
   --target https://hooks.example/vpsman \
   --cooldown-secs 3600 \
   --confirmed
 cargo run -p vpsctl -- fleet-alert-notification-dispatch --dry-run --include-muted
 cargo run -p vpsctl -- fleet-alert-notification-dispatch --confirmed --include-muted
-cargo run -p vpsctl -- fleet-alert-notification-process --status queued --delivery-kind webhook_json --dry-run
-cargo run -p vpsctl -- fleet-alert-notification-process --status queued --delivery-kind webhook_json --confirmed
+cargo run -p vpsctl -- fleet-alert-notification-process --status queued --delivery-kind webhook --dry-run
+cargo run -p vpsctl -- fleet-alert-notification-process --status queued --delivery-kind webhook --confirmed
+cargo run -p vpsctl -- fleet-alert-notifications --status failed
+```
+
+Create additional webhook channels when different alert scopes need different
+receivers:
+
+```sh
+cargo run -p vpsctl -- fleet-alert-notification-channel-upsert \
+  --name core-webhook \
+  --scope-kind tag \
+  --scope-value core \
+  --min-severity warning \
+  --categories agent_status,network \
+  --operator-states open,escalated \
+  --delivery-kind webhook \
+  --target https://hooks.example/vpsman/core \
+  --cooldown-secs 3600 \
+  --confirmed
+cargo run -p vpsctl -- fleet-alert-notification-dispatch --dry-run --include-muted
+cargo run -p vpsctl -- fleet-alert-notification-dispatch --confirmed --include-muted
+cargo run -p vpsctl -- fleet-alert-notification-process --status failed --delivery-kind webhook --dry-run
+cargo run -p vpsctl -- fleet-alert-notification-process --status failed --delivery-kind webhook --confirmed
 cargo run -p vpsctl -- fleet-alert-notifications --status failed
 ```
 
@@ -172,19 +174,12 @@ VPSMAN_POSTGRES_URL=postgres://vpsman:vpsman@127.0.0.1:5432/vpsman \
   --notification-webhook-timeout-secs 5
 ```
 
-The worker uses the same queued outbox. `audit_log` deliveries complete without
-external I/O, `webhook` and `webhook_json` POST bounded JSON payloads, and
-unsupported custom adapter keys fail with visible errors until a future adapter
-is configured.
+The worker uses the same queued webhook outbox. Notification targets must use
+HTTPS, except localhost HTTP for lab receivers. Failed rows keep attempt counts,
+error details, and the next retry timestamp until they are delivered or become
+permanently failed. Normal audit records remain the durable evidence trail for
+channel changes, dispatches, and processing.
 
-`webhook` and `webhook_json` targets must use HTTPS, except localhost HTTP for
-lab receivers. Other delivery kinds stay customizable but need an adapter
-before processing will succeed; failed rows keep attempt counts and errors for
-retry after the adapter is added.
-
-Use `audit_log` for immediate durable audit delivery. Other delivery kinds,
-such as `webhook` or a custom adapter name, create queued outbox records for an
-external adapter worker while preserving the same scope/filter/cooldown model.
 The panel uses CRUD tables for notification channels, expression webhook rules,
 and delivery histories so operators can search, select, edit, delete, dispatch,
 dry-run, and rotate retained records from one dense workflow.

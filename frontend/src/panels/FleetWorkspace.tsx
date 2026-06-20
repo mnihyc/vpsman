@@ -3691,14 +3691,14 @@ function FleetAlertNotificationManager({
     request: FleetAlertNotificationChannelRequest;
     title: string;
   } | null>(null);
-  const [name, setName] = useState("critical-audit-channel");
+  const [name, setName] = useState("critical-webhook-channel");
   const [scopeKind, setScopeKind] = useState("global");
   const [scopeValue, setScopeValue] = useState("");
   const [minSeverity, setMinSeverity] = useState("critical");
   const [categories, setCategories] = useState("");
   const [operatorStates, setOperatorStates] = useState("");
-  const [deliveryKind, setDeliveryKind] = useState("audit_log");
-  const [target, setTarget] = useState("fleet-alerts");
+  const [deliveryKind, setDeliveryKind] = useState("webhook");
+  const [target, setTarget] = useState("");
   const [cooldownSecs, setCooldownSecs] = useState("300");
   const [enabled, setEnabled] = useState(true);
   const [notes, setNotes] = useState("");
@@ -3834,14 +3834,14 @@ function FleetAlertNotificationManager({
 
   function resetForm() {
     setEditingId(null);
-    setName("critical-audit-channel");
+    setName("critical-webhook-channel");
     setScopeKind("global");
     setScopeValue("");
     setMinSeverity("critical");
     setCategories("");
     setOperatorStates("");
-    setDeliveryKind("audit_log");
-    setTarget("fleet-alerts");
+    setDeliveryKind("webhook");
+    setTarget("");
     setCooldownSecs("300");
     setEnabled(true);
     setNotes("");
@@ -3863,7 +3863,7 @@ function FleetAlertNotificationManager({
     setMinSeverity(channel.min_severity);
     setCategories(channel.categories.join(", "));
     setOperatorStates(channel.operator_states.join(", "));
-    setDeliveryKind(channel.delivery_kind);
+    setDeliveryKind(channel.delivery_kind === "webhook" ? channel.delivery_kind : "webhook");
     setTarget(channel.target);
     setCooldownSecs(String(channel.cooldown_secs));
     setEnabled(channel.enabled);
@@ -4373,23 +4373,26 @@ function FleetAlertNotificationManager({
                 />
                 <TokenPreview empty="all states" values={operatorStateTokens} />
               </ConsoleField>
-              <ConsoleField label="Delivery kind">
-                <input
+              <ConsoleField
+                label="Delivery kind"
+                hint="Webhook is the supported delivery boundary."
+              >
+                <select
                   aria-label="Delivery kind"
-                  list="alert-delivery-kinds"
                   value={deliveryKind}
                   onChange={(event) => setDeliveryKind(event.target.value)}
-                />
-                <datalist id="alert-delivery-kinds">
-                  <option value="audit_log" />
-                  <option value="webhook" />
-                  <option value="email" />
-                  <option value="slack" />
-                </datalist>
+                >
+                  <option value="webhook">webhook</option>
+                </select>
               </ConsoleField>
-              <ConsoleField label="Delivery target" className="fieldWide">
+              <ConsoleField
+                label="Delivery target"
+                className="fieldWide"
+                hint="Use HTTPS, or local HTTP for agent-local receivers."
+              >
                 <input
                   aria-label="Delivery target"
+                  placeholder="https://hooks.example/vpsman"
                   value={target}
                   onChange={(event) => setTarget(event.target.value)}
                 />
@@ -4638,7 +4641,12 @@ function NotificationDeliveryHistoryGrid({
         align: "end",
         sortValue: (delivery) => delivery.attempt_count,
         cell: (delivery) => (
-          <span className="monoValue">{delivery.attempt_count}</span>
+          <span className="historyPrimary">
+            <strong className="monoValue">{delivery.attempt_count}</strong>
+            {delivery.next_attempt_at ? (
+              <small title={delivery.next_attempt_at}>retry due</small>
+            ) : null}
+          </span>
         ),
       },
       {
@@ -4671,6 +4679,11 @@ function NotificationDeliveryHistoryGrid({
           <span>{delivery.delivery_kind}</span>
           <span>{delivery.target}</span>
           <span>{delivery.attempt_count} attempts</span>
+          {delivery.next_attempt_at && (
+            <span title={delivery.next_attempt_at}>
+              retry at {formatCompactTime(delivery.next_attempt_at)}
+            </span>
+          )}
           {delivery.error && (
             <span className="deliveryErrorText" title={delivery.error}>
               error: {delivery.error}

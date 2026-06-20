@@ -1672,7 +1672,7 @@ fn parse_fleet_alert_notification_channel_list(
         validate_fleet_alert_policy_scope_kind(scope_kind)?;
     }
     if let Some(delivery_kind) = delivery_kind.as_deref() {
-        validate_alert_token(
+        validate_alert_notification_delivery_kind(
             delivery_kind,
             "fleet-alert-notification-channels --delivery-kind",
         )?;
@@ -1784,7 +1784,7 @@ fn parse_fleet_alert_notification_channel_upsert(parts: &[&str]) -> Result<VtyIn
     }
     let delivery_kind = delivery_kind
         .context("fleet-alert-notification-channel-upsert requires --delivery-kind")?;
-    validate_alert_token(
+    validate_alert_notification_delivery_kind(
         &delivery_kind,
         "fleet-alert-notification-channel-upsert --delivery-kind",
     )?;
@@ -2036,7 +2036,7 @@ fn parse_fleet_alert_notification_process(parts: &[&str]) -> Result<VtyInventory
         );
     }
     if let Some(delivery_kind) = delivery_kind.as_deref() {
-        validate_alert_token(
+        validate_alert_notification_delivery_kind(
             delivery_kind,
             "fleet-alert-notification-process --delivery-kind",
         )?;
@@ -2094,6 +2094,11 @@ fn validate_alert_token(value: &str, context: &str) -> Result<()> {
             }),
         "{context} contains unsupported characters"
     );
+    Ok(())
+}
+
+fn validate_alert_notification_delivery_kind(value: &str, context: &str) -> Result<()> {
+    anyhow::ensure!(value.trim() == "webhook", "{context} must be webhook");
     Ok(())
 }
 

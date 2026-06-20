@@ -3,10 +3,12 @@ use chrono::{DateTime, Duration, Utc};
 use reqwest::Url;
 use serde_json::json;
 use sqlx::{types::Json as SqlJson, Row};
+use std::collections::HashSet;
 use uuid::Uuid;
 use vpsman_common::{
-    payload_hash, validate_template, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
-    WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN,
+    payload_hash, validate_template, WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED,
+    WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
+    WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS, WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN,
     WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
 };
 
@@ -121,6 +123,14 @@ impl Repository {
                     candidate
                 };
                 drop(rules);
+                if !rule.enabled {
+                    let mut deliveries = memory.webhook_rule_deliveries.write().await;
+                    cancel_memory_webhook_rule_deliveries(
+                        &mut deliveries,
+                        rule.id,
+                        "webhook rule disabled",
+                    );
+                }
                 memory
                     .audits
                     .write()
@@ -180,6 +190,26 @@ impl Repository {
                 .fetch_one(&mut *tx)
                 .await?;
                 let rule = webhook_rule_from_row(row)?;
+                if !rule.enabled {
+                    sqlx::query(
+                        r#"
+                        UPDATE webhook_rule_deliveries
+                        SET
+                            status = 'canceled_disabled',
+                            error = $2,
+                            delivery_lease_id = NULL,
+                            delivery_lease_until = NULL,
+                            next_attempt_at = NULL,
+                            delivered_at = NULL
+                        WHERE rule_id = $1
+                          AND status IN ('queued', 'failed', 'in_progress')
+                        "#,
+                    )
+                    .bind(rule.id)
+                    .bind("webhook rule disabled")
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 insert_webhook_rule_audit(&mut tx, &rule, operator).await?;
                 tx.commit().await?;
                 Ok(rule)
@@ -201,6 +231,11 @@ impl Repository {
                     .ok_or_else(|| anyhow::anyhow!("webhook_rule_not_found:{rule_id}"))?;
                 let rule = rules.remove(position);
                 drop(rules);
+                memory
+                    .webhook_rule_deliveries
+                    .write()
+                    .await
+                    .retain(|delivery| delivery.rule_id != rule_id);
                 memory
                     .audits
                     .write()
@@ -595,11 +630,136 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn update_webhook_rule_delivery_attempt(
+    pub(crate) async fn claim_webhook_rule_deliveries_for_process(
+        &self,
+        delivery_ids: &[Uuid],
+        lease_id: Uuid,
+        lease_secs: i64,
+    ) -> Result<Vec<WebhookRuleDeliveryView>> {
+        if delivery_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let id_set = delivery_ids.iter().copied().collect::<HashSet<_>>();
+        match self {
+            Self::Memory(memory) => {
+                let enabled_rule_ids = memory
+                    .webhook_rules
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|rule| rule.enabled)
+                    .map(|rule| rule.id)
+                    .collect::<HashSet<_>>();
+                let mut deliveries = memory.webhook_rule_deliveries.write().await;
+                let mut claimed = Vec::new();
+                for delivery in deliveries.iter_mut() {
+                    if !id_set.contains(&delivery.id)
+                        || !enabled_rule_ids.contains(&delivery.rule_id)
+                        || !matches!(
+                            delivery.status.as_str(),
+                            WEBHOOK_RULE_DELIVERY_STATUS_QUEUED
+                                | WEBHOOK_RULE_DELIVERY_STATUS_FAILED
+                        )
+                    {
+                        continue;
+                    }
+                    delivery.status = WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS.to_string();
+                    delivery.error = None;
+                    delivery.next_attempt_at = None;
+                    claimed.push(delivery.clone());
+                }
+                Ok(claimed)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    WITH requested AS (
+                        SELECT unnest($1::uuid[]) AS id
+                    ),
+                    claim AS (
+                        SELECT delivery.id
+                        FROM webhook_rule_deliveries delivery
+                        JOIN requested ON requested.id = delivery.id
+                        JOIN webhook_rules rule
+                          ON rule.id = delivery.rule_id
+                         AND rule.enabled = TRUE
+                        WHERE delivery.status IN ('queued', 'failed')
+                        ORDER BY delivery.created_at ASC, delivery.id ASC
+                        FOR UPDATE OF delivery SKIP LOCKED
+                    )
+                    UPDATE webhook_rule_deliveries delivery
+                    SET
+                        status = 'in_progress',
+                        error = NULL,
+                        delivery_lease_id = $2,
+                        delivery_lease_until = now() + ($3::bigint * interval '1 second'),
+                        next_attempt_at = NULL
+                    FROM claim
+                    WHERE delivery.id = claim.id
+                    RETURNING
+                        delivery.id,
+                        delivery.rule_id,
+                        delivery.rule_name,
+                        delivery.event_kind,
+                        delivery.event_id,
+                        delivery.status,
+                        delivery.target,
+                        delivery.dedupe_key,
+                        delivery.payload,
+                        delivery.matched_vps,
+                        delivery.message,
+                        delivery.error,
+                        delivery.cooldown_until_unix,
+                        delivery.attempt_count,
+                        delivery.next_attempt_at::text AS next_attempt_at,
+                        delivery.last_attempt_at::text AS last_attempt_at,
+                        delivery.actor_id,
+                        delivery.created_at::text AS created_at,
+                        delivery.delivered_at::text AS delivered_at
+                    "#,
+                )
+                .bind(delivery_ids)
+                .bind(lease_id)
+                .bind(lease_secs.max(1))
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(webhook_delivery_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn webhook_rule_enabled(&self, rule_id: Uuid) -> Result<bool> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .webhook_rules
+                .read()
+                .await
+                .iter()
+                .any(|rule| rule.id == rule_id && rule.enabled)),
+            Self::Postgres(pool) => {
+                let enabled = sqlx::query_scalar::<_, bool>(
+                    r#"
+                    SELECT enabled
+                    FROM webhook_rules
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(rule_id)
+                .fetch_optional(pool)
+                .await?
+                .unwrap_or(false);
+                Ok(enabled)
+            }
+        }
+    }
+
+    pub(crate) async fn complete_webhook_rule_delivery_attempt(
         &self,
         delivery_id: Uuid,
+        lease_id: Uuid,
         status: &str,
         error: Option<&str>,
+        next_attempt_after_secs: Option<i64>,
     ) -> Result<WebhookRuleDeliveryView> {
         let status = normalize_delivery_attempt_status(status)?;
         let error = error
@@ -615,15 +775,15 @@ impl Repository {
                     .find(|delivery| delivery.id == delivery_id)
                     .context("webhook rule delivery not found")?;
                 anyhow::ensure!(
-                    matches!(
-                        delivery.status.as_str(),
-                        WEBHOOK_RULE_DELIVERY_STATUS_QUEUED | WEBHOOK_RULE_DELIVERY_STATUS_FAILED
-                    ),
-                    "webhook rule delivery is not retryable"
+                    delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS,
+                    "webhook rule delivery is not claimed"
                 );
                 delivery.status = status.to_string();
                 delivery.error = error;
                 delivery.attempt_count = delivery.attempt_count.saturating_add(1);
+                delivery.next_attempt_at = next_attempt_after_secs
+                    .filter(|seconds| *seconds > 0)
+                    .map(|seconds| (Utc::now() + Duration::seconds(seconds)).to_rfc3339());
                 delivery.last_attempt_at = Some(now.clone());
                 delivery.delivered_at =
                     (status == WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED).then_some(now);
@@ -637,10 +797,17 @@ impl Repository {
                         status = $2,
                         error = $3,
                         attempt_count = attempt_count + 1,
+                        delivery_lease_id = NULL,
+                        delivery_lease_until = NULL,
+                        next_attempt_at = CASE
+                            WHEN $5::bigint IS NULL THEN NULL
+                            ELSE now() + ($5::bigint * interval '1 second')
+                        END,
                         last_attempt_at = now(),
-                        delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE delivered_at END
+                        delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE NULL END
                     WHERE id = $1
-                      AND status IN ('queued', 'failed')
+                      AND status = 'in_progress'
+                      AND delivery_lease_id = $4
                     RETURNING
                         id,
                         rule_id,
@@ -666,9 +833,86 @@ impl Repository {
                 .bind(delivery_id)
                 .bind(status)
                 .bind(error.as_deref())
+                .bind(lease_id)
+                .bind(next_attempt_after_secs.filter(|seconds| *seconds > 0))
                 .fetch_optional(pool)
                 .await?
-                .context("webhook rule delivery not found or not retryable")?;
+                .context("webhook rule delivery not found or not claimed")?;
+                webhook_delivery_from_row(row)
+            }
+        }
+    }
+
+    pub(crate) async fn cancel_claimed_webhook_rule_delivery(
+        &self,
+        delivery_id: Uuid,
+        lease_id: Uuid,
+        error: &str,
+    ) -> Result<WebhookRuleDeliveryView> {
+        let error = error
+            .trim()
+            .chars()
+            .take(MAX_NOTES_BYTES)
+            .collect::<String>();
+        match self {
+            Self::Memory(memory) => {
+                let mut deliveries = memory.webhook_rule_deliveries.write().await;
+                let delivery = deliveries
+                    .iter_mut()
+                    .find(|delivery| delivery.id == delivery_id)
+                    .context("webhook rule delivery not found")?;
+                anyhow::ensure!(
+                    delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS,
+                    "webhook rule delivery is not claimed"
+                );
+                delivery.status = WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED.to_string();
+                delivery.error = Some(error);
+                delivery.next_attempt_at = None;
+                delivery.delivered_at = None;
+                Ok(delivery.clone())
+            }
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    UPDATE webhook_rule_deliveries
+                    SET
+                        status = 'canceled_disabled',
+                        error = $3,
+                        delivery_lease_id = NULL,
+                        delivery_lease_until = NULL,
+                        next_attempt_at = NULL,
+                        delivered_at = NULL
+                    WHERE id = $1
+                      AND status = 'in_progress'
+                      AND delivery_lease_id = $2
+                    RETURNING
+                        id,
+                        rule_id,
+                        rule_name,
+                        event_kind,
+                        event_id,
+                        status,
+                        target,
+                        dedupe_key,
+                        payload,
+                        matched_vps,
+                        message,
+                        error,
+                        cooldown_until_unix,
+                        attempt_count,
+                        next_attempt_at::text AS next_attempt_at,
+                        last_attempt_at::text AS last_attempt_at,
+                        actor_id,
+                        created_at::text AS created_at,
+                        delivered_at::text AS delivered_at
+                    "#,
+                )
+                .bind(delivery_id)
+                .bind(lease_id)
+                .bind(&error)
+                .fetch_optional(pool)
+                .await?
+                .context("webhook rule delivery not found or not claimed")?;
                 webhook_delivery_from_row(row)
             }
         }
@@ -1217,6 +1461,7 @@ fn normalize_optional_status(status: Option<&str>) -> Result<Option<String>> {
                     WEBHOOK_RULE_DELIVERY_STATUS_QUEUED
                         | WEBHOOK_RULE_DELIVERY_STATUS_FAILED
                         | WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED
+                        | WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED
                         | WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED
                 ),
                 "webhook rule delivery status is invalid"
@@ -1234,6 +1479,29 @@ fn normalize_delivery_attempt_status(status: &str) -> Result<&'static str> {
             Ok(WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED)
         }
         _ => anyhow::bail!("webhook rule delivery attempt status is invalid"),
+    }
+}
+
+fn cancel_memory_webhook_rule_deliveries(
+    deliveries: &mut [WebhookRuleDeliveryView],
+    rule_id: Uuid,
+    reason: &str,
+) {
+    for delivery in deliveries.iter_mut() {
+        if delivery.rule_id != rule_id
+            || !matches!(
+                delivery.status.as_str(),
+                WEBHOOK_RULE_DELIVERY_STATUS_QUEUED
+                    | WEBHOOK_RULE_DELIVERY_STATUS_FAILED
+                    | WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS
+            )
+        {
+            continue;
+        }
+        delivery.status = WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED.to_string();
+        delivery.error = Some(reason.to_string());
+        delivery.next_attempt_at = None;
+        delivery.delivered_at = None;
     }
 }
 

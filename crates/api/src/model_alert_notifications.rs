@@ -69,6 +69,7 @@ pub(crate) struct FleetAlertNotificationDeliveryView {
     pub(crate) payload: serde_json::Value,
     pub(crate) error: Option<String>,
     pub(crate) attempt_count: i32,
+    pub(crate) next_attempt_at: Option<String>,
     pub(crate) last_attempt_at: Option<String>,
     pub(crate) cooldown_until_unix: i64,
     pub(crate) actor_id: Option<Uuid>,

@@ -416,10 +416,7 @@ fn validate_alert_notification_channel_query(
         validate_short_required_value(scope_value, "fleet_alert_notification_scope_value_invalid")?;
     }
     if let Some(delivery_kind) = query.delivery_kind.as_deref() {
-        validate_alert_token(
-            delivery_kind,
-            "fleet_alert_notification_delivery_kind_invalid",
-        )?;
+        validate_alert_notification_delivery_kind(delivery_kind)?;
     }
     Ok(())
 }
@@ -469,10 +466,7 @@ fn validate_alert_notification_channel_request(
     for state in request.operator_states.as_deref().unwrap_or(&[]) {
         validate_alert_state_value(state, "fleet_alert_notification_operator_state_invalid")?;
     }
-    validate_alert_token(
-        &request.delivery_kind,
-        "fleet_alert_notification_delivery_kind_invalid",
-    )?;
+    validate_alert_notification_delivery_kind(&request.delivery_kind)?;
     let target = request.target.trim();
     if target.is_empty() || target.len() > 512 || target.as_bytes().contains(&0) {
         return Err(ApiError::bad_request(
@@ -585,10 +579,16 @@ fn validate_alert_notification_process_request(
         }
     }
     if let Some(delivery_kind) = request.delivery_kind.as_deref() {
-        validate_alert_token(
-            delivery_kind,
+        validate_alert_notification_delivery_kind(delivery_kind)?;
+    }
+    Ok(())
+}
+
+fn validate_alert_notification_delivery_kind(delivery_kind: &str) -> Result<(), ApiError> {
+    if delivery_kind.trim() != "webhook" {
+        return Err(ApiError::bad_request(
             "fleet_alert_notification_delivery_kind_invalid",
-        )?;
+        ));
     }
     Ok(())
 }
