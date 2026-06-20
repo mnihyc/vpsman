@@ -18,7 +18,7 @@ operator_auth_failed_attempt_window_secs = 86400
 operator_auth_lockout_secs = 86400
 
 [gateway]
-bind = "0.0.0.0:9443"
+bind = "127.0.0.1:9443"
 control_bind = "unix:/var/lib/vpsman/gateway-control.sock"
 api_url = "http://api:8080"
 gateway_id = "compose-gateway"

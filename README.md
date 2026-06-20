@@ -99,9 +99,11 @@ Compose also sets `VPSMAN_SUITE_CONFIG=/etc/vpsman/vpsman.toml` and mounts
 `deploy/config` at `/etc/vpsman`. `deploy/config/vpsman.toml` remains the single
 authoritative compose suite config; the API receives that config directory as
 writable so dashboard saves can atomically replace the TOML, while gateway,
-worker, and secret mounts stay read-only. Direct binary runs are independent of
-the compose layout; set `VPSMAN_SUITE_CONFIG` yourself when you want a specific
-operator config file.
+worker, and secret mounts stay read-only. Compose mounts secret files per
+service under `/run/secrets`; API and worker containers do not receive
+gateway-only private-key or privilege-verifier material. Direct binary runs are
+independent of the compose layout; set `VPSMAN_SUITE_CONFIG` yourself when you
+want a specific operator config file.
 
 Long-running job control uses `timeout_secs` as the agent execution budget.
 The API adds dispatch/event grace through `timeout.control_deadline_grace_secs`,

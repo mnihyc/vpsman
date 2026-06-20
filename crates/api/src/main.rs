@@ -666,6 +666,7 @@ fn required_internal_token(value: Option<&str>) -> Result<String> {
             token,
             "change-me"
                 | "change-me-internal-token"
+                | "dev-internal-token-change-me-32chars"
                 | "replace-with-random-token-at-least-32-chars"
         ),
         "VPSMAN_INTERNAL_TOKEN must be changed from the deployment template placeholder"

@@ -50,7 +50,7 @@ pub(crate) struct Args {
         default_value = "config/vpsman.toml"
     )]
     suite_config: PathBuf,
-    #[arg(long, env = "VPSMAN_GATEWAY_BIND", default_value = "0.0.0.0:9443")]
+    #[arg(long, env = "VPSMAN_GATEWAY_BIND", default_value = "127.0.0.1:9443")]
     bind: String,
     #[arg(
         long,
@@ -434,6 +434,7 @@ fn required_internal_token(value: Option<&str>) -> Result<String> {
             token,
             "change-me"
                 | "change-me-internal-token"
+                | "dev-internal-token-change-me-32chars"
                 | "replace-with-random-token-at-least-32-chars"
         ),
         "VPSMAN_INTERNAL_TOKEN must be changed from the deployment template placeholder"
@@ -1092,10 +1093,19 @@ mod tests {
         assert!(required_internal_token(None).is_err());
         assert!(required_internal_token(Some("short")).is_err());
         assert!(required_internal_token(Some("change-me-internal-token")).is_err());
+        assert!(required_internal_token(Some("dev-internal-token-change-me-32chars")).is_err());
         assert!(
             required_internal_token(Some("replace-with-random-token-at-least-32-chars")).is_err()
         );
         assert!(required_internal_token(Some("real-internal-token-value-32-plus-chars")).is_ok());
+    }
+
+    #[test]
+    fn gateway_bind_defaults_to_loopback() {
+        with_cleared_gateway_env(&["VPSMAN_GATEWAY_BIND"], || {
+            let args = Args::parse_from(["vpsman-gateway"]);
+            assert_eq!(args.bind, "127.0.0.1:9443");
+        });
     }
 
     #[test]

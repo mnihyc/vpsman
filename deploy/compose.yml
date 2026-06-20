@@ -24,8 +24,15 @@ services:
       - ./runtime/server/current:/opt/vpsman:ro
       - ./runtime/data:/var/lib/vpsman
       - ./config:/etc/vpsman:rw
-      - ./config/secrets:/etc/vpsman/secrets:ro
-      - ./config/secrets:/run/secrets:ro
+      - type: tmpfs
+        target: /etc/vpsman/secrets
+        read_only: true
+      - type: bind
+        source: ./config/secrets/vpsman_internal_token
+        target: /run/secrets/vpsman_internal_token
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       - postgres
 
@@ -36,13 +43,36 @@ services:
     command: ./bin/vpsman-gateway
     environment:
       VPSMAN_SUITE_CONFIG: /etc/vpsman/vpsman.toml
+      # Docker publishes to the container network address, while the host
+      # boundary remains loopback-only through the ports mapping below.
+      VPSMAN_GATEWAY_BIND: 0.0.0.0:9443
     ports:
       - "127.0.0.1:9443:9443"
     volumes:
       - ./runtime/server/current:/opt/vpsman:ro
       - ./runtime/data:/var/lib/vpsman
       - ./config:/etc/vpsman:ro
-      - ./config/secrets:/run/secrets:ro
+      - type: tmpfs
+        target: /etc/vpsman/secrets
+        read_only: true
+      - type: bind
+        source: ./config/secrets/vpsman_internal_token
+        target: /run/secrets/vpsman_internal_token
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./config/secrets/vpsman_gateway_private_key_hex
+        target: /run/secrets/vpsman_gateway_private_key_hex
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./config/secrets/vpsman_privilege_verifier_key_hex
+        target: /run/secrets/vpsman_privilege_verifier_key_hex
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
       - api
 
@@ -57,7 +87,9 @@ services:
       - ./runtime/server/current:/opt/vpsman:ro
       - ./runtime/data:/var/lib/vpsman
       - ./config:/etc/vpsman:ro
-      - ./config/secrets:/run/secrets:ro
+      - type: tmpfs
+        target: /etc/vpsman/secrets
+        read_only: true
     depends_on:
       - postgres
       - api

@@ -2204,6 +2204,7 @@ fn internal_token_startup_validation_rejects_missing_short_or_placeholder() {
     assert!(required_internal_token(None).is_err());
     assert!(required_internal_token(Some("short")).is_err());
     assert!(required_internal_token(Some("change-me-internal-token")).is_err());
+    assert!(required_internal_token(Some("dev-internal-token-change-me-32chars")).is_err());
     assert!(required_internal_token(Some("replace-with-random-token-at-least-32-chars")).is_err());
     assert!(required_internal_token(Some("real-internal-token-value-32-plus-chars")).is_ok());
 }

@@ -156,10 +156,10 @@ of the same root cause.
 | AUD-140 | Medium/High | Fixed | Frontend/File Browser | Single-file browser confirmations remain armed after operation edits |
 | AUD-141 | High | Confirmed | Agent/Process Supervisor/Safety | Supervisor PID records can target reused host processes after agent restart |
 | AUD-142 | High | Fixed | Agent/Process Supervisor/Security | Supervisor records and logs are written with default-readable permissions |
-| AUD-143 | Medium/High | Confirmed | Docs/Deployment/API Boundary | Headless CLI tutorial presents the public panel URL as the operator API endpoint |
+| AUD-143 | Medium/High | Skipped | Docs/Deployment/API Boundary | Headless CLI tutorial presents the public panel URL as the operator API endpoint |
 | AUD-144 | High | Confirmed | API/Worker/Agent Updates | Strict registered-update policy only gates direct staging jobs |
 | AUD-145 | High | Confirmed | API/Gateway/Key Lifecycle | Key rotation, revoke, and delete disconnect before DB invalidation, leaving a reconnect race |
-| AUD-146 | High | Confirmed | Deploy/Nginx/API Boundary | Publishing the dashboard frontend still publishes API and WebSocket routes |
+| AUD-146 | High | Skipped | Deploy/Nginx/API Boundary | Publishing the dashboard frontend still publishes API and WebSocket routes |
 | AUD-147 | Medium/High | Confirmed | Deploy/Agent Install/Supply Chain | Custom agent binary URL installs without a required SHA-256 pin |
 | AUD-148 | High | Fixed | API/Frontend/CLI/Backups/Retention | Backup policy prune confirms scope and mode but reselects live artifacts instead of the reviewed candidate set |
 | AUD-149 | High | Confirmed | Deploy/Update/Rollback | Compose update and rollback swap release directories without forcing container recreation |
@@ -205,12 +205,12 @@ of the same root cause.
 | AUD-189 | Medium/High | Confirmed | Deploy/Agent Install/Docs | Official agent install examples do not start the service they claim to start |
 | AUD-190 | Medium/High | Confirmed | Deploy/Compose/Database | Secure compose password edits leave API and worker using the wrong Postgres credentials |
 | AUD-191 | High | Confirmed | API/Gateway/Dispatch | Backup gateway endpoints cannot receive API dispatch, cancel, or lifecycle disconnect control |
-| AUD-192 | Medium/High | Confirmed | Gateway/Deploy/Security | Gateway agent TCP listener still defaults to all-interface binding |
+| AUD-192 | Medium/High | Fixed | Gateway/Deploy/Security | Gateway agent TCP listener still defaults to all-interface binding |
 | AUD-193 | High | Confirmed | Gateway/API/Lifecycle | Gateway lifecycle events can expire before API accepts a new process incarnation |
 | AUD-194 | High | Confirmed | Release/Updates/Supply Chain | Manual release workflow can publish tag-named update assets from the wrong commit |
-| AUD-195 | Medium/High | Confirmed | API/Gateway/Security/Docs | Documented dev internal token bypasses placeholder startup validation |
+| AUD-195 | Medium/High | Fixed | API/Gateway/Security/Docs | Documented dev internal token bypasses placeholder startup validation |
 | AUD-196 | Medium | Confirmed | Docs/Local Control Plane | Manual quickstart no longer starts a usable Postgres-backed API |
-| AUD-197 | High | Confirmed | Deploy/API/Gateway/Secrets | API and worker containers can read gateway-only secret material |
+| AUD-197 | High | Fixed | Deploy/API/Gateway/Secrets | API and worker containers can read gateway-only secret material |
 | AUD-198 | Medium/High | Fixed | API/Worker/Object Storage/Security | S3-compatible object store accepts plaintext HTTP endpoints for signed requests |
 | AUD-199 | High | Fixed | API/Frontend/Job Outputs/Resource Bounds | Job-output and file-download archive exports can exhaust API temp disk across targets |
 | AUD-200 | High | Fixed | API/Frontend/CLI/Job Outputs/Resource Bounds | Job-output listing and chunk downloads load entire output history without pagination |
@@ -5324,7 +5324,7 @@ of the same root cause.
 ### AUD-143: Headless CLI Tutorial Presents The Public Panel URL As The Operator API Endpoint
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Skipped
 - Area: Docs/Deployment/API Boundary
 - Context: The project policy and current deployment shape keep the API as a
   private operator/control-plane service. Public URLs, when needed, are for
@@ -5349,6 +5349,10 @@ of the same root cause.
 - Notes: This is distinct from AUD-067. AUD-067 fixed the default compose
   public frontend/API exposure path; this is stale operator-facing guidance that
   can lead a production deployment back into that unsafe topology.
+- Resolution: Skipped by product decision. The accepted deployment model keeps
+  the dashboard and operator API on the same private same-origin nginx surface
+  for simplicity; public/static split guidance is not being added in this
+  pre-release batch.
 
 ### AUD-144: Strict Registered-Update Policy Only Gates Direct Staging Jobs
 
@@ -5448,7 +5452,7 @@ of the same root cause.
 ### AUD-146: Publishing The Dashboard Frontend Still Publishes API And WebSocket Routes
 
 - Severity: High
-- Status: Confirmed
+- Status: Skipped
 - Area: Deploy/Nginx/API Boundary
 - Context: The API and gateway are private operator control-plane services, and
   public URLs for static frontend hosting or release artifacts are supposed to
@@ -5483,6 +5487,10 @@ of the same root cause.
   public/static frontend profile should not proxy API or WebSocket routes at
   all. If a same-origin dashboard-to-API proxy remains useful, it should be a
   clearly private operator profile/config with explicit naming and docs.
+- Resolution: Skipped by product decision. The shipped nginx server remains a
+  simple same-origin static dashboard plus `/api`, `/health`, and `/ws` proxy.
+  The deployment boundary is the frontend bind/reverse-proxy choice, not a
+  separate static-only profile.
 
 ### AUD-147: Custom Agent Binary URL Installs Without A Required SHA-256 Pin
 
@@ -7489,7 +7497,7 @@ of the same root cause.
 ### AUD-192: Gateway Agent TCP Listener Still Defaults To All-Interface Binding
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Gateway/Deploy/Security
 - Context: Current deployment guidance says API and gateway host ports should
   stay localhost-bound by default, and operators should expose agent TCP only
@@ -7522,6 +7530,10 @@ of the same root cause.
   API/dashboard exposure boundary. A clean fix should make the gateway process
   and shipped suite config default to loopback, then require explicit operator
   configuration for public agent TCP exposure.
+- Resolution: Fixed by changing the gateway binary default and shipped suite
+  config to `127.0.0.1:9443`. Compose now sets an explicit container-internal
+  `VPSMAN_GATEWAY_BIND=0.0.0.0:9443` only so Docker can forward the loopback
+  host port to the gateway container.
 
 ### AUD-193: Gateway Lifecycle Events Can Expire Before API Accepts A New Process Incarnation
 
@@ -7622,7 +7634,7 @@ of the same root cause.
 ### AUD-195: Documented Dev Internal Token Bypasses Placeholder Startup Validation
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Gateway/Security/Docs
 - Context: The API-to-gateway internal token protects private control-plane
   ingest and gateway-control requests. Repository maintenance rules require
@@ -7650,6 +7662,9 @@ of the same root cause.
   Those cover reachability defaults; this issue covers startup accepting a
   documented placeholder secret after the project explicitly required
   placeholder rejection.
+- Resolution: Fixed by making API and gateway startup validation reject the
+  documented placeholder token and by changing manual tutorials to generate a
+  random local token with `openssl rand -hex 32`.
 
 ### AUD-196: Manual Quickstart No Longer Starts A Usable Postgres-Backed API
 
@@ -7689,7 +7704,7 @@ of the same root cause.
 ### AUD-197: API And Worker Containers Can Read Gateway-Only Secret Material
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Deploy/API/Gateway/Secrets
 - Context: The privilege model keeps the super password in the browser/CLI and
   requires the private gateway to verify request-bound privilege assertions.
@@ -7732,6 +7747,12 @@ of the same root cause.
   deployment secret boundary itself. A clean fix should provide service-specific
   secret mounts so only the gateway receives gateway identity and verifier
   material, while API and worker receive only the secrets they actually need.
+- Resolution: Fixed by replacing shared compose secret-directory mounts with
+  per-service secret file mounts. API receives only the internal token,
+  gateway receives the internal token plus gateway private key and privilege
+  verifier key, and worker receives no default gateway/internal secret files.
+  The parent `/etc/vpsman/secrets` path is masked so the full secrets directory
+  is not exposed through the suite-config mount.
 
 ### AUD-198: S3-Compatible Object Store Accepts Plaintext HTTP Endpoints For Signed Requests
 
