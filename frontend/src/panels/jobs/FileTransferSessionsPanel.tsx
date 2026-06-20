@@ -1,6 +1,7 @@
 import { Database, Download, FileArchive, RefreshCw, Upload } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ArtifactDownloadMode } from "../../artifactDownload";
+import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { CrudPager } from "../../components/CrudPager";
 import { fileTransferSessionStatusBadgeClass } from "../../jobStatusPresentation";
 import type {
@@ -12,6 +13,22 @@ import type {
 import { formatTime, shortHash, shortId } from "../../utils";
 
 const MAX_SOURCE_ARTIFACT_BYTES = 16 * 1024 * 1024;
+
+type HandoffReviewItem = {
+  clientId: string;
+  clientLabel: string;
+  fileName: string;
+  key: string;
+  path: string;
+  sessionId: string;
+  sha256Hex: string | null;
+  sizeBytes: number | null;
+};
+
+type HandoffReviewSnapshot = {
+  mode: ArtifactDownloadMode;
+  transfers: HandoffReviewItem[];
+};
 
 export function FileTransferSessionsPanel({
   clientLabel,
@@ -46,6 +63,7 @@ export function FileTransferSessionsPanel({
   const [handoffError, setHandoffError] = useState<string | null>(null);
   const [handoffDownloadMode, setHandoffDownloadMode] = useState<ArtifactDownloadMode>("browser-download");
   const [handoffProgress, setHandoffProgress] = useState<string | null>(null);
+  const [handoffSnapshot, setHandoffSnapshot] = useState<HandoffReviewSnapshot | null>(null);
   const [selectedHandoffKeys, setSelectedHandoffKeys] = useState<string[]>([]);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
@@ -53,55 +71,68 @@ export function FileTransferSessionsPanel({
   const [sourceName, setSourceName] = useState("");
   const [sourcePending, setSourcePending] = useState(false);
   const [sourcePendingId, setSourcePendingId] = useState<string | null>(null);
+  const [sourceSnapshot, setSourceSnapshot] = useState<{
+    fileName: string;
+    request: UploadFileTransferSourceArtifactRequest;
+  } | null>(null);
   const handoffCandidates = transfers.filter(canCreateHandoff);
   const selectedHandoffKeySet = new Set(selectedHandoffKeys);
   const selectedHandoffTransfers = handoffCandidates.filter((transfer) => selectedHandoffKeySet.has(transferKey(transfer)));
   const handoffBusy = handoffPendingKey !== null;
   const handoffSummary = handoffError ?? handoffProgress ?? `${transfers.length} resumable upload/download states`;
 
-  async function createAndDownloadHandoff(transfer: FileTransferSessionRecord) {
-    const key = transferKey(transfer);
-    setHandoffPendingKey(key);
+  useEffect(() => {
+    setSourceSnapshot(null);
+  }, [sourceFile, sourceName]);
+
+  useEffect(() => {
+    setHandoffSnapshot(null);
+  }, [handoffDownloadMode, selectedHandoffKeys]);
+
+  function reviewHandoff(transfer: FileTransferSessionRecord) {
+    setHandoffError(null);
+    setHandoffSnapshot({
+      mode: handoffDownloadMode,
+      transfers: [handoffReviewItem(transfer, clientLabel)],
+    });
+  }
+
+  function reviewSelectedHandoffs() {
+    if (selectedHandoffTransfers.length === 0) {
+      return;
+    }
+    setHandoffError(null);
+    setHandoffSnapshot({
+      mode: handoffDownloadMode,
+      transfers: selectedHandoffTransfers.map((transfer) => handoffReviewItem(transfer, clientLabel)),
+    });
+  }
+
+  async function createAndDownloadReviewedHandoffs() {
+    if (!handoffSnapshot || handoffSnapshot.transfers.length === 0) {
+      return;
+    }
+    const pendingKey = handoffSnapshot.transfers.length === 1 ? handoffSnapshot.transfers[0].key : "bulk";
+    const completedKeys = new Set<string>();
+    setHandoffPendingKey(pendingKey);
     setHandoffError(null);
     setHandoffProgress(null);
     try {
-      const handoff = await onCreateHandoff(transfer.client_id, transfer.session_id);
-      await onSaveHandoff(handoff.download_path, {
-        expectedSha256Hex: handoff.sha256_hex,
-        expectedSizeBytes: handoff.size_bytes,
-        fileName: downloadFileNameForTransfer(transfer, clientLabel),
-        mode: handoffDownloadMode,
-      });
-    } catch (error) {
-      setHandoffError(error instanceof Error ? error.message : "Transfer handoff failed");
-    } finally {
-      setHandoffPendingKey(null);
-    }
-  }
-
-  async function createAndDownloadSelectedHandoffs() {
-    const transfersToDownload = selectedHandoffTransfers;
-    if (transfersToDownload.length === 0) {
-      return;
-    }
-    const completedKeys = new Set<string>();
-    setHandoffPendingKey("bulk");
-    setHandoffError(null);
-    try {
-      for (const [index, transfer] of transfersToDownload.entries()) {
-        setHandoffProgress(`Downloading ${index + 1}/${transfersToDownload.length}: ${clientLabel(transfer.client_id)}`);
-        const handoff = await onCreateHandoff(transfer.client_id, transfer.session_id);
+      for (const [index, transfer] of handoffSnapshot.transfers.entries()) {
+        setHandoffProgress(`Downloading ${index + 1}/${handoffSnapshot.transfers.length}: ${transfer.clientLabel}`);
+        const handoff = await onCreateHandoff(transfer.clientId, transfer.sessionId);
         await onSaveHandoff(handoff.download_path, {
           expectedSha256Hex: handoff.sha256_hex,
           expectedSizeBytes: handoff.size_bytes,
-          fileName: downloadFileNameForTransfer(transfer, clientLabel),
-          mode: handoffDownloadMode,
+          fileName: transfer.fileName,
+          mode: handoffSnapshot.mode,
         });
-        completedKeys.add(transferKey(transfer));
+        completedKeys.add(transfer.key);
       }
-      setHandoffProgress(`Downloaded ${transfersToDownload.length} transfer handoffs`);
+      setHandoffProgress(`Downloaded ${handoffSnapshot.transfers.length} transfer handoffs`);
+      setHandoffSnapshot(null);
     } catch (error) {
-      setHandoffError(error instanceof Error ? error.message : "Selected transfer handoff failed");
+      setHandoffError(error instanceof Error ? error.message : "Transfer handoff failed");
     } finally {
       setSelectedHandoffKeys((keys) => keys.filter((key) => !completedKeys.has(key)));
       setHandoffPendingKey(null);
@@ -126,7 +157,7 @@ export function FileTransferSessionsPanel({
     });
   }
 
-  async function uploadSourceArtifact() {
+  async function reviewSourceArtifact() {
     if (!sourceFile) {
       setSourceError("Choose a source artifact first");
       return;
@@ -140,13 +171,33 @@ export function FileTransferSessionsPanel({
     try {
       const bytes = new Uint8Array(await sourceFile.arrayBuffer());
       const [sha256Hex, sourceBase64] = await Promise.all([sha256HexForBytes(bytes), base64ForBytes(bytes)]);
-      await onUploadSource({
-        name: sourceName.trim() || sourceFile.name || undefined,
-        source_base64: sourceBase64,
-        sha256_hex: sha256Hex,
-        size_bytes: bytes.byteLength,
-        confirmed: true,
+      setSourceSnapshot({
+        fileName: sourceFile.name,
+        request: {
+          name: sourceName.trim() || sourceFile.name || undefined,
+          source_base64: sourceBase64,
+          sha256_hex: sha256Hex,
+          size_bytes: bytes.byteLength,
+          confirmed: true,
+        },
       });
+    } catch (error) {
+      setSourceError(error instanceof Error ? error.message : "Source artifact review failed");
+    } finally {
+      setSourcePending(false);
+    }
+  }
+
+  async function uploadSourceArtifact() {
+    if (!sourceSnapshot) {
+      setSourceError("Review source artifact before upload");
+      return;
+    }
+    setSourcePending(true);
+    setSourceError(null);
+    try {
+      await onUploadSource(sourceSnapshot.request);
+      setSourceSnapshot(null);
       setSourceFile(null);
       setSourceInputKey((key) => key + 1);
       setSourceName("");
@@ -215,13 +266,31 @@ export function FileTransferSessionsPanel({
           <button
             className="primaryAction"
             disabled={sourcePending || !sourceFile || loading}
-            onClick={() => void uploadSourceArtifact()}
+            onClick={() => void reviewSourceArtifact()}
             type="button"
           >
             <Upload size={14} />
-            <span>{sourcePending ? "Uploading" : "Upload source artifact"}</span>
+            <span>{sourcePending ? "Reviewing" : "Review source artifact"}</span>
           </button>
         </div>
+        <ConfirmationPrompt
+          confirmLabel="Upload source artifact"
+          detail="Persists the reviewed source artifact with the computed SHA-256 and size."
+          items={[
+            { label: "Name", value: sourceSnapshot?.request.name ?? sourceSnapshot?.fileName ?? "-" },
+            {
+              label: "SHA-256",
+              title: sourceSnapshot?.request.sha256_hex,
+              value: sourceSnapshot ? shortHash(sourceSnapshot.request.sha256_hex) : "-",
+            },
+            { label: "Size", value: sourceSnapshot ? formatBytes(sourceSnapshot.request.size_bytes) : "-" },
+          ]}
+          onCancel={() => setSourceSnapshot(null)}
+          onConfirm={() => void uploadSourceArtifact()}
+          open={sourceSnapshot !== null}
+          pending={sourcePending}
+          title="Confirm source artifact upload"
+        />
         <CrudPager
           fields={[
             { label: "Name", value: (source) => source.name },
@@ -307,14 +376,33 @@ export function FileTransferSessionsPanel({
           <button
             className="primaryAction compactAction"
             disabled={handoffBusy || selectedHandoffTransfers.length === 0}
-            onClick={() => void createAndDownloadSelectedHandoffs()}
+            onClick={() => reviewSelectedHandoffs()}
             type="button"
           >
             <Download size={14} />
-            <span>{handoffBusy && handoffPendingKey === "bulk" ? "Downloading" : "Download selected handoffs"}</span>
+            <span>{handoffBusy && handoffPendingKey === "bulk" ? "Downloading" : "Review selected handoffs"}</span>
           </button>
         </span>
       </div>
+      <ConfirmationPrompt
+        confirmLabel="Create and download handoffs"
+        detail="Creates server-side transfer handoffs for the reviewed completed download sessions, then saves them using the selected method."
+        items={[
+          { label: "Save method", value: handoffSnapshot?.mode ?? "-" },
+          { label: "Transfers", value: handoffSnapshot ? String(handoffSnapshot.transfers.length) : "-" },
+          { label: "Sessions", value: handoffSnapshot ? handoffSessionSummary(handoffSnapshot.transfers) : "-" },
+          {
+            label: "Expected hashes",
+            title: handoffSnapshot ? handoffFullHashSummary(handoffSnapshot.transfers) : undefined,
+            value: handoffSnapshot ? handoffHashSummary(handoffSnapshot.transfers) : "-",
+          },
+        ]}
+        onCancel={() => setHandoffSnapshot(null)}
+        onConfirm={() => void createAndDownloadReviewedHandoffs()}
+        open={handoffSnapshot !== null}
+        pending={handoffBusy}
+        title="Confirm transfer handoff download"
+      />
       <CrudPager
         fields={[
           { label: "VPS", value: (transfer) => clientLabel(transfer.client_id) },
@@ -395,8 +483,8 @@ export function FileTransferSessionsPanel({
                         aria-label={`Create transfer handoff session ${shortId(transfer.session_id)}`}
                         className="iconButton"
                         disabled={handoffPendingKey === key || handoffPendingKey === "bulk"}
-                        onClick={() => void createAndDownloadHandoff(transfer)}
-                        title="Create server-side transfer handoff and download"
+                        onClick={() => reviewHandoff(transfer)}
+                        title="Review server-side transfer handoff download"
                         type="button"
                       >
                         <Download size={14} />
@@ -421,6 +509,44 @@ function transferKey(transfer: FileTransferSessionRecord): string {
 
 function canCreateHandoff(transfer: FileTransferSessionRecord): boolean {
   return transfer.direction === "download" && transfer.status === "completed" && transfer.handoff_available;
+}
+
+function handoffReviewItem(
+  transfer: FileTransferSessionRecord,
+  clientLabel: (clientId: string) => string,
+): HandoffReviewItem {
+  return {
+    clientId: transfer.client_id,
+    clientLabel: clientLabel(transfer.client_id),
+    fileName: downloadFileNameForTransfer(transfer, clientLabel),
+    key: transferKey(transfer),
+    path: transfer.path,
+    sessionId: transfer.session_id,
+    sha256Hex: transfer.sha256_hex,
+    sizeBytes: transfer.size_bytes,
+  };
+}
+
+function handoffSessionSummary(transfers: HandoffReviewItem[]): string {
+  const shown = transfers
+    .slice(0, 3)
+    .map((transfer) => `${transfer.clientLabel}/${shortId(transfer.sessionId)} ${transfer.path}`)
+    .join(", ");
+  return transfers.length > 3 ? `${shown}, +${transfers.length - 3} more` : shown;
+}
+
+function handoffHashSummary(transfers: HandoffReviewItem[]): string {
+  const hashes = transfers.map((transfer) => transfer.sha256Hex).filter((hash): hash is string => Boolean(hash));
+  if (hashes.length === 0) {
+    return "not reported";
+  }
+  const shown = hashes.slice(0, 3).map(shortHash).join(", ");
+  return hashes.length > 3 ? `${shown}, +${hashes.length - 3} more` : shown;
+}
+
+function handoffFullHashSummary(transfers: HandoffReviewItem[]): string {
+  const hashes = transfers.map((transfer) => transfer.sha256Hex).filter((hash): hash is string => Boolean(hash));
+  return hashes.length > 0 ? hashes.join(", ") : "not reported";
 }
 
 async function sha256HexForBytes(bytes: Uint8Array): Promise<string> {

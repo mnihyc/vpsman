@@ -6,7 +6,7 @@ use vpsman_common::validate_incremental_config_patch_section;
 
 use crate::{
     model::{
-        AuthContext, HotConfigRuleTemplateRenderView, HotConfigRuleTemplateView,
+        AuditLogView, AuthContext, HotConfigRuleTemplateRenderView, HotConfigRuleTemplateView,
         RenderHotConfigRuleTemplateRequest, UpsertHotConfigRuleTemplateRequest,
     },
     repository::Repository,
@@ -84,8 +84,11 @@ impl Repository {
                 let saved = if let Some(existing) =
                     templates.iter_mut().find(|existing| existing.id == id)
                 {
+                    anyhow::ensure!(
+                        !existing.built_in,
+                        "hot_config_rule_template_builtin_immutable"
+                    );
                     let created_at = existing.created_at.clone();
-                    let built_in = existing.built_in;
                     *existing = HotConfigRuleTemplateView {
                         id: template.id,
                         name: template.name.clone(),
@@ -95,7 +98,7 @@ impl Repository {
                         field_schema: template.field_schema.clone(),
                         raw_generator_body: template.raw_generator_body.clone(),
                         docs_metadata: template.docs_metadata.clone(),
-                        built_in,
+                        built_in: false,
                         actor_id: template.actor_id,
                         created_at,
                         updated_at: template.updated_at.clone(),
@@ -105,6 +108,12 @@ impl Repository {
                     templates.push(template.clone());
                     template.clone()
                 };
+                memory.audits.write().await.push(hot_config_template_audit(
+                    "hot_config_rule_template.saved",
+                    &saved,
+                    operator,
+                    unix_now().to_string(),
+                ));
                 Ok(saved)
             }
             Self::Postgres(pool) => {
@@ -133,6 +142,7 @@ impl Repository {
                         docs_metadata = EXCLUDED.docs_metadata,
                         actor_id = EXCLUDED.actor_id,
                         updated_at = now()
+                    WHERE hot_config_rule_templates.built_in = FALSE
                     RETURNING
                         id,
                         name,
@@ -157,9 +167,25 @@ impl Repository {
                 .bind(&template.raw_generator_body)
                 .bind(SqlJson(&template.docs_metadata))
                 .bind(operator.operator.id)
-                .fetch_one(pool)
+                .fetch_optional(pool)
                 .await?;
-                rule_template_from_row(row)
+                let row = row.with_context(|| "hot_config_rule_template_builtin_immutable")?;
+                let saved = rule_template_from_row(row)?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.operator.id)
+                .bind("hot_config_rule_template.saved")
+                .bind(format!("hot_config_rule_template:{}", saved.id))
+                .bind(Option::<String>::None)
+                .bind(hot_config_template_audit_metadata(&saved, operator))
+                .execute(pool)
+                .await?;
+                Ok(saved)
             }
         }
     }
@@ -194,28 +220,74 @@ impl Repository {
         })
     }
 
-    pub(crate) async fn delete_hot_config_rule_template(&self, template_id: Uuid) -> Result<()> {
+    pub(crate) async fn delete_hot_config_rule_template(
+        &self,
+        template_id: Uuid,
+        operator: &AuthContext,
+    ) -> Result<()> {
         match self {
             Self::Memory(memory) => {
                 self.ensure_builtin_hot_config_rule_templates().await?;
                 let mut templates = memory.hot_config_rule_templates.write().await;
-                let before = templates.len();
-                templates.retain(|template| template.id != template_id);
+                let existing = templates
+                    .iter()
+                    .find(|template| template.id == template_id)
+                    .cloned()
+                    .with_context(|| "hot_config_rule_template_not_found")?;
                 anyhow::ensure!(
-                    templates.len() != before,
-                    "hot_config_rule_template_not_found"
+                    !existing.built_in,
+                    "hot_config_rule_template_builtin_immutable"
                 );
+                templates.retain(|template| template.id != template_id);
+                memory.audits.write().await.push(hot_config_template_audit(
+                    "hot_config_rule_template.deleted",
+                    &existing,
+                    operator,
+                    unix_now().to_string(),
+                ));
                 Ok(())
             }
             Self::Postgres(pool) => {
-                let result = sqlx::query("DELETE FROM hot_config_rule_templates WHERE id = $1")
-                    .bind(template_id)
-                    .execute(pool)
-                    .await?;
-                anyhow::ensure!(
-                    result.rows_affected() > 0,
-                    "hot_config_rule_template_not_found"
-                );
+                let row = sqlx::query(
+                    r#"
+                    DELETE FROM hot_config_rule_templates
+                    WHERE id = $1 AND built_in = FALSE
+                    RETURNING
+                        id,
+                        name,
+                        category,
+                        domain,
+                        description,
+                        field_schema,
+                        raw_generator_body,
+                        docs_metadata,
+                        built_in,
+                        actor_id,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at
+                    "#,
+                )
+                .bind(template_id)
+                .fetch_optional(pool)
+                .await?;
+                let deleted = row
+                    .map(rule_template_from_row)
+                    .transpose()?
+                    .with_context(|| "hot_config_rule_template_not_found")?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.operator.id)
+                .bind("hot_config_rule_template.deleted")
+                .bind(format!("hot_config_rule_template:{}", deleted.id))
+                .bind(Option::<String>::None)
+                .bind(hot_config_template_audit_metadata(&deleted, operator))
+                .execute(pool)
+                .await?;
                 Ok(())
             }
         }
@@ -240,6 +312,43 @@ impl Repository {
             Self::Postgres(_) => Ok(()),
         }
     }
+}
+
+fn hot_config_template_audit(
+    action: &str,
+    template: &HotConfigRuleTemplateView,
+    operator: &AuthContext,
+    created_at: String,
+) -> AuditLogView {
+    AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: Some(operator.operator.id),
+        action: action.to_string(),
+        target: format!("hot_config_rule_template:{}", template.id),
+        command_hash: None,
+        metadata: hot_config_template_audit_metadata(template, operator),
+        created_at,
+    }
+}
+
+fn hot_config_template_audit_metadata(
+    template: &HotConfigRuleTemplateView,
+    operator: &AuthContext,
+) -> serde_json::Value {
+    serde_json::json!({
+        "template_id": template.id,
+        "name": template.name,
+        "category": template.category,
+        "domain": template.domain,
+        "description": template.description,
+        "field_schema": template.field_schema,
+        "raw_generator_body": template.raw_generator_body,
+        "docs_metadata": template.docs_metadata,
+        "built_in": template.built_in,
+        "operator_username": &operator.operator.username,
+        "operator_role": &operator.operator.role,
+        "session_id": operator.session_id,
+    })
 }
 
 fn rule_template_from_row(row: sqlx::postgres::PgRow) -> Result<HotConfigRuleTemplateView> {

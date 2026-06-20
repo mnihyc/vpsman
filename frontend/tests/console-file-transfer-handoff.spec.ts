@@ -17,8 +17,14 @@ test("creates server-side handoff for a completed download session", async ({ pa
   await openConsoleSubpage(page, "Jobs", "Transfer history");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
-  await expect(panel.getByText("core-fra-02")).toBeVisible();
+  await expect(panel.getByText("core-fra-02 (ra02) / 51515151")).toBeVisible();
   await activate(panel.getByRole("button", { name: "Create transfer handoff session 51515151" }));
+  await expect(panel.getByLabel("Confirm transfer handoff download")).toBeVisible();
+  await activate(
+    panel
+      .getByLabel("Confirm transfer handoff download")
+      .getByRole("button", { name: "Create and download handoffs" }),
+  );
 
   const requests = await page.evaluate(() => (window as any).__vpsmanTestRequests.fileTransferHandoffs);
   expect(requests).toEqual([
@@ -40,7 +46,13 @@ test("downloads selected handoffs for multiple completed download sessions", asy
   await expect(panel.getByText("2 completed downloads available, 0 selected")).toBeVisible();
   await activate(panel.getByRole("button", { name: "Select all" }));
   await expect(panel.getByText("2 completed downloads available, 2 selected")).toBeVisible();
-  await activate(panel.getByRole("button", { name: "Download selected handoffs" }));
+  await activate(panel.getByRole("button", { name: "Review selected handoffs" }));
+  await expect(panel.getByLabel("Confirm transfer handoff download")).toBeVisible();
+  await activate(
+    panel
+      .getByLabel("Confirm transfer handoff download")
+      .getByRole("button", { name: "Create and download handoffs" }),
+  );
 
   await expect
     .poll(() => page.evaluate(() => (window as any).__vpsmanTestRequests.fileTransferHandoffs.length))
@@ -94,6 +106,12 @@ test("streams a handoff artifact to a browser file handle", async ({ page }, tes
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
   await panel.getByLabel("Transfer handoff save method").selectOption("stream-to-file");
   await activate(panel.getByRole("button", { name: "Create transfer handoff session 51515151" }));
+  await expect(panel.getByLabel("Confirm transfer handoff download")).toBeVisible();
+  await activate(
+    panel
+      .getByLabel("Confirm transfer handoff download")
+      .getByRole("button", { name: "Create and download handoffs" }),
+  );
 
   await expect
     .poll(() => page.evaluate(() => (window as any).__vpsmanStreamedArtifact.closed))
@@ -126,7 +144,13 @@ test("uploads a confirmed source artifact for transfer reuse", async ({ page }, 
     buffer: payload,
   });
   await panel.getByLabel("Artifact name").fill("source.bin");
-  await activate(panel.getByRole("button", { name: "Upload source artifact" }));
+  await activate(panel.getByRole("button", { name: "Review source artifact" }));
+  await expect(panel.getByLabel("Confirm source artifact upload")).toBeVisible();
+  await activate(
+    panel
+      .getByLabel("Confirm source artifact upload")
+      .getByRole("button", { name: "Upload source artifact" }),
+  );
 
   const requests = await page.evaluate(() => (window as any).__vpsmanTestRequests.fileTransferSourceUploads);
   expect(requests).toHaveLength(1);

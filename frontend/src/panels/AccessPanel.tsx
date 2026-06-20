@@ -1187,6 +1187,7 @@ export function AccessPanel({
           { label: "Client", value: identitySnapshot?.clientId ?? "" },
           {
             label: "Public key",
+            title: identitySnapshot?.publicKeyHex,
             value: identitySnapshot ? shortHash(identitySnapshot.publicKeyHex) : "",
           },
           {

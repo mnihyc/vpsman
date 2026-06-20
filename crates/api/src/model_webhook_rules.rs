@@ -41,6 +41,14 @@ pub(crate) struct CreateWebhookRuleRequest {
     pub(crate) confirmed: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeleteWebhookRuleRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) reviewed_name: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct WebhookRuleDeliveryView {
     pub(crate) id: Uuid,
@@ -62,6 +70,8 @@ pub(crate) struct WebhookRuleDeliveryView {
     pub(crate) actor_id: Option<Uuid>,
     pub(crate) created_at: String,
     pub(crate) delivered_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) review_preview_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -105,6 +115,7 @@ pub(crate) struct WebhookRuleDispatchRequest {
     pub(crate) event_id: Option<String>,
     pub(crate) limit: Option<i64>,
     pub(crate) dry_run: Option<bool>,
+    pub(crate) preview_hash: Option<String>,
     #[serde(default)]
     pub(crate) confirmed: bool,
 }
@@ -115,6 +126,7 @@ pub(crate) struct WebhookRuleProcessRequest {
     pub(crate) limit: Option<i64>,
     pub(crate) status: Option<String>,
     pub(crate) dry_run: Option<bool>,
+    pub(crate) preview_hash: Option<String>,
     #[serde(default)]
     pub(crate) confirmed: bool,
 }
@@ -126,6 +138,7 @@ pub(crate) struct WebhookDeliveryRotationRequest {
     pub(crate) older_than_days: Option<i64>,
     pub(crate) status: Option<String>,
     pub(crate) rule_id: Option<Uuid>,
+    pub(crate) preview_hash: Option<String>,
     #[serde(default)]
     pub(crate) confirmed: bool,
 }
@@ -138,6 +151,7 @@ pub(crate) struct WebhookDeliveryRotationResponse {
     pub(crate) older_than: Option<String>,
     pub(crate) status: Option<String>,
     pub(crate) rule_id: Option<Uuid>,
+    pub(crate) preview_hash: String,
 }
 
 #[derive(Clone, Debug)]

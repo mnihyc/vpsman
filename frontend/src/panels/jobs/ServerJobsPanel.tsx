@@ -209,6 +209,7 @@ export function ServerJobsPanel({
             },
             {
               label: "Preview hash",
+              title: preview?.preview_hash,
               value: preview ? shortHash(preview.preview_hash) : "-",
             },
           ]}

@@ -17,10 +17,11 @@ use crate::{
         DataSourceHotConfigView, DataSourcePresetAssignmentQuery, DataSourcePresetAssignmentView,
         DataSourcePresetDiffRequest, DataSourcePresetDiffView, DataSourcePresetQuery,
         DataSourcePresetTestView, DataSourcePresetView, DataSourceStatusQuery,
-        DataSourceStatusView, DeleteAgentRequest, DeleteAgentResponse, DeleteTagRequest,
-        FleetSummary, GatewaySessionView, HistoryQuery, HotConfigRuleTemplateRenderView,
-        HotConfigRuleTemplateView, RenderHotConfigRuleTemplateRequest, TagMutationResponse,
-        TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
+        DataSourceStatusView, DeleteAgentRequest, DeleteAgentResponse,
+        DeleteHotConfigRuleTemplateRequest, DeleteTagRequest, FleetSummary, GatewaySessionView,
+        HistoryQuery, HotConfigRuleTemplateRenderView, HotConfigRuleTemplateView,
+        RenderHotConfigRuleTemplateRequest, TagMutationResponse, TagView,
+        TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
         TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView,
         TestDataSourcePresetRequest, UpdateAgentAliasRequest, UpdateDataSourcePresetRequest,
         UpdateDataSourcePresetResponse, UpdateTagOrderRequest, UpsertHotConfigRuleTemplateRequest,
@@ -255,6 +256,11 @@ pub(crate) async fn upsert_hot_config_rule_template(
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
     validate_hot_config_rule_template(&request)?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "hot_config_rule_template_confirmation_required",
+        ));
+    }
     Ok(Json(
         state
             .repo
@@ -286,13 +292,35 @@ pub(crate) async fn delete_hot_config_rule_template(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(template_id): Path<uuid::Uuid>,
+    Json(request): Json<DeleteHotConfigRuleTemplateRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "hot_config_rule_template_delete_confirmation_required",
+        ));
+    }
+    validate_short_required_value(
+        &request.reviewed_name,
+        "hot_config_rule_template_delete_review_invalid",
+    )?;
+    let existing = state
+        .repo
+        .list_hot_config_rule_templates()
+        .await?
+        .into_iter()
+        .find(|template| template.id == template_id)
+        .ok_or_else(|| ApiError::not_found("hot_config_rule_template_not_found"))?;
+    if existing.name != request.reviewed_name.trim() {
+        return Err(ApiError::conflict(
+            "hot_config_rule_template_delete_review_stale",
+        ));
+    }
     state
         .repo
-        .delete_hot_config_rule_template(template_id)
+        .delete_hot_config_rule_template(template_id, &operator)
         .await
         .map_err(hot_config_rule_template_error)?;
     Ok(StatusCode::NO_CONTENT)
@@ -311,7 +339,8 @@ pub(crate) async fn create_data_source_preset(
         state
             .repo
             .create_data_source_preset(&request, &operator)
-            .await?,
+            .await
+            .map_err(data_source_preset_lifecycle_error)?,
     ))
 }
 
@@ -607,9 +636,19 @@ fn hot_config_rule_template_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("not_found") {
         ApiError::not_found("hot_config_rule_template_not_found")
+    } else if message.contains("hot_config_rule_template_builtin_immutable") {
+        ApiError::conflict("hot_config_rule_template_builtin_immutable")
     } else {
         ApiError::from(error)
     }
+}
+
+fn validate_short_required_value(value: &str, error: &'static str) -> Result<(), ApiError> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 128 {
+        return Err(ApiError::bad_request(error));
+    }
+    Ok(())
 }
 
 fn validate_clone_data_source_preset(
@@ -814,6 +853,7 @@ fn data_source_preset_lifecycle_error(error: anyhow::Error) -> ApiError {
         ApiError::not_found("data_source_preset_not_found")
     } else if message.contains("data_source_preset_builtin_immutable")
         || message.contains("data_source_preset_clone_target_exists")
+        || message.contains("data_source_preset_duplicate")
     {
         ApiError::conflict("data_source_preset_lifecycle_conflict")
     } else {

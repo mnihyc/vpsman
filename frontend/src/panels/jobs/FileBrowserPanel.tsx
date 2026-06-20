@@ -351,7 +351,7 @@ export function FileBrowserPanel({
       });
       const status = parseLatestFileStatus(outputs, operation.type);
       if (operation.type === "file_write_text") {
-        setEditorSavedContent(editorContent);
+        setEditorSavedContent(reviewedTextContent(operation));
         if (status?.sha256_hex) {
           setEditorSha256Hex(status.sha256_hex);
         }
@@ -1282,6 +1282,10 @@ function concatenateStdout(outputs: JobOutputRecord[]): Uint8Array {
 
 function arrayBufferForBytes(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+function reviewedTextContent(operation: Extract<JobOperation, { type: "file_write_text" }>): string {
+  return new TextDecoder().decode(base64ToBytes(operation.content_base64));
 }
 
 function operationTargetPath(operation: JobOperation): string {

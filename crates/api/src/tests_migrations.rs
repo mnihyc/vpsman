@@ -20,6 +20,7 @@ fn migration_link_validation_requires_confirmation() {
         restore_plan_id: Uuid::new_v4(),
         confirmed: false,
         note: None,
+        privilege_assertion: None,
     };
     assert_eq!(
         validate_create_migration_link(&unconfirmed)
@@ -32,6 +33,7 @@ fn migration_link_validation_requires_confirmation() {
         restore_plan_id: Uuid::new_v4(),
         confirmed: true,
         note: Some("x".repeat(1025)),
+        privilege_assertion: None,
     };
     assert_eq!(
         validate_create_migration_link(&oversized_note)
@@ -50,6 +52,7 @@ async fn migration_link_records_restore_plan_identity_and_audit() {
         restore_plan_id,
         confirmed: true,
         note: Some("rebuilt node ready".to_string()),
+        privilege_assertion: None,
     };
 
     let state = test_state(repo.clone());
@@ -83,6 +86,7 @@ async fn migration_link_rejects_missing_restore_plan() {
         restore_plan_id: Uuid::new_v4(),
         confirmed: true,
         note: None,
+        privilege_assertion: None,
     };
     let state = test_state(repo);
     let headers = crate::test_auth_headers(&state).await;

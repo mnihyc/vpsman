@@ -12,13 +12,14 @@ use crate::{
     error::ApiError,
     model::{FleetAlertQuery, FleetAlertView},
     model_alert_notifications::{
-        CreateFleetAlertNotificationChannelRequest, FleetAlertNotificationChannelQuery,
-        FleetAlertNotificationChannelView, FleetAlertNotificationDeliveryQuery,
-        FleetAlertNotificationDeliveryView, FleetAlertNotificationDispatchRequest,
-        FleetAlertNotificationProcessRequest,
+        CreateFleetAlertNotificationChannelRequest, DeleteFleetAlertNotificationChannelRequest,
+        FleetAlertNotificationChannelQuery, FleetAlertNotificationChannelView,
+        FleetAlertNotificationDeliveryQuery, FleetAlertNotificationDeliveryView,
+        FleetAlertNotificationDispatchRequest, FleetAlertNotificationProcessRequest,
     },
     model_alert_policies::{
-        CreateFleetAlertPolicyRequest, FleetAlertPolicyOverrideView, FleetAlertPolicyQuery,
+        CreateFleetAlertPolicyRequest, DeleteFleetAlertPolicyRequest, FleetAlertPolicyOverrideView,
+        FleetAlertPolicyQuery,
     },
     model_alert_states::{
         FleetAlertExportView, FleetAlertStateQuery, FleetAlertStateView,
@@ -147,10 +148,27 @@ pub(crate) async fn delete_fleet_alert_policy(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(policy_id): Path<uuid::Uuid>,
+    Json(request): Json<DeleteFleetAlertPolicyRequest>,
 ) -> Result<StatusCode, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
+    validate_delete_confirmation(
+        request.confirmed,
+        &request.reviewed_name,
+        "fleet_alert_policy_delete_confirmation_required",
+        "fleet_alert_policy_delete_review_invalid",
+    )?;
+    let existing = state
+        .repo
+        .list_fleet_alert_policies(1000, None, None, None)
+        .await?
+        .into_iter()
+        .find(|policy| policy.id == policy_id)
+        .ok_or_else(|| ApiError::not_found("fleet_alert_policy_not_found"))?;
+    if existing.name != request.reviewed_name.trim() {
+        return Err(ApiError::conflict("fleet_alert_policy_delete_review_stale"));
+    }
     state
         .repo
         .delete_fleet_alert_policy(policy_id, &operator)
@@ -202,10 +220,29 @@ pub(crate) async fn delete_fleet_alert_notification_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(channel_id): Path<uuid::Uuid>,
+    Json(request): Json<DeleteFleetAlertNotificationChannelRequest>,
 ) -> Result<StatusCode, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
+    validate_delete_confirmation(
+        request.confirmed,
+        &request.reviewed_name,
+        "fleet_alert_notification_channel_delete_confirmation_required",
+        "fleet_alert_notification_channel_delete_review_invalid",
+    )?;
+    let existing = state
+        .repo
+        .list_fleet_alert_notification_channels(1000, None, None, None, None)
+        .await?
+        .into_iter()
+        .find(|channel| channel.id == channel_id)
+        .ok_or_else(|| ApiError::not_found("fleet_alert_notification_channel_not_found"))?;
+    if existing.name != request.reviewed_name.trim() {
+        return Err(ApiError::conflict(
+            "fleet_alert_notification_channel_delete_review_stale",
+        ));
+    }
     state
         .repo
         .delete_fleet_alert_notification_channel(channel_id, &operator)
@@ -247,7 +284,8 @@ pub(crate) async fn dispatch_fleet_alert_notifications(
     Ok(Json(
         state
             .dispatch_fleet_alert_notifications(&request, &operator)
-            .await?,
+            .await
+            .map_err(alert_notification_delivery_error)?,
     ))
 }
 
@@ -263,8 +301,17 @@ pub(crate) async fn process_fleet_alert_notifications(
     Ok(Json(
         state
             .process_fleet_alert_notifications(&request, &operator)
-            .await?,
+            .await
+            .map_err(alert_notification_delivery_error)?,
     ))
+}
+
+fn alert_notification_delivery_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("preview_hash_mismatch") {
+        return ApiError::conflict("fleet_alert_notification_preview_hash_mismatch");
+    }
+    ApiError::from(error)
 }
 
 fn validate_alert_query(query: &FleetAlertQuery) -> Result<(), ApiError> {
@@ -289,6 +336,19 @@ fn validate_alert_query(query: &FleetAlertQuery) -> Result<(), ApiError> {
     if let Some(operator_state) = query.operator_state.as_deref() {
         validate_alert_state_value(operator_state, "fleet_alert_operator_state_invalid")?;
     }
+    Ok(())
+}
+
+fn validate_delete_confirmation(
+    confirmed: bool,
+    reviewed_name: &str,
+    confirmation_error: &'static str,
+    reviewed_name_error: &'static str,
+) -> Result<(), ApiError> {
+    if !confirmed {
+        return Err(ApiError::bad_request(confirmation_error));
+    }
+    validate_short_required_value(reviewed_name, reviewed_name_error)?;
     Ok(())
 }
 
@@ -458,6 +518,18 @@ fn validate_alert_notification_dispatch_request(
             "fleet_alert_notification_dispatch_confirmation_required",
         ));
     }
+    if !request.dry_run.unwrap_or(false)
+        && request
+            .preview_hash
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "fleet_alert_notification_dispatch_preview_hash_required",
+        ));
+    }
     validate_alert_query(&FleetAlertQuery {
         limit: request.limit,
         client_id: request.client_id.clone(),
@@ -475,6 +547,18 @@ fn validate_alert_notification_process_request(
     if !request.dry_run.unwrap_or(false) && !request.confirmed {
         return Err(ApiError::bad_request(
             "fleet_alert_notification_process_confirmation_required",
+        ));
+    }
+    if !request.dry_run.unwrap_or(false)
+        && request
+            .preview_hash
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "fleet_alert_notification_process_preview_hash_required",
         ));
     }
     if let Some(limit) = request.limit {

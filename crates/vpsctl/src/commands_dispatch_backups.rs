@@ -67,6 +67,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             schedule_id,
             dry_run,
             metadata_only,
+            preview_hash,
             confirmed,
         } => {
             commands_backups::backup_policy_prune(
@@ -75,6 +76,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 schedule_id,
                 dry_run,
                 metadata_only,
+                preview_hash,
                 confirmed,
             )?;
             Ok(None)
@@ -284,9 +286,21 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
         Command::MigrationLink {
             restore_plan_id,
             note,
+            password_env,
+            super_salt_hex,
+            privilege_ttl_secs,
             confirmed,
         } => {
-            commands_migrations::migration_link(api_url, token, restore_plan_id, note, confirmed)?;
+            commands_migrations::migration_link(
+                api_url,
+                token,
+                restore_plan_id,
+                note,
+                password_env,
+                super_salt_hex,
+                privilege_ttl_secs,
+                confirmed,
+            )?;
             Ok(None)
         }
         Command::MigrationRun {

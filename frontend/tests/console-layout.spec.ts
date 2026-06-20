@@ -71,8 +71,12 @@ async function chooseVpsBySearch(
 }
 
 async function dispatchWithPrompt(composer: Locator) {
-  await activate(composer.getByRole("button", { name: "Review dispatch" }));
-  await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
+  const reviewButton = composer.getByRole("button", { name: "Review dispatch" });
+  await expect(reviewButton).toBeEnabled();
+  await activate(reviewButton);
+  await expect(composer.getByText("Confirm job dispatch")).toBeVisible({
+    timeout: 15_000,
+  });
   await activate(
     composer
       .locator(".confirmationPrompt")
@@ -101,7 +105,7 @@ async function confirmVisiblePrompt(
       return box.y >= 0 && box.y + box.height <= viewport.height;
     })
     .toBe(true);
-  await activate(prompt.getByRole("button", { name: label }));
+  await activate(prompt.getByRole("button", { name: label, exact: true }));
 }
 
 async function unlockPrivilegeFor(
@@ -1131,7 +1135,9 @@ test("manages data-source preset assignments from the config view", async ({
   await expect(
     panel
       .locator(".sourceStatusSection")
-      .getByText("agent update registry, 1 releases, 1 external"),
+      .locator(".historyRow")
+      .filter({ hasText: "Update artifact source" })
+      .filter({ hasText: "ready" }),
   ).toBeVisible();
   await activeSourcesSearchField.selectOption("Preset");
   await activeSourcesSearch.click();
@@ -1243,7 +1249,7 @@ test("renders updater rules and submits explicit config apply modes", async ({
   );
   await expect(
     rules.getByRole("button", { name: "Review deletion" }),
-  ).toBeEnabled();
+  ).toBeDisabled();
   await activate(rules.getByRole("button", { name: "Render patch" }));
   await expect(rules.getByLabel("Rendered rule patch TOML")).toHaveValue(
     /\[update\][\s\S]*unmanaged_enabled = true[\s\S]*version\.json/,
@@ -1266,8 +1272,12 @@ test("renders updater rules and submits explicit config apply modes", async ({
   await bulk
     .getByRole("searchbox", { name: "Bulk config selector expression" })
     .fill("id:agent-sfo-01");
+  await expect(page.getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ })).toBeVisible();
+  await page.keyboard.press("Enter");
   await activate(bulk.getByRole("button", { name: "Review targets" }));
   await expect(bulk.getByText("1/3")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(bulk.getByRole("button", { name: "Review apply" })).toBeEnabled();
   await activate(bulk.getByRole("button", { name: "Review apply" }));
   await expect(page.getByText("Confirm bulk config apply")).toBeVisible();
   await confirmVisiblePrompt(page, "Apply config patch");
@@ -2210,7 +2220,7 @@ test("previews degraded update targets and sends explicit force override", async
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   await unlockPrivilegeFor(page, "Jobs", "Dispatch");
-  await activate(page.getByRole("button", { name: "Update", exact: true }));
+  await activate(page.getByRole("button", { name: "Manual update" }));
   await page
     .getByLabel("Agent update artifact URL")
     .fill("https://updates.example/vpsman-agent");
@@ -2219,6 +2229,8 @@ test("previews degraded update targets and sends explicit force override", async
     .locator(".commandComposer")
     .getByLabel("Bulk target selector expression")
     .fill("id:agent-nyc-03");
+  await expect(page.getByRole("option", { name: /backup-nyc-03.*agent-nyc-03/ })).toBeVisible();
+  await page.keyboard.press("Enter");
   await activate(page.getByRole("button", { name: "Review targets" }));
 
   const impact = page.locator(".commandComposer .targetImpactPreview");

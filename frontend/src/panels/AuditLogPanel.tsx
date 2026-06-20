@@ -33,7 +33,7 @@ export function AuditLogPanel({
   historyRetentionPolicies: HistoryRetentionPolicyRecord[];
   loading: boolean;
   onExportHistory: (domains?: string) => Promise<void>;
-  onPruneHistoryRetention: (request: HistoryRetentionPruneRequest) => Promise<void>;
+  onPruneHistoryRetention: (request: HistoryRetentionPruneRequest) => Promise<HistoryRetentionPruneResponse>;
   onRefresh: () => void;
   onUpsertHistoryRetentionPolicy: (request: HistoryRetentionPolicyRequest) => Promise<void>;
 }) {
@@ -47,6 +47,13 @@ export function AuditLogPanel({
   const [pruneLimit, setPruneLimit] = useState("1000");
   const [metadataOnly, setMetadataOnly] = useState(false);
   const [exportEnabled, setExportEnabled] = useState(true);
+  const [policyConfirmation, setPolicyConfirmation] =
+    useState<HistoryRetentionPolicyRequest | null>(null);
+  const [pruneSnapshot, setPruneSnapshot] = useState<{
+    previewHash: string;
+    request: HistoryRetentionPruneRequest;
+    reviewedRows: number;
+  } | null>(null);
   const [pruneConfirmationOpen, setPruneConfirmationOpen] = useState(false);
 
   useEffect(() => {
@@ -126,8 +133,17 @@ export function AuditLogPanel({
     [],
   );
 
+  function clearPolicyConfirmation() {
+    setPolicyConfirmation(null);
+  }
+
+  function clearPruneConfirmation() {
+    setPruneSnapshot(null);
+    setPruneConfirmationOpen(false);
+  }
+
   const submitPolicy = () => {
-    void onUpsertHistoryRetentionPolicy({
+    setPolicyConfirmation({
       domain: selectedPolicy?.domain ?? selectedDomain,
       retention_days: Number(retentionDays),
       prune_limit: Number(pruneLimit),
@@ -137,19 +153,57 @@ export function AuditLogPanel({
     });
   };
 
-  const prune = (dryRun: boolean) => {
-    if (!dryRun && !pruneConfirmationOpen) {
-      setPruneConfirmationOpen(true);
-      return;
-    }
-    void onPruneHistoryRetention({
+  const pruneRequest = (dryRun: boolean): HistoryRetentionPruneRequest => ({
       domain: selectedPolicy?.domain ?? selectedDomain,
       dry_run: dryRun,
       metadata_only: metadataOnly,
       confirmed: !dryRun,
     });
-    if (!dryRun) {
-      setPruneConfirmationOpen(false);
+
+  const previewPrune = async (openConfirmation: boolean) => {
+    try {
+      const preview = await onPruneHistoryRetention({
+        ...pruneRequest(true),
+        confirmed: false,
+        preview_hash: null,
+      });
+      if (openConfirmation) {
+        setPruneSnapshot({
+          previewHash: preview.preview_hash,
+          request: {
+            ...pruneRequest(false),
+            confirmed: true,
+            preview_hash: preview.preview_hash,
+          },
+          reviewedRows: preview.domains.reduce(
+            (sum, domain) => sum + domain.matched_rows,
+            0,
+          ),
+        });
+        setPruneConfirmationOpen(true);
+      }
+    } catch {
+      // The data hook owns the visible error state for this panel.
+    }
+  };
+
+  const confirmPolicy = async () => {
+    if (!policyConfirmation) {
+      return;
+    }
+    await onUpsertHistoryRetentionPolicy(policyConfirmation);
+    setPolicyConfirmation(null);
+  };
+
+  const confirmPrune = async () => {
+    if (!pruneSnapshot) {
+      return;
+    }
+    try {
+      await onPruneHistoryRetention(pruneSnapshot.request);
+      clearPruneConfirmation();
+    } catch {
+      // The data hook owns the visible error state for this panel.
     }
   };
 
@@ -217,7 +271,14 @@ export function AuditLogPanel({
         <div className="historyRetentionGrid">
           <label>
             <span>Domain</span>
-            <select value={selectedPolicy?.domain ?? selectedDomain} onChange={(event) => setSelectedDomain(event.target.value)}>
+            <select
+              value={selectedPolicy?.domain ?? selectedDomain}
+              onChange={(event) => {
+                setSelectedDomain(event.target.value);
+                clearPolicyConfirmation();
+                clearPruneConfirmation();
+              }}
+            >
               {historyRetentionPolicies.map((policy) => (
                 <option key={policy.domain} value={policy.domain}>
                   {policy.domain}
@@ -227,18 +288,53 @@ export function AuditLogPanel({
           </label>
           <label>
             <span>Retention days</span>
-            <input min={1} max={3650} type="number" value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} />
+            <input
+              min={1}
+              max={3650}
+              type="number"
+              value={retentionDays}
+              onChange={(event) => {
+                setRetentionDays(event.target.value);
+                clearPolicyConfirmation();
+                clearPruneConfirmation();
+              }}
+            />
           </label>
           <label>
             <span>Prune limit</span>
-            <input min={1} max={100000} type="number" value={pruneLimit} onChange={(event) => setPruneLimit(event.target.value)} />
+            <input
+              min={1}
+              max={100000}
+              type="number"
+              value={pruneLimit}
+              onChange={(event) => {
+                setPruneLimit(event.target.value);
+                clearPolicyConfirmation();
+                clearPruneConfirmation();
+              }}
+            />
           </label>
           <label className="checkControl">
-            <input checked={metadataOnly} type="checkbox" onChange={(event) => setMetadataOnly(event.target.checked)} />
+            <input
+              checked={metadataOnly}
+              type="checkbox"
+              onChange={(event) => {
+                setMetadataOnly(event.target.checked);
+                clearPolicyConfirmation();
+                clearPruneConfirmation();
+              }}
+            />
             <span>Metadata only</span>
           </label>
           <label className="checkControl">
-            <input checked={exportEnabled} type="checkbox" onChange={(event) => setExportEnabled(event.target.checked)} />
+            <input
+              checked={exportEnabled}
+              type="checkbox"
+              onChange={(event) => {
+                setExportEnabled(event.target.checked);
+                clearPolicyConfirmation();
+              }}
+            />
             <span>Export enabled</span>
           </label>
           <div className="retentionActions">
@@ -246,31 +342,51 @@ export function AuditLogPanel({
               <ShieldCheck size={16} />
               Save
             </button>
-            <button className="secondaryAction" onClick={() => prune(true)} type="button">
-              Review prune
+            <button className="secondaryAction" onClick={() => void previewPrune(false)} type="button">
+              Preview prune
             </button>
-            <button className="dangerAction" onClick={() => prune(false)} type="button">
+            <button className="dangerAction" onClick={() => void previewPrune(true)} type="button">
               <Scissors size={16} />
-              Review prune
+              Review cleanup
             </button>
           </div>
         </div>
         <ConfirmationPrompt
+          confirmLabel="Save retention"
+          detail="Saves the selected domain retention policy exactly as reviewed."
+          items={[
+            { label: "Domain", value: policyConfirmation?.domain ?? selectedDomain },
+            { label: "Retention days", value: policyConfirmation?.retention_days ?? retentionDays },
+            { label: "Limit", value: policyConfirmation?.prune_limit ?? pruneLimit },
+            { label: "Metadata only", value: policyConfirmation?.metadata_only ? "yes" : "no" },
+            { label: "Export enabled", value: policyConfirmation?.export_enabled ? "yes" : "no" },
+          ]}
+          onCancel={clearPolicyConfirmation}
+          onConfirm={() => void confirmPolicy()}
+          open={policyConfirmation !== null}
+          title="Confirm history retention policy"
+        />
+        <ConfirmationPrompt
           confirmLabel="Prune history"
           detail={
-            metadataOnly
+            pruneSnapshot?.request.metadata_only ?? metadataOnly
               ? "Deletes history metadata rows that match the selected domain, retention days, and prune limit."
               : "Deletes history rows and retained object files that match the selected domain, retention days, and prune limit."
           }
           items={[
-            { label: "Domain", value: selectedPolicy?.domain ?? selectedDomain },
+            { label: "Domain", value: pruneSnapshot?.request.domain ?? selectedDomain },
             { label: "Retention days", value: retentionDays },
             { label: "Limit", value: pruneLimit },
-            { label: "Metadata only", value: metadataOnly ? "yes" : "no" },
+            { label: "Metadata only", value: pruneSnapshot?.request.metadata_only ? "yes" : "no" },
+            { label: "Reviewed rows", value: pruneSnapshot?.reviewedRows ?? 0 },
+            {
+              label: "Review hash",
+              value: pruneSnapshot ? `${pruneSnapshot.previewHash.slice(0, 12)}...` : "review required",
+            },
           ]}
-          onCancel={() => setPruneConfirmationOpen(false)}
-          onConfirm={() => prune(false)}
-          open={pruneConfirmationOpen}
+          onCancel={clearPruneConfirmation}
+          onConfirm={() => void confirmPrune()}
+          open={pruneConfirmationOpen && pruneSnapshot !== null}
           title="Confirm history prune"
           tone="danger"
         />

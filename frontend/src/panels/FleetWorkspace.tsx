@@ -160,6 +160,36 @@ type DeleteAgentConfirmationSnapshot = {
   privilegeAssertion: PrivilegeAssertion;
 };
 
+type AlertDeliveryQueueSnapshot =
+  | {
+      action: "dispatch";
+      request: FleetAlertNotificationDispatchRequest;
+      previewHash: string;
+      reviewedRows: number;
+    }
+  | {
+      action: "process";
+      request: FleetAlertNotificationProcessRequest;
+      previewHash: string;
+      reviewedRows: number;
+    };
+
+type WebhookDeliveryQueueSnapshot =
+  | {
+      action: "dispatch";
+      request: WebhookRuleDispatchRequest;
+      previewHash: string;
+      reviewedRows: number;
+      eventLabel: string;
+    }
+  | {
+      action: "process";
+      request: WebhookRuleProcessRequest;
+      previewHash: string;
+      reviewedRows: number;
+      eventLabel: string;
+    };
+
 const detailTabs: FleetDetailTab[] = [
   "Overview",
   "Telemetry",
@@ -259,9 +289,18 @@ export function FleetWorkspace({
   onRenderDataSourceHotConfig: (
     clientId: string,
   ) => Promise<DataSourceHotConfigResponse>;
-  onDeleteFleetAlertNotificationChannel: (channelId: string) => Promise<void>;
-  onDeleteFleetAlertPolicy: (policyId: string) => Promise<void>;
-  onDeleteWebhookRule: (ruleId: string) => Promise<void>;
+  onDeleteFleetAlertNotificationChannel: (
+    channelId: string,
+    reviewedName: string,
+  ) => Promise<void>;
+  onDeleteFleetAlertPolicy: (
+    policyId: string,
+    reviewedName: string,
+  ) => Promise<void>;
+  onDeleteWebhookRule: (
+    ruleId: string,
+    reviewedName: string,
+  ) => Promise<void>;
   onDispatchFleetAlertNotifications: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -2536,6 +2575,26 @@ function selectedRecordSummary<T>(
   );
 }
 
+function reviewedDeliveryHash(
+  rows: Array<{ review_preview_hash?: string | null }>,
+  operationLabel: string,
+): string {
+  const hashes = Array.from(
+    new Set(
+      rows
+        .map((row) => row.review_preview_hash?.trim())
+        .filter((hash): hash is string => Boolean(hash)),
+    ),
+  );
+  if (rows.length === 0) {
+    throw new Error(`${operationLabel} matched no delivery rows`);
+  }
+  if (hashes.length !== 1) {
+    throw new Error(`${operationLabel} review hash is missing or inconsistent`);
+  }
+  return hashes[0];
+}
+
 function shortDeliveryError(error: string | null | undefined): string {
   const trimmed = error?.trim();
   if (!trimmed) {
@@ -2545,6 +2604,30 @@ function shortDeliveryError(error: string | null | undefined): string {
 }
 
 function thresholdSummary(policy: FleetAlertPolicyRecord): string {
+  const parts = [
+    policy.memory_available_warning_ratio == null
+      ? null
+      : `mem warn ${policy.memory_available_warning_ratio}`,
+    policy.memory_available_critical_ratio == null
+      ? null
+      : `mem crit ${policy.memory_available_critical_ratio}`,
+    policy.disk_available_warning_ratio == null
+      ? null
+      : `disk warn ${policy.disk_available_warning_ratio}`,
+    policy.disk_available_critical_ratio == null
+      ? null
+      : `disk crit ${policy.disk_available_critical_ratio}`,
+    policy.cpu_load_warning == null
+      ? null
+      : `cpu warn ${policy.cpu_load_warning}`,
+    policy.cpu_load_critical == null
+      ? null
+      : `cpu crit ${policy.cpu_load_critical}`,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" · ") : "no thresholds";
+}
+
+function thresholdRequestSummary(policy: FleetAlertPolicyRequest): string {
   const parts = [
     policy.memory_available_warning_ratio == null
       ? null
@@ -2731,7 +2814,7 @@ function FleetAlertPolicyManager({
 }: {
   agents: AgentView[];
   policies: FleetAlertPolicyRecord[];
-  onDelete: (policyId: string) => Promise<void>;
+  onDelete: (policyId: string, reviewedName: string) => Promise<void>;
   onUpsert: (
     request: FleetAlertPolicyRequest,
   ) => Promise<FleetAlertPolicyRecord>;
@@ -2744,6 +2827,10 @@ function FleetAlertPolicyManager({
   );
   const [deletePending, setDeletePending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [saveSnapshot, setSaveSnapshot] = useState<{
+    request: FleetAlertPolicyRequest;
+    title: string;
+  } | null>(null);
   const [name, setName] = useState("edge-resource-policy");
   const [scopeKind, setScopeKind] = useState("tag");
   const [scopeValue, setScopeValue] = useState("edge");
@@ -2838,6 +2925,23 @@ function FleetAlertPolicyManager({
     [],
   );
 
+  useEffect(() => {
+    setSaveSnapshot(null);
+  }, [
+    name,
+    scopeKind,
+    scopeValue,
+    memoryWarning,
+    memoryCritical,
+    diskWarning,
+    diskCritical,
+    cpuWarning,
+    cpuCritical,
+    priority,
+    enabled,
+    notes,
+  ]);
+
   function resetForm() {
     setEditingId(null);
     setName("edge-resource-policy");
@@ -2913,10 +3017,9 @@ function FleetAlertPolicyManager({
     };
   }
 
-  async function submit() {
-    setStatus(editingId ? "updating policy" : "creating policy");
-    try {
-      const policy = await onUpsert({
+  function reviewSubmit() {
+    setSaveSnapshot({
+      request: {
         id: editingId ?? undefined,
         name: name.trim(),
         scope_kind: scopeKind,
@@ -2931,9 +3034,23 @@ function FleetAlertPolicyManager({
         enabled,
         notes: notes.trim() || null,
         confirmed: true,
-      });
+      },
+      title: editingId ? "Update alert policy" : "Create alert policy",
+    });
+  }
+
+  async function submit() {
+    const snapshot = saveSnapshot;
+    if (!snapshot) {
+      setStatus("Review policy before saving");
+      return;
+    }
+    setStatus(editingId ? "updating policy" : "creating policy");
+    try {
+      const policy = await onUpsert(snapshot.request);
       setEditingId(policy.id);
       setEditorOpen(true);
+      setSaveSnapshot(null);
       setStatus(`saved ${policy.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "policy save failed");
@@ -2953,7 +3070,7 @@ function FleetAlertPolicyManager({
     setStatus("deleting policies");
     try {
       for (const policy of rows) {
-        await onDelete(policy.id);
+        await onDelete(policy.id, policy.name);
       }
       if (rows.some((policy) => policy.id === editingId)) {
         resetForm();
@@ -3122,9 +3239,9 @@ function FleetAlertPolicyManager({
                 <button
                   className="primaryAction"
                   type="button"
-                  onClick={() => void submit()}
+                  onClick={reviewSubmit}
                 >
-                  {editingId ? "Update policy" : "Create policy"}
+                  {editingId ? "Review update" : "Review create"}
                 </button>
                 <button
                   className="secondaryAction"
@@ -3268,6 +3385,34 @@ function FleetAlertPolicyManager({
       </div>
       {status && <small className="fleetPolicyStatus">{status}</small>}
       <ConfirmationPrompt
+        confirmLabel={saveSnapshot?.title ?? "Save policy"}
+        detail="Saves the reviewed alert policy request exactly as shown."
+        items={[
+          { label: "Policy", value: saveSnapshot?.request.name ?? "-" },
+          {
+            label: "Scope",
+            value: saveSnapshot
+              ? `${saveSnapshot.request.scope_kind}${saveSnapshot.request.scope_value ? `:${saveSnapshot.request.scope_value}` : ""}`
+              : "-",
+          },
+          {
+            label: "State",
+            value: saveSnapshot?.request.enabled ? "enabled" : "disabled",
+          },
+          {
+            label: "Thresholds",
+            value: saveSnapshot
+              ? thresholdRequestSummary(saveSnapshot.request)
+              : "-",
+          },
+        ]}
+        onCancel={() => setSaveSnapshot(null)}
+        onConfirm={() => void submit()}
+        open={saveSnapshot !== null}
+        pending={false}
+        title="Confirm alert policy save"
+      />
+      <ConfirmationPrompt
         confirmLabel="Delete"
         detail="Deletes selected alert policy records. Existing alert states are not changed."
         items={[
@@ -3325,8 +3470,8 @@ function FleetNotificationsHub({
   alertDeliveries: FleetAlertNotificationDeliveryRecord[];
   webhookDeliveries: WebhookRuleDeliveryRecord[];
   webhookRules: WebhookRuleRecord[];
-  onDeleteAlertChannel: (channelId: string) => Promise<void>;
-  onDeleteWebhookRule: (ruleId: string) => Promise<void>;
+  onDeleteAlertChannel: (channelId: string, reviewedName: string) => Promise<void>;
+  onDeleteWebhookRule: (ruleId: string, reviewedName: string) => Promise<void>;
   onDispatchAlertNotifications: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -3521,7 +3666,7 @@ function FleetAlertNotificationManager({
 }: {
   agents: AgentView[];
   channels: FleetAlertNotificationChannelRecord[];
-  onDelete: (channelId: string) => Promise<void>;
+  onDelete: (channelId: string, reviewedName: string) => Promise<void>;
   onDispatch: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -3542,6 +3687,10 @@ function FleetAlertNotificationManager({
   >(null);
   const [deletePending, setDeletePending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [saveSnapshot, setSaveSnapshot] = useState<{
+    request: FleetAlertNotificationChannelRequest;
+    title: string;
+  } | null>(null);
   const [name, setName] = useState("critical-audit-channel");
   const [scopeKind, setScopeKind] = useState("global");
   const [scopeValue, setScopeValue] = useState("");
@@ -3557,6 +3706,8 @@ function FleetAlertNotificationManager({
   const [queueConfirmation, setQueueConfirmation] = useState<
     "dispatch" | "process" | null
   >(null);
+  const [queueSnapshot, setQueueSnapshot] =
+    useState<AlertDeliveryQueueSnapshot | null>(null);
   const [queuePending, setQueuePending] = useState(false);
 
   const categoryTokens = useMemo(() => csvValues(categories), [categories]);
@@ -3665,6 +3816,22 @@ function FleetAlertNotificationManager({
     [],
   );
 
+  useEffect(() => {
+    setSaveSnapshot(null);
+  }, [
+    name,
+    scopeKind,
+    scopeValue,
+    minSeverity,
+    categories,
+    operatorStates,
+    deliveryKind,
+    target,
+    cooldownSecs,
+    enabled,
+    notes,
+  ]);
+
   function resetForm() {
     setEditingId(null);
     setName("critical-audit-channel");
@@ -3733,10 +3900,9 @@ function FleetAlertNotificationManager({
     };
   }
 
-  async function submit() {
-    setStatus(editingId ? "updating channel" : "creating channel");
-    try {
-      const channel = await onUpsert({
+  function reviewSubmit() {
+    setSaveSnapshot({
+      request: {
         id: editingId ?? undefined,
         name: name.trim(),
         scope_kind: scopeKind,
@@ -3750,9 +3916,23 @@ function FleetAlertNotificationManager({
         enabled,
         notes: notes.trim() || null,
         confirmed: true,
-      });
+      },
+      title: editingId ? "Update channel" : "Create channel",
+    });
+  }
+
+  async function submit() {
+    const snapshot = saveSnapshot;
+    if (!snapshot) {
+      setStatus("Review channel before saving");
+      return;
+    }
+    setStatus(editingId ? "updating channel" : "creating channel");
+    try {
+      const channel = await onUpsert(snapshot.request);
       setEditingId(channel.id);
       setEditorOpen(true);
+      setSaveSnapshot(null);
       setStatus(`saved ${channel.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "channel save failed");
@@ -3774,7 +3954,7 @@ function FleetAlertNotificationManager({
     setStatus("deleting channels");
     try {
       for (const channel of rows) {
-        await onDelete(channel.id);
+        await onDelete(channel.id, channel.name);
       }
       if (rows.some((channel) => channel.id === editingId)) {
         resetForm();
@@ -3813,7 +3993,7 @@ function FleetAlertNotificationManager({
     }
   }
 
-  async function dispatch(dryRun: boolean) {
+  async function dispatch(dryRun: boolean, openConfirmation = false) {
     setStatus(dryRun ? "matching alerts" : "queueing alert notifications");
     if (!dryRun) {
       setQueuePending(true);
@@ -3826,7 +4006,27 @@ function FleetAlertNotificationManager({
       });
       if (dryRun) {
         onPreviewRows(rows);
-        onOpenDeliveries();
+        if (!openConfirmation) {
+          onOpenDeliveries();
+        }
+        if (openConfirmation) {
+          const previewHash = reviewedDeliveryHash(
+            rows,
+            "Notification dispatch",
+          );
+          setQueueSnapshot({
+            action: "dispatch",
+            request: {
+              limit: 50,
+              dry_run: false,
+              confirmed: true,
+              preview_hash: previewHash,
+            },
+            previewHash,
+            reviewedRows: rows.length,
+          });
+          setQueueConfirmation("dispatch");
+        }
       }
       setStatus(`${dryRun ? "matched" : "queued"} ${rows.length}`);
     } catch (error) {
@@ -3840,7 +4040,7 @@ function FleetAlertNotificationManager({
     }
   }
 
-  async function process(dryRun: boolean) {
+  async function process(dryRun: boolean, openConfirmation = false) {
     setStatus(
       dryRun ? "previewing notification queue" : "delivering notifications",
     );
@@ -3856,7 +4056,28 @@ function FleetAlertNotificationManager({
       });
       if (dryRun) {
         onPreviewRows(rows);
-        onOpenDeliveries();
+        if (!openConfirmation) {
+          onOpenDeliveries();
+        }
+        if (openConfirmation) {
+          const previewHash = reviewedDeliveryHash(
+            rows,
+            "Notification delivery",
+          );
+          setQueueSnapshot({
+            action: "process",
+            request: {
+              limit: 50,
+              status: "queued",
+              dry_run: false,
+              confirmed: true,
+              preview_hash: previewHash,
+            },
+            previewHash,
+            reviewedRows: rows.length,
+          });
+          setQueueConfirmation("process");
+        }
       }
       setStatus(`${dryRun ? "previewed" : "processed"} ${rows.length}`);
     } catch (error) {
@@ -3873,16 +4094,35 @@ function FleetAlertNotificationManager({
   }
 
   async function confirmQueueAction() {
-    const action = queueConfirmation;
-    if (!action || queuePending) {
+    const snapshot = queueSnapshot;
+    if (!snapshot || queuePending) {
       return;
     }
-    if (action === "dispatch") {
-      await dispatch(false);
-    } else {
-      await process(false);
+    setQueuePending(true);
+    setStatus(
+      snapshot.action === "dispatch"
+        ? "queueing reviewed alert notifications"
+        : "delivering reviewed notifications",
+    );
+    try {
+      const rows =
+        snapshot.action === "dispatch"
+          ? await onDispatch(snapshot.request)
+          : await onProcess(snapshot.request);
+      setStatus(
+        `${snapshot.action === "dispatch" ? "queued" : "processed"} ${rows.length}`,
+      );
+      setQueueConfirmation(null);
+      setQueueSnapshot(null);
+    } catch (error) {
+      setStatus(
+        error instanceof Error
+          ? error.message
+          : "notification queue action failed",
+      );
+    } finally {
+      setQueuePending(false);
     }
-    setQueueConfirmation(null);
   }
 
   const channelActions: ConsoleDataGridAction<FleetAlertNotificationChannelRecord>[] =
@@ -4020,9 +4260,9 @@ function FleetAlertNotificationManager({
                 <button
                   className="primaryAction"
                   type="button"
-                  onClick={() => void submit()}
+                  onClick={reviewSubmit}
                 >
-                  {editingId ? "Update channel" : "Create channel"}
+                  {editingId ? "Review update" : "Review create"}
                 </button>
                 <button
                   className="secondaryAction"
@@ -4193,7 +4433,7 @@ function FleetAlertNotificationManager({
             className="secondaryAction"
             disabled={queuePending}
             type="button"
-            onClick={() => setQueueConfirmation("dispatch")}
+            onClick={() => void dispatch(true, true)}
           >
             Review queue dispatch
           </button>
@@ -4209,7 +4449,7 @@ function FleetAlertNotificationManager({
             className="primaryAction"
             disabled={queuePending}
             type="button"
-            onClick={() => setQueueConfirmation("process")}
+            onClick={() => void process(true, true)}
           >
             Review delivery
           </button>
@@ -4228,13 +4468,22 @@ function FleetAlertNotificationManager({
         }
         items={[
           {
-            label: "Limit",
-            value: "50 queued records",
+            label: "Reviewed rows",
+            value: queueSnapshot?.reviewedRows ?? 0,
+          },
+          {
+            label: "Review hash",
+            value: queueSnapshot
+              ? `${queueSnapshot.previewHash.slice(0, 12)}...`
+              : "review required",
           },
         ]}
-        onCancel={() => setQueueConfirmation(null)}
+        onCancel={() => {
+          setQueueConfirmation(null);
+          setQueueSnapshot(null);
+        }}
         onConfirm={() => void confirmQueueAction()}
-        open={queueConfirmation !== null}
+        open={queueConfirmation !== null && queueSnapshot !== null}
         pending={queuePending}
         title={
           queueConfirmation === "dispatch"
@@ -4244,6 +4493,37 @@ function FleetAlertNotificationManager({
         tone={queueConfirmation === "process" ? "danger" : "normal"}
       />
       {status && <small className="fleetPolicyStatus">{status}</small>}
+      <ConfirmationPrompt
+        confirmLabel={saveSnapshot?.title ?? "Save channel"}
+        detail="Saves the reviewed notification channel request exactly as shown."
+        items={[
+          { label: "Channel", value: saveSnapshot?.request.name ?? "-" },
+          {
+            label: "Scope",
+            value: saveSnapshot
+              ? scopeSummary(
+                  saveSnapshot.request.scope_kind,
+                  saveSnapshot.request.scope_value,
+                )
+              : "-",
+          },
+          {
+            label: "Severity",
+            value: saveSnapshot?.request.min_severity ?? "-",
+          },
+          {
+            label: "Delivery",
+            value: saveSnapshot
+              ? `${saveSnapshot.request.delivery_kind} -> ${saveSnapshot.request.target}`
+              : "-",
+          },
+        ]}
+        onCancel={() => setSaveSnapshot(null)}
+        onConfirm={() => void submit()}
+        open={saveSnapshot !== null}
+        pending={false}
+        title="Confirm notification channel save"
+      />
       <ConfirmationPrompt
         confirmLabel="Delete"
         detail="Deletes selected alert notification channel records. Retained delivery history is not removed."
@@ -4423,7 +4703,7 @@ function WebhookRuleManager({
   rules,
 }: {
   agents: AgentView[];
-  onDelete: (ruleId: string) => Promise<void>;
+  onDelete: (ruleId: string, reviewedName: string) => Promise<void>;
   onDispatch: (
     request: WebhookRuleDispatchRequest,
   ) => Promise<WebhookRuleDeliveryRecord[]>;
@@ -4447,6 +4727,10 @@ function WebhookRuleManager({
   );
   const [deletePending, setDeletePending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [saveSnapshot, setSaveSnapshot] = useState<{
+    request: WebhookRuleRequest;
+    title: string;
+  } | null>(null);
   const [name, setName] = useState("edge-interval-webhook");
   const [enabled, setEnabled] = useState(true);
   const [expression, setExpression] = useState("interval.30sec && tag:edge");
@@ -4462,6 +4746,8 @@ function WebhookRuleManager({
   const [queueConfirmation, setQueueConfirmation] = useState<
     "dispatch" | "process" | null
   >(null);
+  const [queueSnapshot, setQueueSnapshot] =
+    useState<WebhookDeliveryQueueSnapshot | null>(null);
   const [queuePending, setQueuePending] = useState(false);
 
   const selectedPreviewNames = useMemo(() => {
@@ -4541,6 +4827,18 @@ function WebhookRuleManager({
     [],
   );
 
+  useEffect(() => {
+    setSaveSnapshot(null);
+  }, [
+    name,
+    enabled,
+    expression,
+    target,
+    bodyTemplate,
+    cooldownSecs,
+    notes,
+  ]);
+
   function resetForm() {
     setEditingId(null);
     setName("edge-interval-webhook");
@@ -4597,10 +4895,9 @@ function WebhookRuleManager({
     };
   }
 
-  async function submit() {
-    setStatus(editingId ? "updating webhook rule" : "creating webhook rule");
-    try {
-      const rule = await onUpsert({
+  function reviewSubmit() {
+    setSaveSnapshot({
+      request: {
         id: editingId ?? undefined,
         name: name.trim(),
         enabled,
@@ -4610,9 +4907,23 @@ function WebhookRuleManager({
         cooldown_secs: optionalInteger(cooldownSecs),
         notes: notes.trim() || null,
         confirmed: true,
-      });
+      },
+      title: editingId ? "Update rule" : "Create rule",
+    });
+  }
+
+  async function submit() {
+    const snapshot = saveSnapshot;
+    if (!snapshot) {
+      setStatus("Review webhook rule before saving");
+      return;
+    }
+    setStatus(editingId ? "updating webhook rule" : "creating webhook rule");
+    try {
+      const rule = await onUpsert(snapshot.request);
       setEditingId(rule.id);
       setEditorOpen(true);
+      setSaveSnapshot(null);
       setStatus(`saved ${rule.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "webhook save failed");
@@ -4632,7 +4943,7 @@ function WebhookRuleManager({
     setStatus("deleting webhook rules");
     try {
       for (const rule of rows) {
-        await onDelete(rule.id);
+        await onDelete(rule.id, rule.name);
       }
       if (rows.some((rule) => rule.id === editingId)) {
         resetForm();
@@ -4707,7 +5018,22 @@ function WebhookRuleManager({
     }
   }
 
-  async function dispatch(dryRunMode: boolean) {
+  function clearWebhookQueueReview() {
+    setQueueConfirmation(null);
+    setQueueSnapshot(null);
+  }
+
+  function setWebhookEventKind(value: string) {
+    setEventKind(value);
+    clearWebhookQueueReview();
+  }
+
+  function setWebhookEventId(value: string) {
+    setEventId(value);
+    clearWebhookQueueReview();
+  }
+
+  async function dispatch(dryRunMode: boolean, openConfirmation = false) {
     setStatus(dryRunMode ? "matching webhook rules" : "queueing webhooks");
     if (!dryRunMode) {
       setQueuePending(true);
@@ -4722,7 +5048,32 @@ function WebhookRuleManager({
       });
       if (dryRunMode) {
         onPreviewRows(rows);
-        onOpenDeliveries();
+        if (!openConfirmation) {
+          onOpenDeliveries();
+        }
+        if (openConfirmation) {
+          const previewHash = reviewedDeliveryHash(
+            rows,
+            "Webhook dispatch",
+          );
+          const frozenEventKind = eventKind.trim();
+          const frozenEventId = eventId.trim();
+          setQueueSnapshot({
+            action: "dispatch",
+            request: {
+              event_kind: frozenEventKind,
+              event_id: frozenEventId || null,
+              limit: 50,
+              dry_run: false,
+              confirmed: true,
+              preview_hash: previewHash,
+            },
+            previewHash,
+            reviewedRows: rows.length,
+            eventLabel: `${frozenEventKind || "event"}${frozenEventId ? ` / ${frozenEventId}` : ""}`,
+          });
+          setQueueConfirmation("dispatch");
+        }
       }
       setStatus(`${dryRunMode ? "matched" : "queued"} ${rows.length}`);
     } catch (error) {
@@ -4736,7 +5087,7 @@ function WebhookRuleManager({
     }
   }
 
-  async function process(dryRunMode: boolean) {
+  async function process(dryRunMode: boolean, openConfirmation = false) {
     setStatus(dryRunMode ? "previewing webhook queue" : "delivering webhooks");
     if (!dryRunMode) {
       setQueuePending(true);
@@ -4750,7 +5101,26 @@ function WebhookRuleManager({
       });
       if (dryRunMode) {
         onPreviewRows(rows);
-        onOpenDeliveries();
+        if (!openConfirmation) {
+          onOpenDeliveries();
+        }
+        if (openConfirmation) {
+          const previewHash = reviewedDeliveryHash(rows, "Webhook delivery");
+          setQueueSnapshot({
+            action: "process",
+            request: {
+              limit: 50,
+              status: "queued",
+              dry_run: false,
+              confirmed: true,
+              preview_hash: previewHash,
+            },
+            previewHash,
+            reviewedRows: rows.length,
+            eventLabel: "queued deliveries",
+          });
+          setQueueConfirmation("process");
+        }
       }
       setStatus(`${dryRunMode ? "previewed" : "processed"} ${rows.length}`);
     } catch (error) {
@@ -4765,16 +5135,32 @@ function WebhookRuleManager({
   }
 
   async function confirmQueueAction() {
-    const action = queueConfirmation;
-    if (!action || queuePending) {
+    const snapshot = queueSnapshot;
+    if (!snapshot || queuePending) {
       return;
     }
-    if (action === "dispatch") {
-      await dispatch(false);
-    } else {
-      await process(false);
+    setQueuePending(true);
+    setStatus(
+      snapshot.action === "dispatch"
+        ? "queueing reviewed webhooks"
+        : "delivering reviewed webhooks",
+    );
+    try {
+      const rows =
+        snapshot.action === "dispatch"
+          ? await onDispatch(snapshot.request)
+          : await onProcess(snapshot.request);
+      setStatus(
+        `${snapshot.action === "dispatch" ? "queued" : "processed"} ${rows.length}`,
+      );
+      clearWebhookQueueReview();
+    } catch (error) {
+      setStatus(
+        error instanceof Error ? error.message : "webhook queue action failed",
+      );
+    } finally {
+      setQueuePending(false);
     }
-    setQueueConfirmation(null);
   }
 
   const ruleActions: ConsoleDataGridAction<WebhookRuleRecord>[] = [
@@ -4943,9 +5329,9 @@ function WebhookRuleManager({
                 <button
                   className="primaryAction"
                   type="button"
-                  onClick={() => void submit()}
+                  onClick={reviewSubmit}
                 >
-                  {editingId ? "Update rule" : "Create rule"}
+                  {editingId ? "Review update" : "Review create"}
                 </button>
                 <button
                   className="secondaryAction"
@@ -5011,14 +5397,14 @@ function WebhookRuleManager({
                 <input
                   aria-label="Webhook event kind"
                   value={eventKind}
-                  onChange={(event) => setEventKind(event.target.value)}
+                  onChange={(event) => setWebhookEventKind(event.target.value)}
                 />
               </ConsoleField>
               <ConsoleField label="Preview event id">
                 <input
                   aria-label="Webhook event id"
                   value={eventId}
-                  onChange={(event) => setEventId(event.target.value)}
+                  onChange={(event) => setWebhookEventId(event.target.value)}
                   placeholder="optional"
                 />
               </ConsoleField>
@@ -5058,7 +5444,7 @@ function WebhookRuleManager({
             <input
               aria-label="Webhook dispatch event kind"
               value={eventKind}
-              onChange={(event) => setEventKind(event.target.value)}
+              onChange={(event) => setWebhookEventKind(event.target.value)}
             />
           </label>
           <label className="consoleField">
@@ -5066,7 +5452,7 @@ function WebhookRuleManager({
             <input
               aria-label="Webhook dispatch event id"
               value={eventId}
-              onChange={(event) => setEventId(event.target.value)}
+              onChange={(event) => setWebhookEventId(event.target.value)}
               placeholder="optional"
             />
           </label>
@@ -5082,7 +5468,7 @@ function WebhookRuleManager({
             className="secondaryAction"
             disabled={queuePending}
             type="button"
-            onClick={() => setQueueConfirmation("dispatch")}
+            onClick={() => void dispatch(true, true)}
           >
             Review queue dispatch
           </button>
@@ -5098,7 +5484,7 @@ function WebhookRuleManager({
             className="primaryAction"
             disabled={queuePending}
             type="button"
-            onClick={() => setQueueConfirmation("process")}
+            onClick={() => void process(true, true)}
           >
             Review delivery
           </button>
@@ -5118,16 +5504,22 @@ function WebhookRuleManager({
         items={[
           {
             label: "Event",
-            value: `${eventKind.trim() || "event"}${eventId.trim() ? ` / ${eventId.trim()}` : ""}`,
+            value: queueSnapshot?.eventLabel ?? "review required",
           },
           {
-            label: "Limit",
-            value: "50 queued records",
+            label: "Reviewed rows",
+            value: queueSnapshot?.reviewedRows ?? 0,
+          },
+          {
+            label: "Review hash",
+            value: queueSnapshot
+              ? `${queueSnapshot.previewHash.slice(0, 12)}...`
+              : "review required",
           },
         ]}
-        onCancel={() => setQueueConfirmation(null)}
+        onCancel={clearWebhookQueueReview}
         onConfirm={() => void confirmQueueAction()}
-        open={queueConfirmation !== null}
+        open={queueConfirmation !== null && queueSnapshot !== null}
         pending={queuePending}
         title={
           queueConfirmation === "dispatch"
@@ -5137,6 +5529,30 @@ function WebhookRuleManager({
         tone={queueConfirmation === "process" ? "danger" : "normal"}
       />
       {status && <small className="fleetPolicyStatus">{status}</small>}
+      <ConfirmationPrompt
+        confirmLabel={saveSnapshot?.title ?? "Save rule"}
+        detail="Saves the reviewed webhook rule request exactly as shown."
+        items={[
+          { label: "Rule", value: saveSnapshot?.request.name ?? "-" },
+          {
+            label: "Expression",
+            value: saveSnapshot?.request.expression ?? "-",
+          },
+          {
+            label: "Target",
+            value: saveSnapshot?.request.target ?? "-",
+          },
+          {
+            label: "State",
+            value: saveSnapshot?.request.enabled ? "enabled" : "disabled",
+          },
+        ]}
+        onCancel={() => setSaveSnapshot(null)}
+        onConfirm={() => void submit()}
+        open={saveSnapshot !== null}
+        pending={false}
+        title="Confirm webhook rule save"
+      />
       <ConfirmationPrompt
         confirmLabel="Delete"
         detail="Deletes selected webhook rule records. Retained delivery history is not removed."
@@ -5346,8 +5762,18 @@ function WebhookDeliveryMaintenancePanel({
   const [rotationError, setRotationError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
 
+  function clearRotationReview() {
+    setRotationPreview(null);
+    setConfirmDelete(false);
+    setRotationError(null);
+  }
+
   async function rotate(confirmed: boolean) {
     if (rotationPending) {
+      return;
+    }
+    if (confirmed && !rotationPreview) {
+      setRotationError("Review rotation before confirming cleanup");
       return;
     }
     setRotationPending(true);
@@ -5361,6 +5787,7 @@ function WebhookDeliveryMaintenancePanel({
         status: rotationStatus,
         rule_id: rotationRuleId || null,
         confirmed,
+        preview_hash: confirmed ? rotationPreview?.preview_hash : null,
       });
       setRotationPreview(response);
       setConfirmDelete(false);
@@ -5414,16 +5841,22 @@ function WebhookDeliveryMaintenancePanel({
             <input
               aria-label="Webhook rotation days"
               value={rotationDays}
-              onChange={(event) => setRotationDays(event.target.value)}
+              onChange={(event) => {
+                setRotationDays(event.target.value);
+                clearRotationReview();
+              }}
             />
           </ConsoleField>
           <ConsoleField label="Status">
             <select
               aria-label="Webhook rotation status"
               value={rotationStatus}
-              onChange={(event) =>
-                setRotationStatus(event.target.value as WebhookRuleDeliveryHistoryStatus)
-              }
+              onChange={(event) => {
+                setRotationStatus(
+                  event.target.value as WebhookRuleDeliveryHistoryStatus,
+                );
+                clearRotationReview();
+              }}
             >
               {WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES.map((status) => (
                 <option key={status} value={status}>
@@ -5436,7 +5869,10 @@ function WebhookDeliveryMaintenancePanel({
             <select
               aria-label="Webhook rotation rule"
               value={rotationRuleId}
-              onChange={(event) => setRotationRuleId(event.target.value)}
+              onChange={(event) => {
+                setRotationRuleId(event.target.value);
+                clearRotationReview();
+              }}
             >
               <option value="">all rules</option>
               {rules.map((rule) => (
@@ -5467,6 +5903,12 @@ function WebhookDeliveryMaintenancePanel({
           {
             label: "Status",
             value: rotationPreview?.status ?? "any",
+          },
+          {
+            label: "Review hash",
+            value: rotationPreview
+              ? `${rotationPreview.preview_hash.slice(0, 12)}...`
+              : "review required",
           },
         ]}
         error={rotationError}
@@ -5568,6 +6010,11 @@ function FleetAlertList({
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [pending, setPending] = useState<string | null>(null);
+  const [reviewSnapshot, setReviewSnapshot] = useState<{
+    action: FleetAlertStateRequest["action"];
+    requests: FleetAlertStateRequest[];
+    rows: FleetAlertRecord[];
+  } | null>(null);
   const criticalCount = alerts.filter(
     (alert) => alert.severity === "critical",
   ).length;
@@ -5679,31 +6126,50 @@ function FleetAlertList({
     [nameById],
   );
 
-  async function updateAlerts(
+  useEffect(() => {
+    setReviewSnapshot(null);
+  }, [alerts]);
+
+  function reviewAlertUpdate(
     rows: FleetAlertRecord[],
     action: FleetAlertStateRequest["action"],
   ) {
     if (rows.length === 0 || pending) {
       return;
     }
-    setPending(`${action}:${rows.map((alert) => alert.id).join(",")}`);
+    setReviewSnapshot({
+      action,
+      rows,
+      requests: rows.map((alert) => ({
+        alert_id: alert.id,
+        action,
+        muted_for_secs: action === "mute" ? 4 * 60 * 60 : null,
+        reason:
+          action === "mute"
+            ? "panel mute"
+            : action === "acknowledge"
+              ? "panel acknowledgement"
+              : action === "escalate"
+                ? "panel escalation"
+                : "panel clear",
+        confirmed: true,
+      })),
+    });
+  }
+
+  async function updateReviewedAlerts() {
+    const snapshot = reviewSnapshot;
+    if (!snapshot || pending) {
+      return;
+    }
+    setPending(
+      `${snapshot.action}:${snapshot.rows.map((alert) => alert.id).join(",")}`,
+    );
     try {
-      for (const alert of rows) {
-        await onUpdate({
-          alert_id: alert.id,
-          action,
-          muted_for_secs: action === "mute" ? 4 * 60 * 60 : null,
-          reason:
-            action === "mute"
-              ? "panel mute"
-              : action === "acknowledge"
-                ? "panel acknowledgement"
-                : action === "escalate"
-                  ? "panel escalation"
-                  : "panel clear",
-          confirmed: true,
-        });
+      for (const request of snapshot.requests) {
+        await onUpdate(request);
       }
+      setReviewSnapshot(null);
     } finally {
       setPending(null);
     }
@@ -5736,7 +6202,7 @@ function FleetAlertList({
             disabled: (rows) => pending != null || openRows(rows).length === 0,
             icon: <Check size={14} />,
             onSelect: (rows) =>
-              void updateAlerts(openRows(rows), "acknowledge"),
+              reviewAlertUpdate(openRows(rows), "acknowledge"),
           },
           {
             label: "Mute open 4h",
@@ -5744,7 +6210,7 @@ function FleetAlertList({
               `Mute ${openRows(rows).length} selected open fleet alerts for four hours.`,
             disabled: (rows) => pending != null || openRows(rows).length === 0,
             icon: <VolumeX size={14} />,
-            onSelect: (rows) => void updateAlerts(openRows(rows), "mute"),
+            onSelect: (rows) => reviewAlertUpdate(openRows(rows), "mute"),
           },
           {
             label: "Escalate open",
@@ -5752,7 +6218,7 @@ function FleetAlertList({
               `Escalate ${openRows(rows).length} selected open fleet alerts.`,
             disabled: (rows) => pending != null || openRows(rows).length === 0,
             icon: <ArrowUpCircle size={14} />,
-            onSelect: (rows) => void updateAlerts(openRows(rows), "escalate"),
+            onSelect: (rows) => reviewAlertUpdate(openRows(rows), "escalate"),
           },
           {
             label: "Clear triaged",
@@ -5761,7 +6227,7 @@ function FleetAlertList({
             disabled: (rows) =>
               pending != null || triagedRows(rows).length === 0,
             icon: <CircleCheck size={14} />,
-            onSelect: (rows) => void updateAlerts(triagedRows(rows), "clear"),
+            onSelect: (rows) => reviewAlertUpdate(triagedRows(rows), "clear"),
           },
         ]}
         columns={alertColumns}
@@ -5804,7 +6270,7 @@ function FleetAlertList({
               !rows[0] ||
               alertOperatorState(rows[0]) !== "open",
             icon: <Check size={14} />,
-            onSelect: (rows) => void updateAlerts(rows, "acknowledge"),
+            onSelect: (rows) => reviewAlertUpdate(rows, "acknowledge"),
           },
           {
             label: "Mute",
@@ -5820,7 +6286,7 @@ function FleetAlertList({
               !rows[0] ||
               alertOperatorState(rows[0]) !== "open",
             icon: <VolumeX size={14} />,
-            onSelect: (rows) => void updateAlerts(rows, "mute"),
+            onSelect: (rows) => reviewAlertUpdate(rows, "mute"),
           },
           {
             label: "Escalate",
@@ -5836,7 +6302,7 @@ function FleetAlertList({
               !rows[0] ||
               alertOperatorState(rows[0]) !== "open",
             icon: <ArrowUpCircle size={14} />,
-            onSelect: (rows) => void updateAlerts(rows, "escalate"),
+            onSelect: (rows) => reviewAlertUpdate(rows, "escalate"),
           },
           {
             label: "Clear",
@@ -5852,7 +6318,7 @@ function FleetAlertList({
               !rows[0] ||
               alertOperatorState(rows[0]) === "open",
             icon: <CircleCheck size={14} />,
-            onSelect: (rows) => void updateAlerts(rows, "clear"),
+            onSelect: (rows) => reviewAlertUpdate(rows, "clear"),
           },
         ]}
         renderSelectionPanel={(rows) => {
@@ -5870,12 +6336,53 @@ function FleetAlertList({
         storageKey="vpsman.grid.fleet.alerts.v1"
         title="Fleet alerts"
       />
+      <ConfirmationPrompt
+        confirmLabel={fleetAlertActionLabel(reviewSnapshot?.action)}
+        detail="Applies the reviewed operator state update to the selected fleet alerts."
+        items={[
+          {
+            label: "Action",
+            value: fleetAlertActionLabel(reviewSnapshot?.action),
+          },
+          {
+            label: "Alerts",
+            value: selectedRecordSummary(
+              reviewSnapshot?.rows ?? null,
+              "alert",
+              "alerts",
+              (row) => row.title,
+              (row) => row.id,
+            ),
+          },
+        ]}
+        onCancel={() => setReviewSnapshot(null)}
+        onConfirm={() => void updateReviewedAlerts()}
+        open={reviewSnapshot !== null}
+        pending={pending !== null}
+        title="Confirm fleet alert triage"
+        tone={reviewSnapshot?.action === "clear" ? "normal" : "danger"}
+      />
     </div>
   );
 }
 
 function formatUnixTime(value: number): string {
   return formatCompactTime(new Date(value * 1000).toISOString());
+}
+
+function fleetAlertActionLabel(action: FleetAlertStateRequest["action"] | undefined): string {
+  switch (action) {
+    case "acknowledge":
+      return "Acknowledge";
+    case "mute":
+      return "Mute";
+    case "escalate":
+      return "Escalate";
+    case "clear":
+      return "Clear";
+    default:
+      return "Confirm";
+  }
 }
 
 function alertTone(severity: string): "critical" | "warning" | "info" {

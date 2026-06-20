@@ -450,3 +450,22 @@ fn rejects_invalid_inventory_commands() {
     );
     assert!(parse_vty_inventory_command("telemetry-tunnels --limit=0").is_err());
 }
+
+#[test]
+fn parses_explicit_tag_confirmations() {
+    assert_eq!(
+        parse_vty_inventory_command("tag-create prod --confirmed").unwrap(),
+        VtyInventoryCommand::TagCreate {
+            name: "prod".to_string(),
+            confirmed: true,
+        }
+    );
+    assert_eq!(
+        parse_vty_inventory_command("agent-tag edge-a prod --confirmed").unwrap(),
+        VtyInventoryCommand::AgentTag {
+            client_id: "edge-a".to_string(),
+            tag: "prod".to_string(),
+            confirmed: true,
+        }
+    );
+}

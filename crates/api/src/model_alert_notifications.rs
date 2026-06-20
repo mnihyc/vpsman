@@ -46,6 +46,14 @@ pub(crate) struct CreateFleetAlertNotificationChannelRequest {
     pub(crate) confirmed: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeleteFleetAlertNotificationChannelRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) reviewed_name: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct FleetAlertNotificationDeliveryView {
     pub(crate) id: Uuid,
@@ -66,6 +74,8 @@ pub(crate) struct FleetAlertNotificationDeliveryView {
     pub(crate) actor_id: Option<Uuid>,
     pub(crate) created_at: String,
     pub(crate) delivered_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) review_preview_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +95,7 @@ pub(crate) struct FleetAlertNotificationDispatchRequest {
     pub(crate) operator_state: Option<String>,
     pub(crate) include_muted: Option<bool>,
     pub(crate) dry_run: Option<bool>,
+    pub(crate) preview_hash: Option<String>,
     pub(crate) confirmed: bool,
 }
 
@@ -94,6 +105,7 @@ pub(crate) struct FleetAlertNotificationProcessRequest {
     pub(crate) status: Option<String>,
     pub(crate) delivery_kind: Option<String>,
     pub(crate) dry_run: Option<bool>,
+    pub(crate) preview_hash: Option<String>,
     pub(crate) confirmed: bool,
 }
 

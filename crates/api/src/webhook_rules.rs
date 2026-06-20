@@ -106,12 +106,22 @@ impl AppState {
                 candidates.push(candidate);
             }
         }
+        let preview_hash =
+            webhook_dispatch_preview_hash(request, event_kind, &event_id, &candidates)?;
         if dry_run {
             return Ok(candidates
                 .iter()
-                .map(dry_run_webhook_delivery)
+                .map(|candidate| {
+                    let mut delivery = dry_run_webhook_delivery(candidate);
+                    delivery.review_preview_hash = Some(preview_hash.clone());
+                    delivery
+                })
                 .collect::<Vec<_>>());
         }
+        anyhow::ensure!(
+            request.preview_hash.as_deref() == Some(preview_hash.as_str()),
+            "webhook_rule_dispatch_preview_hash_mismatch"
+        );
         self.repo
             .record_webhook_event(WebhookEventCandidate {
                 kind: event_kind.to_string(),
@@ -133,6 +143,7 @@ impl AppState {
             .map(|candidate| {
                 let mut delivery = dry_run_webhook_delivery(candidate);
                 delivery.status = "event_logged".to_string();
+                delivery.review_preview_hash = Some(preview_hash.clone());
                 delivery
             })
             .collect())
@@ -165,6 +176,13 @@ impl AppState {
                 Some(status),
             )
             .await?;
+        let preview_hash = webhook_process_preview_hash(request, &deliveries)?;
+        if !dry_run {
+            anyhow::ensure!(
+                request.preview_hash.as_deref() == Some(preview_hash.as_str()),
+                "webhook_rule_process_preview_hash_mismatch"
+            );
+        }
         let client = reqwest::Client::builder()
             .timeout(tokio::time::Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
@@ -175,6 +193,7 @@ impl AppState {
             if dry_run {
                 let mut delivery = delivery;
                 delivery.status = WEBHOOK_PROCESS_DRY_RUN_STATUS.to_string();
+                delivery.review_preview_hash = Some(preview_hash.clone());
                 processed.push(delivery);
                 continue;
             }
@@ -231,6 +250,63 @@ fn optional_trimmed(value: &Option<String>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn webhook_dispatch_preview_hash(
+    request: &WebhookRuleDispatchRequest,
+    event_kind: &str,
+    event_id: &str,
+    candidates: &[WebhookRuleDeliveryCandidate],
+) -> Result<String> {
+    let payload = serde_json::to_vec(&json!({
+        "version": 1,
+        "kind": "webhook_rule_dispatch",
+        "request": {
+            "event_kind": event_kind,
+            "event_id": event_id,
+            "limit": request.limit,
+        },
+        "candidates": candidates.iter().map(|candidate| {
+            json!({
+                "rule_id": candidate.rule_id,
+                "event_kind": candidate.event_kind,
+                "event_id": candidate.event_id,
+                "target": candidate.target,
+                "dedupe_key": candidate.dedupe_key,
+                "payload": candidate.payload,
+                "matched_vps": candidate.matched_vps,
+                "message": candidate.message,
+            })
+        }).collect::<Vec<_>>(),
+    }))?;
+    Ok(payload_hash(&payload))
+}
+
+fn webhook_process_preview_hash(
+    request: &WebhookRuleProcessRequest,
+    deliveries: &[WebhookRuleDeliveryView],
+) -> Result<String> {
+    let payload = serde_json::to_vec(&json!({
+        "version": 1,
+        "kind": "webhook_rule_process",
+        "request": {
+            "limit": request.limit,
+            "status": request.status,
+        },
+        "deliveries": deliveries.iter().map(|delivery| {
+            json!({
+                "id": delivery.id,
+                "rule_id": delivery.rule_id,
+                "event_kind": delivery.event_kind,
+                "event_id": delivery.event_id,
+                "status": delivery.status,
+                "target": delivery.target,
+                "dedupe_key": delivery.dedupe_key,
+                "attempt_count": delivery.attempt_count,
+            })
+        }).collect::<Vec<_>>(),
+    }))?;
+    Ok(payload_hash(&payload))
 }
 
 pub(crate) fn webhook_candidate_for_rule(

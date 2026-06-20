@@ -733,6 +733,7 @@ fn delivery_from_candidate(
         created_at: now.to_string(),
         delivered_at: (candidate.status == FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_DELIVERED)
             .then(|| now.to_string()),
+        review_preview_hash: None,
     }
 }
 
@@ -779,6 +780,7 @@ fn delivery_from_row(row: sqlx::postgres::PgRow) -> Result<FleetAlertNotificatio
         actor_id: row.try_get("actor_id")?,
         created_at: row.try_get("created_at")?,
         delivered_at: row.try_get("delivered_at")?,
+        review_preview_hash: None,
     })
 }
 

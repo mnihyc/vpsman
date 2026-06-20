@@ -19,8 +19,8 @@ type MigrationLinkFormProps = {
   onArchiveTransferChange: (value: string) => void;
   onMigrationNoteChange: (value: string) => void;
   onMigrationRestorePlanIdChange: (value: string) => void;
-  onRunMigrationRestore: () => void;
-  onSubmit: () => void;
+  onRunMigrationRestore: () => void | Promise<void>;
+  onSubmit: () => void | Promise<void>;
   pending: boolean;
   clientLabel: (clientId: string) => string;
   postRestoreArgv: string;
@@ -70,9 +70,9 @@ export function MigrationLinkForm({
       label: "Archive metadata",
       detail: archiveReady
         ? "Completed upload transfer selected"
-        : "Select a completed upload transfer record",
+        : "Required for migration restore; not needed for link-only",
       ready: archiveReady,
-      required: true,
+      required: false,
     },
     {
       label: "Privilege",
@@ -182,8 +182,8 @@ export function MigrationLinkForm({
         {!linkConfirmationOpen && (
           <button
             className="primaryAction"
-            disabled={pending || !migrationRestorePlanId}
-            onClick={onSubmit}
+            disabled={pending || !migrationRestorePlanId || !privilegeReady}
+            onClick={() => void onSubmit()}
             type="button"
           >
             Review link
@@ -193,7 +193,7 @@ export function MigrationLinkForm({
           <button
             className="secondaryAction"
             disabled={pending || !migrationRestorePlanId || !privilegeReady || !archiveReady}
-            onClick={onRunMigrationRestore}
+            onClick={() => void onRunMigrationRestore()}
             type="button"
           >
             Review migration restore

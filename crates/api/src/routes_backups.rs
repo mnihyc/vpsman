@@ -166,8 +166,72 @@ pub(crate) async fn prune_backup_policies(
             "backup_policy_prune_confirmation_required",
         ));
     }
+    if !request.dry_run
+        && request
+            .preview_hash
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "backup_policy_prune_preview_hash_required",
+        ));
+    }
     let metadata_only = request.metadata_only.unwrap_or(false);
     if !request.dry_run && !metadata_only && state.backup_object_store.is_none() {
+        return Err(ApiError::bad_request(
+            "backup_policy_prune_object_store_required",
+        ));
+    }
+    let preview_outputs = collect_backup_policy_prune_outputs(&state, &request, false).await?;
+    let preview_hash = backup_policy_prune_preview_hash(
+        request.schedule_id,
+        request.metadata_only,
+        &preview_outputs,
+    )?;
+    if request.dry_run {
+        return Ok(Json(BackupPolicyPruneResponse {
+            dry_run: true,
+            metadata_only_requested: request.metadata_only,
+            preview_hash,
+            policies: preview_outputs,
+        }));
+    }
+    if request
+        .preview_hash
+        .as_deref()
+        .is_some_and(|submitted| submitted.trim() != preview_hash)
+    {
+        return Err(ApiError::conflict(
+            "backup_policy_prune_preview_hash_mismatch",
+        ));
+    }
+    let outputs = collect_backup_policy_prune_outputs(&state, &request, true).await?;
+    state
+        .repo
+        .record_backup_policy_prune_audit(
+            &operator,
+            request.dry_run,
+            request.metadata_only,
+            &outputs,
+        )
+        .await?;
+    Ok(Json(BackupPolicyPruneResponse {
+        dry_run: false,
+        metadata_only_requested: request.metadata_only,
+        preview_hash,
+        policies: outputs,
+    }))
+}
+
+async fn collect_backup_policy_prune_outputs(
+    state: &AppState,
+    request: &BackupPolicyPruneRequest,
+    execute: bool,
+) -> Result<Vec<crate::model::BackupPolicyPrunePolicyView>, ApiError> {
+    let metadata_only = request.metadata_only.unwrap_or(false);
+    if execute && !metadata_only && state.backup_object_store.is_none() {
         return Err(ApiError::bad_request(
             "backup_policy_prune_object_store_required",
         ));
@@ -188,7 +252,7 @@ pub(crate) async fn prune_backup_policies(
             .await?;
         let matched_rows = candidates.len() as i64;
         let mut pruned_rows = 0_i64;
-        let mut object_keys = if request.dry_run || metadata_only {
+        let mut object_keys = if !execute || metadata_only {
             candidates
                 .iter()
                 .map(|candidate| candidate.object_key.clone())
@@ -198,7 +262,7 @@ pub(crate) async fn prune_backup_policies(
         };
         let mut object_delete_attempted = false;
         let mut object_delete_errors = Vec::new();
-        if !request.dry_run {
+        if execute {
             if metadata_only {
                 pruned_rows = state
                     .repo
@@ -229,7 +293,7 @@ pub(crate) async fn prune_backup_policies(
                 }
             }
         }
-        let status = if request.dry_run {
+        let status = if !execute {
             "dry_run"
         } else if !object_delete_errors.is_empty() {
             "partial_error"
@@ -251,22 +315,33 @@ pub(crate) async fn prune_backup_policies(
         );
         outputs.push(output);
     }
-    if !request.dry_run {
-        state
-            .repo
-            .record_backup_policy_prune_audit(
-                &operator,
-                request.dry_run,
-                request.metadata_only,
-                &outputs,
-            )
-            .await?;
-    }
-    Ok(Json(BackupPolicyPruneResponse {
-        dry_run: request.dry_run,
-        metadata_only_requested: request.metadata_only,
-        policies: outputs,
+    Ok(outputs)
+}
+
+fn backup_policy_prune_preview_hash(
+    schedule_id: Option<uuid::Uuid>,
+    metadata_only: Option<bool>,
+    outputs: &[crate::model::BackupPolicyPrunePolicyView],
+) -> Result<String, ApiError> {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "schedule_id": schedule_id,
+        "metadata_only_requested": metadata_only,
+        "policies": outputs.iter().map(|policy| {
+            serde_json::json!({
+                "schedule_id": policy.schedule_id,
+                "retention_days": policy.retention_days,
+                "keep_last": policy.keep_last,
+                "cutoff_unix": policy.cutoff_unix,
+                "matched_rows": policy.matched_rows,
+                "object_keys": policy.object_keys,
+                "metadata_only": policy.metadata_only,
+                "status": policy.status,
+            })
+        }).collect::<Vec<_>>(),
     }))
+    .map_err(|error| ApiError::from(anyhow!("backup_policy_prune_preview_hash_failed: {error}")))?;
+    Ok(payload_hash(&payload))
 }
 
 pub(crate) async fn create_backup_request(

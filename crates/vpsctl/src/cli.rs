@@ -755,6 +755,8 @@ pub(crate) enum Command {
         dry_run: bool,
         #[arg(long)]
         metadata_only: Option<bool>,
+        #[arg(long)]
+        preview_hash: Option<String>,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -842,6 +844,8 @@ pub(crate) enum Command {
         dry_run: bool,
         #[arg(long)]
         metadata_only: Option<bool>,
+        #[arg(long)]
+        preview_hash: Option<String>,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -958,6 +962,12 @@ pub(crate) enum Command {
         restore_plan_id: String,
         #[arg(long)]
         note: Option<String>,
+        #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
+        password_env: String,
+        #[arg(long)]
+        super_salt_hex: Option<String>,
+        #[arg(long, default_value_t = 300)]
+        privilege_ttl_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },

@@ -108,6 +108,7 @@ pub(crate) struct HistoryRetentionPruneRequest {
     #[serde(default)]
     pub(crate) dry_run: bool,
     pub(crate) metadata_only: Option<bool>,
+    pub(crate) preview_hash: Option<String>,
     #[serde(default)]
     pub(crate) confirmed: bool,
 }
@@ -116,6 +117,7 @@ pub(crate) struct HistoryRetentionPruneRequest {
 pub(crate) struct HistoryRetentionPruneResponse {
     pub(crate) dry_run: bool,
     pub(crate) metadata_only_requested: Option<bool>,
+    pub(crate) preview_hash: String,
     pub(crate) domains: Vec<HistoryRetentionPruneDomainView>,
 }
 

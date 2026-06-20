@@ -46,3 +46,11 @@ pub(crate) struct CreateFleetAlertPolicyRequest {
     pub(crate) notes: Option<String>,
     pub(crate) confirmed: bool,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeleteFleetAlertPolicyRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) reviewed_name: String,
+}

@@ -456,7 +456,13 @@ pub(crate) fn tags(api_url: &str, token: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn tag_create(api_url: &str, token: Option<&str>, name: String) -> Result<()> {
+pub(crate) fn tag_create(
+    api_url: &str,
+    token: Option<&str>,
+    name: String,
+    confirmed: bool,
+) -> Result<()> {
+    anyhow::ensure!(confirmed, "tag-create requires --confirmed");
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
     let privilege_assertion = build_privilege_for_db(
@@ -465,7 +471,7 @@ pub(crate) fn tag_create(api_url: &str, token: Option<&str>, name: String) -> Re
             target: &name,
             selector_expression: None,
             resolved_targets: &[],
-            confirmed: true,
+            confirmed,
             payload_hash: None,
         },
         &password,
@@ -480,7 +486,7 @@ pub(crate) fn tag_create(api_url: &str, token: Option<&str>, name: String) -> Re
             token,
             &serde_json::json!({
                 "name": name,
-                "confirmed": true,
+                "confirmed": confirmed,
                 "privilege_assertion": privilege_assertion,
             }),
         )?
@@ -493,7 +499,9 @@ pub(crate) fn agent_tag(
     token: Option<&str>,
     client_id: String,
     tag: String,
+    confirmed: bool,
 ) -> Result<()> {
+    anyhow::ensure!(confirmed, "agent-tag requires --confirmed");
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
     let targets = vec![client_id.clone()];
@@ -503,7 +511,7 @@ pub(crate) fn agent_tag(
             target: &tag,
             selector_expression: None,
             resolved_targets: &targets,
-            confirmed: true,
+            confirmed,
             payload_hash: None,
         },
         &password,
@@ -518,7 +526,7 @@ pub(crate) fn agent_tag(
             token,
             &serde_json::json!({
                 "tag": tag,
-                "confirmed": true,
+                "confirmed": confirmed,
                 "privilege_assertion": privilege_assertion,
             }),
         )?

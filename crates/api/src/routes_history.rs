@@ -5,6 +5,7 @@ use axum::{
     Json,
 };
 use serde_json::{json, Map, Value};
+use vpsman_common::payload_hash;
 
 use crate::{
     error::ApiError,
@@ -37,6 +38,11 @@ pub(crate) async fn upsert_history_retention_policy(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "history_retention_policy_confirmation_required",
+        ));
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(
@@ -61,6 +67,79 @@ pub(crate) async fn prune_history_retention(
             "history_retention_prune_requires_confirmation",
         ));
     }
+    if !request.dry_run
+        && request
+            .preview_hash
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "history_retention_prune_preview_hash_required",
+        ));
+    }
+    let preview_outputs = collect_history_retention_prune_outputs(&state, &request, false).await?;
+    let preview_hash = history_retention_prune_preview_hash(
+        request.domain.as_deref(),
+        request.metadata_only,
+        &preview_outputs,
+    )?;
+    if request.dry_run {
+        return Ok(Json(HistoryRetentionPruneResponse {
+            dry_run: true,
+            metadata_only_requested: request.metadata_only,
+            preview_hash,
+            domains: preview_outputs,
+        }));
+    }
+    if request
+        .preview_hash
+        .as_deref()
+        .is_some_and(|submitted| submitted.trim() != preview_hash)
+    {
+        return Err(ApiError::conflict(
+            "history_retention_prune_preview_hash_mismatch",
+        ));
+    }
+    let outputs = collect_history_retention_prune_outputs(&state, &request, true).await?;
+    let audit_domains = outputs
+        .iter()
+        .map(|domain| {
+            json!({
+                "domain": domain.domain,
+                "matched_rows": domain.matched_rows,
+                "pruned_rows": domain.pruned_rows,
+                "metadata_only": domain.metadata_only,
+                "object_delete_attempted": domain.object_delete_attempted,
+                "object_delete_errors": &domain.object_delete_errors,
+                "status": &domain.status,
+                "preview_hash": preview_hash,
+            })
+        })
+        .collect::<Vec<_>>();
+    state
+        .repo
+        .record_history_retention_prune_audit(
+            &operator,
+            request.dry_run,
+            request.metadata_only,
+            &audit_domains,
+        )
+        .await?;
+    Ok(Json(HistoryRetentionPruneResponse {
+        dry_run: false,
+        metadata_only_requested: request.metadata_only,
+        preview_hash,
+        domains: outputs,
+    }))
+}
+
+async fn collect_history_retention_prune_outputs(
+    state: &AppState,
+    request: &HistoryRetentionPruneRequest,
+    execute: bool,
+) -> Result<Vec<HistoryRetentionPruneDomainView>, ApiError> {
     let requested_domain = request
         .domain
         .as_deref()
@@ -76,7 +155,7 @@ pub(crate) async fn prune_history_retention(
         let cutoff_unix = unix_now().saturating_sub(policy.retention_days.max(1) as u64 * 86_400);
         let metadata_only = request.metadata_only.unwrap_or(policy.metadata_only);
         if domain.object_backed()
-            && !request.dry_run
+            && execute
             && !metadata_only
             && state.backup_object_store.is_none()
         {
@@ -98,7 +177,7 @@ pub(crate) async fn prune_history_retention(
                 .await?;
             let matched_rows = candidates.len() as i64;
             let mut pruned_rows = 0_i64;
-            let mut object_keys = if request.dry_run || metadata_only {
+            let mut object_keys = if !execute || metadata_only {
                 candidates
                     .iter()
                     .filter_map(|candidate| candidate.object_key().map(str::to_string))
@@ -106,7 +185,7 @@ pub(crate) async fn prune_history_retention(
             } else {
                 Vec::new()
             };
-            if !request.dry_run {
+            if execute {
                 if metadata_only {
                     pruned_rows = state
                         .repo
@@ -146,12 +225,12 @@ pub(crate) async fn prune_history_retention(
         } else {
             state
                 .repo
-                .prune_history_domain(&plan, cutoff_unix, request.dry_run)
+                .prune_history_domain(&plan, cutoff_unix, !execute)
                 .await?
         };
         let status = if !policy.enabled {
             "disabled"
-        } else if request.dry_run {
+        } else if !execute {
             "dry_run"
         } else if !object_delete_errors.is_empty() {
             "partial_error"
@@ -177,36 +256,37 @@ pub(crate) async fn prune_history_retention(
     if outputs.is_empty() {
         return Err(ApiError::bad_request("history_retention_domain_not_found"));
     }
-    if !request.dry_run {
-        let audit_domains = outputs
-            .iter()
-            .map(|domain| {
-                json!({
-                    "domain": domain.domain,
-                    "matched_rows": domain.matched_rows,
-                    "pruned_rows": domain.pruned_rows,
-                    "metadata_only": domain.metadata_only,
-                    "object_delete_attempted": domain.object_delete_attempted,
-                    "object_delete_errors": &domain.object_delete_errors,
-                    "status": &domain.status,
-                })
+    Ok(outputs)
+}
+
+fn history_retention_prune_preview_hash(
+    requested_domain: Option<&str>,
+    metadata_only: Option<bool>,
+    outputs: &[HistoryRetentionPruneDomainView],
+) -> Result<String, ApiError> {
+    let payload = serde_json::to_vec(&json!({
+        "version": 1,
+        "requested_domain": requested_domain,
+        "metadata_only_requested": metadata_only,
+        "domains": outputs.iter().map(|domain| {
+            json!({
+                "domain": domain.domain,
+                "enabled": domain.enabled,
+                "retention_days": domain.retention_days,
+                "cutoff_unix": domain.cutoff_unix,
+                "matched_rows": domain.matched_rows,
+                "object_keys": domain.object_keys,
+                "metadata_only": domain.metadata_only,
+                "status": domain.status,
             })
-            .collect::<Vec<_>>();
-        state
-            .repo
-            .record_history_retention_prune_audit(
-                &operator,
-                request.dry_run,
-                request.metadata_only,
-                &audit_domains,
-            )
-            .await?;
-    }
-    Ok(Json(HistoryRetentionPruneResponse {
-        dry_run: request.dry_run,
-        metadata_only_requested: request.metadata_only,
-        domains: outputs,
+        }).collect::<Vec<_>>(),
     }))
+    .map_err(|error| {
+        ApiError::from(anyhow::anyhow!(
+            "history_retention_preview_hash_failed: {error}"
+        ))
+    })?;
+    Ok(payload_hash(&payload))
 }
 
 pub(crate) async fn export_history(

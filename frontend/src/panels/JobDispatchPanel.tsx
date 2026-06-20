@@ -57,6 +57,7 @@ import type {
   CommandTemplateRecord,
   CreateJobRequest,
   CreateJobResponse,
+  DeleteCommandTemplateRequest,
   FileExistingPolicy,
   JobHistoryRecord,
   JobOutputRecord,
@@ -237,7 +238,10 @@ export function JobDispatchPanel({
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onResolveTargets: (selection: JobTargetSelection) => Promise<BulkResolveResponse>;
-  onDeleteCommandTemplate: (templateId: string) => Promise<CommandTemplateRecord>;
+  onDeleteCommandTemplate: (
+    templateId: string,
+    request: DeleteCommandTemplateRequest,
+  ) => Promise<CommandTemplateRecord>;
   onUpsertCommandTemplate: (request: UpsertCommandTemplateRequest) => Promise<CommandTemplateRecord>;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
@@ -283,7 +287,13 @@ export function JobDispatchPanel({
   const [templateScopeKind, setTemplateScopeKind] = useState<"global" | "provider" | "tag" | "client">("global");
   const [templateScopeValue, setTemplateScopeValue] = useState("");
   const [templatePending, setTemplatePending] = useState(false);
-  const [templateConfirmation, setTemplateConfirmation] = useState<"save-copy" | "delete" | null>(null);
+  const [templateConfirmation, setTemplateConfirmation] = useState<"save" | "save-copy" | "delete" | null>(null);
+  const [templateSaveSnapshot, setTemplateSaveSnapshot] = useState<{
+    request: UpsertCommandTemplateRequest;
+    title: string;
+  } | null>(null);
+  const [deleteTemplateSnapshot, setDeleteTemplateSnapshot] =
+    useState<CommandTemplateRecord | null>(null);
   const [hotConfigToml, setHotConfigToml] = useState("");
   const [updateArtifactUrl, setUpdateArtifactUrl] = useState("");
   const [updateSha256Hex, setUpdateSha256Hex] = useState("");
@@ -397,11 +407,25 @@ export function JobDispatchPanel({
     writeLocalString(JOB_SELECTOR_STORAGE_KEY, selectorExpression);
   }, [selectorExpression]);
 
+  useEffect(() => {
+    setTemplateSaveSnapshot(null);
+    setDeleteTemplateSnapshot(null);
+    setTemplateConfirmation((current) =>
+      current === "save" || current === "save-copy" || current === "delete"
+        ? null
+        : current,
+    );
+  }, [selectedTemplateId, templateName, templateScopeKind, templateScopeValue]);
+
   useLayoutEffect(() => {
     invalidateReviewGeneration();
     setDispatchPromptOpen(false);
     setDispatchConfirmation(null);
     setReviewStatus(null);
+    setTemplateSaveSnapshot(null);
+    setTemplateConfirmation((current) =>
+      current === "save" || current === "save-copy" ? null : current,
+    );
   }, [
     backupIncludeConfig,
     backupPathsText,
@@ -941,93 +965,116 @@ export function JobDispatchPanel({
     }
   }
 
-  async function saveCommandTemplate(confirmedBuiltinCopy = false) {
-    if (selectedTemplate?.built_in && !confirmedBuiltinCopy) {
-      setTemplateConfirmation("save-copy");
+  function commandTemplateRequest(): UpsertCommandTemplateRequest {
+    const name = templateName.trim();
+    if (!name) {
+      throw new Error("Template name is required");
+    }
+    const scopeValue = templateScopeKind === "global" ? null : templateScopeValue.trim();
+    if (templateScopeKind !== "global" && !scopeValue) {
+      throw new Error("Template scope value is required");
+    }
+    const operation = buildOperation(
+      mode,
+      commandText,
+      shellPty,
+      shellScript,
+      terminalAction,
+      terminalSessionId,
+      terminalArgv,
+      terminalCwd,
+      terminalUser,
+      terminalUserPolicy,
+      terminalCols,
+      terminalRows,
+      terminalReplayFromSeq,
+      terminalIdleTimeoutSecs,
+      terminalFlowWindowBytes,
+      terminalInputSeq,
+      terminalInputText,
+      terminalCloseReason,
+      filePath,
+      fileFollowSymlinks,
+      processLimit,
+      supervisorAction,
+      supervisorName,
+      supervisorArgv,
+      supervisorCwd,
+      supervisorEnv,
+      supervisorLogBytes,
+      hotConfigToml,
+      updateArtifactUrl,
+      updateSha256Hex,
+      updateCheckVersionUrl,
+      updateCheckActivate,
+      updateCheckRestartAgent,
+      updateActivationSha256Hex,
+      updateRestartAgent,
+      updateRollbackSha256Hex,
+      backupPathsText,
+      backupIncludeConfig,
+      filePushPath,
+      filePushMode,
+      null,
+    );
+    return {
+      name,
+      scope_kind: templateScopeKind,
+      scope_value: scopeValue,
+      display_group: displayGroupForOperation(operation),
+      operation,
+      defaults: {
+        confirmed: operationNeedsConfirmation,
+        destructive: operationNeedsConfirmation,
+        force_unprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
+        timeout_secs: clampInteger(timeoutSecs, 1, 3600),
+      },
+      confirmed: true,
+    };
+  }
+
+  async function reviewCommandTemplateSave() {
+    await runPanelAction(setTemplatePending, setActionError, async () => {
+      const request = commandTemplateRequest();
+      setTemplateSaveSnapshot({
+        request,
+        title: selectedTemplate?.built_in
+          ? "Save built-in as user template"
+          : "Save command template",
+      });
+      setTemplateConfirmation(selectedTemplate?.built_in ? "save-copy" : "save");
+    });
+  }
+
+  async function saveCommandTemplate() {
+    const snapshot = templateSaveSnapshot;
+    if (!snapshot) {
+      setActionError("Review template before saving");
       return;
     }
     await runPanelAction(setTemplatePending, setActionError, async () => {
-      const name = templateName.trim();
-      if (!name) {
-        throw new Error("Template name is required");
-      }
-      const scopeValue = templateScopeKind === "global" ? null : templateScopeValue.trim();
-      if (templateScopeKind !== "global" && !scopeValue) {
-        throw new Error("Template scope value is required");
-      }
-      const operation = buildOperation(
-        mode,
-        commandText,
-        shellPty,
-        shellScript,
-        terminalAction,
-        terminalSessionId,
-        terminalArgv,
-        terminalCwd,
-        terminalUser,
-        terminalUserPolicy,
-        terminalCols,
-        terminalRows,
-        terminalReplayFromSeq,
-        terminalIdleTimeoutSecs,
-        terminalFlowWindowBytes,
-        terminalInputSeq,
-        terminalInputText,
-        terminalCloseReason,
-        filePath,
-        fileFollowSymlinks,
-        processLimit,
-        supervisorAction,
-        supervisorName,
-        supervisorArgv,
-        supervisorCwd,
-        supervisorEnv,
-        supervisorLogBytes,
-        hotConfigToml,
-        updateArtifactUrl,
-        updateSha256Hex,
-        updateCheckVersionUrl,
-        updateCheckActivate,
-        updateCheckRestartAgent,
-        updateActivationSha256Hex,
-        updateRestartAgent,
-        updateRollbackSha256Hex,
-        backupPathsText,
-        backupIncludeConfig,
-        filePushPath,
-        filePushMode,
-        null,
-      );
-      const saved = await onUpsertCommandTemplate({
-        name,
-        scope_kind: templateScopeKind,
-        scope_value: scopeValue,
-        display_group: displayGroupForOperation(operation),
-        operation,
-        defaults: {
-          confirmed: operationNeedsConfirmation,
-          destructive: operationNeedsConfirmation,
-          force_unprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
-          timeout_secs: clampInteger(timeoutSecs, 1, 3600),
-        },
-        confirmed: true,
-      });
+      const saved = await onUpsertCommandTemplate(snapshot.request);
       setSelectedTemplateId(saved.id);
       setTemplateName(saved.name);
       setTemplateScopeKind(saved.scope_kind as "global" | "provider" | "tag" | "client");
       setTemplateScopeValue(saved.scope_value ?? "");
       setTemplateConfirmation(null);
+      setTemplateSaveSnapshot(null);
     });
   }
 
   async function deleteSelectedCommandTemplate() {
-    if (!selectedTemplate || selectedTemplate.built_in) {
+    if (!deleteTemplateSnapshot || deleteTemplateSnapshot.built_in) {
       return;
     }
     await runPanelAction(setTemplatePending, setActionError, async () => {
-      await onDeleteCommandTemplate(selectedTemplate.id);
+      await onDeleteCommandTemplate(deleteTemplateSnapshot.id, {
+        confirmed: true,
+        reviewed_name: deleteTemplateSnapshot.name,
+      });
       setSelectedTemplateId("");
       setTemplateConfirmation(null);
+      setDeleteTemplateSnapshot(null);
     });
   }
 
@@ -1243,15 +1290,21 @@ export function JobDispatchPanel({
             <button
               className="secondaryAction"
               disabled={templatePending}
-              onClick={() => void saveCommandTemplate()}
+              onClick={() => void reviewCommandTemplateSave()}
               type="button"
             >
-              {selectedTemplate?.built_in ? "Save copy" : "Save"}
+              {selectedTemplate?.built_in ? "Review copy" : "Review save"}
             </button>
             <button
               className="secondaryAction dangerAction"
               disabled={templatePending || !selectedTemplate || selectedTemplate.built_in}
-              onClick={() => setTemplateConfirmation("delete")}
+              onClick={() => {
+                if (!selectedTemplate || selectedTemplate.built_in) {
+                  return;
+                }
+                setDeleteTemplateSnapshot(selectedTemplate);
+                setTemplateConfirmation("delete");
+              }}
               type="button"
             >
               Delete
@@ -1259,42 +1312,60 @@ export function JobDispatchPanel({
           </div>
         </div>
         <ConfirmationPrompt
-          confirmLabel="Save copy"
-          detail="Creates a user-defined command template. The built-in template remains unchanged."
+          confirmLabel={templateSaveSnapshot?.title ?? "Save template"}
+          detail={
+            templateConfirmation === "save-copy"
+              ? "Creates a user-defined command template. The built-in template remains unchanged."
+              : "Saves the reviewed command template request exactly as shown."
+          }
           items={[
-            { label: "Built-in", value: selectedTemplate?.name ?? "-" },
-            { label: "Copy name", value: templateName.trim() || "-" },
+            { label: "Template", value: templateSaveSnapshot?.request.name ?? "-" },
             {
               label: "Scope",
-              value:
-                templateScopeKind === "global"
+              value: templateSaveSnapshot
+                ? templateSaveSnapshot.request.scope_kind === "global"
                   ? "global"
-                  : `${templateScopeKind}:${templateScopeValue.trim() || "-"}`,
+                  : `${templateSaveSnapshot.request.scope_kind}:${templateSaveSnapshot.request.scope_value ?? "-"}`
+                : "-",
+            },
+            {
+              label: "Operation",
+              value: templateSaveSnapshot?.request.operation.type ?? "-",
             },
           ]}
-          onCancel={() => setTemplateConfirmation(null)}
-          onConfirm={() => void saveCommandTemplate(true)}
-          open={templateConfirmation === "save-copy"}
+          onCancel={() => {
+            setTemplateConfirmation(null);
+            setTemplateSaveSnapshot(null);
+          }}
+          onConfirm={() => void saveCommandTemplate()}
+          open={
+            (templateConfirmation === "save-copy" ||
+              templateConfirmation === "save") &&
+            templateSaveSnapshot !== null
+          }
           pending={templatePending}
-          title="Save built-in as user template"
+          title="Confirm command template save"
         />
         <ConfirmationPrompt
           confirmLabel="Delete template"
           detail="Deletes this user-defined command template. Built-in templates cannot be deleted."
           items={[
-            { label: "Template", value: selectedTemplate?.name ?? "-" },
+            { label: "Template", value: deleteTemplateSnapshot?.name ?? "-" },
             {
               label: "Scope",
-              value: selectedTemplate
-                ? selectedTemplate.scope_value
-                  ? `${selectedTemplate.scope_kind}:${selectedTemplate.scope_value}`
-                  : selectedTemplate.scope_kind
+              value: deleteTemplateSnapshot
+                ? deleteTemplateSnapshot.scope_value
+                  ? `${deleteTemplateSnapshot.scope_kind}:${deleteTemplateSnapshot.scope_value}`
+                  : deleteTemplateSnapshot.scope_kind
                 : "-",
             },
           ]}
-          onCancel={() => setTemplateConfirmation(null)}
+          onCancel={() => {
+            setTemplateConfirmation(null);
+            setDeleteTemplateSnapshot(null);
+          }}
           onConfirm={() => void deleteSelectedCommandTemplate()}
-          open={templateConfirmation === "delete"}
+          open={templateConfirmation === "delete" && deleteTemplateSnapshot !== null}
           pending={templatePending}
           title="Confirm template delete"
           tone="danger"

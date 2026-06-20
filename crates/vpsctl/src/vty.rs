@@ -85,7 +85,7 @@ Access:
   client-key-revocations | key-lifecycle-report
 
 Fleet and integrations:
-  tags | tag-create | agent-tag
+  tags | tag-create <name> --confirmed | agent-tag <client_id> <tag> --confirmed
   fleet-alerts | fleet-alert-export | fleet-alert-states | fleet-alert-state-update
   fleet-alert-policies | fleet-alert-policy-upsert
   fleet-alert-notification-channels | fleet-alert-notification-channel-upsert
@@ -916,6 +916,10 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                 );
             }
             command if command.starts_with("migration-link ") => {
+                if !privilege_context.enabled {
+                    println!("enter privileged mode first with: enable");
+                    continue;
+                }
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 let request = match parse_vty_migration_link(&parts[1..]) {
                     Ok(request) => request,
@@ -929,7 +933,12 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                 };
                 println!(
                     "{}",
-                    submit_vty_migration_link(api_url, token.as_deref(), request)?
+                    submit_vty_migration_link(
+                        api_url,
+                        token.as_deref(),
+                        &privilege_context,
+                        request,
+                    )?
                 );
             }
             command if command.starts_with("migration-run ") => {

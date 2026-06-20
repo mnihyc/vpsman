@@ -51,14 +51,14 @@ of the same root cause.
 | AUD-035 | Critical | Fixed | Frontend/Config | Single-VPS config apply confirmation uses mutable TOML payload after review |
 | AUD-036 | Medium/High | Confirmed | Frontend/Webhooks | Webhook queue dispatch confirmation can send a different event than reviewed |
 | AUD-037 | High | Confirmed | Frontend/Audit Retention | Audit history prune confirmation uses mutable prune domain and mode after review |
-| AUD-038 | Medium/High | Confirmed | Frontend/Webhook Retention | Webhook delivery cleanup deletes using live filters instead of the reviewed preview |
-| AUD-039 | High | Confirmed | Frontend/Topology/Automation | Monitoring automation bulk action submits privileged config patches without review |
-| AUD-040 | High | Confirmed | Frontend/Agent Updates | Update release registry records artifact hashes without a review confirmation |
-| AUD-041 | Medium/High | Confirmed | Frontend/Fleet Tags | Inline Fleet tag mutations bypass preview confirmation and schedule impact review |
-| AUD-042 | High | Confirmed | Frontend/Alerts/Webhooks | Alert and webhook configuration saves bypass required operator review |
-| AUD-043 | High | Confirmed | Frontend/Alerts | Fleet alert triage actions bypass required operator review |
-| AUD-044 | Medium/High | Confirmed | Frontend/File Transfers | Source and handoff artifact persistence bypasses operator review |
-| AUD-045 | Medium/High | Confirmed | Frontend/Command Templates | Command template saves persist reusable operation payloads without review |
+| AUD-038 | Medium/High | Fixed | Frontend/Webhook Retention | Webhook delivery cleanup deletes using live filters instead of the reviewed preview |
+| AUD-039 | High | Fixed | Frontend/Topology/Automation | Monitoring automation bulk action submits privileged config patches without review |
+| AUD-040 | High | Fixed | Frontend/Agent Updates | Update release registry records artifact hashes without a review confirmation |
+| AUD-041 | Medium/High | Fixed | Frontend/Fleet Tags | Inline Fleet tag mutations bypass preview confirmation and schedule impact review |
+| AUD-042 | High | Fixed | Frontend/Alerts/Webhooks | Alert and webhook configuration saves bypass required operator review |
+| AUD-043 | High | Fixed | Frontend/Alerts | Fleet alert triage actions bypass required operator review |
+| AUD-044 | Medium/High | Fixed | Frontend/File Transfers | Source and handoff artifact persistence bypasses operator review |
+| AUD-045 | Medium/High | Fixed | Frontend/Command Templates | Command template saves persist reusable operation payloads without review |
 | AUD-046 | High | Fixed | API/CLI/Auth | Operator access-management mutations bypass or auto-confirm the confirmation contract |
 | AUD-047 | Medium/High | Confirmed | API/Backups/Auth | Migration-link listings expose restore metadata with fleet-read scope |
 | AUD-048 | High | Confirmed | API/History/Auth | History retention prune can delete job and backup payload history with inventory-write only |
@@ -66,9 +66,9 @@ of the same root cause.
 | AUD-050 | Critical | Fixed | API/Worker/Artifact Cleanup | Artifact cleanup jobs re-evaluate expressions instead of deleting the reviewed artifact set |
 | AUD-051 | Medium/High | Confirmed | API/History/Artifact Cleanup | History retention object prune drops metadata before object deletion succeeds |
 | AUD-052 | High | Confirmed | API/Data Sources/Auth | Data-source preset and assignment mutations use inventory-write instead of config-write |
-| AUD-053 | High | Confirmed | API/Frontend/Data Sources | Data-source preset create path silently updates existing presets without review |
-| AUD-054 | Medium/High | Confirmed | API/Config/Hot Config | Hot-config rule-template mutations lack confirmation and audit records |
-| AUD-055 | Medium/High | Confirmed | Frontend/File Browser | File save confirmation can mark unsent editor changes as saved |
+| AUD-053 | High | Fixed | API/Frontend/Data Sources | Data-source preset create path silently updates existing presets without review |
+| AUD-054 | Medium/High | Fixed | API/Config/Hot Config | Hot-config rule-template mutations lack confirmation and audit records |
+| AUD-055 | Medium/High | Fixed | Frontend/File Browser | File save confirmation can mark unsent editor changes as saved |
 | AUD-056 | Medium/High | Confirmed | API/Worker/Backups/Retention | Backup policy retention prune drops backup metadata before object deletion succeeds |
 | AUD-057 | High | Fixed | API/Auth/User Management | User management can remove the last active admin |
 | AUD-058 | Medium/High | Confirmed | API/Integrations/Auth | Integration mutations use inventory-write instead of an integrations write boundary |
@@ -76,9 +76,9 @@ of the same root cause.
 | AUD-060 | Medium/High | Confirmed | API/Agent Updates/Auth | Update-release registry mutations use jobs-write instead of config-write |
 | AUD-061 | High | Fixed | Frontend/System Users | User-management confirmations remain armed after editor or selection changes |
 | AUD-062 | High | Confirmed | API/Object Storage/Artifacts | Artifact creation can commit metadata or bytes without cleanup-registry consistency |
-| AUD-063 | High | Confirmed | Frontend/Schedules | Schedule confirmations remain armed after form, defer, or table context changes |
+| AUD-063 | High | Fixed | Frontend/Schedules | Schedule confirmations remain armed after form, defer, or table context changes |
 | AUD-064 | Medium/High | Confirmed | Frontend/Agent Updates | Release-registry manual update shortcut cannot provide the artifact URL it requires |
-| AUD-065 | High | Confirmed | Frontend/Integrations | Delivery queue confirmations are not bound to previewed rows |
+| AUD-065 | High | Fixed | Frontend/Integrations | Delivery queue confirmations are not bound to previewed rows |
 | AUD-066 | High | Fixed | API/Deploy/Security | API binary and suite config default to all-interface binding |
 | AUD-067 | High | Fixed | Deploy/Nginx/API Boundary | Public frontend proxy exposes private API and WebSocket routes |
 | AUD-068 | High | Fixed | API/CLI/Schedules | Schedule mutations lack an explicit backend confirmation contract |
@@ -111,7 +111,7 @@ of the same root cause.
 | AUD-095 | High | Confirmed | API/Suite Config/Audit | Suite config audit redaction leaves database URLs visible |
 | AUD-096 | Medium/High | Confirmed | API/Suite Config/Audit | Suite config can be applied without a durable audit record |
 | AUD-097 | Medium/High | Confirmed | API/Suite Config/Audit | Suite config changed-key detection runs after redaction |
-| AUD-098 | High | Confirmed | Frontend/Suite Config | Suite config save review can use a stale validation result for a newer draft |
+| AUD-098 | High | Fixed | Frontend/Suite Config | Suite config save review can use a stale validation result for a newer draft |
 | AUD-099 | Medium/High | Confirmed | API/Suite Config/Durability | Suite config file replacement is rename-only without fsync durability |
 | AUD-100 | Medium/High | Confirmed | API/Auth/Audit | Locked login attempts can still flood durable audit logs |
 | AUD-101 | Medium/High | Confirmed | Deploy/API/Suite Config | Official compose mounts the dashboard-editable suite config read-only |
@@ -123,13 +123,13 @@ of the same root cause.
 | AUD-107 | High | Confirmed | API/Schedules/Client Lifecycle | Stale fixed targets can block schedule management and apply-now |
 | AUD-108 | High | Fixed | API/Jobs/State Machine | Terminal targets can leave the parent job active after a crash or side-effect error |
 | AUD-109 | Medium/High | Fixed | Gateway/API/Job Outputs | Gateway spool replay treats sequence existence as full output acknowledgement |
-| AUD-110 | High | Confirmed | Frontend/CLI/Backups/Migrations | Bundled migration-run can persist a migration link before restore dispatch succeeds |
+| AUD-110 | High | Fixed | Frontend/CLI/Backups/Migrations | Bundled migration-run can persist a migration link before restore dispatch succeeds |
 | AUD-111 | Medium/High | Confirmed | API/CLI/Backups/Restore Plans | Restore plans can record config-restore intent that later restore-run rejects |
 | AUD-112 | High | Fixed | API/Jobs/Client Lifecycle | Deleting or revoking a client can leave already-created queued targets unclaimable forever |
 | AUD-113 | High | Fixed | API/Gateway/Key Lifecycle | Replacing a client public key does not invalidate the old live gateway session |
 | AUD-114 | High | Fixed | API/Gateway/Client Lifecycle | Delete and key-revoke mark sessions ended without disconnecting the live gateway session |
 | AUD-115 | Medium/High | Confirmed | API/WebSocket/Auth | Fleet WebSocket streams continue after token expiry, session revocation, or scope removal |
-| AUD-116 | High | Confirmed | API/Integrations/Confirmation | Alert and webhook configuration delete routes lack backend confirmation |
+| AUD-116 | High | Fixed | API/Integrations/Confirmation | Alert and webhook configuration delete routes lack backend confirmation |
 | AUD-117 | Medium/High | Confirmed | Worker/Alerts/Reliability | Alert notification webhooks are not retried automatically after transient failures |
 | AUD-118 | High | Confirmed | API/Integrations/Delivery State | Manual delivery processors can send in-progress webhooks before failing the state update |
 | AUD-119 | High | Fixed | Agent/Updates/Lifecycle | Agent update activation can replace the binary before durable heartbeat evidence exists |
@@ -150,9 +150,9 @@ of the same root cause.
 | AUD-134 | High | Fixed | Agent/Restore/Safety | Restore staging pathnames can be precreated or swapped into symlinks |
 | AUD-135 | High | Fixed | Agent/File Browser/Safety | Text-write and copy staging pathnames can be swapped before chmod or commit |
 | AUD-136 | Medium/High | Fixed | Agent/File Browser/Safety | Directory creation can chmod a swapped symlink target after mkdir |
-| AUD-137 | Medium/High | Confirmed | API/Command Templates/Confirmation | Command-template delete route lacks backend confirmation |
-| AUD-138 | Medium/High | Confirmed | API/CLI/Data Sources/Confirmation | Data-source preset updates can bypass confirmation for one assigned VPS |
-| AUD-139 | Medium/High | Confirmed | CLI/VTY/Fleet Tags | CLI tag create and single-VPS assignment auto-confirm tag mutations |
+| AUD-137 | Medium/High | Fixed | API/Command Templates/Confirmation | Command-template delete route lacks backend confirmation |
+| AUD-138 | Medium/High | Fixed | API/CLI/Data Sources/Confirmation | Data-source preset updates can bypass confirmation for one assigned VPS |
+| AUD-139 | Medium/High | Fixed | CLI/VTY/Fleet Tags | CLI tag create and single-VPS assignment auto-confirm tag mutations |
 | AUD-140 | Medium/High | Fixed | Frontend/File Browser | Single-file browser confirmations remain armed after operation edits |
 | AUD-141 | High | Confirmed | Agent/Process Supervisor/Safety | Supervisor PID records can target reused host processes after agent restart |
 | AUD-142 | High | Confirmed | Agent/Process Supervisor/Security | Supervisor records and logs are written with default-readable permissions |
@@ -161,13 +161,13 @@ of the same root cause.
 | AUD-145 | High | Confirmed | API/Gateway/Key Lifecycle | Key rotation, revoke, and delete disconnect before DB invalidation, leaving a reconnect race |
 | AUD-146 | High | Confirmed | Deploy/Nginx/API Boundary | Publishing the dashboard frontend still publishes API and WebSocket routes |
 | AUD-147 | Medium/High | Confirmed | Deploy/Agent Install/Supply Chain | Custom agent binary URL installs without a required SHA-256 pin |
-| AUD-148 | High | Confirmed | API/Frontend/CLI/Backups/Retention | Backup policy prune confirms scope and mode but reselects live artifacts instead of the reviewed candidate set |
+| AUD-148 | High | Fixed | API/Frontend/CLI/Backups/Retention | Backup policy prune confirms scope and mode but reselects live artifacts instead of the reviewed candidate set |
 | AUD-149 | High | Confirmed | Deploy/Update/Rollback | Compose update and rollback swap release directories without forcing container recreation |
 | AUD-150 | High | Confirmed | Gateway/API/Telemetry/Lifecycle | Displaced gateway sessions can keep forwarding telemetry after replacement |
 | AUD-151 | High | Fixed | API/Frontend/CLI/Auth/Privilege | Operator management mutations lack request-bound privilege verification |
-| AUD-152 | High | Confirmed | Frontend/Backups/Migrations | Migration restore runs can use stale hidden restore options |
+| AUD-152 | High | Fixed | Frontend/Backups/Migrations | Migration restore runs can use stale hidden restore options |
 | AUD-153 | Medium/High | Confirmed | API/Telemetry/Retention | Per-interface network-rate telemetry has no retention path |
-| AUD-154 | High | Confirmed | API/Frontend/CLI/History Retention | History retention prune reselects live rows instead of deleting the reviewed dry-run set |
+| AUD-154 | High | Fixed | API/Frontend/CLI/History Retention | History retention prune reselects live rows instead of deleting the reviewed dry-run set |
 | AUD-155 | High | Confirmed | Worker/Artifact Cleanup/Observability | Failed artifact cleanup jobs can hide already-deleted artifacts |
 | AUD-156 | High | Confirmed | Agent/Process Supervisor/Command Semantics | Process status and log reads can restart supervised processes |
 | AUD-157 | Medium/High | Confirmed | API/Gateway/Client Lifecycle/Retention | Client and gateway lifecycle histories have no retention path |
@@ -180,7 +180,7 @@ of the same root cause.
 | AUD-164 | High | Confirmed | Agent/Process Supervisor/Timeouts | Process supervisor stop and restart can mutate host state after command timeout |
 | AUD-165 | High | Confirmed | Agent/Network Apply/Rollback | Managed network rollback rewrites files non-atomically and drops original modes |
 | AUD-166 | Medium/High | Confirmed | API/File Transfers/Reliability | Duplicate resumable download chunks can poison server-side handoff |
-| AUD-167 | Medium/High | Confirmed | API/Backups/Migrations/Privilege | Migration-link creation bypasses request-bound privilege verification |
+| AUD-167 | Medium/High | Fixed | API/Backups/Migrations/Privilege | Migration-link creation bypasses request-bound privilege verification |
 | AUD-168 | Medium/High | Confirmed | API/Backups/Resource Bounds | Chunked backup artifact commit rehydrates the whole artifact in API memory |
 | AUD-169 | Medium/High | Fixed | API/Backups/Restore Workflow | Agent backups can be valid above the API restore-preparation inline limit |
 | AUD-170 | High | Fixed | Frontend/API/Backups/Key Custody | Dashboard restore preparation sends the backup private key to the API |
@@ -200,7 +200,7 @@ of the same root cause.
 | AUD-184 | Critical | Fixed | Frontend/Jobs/Multi-File | Bulk file review can open stale confirmations after selector or operation edits |
 | AUD-185 | High | Confirmed | Agent/API/Terminal | Terminal input sequencing can drop out-of-order or conflicting input |
 | AUD-186 | Medium/High | Confirmed | Agent/Gateway/Terminal/Lifecycle | Terminal PTYs can survive disconnect or access revocation without reconciliation |
-| AUD-187 | Medium/High | Confirmed | API/Frontend/History Retention | History retention policy saves ignore the confirmation contract |
+| AUD-187 | Medium/High | Fixed | API/Frontend/History Retention | History retention policy saves ignore the confirmation contract |
 | AUD-188 | High | Fixed | Agent/File Browser/Safety | File rename and move can follow path races outside the reviewed source or destination |
 | AUD-189 | Medium/High | Confirmed | Deploy/Agent Install/Docs | Official agent install examples do not start the service they claim to start |
 | AUD-190 | Medium/High | Confirmed | Deploy/Compose/Database | Secure compose password edits leave API and worker using the wrong Postgres credentials |
@@ -1009,7 +1009,7 @@ of the same root cause.
 ### AUD-038: Webhook Delivery Cleanup Deletes Using Live Filters Instead Of The Reviewed Preview
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Webhook Retention
 - Context: Webhook delivery maintenance previews retained delivery rows by
   age/status/rule and then confirms deletion of the matched history rows.
@@ -1031,7 +1031,7 @@ of the same root cause.
 ### AUD-039: Monitoring Automation Bulk Action Submits Privileged Config Patches Without Review
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Topology/Automation
 - Context: The topology automation table can enable or disable latency
   monitoring and automatic OSPF update settings across selected VPSs by writing
@@ -1056,7 +1056,7 @@ of the same root cause.
 ### AUD-040: Update Release Registry Records Artifact Hashes Without A Review Confirmation
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Agent Updates
 - Context: The agent update registry records external artifact URLs and
   SHA-256 hashes. When registered-update policy is enforced, those hashes
@@ -1082,7 +1082,7 @@ of the same root cause.
 ### AUD-041: Inline Fleet Tag Mutations Bypass Preview Confirmation And Schedule Impact Review
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Fleet Tags
 - Context: Tags drive operator selectors, alert scopes, grouping, schedule
   target updates, and future bulk job targeting. The dedicated bulk tag panel
@@ -1108,7 +1108,7 @@ of the same root cause.
 ### AUD-042: Alert And Webhook Configuration Saves Bypass Required Operator Review
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Alerts/Webhooks
 - Context: Fleet alert policies, alert notification channels, and webhook
   rules control which events become alerts and which external endpoints receive
@@ -1139,7 +1139,7 @@ of the same root cause.
 ### AUD-043: Fleet Alert Triage Actions Bypass Required Operator Review
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Alerts
 - Context: The fleet alert table lets operators acknowledge, mute, escalate,
   and clear current production alerts, including critical alerts across
@@ -1163,7 +1163,7 @@ of the same root cause.
 ### AUD-044: Source And Handoff Artifact Persistence Bypasses Operator Review
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/File Transfers
 - Context: File-transfer source artifacts store operator-supplied bytes in the
   API artifact store for later remote uploads. File-transfer handoffs promote
@@ -1196,7 +1196,7 @@ of the same root cause.
 ### AUD-045: Command Template Saves Persist Reusable Operation Payloads Without Review
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Command Templates
 - Context: Command templates are reusable saved job definitions. They can carry
   command bodies, file operations, process supervisor operations, update
@@ -1464,7 +1464,7 @@ of the same root cause.
 ### AUD-053: Data-Source Preset Create Path Silently Updates Existing Presets Without Review
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/Data Sources
 - Context: Data-source presets can be assigned to VPSs and used to generate
   agent hot-config patches. Updating an assigned preset can change future
@@ -1498,7 +1498,7 @@ of the same root cause.
 ### AUD-054: Hot-Config Rule-Template Mutations Lack Confirmation And Audit Records
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Config/Hot Config
 - Context: Hot-config rule templates generate reusable TOML patches for agent
   runtime configuration, including telemetry, execution policy, network
@@ -1535,7 +1535,7 @@ of the same root cause.
 ### AUD-055: File Save Confirmation Can Mark Unsent Editor Changes As Saved
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/File Browser
 - Context: The single-VPS file browser lets an operator open a remote text
   file, edit it in the browser, review a save confirmation, and dispatch a
@@ -1823,7 +1823,7 @@ of the same root cause.
 ### AUD-063: Schedule Confirmations Remain Armed After Form, Defer, Or Table Context Changes
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Schedules
 - Context: The Schedules page creates and updates recurring jobs, applies a
   schedule immediately, updates the saved fixed target snapshot, defers
@@ -1901,7 +1901,7 @@ of the same root cause.
 ### AUD-065: Delivery Queue Confirmations Are Not Bound To Previewed Rows
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Integrations
 - Context: Alert notification and webhook delivery screens let operators
   preview queued work, then confirm queueing or delivery. Delivery processing
@@ -3250,7 +3250,7 @@ of the same root cause.
 ### AUD-098: Suite Config Save Review Can Use A Stale Validation Result For A Newer Draft
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Suite Config
 - Context: The System Config panel requires operators to validate suite TOML,
   review changed keys and hot-reload/restart impact, unlock privilege, then
@@ -3765,7 +3765,7 @@ of the same root cause.
 ### AUD-110: Bundled Migration-Run Can Persist A Migration Link Before Restore Dispatch Succeeds
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/CLI/Backups/Migrations
 - Context: Operators can run a migration workflow that is presented as one
   combined action: create the migration link for a metadata-only restore plan
@@ -4034,7 +4034,7 @@ of the same root cause.
 ### AUD-116: Alert And Webhook Configuration Delete Routes Lack Backend Confirmation
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Integrations/Confirmation
 - Context: Fleet alert policies, alert notification channels, and webhook rules
   are saved production integration configuration. They decide which events are
@@ -4983,7 +4983,7 @@ of the same root cause.
 ### AUD-137: Command-Template Delete Route Lacks Backend Confirmation
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Command Templates/Confirmation
 - Context: Command templates are durable reusable job definitions. Deleting a
   user-defined template removes saved operation payloads and defaults that
@@ -5014,7 +5014,7 @@ of the same root cause.
 ### AUD-138: Data-Source Preset Updates Can Bypass Confirmation For One Assigned VPS
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/CLI/Data Sources/Confirmation
 - Context: Data-source presets generate agent hot-config sections for
   telemetry, process inventory, execution policy, tunnel adapters, backup and
@@ -5050,7 +5050,7 @@ of the same root cause.
 ### AUD-139: CLI Tag Create And Single-VPS Assignment Auto-Confirm Tag Mutations
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: CLI/VTY/Fleet Tags
 - Context: Fleet tags drive selectors, saved schedules, bulk job targeting,
   dashboard grouping, and future operator workflows. Tag mutations can change
@@ -5410,7 +5410,7 @@ of the same root cause.
 ### AUD-148: Backup Policy Prune Reselects Live Artifacts Instead Of The Reviewed Candidate Set
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/CLI/Backups/Retention
 - Context: Backup policy pruning is a destructive retention workflow. Operators
   can dry-run policy prune, review matched rows/object keys, then run a
@@ -5577,7 +5577,7 @@ of the same root cause.
 ### AUD-152: Migration Restore Runs Can Use Stale Hidden Restore Options
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Backups/Migrations
 - Context: The dashboard migration assistant is presented as a migration-specific
   workflow: select a restore plan, link it, and optionally dispatch the restore
@@ -5663,7 +5663,7 @@ of the same root cause.
 ### AUD-154: History Retention Prune Reselects Live Rows Instead Of Deleting The Reviewed Dry-Run Set
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/CLI/History Retention
 - Context: Operators can dry-run history retention prune for domains such as
   `job_outputs`, `backup_artifacts`, audit logs, telemetry rollups, and network
@@ -6209,7 +6209,7 @@ of the same root cause.
 ### AUD-167: Migration-Link Creation Bypasses Request-Bound Privilege Verification
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Backups/Migrations/Privilege
 - Context: Operators create migration links to bind a metadata-only restore
   plan into a later migration workflow. The link records source backup ID,
@@ -7142,7 +7142,7 @@ of the same root cause.
 ### AUD-187: History Retention Policy Saves Ignore The Confirmation Contract
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/History Retention
 - Context: History retention policies control how long audit logs, telemetry,
   network history, job-output history, and backup-artifact history are

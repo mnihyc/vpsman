@@ -19,6 +19,7 @@ import type {
   CommandTemplateRecord,
   CreateJobRequest,
   CreateJobResponse,
+  DeleteCommandTemplateRequest,
   CreateAgentUpdateReleaseRequest,
   JobHistoryRecord,
   JobOutputCompareMode,
@@ -227,7 +228,10 @@ export function JobHistoryPanel({
   onUploadFileTransferSource: (
     request: UploadFileTransferSourceArtifactRequest,
   ) => Promise<FileTransferSourceArtifactRecord>;
-  onDeleteCommandTemplate: (templateId: string) => Promise<CommandTemplateRecord>;
+  onDeleteCommandTemplate: (
+    templateId: string,
+    request: DeleteCommandTemplateRequest,
+  ) => Promise<CommandTemplateRecord>;
   onUpsertCommandTemplate: (
     request: UpsertCommandTemplateRequest,
   ) => Promise<CommandTemplateRecord>;

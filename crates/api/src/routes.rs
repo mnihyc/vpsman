@@ -71,7 +71,7 @@ use crate::{
         key_lifecycle_report, list_client_key_revocations, revoke_current_client_key,
         upsert_agent_identity,
     },
-    routes_migrations::{create_migration_link, list_migration_links},
+    routes_migrations::{create_migration_link, create_migration_run, list_migration_links},
     routes_network::{
         allocate_tunnel_endpoints, create_tunnel_plan, disable_tunnel_plan, enable_tunnel_plan,
         get_topology_graph, list_network_ospf_recommendations, list_network_ospf_update_plans,
@@ -520,6 +520,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/migration-links",
             get(list_migration_links).post(create_migration_link),
         )
+        .route("/api/v1/migration-runs", post(create_migration_run))
         .route("/api/v1/audit", get(list_audit_logs))
         .route(
             "/internal/v1/gateway/agent-identity",

@@ -259,6 +259,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             domain,
             dry_run,
             metadata_only,
+            preview_hash,
             confirmed,
         } => {
             commands_jobs::history_retention_prune(
@@ -268,6 +269,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     domain,
                     dry_run,
                     metadata_only,
+                    preview_hash,
                     confirmed,
                 },
             )?;

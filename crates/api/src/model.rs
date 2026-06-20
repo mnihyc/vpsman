@@ -926,6 +926,19 @@ pub(crate) struct CreateJobResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct CreateMigrationRunRequest {
+    pub(crate) link: CreateMigrationLinkRequest,
+    pub(crate) job: CreateJobRequest,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CreateMigrationRunResponse {
+    pub(crate) migration_link: MigrationLinkView,
+    pub(crate) restore_job: CreateJobResponse,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CancelJobRequest {
     #[serde(default)]
     pub(crate) reason: Option<String>,

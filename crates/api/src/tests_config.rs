@@ -103,7 +103,7 @@ fn autonomous_updater_defaults_disabled_with_official_manifest_defaults() {
 }
 
 #[tokio::test]
-async fn hot_config_rule_templates_include_editable_autonomous_updater_rules() {
+async fn hot_config_rule_templates_keep_built_ins_immutable_and_custom_rules_editable() {
     let repo = Repository::Memory(MemoryState::default());
     let templates = repo.list_hot_config_rule_templates().await.unwrap();
     let enable = templates
@@ -132,7 +132,7 @@ async fn hot_config_rule_templates_include_editable_autonomous_updater_rules() {
         .contains("https://github.com/mnihyc/vpsman/releases/latest/download/version.json"));
 
     let operator = memory_admin();
-    let edited = repo
+    let built_in_edit = repo
         .upsert_hot_config_rule_template(
             &UpsertHotConfigRuleTemplateRequest {
                 id: Some(enable.id),
@@ -143,19 +143,70 @@ async fn hot_config_rule_templates_include_editable_autonomous_updater_rules() {
                 field_schema: enable.field_schema.clone(),
                 raw_generator_body: enable.raw_generator_body.clone(),
                 docs_metadata: enable.docs_metadata.clone(),
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await;
+    assert!(built_in_edit
+        .unwrap_err()
+        .to_string()
+        .contains("hot_config_rule_template_builtin_immutable"));
+
+    let custom = repo
+        .upsert_hot_config_rule_template(
+            &UpsertHotConfigRuleTemplateRequest {
+                id: None,
+                name: "Custom updater enabled".to_string(),
+                category: "update".to_string(),
+                domain: "agent_update".to_string(),
+                description: "operator-managed updater rule".to_string(),
+                field_schema: enable.field_schema.clone(),
+                raw_generator_body: enable.raw_generator_body.clone(),
+                docs_metadata: enable.docs_metadata.clone(),
+                confirmed: true,
             },
             &operator,
         )
         .await
         .unwrap();
-    assert_eq!(edited.name, "Autonomous updater enabled edited");
-    assert!(edited.built_in);
+    assert_eq!(custom.name, "Custom updater enabled");
+    assert!(!custom.built_in);
 
-    repo.delete_hot_config_rule_template(disable.id)
+    let edited = repo
+        .upsert_hot_config_rule_template(
+            &UpsertHotConfigRuleTemplateRequest {
+                id: Some(custom.id),
+                name: "Custom updater enabled edited".to_string(),
+                category: "update".to_string(),
+                domain: "agent_update".to_string(),
+                description: "operator-edited custom updater rule".to_string(),
+                field_schema: custom.field_schema.clone(),
+                raw_generator_body: custom.raw_generator_body.clone(),
+                docs_metadata: custom.docs_metadata.clone(),
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited.name, "Custom updater enabled edited");
+    assert!(!edited.built_in);
+
+    let built_in_delete = repo
+        .delete_hot_config_rule_template(disable.id, &operator)
+        .await;
+    assert!(built_in_delete
+        .unwrap_err()
+        .to_string()
+        .contains("hot_config_rule_template_builtin_immutable"));
+
+    repo.delete_hot_config_rule_template(custom.id, &operator)
         .await
         .unwrap();
     let after_delete = repo.list_hot_config_rule_templates().await.unwrap();
-    assert!(!after_delete
+    assert!(!after_delete.iter().any(|template| template.id == custom.id));
+    assert!(after_delete
         .iter()
         .any(|template| template.id == disable.id));
 }

@@ -126,6 +126,7 @@ pub(crate) struct BackupPolicyPruneRequest {
     #[serde(default)]
     pub(crate) dry_run: bool,
     pub(crate) metadata_only: Option<bool>,
+    pub(crate) preview_hash: Option<String>,
     #[serde(default)]
     pub(crate) confirmed: bool,
 }
@@ -134,6 +135,7 @@ pub(crate) struct BackupPolicyPruneRequest {
 pub(crate) struct BackupPolicyPruneResponse {
     pub(crate) dry_run: bool,
     pub(crate) metadata_only_requested: Option<bool>,
+    pub(crate) preview_hash: String,
     pub(crate) policies: Vec<BackupPolicyPrunePolicyView>,
 }
 
@@ -283,6 +285,8 @@ pub(crate) struct CreateMigrationLinkRequest {
     #[serde(default)]
     pub(crate) confirmed: bool,
     pub(crate) note: Option<String>,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 fn backup_policy_default_enabled() -> bool {

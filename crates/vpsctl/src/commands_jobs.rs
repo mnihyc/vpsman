@@ -547,6 +547,7 @@ pub(crate) struct HistoryRetentionPruneOptions {
     pub(crate) domain: Option<String>,
     pub(crate) dry_run: bool,
     pub(crate) metadata_only: Option<bool>,
+    pub(crate) preview_hash: Option<String>,
     pub(crate) confirmed: bool,
 }
 
@@ -565,6 +566,7 @@ pub(crate) fn history_retention_prune(
                 "domain": options.domain,
                 "dry_run": options.dry_run,
                 "metadata_only": options.metadata_only,
+                "preview_hash": options.preview_hash,
                 "confirmed": options.confirmed,
             }),
         )?

@@ -15,6 +15,7 @@ import type {
   DataSourcePresetTestRequest,
   DataSourcePresetTestResponse,
   DataSourceStatusRecord,
+  DeleteHotConfigRuleTemplateRequest,
   HotConfigRuleTemplateRecord,
   HotConfigRuleTemplateRenderRequest,
   HotConfigRuleTemplateRenderResponse,
@@ -227,8 +228,8 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   );
 
   const deleteHotConfigRuleTemplate = useCallback(
-    async (templateId: string) => {
-      await apiDelete(`/api/v1/hot-config/rule-templates/${encodeURIComponent(templateId)}`, apiToken);
+    async (templateId: string, request: DeleteHotConfigRuleTemplateRequest) => {
+      await apiDelete(`/api/v1/hot-config/rule-templates/${encodeURIComponent(templateId)}`, apiToken, request);
       await loadTagInventory();
     },
     [apiToken, loadTagInventory],

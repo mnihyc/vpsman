@@ -68,6 +68,7 @@ const PRIVILEGE_REQUIRED_COMMANDS: &[&str] = &[
     "restore-plan",
     "restore-run",
     "restore-rollback",
+    "migration-link",
     "migration-run",
     "tunnel-apply",
     "tunnel-ospf-cost-update",

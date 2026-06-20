@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
-use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    commands_migrations::migration_run_with_credentials, http::http_post_json,
+    commands_migrations::{migration_link_with_credentials, migration_run_with_credentials},
     vty_jobs::VtyPrivilegeContext,
 };
 
@@ -142,14 +141,19 @@ pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRun
 pub(crate) fn submit_vty_migration_link(
     api_url: &str,
     token: Option<&str>,
+    privilege_context: &VtyPrivilegeContext,
     request: VtyMigrationLinkRequest,
 ) -> Result<String> {
-    let body = json!({
-        "restore_plan_id": request.restore_plan_id,
-        "confirmed": request.confirmed,
-        "note": request.note,
-    });
-    http_post_json(api_url, "/api/v1/migration-links", token, &body)
+    migration_link_with_credentials(
+        api_url,
+        token,
+        request.restore_plan_id,
+        request.note,
+        &privilege_context.password,
+        &privilege_context.salt_hex,
+        300,
+        request.confirmed,
+    )
 }
 
 pub(crate) fn submit_vty_migration_run(

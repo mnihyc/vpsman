@@ -20,7 +20,7 @@ export function ConfirmationPrompt({
   detail: ReactNode;
   error?: ReactNode;
   expiresAtUnix?: number | null;
-  items?: Array<{ label: string; value: ReactNode }>;
+  items?: Array<{ label: string; title?: string; value: ReactNode }>;
   onCancel: () => void;
   onConfirm: () => void;
   open: boolean;
@@ -85,7 +85,7 @@ export function ConfirmationPrompt({
         {items.length > 0 && (
           <dl>
             {items.map((item) => {
-              const valueTitle = confirmationItemTitle(item.value);
+              const valueTitle = item.title ?? confirmationItemTitle(item.value);
               return (
                 <div key={item.label}>
                   <dt>{item.label}</dt>

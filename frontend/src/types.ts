@@ -565,6 +565,7 @@ export type FleetAlertNotificationDeliveryRecord = {
   actor_id: string | null;
   created_at: string;
   delivered_at: string | null;
+  review_preview_hash?: string | null;
 };
 
 export type FleetAlertNotificationDispatchRequest = {
@@ -575,6 +576,7 @@ export type FleetAlertNotificationDispatchRequest = {
   operator_state?: string | null;
   include_muted?: boolean;
   dry_run?: boolean;
+  preview_hash?: string | null;
   confirmed: boolean;
 };
 
@@ -583,6 +585,7 @@ export type FleetAlertNotificationProcessRequest = {
   status?: FleetAlertNotificationDeliveryProcessStatus | null;
   delivery_kind?: string | null;
   dry_run?: boolean;
+  preview_hash?: string | null;
   confirmed: boolean;
 };
 
@@ -632,6 +635,7 @@ export type WebhookRuleDeliveryRecord = {
   actor_id: string | null;
   created_at: string;
   delivered_at: string | null;
+  review_preview_hash?: string | null;
 };
 
 export type WebhookRuleDryRunRecord = {
@@ -659,6 +663,7 @@ export type WebhookRuleDispatchRequest = {
   event_id?: string | null;
   limit?: number;
   dry_run?: boolean;
+  preview_hash?: string | null;
   confirmed: boolean;
 };
 
@@ -666,6 +671,7 @@ export type WebhookRuleProcessRequest = {
   limit?: number;
   status?: WebhookRuleDeliveryProcessStatus | null;
   dry_run?: boolean;
+  preview_hash?: string | null;
   confirmed: boolean;
 };
 
@@ -674,6 +680,7 @@ export type WebhookDeliveryRotationRequest = {
   older_than_days?: number | null;
   status?: WebhookRuleDeliveryHistoryStatus | null;
   rule_id?: string | null;
+  preview_hash?: string | null;
   confirmed: boolean;
 };
 
@@ -684,6 +691,7 @@ export type WebhookDeliveryRotationResponse = {
   older_than: string | null;
   status: string | null;
   rule_id: string | null;
+  preview_hash: string;
 };
 
 export type AgentView = {
@@ -1013,6 +1021,11 @@ export type UpsertCommandTemplateRequest = {
   operation: JobOperation;
   defaults?: JsonValue;
   confirmed: boolean;
+};
+
+export type DeleteCommandTemplateRequest = {
+  confirmed: boolean;
+  reviewed_name: string;
 };
 
 export type JobOutputCompareMode = "binary" | "text";
@@ -1970,6 +1983,7 @@ export type BackupPolicyPruneRequest = {
   schedule_id?: string | null;
   dry_run: boolean;
   metadata_only?: boolean | null;
+  preview_hash?: string | null;
   confirmed: boolean;
 };
 
@@ -1992,6 +2006,7 @@ export type BackupPolicyPrunePolicyRecord = {
 export type BackupPolicyPruneResponse = {
   dry_run: boolean;
   metadata_only_requested: boolean | null;
+  preview_hash: string;
   policies: BackupPolicyPrunePolicyRecord[];
 };
 
@@ -2096,6 +2111,17 @@ export type CreateMigrationLinkRequest = {
   restore_plan_id: string;
   confirmed: boolean;
   note: string | null;
+  privilege_assertion?: PrivilegeAssertion | null;
+};
+
+export type CreateMigrationRunRequest = {
+  link: CreateMigrationLinkRequest;
+  job: CreateJobRequest;
+};
+
+export type CreateMigrationRunResponse = {
+  migration_link: MigrationLinkRecord;
+  restore_job: CreateJobResponse;
 };
 
 export type JobTargetSelection = {
@@ -2149,6 +2175,7 @@ export type HistoryRetentionPruneRequest = {
   domain?: string | null;
   dry_run?: boolean;
   metadata_only?: boolean | null;
+  preview_hash?: string | null;
   confirmed: boolean;
 };
 
@@ -2169,6 +2196,7 @@ export type HistoryRetentionPruneDomainRecord = {
 export type HistoryRetentionPruneResponse = {
   dry_run: boolean;
   metadata_only_requested: boolean | null;
+  preview_hash: string;
   domains: HistoryRetentionPruneDomainRecord[];
 };
 
@@ -2378,6 +2406,12 @@ export type UpsertHotConfigRuleTemplateRequest = {
   field_schema: JsonValue;
   raw_generator_body: string;
   docs_metadata: JsonValue;
+  confirmed: boolean;
+};
+
+export type DeleteHotConfigRuleTemplateRequest = {
+  confirmed: boolean;
+  reviewed_name: string;
 };
 
 export type HotConfigRuleTemplateRenderRequest = {

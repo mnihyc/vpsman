@@ -58,12 +58,21 @@ impl AppState {
         let agents = self.repo.list_agents().await?;
         let agent_scopes = build_agent_alert_scopes(&agents);
         let candidates = notification_candidates(&alerts, &channels, &agent_scopes);
+        let preview_hash = notification_dispatch_preview_hash(request, &candidates)?;
         if dry_run {
             return Ok(candidates
                 .iter()
-                .map(|candidate| dry_run_delivery(candidate, operator))
+                .map(|candidate| {
+                    let mut delivery = dry_run_delivery(candidate, operator);
+                    delivery.review_preview_hash = Some(preview_hash.clone());
+                    delivery
+                })
                 .collect());
         }
+        anyhow::ensure!(
+            request.preview_hash.as_deref() == Some(preview_hash.as_str()),
+            "fleet_alert_notification_dispatch_preview_hash_mismatch"
+        );
         self.repo
             .record_fleet_alert_notification_deliveries(&candidates, operator)
             .await
@@ -92,18 +101,29 @@ impl AppState {
             .repo
             .list_fleet_alert_notification_deliveries(limit, None, None, Some(status))
             .await?;
+        let filtered_deliveries = deliveries
+            .into_iter()
+            .filter(|delivery| {
+                request
+                    .delivery_kind
+                    .as_deref()
+                    .is_none_or(|kind| delivery.delivery_kind == kind)
+            })
+            .collect::<Vec<_>>();
+        let preview_hash = notification_process_preview_hash(request, &filtered_deliveries)?;
+        if !dry_run {
+            anyhow::ensure!(
+                request.preview_hash.as_deref() == Some(preview_hash.as_str()),
+                "fleet_alert_notification_process_preview_hash_mismatch"
+            );
+        }
         let mut processed = Vec::new();
         let client = webhook_client()?;
-        for delivery in deliveries {
-            if request
-                .delivery_kind
-                .as_deref()
-                .is_some_and(|kind| delivery.delivery_kind != kind)
-            {
-                continue;
-            }
+        for delivery in filtered_deliveries {
             if dry_run {
-                processed.push(dry_run_process_delivery(&delivery));
+                let mut delivery = dry_run_process_delivery(&delivery);
+                delivery.review_preview_hash = Some(preview_hash.clone());
+                processed.push(delivery);
                 continue;
             }
             let result = if self
@@ -304,6 +324,7 @@ fn dry_run_delivery(
         actor_id: Some(operator.operator.id),
         created_at: unix_now().to_string(),
         delivered_at: None,
+        review_preview_hash: None,
     }
 }
 
@@ -313,6 +334,62 @@ fn dry_run_process_delivery(
     let mut delivery = delivery.clone();
     delivery.status = NOTIFICATION_PROCESS_DRY_RUN_STATUS.to_string();
     delivery
+}
+
+fn notification_dispatch_preview_hash(
+    request: &FleetAlertNotificationDispatchRequest,
+    candidates: &[FleetAlertNotificationCandidate],
+) -> Result<String> {
+    let payload = serde_json::to_vec(&json!({
+        "version": 1,
+        "kind": "fleet_alert_notification_dispatch",
+        "request": {
+            "limit": request.limit,
+            "client_id": request.client_id,
+            "severity": request.severity,
+            "category": request.category,
+            "operator_state": request.operator_state,
+            "include_muted": request.include_muted,
+        },
+        "candidates": candidates.iter().map(|candidate| {
+            json!({
+                "channel_id": candidate.channel_id,
+                "alert_id": candidate.alert_id,
+                "status": candidate.status,
+                "delivery_kind": candidate.delivery_kind,
+                "target": candidate.target,
+                "dedupe_key": candidate.dedupe_key,
+                "payload": candidate.payload,
+            })
+        }).collect::<Vec<_>>(),
+    }))?;
+    Ok(payload_hash(&payload))
+}
+
+fn notification_process_preview_hash(
+    request: &FleetAlertNotificationProcessRequest,
+    deliveries: &[FleetAlertNotificationDeliveryView],
+) -> Result<String> {
+    let payload = serde_json::to_vec(&json!({
+        "version": 1,
+        "kind": "fleet_alert_notification_process",
+        "request": {
+            "limit": request.limit,
+            "status": request.status,
+            "delivery_kind": request.delivery_kind,
+        },
+        "deliveries": deliveries.iter().map(|delivery| {
+            json!({
+                "id": delivery.id,
+                "status": delivery.status,
+                "delivery_kind": delivery.delivery_kind,
+                "target": delivery.target,
+                "dedupe_key": delivery.dedupe_key,
+                "attempt_count": delivery.attempt_count,
+            })
+        }).collect::<Vec<_>>(),
+    }))?;
+    Ok(payload_hash(&payload))
 }
 
 fn webhook_client() -> Result<reqwest::Client> {

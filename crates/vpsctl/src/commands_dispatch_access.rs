@@ -394,11 +394,17 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             Ok(None)
         }
         Command::TagCreate(command) => {
-            commands_inventory::tag_create(api_url, token, command.name)?;
+            commands_inventory::tag_create(api_url, token, command.name, command.confirmed)?;
             Ok(None)
         }
         Command::AgentTag(command) => {
-            commands_inventory::agent_tag(api_url, token, command.client_id, command.tag)?;
+            commands_inventory::agent_tag(
+                api_url,
+                token,
+                command.client_id,
+                command.tag,
+                command.confirmed,
+            )?;
             Ok(None)
         }
         Command::DataSourcePresets(command) => {

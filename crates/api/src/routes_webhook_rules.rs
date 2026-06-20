@@ -7,10 +7,10 @@ use axum::{
 use crate::{
     error::ApiError,
     model_webhook_rules::{
-        CreateWebhookRuleRequest, WebhookDeliveryRotationRequest, WebhookDeliveryRotationResponse,
-        WebhookRuleDeliveryQuery, WebhookRuleDeliveryView, WebhookRuleDispatchRequest,
-        WebhookRuleDryRunRequest, WebhookRuleDryRunView, WebhookRuleProcessRequest,
-        WebhookRuleQuery, WebhookRuleView,
+        CreateWebhookRuleRequest, DeleteWebhookRuleRequest, WebhookDeliveryRotationRequest,
+        WebhookDeliveryRotationResponse, WebhookRuleDeliveryQuery, WebhookRuleDeliveryView,
+        WebhookRuleDispatchRequest, WebhookRuleDryRunRequest, WebhookRuleDryRunView,
+        WebhookRuleProcessRequest, WebhookRuleQuery, WebhookRuleView,
     },
     repository_webhook_rules::validate_webhook_rule_target,
     security::SCOPE_INTEGRATIONS_READ,
@@ -58,10 +58,31 @@ pub(crate) async fn delete_webhook_rule(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(rule_id): Path<uuid::Uuid>,
+    Json(request): Json<DeleteWebhookRuleRequest>,
 ) -> Result<StatusCode, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "webhook_rule_delete_confirmation_required",
+        ));
+    }
+    validate_required_text(
+        &request.reviewed_name,
+        128,
+        "webhook_rule_delete_review_invalid",
+    )?;
+    let existing = state
+        .repo
+        .list_webhook_rules(1000, None)
+        .await?
+        .into_iter()
+        .find(|rule| rule.id == rule_id)
+        .ok_or_else(|| ApiError::not_found("webhook_rule_not_found"))?;
+    if existing.name != request.reviewed_name.trim() {
+        return Err(ApiError::conflict("webhook_rule_delete_review_stale"));
+    }
     state.repo.delete_webhook_rule(rule_id, &operator).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -88,7 +109,10 @@ pub(crate) async fn dispatch_webhook_rules(
         .await?;
     validate_webhook_rule_dispatch_request(&request)?;
     Ok(Json(
-        state.dispatch_webhook_rules(&request, &operator).await?,
+        state
+            .dispatch_webhook_rules(&request, &operator)
+            .await
+            .map_err(webhook_delivery_error)?,
     ))
 }
 
@@ -102,7 +126,11 @@ pub(crate) async fn rotate_webhook_delivery_history(
         .await?;
     validate_webhook_delivery_rotation_request(&request)?;
     Ok(Json(
-        state.repo.rotate_webhook_delivery_history(&request).await?,
+        state
+            .repo
+            .rotate_webhook_delivery_history(&request)
+            .await
+            .map_err(webhook_delivery_error)?,
     ))
 }
 
@@ -140,8 +168,17 @@ pub(crate) async fn process_webhook_rule_deliveries(
     Ok(Json(
         state
             .process_webhook_rule_deliveries(&request, &operator)
-            .await?,
+            .await
+            .map_err(webhook_delivery_error)?,
     ))
+}
+
+fn webhook_delivery_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("preview_hash_mismatch") {
+        return ApiError::conflict("webhook_rule_delivery_preview_hash_mismatch");
+    }
+    ApiError::from(error)
 }
 
 fn validate_webhook_rule_query(query: &WebhookRuleQuery) -> Result<(), ApiError> {
@@ -228,6 +265,18 @@ fn validate_webhook_rule_dispatch_request(
             "webhook_rule_dispatch_confirmation_required",
         ));
     }
+    if !request.dry_run.unwrap_or(false)
+        && request
+            .preview_hash
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "webhook_rule_dispatch_preview_hash_required",
+        ));
+    }
     validate_required_text(&request.event_kind, 128, "webhook_rule_event_kind_invalid")?;
     if let Some(event_id) = request.event_id.as_deref() {
         validate_required_text(event_id, 256, "webhook_rule_event_id_invalid")?;
@@ -295,6 +344,18 @@ fn validate_webhook_delivery_rotation_request(
             ));
         }
     }
+    if request.confirmed
+        && request
+            .preview_hash
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "webhook_delivery_rotation_preview_hash_required",
+        ));
+    }
     Ok(())
 }
 
@@ -304,6 +365,18 @@ fn validate_webhook_rule_process_request(
     if !request.dry_run.unwrap_or(false) && !request.confirmed {
         return Err(ApiError::bad_request(
             "webhook_rule_delivery_process_confirmation_required",
+        ));
+    }
+    if !request.dry_run.unwrap_or(false)
+        && request
+            .preview_hash
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "webhook_rule_delivery_process_preview_hash_required",
         ));
     }
     if let Some(limit) = request.limit {

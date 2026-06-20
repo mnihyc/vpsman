@@ -542,6 +542,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
                 operator_state: None,
                 include_muted: None,
                 dry_run: Some(true),
+                preview_hash: None,
                 confirmed: false,
             },
             &operator,
@@ -552,6 +553,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
     assert!(dry_run
         .iter()
         .all(|delivery| delivery.status == "matched_dry_run"));
+    let dispatch_preview_hash = dry_run[0].review_preview_hash.clone();
 
     let delivered = state
         .dispatch_fleet_alert_notifications(
@@ -563,6 +565,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
                 operator_state: None,
                 include_muted: None,
                 dry_run: Some(false),
+                preview_hash: dispatch_preview_hash.clone(),
                 confirmed: true,
             },
             &operator,
@@ -590,6 +593,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
                 operator_state: None,
                 include_muted: None,
                 dry_run: None,
+                preview_hash: dispatch_preview_hash,
                 confirmed: true,
             },
             &operator,
@@ -616,6 +620,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
                 status: Some("queued".to_string()),
                 delivery_kind: Some("webhook".to_string()),
                 dry_run: Some(true),
+                preview_hash: None,
                 confirmed: false,
             },
             &operator,
@@ -632,6 +637,23 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
     assert_eq!(after_dry_run.len(), 2);
     assert!(after_dry_run.iter().all(|row| row.attempt_count == 0));
 
+    let custom_process_dry_run = state
+        .process_fleet_alert_notifications(
+            &FleetAlertNotificationProcessRequest {
+                limit: Some(20),
+                status: Some("queued".to_string()),
+                delivery_kind: Some("custom_pager".to_string()),
+                dry_run: Some(true),
+                preview_hash: None,
+                confirmed: false,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(custom_process_dry_run.len(), 1);
+    let custom_process_preview_hash = custom_process_dry_run[0].review_preview_hash.clone();
+
     let failed_custom = state
         .process_fleet_alert_notifications(
             &FleetAlertNotificationProcessRequest {
@@ -639,6 +661,7 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
                 status: Some("queued".to_string()),
                 delivery_kind: Some("custom_pager".to_string()),
                 dry_run: Some(false),
+                preview_hash: custom_process_preview_hash,
                 confirmed: true,
             },
             &operator,

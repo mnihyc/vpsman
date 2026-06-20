@@ -8,7 +8,8 @@ use uuid::Uuid;
 use crate::{
     error::ApiError,
     model_command_templates::{
-        CommandTemplateQuery, CommandTemplateView, UpsertCommandTemplateRequest,
+        CommandTemplateQuery, CommandTemplateView, DeleteCommandTemplateRequest,
+        UpsertCommandTemplateRequest,
     },
     repository_command_templates::{
         command_template_id_is_builtin, command_template_name_scope_is_builtin,
@@ -74,12 +75,33 @@ pub(crate) async fn delete_command_template(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(template_id): Path<Uuid>,
+    Json(request): Json<DeleteCommandTemplateRequest>,
 ) -> Result<Json<CommandTemplateView>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "jobs:write")
         .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict(
+            "command_template_delete_confirmation_required",
+        ));
+    }
+    if request.reviewed_name.trim().is_empty() || request.reviewed_name.len() > 128 {
+        return Err(ApiError::bad_request(
+            "command_template_delete_review_invalid",
+        ));
+    }
     if command_template_id_is_builtin(template_id) {
         return Err(ApiError::conflict("command_template_builtin_immutable"));
+    }
+    let existing = state
+        .repo
+        .list_command_templates(1000, None, None, None, None)
+        .await?
+        .into_iter()
+        .find(|template| template.id == template_id)
+        .ok_or_else(|| ApiError::not_found("command_template_not_found"))?;
+    if existing.name != request.reviewed_name.trim() {
+        return Err(ApiError::conflict("command_template_delete_review_stale"));
     }
     state
         .repo

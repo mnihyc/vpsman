@@ -178,9 +178,11 @@ pub(crate) fn backup_policy_prune(
     schedule_id: Option<String>,
     dry_run: bool,
     metadata_only: Option<bool>,
+    preview_hash: Option<String>,
     confirmed: bool,
 ) -> Result<()> {
-    let payload = backup_policy_prune_payload(schedule_id, dry_run, metadata_only, confirmed)?;
+    let payload =
+        backup_policy_prune_payload(schedule_id, dry_run, metadata_only, preview_hash, confirmed)?;
     println!(
         "{}",
         http_post_json(api_url, "/api/v1/backup-policies/prune", token, &payload,)?
@@ -192,6 +194,7 @@ fn backup_policy_prune_payload(
     schedule_id: Option<String>,
     dry_run: bool,
     metadata_only: Option<bool>,
+    preview_hash: Option<String>,
     confirmed: bool,
 ) -> Result<serde_json::Value> {
     let schedule_id = schedule_id
@@ -203,6 +206,7 @@ fn backup_policy_prune_payload(
         "schedule_id": schedule_id,
         "dry_run": dry_run,
         "metadata_only": metadata_only,
+        "preview_hash": preview_hash,
         "confirmed": confirmed,
     }))
 }
@@ -852,6 +856,15 @@ pub(crate) fn restore_run_with_credentials(
     token: Option<&str>,
     request: RestoreRunWithCredentials<'_>,
 ) -> Result<String> {
+    let body = restore_run_request_with_credentials(api_url, token, request)?;
+    http_post_json(api_url, "/api/v1/jobs", token, &body)
+}
+
+pub(crate) fn restore_run_request_with_credentials(
+    api_url: &str,
+    token: Option<&str>,
+    request: RestoreRunWithCredentials<'_>,
+) -> Result<serde_json::Value> {
     anyhow::ensure!(request.confirmed, "restore-run requires --confirmed");
     let archive = resolve_restore_archive_transfer(
         api_url,
@@ -884,25 +897,20 @@ pub(crate) fn restore_run_with_credentials(
         true,
     )?;
 
-    http_post_json(
-        api_url,
-        "/api/v1/jobs",
-        token,
-        &serde_json::json!({
-            "job_id": Uuid::new_v4(),
-            "command": "restore",
-            "argv": [],
-            "selector_expression": selector_expression,
-            "target_client_ids": target_ids,
-            "privileged": true,
-            "destructive": true,
-            "confirmed": request.confirmed,
-            "force_unprivileged": request.force_unprivileged,
-            "timeout_secs": request.timeout_secs,
-            "operation": operation,
-            "privilege_assertion": privilege.privilege_assertion,
-        }),
-    )
+    Ok(serde_json::json!({
+        "job_id": Uuid::new_v4(),
+        "command": "restore",
+        "argv": [],
+        "selector_expression": selector_expression,
+        "target_client_ids": target_ids,
+        "privileged": true,
+        "destructive": true,
+        "confirmed": request.confirmed,
+        "force_unprivileged": request.force_unprivileged,
+        "timeout_secs": request.timeout_secs,
+        "operation": operation,
+        "privilege_assertion": privilege.privilege_assertion,
+    }))
 }
 
 fn resolve_restore_archive_transfer(
@@ -1230,17 +1238,27 @@ mod tests {
     #[test]
     fn builds_backup_policy_prune_payload() {
         let schedule_id = Uuid::new_v4();
-        let payload =
-            backup_policy_prune_payload(Some(schedule_id.to_string()), true, Some(false), true)
-                .unwrap();
+        let payload = backup_policy_prune_payload(
+            Some(schedule_id.to_string()),
+            true,
+            Some(false),
+            Some("aa".repeat(32)),
+            true,
+        )
+        .unwrap();
 
         assert_eq!(payload["schedule_id"], schedule_id.to_string());
         assert_eq!(payload["dry_run"], true);
         assert_eq!(payload["metadata_only"], false);
+        assert_eq!(payload["preview_hash"], "aa".repeat(32));
         assert_eq!(payload["confirmed"], true);
-        assert!(
-            backup_policy_prune_payload(Some("not-a-uuid".to_string()), true, None, false,)
-                .is_err()
-        );
+        assert!(backup_policy_prune_payload(
+            Some("not-a-uuid".to_string()),
+            true,
+            None,
+            None,
+            false,
+        )
+        .is_err());
     }
 }

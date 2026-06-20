@@ -10,9 +10,11 @@ import { usePanelDisplaySettings } from "../panelDisplay";
 import {
   buildPrivilegeAssertion,
   buildPrivilegeForJobOperation,
+  canonicalDbPrivilegeIntent,
   canonicalSchedulePrivilegeIntent,
   operationPayloadHashHex,
   parseCommandArgv,
+  textPayloadHashHex,
   type PrivilegeMaterial,
 } from "../privilege";
 import {
@@ -48,6 +50,8 @@ import type {
   CreateJobRequest,
   CreateJobResponse,
   CreateMigrationLinkRequest,
+  CreateMigrationRunRequest,
+  CreateMigrationRunResponse,
   CreateRestorePlanRequest,
   JobOperation,
   JobOutputRecord,
@@ -86,6 +90,9 @@ type BackupsPanelProps = {
   onCreateMigrationLink: (
     request: CreateMigrationLinkRequest,
   ) => Promise<MigrationLinkRecord>;
+  onCreateMigrationRun: (
+    request: CreateMigrationRunRequest,
+  ) => Promise<CreateMigrationRunResponse>;
   onCreateRestorePlan: (
     request: CreateRestorePlanRequest,
   ) => Promise<RestorePlanRecord>;
@@ -157,7 +164,9 @@ type BackupActionSnapshot =
   | {
       action: "policy-prune";
       modeLabel: string;
+      previewHash: string;
       request: BackupPolicyPruneRequest;
+      reviewedRows: number;
       scopeLabel: string;
     }
   | {
@@ -209,12 +218,14 @@ type BackupActionSnapshot =
   | {
       action: "migration-link";
       noteLabel: string;
+      payloadHashHex: string;
       planLabel: string;
       request: CreateMigrationLinkRequest;
     }
   | {
       action: "migration-run";
       linkRequest: CreateMigrationLinkRequest;
+      linkPayloadHashHex: string;
       modeLabel: string;
       restorePlan: RestorePlanRecord;
       routeLabel: string;
@@ -248,6 +259,7 @@ export function BackupsPanel({
   onCreateBackupRequest,
   onCreateJob,
   onCreateMigrationLink,
+  onCreateMigrationRun,
   onCreateRestorePlan,
   onDownloadBackupArtifact,
   onHandoffBackupArtifact,
@@ -626,23 +638,43 @@ export function BackupsPanel({
     };
   }
 
-  function submitPolicyPrune(event: FormEvent<HTMLFormElement>) {
+  async function submitPolicyPrune(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const request = policyPruneRequest();
     if (policyPruneDryRun) {
-      void executePolicyPrune(request);
+      await executePolicyPrune(request);
     } else {
-      setPendingActionSnapshot({
-        action: "policy-prune",
-        modeLabel: policyPruneMetadataOnly
-          ? "metadata only"
-          : "metadata and objects",
-        request,
-        scopeLabel: policyPruneScheduleId
-          ? shortId(policyPruneScheduleId)
-          : "all policies",
+      await runPanelAction(setPending, setActionError, async () => {
+        const previewRequest: BackupPolicyPruneRequest = {
+          ...request,
+          dry_run: true,
+          confirmed: false,
+          preview_hash: null,
+        };
+        const preview = await onPruneBackupPolicies(previewRequest);
+        setLastPolicyPrune(preview);
+        setPendingActionSnapshot({
+          action: "policy-prune",
+          modeLabel: policyPruneMetadataOnly
+            ? "metadata only"
+            : "metadata and objects",
+          previewHash: preview.preview_hash,
+          request: {
+            ...request,
+            dry_run: false,
+            confirmed: true,
+            preview_hash: preview.preview_hash,
+          },
+          reviewedRows: preview.policies.reduce(
+            (sum, policy) => sum + policy.matched_rows,
+            0,
+          ),
+          scopeLabel: policyPruneScheduleId
+            ? shortId(policyPruneScheduleId)
+            : "all policies",
+        });
+        setPendingConfirmation("policy-prune");
       });
-      setPendingConfirmation("policy-prune");
     }
   }
 
@@ -1101,22 +1133,61 @@ export function BackupsPanel({
     });
   }
 
-  function submitMigrationLink() {
-    if (!migrationRestorePlanId) {
-      setActionError("Select a restore plan");
-      return;
+  async function buildMigrationLinkReview(
+    restorePlan: RestorePlanRecord,
+  ): Promise<{
+    payloadHashHex: string;
+    request: CreateMigrationLinkRequest;
+  }> {
+    if (!privilegeMaterial) {
+      onOpenPrivilegeUnlock();
+      throw new Error("Privilege unlock is locked");
     }
-    setPendingActionSnapshot({
-      action: "migration-link",
-      noteLabel: migrationNote.trim() || "none",
-      planLabel: shortId(migrationRestorePlanId),
+    const note = migrationNote.trim() || null;
+    const payloadHashHex = await migrationLinkPayloadHashHex(restorePlan, note);
+    return {
+      payloadHashHex,
       request: {
-        restore_plan_id: migrationRestorePlanId,
+        restore_plan_id: restorePlan.id,
         confirmed: true,
-        note: migrationNote.trim() || null,
+        note,
+        privilege_assertion: await buildPrivilegeAssertion({
+          intent: canonicalDbPrivilegeIntent({
+            action: "migration.link",
+            target: restorePlan.id,
+            selectorExpression: null,
+            resolvedTargets: [
+              restorePlan.source_client_id,
+              restorePlan.target_client_id,
+            ],
+            confirmed: true,
+            payloadHash: payloadHashHex,
+          }),
+          privilegeMaterial,
+        }),
       },
+    };
+  }
+
+  async function submitMigrationLink() {
+    await runBackupReview("Preparing migration link review", async (reviewGeneration) => {
+      const restorePlan = selectedMigrationRestorePlan;
+      if (!restorePlan) {
+        throw new Error("Select a restore plan");
+      }
+      const review = await buildMigrationLinkReview(restorePlan);
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
+      setPendingActionSnapshot({
+        action: "migration-link",
+        noteLabel: migrationNote.trim() || "none",
+        payloadHashHex: review.payloadHashHex,
+        planLabel: shortId(restorePlan.id),
+        request: review.request,
+      });
+      setPendingConfirmation("migration-link");
     });
-    setPendingConfirmation("migration-link");
   }
 
   async function executeMigrationLink(snapshot: Extract<BackupActionSnapshot, { action: "migration-link" }>) {
@@ -1150,16 +1221,14 @@ export function BackupsPanel({
         forceUnprivileged: restoreForceUnprivileged,
       };
       const run = await buildRestoreRunJobSnapshot(input);
+      const linkReview = await buildMigrationLinkReview(restorePlan);
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
       }
       setPendingActionSnapshot({
         action: "migration-run",
-        linkRequest: {
-          restore_plan_id: restorePlan.id,
-          confirmed: true,
-          note: migrationNote.trim() || null,
-        },
+        linkRequest: linkReview.request,
+        linkPayloadHashHex: linkReview.payloadHashHex,
         modeLabel: input.dryRun ? "dry run" : "live restore",
         restorePlan,
         routeLabel: `${clientLabel(restorePlan.source_client_id)} to ${clientLabel(restorePlan.target_client_id)}`,
@@ -1171,8 +1240,12 @@ export function BackupsPanel({
 
   async function executeMigrationRun(snapshot: Extract<BackupActionSnapshot, { action: "migration-run" }>) {
     await runPanelAction(setPending, setActionError, async () => {
-      const link = await onCreateMigrationLink(snapshot.linkRequest);
-      const nextJob = await onCreateJob(snapshot.run.request);
+      const response = await onCreateMigrationRun({
+        link: snapshot.linkRequest,
+        job: snapshot.run.request,
+      });
+      const link = response.migration_link;
+      const nextJob = response.restore_job;
       setRestoreSourceId(snapshot.restorePlan.source_backup_request_id);
       setRestoreTargetId(snapshot.restorePlan.target_client_id);
       setRestoreArchiveTransferKey("");
@@ -1272,6 +1345,14 @@ export function BackupsPanel({
               (policyPruneMetadataOnly
                 ? "metadata only"
                 : "metadata and objects"),
+          },
+          {
+            label: "Reviewed rows",
+            value: snapshot?.reviewedRows ?? 0,
+          },
+          {
+            label: "Review hash",
+            value: snapshot ? `${snapshot.previewHash.slice(0, 12)}...` : "review required",
           },
         ];
       }
@@ -1445,6 +1526,10 @@ export function BackupsPanel({
               (migrationRestorePlanId ? shortId(migrationRestorePlanId) : "none"),
           },
           { label: "Note", value: snapshot?.noteLabel ?? (migrationNote.trim() || "none") },
+          {
+            label: "Link hash",
+            value: snapshot ? `${snapshot.payloadHashHex.slice(0, 12)}...` : "review required",
+          },
         ];
       }
       case "migration-run": {
@@ -1477,6 +1562,10 @@ export function BackupsPanel({
           {
             label: "Privilege",
             value: snapshot ? "Frozen assertion" : "Review migration to freeze",
+          },
+          {
+            label: "Link hash",
+            value: snapshot ? `${snapshot.linkPayloadHashHex.slice(0, 12)}...` : "review required",
           },
         ];
       }
@@ -2064,7 +2153,7 @@ export function BackupsPanel({
                 onOpenUnlock={onOpenPrivilegeUnlock}
                 onPrivilegeMaterialChange={(material) => {
                   setPrivilegeMaterial(material);
-                  clearBackupConfirmations(["migration-run"]);
+                  clearBackupConfirmations(["migration-link", "migration-run"]);
                 }}
                 privilegeMaterial={privilegeMaterial}
               />
@@ -2084,6 +2173,25 @@ function backupArtifactForRequest(
     return null;
   }
   return artifacts.find((artifact) => artifact.id === backup.artifact_id) ?? null;
+}
+
+function migrationLinkPayloadHashHex(
+  restorePlan: RestorePlanRecord,
+  note: string | null,
+): Promise<string> {
+  return textPayloadHashHex(
+    JSON.stringify({
+      destination_root: restorePlan.destination_root ?? null,
+      include_config: restorePlan.include_config,
+      note,
+      paths: restorePlan.paths,
+      restore_plan_id: restorePlan.id,
+      source_backup_request_id: restorePlan.source_backup_request_id,
+      source_client_id: restorePlan.source_client_id,
+      target_client_id: restorePlan.target_client_id,
+      version: 1,
+    }),
+  );
 }
 
 function buildRestoreArchiveTransferOptions(

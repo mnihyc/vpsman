@@ -34,6 +34,7 @@ import type {
   DataSourcePresetTestRequest,
   DataSourcePresetTestResponse,
   DataSourceStatusRecord,
+  DeleteHotConfigRuleTemplateRequest,
   HotConfigRuleTemplateRecord,
   HotConfigRuleTemplateRenderResponse,
   JobOperation,
@@ -124,7 +125,10 @@ export function ConfigPanel({
   onDiffDataSourcePreset: (presetId: string, request: DataSourcePresetDiffRequest) => Promise<DataSourcePresetDiffResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
-  onDeleteHotConfigRuleTemplate: (templateId: string) => Promise<void>;
+  onDeleteHotConfigRuleTemplate: (
+    templateId: string,
+    request: DeleteHotConfigRuleTemplateRequest,
+  ) => Promise<void>;
   onOpenJobDetails: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onRefresh: () => void;
@@ -303,7 +307,10 @@ function RuleTemplateWorkspace({
   runAction,
 }: {
   hotConfigRuleTemplates: HotConfigRuleTemplateRecord[];
-  onDeleteHotConfigRuleTemplate: (templateId: string) => Promise<void>;
+  onDeleteHotConfigRuleTemplate: (
+    templateId: string,
+    request: DeleteHotConfigRuleTemplateRequest,
+  ) => Promise<void>;
   onRenderHotConfigRuleTemplate: (templateId: string, request: { values: JsonValue }) => Promise<HotConfigRuleTemplateRenderResponse>;
   onUpsertHotConfigRuleTemplate: (request: UpsertHotConfigRuleTemplateRequest) => Promise<HotConfigRuleTemplateRecord>;
   pending: boolean;
@@ -320,6 +327,7 @@ function RuleTemplateWorkspace({
     if (selected) {
       setValuesText(formatJsonObject(exampleValuesForTemplate(selected)));
     }
+    setDeleteTemplate(null);
   }, [selected?.id]);
 
   async function renderSelected() {
@@ -344,6 +352,7 @@ function RuleTemplateWorkspace({
         field_schema: selected.field_schema,
         name: `${selected.name}.copy`,
         raw_generator_body: selected.raw_generator_body,
+        confirmed: true,
       });
     });
   }
@@ -353,8 +362,12 @@ function RuleTemplateWorkspace({
       return;
     }
     const templateId = deleteTemplate.id;
+    const reviewedName = deleteTemplate.name;
     await runAction(async () => {
-      await onDeleteHotConfigRuleTemplate(templateId);
+      await onDeleteHotConfigRuleTemplate(templateId, {
+        confirmed: true,
+        reviewed_name: reviewedName,
+      });
       setSelectedId("");
       setRendered(null);
       setDeleteTemplate(null);
@@ -408,9 +421,14 @@ function RuleTemplateWorkspace({
           </button>
           <button
             className="secondaryAction dangerAction"
-            disabled={pending || !selected}
+            disabled={pending || !selected || selected.built_in}
             onClick={() => selected && setDeleteTemplate(selected)}
             type="button"
+            title={
+              selected?.built_in
+                ? "Predefined templates are immutable; clone before editing or deleting"
+                : "Review deletion"
+            }
           >
             <Trash2 size={15} />
             Review deletion
@@ -418,7 +436,7 @@ function RuleTemplateWorkspace({
         </div>
         <ConfirmationPrompt
           confirmLabel="Delete template"
-          detail="This removes the shared rule template. Predefined templates are operator-editable and can be recreated manually if needed."
+          detail="This removes the reviewed operator-managed rule template. Predefined templates are immutable; clone them before editing."
           items={[
             { label: "Template", value: deleteTemplate?.name ?? "" },
             { label: "Domain", value: deleteTemplate?.domain ?? "" },

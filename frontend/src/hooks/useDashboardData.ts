@@ -362,6 +362,7 @@ export function useDashboardData(activeView: ActiveView) {
     createBackupPolicy: backups.createBackupPolicy,
     createFileTransferHandoff: jobs.createFileTransferHandoff,
     createMigrationLink: backups.createMigrationLink,
+    createMigrationRun: backups.createMigrationRun,
     createRestorePlan: backups.createRestorePlan,
     downloadBackupArtifact: backups.downloadBackupArtifact,
     handoffBackupArtifact: backups.handoffBackupArtifact,

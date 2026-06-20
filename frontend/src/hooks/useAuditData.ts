@@ -71,8 +71,10 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
         );
         setHistoryPruneResult(response);
         await loadAudits();
+        return response;
       } catch (error) {
         handleAuditError(error, "History retention prune failed");
+        throw error;
       }
     },
     [apiToken, handleAuditError, loadAudits],

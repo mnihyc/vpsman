@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { PackageCheck } from "lucide-react";
+import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { CrudPager } from "../../components/CrudPager";
 import {
   DEFAULT_UPDATE_VERSION_URL,
@@ -55,43 +56,76 @@ export function AgentUpdateReleasesPanel({
   const [releaseNotes, setReleaseNotes] = useState("");
   const [releaseError, setReleaseError] = useState<string | null>(null);
   const [releasePending, setReleasePending] = useState(false);
+  const [releaseSnapshot, setReleaseSnapshot] =
+    useState<CreateAgentUpdateReleaseRequest | null>(null);
   const latestRelease = releases[0] ?? null;
   const policy = registeredUpdatePolicy(suiteConfig, suiteConfigError, suiteConfigLoading);
 
-  async function recordAgentUpdateRelease() {
+  useEffect(() => {
+    setReleaseSnapshot(null);
+  }, [
+    releaseName,
+    releaseVersion,
+    releaseChannel,
+    releaseArtifactUrl,
+    releaseSha256Hex,
+    releaseSizeBytes,
+    rollbackArtifactUrl,
+    rollbackSha256Hex,
+    rollbackSizeBytes,
+    releaseNotes,
+  ]);
+
+  function releaseRequest(): CreateAgentUpdateReleaseRequest {
+    const artifactUrl = releaseArtifactUrl.trim();
+    const sha256Hex = releaseSha256Hex.trim().toLowerCase();
+    if (!artifactUrl.startsWith("https://")) {
+      throw new Error("Artifact URL must use https://");
+    }
+    if (!/^[0-9a-f]{64}$/.test(sha256Hex)) {
+      throw new Error("Artifact SHA-256 must be 64 hex characters");
+    }
+    const rollbackUrl = rollbackArtifactUrl.trim();
+    const rollbackSha = rollbackSha256Hex.trim().toLowerCase();
+    const hasRollback = Boolean(rollbackUrl || rollbackSha || rollbackSizeBytes.trim());
+    if (hasRollback) {
+      if (!rollbackUrl.startsWith("https://")) {
+        throw new Error("Rollback artifact URL must use https://");
+      }
+      if (!/^[0-9a-f]{64}$/.test(rollbackSha)) {
+        throw new Error("Rollback SHA-256 must be 64 hex characters");
+      }
+    }
+    return {
+      name: releaseName.trim(),
+      version: releaseVersion.trim(),
+      channel: releaseChannel.trim() || "stable",
+      artifact_url: artifactUrl,
+      artifact_sha256_hex: sha256Hex,
+      rollback_artifact_sha256_hex: hasRollback ? rollbackSha : null,
+      rollback_artifact_url: hasRollback ? rollbackUrl : null,
+      rollback_size_bytes: hasRollback ? parseOptionalPositiveInteger(rollbackSizeBytes, "Rollback size") : null,
+      size_bytes: parseOptionalPositiveInteger(releaseSizeBytes, "Size"),
+      notes: releaseNotes.trim() || null,
+      confirmed: true,
+    };
+  }
+
+  async function reviewAgentUpdateRelease() {
     await runPanelAction(setReleasePending, setReleaseError, async () => {
-      const artifactUrl = releaseArtifactUrl.trim();
-      const sha256Hex = releaseSha256Hex.trim().toLowerCase();
-      if (!artifactUrl.startsWith("https://")) {
-        throw new Error("Artifact URL must use https://");
-      }
-      if (!/^[0-9a-f]{64}$/.test(sha256Hex)) {
-        throw new Error("Artifact SHA-256 must be 64 hex characters");
-      }
-      const rollbackUrl = rollbackArtifactUrl.trim();
-      const rollbackSha = rollbackSha256Hex.trim().toLowerCase();
-      const hasRollback = Boolean(rollbackUrl || rollbackSha || rollbackSizeBytes.trim());
-      if (hasRollback) {
-        if (!rollbackUrl.startsWith("https://")) {
-          throw new Error("Rollback artifact URL must use https://");
-        }
-        if (!/^[0-9a-f]{64}$/.test(rollbackSha)) {
-          throw new Error("Rollback SHA-256 must be 64 hex characters");
-        }
-      }
-      await onCreateAgentUpdateRelease({
-        name: releaseName.trim(),
-        version: releaseVersion.trim(),
-        channel: releaseChannel.trim() || "stable",
-        artifact_url: artifactUrl,
-        artifact_sha256_hex: sha256Hex,
-        rollback_artifact_sha256_hex: hasRollback ? rollbackSha : null,
-        rollback_artifact_url: hasRollback ? rollbackUrl : null,
-        rollback_size_bytes: hasRollback ? parseOptionalPositiveInteger(rollbackSizeBytes, "Rollback size") : null,
-        size_bytes: parseOptionalPositiveInteger(releaseSizeBytes, "Size"),
-        notes: releaseNotes.trim() || null,
-        confirmed: true,
-      });
+      setReleaseSnapshot(releaseRequest());
+    });
+  }
+
+  async function recordAgentUpdateRelease() {
+    const snapshot = releaseSnapshot;
+    if (!snapshot) {
+      setReleaseError("Review release metadata before recording");
+      return;
+    }
+    await runPanelAction(setReleasePending, setReleaseError, async () => {
+      await onCreateAgentUpdateRelease(snapshot);
+      setReleaseSnapshot(null);
       clearReleaseInputs();
     });
   }
@@ -275,12 +309,37 @@ export function AgentUpdateReleasesPanel({
         </div>
 
         <div className="releaseFormActions">
-          <button className="primaryAction" disabled={releasePending} onClick={recordAgentUpdateRelease} type="button">
-            Record release
+          <button className="primaryAction" disabled={releasePending} onClick={() => void reviewAgentUpdateRelease()} type="button">
+            Review release
           </button>
         </div>
         {releaseError && <span className="inlineError">{releaseError}</span>}
       </div>
+      <ConfirmationPrompt
+        confirmLabel="Record release"
+        detail="Records the reviewed HTTPS artifact hashes for update admission."
+        items={[
+          { label: "Release", value: releaseSnapshot ? `${releaseSnapshot.name} ${releaseSnapshot.version}` : "-" },
+          { label: "Channel", value: releaseSnapshot?.channel ?? "-" },
+          {
+            label: "Artifact",
+            title: releaseSnapshot?.artifact_sha256_hex,
+            value: releaseSnapshot ? shortHash(releaseSnapshot.artifact_sha256_hex) : "-",
+          },
+          {
+            label: "Rollback",
+            title: releaseSnapshot?.rollback_artifact_sha256_hex ?? undefined,
+            value: releaseSnapshot?.rollback_artifact_sha256_hex
+              ? shortHash(releaseSnapshot.rollback_artifact_sha256_hex)
+              : "none",
+          },
+        ]}
+        onCancel={() => setReleaseSnapshot(null)}
+        onConfirm={() => void recordAgentUpdateRelease()}
+        open={releaseSnapshot !== null}
+        pending={releasePending}
+        title="Confirm agent update release"
+      />
       <CrudPager
         fields={[
           { label: "Release", value: (release) => `${release.name} ${release.version} ${release.channel}` },

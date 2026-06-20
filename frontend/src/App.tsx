@@ -532,6 +532,7 @@ export function App() {
                 onCreateBackupPolicy={dashboard.createBackupPolicy}
                 onCreateJob={dashboard.createJob}
                 onCreateMigrationLink={dashboard.createMigrationLink}
+                onCreateMigrationRun={dashboard.createMigrationRun}
                 onCreateRestorePlan={dashboard.createRestorePlan}
                 onDownloadBackupArtifact={dashboard.downloadBackupArtifact}
                 onHandoffBackupArtifact={dashboard.handoffBackupArtifact}

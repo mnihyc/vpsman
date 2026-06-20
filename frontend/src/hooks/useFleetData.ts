@@ -239,10 +239,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   );
 
   const deleteFleetAlertPolicy = useCallback(
-    async (policyId: string) => {
+    async (policyId: string, reviewedName: string) => {
       await apiDelete(
         `/api/v1/fleet-alert-policies/${encodeURIComponent(policyId)}`,
         apiToken,
+        { confirmed: true, reviewed_name: reviewedName },
       );
       setFleetAlertPolicies((current) =>
         current.filter((policy) => policy.id !== policyId),
@@ -295,10 +296,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   );
 
   const deleteFleetAlertNotificationChannel = useCallback(
-    async (channelId: string) => {
+    async (channelId: string, reviewedName: string) => {
       await apiDelete(
         `/api/v1/fleet-alert-notification-channels/${encodeURIComponent(channelId)}`,
         apiToken,
+        { confirmed: true, reviewed_name: reviewedName },
       );
       setFleetAlertNotificationChannels((current) =>
         current.filter((channel) => channel.id !== channelId),
@@ -380,10 +382,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   );
 
   const deleteWebhookRule = useCallback(
-    async (ruleId: string) => {
+    async (ruleId: string, reviewedName: string) => {
       await apiDelete(
         `/api/v1/webhook-rules/${encodeURIComponent(ruleId)}`,
         apiToken,
+        { confirmed: true, reviewed_name: reviewedName },
       );
       setWebhookRules((current) =>
         current.filter((rule) => rule.id !== ruleId),

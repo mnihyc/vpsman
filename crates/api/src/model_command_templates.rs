@@ -42,6 +42,14 @@ pub(crate) struct UpsertCommandTemplateRequest {
     pub(crate) confirmed: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeleteCommandTemplateRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) reviewed_name: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct JobOutputComparisonView {
     pub(crate) job_id: Uuid,

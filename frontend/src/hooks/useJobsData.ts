@@ -15,6 +15,7 @@ import type {
   ProcessSupervisorInventoryRecord,
   ArtifactCleanupPreviewRecord,
   ServerJobRecord,
+  DeleteCommandTemplateRequest,
   UpsertCommandTemplateRequest,
 } from "../types";
 import type {
@@ -284,10 +285,11 @@ export function useJobsData(
   );
 
   const deleteCommandTemplate = useCallback(
-    async (templateId: string) => {
+    async (templateId: string, request: DeleteCommandTemplateRequest) => {
       const response = await apiDelete<CommandTemplateRecord>(
         `/api/v1/command-templates/${encodeURIComponent(templateId)}`,
         apiToken,
+        request,
       );
       setCommandTemplates((current) => current.filter((template) => template.id !== response.id));
       void onAuditChanged();

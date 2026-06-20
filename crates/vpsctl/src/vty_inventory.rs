@@ -13,10 +13,12 @@ use crate::{
 enum VtyInventoryCommand {
     TagCreate {
         name: String,
+        confirmed: bool,
     },
     AgentTag {
         client_id: String,
         tag: String,
+        confirmed: bool,
     },
     DataSourcePresets {
         domain: Option<String>,
@@ -320,7 +322,8 @@ pub(crate) fn submit_vty_inventory_command(
     command: &str,
 ) -> Result<String> {
     match parse_vty_inventory_command(command)? {
-        VtyInventoryCommand::TagCreate { name } => {
+        VtyInventoryCommand::TagCreate { name, confirmed } => {
+            anyhow::ensure!(confirmed, "tag-create requires --confirmed");
             let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
             let salt_hex = load_super_salt_hex(None)?;
             let privilege_assertion = build_privilege_for_db(
@@ -329,7 +332,7 @@ pub(crate) fn submit_vty_inventory_command(
                     target: &name,
                     selector_expression: None,
                     resolved_targets: &[],
-                    confirmed: true,
+                    confirmed,
                     payload_hash: None,
                 },
                 &password,
@@ -342,12 +345,17 @@ pub(crate) fn submit_vty_inventory_command(
                 token,
                 &serde_json::json!({
                     "name": name,
-                    "confirmed": true,
+                    "confirmed": confirmed,
                     "privilege_assertion": privilege_assertion,
                 }),
             )
         }
-        VtyInventoryCommand::AgentTag { client_id, tag } => {
+        VtyInventoryCommand::AgentTag {
+            client_id,
+            tag,
+            confirmed,
+        } => {
+            anyhow::ensure!(confirmed, "agent-tag requires --confirmed");
             let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
             let salt_hex = load_super_salt_hex(None)?;
             let targets = vec![client_id.clone()];
@@ -357,7 +365,7 @@ pub(crate) fn submit_vty_inventory_command(
                     target: &tag,
                     selector_expression: None,
                     resolved_targets: &targets,
-                    confirmed: true,
+                    confirmed,
                     payload_hash: None,
                 },
                 &password,
@@ -370,7 +378,7 @@ pub(crate) fn submit_vty_inventory_command(
                 token,
                 &serde_json::json!({
                     "tag": tag,
-                    "confirmed": true,
+                    "confirmed": confirmed,
                     "privilege_assertion": privilege_assertion,
                 }),
             )
@@ -778,16 +786,38 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
     let name = parts.first().copied().context("empty inventory command")?;
     match name {
         "tag-create" => {
-            anyhow::ensure!(parts.len() == 2, "usage: tag-create <name>");
+            let mut confirmed = false;
+            let mut tag_name = None;
+            for part in parts.iter().skip(1) {
+                match *part {
+                    "--confirmed" => confirmed = true,
+                    value if tag_name.is_none() => tag_name = Some(value.to_string()),
+                    _ => anyhow::bail!("usage: tag-create <name> --confirmed"),
+                }
+            }
+            let tag_name = tag_name.context("usage: tag-create <name> --confirmed")?;
             Ok(VtyInventoryCommand::TagCreate {
-                name: parts[1].to_string(),
+                name: tag_name,
+                confirmed,
             })
         }
         "agent-tag" => {
-            anyhow::ensure!(parts.len() == 3, "usage: agent-tag <client_id> <tag>");
+            let mut confirmed = false;
+            let mut args = Vec::new();
+            for part in parts.iter().skip(1) {
+                match *part {
+                    "--confirmed" => confirmed = true,
+                    value => args.push(value.to_string()),
+                }
+            }
+            anyhow::ensure!(
+                args.len() == 2,
+                "usage: agent-tag <client_id> <tag> --confirmed"
+            );
             Ok(VtyInventoryCommand::AgentTag {
-                client_id: parts[1].to_string(),
-                tag: parts[2].to_string(),
+                client_id: args[0].clone(),
+                tag: args[1].clone(),
+                confirmed,
             })
         }
         "data-source-presets" => {

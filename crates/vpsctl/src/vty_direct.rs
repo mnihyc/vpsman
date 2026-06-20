@@ -682,6 +682,7 @@ fn submit_history_retention_prune(
     let mut domain = None::<String>;
     let mut dry_run = false;
     let mut metadata_only = None::<bool>;
+    let mut preview_hash = None::<String>;
     let mut confirmed = false;
     let mut index = 1;
     while index < parts.len() {
@@ -698,6 +699,14 @@ fn submit_history_retention_prune(
                 metadata_only = Some(parse_bool(parts[index + 1])?);
                 index += 2;
             }
+            "--preview-hash" if index + 1 < parts.len() => {
+                preview_hash = Some(parts[index + 1].to_string());
+                index += 2;
+            }
+            value if value.starts_with("--preview-hash=") => {
+                preview_hash = Some(value.trim_start_matches("--preview-hash=").to_string());
+                index += 1;
+            }
             "--confirmed" => {
                 confirmed = true;
                 index += 1;
@@ -713,6 +722,7 @@ fn submit_history_retention_prune(
             "domain": domain,
             "dry_run": dry_run,
             "metadata_only": metadata_only,
+            "preview_hash": preview_hash,
             "confirmed": confirmed,
         }),
     )
@@ -808,6 +818,7 @@ fn submit_backup_policy_prune(api_url: &str, token: Option<&str>, command: &str)
     let mut schedule_id = None::<String>;
     let mut dry_run = false;
     let mut metadata_only = None::<bool>;
+    let mut preview_hash = None::<String>;
     let mut confirmed = false;
     let mut index = 1;
     while index < parts.len() {
@@ -824,6 +835,14 @@ fn submit_backup_policy_prune(api_url: &str, token: Option<&str>, command: &str)
                 metadata_only = Some(parse_bool(parts[index + 1])?);
                 index += 2;
             }
+            "--preview-hash" if index + 1 < parts.len() => {
+                preview_hash = Some(parts[index + 1].to_string());
+                index += 2;
+            }
+            value if value.starts_with("--preview-hash=") => {
+                preview_hash = Some(value.trim_start_matches("--preview-hash=").to_string());
+                index += 1;
+            }
             "--confirmed" => {
                 confirmed = true;
                 index += 1;
@@ -839,6 +858,7 @@ fn submit_backup_policy_prune(api_url: &str, token: Option<&str>, command: &str)
             "schedule_id": schedule_id,
             "dry_run": dry_run,
             "metadata_only": metadata_only,
+            "preview_hash": preview_hash,
             "confirmed": confirmed,
         }),
     )
@@ -949,7 +969,7 @@ fn history_retention_upsert_usage() -> String {
 }
 
 fn history_retention_prune_usage() -> String {
-    "usage: history-retention-prune [--domain <domain>] [--dry-run] [--metadata-only true|false] [--confirmed]".to_string()
+    "usage: history-retention-prune [--domain <domain>] [--dry-run] [--metadata-only true|false] [--preview-hash <sha256>] [--confirmed]".to_string()
 }
 
 fn server_jobs_usage() -> String {
@@ -970,5 +990,5 @@ fn server_job_cancel_usage() -> String {
 }
 
 fn backup_policy_prune_usage() -> String {
-    "usage: backup-policy-prune [--schedule-id <uuid>] [--dry-run] [--metadata-only true|false] [--confirmed]".to_string()
+    "usage: backup-policy-prune [--schedule-id <uuid>] [--dry-run] [--metadata-only true|false] [--preview-hash <sha256>] [--confirmed]".to_string()
 }

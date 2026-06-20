@@ -203,6 +203,16 @@ pub(crate) struct UpsertHotConfigRuleTemplateRequest {
     pub(crate) field_schema: serde_json::Value,
     pub(crate) raw_generator_body: String,
     pub(crate) docs_metadata: serde_json::Value,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeleteHotConfigRuleTemplateRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) reviewed_name: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]

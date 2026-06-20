@@ -198,6 +198,20 @@ async fn history_retention_object_prune_partial_error_prunes_metadata_before_del
         ));
     }
 
+    let Json(dry_run) = prune_history_retention(
+        State(state.clone()),
+        headers.clone(),
+        Json(HistoryRetentionPruneRequest {
+            domain: Some("job_outputs".to_string()),
+            dry_run: true,
+            metadata_only: Some(false),
+            preview_hash: None,
+            confirmed: false,
+        }),
+    )
+    .await
+    .unwrap();
+
     let Json(response) = prune_history_retention(
         State(state),
         headers,
@@ -205,6 +219,7 @@ async fn history_retention_object_prune_partial_error_prunes_metadata_before_del
             domain: Some("job_outputs".to_string()),
             dry_run: false,
             metadata_only: Some(false),
+            preview_hash: Some(dry_run.preview_hash),
             confirmed: true,
         }),
     )

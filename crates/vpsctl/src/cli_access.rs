@@ -518,6 +518,8 @@ pub(crate) struct TelemetryTunnelsCommand {
 pub(crate) struct NameCommand {
     #[arg(long)]
     pub(crate) name: String,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -526,6 +528,8 @@ pub(crate) struct AgentTagCommand {
     pub(crate) client_id: String,
     #[arg(long)]
     pub(crate) tag: String,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Args)]

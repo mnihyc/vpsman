@@ -968,6 +968,8 @@ const fleetAlertNotifications = [
     error: null,
     id: "fdfdfdfd-1111-4111-8111-111111111111",
     last_attempt_at: "2026-06-02T10:01:05Z",
+    review_preview_hash:
+      "1111111111111111111111111111111111111111111111111111111111111111",
     status: "queued",
     target: "audit:fleet",
     updated_at: "2026-06-02T10:01:05Z",
@@ -2353,6 +2355,13 @@ export async function installConsoleApiMock(
           target,
         };
       };
+      const withReviewPreviewHash = (
+        delivery: Record<string, unknown>,
+        reviewPreviewHash: string | null,
+      ) =>
+        reviewPreviewHash
+          ? { ...delivery, review_preview_hash: reviewPreviewHash }
+          : delivery;
 
       const readJsonBody = async (
         input: RequestInfo | URL,
@@ -2999,7 +3008,17 @@ export async function installConsoleApiMock(
         ) {
           const body = await readJsonBody(input, init);
           requests.fleetAlertNotificationDispatches.push(body);
-          return jsonResponse(fleetAlertNotificationsFixture);
+          return jsonResponse(
+            fleetAlertNotificationsFixture.map(
+              (delivery: Record<string, unknown>) => ({
+                ...delivery,
+                review_preview_hash: (body as { dry_run?: boolean } | null)
+                  ?.dry_run
+                  ? "1111111111111111111111111111111111111111111111111111111111111111"
+                  : delivery.review_preview_hash,
+              }),
+            ),
+          );
         }
         if (
           pathname === "/api/v1/fleet-alert-notifications/process" &&
@@ -3011,6 +3030,10 @@ export async function installConsoleApiMock(
             fleetAlertNotificationsFixture.map(
               (delivery: Record<string, unknown>) => ({
                 ...delivery,
+                review_preview_hash: (body as { dry_run?: boolean } | null)
+                  ?.dry_run
+                  ? "2222222222222222222222222222222222222222222222222222222222222222"
+                  : delivery.review_preview_hash,
                 status: (body as { dry_run?: boolean } | null)?.dry_run
                   ? delivery.status
                   : "sent",
@@ -3062,13 +3085,18 @@ export async function installConsoleApiMock(
           requests.webhookRuleDispatches.push(body);
           return jsonResponse(
             webhookRulesFixture.map((rule: Record<string, unknown>) =>
-              buildWebhookDelivery(
-                {
-                  ...rule,
-                  event_id: body.event_id,
-                  event_kind: body.event_kind,
-                },
-                body.dry_run ? "matched_dry_run" : "queued",
+              withReviewPreviewHash(
+                buildWebhookDelivery(
+                  {
+                    ...rule,
+                    event_id: body.event_id,
+                    event_kind: body.event_kind,
+                  },
+                  body.dry_run ? "matched_dry_run" : "queued",
+                ),
+                body.dry_run
+                  ? "3333333333333333333333333333333333333333333333333333333333333333"
+                  : null,
               ),
             ),
           );
@@ -3095,6 +3123,9 @@ export async function installConsoleApiMock(
           return jsonResponse(
             webhookDeliveriesFixture.map((delivery: Record<string, unknown>) => ({
               ...delivery,
+              review_preview_hash: body?.dry_run
+                ? "4444444444444444444444444444444444444444444444444444444444444444"
+                : delivery.review_preview_hash,
               status: body?.dry_run ? delivery.status : "delivered",
             })),
           );

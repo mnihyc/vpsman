@@ -95,17 +95,13 @@ impl Repository {
         let preset = match self {
             Self::Memory(memory) => {
                 let mut presets = memory.data_source_presets.write().await;
-                if let Some(existing) = presets.iter_mut().find(|preset| {
+                if presets.iter().any(|preset| {
                     preset.domain == request.domain
                         && preset.name == request.name
                         && preset.scope == scope
                         && preset.owner_client_id.as_deref() == owner
                 }) {
-                    anyhow::ensure!(!existing.built_in, "data_source_preset_builtin_immutable");
-                    existing.description = request.description.clone();
-                    existing.definition = request.definition.clone();
-                    existing.updated_at = now.clone();
-                    existing.clone()
+                    anyhow::bail!("data_source_preset_duplicate");
                 } else {
                     let preset = DataSourcePresetView {
                         id: Uuid::new_v4(),
@@ -154,49 +150,30 @@ impl Repository {
                     .map(|row| row.get::<Uuid, _>("id"))
                 };
 
-                let row = if let Some(existing_id) = existing_id {
-                    sqlx::query(
-                        r#"
-                        UPDATE data_source_presets
-                        SET description = $2, definition = $3, updated_at = now()
-                        WHERE id = $1 AND built_in = FALSE
-                        RETURNING
-                            id, domain, name, scope, built_in, is_default, owner_client_id,
-                            description, definition, created_at::text AS created_at,
-                            updated_at::text AS updated_at,
-                            0::bigint AS assigned_client_count
-                        "#,
+                anyhow::ensure!(existing_id.is_none(), "data_source_preset_duplicate");
+                let row = sqlx::query(
+                    r#"
+                    INSERT INTO data_source_presets (
+                        id, domain, name, scope, built_in, is_default, owner_client_id,
+                        description, definition
                     )
-                    .bind(existing_id)
-                    .bind(&request.description)
-                    .bind(sqlx::types::Json(&request.definition))
-                    .fetch_one(pool)
-                    .await?
-                } else {
-                    sqlx::query(
-                        r#"
-                        INSERT INTO data_source_presets (
-                            id, domain, name, scope, built_in, is_default, owner_client_id,
-                            description, definition
-                        )
-                        VALUES ($1, $2, $3, $4, FALSE, FALSE, $5, $6, $7)
-                        RETURNING
-                            id, domain, name, scope, built_in, is_default, owner_client_id,
-                            description, definition, created_at::text AS created_at,
-                            updated_at::text AS updated_at,
-                            0::bigint AS assigned_client_count
-                        "#,
-                    )
-                    .bind(Uuid::new_v4())
-                    .bind(&request.domain)
-                    .bind(&request.name)
-                    .bind(scope)
-                    .bind(owner)
-                    .bind(&request.description)
-                    .bind(sqlx::types::Json(&request.definition))
-                    .fetch_one(pool)
-                    .await?
-                };
+                    VALUES ($1, $2, $3, $4, FALSE, FALSE, $5, $6, $7)
+                    RETURNING
+                        id, domain, name, scope, built_in, is_default, owner_client_id,
+                        description, definition, created_at::text AS created_at,
+                        updated_at::text AS updated_at,
+                        0::bigint AS assigned_client_count
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(&request.domain)
+                .bind(&request.name)
+                .bind(scope)
+                .bind(owner)
+                .bind(&request.description)
+                .bind(sqlx::types::Json(&request.definition))
+                .fetch_one(pool)
+                .await?;
                 data_source_preset_from_row(row)?
             }
         };
@@ -425,7 +402,7 @@ impl Repository {
                 diff,
             });
         }
-        if diff.affected_client_count > 1 && !request.confirmed {
+        if !request.confirmed {
             return Ok(UpdateDataSourcePresetResponse {
                 preset,
                 affected_client_count: diff.affected_client_count,

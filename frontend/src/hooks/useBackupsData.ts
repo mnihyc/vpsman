@@ -13,6 +13,8 @@ import type {
   CreateBackupPolicyRequest,
   CreateBackupRequest,
   CreateMigrationLinkRequest,
+  CreateMigrationRunRequest,
+  CreateMigrationRunResponse,
   CreateRestorePlanRequest,
   MigrationLinkRecord,
   RestorePlanRecord,
@@ -124,6 +126,15 @@ export function useBackupsData(
     [apiToken, loadBackups, onAuditChanged],
   );
 
+  const createMigrationRun = useCallback(
+    async (request: CreateMigrationRunRequest) => {
+      const response = await apiPost<CreateMigrationRunResponse>("/api/v1/migration-runs", apiToken, request);
+      await Promise.all([loadBackups(), onAuditChanged()]);
+      return response;
+    },
+    [apiToken, loadBackups, onAuditChanged],
+  );
+
   const uploadBackupArtifact = useCallback(
     async (backupRequestId: string, request: UploadBackupArtifactRequest) => {
       const response = await apiPost<BackupArtifactRecord>(
@@ -226,6 +237,7 @@ export function useBackupsData(
     createBackupRequest,
     createBackupPolicy,
     createMigrationLink,
+    createMigrationRun,
     createRestorePlan,
     downloadBackupArtifact,
     handoffBackupArtifact,
