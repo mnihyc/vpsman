@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use sqlx::Row;
 use uuid::Uuid;
-use vpsman_common::{payload_hash, JobCommand};
+use vpsman_common::JobCommand;
 
 use crate::{
     model::{
@@ -55,9 +55,6 @@ impl Repository {
             operation: JobCommand::Backup {
                 paths: request.paths,
                 include_config: request.include_config,
-                recipient_public_key_hex: request
-                    .recipient_public_key_hex
-                    .map(|value| value.to_ascii_lowercase()),
             },
             selector_expression: request.selector_expression,
             target_client_ids: request.target_client_ids,
@@ -221,6 +218,48 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 prune_postgres_backup_policy_candidates_metadata(pool, candidates).await
+            }
+        }
+    }
+
+    pub(crate) async fn begin_backup_policy_candidate_object_delete(
+        &self,
+        candidate: &BackupPolicyPruneCandidate,
+    ) -> Result<bool> {
+        match self {
+            Self::Memory(_) => Ok(true),
+            Self::Postgres(pool) => {
+                Repository::mark_server_artifact_deleting_in_pool(pool, &candidate.object_key).await
+            }
+        }
+    }
+
+    pub(crate) async fn finalize_backup_policy_candidate_object_delete(
+        &self,
+        candidate: &BackupPolicyPruneCandidate,
+    ) -> Result<i64> {
+        match self {
+            Self::Memory(_) => self.prune_backup_policy_candidate_metadata(candidate).await,
+            Self::Postgres(pool) => {
+                finalize_postgres_backup_policy_candidate_object_delete(pool, candidate).await
+            }
+        }
+    }
+
+    pub(crate) async fn mark_backup_policy_candidate_delete_failed(
+        &self,
+        candidate: &BackupPolicyPruneCandidate,
+        error: &str,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(_) => Ok(()),
+            Self::Postgres(pool) => {
+                Repository::mark_server_artifact_delete_failed_in_pool(
+                    pool,
+                    &candidate.object_key,
+                    error,
+                )
+                .await
             }
         }
     }
@@ -429,15 +468,6 @@ impl Repository {
         metadata: &BackupPolicyMetadata,
         operator: &AuthContext,
     ) -> Result<()> {
-        let recipient_key_sha256_hex = match &schedule.operation {
-            JobCommand::Backup {
-                recipient_public_key_hex: Some(recipient_public_key_hex),
-                ..
-            } => Some(payload_hash(
-                recipient_public_key_hex.to_ascii_lowercase().as_bytes(),
-            )),
-            _ => None,
-        };
         let audit_metadata = serde_json::json!({
             "name": &schedule.name,
             "selector_expression": &schedule.selector_expression,
@@ -447,7 +477,6 @@ impl Repository {
             "retention_days": metadata.retention_days,
             "keep_last": metadata.keep_last,
             "rotation_generation": &metadata.rotation_generation,
-            "recipient_public_key_sha256_hex": recipient_key_sha256_hex,
             "operator_username": &operator.operator.username,
             "session_id": operator.session_id,
         });
@@ -590,6 +619,50 @@ async fn prune_postgres_backup_policy_candidate_metadata(
     Ok(pruned_rows)
 }
 
+async fn finalize_postgres_backup_policy_candidate_object_delete(
+    pool: &sqlx::PgPool,
+    candidate: &BackupPolicyPruneCandidate,
+) -> Result<i64> {
+    let mut tx = pool.begin().await?;
+    let pruned_rows = sqlx::query_scalar::<_, i64>(
+        r#"
+        WITH doomed AS (
+            SELECT
+                $1::uuid AS request_id,
+                artifact.id AS artifact_id,
+                artifact.object_key
+            FROM backup_artifacts artifact
+            WHERE artifact.id = $2
+              AND artifact.object_key = $3
+        ),
+        cleared_requests AS (
+            UPDATE backup_requests request
+            SET artifact_id = NULL,
+                status = 'requested_metadata_only'
+            FROM doomed
+            WHERE request.id = doomed.request_id
+              AND request.artifact_id = doomed.artifact_id
+            RETURNING request.id
+        ),
+        deleted_artifacts AS (
+            DELETE FROM backup_artifacts artifact
+            USING doomed
+            WHERE artifact.id = doomed.artifact_id
+            RETURNING artifact.object_key
+        )
+        SELECT count(*)::bigint FROM deleted_artifacts
+        "#,
+    )
+    .bind(candidate.request_id)
+    .bind(candidate.artifact_id)
+    .bind(&candidate.object_key)
+    .fetch_one(&mut *tx)
+    .await?;
+    Repository::mark_server_artifact_deleted_in_tx(&mut tx, &candidate.object_key).await?;
+    tx.commit().await?;
+    Ok(pruned_rows)
+}
+
 async fn prune_postgres_backup_policy_candidates_metadata(
     pool: &sqlx::PgPool,
     candidates: &[BackupPolicyPruneCandidate],
@@ -656,7 +729,6 @@ fn backup_policy_view(
     let JobCommand::Backup {
         paths,
         include_config,
-        recipient_public_key_hex,
     } = schedule.operation.clone()
     else {
         return None;
@@ -669,7 +741,6 @@ fn backup_policy_view(
         target_client_ids: schedule.target_client_ids,
         paths,
         include_config,
-        recipient_public_key_hex,
         retention_days: metadata.retention_days,
         keep_last: metadata.keep_last,
         rotation_generation: metadata.rotation_generation,

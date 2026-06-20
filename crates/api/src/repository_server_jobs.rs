@@ -1,6 +1,6 @@
 use anyhow::{ensure, Result};
 use serde_json::json;
-use sqlx::Row;
+use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::{
     expression_matches, parse_expression, payload_hash, Expression, ExpressionContext,
@@ -21,59 +21,78 @@ impl Repository {
         let Self::Postgres(pool) = self else {
             return Ok(());
         };
+        let mut tx = pool.begin().await?;
+        insert_server_artifact_in_tx(&mut tx, &artifact, "active").await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn reserve_server_artifact(&self, artifact: NewServerArtifact) -> Result<()> {
+        let Self::Postgres(pool) = self else {
+            return Ok(());
+        };
+        let mut tx = pool.begin().await?;
+        insert_server_artifact_in_tx(&mut tx, &artifact, "creating").await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn upsert_server_artifact_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        artifact: &NewServerArtifact,
+        status: &str,
+    ) -> Result<()> {
+        insert_server_artifact_in_tx(tx, artifact, status).await
+    }
+
+    pub(crate) async fn mark_server_artifact_deleted_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        object_key: &str,
+    ) -> Result<()> {
+        mark_server_artifact_deleted_in_tx(tx, object_key).await
+    }
+
+    pub(crate) async fn discard_server_artifact_reservation(&self, object_key: &str) -> Result<()> {
+        let Self::Postgres(pool) = self else {
+            return Ok(());
+        };
         sqlx::query(
             r#"
-            INSERT INTO server_artifacts (
-                id,
-                domain,
-                object_key,
-                sha256_hex,
-                size_bytes,
-                status,
-                job_id,
-                client_id,
-                stream,
-                seq,
-                backup_request_id,
-                backup_artifact_id,
-                release_id,
-                metadata
-            )
-            VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $10, $11, $12, $13)
-            ON CONFLICT (object_key)
-            DO UPDATE SET
-                domain = EXCLUDED.domain,
-                sha256_hex = EXCLUDED.sha256_hex,
-                size_bytes = EXCLUDED.size_bytes,
-                status = 'active',
-                job_id = EXCLUDED.job_id,
-                client_id = EXCLUDED.client_id,
-                stream = EXCLUDED.stream,
-                seq = EXCLUDED.seq,
-                backup_request_id = EXCLUDED.backup_request_id,
-                backup_artifact_id = EXCLUDED.backup_artifact_id,
-                release_id = EXCLUDED.release_id,
-                metadata = EXCLUDED.metadata,
-                tombstoned_at = NULL,
-                deleted_at = NULL
+            DELETE FROM server_artifacts
+            WHERE object_key = $1
+              AND status = 'creating'
             "#,
         )
-        .bind(Uuid::new_v4())
-        .bind(&artifact.domain)
-        .bind(&artifact.object_key)
-        .bind(&artifact.sha256_hex)
-        .bind(artifact.size_bytes)
-        .bind(artifact.job_id)
-        .bind(&artifact.client_id)
-        .bind(&artifact.stream)
-        .bind(artifact.seq)
-        .bind(artifact.backup_request_id)
-        .bind(artifact.backup_artifact_id)
-        .bind(artifact.release_id)
-        .bind(artifact.metadata)
+        .bind(object_key)
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    pub(crate) async fn mark_server_artifact_delete_failed(
+        &self,
+        object_key: &str,
+        error: &str,
+    ) -> Result<()> {
+        let Self::Postgres(pool) = self else {
+            return Ok(());
+        };
+        mark_server_artifact_delete_failed_in_pool(pool, object_key, error).await
+    }
+
+    pub(crate) async fn mark_server_artifact_delete_failed_in_pool(
+        pool: &sqlx::PgPool,
+        object_key: &str,
+        error: &str,
+    ) -> Result<()> {
+        mark_server_artifact_delete_failed_in_pool(pool, object_key, error).await
+    }
+
+    pub(crate) async fn mark_server_artifact_deleting_in_pool(
+        pool: &sqlx::PgPool,
+        object_key: &str,
+    ) -> Result<bool> {
+        mark_server_artifact_deleting_in_pool(pool, object_key).await
     }
 
     pub(crate) async fn preview_artifact_cleanup(
@@ -344,7 +363,7 @@ impl Repository {
                         seq,
                         created_at::text AS created_at
                     FROM server_artifacts
-                    WHERE status IN ('active', 'deleting')
+                    WHERE status IN ('creating', 'active', 'deleting', 'delete_failed')
                       AND domain = ANY($1)
                     ORDER BY created_at DESC, object_key ASC
                     LIMIT 10000
@@ -360,6 +379,134 @@ impl Repository {
             }
         }
     }
+}
+
+async fn insert_server_artifact_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    artifact: &NewServerArtifact,
+    status: &str,
+) -> Result<()> {
+    let row = sqlx::query(
+        r#"
+        INSERT INTO server_artifacts (
+            id,
+            domain,
+            object_key,
+            sha256_hex,
+            size_bytes,
+            status,
+            job_id,
+            client_id,
+            stream,
+            seq,
+            backup_request_id,
+            backup_artifact_id,
+            release_id,
+            metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ON CONFLICT (object_key)
+        DO UPDATE SET
+            status = EXCLUDED.status,
+            sha256_hex = EXCLUDED.sha256_hex,
+            size_bytes = EXCLUDED.size_bytes,
+            metadata = EXCLUDED.metadata,
+            tombstoned_at = NULL,
+            deleted_at = NULL
+        WHERE server_artifacts.domain = EXCLUDED.domain
+          AND server_artifacts.sha256_hex = EXCLUDED.sha256_hex
+          AND server_artifacts.size_bytes = EXCLUDED.size_bytes
+          AND server_artifacts.job_id IS NOT DISTINCT FROM EXCLUDED.job_id
+          AND server_artifacts.client_id IS NOT DISTINCT FROM EXCLUDED.client_id
+          AND server_artifacts.stream IS NOT DISTINCT FROM EXCLUDED.stream
+          AND server_artifacts.seq IS NOT DISTINCT FROM EXCLUDED.seq
+          AND server_artifacts.backup_request_id IS NOT DISTINCT FROM EXCLUDED.backup_request_id
+          AND server_artifacts.backup_artifact_id IS NOT DISTINCT FROM EXCLUDED.backup_artifact_id
+          AND server_artifacts.release_id IS NOT DISTINCT FROM EXCLUDED.release_id
+          AND server_artifacts.status IN ('creating', 'active', 'delete_failed')
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(&artifact.domain)
+    .bind(&artifact.object_key)
+    .bind(&artifact.sha256_hex)
+    .bind(artifact.size_bytes)
+    .bind(status)
+    .bind(artifact.job_id)
+    .bind(&artifact.client_id)
+    .bind(&artifact.stream)
+    .bind(artifact.seq)
+    .bind(artifact.backup_request_id)
+    .bind(artifact.backup_artifact_id)
+    .bind(artifact.release_id)
+    .bind(&artifact.metadata)
+    .fetch_optional(&mut **tx)
+    .await?;
+    ensure!(row.is_some(), "server_artifact_object_key_conflict");
+    Ok(())
+}
+
+async fn mark_server_artifact_deleting_in_pool(
+    pool: &sqlx::PgPool,
+    object_key: &str,
+) -> Result<bool> {
+    let updated = sqlx::query(
+        r#"
+        UPDATE server_artifacts
+        SET status = 'deleting',
+            metadata = metadata - 'delete_error' - 'delete_failed_at'
+        WHERE object_key = $1
+          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
+        "#,
+    )
+    .bind(object_key)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() > 0)
+}
+
+async fn mark_server_artifact_delete_failed_in_pool(
+    pool: &sqlx::PgPool,
+    object_key: &str,
+    error: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE server_artifacts
+        SET status = 'delete_failed',
+            metadata = metadata || jsonb_build_object(
+                'delete_error', left($2, 1000),
+                'delete_failed_at', now()::text
+            )
+        WHERE object_key = $1
+          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
+        "#,
+    )
+    .bind(object_key)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn mark_server_artifact_deleted_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    object_key: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE server_artifacts
+        SET status = 'deleted',
+            deleted_at = now()
+        WHERE object_key = $1
+          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
+        "#,
+    )
+    .bind(object_key)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 fn normalize_cleanup_expression(expression: &str) -> Result<String> {

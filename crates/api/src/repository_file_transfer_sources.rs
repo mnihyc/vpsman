@@ -27,15 +27,19 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT
-                        id,
-                        name,
-                        object_key,
-                        sha256_hex,
-                        size_bytes,
-                        created_by,
-                        created_at::text AS created_at
-                    FROM file_transfer_source_artifacts
-                    ORDER BY created_at DESC, id DESC
+                        artifact.id,
+                        artifact.name,
+                        artifact.object_key,
+                        artifact.sha256_hex,
+                        artifact.size_bytes,
+                        COALESCE(server_artifact.status, 'active') AS status,
+                        artifact.created_by,
+                        artifact.created_at::text AS created_at
+                    FROM file_transfer_source_artifacts artifact
+                    LEFT JOIN server_artifacts server_artifact
+                      ON server_artifact.object_key = artifact.object_key
+                     AND server_artifact.status <> 'deleted'
+                    ORDER BY artifact.created_at DESC, artifact.id DESC
                     LIMIT $1
                     "#,
                 )
@@ -65,15 +69,19 @@ impl Repository {
                 let row = sqlx::query(
                     r#"
                     SELECT
-                        id,
-                        name,
-                        object_key,
-                        sha256_hex,
-                        size_bytes,
-                        created_by,
-                        created_at::text AS created_at
-                    FROM file_transfer_source_artifacts
-                    WHERE id = $1
+                        artifact.id,
+                        artifact.name,
+                        artifact.object_key,
+                        artifact.sha256_hex,
+                        artifact.size_bytes,
+                        COALESCE(server_artifact.status, 'active') AS status,
+                        artifact.created_by,
+                        artifact.created_at::text AS created_at
+                    FROM file_transfer_source_artifacts artifact
+                    LEFT JOIN server_artifacts server_artifact
+                      ON server_artifact.object_key = artifact.object_key
+                     AND server_artifact.status <> 'deleted'
+                    WHERE artifact.id = $1
                     "#,
                 )
                 .bind(artifact_id)
@@ -87,12 +95,12 @@ impl Repository {
     pub(crate) async fn record_file_transfer_source_artifact(
         &self,
         name: String,
+        artifact_id: Uuid,
         object_key: String,
         sha256_hex: String,
         size_bytes: i64,
         operator: &AuthContext,
     ) -> Result<FileTransferSourceArtifactView> {
-        let artifact_id = Uuid::new_v4();
         let artifact = match self {
             Self::Memory(memory) => {
                 let artifact = FileTransferSourceArtifactView {
@@ -101,6 +109,7 @@ impl Repository {
                     object_key,
                     sha256_hex,
                     size_bytes,
+                    status: "active".to_string(),
                     created_by: Some(operator.operator.id),
                     created_at: unix_now().to_string(),
                     download_path: file_transfer_source_artifact_download_path(artifact_id),
@@ -113,6 +122,7 @@ impl Repository {
                 artifact
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let row = sqlx::query(
                     r#"
                     INSERT INTO file_transfer_source_artifacts (
@@ -125,6 +135,7 @@ impl Repository {
                         object_key,
                         sha256_hex,
                         size_bytes,
+                        'active' AS status,
                         created_by,
                         created_at::text AS created_at
                     "#,
@@ -135,30 +146,19 @@ impl Repository {
                 .bind(sha256_hex)
                 .bind(size_bytes)
                 .bind(operator.operator.id)
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await?;
-                file_transfer_source_artifact_from_row(row)?
+                let artifact = file_transfer_source_artifact_from_row(row)?;
+                Repository::upsert_server_artifact_in_tx(
+                    &mut tx,
+                    &file_transfer_source_server_artifact(&artifact),
+                    "active",
+                )
+                .await?;
+                tx.commit().await?;
+                artifact
             }
         };
-        self.register_server_artifact(NewServerArtifact {
-            domain: "file_transfer_source".to_string(),
-            object_key: artifact.object_key.clone(),
-            sha256_hex: artifact.sha256_hex.clone(),
-            size_bytes: artifact.size_bytes,
-            job_id: None,
-            client_id: None,
-            stream: None,
-            seq: None,
-            backup_request_id: None,
-            backup_artifact_id: None,
-            release_id: None,
-            metadata: serde_json::json!({
-                "source_artifact_id": artifact.id,
-                "name": &artifact.name,
-                "created_by": artifact.created_by,
-            }),
-        })
-        .await?;
         Ok(artifact)
     }
 }
@@ -173,16 +173,43 @@ fn file_transfer_source_artifact_from_row(
         object_key: row.try_get("object_key")?,
         sha256_hex: row.try_get("sha256_hex")?,
         size_bytes: row.try_get("size_bytes")?,
+        status: row.try_get("status")?,
         created_by: row.try_get("created_by")?,
         created_at: row.try_get("created_at")?,
         download_path: file_transfer_source_artifact_download_path(id),
     })
 }
 
-pub(crate) fn file_transfer_source_artifact_object_key(sha256_hex: &str) -> String {
-    format!("file-transfer-sources/{sha256_hex}.bin")
+pub(crate) fn file_transfer_source_artifact_object_key(
+    artifact_id: Uuid,
+    sha256_hex: &str,
+) -> String {
+    format!("file-transfer-sources/{artifact_id}-{sha256_hex}.bin")
 }
 
 pub(crate) fn file_transfer_source_artifact_download_path(artifact_id: Uuid) -> String {
     format!("/api/v1/file-transfer-sources/{artifact_id}/artifact")
+}
+
+pub(crate) fn file_transfer_source_server_artifact(
+    artifact: &FileTransferSourceArtifactView,
+) -> NewServerArtifact {
+    NewServerArtifact {
+        domain: "file_transfer_source".to_string(),
+        object_key: artifact.object_key.clone(),
+        sha256_hex: artifact.sha256_hex.clone(),
+        size_bytes: artifact.size_bytes,
+        job_id: None,
+        client_id: None,
+        stream: None,
+        seq: None,
+        backup_request_id: None,
+        backup_artifact_id: None,
+        release_id: None,
+        metadata: serde_json::json!({
+            "source_artifact_id": artifact.id,
+            "name": &artifact.name,
+            "created_by": artifact.created_by,
+        }),
+    }
 }

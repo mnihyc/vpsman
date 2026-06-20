@@ -6,14 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use chacha20poly1305::{
-    aead::{Aead, KeyInit},
-    ChaCha20Poly1305, Key, Nonce,
-};
-use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::{
     io::AsyncReadExt,
     sync::mpsc,
@@ -22,12 +15,10 @@ use tokio::{
 use vpsman_common::{
     payload_hash, validate_absolute_file_path, AgentConfig, CommandOutput, OutputStream,
 };
-use x25519_dalek::{EphemeralSecret, PublicKey};
 
 use crate::command_worker::{run_cancelable, CommandCancelToken};
 use crate::telemetry::unix_now;
 
-pub(crate) const BACKUP_ARTIFACT_FORMAT: &str = "vpsman.backup_artifact.v1";
 pub(crate) const BACKUP_ARCHIVE_FORMAT: &str = "vpsman.backup_tar.v1";
 pub(crate) const BACKUP_ARCHIVE_MANIFEST_PATH: &str = "vpsman-backup/manifest.json";
 const MAX_BACKUP_PATHS: usize = 64;
@@ -104,28 +95,12 @@ struct BackupFilePayload {
     data: Vec<u8>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-struct EncryptedBackupArtifact {
-    format: String,
-    version: u32,
-    cipher: String,
-    compression: String,
-    client_id: String,
-    created_unix: u64,
-    recipient_public_key_sha256_hex: String,
-    ephemeral_public_key_hex: String,
-    nonce_hex: String,
-    ciphertext_sha256_hex: String,
-    ciphertext_base64: String,
-}
-
 pub(crate) struct BackupCommandInput<'a> {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) config: &'a AgentConfig,
     pub(crate) config_path: &'a Path,
     pub(crate) paths: &'a [String],
     pub(crate) include_config: bool,
-    pub(crate) recipient_public_key_hex: Option<&'a str>,
     pub(crate) output_tx: Option<mpsc::Sender<CommandOutput>>,
     pub(crate) timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
@@ -140,7 +115,6 @@ pub(crate) async fn execute_backup_command(
         config_path,
         paths,
         include_config,
-        recipient_public_key_hex,
         output_tx,
         timeout_secs,
         cancel_token,
@@ -148,13 +122,12 @@ pub(crate) async fn execute_backup_command(
     run_cancelable("backup", cancel_token.clone(), async move {
         time::timeout(
             Duration::from_secs(timeout_secs.max(1)),
-            create_encrypted_backup(
+            create_backup_archive_artifact(
                 job_id,
                 config,
                 config_path,
                 paths,
                 include_config,
-                recipient_public_key_hex,
                 output_tx,
                 cancel_token,
             ),
@@ -165,23 +138,17 @@ pub(crate) async fn execute_backup_command(
     .await
 }
 
-async fn create_encrypted_backup(
+async fn create_backup_archive_artifact(
     job_id: uuid::Uuid,
     config: &AgentConfig,
     config_path: &Path,
     paths: &[String],
     include_config: bool,
-    recipient_public_key_hex: Option<&str>,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
     cancel_token.check("backup")?;
     validate_backup_scope(paths, include_config)?;
-    let recipient_public_key_hex = recipient_public_key_hex
-        .or(config.backup.recipient_public_key_hex.as_deref())
-        .context("backup recipient public key is not configured")?;
-    cancel_token.check("backup")?;
-    let recipient_public_key = decode_public_key(recipient_public_key_hex)?;
     let files = collect_backup_files(
         config_path,
         paths,
@@ -209,12 +176,7 @@ async fn create_encrypted_backup(
             config.backup.max_plaintext_bytes
         );
     }
-    let compressed = lz4_flex::compress_prepend_size(&plaintext);
-    cancel_token.check("backup")?;
-    let artifact = encrypt_backup_artifact(config, &recipient_public_key, &compressed)?;
-    cancel_token.check("backup")?;
-    let artifact_bytes =
-        serde_json::to_vec(&artifact).context("failed to encode encrypted backup artifact")?;
+    let artifact_bytes = plaintext;
     let (mut outputs, streamed, chunk_count, chunk_bytes, artifact_sha256_hex) =
         if let Some(output_tx) = output_tx {
             let summary = super::file_pull::stream_buffered_payload_output(
@@ -246,20 +208,13 @@ async fn create_encrypted_backup(
         };
     let status = serde_json::json!({
         "type": "backup",
-        "format": BACKUP_ARTIFACT_FORMAT,
-        "encrypted": true,
-        "compression": "lz4-size-prepended",
-        "cipher": "x25519-chacha20poly1305",
+        "format": BACKUP_ARCHIVE_FORMAT,
         "archive_format": BACKUP_ARCHIVE_FORMAT,
         "paths": paths,
         "include_config": include_config,
         "file_count": file_count,
         "artifact_size_bytes": artifact_bytes.len(),
-        "ciphertext_sha256_hex": artifact.ciphertext_sha256_hex,
         "artifact_sha256_hex": artifact_sha256_hex,
-        "recipient_public_key_sha256_hex": artifact.recipient_public_key_sha256_hex,
-        "ephemeral_public_key_hex": artifact.ephemeral_public_key_hex,
-        "nonce_hex": artifact.nonce_hex,
         "chunk_bytes": chunk_bytes,
         "chunk_count": chunk_count,
         "streamed": streamed,
@@ -458,70 +413,13 @@ fn validate_backup_scope(paths: &[String], include_config: bool) -> Result<()> {
     Ok(())
 }
 
-fn encrypt_backup_artifact(
-    config: &AgentConfig,
-    recipient_public_key: &PublicKey,
-    compressed_archive: &[u8],
-) -> Result<EncryptedBackupArtifact> {
-    let ephemeral_secret = EphemeralSecret::random_from_rng(OsRng);
-    let ephemeral_public = PublicKey::from(&ephemeral_secret);
-    let shared_secret = ephemeral_secret.diffie_hellman(recipient_public_key);
-    let key_bytes = backup_encryption_key(
-        shared_secret.as_bytes(),
-        recipient_public_key.as_bytes(),
-        ephemeral_public.as_bytes(),
-    );
-    let mut nonce = [0_u8; 12];
-    OsRng.fill_bytes(&mut nonce);
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
-    let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), compressed_archive)
-        .map_err(|_| anyhow::anyhow!("failed to encrypt backup artifact"))?;
-    Ok(EncryptedBackupArtifact {
-        format: BACKUP_ARTIFACT_FORMAT.to_string(),
-        version: 1,
-        cipher: "x25519-chacha20poly1305".to_string(),
-        compression: "lz4-size-prepended".to_string(),
-        client_id: config.client_id.clone(),
-        created_unix: unix_now(),
-        recipient_public_key_sha256_hex: payload_hash(recipient_public_key.as_bytes()),
-        ephemeral_public_key_hex: hex::encode(ephemeral_public.as_bytes()),
-        nonce_hex: hex::encode(nonce),
-        ciphertext_sha256_hex: payload_hash(&ciphertext),
-        ciphertext_base64: BASE64_STANDARD.encode(ciphertext),
-    })
-}
-
-fn decode_public_key(value: &str) -> Result<PublicKey> {
-    let bytes = hex::decode(value).context("backup recipient public key is not valid hex")?;
-    let bytes: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("backup recipient public key must be 32 bytes"))?;
-    Ok(PublicKey::from(bytes))
-}
-
-fn backup_encryption_key(
-    shared_secret: &[u8; 32],
-    recipient_public_key: &[u8; 32],
-    ephemeral_public_key: &[u8; 32],
-) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"vpsman-backup-artifact-v1");
-    hasher.update(shared_secret);
-    hasher.update(recipient_public_key);
-    hasher.update(ephemeral_public_key);
-    hasher.finalize().into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chacha20poly1305::aead::Aead;
     use vpsman_common::AgentBackupConfig;
-    use x25519_dalek::StaticSecret;
 
     #[tokio::test]
-    async fn creates_encrypted_backup_artifact_without_plaintext_leak() {
+    async fn creates_plain_backup_tar_artifact() {
         let job_id = uuid::Uuid::new_v4();
         let dir = std::env::temp_dir().join(format!("vpsman-agent-backup-{job_id}"));
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -533,12 +431,9 @@ mod tests {
         tokio::fs::write(&config_path, b"noise_client_private_key_hex = \"secret\"")
             .await
             .unwrap();
-        let recipient_secret = StaticSecret::from([7_u8; 32]);
-        let recipient_public = PublicKey::from(&recipient_secret);
         let mut config = AgentConfig {
             client_id: "client-a".to_string(),
             backup: AgentBackupConfig {
-                recipient_public_key_hex: Some(hex::encode(recipient_public.as_bytes())),
                 max_plaintext_bytes: 8192,
             },
             ..AgentConfig::default()
@@ -552,7 +447,6 @@ mod tests {
             config_path: &config_path,
             paths: &paths,
             include_config: true,
-            recipient_public_key_hex: None,
             output_tx: None,
             timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -564,13 +458,7 @@ mod tests {
             .filter(|output| output.stream == OutputStream::Stdout)
             .flat_map(|output| output.data.clone())
             .collect::<Vec<_>>();
-        let artifact_text = String::from_utf8_lossy(&artifact_bytes);
-        assert!(!artifact_text.contains("selected secret contents"));
-        assert!(!artifact_text.contains("secret-privilege-key"));
-
-        let artifact: EncryptedBackupArtifact = serde_json::from_slice(&artifact_bytes).unwrap();
-        assert_eq!(artifact.format, BACKUP_ARTIFACT_FORMAT);
-        let archive = decrypt_artifact(&recipient_secret, &artifact);
+        let archive = manifest_from_tar(&artifact_bytes);
         assert_eq!(archive.format, BACKUP_ARCHIVE_FORMAT);
         assert_eq!(archive.client_id, "client-a");
         assert_eq!(archive.files.len(), 2);
@@ -582,7 +470,6 @@ mod tests {
         let status = outputs.iter().find(|output| output.done).unwrap();
         let status: serde_json::Value = serde_json::from_slice(&status.data).unwrap();
         assert_eq!(status["type"], "backup");
-        assert_eq!(status["encrypted"], true);
         assert_eq!(status["file_count"], 2);
         assert_eq!(status["artifact_sha256_hex"], payload_hash(&artifact_bytes));
 
@@ -605,12 +492,9 @@ mod tests {
         tokio::fs::write(&config_path, b"noise_client_private_key_hex = \"secret\"")
             .await
             .unwrap();
-        let recipient_secret = StaticSecret::from([11_u8; 32]);
-        let recipient_public = PublicKey::from(&recipient_secret);
         let mut config = AgentConfig {
             client_id: "client-stream".to_string(),
             backup: AgentBackupConfig {
-                recipient_public_key_hex: Some(hex::encode(recipient_public.as_bytes())),
                 max_plaintext_bytes: 64 * 1024,
             },
             ..AgentConfig::default()
@@ -625,7 +509,6 @@ mod tests {
             config_path: &config_path,
             paths: &paths,
             include_config: true,
-            recipient_public_key_hex: None,
             output_tx: Some(tx),
             timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -649,10 +532,7 @@ mod tests {
         assert_eq!(status["artifact_sha256_hex"], payload_hash(&artifact_bytes));
         assert!(status["chunk_count"].as_u64().unwrap() >= 1);
 
-        let artifact_text = String::from_utf8_lossy(&artifact_bytes);
-        assert!(!artifact_text.contains("secret-privilege-key"));
-        let artifact: EncryptedBackupArtifact = serde_json::from_slice(&artifact_bytes).unwrap();
-        let archive = decrypt_artifact(&recipient_secret, &artifact);
+        let archive = manifest_from_tar(&artifact_bytes);
         assert_eq!(archive.client_id, "client-stream");
         assert_eq!(archive.files.len(), 2);
 
@@ -660,7 +540,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backup_rejects_missing_recipient_and_unsafe_scope() {
+    async fn backup_rejects_unsafe_scope_and_size_limits() {
         let job_id = uuid::Uuid::new_v4();
         let dir = std::env::temp_dir().join(format!("vpsman-agent-backup-reject-{job_id}"));
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -668,29 +548,8 @@ mod tests {
         tokio::fs::write(&file_path, b"contents").await.unwrap();
 
         let paths = vec![file_path.to_string_lossy().to_string()];
-        let default_config = AgentConfig::default();
-        let missing_key = execute_backup_command(BackupCommandInput {
-            job_id,
-            config: &default_config,
-            config_path: &file_path,
-            paths: &paths,
-            include_config: false,
-            recipient_public_key_hex: None,
-            output_tx: None,
-            timeout_secs: 5,
-            cancel_token: CommandCancelToken::default(),
-        })
-        .await
-        .unwrap_err();
-        assert!(missing_key
-            .to_string()
-            .contains("backup recipient public key is not configured"));
-
-        let recipient_secret = StaticSecret::from([9_u8; 32]);
-        let recipient_public = PublicKey::from(&recipient_secret);
         let config = AgentConfig {
             backup: AgentBackupConfig {
-                recipient_public_key_hex: Some(hex::encode(recipient_public.as_bytes())),
                 max_plaintext_bytes: 4,
             },
             ..AgentConfig::default()
@@ -702,7 +561,6 @@ mod tests {
             config_path: &file_path,
             paths: &relative_paths,
             include_config: false,
-            recipient_public_key_hex: None,
             output_tx: None,
             timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -717,7 +575,6 @@ mod tests {
             config_path: &file_path,
             paths: &paths,
             include_config: false,
-            recipient_public_key_hex: None,
             output_tx: None,
             timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -729,26 +586,8 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
-    fn decrypt_artifact(
-        recipient_secret: &StaticSecret,
-        artifact: &EncryptedBackupArtifact,
-    ) -> BackupArchive {
-        let ephemeral_public = decode_public_key(&artifact.ephemeral_public_key_hex).unwrap();
-        let shared = recipient_secret.diffie_hellman(&ephemeral_public);
-        let recipient_public = PublicKey::from(recipient_secret);
-        let key_bytes = backup_encryption_key(
-            shared.as_bytes(),
-            recipient_public.as_bytes(),
-            ephemeral_public.as_bytes(),
-        );
-        let nonce = hex::decode(&artifact.nonce_hex).unwrap();
-        let ciphertext = BASE64_STANDARD.decode(&artifact.ciphertext_base64).unwrap();
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
-        let compressed = cipher
-            .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
-            .unwrap();
-        let plaintext = lz4_flex::decompress_size_prepended(&compressed).unwrap();
-        let mut tar_archive = tar::Archive::new(std::io::Cursor::new(plaintext));
+    fn manifest_from_tar(bytes: &[u8]) -> BackupArchive {
+        let mut tar_archive = tar::Archive::new(std::io::Cursor::new(bytes));
         for entry in tar_archive.entries().unwrap() {
             let mut entry = entry.unwrap();
             if entry.path().unwrap().to_string_lossy() == BACKUP_ARCHIVE_MANIFEST_PATH {

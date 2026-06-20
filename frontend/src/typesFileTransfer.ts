@@ -47,6 +47,7 @@ export type FileTransferSourceArtifactRecord = {
   object_key: string;
   sha256_hex: string;
   size_bytes: number;
+  status: string;
   created_by: string | null;
   created_at: string;
   download_path: string;

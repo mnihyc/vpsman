@@ -592,7 +592,7 @@ api_get "/api/v1/jobs/$full_job_id/targets" | jq -e --argjson expected "$agent_c
   length == $expected and all(.[]; .status == "completed" and .exit_code == 0)
 ' >/dev/null
 api_get "/api/v1/jobs/$full_job_id/outputs" | jq -e --argjson expected "$agent_count" '
-  ([.[] | select(.stream == "stdout") | .data_base64 | @base64d] | map(select(. == "fault-fuzz-recovered-ok\n")) | length) == $expected
+  ([.items[] | select(.stream == "stdout") | .data_base64 | @base64d] | map(select(. == "fault-fuzz-recovered-ok\n")) | length) == $expected
 ' >/dev/null
 
 tunnel_plan_json="$(vpsctl_json tunnel-plan \

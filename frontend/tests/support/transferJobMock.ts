@@ -542,7 +542,12 @@ export async function installTransferJobApiMock(page: Page) {
       const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
       const outputMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/outputs$/);
       if (outputMatch && method === "GET" && dynamicJobOutputs[outputMatch[1]]) {
-        return jsonResponse(dynamicJobOutputs[outputMatch[1]]);
+        return jsonResponse({
+          items: dynamicJobOutputs[outputMatch[1]],
+          limit: 1000,
+          next_cursor: null,
+          has_more: false,
+        });
       }
       const targetMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/targets$/);
       if (targetMatch && method === "GET" && dynamicJobTargets[targetMatch[1]]) {

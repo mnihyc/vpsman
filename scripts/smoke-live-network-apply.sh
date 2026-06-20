@@ -191,7 +191,7 @@ status_output_for_job() {
   local output_file="$2"
   local encoded
   encoded="$(api_get "/api/v1/jobs/$job_id/outputs" \
-    | jq -er 'first(.[] | select(.stream == "status" and .done == true and .exit_code == 0) | .data_base64)')"
+    | jq -er 'first(.items[] | select(.stream == "status" and .done == true and .exit_code == 0) | .data_base64)')"
   printf '%s' "$encoded" | base64 -d >"$output_file"
 }
 
@@ -220,7 +220,7 @@ assert_outputs_redacted() {
       "${adapter_rollback_job_id:-}"; do
       [[ -n "$job_id" ]] || continue
       api_get "/api/v1/jobs/$job_id/outputs"
-    done | jq -r '.[].data_base64' | while IFS= read -r item; do
+    done | jq -r '.items[].data_base64' | while IFS= read -r item; do
       printf '%s' "$item" | base64 -d
       printf '\n'
     done

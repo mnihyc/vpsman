@@ -486,6 +486,53 @@ impl Repository {
         Ok(pruned_rows)
     }
 
+    pub(crate) async fn begin_history_retention_object_delete(
+        &self,
+        candidate: &HistoryRetentionObjectCandidate,
+    ) -> Result<bool> {
+        let Some(object_key) = candidate.object_key() else {
+            return Ok(false);
+        };
+        match self {
+            Self::Memory(_) => Ok(true),
+            Self::Postgres(pool) => {
+                Repository::mark_server_artifact_deleting_in_pool(pool, object_key).await
+            }
+        }
+    }
+
+    pub(crate) async fn finalize_history_retention_object_delete(
+        &self,
+        candidate: &HistoryRetentionObjectCandidate,
+    ) -> Result<i64> {
+        match self {
+            Self::Memory(_) => {
+                self.prune_history_retention_object_candidate(candidate)
+                    .await
+            }
+            Self::Postgres(pool) => {
+                finalize_postgres_history_retention_object_delete(pool, candidate).await
+            }
+        }
+    }
+
+    pub(crate) async fn mark_history_retention_object_delete_failed(
+        &self,
+        candidate: &HistoryRetentionObjectCandidate,
+        error: &str,
+    ) -> Result<()> {
+        let Some(object_key) = candidate.object_key() else {
+            return Ok(());
+        };
+        match self {
+            Self::Memory(_) => Ok(()),
+            Self::Postgres(pool) => {
+                Repository::mark_server_artifact_delete_failed_in_pool(pool, object_key, error)
+                    .await
+            }
+        }
+    }
+
     pub(crate) async fn record_history_retention_prune_audit(
         &self,
         operator: &AuthContext,
@@ -837,6 +884,85 @@ async fn prune_postgres_history_retention_object_candidate(
             .fetch_one(pool)
             .await
             .map_err(Into::into)
+        }
+    }
+}
+
+async fn finalize_postgres_history_retention_object_delete(
+    pool: &sqlx::PgPool,
+    candidate: &HistoryRetentionObjectCandidate,
+) -> Result<i64> {
+    match candidate {
+        HistoryRetentionObjectCandidate::JobOutput {
+            job_id,
+            client_id,
+            seq,
+            object_key,
+        } => {
+            let Some(object_key) = object_key else {
+                return prune_postgres_history_retention_object_candidate(pool, candidate).await;
+            };
+            let mut tx = pool.begin().await?;
+            let pruned_rows = sqlx::query_scalar::<_, i64>(
+                r#"
+                WITH deleted_outputs AS (
+                    DELETE FROM job_outputs
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND seq = $3
+                      AND object_key = $4
+                    RETURNING object_key
+                )
+                SELECT count(*)::bigint FROM deleted_outputs
+                "#,
+            )
+            .bind(job_id)
+            .bind(client_id)
+            .bind(seq)
+            .bind(object_key)
+            .fetch_one(&mut *tx)
+            .await?;
+            Repository::mark_server_artifact_deleted_in_tx(&mut tx, object_key).await?;
+            tx.commit().await?;
+            Ok(pruned_rows)
+        }
+        HistoryRetentionObjectCandidate::BackupArtifact {
+            artifact_id,
+            object_key,
+        } => {
+            let mut tx = pool.begin().await?;
+            let pruned_rows = sqlx::query_scalar::<_, i64>(
+                r#"
+                WITH doomed AS (
+                    SELECT artifact.id AS artifact_id, artifact.object_key
+                    FROM backup_artifacts artifact
+                    WHERE artifact.id = $1
+                      AND artifact.object_key = $2
+                ),
+                cleared_requests AS (
+                    UPDATE backup_requests request
+                    SET artifact_id = NULL,
+                        status = 'requested_metadata_only'
+                    FROM doomed
+                    WHERE request.artifact_id = doomed.artifact_id
+                    RETURNING request.id
+                ),
+                deleted_artifacts AS (
+                    DELETE FROM backup_artifacts artifact
+                    USING doomed
+                    WHERE artifact.id = doomed.artifact_id
+                    RETURNING artifact.object_key
+                )
+                SELECT count(*)::bigint FROM deleted_artifacts
+                "#,
+            )
+            .bind(artifact_id)
+            .bind(object_key)
+            .fetch_one(&mut *tx)
+            .await?;
+            Repository::mark_server_artifact_deleted_in_tx(&mut tx, object_key).await?;
+            tx.commit().await?;
+            Ok(pruned_rows)
         }
     }
 }

@@ -15,18 +15,18 @@ async fn filesystem_object_store_writes_under_safe_relative_key() {
     let root = std::env::temp_dir().join(format!("vpsman-object-store-{}", Uuid::new_v4()));
     let store = BackupObjectStore::filesystem(root.clone()).unwrap();
     store
-        .put_new("backups/client-a/artifact.json", b"ciphertext")
+        .put_new("backups/client-a/artifact.tar", b"artifact-bytes")
         .await
         .unwrap();
     assert_eq!(
-        store.get("backups/client-a/artifact.json").await.unwrap(),
-        b"ciphertext"
+        store.get("backups/client-a/artifact.tar").await.unwrap(),
+        b"artifact-bytes"
     );
-    let path = root.join("backups/client-a/artifact.json");
+    let path = root.join("backups/client-a/artifact.tar");
 
-    assert_eq!(tokio::fs::read(&path).await.unwrap(), b"ciphertext");
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), b"artifact-bytes");
     store
-        .delete_best_effort("backups/client-a/artifact.json")
+        .delete_best_effort("backups/client-a/artifact.tar")
         .await;
     let _ = tokio::fs::remove_dir_all(root).await;
 }
@@ -82,6 +82,33 @@ fn s3_settings_accept_https_and_reject_unsafe_bucket() {
         create_bucket: false,
     })
     .is_ok());
+    assert!(BackupObjectStore::s3(S3BackupObjectStoreSettings {
+        endpoint: "http://localhost:9000".to_string(),
+        bucket: "vpsman-artifacts".to_string(),
+        access_key: "access".to_string(),
+        secret_key: "secret".to_string(),
+        region: "us-east-1".to_string(),
+        create_bucket: false,
+    })
+    .is_ok());
+    assert!(BackupObjectStore::s3(S3BackupObjectStoreSettings {
+        endpoint: "http://127.0.0.1:9000".to_string(),
+        bucket: "vpsman-artifacts".to_string(),
+        access_key: "access".to_string(),
+        secret_key: "secret".to_string(),
+        region: "us-east-1".to_string(),
+        create_bucket: false,
+    })
+    .is_ok());
+    assert!(BackupObjectStore::s3(S3BackupObjectStoreSettings {
+        endpoint: "http://10.0.0.10:9000".to_string(),
+        bucket: "vpsman-artifacts".to_string(),
+        access_key: "access".to_string(),
+        secret_key: "secret".to_string(),
+        region: "us-east-1".to_string(),
+        create_bucket: false,
+    })
+    .is_err());
     assert!(BackupObjectStore::s3(S3BackupObjectStoreSettings {
         endpoint: "http://127.0.0.1:9000".to_string(),
         bucket: "../bad".to_string(),

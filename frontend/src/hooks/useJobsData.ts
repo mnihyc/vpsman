@@ -8,6 +8,7 @@ import type {
   CreateJobRequest,
   CreateJobResponse,
   JobHistoryRecord,
+  JobOutputListPageRecord,
   JobOutputCompareMode,
   JobOutputComparisonRecord,
   JobOutputRecord,
@@ -177,7 +178,27 @@ export function useJobsData(
   const loadJobOutputs = useCallback(
     async (jobId: string) => {
       try {
-        return await apiGet<JobOutputRecord[]>(`/api/v1/jobs/${encodeURIComponent(jobId)}/outputs`, apiToken);
+        const outputs: JobOutputRecord[] = [];
+        let cursor: string | null = null;
+        do {
+          const params = new URLSearchParams({
+            limit: "1000",
+            include_data: "true",
+          });
+          if (cursor) {
+            params.set("cursor", cursor);
+          }
+          const page = await apiGet<JobOutputListPageRecord>(
+            `/api/v1/jobs/${encodeURIComponent(jobId)}/outputs?${params.toString()}`,
+            apiToken,
+          );
+          outputs.push(...page.items);
+          cursor = page.has_more ? page.next_cursor : null;
+          if (page.has_more && !cursor) {
+            throw new Error("Job output page omitted next cursor");
+          }
+        } while (cursor);
+        return outputs;
       } catch (error) {
         if (isApiUnauthorized(error)) {
           onUnauthorized();

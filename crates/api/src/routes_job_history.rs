@@ -9,7 +9,10 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, Response},
     Json,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
+    Engine as _,
+};
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,10 +22,12 @@ use uuid::Uuid;
 use crate::{
     error::ApiError,
     model::{
-        AuditLogView, HistoryQuery, JobHistoryView, JobOutputView, JobTargetView, ListQuery,
-        NetworkObservationTrendView, NetworkObservationView, ProcessSupervisorInventoryView,
+        AuditLogView, HistoryQuery, JobHistoryView, JobOutputListItemView, JobOutputListPageView,
+        JobOutputView, JobTargetView, ListQuery, NetworkObservationTrendView,
+        NetworkObservationView, ProcessSupervisorInventoryView,
     },
     model_command_templates::{JobOutputComparisonQuery, JobOutputComparisonView},
+    repository_job_outputs::{JobOutputCursor, JobOutputListFilter},
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
     security::{SCOPE_AUDIT_READ, SCOPE_FLEET_READ, SCOPE_JOBS_READ, SCOPE_NETWORK_READ},
     state::AppState,
@@ -32,6 +37,9 @@ use crate::{
 const FILE_DOWNLOAD_BUNDLE_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_FILE_DOWNLOAD_BUNDLE_ENTRY_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_JOB_OUTPUT_ARCHIVE_STREAM_BYTES: u64 = 1024 * 1024 * 1024;
+const JOB_OUTPUT_LIST_DEFAULT_LIMIT: i64 = 200;
+const JOB_OUTPUT_LIST_MAX_LIMIT: i64 = 1000;
+const MAX_JOB_OUTPUT_EXPORT_ROWS: usize = 10_000;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct FileDownloadBundleQuery {
@@ -41,6 +49,22 @@ pub(crate) struct FileDownloadBundleQuery {
 #[derive(Debug, Deserialize)]
 pub(crate) struct JobOutputDownloadQuery {
     pub(crate) stream: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct JobOutputListQuery {
+    pub(crate) limit: Option<i64>,
+    pub(crate) cursor: Option<String>,
+    pub(crate) client_id: Option<String>,
+    pub(crate) stream: Option<String>,
+    pub(crate) seq_after: Option<i32>,
+    pub(crate) include_data: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct JobOutputCursorPayload {
+    client_id: String,
+    seq: i32,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -148,11 +172,44 @@ pub(crate) async fn list_job_outputs(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(job_id): Path<Uuid>,
-) -> Result<Json<Vec<JobOutputView>>, ApiError> {
+    Query(query): Query<JobOutputListQuery>,
+) -> Result<Json<JobOutputListPageView>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_JOBS_READ)
         .await?;
-    Ok(Json(state.repo.list_job_outputs(job_id).await?))
+    let stream = normalized_job_output_stream(query.stream.as_deref())?;
+    let limit = query
+        .limit
+        .unwrap_or(JOB_OUTPUT_LIST_DEFAULT_LIMIT)
+        .clamp(1, JOB_OUTPUT_LIST_MAX_LIMIT);
+    let mut items = state
+        .repo
+        .list_job_outputs_page(
+            job_id,
+            JobOutputListFilter {
+                client_id: query
+                    .client_id
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                stream,
+                seq_after: query.seq_after,
+                cursor: decode_job_output_cursor(query.cursor.as_deref())?,
+                include_data: query.include_data.unwrap_or(true),
+                limit: limit.saturating_add(1),
+            },
+        )
+        .await?;
+    let has_more = items.len() as i64 > limit;
+    if has_more {
+        items.truncate(limit as usize);
+    }
+    let next_cursor = items.last().map(encode_job_output_cursor).transpose()?;
+    Ok(Json(JobOutputListPageView {
+        items,
+        limit,
+        next_cursor,
+        has_more,
+    }))
 }
 
 pub(crate) async fn download_file_download_bundle(
@@ -165,20 +222,51 @@ pub(crate) async fn download_file_download_bundle(
         .require_operator_scope(&headers, SCOPE_JOBS_READ)
         .await?;
     let requested_clients = parse_client_filter(query.clients.as_deref());
-    let outputs = state.repo.list_job_outputs(job_id).await?;
     let mut by_client: BTreeMap<String, Vec<JobOutputView>> = BTreeMap::new();
-    for output in outputs {
-        if requested_clients
-            .as_ref()
-            .is_some_and(|clients| !clients.contains(&output.client_id))
-        {
-            continue;
+    if let Some(clients) = requested_clients.as_ref() {
+        let mut remaining_rows = MAX_JOB_OUTPUT_EXPORT_ROWS;
+        for client_id in clients {
+            let outputs = load_job_outputs_for_export(
+                &state,
+                job_id,
+                Some(client_id),
+                None,
+                remaining_rows,
+                "file_download_bundle_output_limit_exceeded",
+            )
+            .await?;
+            remaining_rows = remaining_rows.saturating_sub(outputs.len());
+            if !outputs.is_empty() {
+                by_client.insert(client_id.clone(), outputs);
+            }
         }
-        by_client
-            .entry(output.client_id.clone())
-            .or_default()
-            .push(output);
+    } else {
+        for output in load_job_outputs_for_export(
+            &state,
+            job_id,
+            None,
+            None,
+            MAX_JOB_OUTPUT_EXPORT_ROWS,
+            "file_download_bundle_output_limit_exceeded",
+        )
+        .await?
+        {
+            by_client
+                .entry(output.client_id.clone())
+                .or_default()
+                .push(output);
+        }
     }
+
+    let aggregate_outputs = by_client
+        .values()
+        .flat_map(|outputs| outputs.iter().filter(|output| output.stream == "stdout"))
+        .collect::<Vec<_>>();
+    enforce_output_export_budget(
+        &aggregate_outputs,
+        state.artifact_max_bytes(),
+        "file_download_bundle_too_large",
+    )?;
 
     let mut entries = Vec::new();
     for (client_id, mut outputs) in by_client {
@@ -186,6 +274,15 @@ pub(crate) async fn download_file_download_bundle(
         let Some(status) = latest_file_download_status(&outputs) else {
             continue;
         };
+        let entry_outputs = outputs
+            .iter()
+            .filter(|output| output.stream == "stdout")
+            .collect::<Vec<_>>();
+        enforce_output_export_budget(
+            &entry_outputs,
+            max_u64_as_usize(MAX_FILE_DOWNLOAD_BUNDLE_ENTRY_BYTES),
+            "file_download_bundle_entry_too_large",
+        )?;
         let payload = spool_file_download_payload(&state, &outputs).await?;
         validate_spooled_file_download_payload(&status, &payload)?;
         entries.push(SpooledFileDownloadBundleEntry {
@@ -242,20 +339,70 @@ pub(crate) async fn download_job_output_archive(
         .require_operator_scope(&headers, SCOPE_JOBS_READ)
         .await?;
     let requested_clients = parse_client_filter(query.clients.as_deref());
-    let outputs = state.repo.list_job_outputs(job_id).await?;
     let mut by_client: BTreeMap<String, Vec<JobOutputView>> = BTreeMap::new();
-    for output in outputs {
-        if requested_clients
-            .as_ref()
-            .is_some_and(|clients| !clients.contains(&output.client_id))
-        {
-            continue;
+    if let Some(clients) = requested_clients.as_ref() {
+        let mut remaining_rows = MAX_JOB_OUTPUT_EXPORT_ROWS;
+        for client_id in clients {
+            let mut outputs = load_job_outputs_for_export(
+                &state,
+                job_id,
+                Some(client_id),
+                Some("stdout"),
+                remaining_rows,
+                "job_output_archive_output_limit_exceeded",
+            )
+            .await?;
+            remaining_rows = remaining_rows.saturating_sub(outputs.len());
+            let stderr_outputs = load_job_outputs_for_export(
+                &state,
+                job_id,
+                Some(client_id),
+                Some("stderr"),
+                remaining_rows,
+                "job_output_archive_output_limit_exceeded",
+            )
+            .await?;
+            remaining_rows = remaining_rows.saturating_sub(stderr_outputs.len());
+            outputs.extend(stderr_outputs);
+            if !outputs.is_empty() {
+                by_client.insert(client_id.clone(), outputs);
+            }
         }
-        by_client
-            .entry(output.client_id.clone())
-            .or_default()
-            .push(output);
+    } else {
+        let mut remaining_rows = MAX_JOB_OUTPUT_EXPORT_ROWS;
+        for stream in ["stdout", "stderr"] {
+            let outputs = load_job_outputs_for_export(
+                &state,
+                job_id,
+                None,
+                Some(stream),
+                remaining_rows,
+                "job_output_archive_output_limit_exceeded",
+            )
+            .await?;
+            remaining_rows = remaining_rows.saturating_sub(outputs.len());
+            for output in outputs {
+                by_client
+                    .entry(output.client_id.clone())
+                    .or_default()
+                    .push(output);
+            }
+        }
     }
+
+    let aggregate_outputs = by_client
+        .values()
+        .flat_map(|outputs| {
+            outputs
+                .iter()
+                .filter(|output| matches!(output.stream.as_str(), "stdout" | "stderr"))
+        })
+        .collect::<Vec<_>>();
+    enforce_output_export_budget(
+        &aggregate_outputs,
+        state.artifact_max_bytes(),
+        "job_output_archive_too_large",
+    )?;
 
     let mut entries = Vec::new();
     for (client_id, mut outputs) in by_client {
@@ -307,16 +454,27 @@ pub(crate) async fn download_file_download_for_client(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_JOBS_READ)
         .await?;
-    let mut outputs = state
-        .repo
-        .list_job_outputs(job_id)
-        .await?
-        .into_iter()
-        .filter(|output| output.client_id == client_id)
-        .collect::<Vec<_>>();
+    let mut outputs = load_job_outputs_for_export(
+        &state,
+        job_id,
+        Some(&client_id),
+        None,
+        MAX_JOB_OUTPUT_EXPORT_ROWS,
+        "file_download_output_limit_exceeded",
+    )
+    .await?;
     outputs.sort_by_key(|output| output.seq);
     let status = latest_file_download_status(&outputs)
         .ok_or_else(|| ApiError::not_found("file_download_output_not_found"))?;
+    let payload_outputs = outputs
+        .iter()
+        .filter(|output| output.stream == "stdout")
+        .collect::<Vec<_>>();
+    enforce_output_export_budget(
+        &payload_outputs,
+        state.artifact_max_bytes(),
+        "file_download_output_too_large",
+    )?;
     let payload = spool_file_download_payload(&state, &outputs).await?;
     validate_spooled_file_download_payload(&status, &payload)?;
     let filename = safe_tar_component(status.filename.as_deref().unwrap_or("download.bin"));
@@ -351,19 +509,51 @@ pub(crate) async fn download_job_output_stream(
         "combined" => JobOutputStreamSelection::Combined,
         _ => return Err(ApiError::bad_request("job_output_download_stream_invalid")),
     };
-    let mut outputs = state
-        .repo
-        .list_job_outputs(job_id)
-        .await?
-        .into_iter()
-        .filter(|output| output.client_id == client_id)
-        .filter(|output| stream.includes(&output.stream))
-        .collect::<Vec<_>>();
+    let mut outputs = match &stream {
+        JobOutputStreamSelection::Single(selected) => {
+            load_job_outputs_for_export(
+                &state,
+                job_id,
+                Some(&client_id),
+                Some(selected),
+                MAX_JOB_OUTPUT_EXPORT_ROWS,
+                "job_output_download_output_limit_exceeded",
+            )
+            .await?
+        }
+        JobOutputStreamSelection::Combined => {
+            let mut outputs = load_job_outputs_for_export(
+                &state,
+                job_id,
+                Some(&client_id),
+                Some("stdout"),
+                MAX_JOB_OUTPUT_EXPORT_ROWS,
+                "job_output_download_output_limit_exceeded",
+            )
+            .await?;
+            let stderr_outputs = load_job_outputs_for_export(
+                &state,
+                job_id,
+                Some(&client_id),
+                Some("stderr"),
+                MAX_JOB_OUTPUT_EXPORT_ROWS.saturating_sub(outputs.len()),
+                "job_output_download_output_limit_exceeded",
+            )
+            .await?;
+            outputs.extend(stderr_outputs);
+            outputs
+        }
+    };
     outputs.sort_by_key(|output| output.seq);
     if outputs.is_empty() {
         return Err(ApiError::not_found("job_output_download_not_found"));
     }
     let output_refs = outputs.iter().collect::<Vec<_>>();
+    enforce_output_export_budget(
+        &output_refs,
+        state.artifact_max_bytes(),
+        "job_output_download_too_large",
+    )?;
     let payload =
         spool_selected_job_outputs(&state, &output_refs, "job_output_download_too_large").await?;
     let filename = safe_tar_component(&format!(
@@ -428,13 +618,6 @@ enum JobOutputStreamSelection {
 }
 
 impl JobOutputStreamSelection {
-    fn includes(&self, stream: &str) -> bool {
-        match self {
-            Self::Single(expected) => stream == *expected,
-            Self::Combined => matches!(stream, "stdout" | "stderr"),
-        }
-    }
-
     fn filename_label(&self) -> &'static str {
         match self {
             Self::Single(stream) => stream,
@@ -780,6 +963,147 @@ fn parse_client_filter(value: Option<&str>) -> Option<BTreeSet<String>> {
     }
 }
 
+fn normalized_job_output_stream(value: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if matches!(value, "stdout" | "stderr" | "status" | "pty") {
+        Ok(Some(value.to_string()))
+    } else {
+        Err(ApiError::bad_request("job_output_stream_invalid"))
+    }
+}
+
+fn decode_job_output_cursor(value: Option<&str>) -> Result<Option<JobOutputCursor>, ApiError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let bytes = BASE64_URL
+        .decode(value.as_bytes())
+        .map_err(|_| ApiError::bad_request("job_output_cursor_invalid"))?;
+    let payload = serde_json::from_slice::<JobOutputCursorPayload>(&bytes)
+        .map_err(|_| ApiError::bad_request("job_output_cursor_invalid"))?;
+    if payload.client_id.is_empty() || payload.client_id.len() > 128 || payload.seq < 0 {
+        return Err(ApiError::bad_request("job_output_cursor_invalid"));
+    }
+    Ok(Some(JobOutputCursor {
+        client_id: payload.client_id,
+        seq: payload.seq,
+    }))
+}
+
+fn encode_job_output_cursor(output: &JobOutputListItemView) -> Result<String, ApiError> {
+    let payload = JobOutputCursorPayload {
+        client_id: output.client_id.clone(),
+        seq: output.seq,
+    };
+    let bytes =
+        serde_json::to_vec(&payload).map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+    Ok(BASE64_URL.encode(bytes))
+}
+
+async fn load_job_outputs_for_export(
+    state: &AppState,
+    job_id: Uuid,
+    client_id: Option<&str>,
+    stream: Option<&str>,
+    row_limit: usize,
+    too_many_code: &'static str,
+) -> Result<Vec<JobOutputView>, ApiError> {
+    let mut outputs = Vec::new();
+    let mut cursor = None::<JobOutputCursor>;
+    loop {
+        let remaining = row_limit.saturating_sub(outputs.len()).saturating_add(1);
+        let page_limit = remaining.min(JOB_OUTPUT_LIST_MAX_LIMIT as usize) as i64;
+        let items = state
+            .repo
+            .list_job_outputs_page(
+                job_id,
+                JobOutputListFilter {
+                    client_id: client_id.map(ToString::to_string),
+                    stream: stream.map(ToString::to_string),
+                    seq_after: None,
+                    cursor: cursor.clone(),
+                    include_data: true,
+                    limit: page_limit,
+                },
+            )
+            .await?;
+        if items.is_empty() {
+            break;
+        }
+        let item_count = items.len();
+        for item in items {
+            cursor = Some(JobOutputCursor {
+                client_id: item.client_id.clone(),
+                seq: item.seq,
+            });
+            outputs.push(job_output_list_item_into_view(item)?);
+            if outputs.len() > row_limit {
+                return Err(ApiError::bad_request(too_many_code));
+            }
+        }
+        if item_count < page_limit as usize {
+            break;
+        }
+    }
+    Ok(outputs)
+}
+
+fn job_output_list_item_into_view(item: JobOutputListItemView) -> Result<JobOutputView, ApiError> {
+    Ok(JobOutputView {
+        job_id: item.job_id,
+        client_id: item.client_id,
+        seq: item.seq,
+        stream: item.stream,
+        data_base64: item
+            .data_base64
+            .ok_or_else(|| ApiError::conflict("job_output_data_not_loaded"))?,
+        storage: item.storage,
+        artifact_object_key: item.artifact_object_key,
+        artifact_sha256_hex: item.artifact_sha256_hex,
+        artifact_size_bytes: item.artifact_size_bytes,
+        exit_code: item.exit_code,
+        done: item.done,
+        received_at: item.received_at,
+        created_at: item.created_at,
+    })
+}
+
+fn enforce_output_export_budget(
+    outputs: &[&JobOutputView],
+    max_bytes: usize,
+    too_large_code: &'static str,
+) -> Result<(), ApiError> {
+    let max_bytes = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    let mut total = 0_u64;
+    for output in outputs {
+        let size = job_output_payload_size(output)?;
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| ApiError::bad_request(too_large_code))?;
+        if total > max_bytes {
+            return Err(ApiError::bad_request(too_large_code));
+        }
+    }
+    Ok(())
+}
+
+fn job_output_payload_size(output: &JobOutputView) -> Result<u64, ApiError> {
+    if let Some(size) = output.artifact_size_bytes {
+        return u64::try_from(size)
+            .map_err(|_| ApiError::conflict("job_output_artifact_integrity_mismatch"));
+    }
+    let bytes = BASE64
+        .decode(&output.data_base64)
+        .map_err(|_| ApiError::conflict("job_output_data_invalid"))?;
+    Ok(bytes.len() as u64)
+}
+
+fn max_u64_as_usize(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
 fn latest_file_download_status(outputs: &[JobOutputView]) -> Option<FileDownloadStatus> {
     outputs
         .iter()
@@ -889,10 +1213,8 @@ pub(crate) async fn download_job_output_chunk(
         .await?;
     let output = state
         .repo
-        .list_job_outputs(job_id)
+        .get_job_output(job_id, &client_id, seq)
         .await?
-        .into_iter()
-        .find(|output| output.client_id == client_id && output.seq == seq)
         .ok_or_else(|| ApiError::not_found("job_output_download_not_found"))?;
     if !matches!(output.stream.as_str(), "stdout" | "stderr") {
         return Err(ApiError::bad_request("job_output_status_not_downloadable"));

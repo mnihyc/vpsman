@@ -23,7 +23,6 @@ pub(crate) struct VtyBackupRequest {
     pub(crate) client_id: String,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
-    pub(crate) recipient_public_key_hex: Option<String>,
     pub(crate) confirmed: bool,
     pub(crate) note: Option<String>,
 }
@@ -59,7 +58,6 @@ pub(crate) struct VtyRestoreRollbackRequest {
 pub(crate) struct VtyBackupRunRequest {
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
-    pub(crate) recipient_public_key_hex: Option<String>,
     pub(crate) selection: VtyJobSelection,
     pub(crate) timeout_secs: u64,
 }
@@ -69,7 +67,6 @@ pub(crate) struct VtyBackupPolicyUpsert {
     pub(crate) name: String,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
-    pub(crate) recipient_public_key_hex: Option<String>,
     pub(crate) selection: VtyJobSelection,
     pub(crate) cron_expr: String,
     pub(crate) enabled: bool,
@@ -91,7 +88,6 @@ pub(crate) fn parse_vty_backup_request(tokens: &[&str]) -> Result<VtyBackupReque
         client_id,
         paths: Vec::new(),
         include_config: false,
-        recipient_public_key_hex: None,
         confirmed: false,
         note: None,
     };
@@ -134,35 +130,16 @@ pub(crate) fn parse_vty_backup_request(tokens: &[&str]) -> Result<VtyBackupReque
                 request.note = Some(value.trim_start_matches("--note=").to_string());
                 index += 1;
             }
-            "--recipient-public-key-hex" => {
-                request.recipient_public_key_hex = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--recipient-public-key-hex requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            value if value.starts_with("--recipient-public-key-hex=") => {
-                request.recipient_public_key_hex = Some(
-                    value
-                        .trim_start_matches("--recipient-public-key-hex=")
-                        .to_string(),
-                );
-                index += 1;
-            }
             other => anyhow::bail!("unknown backup-request flag {other}"),
         }
     }
     ensure_backup_scope(&request.paths, request.include_config, "backup-request")?;
-    ensure_backup_recipient_public_key(request.recipient_public_key_hex.as_deref())?;
     Ok(request)
 }
 
 pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunRequest> {
     let mut paths = Vec::new();
     let mut include_config = false;
-    let mut recipient_public_key_hex = None;
     let mut timeout_secs = 60_u64;
     let mut target_tokens = Vec::new();
     let mut index = 0;
@@ -185,23 +162,6 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
                 paths.push(value.trim_start_matches("--path=").to_string());
                 index += 1;
             }
-            "--recipient-public-key-hex" => {
-                recipient_public_key_hex = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--recipient-public-key-hex requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            value if value.starts_with("--recipient-public-key-hex=") => {
-                recipient_public_key_hex = Some(
-                    value
-                        .trim_start_matches("--recipient-public-key-hex=")
-                        .to_string(),
-                );
-                index += 1;
-            }
             "--timeout" => {
                 timeout_secs = tokens
                     .get(index + 1)
@@ -217,6 +177,15 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
                     .context("invalid --timeout")?;
                 index += 1;
             }
+            "--recipient-public-key-hex" | "--recipient-public-key" => {
+                anyhow::bail!("backup recipient public keys were removed")
+            }
+            value
+                if value.starts_with("--recipient-public-key-hex=")
+                    || value.starts_with("--recipient-public-key=") =>
+            {
+                anyhow::bail!("backup recipient public keys were removed")
+            }
             value => {
                 target_tokens.push(value);
                 index += 1;
@@ -224,7 +193,6 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
         }
     }
     ensure_backup_scope(&paths, include_config, "backup-run")?;
-    ensure_backup_recipient_public_key(recipient_public_key_hex.as_deref())?;
     anyhow::ensure!(
         (1..=3600).contains(&timeout_secs),
         "backup timeout out of range"
@@ -232,7 +200,6 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
     Ok(VtyBackupRunRequest {
         paths,
         include_config,
-        recipient_public_key_hex,
         selection: VtyJobSelection::parse(&target_tokens)?,
         timeout_secs,
     })
@@ -241,11 +208,10 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
 pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBackupPolicyUpsert> {
     let name = tokens
         .first()
-        .context("usage: backup-policy-upsert <name> [--path <abs>] [--include-config] [--recipient-public-key-hex <hex>] [--cron <min> <hour> <dom> <mon> <dow>] [--retention-days <n>] [--keep-last <n>] [--rotation-generation <id>] [--disabled] <target>... --confirmed")?
+        .context("usage: backup-policy-upsert <name> [--path <abs>] [--include-config] [--cron <min> <hour> <dom> <mon> <dow>] [--retention-days <n>] [--keep-last <n>] [--rotation-generation <id>] [--disabled] <target>... --confirmed")?
         .to_string();
     let mut paths = Vec::new();
     let mut include_config = false;
-    let mut recipient_public_key_hex = None;
     let mut cron_expr = "0 3 * * *".to_string();
     let mut enabled = true;
     let mut catch_up_policy = "skip_missed".to_string();
@@ -278,23 +244,6 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
             }
             value if value.starts_with("--path=") => {
                 paths.push(value.trim_start_matches("--path=").to_string());
-                index += 1;
-            }
-            "--recipient-public-key-hex" => {
-                recipient_public_key_hex = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--recipient-public-key-hex requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            value if value.starts_with("--recipient-public-key-hex=") => {
-                recipient_public_key_hex = Some(
-                    value
-                        .trim_start_matches("--recipient-public-key-hex=")
-                        .to_string(),
-                );
                 index += 1;
             }
             "--cron" | "--cron-expr" => {
@@ -429,6 +378,15 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
                     .context("invalid --max-failures")?;
                 index += 1;
             }
+            "--recipient-public-key-hex" | "--recipient-public-key" => {
+                anyhow::bail!("backup recipient public keys were removed")
+            }
+            value
+                if value.starts_with("--recipient-public-key-hex=")
+                    || value.starts_with("--recipient-public-key=") =>
+            {
+                anyhow::bail!("backup recipient public keys were removed")
+            }
             value => {
                 target_tokens.push(value);
                 index += 1;
@@ -436,7 +394,6 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
         }
     }
     ensure_backup_scope(&paths, include_config, "backup-policy-upsert")?;
-    ensure_backup_recipient_public_key(recipient_public_key_hex.as_deref())?;
     anyhow::ensure!(
         cron_expr.split_whitespace().count() == 5,
         "backup policy cron must have five fields"
@@ -450,7 +407,6 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
         name,
         paths,
         include_config,
-        recipient_public_key_hex,
         selection,
         cron_expr,
         enabled,
@@ -678,10 +634,6 @@ pub(crate) fn submit_vty_backup_request(
     let operation = JobCommand::Backup {
         paths: request.paths.clone(),
         include_config: request.include_config,
-        recipient_public_key_hex: request
-            .recipient_public_key_hex
-            .clone()
-            .map(|value| value.to_ascii_lowercase()),
     };
     let target_ids = vec![request.client_id.clone()];
     let selector_expression = selector_expression_from_targets(&target_ids, &[]);
@@ -705,7 +657,6 @@ pub(crate) fn submit_vty_backup_request(
             "client_id": request.client_id,
             "paths": request.paths,
             "include_config": request.include_config,
-            "recipient_public_key_hex": request.recipient_public_key_hex,
             "confirmed": request.confirmed,
             "note": request.note,
             "privilege_assertion": privilege.privilege_assertion,
@@ -722,9 +673,6 @@ pub(crate) fn submit_vty_backup_run(
     let operation = JobCommand::Backup {
         paths: request.paths,
         include_config: request.include_config,
-        recipient_public_key_hex: request
-            .recipient_public_key_hex
-            .map(|value| value.to_ascii_lowercase()),
     };
     anyhow::ensure!(
         request.selection.confirmed,
@@ -749,13 +697,9 @@ pub(crate) fn submit_vty_backup_policy_upsert(
     let selector_expression =
         selector_expression_from_targets(&request.selection.clients, &request.selection.tags);
     let target_client_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
-    let recipient_public_key_hex = request
-        .recipient_public_key_hex
-        .map(|value| value.to_ascii_lowercase());
     let operation = JobCommand::Backup {
         paths: request.paths.clone(),
         include_config: request.include_config,
-        recipient_public_key_hex: recipient_public_key_hex.clone(),
     };
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
@@ -790,7 +734,6 @@ pub(crate) fn submit_vty_backup_policy_upsert(
             "name": request.name,
             "paths": request.paths,
             "include_config": request.include_config,
-            "recipient_public_key_hex": recipient_public_key_hex,
             "selector_expression": selector_expression,
             "target_client_ids": target_client_ids,
             "cron_expr": request.cron_expr,
@@ -935,16 +878,6 @@ fn ensure_backup_scope(paths: &[String], include_config: bool, command: &str) ->
             path.starts_with('/'),
             "{} paths must be absolute",
             command.trim_end_matches("-plan")
-        );
-    }
-    Ok(())
-}
-
-fn ensure_backup_recipient_public_key(value: Option<&str>) -> Result<()> {
-    if let Some(value) = value {
-        anyhow::ensure!(
-            value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "backup recipient public key must be 32-byte hex"
         );
     }
     Ok(())

@@ -1,4 +1,4 @@
-mod backup_artifact_crypto;
+mod backup_artifact_validation;
 mod build_info;
 mod cli;
 mod cli_access;

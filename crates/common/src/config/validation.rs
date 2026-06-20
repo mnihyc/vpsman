@@ -127,10 +127,6 @@ fn validate_auth_config(config: &AgentAuthConfig) -> Result<(), String> {
 }
 
 fn validate_backup_config(config: &AgentBackupConfig) -> Result<(), String> {
-    validate_optional_hex32(
-        config.recipient_public_key_hex.as_deref(),
-        "backup_recipient_public_key_hex",
-    )?;
     if !(1..=16 * 1024 * 1024).contains(&config.max_plaintext_bytes) {
         return Err("backup_max_plaintext_bytes_out_of_range".to_string());
     }
@@ -519,13 +515,6 @@ fn validate_absolute_config_path(value: &str, field: &str) -> Result<(), String>
         .any(|segment| segment == "." || segment == "..")
     {
         return Err(format!("{field}_must_not_contain_dot_segments"));
-    }
-    Ok(())
-}
-
-fn validate_optional_hex32(value: Option<&str>, field: &str) -> Result<(), String> {
-    if let Some(value) = value {
-        validate_hex32(value, field)?;
     }
     Ok(())
 }

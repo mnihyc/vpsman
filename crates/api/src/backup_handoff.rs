@@ -27,95 +27,101 @@ pub(crate) async fn stage_retained_backup_artifact_stdout(
         .await
         .map_err(|_| ApiError::conflict("backup_artifact_handoff_staging_unavailable"))?;
     let staging_path = root.join(format!("{}.part", uuid::Uuid::new_v4()));
-    let mut staging = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staging_path)
-        .await
-        .map_err(|_| ApiError::conflict("backup_artifact_handoff_staging_unavailable"))?;
-    let mut hasher = Sha256::new();
-    let mut size_bytes = 0_u64;
-    let mut source_chunk_count = 0_usize;
-    let max_bytes = backup_artifact_streaming_max_bytes() as u64;
-    for output in outputs {
-        if output.stream != "stdout" {
-            continue;
-        }
-        source_chunk_count = source_chunk_count.saturating_add(1);
-        if output.storage == "object_store" {
-            let store = state
-                .backup_object_store
-                .as_ref()
-                .ok_or_else(|| ApiError::conflict("backup_object_store_not_configured"))?;
-            let object_key = output.artifact_object_key.as_deref().ok_or_else(|| {
-                ApiError::conflict("backup_artifact_handoff_output_artifact_missing")
-            })?;
-            if let (Some(expected_hash), Some(expected_size)) = (
-                output.artifact_sha256_hex.as_deref(),
-                output.artifact_size_bytes,
-            ) {
-                let expected_size = expected_size.try_into().map_err(|_| {
-                    ApiError::conflict("backup_artifact_handoff_output_size_mismatch")
-                })?;
-                if let Some(path) = store
-                    .verified_filesystem_path(object_key, expected_hash, expected_size)
-                    .await
-                    .map_err(ApiError::from)?
-                {
-                    append_file_to_backup_handoff_staging(
-                        &path,
-                        &mut staging,
-                        &mut hasher,
-                        &mut size_bytes,
-                        max_bytes,
-                    )
-                    .await?;
-                    continue;
-                }
+    let result = async {
+        let mut staging = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging_path)
+            .await
+            .map_err(|_| ApiError::conflict("backup_artifact_handoff_staging_unavailable"))?;
+        let mut hasher = Sha256::new();
+        let mut size_bytes = 0_u64;
+        let mut source_chunk_count = 0_usize;
+        let max_bytes = backup_artifact_streaming_max_bytes() as u64;
+        for output in outputs {
+            if output.stream != "stdout" {
+                continue;
             }
-            let data = store
-                .get_with_limit(object_key, backup_artifact_streaming_max_bytes())
-                .await
-                .map_err(ApiError::from)?;
-            validate_backup_handoff_output_part(output, &data)?;
-            append_backup_handoff_bytes(
-                &data,
-                &mut staging,
-                &mut hasher,
-                &mut size_bytes,
-                max_bytes,
-            )
-            .await?;
-        } else {
-            let data = BASE64
-                .decode(&output.data_base64)
-                .map_err(|_| ApiError::conflict("backup_artifact_handoff_inline_output_invalid"))?;
-            validate_backup_handoff_output_part(output, &data)?;
-            append_backup_handoff_bytes(
-                &data,
-                &mut staging,
-                &mut hasher,
-                &mut size_bytes,
-                max_bytes,
-            )
-            .await?;
+            source_chunk_count = source_chunk_count.saturating_add(1);
+            if output.storage == "object_store" {
+                let store = state
+                    .backup_object_store
+                    .as_ref()
+                    .ok_or_else(|| ApiError::conflict("backup_object_store_not_configured"))?;
+                let object_key = output.artifact_object_key.as_deref().ok_or_else(|| {
+                    ApiError::conflict("backup_artifact_handoff_output_artifact_missing")
+                })?;
+                if let (Some(expected_hash), Some(expected_size)) = (
+                    output.artifact_sha256_hex.as_deref(),
+                    output.artifact_size_bytes,
+                ) {
+                    let expected_size = expected_size.try_into().map_err(|_| {
+                        ApiError::conflict("backup_artifact_handoff_output_size_mismatch")
+                    })?;
+                    if let Some(path) = store
+                        .verified_filesystem_path(object_key, expected_hash, expected_size)
+                        .await
+                        .map_err(ApiError::from)?
+                    {
+                        append_file_to_backup_handoff_staging(
+                            &path,
+                            &mut staging,
+                            &mut hasher,
+                            &mut size_bytes,
+                            max_bytes,
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+                let data = store
+                    .get_with_limit(object_key, backup_artifact_streaming_max_bytes())
+                    .await
+                    .map_err(ApiError::from)?;
+                validate_backup_handoff_output_part(output, &data)?;
+                append_backup_handoff_bytes(
+                    &data,
+                    &mut staging,
+                    &mut hasher,
+                    &mut size_bytes,
+                    max_bytes,
+                )
+                .await?;
+            } else {
+                let data = BASE64.decode(&output.data_base64).map_err(|_| {
+                    ApiError::conflict("backup_artifact_handoff_inline_output_invalid")
+                })?;
+                validate_backup_handoff_output_part(output, &data)?;
+                append_backup_handoff_bytes(
+                    &data,
+                    &mut staging,
+                    &mut hasher,
+                    &mut size_bytes,
+                    max_bytes,
+                )
+                .await?;
+            }
         }
+        if size_bytes == 0 {
+            return Err(ApiError::conflict("backup_artifact_handoff_stdout_empty"));
+        }
+        staging
+            .sync_data()
+            .await
+            .map_err(|_| ApiError::conflict("backup_artifact_handoff_staging_write_failed"))?;
+        Ok(StagedRetainedBackupArtifact {
+            staging_path: staging_path.clone(),
+            sha256_hex: hex::encode(hasher.finalize()),
+            size_bytes: i64::try_from(size_bytes)
+                .map_err(|_| ApiError::bad_request("backup_artifact_size_invalid"))?,
+            source_chunk_count,
+        })
     }
-    if size_bytes == 0 {
+    .await;
+    if result.is_err() {
         let _ = tokio::fs::remove_file(&staging_path).await;
-        return Err(ApiError::conflict("backup_artifact_handoff_stdout_empty"));
     }
-    staging
-        .sync_data()
-        .await
-        .map_err(|_| ApiError::conflict("backup_artifact_handoff_staging_write_failed"))?;
-    Ok(StagedRetainedBackupArtifact {
-        staging_path,
-        sha256_hex: hex::encode(hasher.finalize()),
-        size_bytes: i64::try_from(size_bytes)
-            .map_err(|_| ApiError::bad_request("backup_artifact_size_invalid"))?,
-        source_chunk_count,
-    })
+    result
 }
 
 pub(crate) fn backup_artifact_streaming_max_bytes() -> usize {

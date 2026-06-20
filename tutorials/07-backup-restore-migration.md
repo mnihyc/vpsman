@@ -1,19 +1,19 @@
 # Tutorial 07: Backup, Restore, And Migration
 
-Backups and restores are privilege-gated workflows. Backup private key material
-stays outside the API restore path; operators stage a verified archive on the
-target agent before dispatching restore or migration restore jobs. The API
-stores encrypted artifact metadata and local-disk object-store bytes by default.
-S3/MinIO-compatible object storage is implemented as an optional adapter for
-deployments that need remote backup or update artifact storage, and is covered
-by adapter-specific smokes.
+Backups and restores are privilege-gated workflows. Agents emit plain tar
+backup artifacts, and operators stage a verified archive on the target agent
+before dispatching restore or migration restore jobs. The API stores backup
+artifact metadata and local-disk object-store bytes by default. S3/MinIO-
+compatible object storage is implemented as an optional adapter for deployments
+that need remote backup or update artifact storage, and is covered by
+adapter-specific smokes.
 
 ## Schedule Backup Policies
 
 Create a policy for a client, pool, or tag selector. Privilege is verified when
 the policy schedule is created or changed. After that, the worker creates due
 runs and dispatches saved backup intent at schedule time, producing the same
-per-target backup request and encrypted artifact history as a manual
+per-target backup request and plain backup artifact history as a manual
 `backup-run`.
 
 ```sh
@@ -21,7 +21,6 @@ cargo run -p vpsctl -- backup-policy-upsert \
   --name nightly-edge \
   --paths /etc/hostname \
   --include-config \
-  --recipient-public-key-hex <32_byte_hex_public_key> \
   --tags backup-critical \
   --interval-secs 86400 \
   --retention-days 30 \
@@ -106,7 +105,7 @@ cargo run -p vpsctl -- backup-run \
 
 `backup-run` auto-creates a per-target backup request when no open request
 already matches the client and payload hash. If the agent emits a valid
-encrypted backup artifact and the backup object store is configured, the API
+plain backup artifact and the backup object store is configured, the API
 links the artifact automatically after the output row, target state, and parent
 job terminal state are durable. Auto-linking is best-effort; if object storage
 or artifact validation fails, the backup job still reaches a terminal state and
@@ -119,7 +118,7 @@ cargo run -p vpsctl -- backup-artifacts
 ```
 
 If the backup job completed but the artifact did not auto-link, promote the
-retained encrypted stdout into the object store. Use `--job-id` when multiple
+retained plain stdout into the object store. Use `--job-id` when multiple
 completed backup jobs used the same backup scope:
 
 ```sh
@@ -129,32 +128,32 @@ cargo run -p vpsctl -- backup-artifact-handoff \
   --confirmed
 ```
 
-If you already have an encrypted artifact file, upload it into the local
+If you already have a plain backup artifact file, upload it into the local
 object-store-backed artifact registry:
 
 ```sh
 cargo run -p vpsctl -- backup-artifact-upload \
   --backup-request-id <backup_request_uuid> \
-  --object-key backups/edge-a/example.json \
-  --artifact-file ./artifact.json \
+  --object-key backups/edge-a/example.tar \
+  --artifact-file ./artifact.tar \
   --confirmed
 ```
 
-For larger encrypted artifact files, use the server-mediated chunked session.
-The API validates the final size, SHA-256, encrypted artifact envelope, and
-object-key uniqueness before linking metadata:
+For larger plain backup artifact files, use the server-mediated chunked session.
+The API validates the final size, SHA-256, tar manifest, and object-key
+uniqueness before linking metadata:
 
 ```sh
 cargo run -p vpsctl -- backup-artifact-upload-chunked \
   --backup-request-id <backup_request_uuid> \
-  --object-key backups/edge-a/example-large.json \
-  --artifact-file ./artifact.json \
+  --object-key backups/edge-a/example-large.tar \
+  --artifact-file ./artifact.tar \
   --chunk-size-bytes 4194304 \
   --confirmed
 ```
 
 Stored artifact upload and download paths share the same configured API
-artifact envelope. The default maximum is 128 MiB; set
+artifact limit. The default maximum is 128 MiB; set
 `api.artifact_max_bytes` in the suite config or `VPSMAN_ARTIFACT_MAX_BYTES` in
 the API environment to change it. Values are clamped between 1 MiB and 4 GiB.
 `api.job_output_artifact_min_bytes` remains only the threshold for externalizing
@@ -165,6 +164,9 @@ For an explicit S3/MinIO-backed deployment, configure the full
 SigV4 over the configured endpoint, rejects duplicate objects with `HEAD`
 before `PUT`, and streams verified downloads through a temporary spool file
 with configured size and hash validation before responding to the client:
+Remote object-store endpoints must use `https://`; plaintext `http://` is
+accepted only for loopback/local MinIO endpoints such as `localhost` or
+`127.0.0.1` used by development smoke tests.
 
 ```sh
 bash scripts/smoke-minio-backup-artifact.sh
@@ -183,6 +185,11 @@ Restore from an archive staged through a completed file-transfer upload on the
 target agent. The restore request selects that transfer record; restore scope is
 derived from the backup request, while path, size, and SHA-256 are derived from
 the recorded transfer and matching backup artifact:
+
+The CLI and VTY generate restore destinations under
+`/var/lib/vpsman/restores` by default. For sandbox agents, set
+`VPSMAN_RESTORE_DESTINATION_ROOT_BASE` to another absolute base directory before
+creating restore plans or restore runs.
 
 ```sh
 cargo run -p vpsctl -- file-transfer-upload \
@@ -227,8 +234,7 @@ cargo run -p vpsctl -- migration-run \
 
 The command loads the restore plan, creates the migration link, and dispatches
 the restore command with a request-bound privilege assertion. The API does not
-receive the backup private key, plaintext archive bytes, or plaintext super
-password.
+receive inline restore archive bytes or plaintext super password material.
 
 Use `migration-link` only when you need metadata linkage without running a
 restore:
@@ -249,9 +255,9 @@ Use the Backups panel for the same sequence:
 1. Create or inspect backup request.
 2. Save backup policies and use Policy prune for dry-run or confirmed
    retention cleanup.
-3. Promote retained encrypted output or upload an encrypted artifact if needed.
+3. Promote retained plain output or upload a plain backup artifact if needed.
 4. Create restore plan.
-5. Run restore with local key material.
+5. Run restore with a selected completed archive upload record.
 6. Roll back restore from retained restore evidence if needed.
 7. Use Run migration restore for rebuilt targets, or link metadata only when
    restore has already been handled.

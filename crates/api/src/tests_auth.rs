@@ -479,6 +479,7 @@ async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
             axum::extract::State(state.clone()),
             viewer_headers.clone(),
             axum::extract::Path(job_id),
+            axum::extract::Query(Default::default()),
         )
         .await,
     );
@@ -927,6 +928,7 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
             axum::extract::State(state.clone()),
             jobs_headers.clone(),
             axum::extract::Path(Uuid::new_v4()),
+            axum::extract::Query(Default::default()),
         )
         .await,
     );

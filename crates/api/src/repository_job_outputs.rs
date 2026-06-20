@@ -1,7 +1,7 @@
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
-use sqlx::Row;
+use sqlx::{postgres::PgRow, Row};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 use vpsman_common::{payload_hash, CommandOutput, OutputStream};
@@ -11,7 +11,8 @@ use vpsman_server_core::{
 };
 
 use crate::model::{
-    AuditLogView, JobOutputView, NewServerArtifact, ProcessSupervisorInventoryView,
+    AuditLogView, JobOutputListItemView, JobOutputView, NewServerArtifact,
+    ProcessSupervisorInventoryView,
 };
 use crate::object_store::BackupObjectStore;
 use crate::repository::{MemoryState, Repository};
@@ -43,6 +44,22 @@ pub(crate) struct JobOutputArtifactRef {
     pub(crate) object_key: String,
     pub(crate) sha256_hex: String,
     pub(crate) size_bytes: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct JobOutputListFilter {
+    pub(crate) client_id: Option<String>,
+    pub(crate) stream: Option<String>,
+    pub(crate) seq_after: Option<i32>,
+    pub(crate) cursor: Option<JobOutputCursor>,
+    pub(crate) include_data: bool,
+    pub(crate) limit: i64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct JobOutputCursor {
+    pub(crate) client_id: String,
+    pub(crate) seq: i32,
 }
 
 impl Repository {
@@ -81,26 +98,157 @@ impl Repository {
                 .bind(job_id)
                 .fetch_all(pool)
                 .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        let data: Vec<u8> = row.try_get("data")?;
-                        Ok(JobOutputView {
-                            job_id: row.try_get("job_id")?,
-                            client_id: row.try_get("client_id")?,
-                            seq: row.try_get("seq")?,
-                            stream: row.try_get("stream")?,
-                            data_base64: BASE64.encode(data),
-                            storage: row.try_get("storage")?,
-                            artifact_object_key: row.try_get("object_key")?,
-                            artifact_sha256_hex: row.try_get("data_sha256_hex")?,
-                            artifact_size_bytes: row.try_get("data_size_bytes")?,
-                            exit_code: row.try_get("exit_code")?,
-                            done: row.try_get("done")?,
-                            received_at: row.try_get("received_at")?,
-                            created_at: row.try_get("created_at")?,
+                Ok(rows
+                    .into_iter()
+                    .map(job_output_view_from_row)
+                    .collect::<std::result::Result<Vec<_>, _>>()?)
+            }
+        }
+    }
+
+    pub(crate) async fn list_job_outputs_page(
+        &self,
+        job_id: Uuid,
+        filter: JobOutputListFilter,
+    ) -> Result<Vec<JobOutputListItemView>> {
+        let limit = filter.limit.clamp(1, 1001);
+        match self {
+            Self::Memory(memory) => {
+                let mut outputs = memory
+                    .job_outputs
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|output| output.job_id == job_id)
+                    .filter(|output| {
+                        filter
+                            .client_id
+                            .as_ref()
+                            .is_none_or(|client_id| &output.client_id == client_id)
+                    })
+                    .filter(|output| {
+                        filter
+                            .stream
+                            .as_ref()
+                            .is_none_or(|stream| &output.stream == stream)
+                    })
+                    .filter(|output| filter.seq_after.is_none_or(|seq| output.seq > seq))
+                    .filter(|output| {
+                        filter.cursor.as_ref().is_none_or(|cursor| {
+                            output.client_id.as_str() > cursor.client_id.as_str()
+                                || (output.client_id == cursor.client_id && output.seq > cursor.seq)
                         })
                     })
-                    .collect()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                outputs.sort_by(|left, right| {
+                    left.client_id
+                        .cmp(&right.client_id)
+                        .then_with(|| left.seq.cmp(&right.seq))
+                });
+                outputs.truncate(limit as usize);
+                Ok(outputs
+                    .into_iter()
+                    .map(|output| output.into_list_item(filter.include_data))
+                    .collect())
+            }
+            Self::Postgres(pool) => {
+                let cursor_client_id = filter
+                    .cursor
+                    .as_ref()
+                    .map(|cursor| cursor.client_id.clone());
+                let cursor_seq = filter.cursor.as_ref().map(|cursor| cursor.seq);
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        job_id,
+                        client_id,
+                        seq,
+                        stream,
+                        CASE WHEN $7 THEN data ELSE NULL END AS data,
+                        storage,
+                        object_key,
+                        data_sha256_hex,
+                        data_size_bytes,
+                        received_at::text AS received_at,
+                        exit_code,
+                        done,
+                        created_at::text AS created_at
+                    FROM job_outputs
+                    WHERE job_id = $1
+                      AND ($2::text IS NULL OR client_id = $2)
+                      AND ($3::text IS NULL OR stream = $3)
+                      AND ($4::integer IS NULL OR seq > $4)
+                      AND (
+                        $5::text IS NULL
+                        OR client_id > $5
+                        OR (client_id = $5 AND seq > $6)
+                      )
+                    ORDER BY client_id, seq
+                    LIMIT $8
+                    "#,
+                )
+                .bind(job_id)
+                .bind(&filter.client_id)
+                .bind(&filter.stream)
+                .bind(filter.seq_after)
+                .bind(cursor_client_id)
+                .bind(cursor_seq)
+                .bind(filter.include_data)
+                .bind(limit)
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(job_output_list_item_from_row)
+                    .collect::<std::result::Result<Vec<_>, _>>()?)
+            }
+        }
+    }
+
+    pub(crate) async fn get_job_output(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        seq: i32,
+    ) -> Result<Option<JobOutputView>> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .job_outputs
+                .read()
+                .await
+                .iter()
+                .find(|output| {
+                    output.job_id == job_id && output.client_id == client_id && output.seq == seq
+                })
+                .cloned()),
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        job_id,
+                        client_id,
+                        seq,
+                        stream,
+                        data,
+                        storage,
+                        object_key,
+                        data_sha256_hex,
+                        data_size_bytes,
+                        received_at::text AS received_at,
+                        exit_code,
+                        done,
+                        created_at::text AS created_at
+                    FROM job_outputs
+                    WHERE job_id = $1 AND client_id = $2 AND seq = $3
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(seq)
+                .fetch_optional(pool)
+                .await?;
+                Ok(row.map(job_output_view_from_row).transpose()?)
             }
         }
     }
@@ -398,13 +546,15 @@ impl Repository {
                             && existing.client_id == stored_output.client_id
                             && existing.seq == stored_output.seq
                     }) {
-                        if let Some(object_key) = stored_output.created_artifact_object_key.clone()
-                        {
-                            orphaned_object_keys.push(object_key);
-                        }
                         if job_output_view_matches_stored(existing, &stored_output) {
+                            accepted_persisted.push(stored_output.clone());
                             JobOutputWriteResult::DuplicateIdentical
                         } else {
+                            if let Some(object_key) =
+                                stored_output.created_artifact_object_key.clone()
+                            {
+                                orphaned_object_keys.push(object_key);
+                            }
                             conflict_audits.push(job_output_conflict_audit(
                                 stored_output.job_id,
                                 &stored_output.client_id,
@@ -517,10 +667,7 @@ impl Repository {
                 .await?;
                 let write_result = match existing {
                     Some(row) if job_output_row_matches_stored(&row, &stored_output) => {
-                        if let Some(object_key) = stored_output.created_artifact_object_key.clone()
-                        {
-                            orphaned_object_keys.push(object_key);
-                        }
+                        accepted_persisted.push(stored_output.clone());
                         JobOutputWriteResult::DuplicateIdentical
                     }
                     Some(_) => {
@@ -576,6 +723,12 @@ impl Repository {
                             );
                         }
                         accepted_persisted.push(stored_output.clone());
+                        if let Some(artifact) =
+                            job_output_server_artifact(client_id, &stored_output)
+                        {
+                            Repository::upsert_server_artifact_in_tx(&mut tx, &artifact, "active")
+                                .await?;
+                        }
                         JobOutputWriteResult::Inserted
                     }
                 };
@@ -881,6 +1034,10 @@ impl Repository {
                     .bind(&output.received_at)
                     .execute(&mut *tx)
                     .await?;
+                    if let Some(artifact) = job_output_server_artifact(client_id, &output) {
+                        Repository::upsert_server_artifact_in_tx(&mut tx, &artifact, "active")
+                            .await?;
+                    }
                     tx.commit().await?;
                     Ok(seq)
                 }
@@ -979,9 +1136,7 @@ impl Repository {
                             has_conflict = true;
                         } else {
                             planned_results.push(JobOutputWriteResult::DuplicateIdentical);
-                        }
-                        if let Some(object_key) = output.created_artifact_object_key.clone() {
-                            orphaned_object_keys.push(object_key);
+                            accepted_persisted.push(output.clone());
                         }
                     } else {
                         planned_results.push(JobOutputWriteResult::Inserted);
@@ -1045,9 +1200,7 @@ impl Repository {
                     match existing {
                         Some(row) if job_output_row_matches_stored(&row, output) => {
                             planned_results.push(JobOutputWriteResult::DuplicateIdentical);
-                            if let Some(object_key) = output.created_artifact_object_key.clone() {
-                                orphaned_object_keys.push(object_key);
-                            }
+                            accepted_persisted.push(output.clone());
                         }
                         Some(_) => {
                             planned_results.push(JobOutputWriteResult::DuplicateConflict);
@@ -1123,6 +1276,10 @@ impl Repository {
                             );
                         }
                         accepted_persisted.push(output.clone());
+                        if let Some(artifact) = job_output_server_artifact(client_id, output) {
+                            Repository::upsert_server_artifact_in_tx(&mut tx, &artifact, "active")
+                                .await?;
+                        }
                     }
                 }
                 write_results = planned_results;
@@ -1177,30 +1334,10 @@ impl Repository {
         outputs: &[StoredJobOutput],
     ) -> Result<()> {
         for output in outputs {
-            let Some(object_key) = output.artifact_object_key.clone() else {
+            let Some(artifact) = job_output_server_artifact(client_id, output) else {
                 continue;
             };
-            let Some(sha256_hex) = output.artifact_sha256_hex.clone() else {
-                continue;
-            };
-            let Some(size_bytes) = output.artifact_size_bytes else {
-                continue;
-            };
-            self.register_server_artifact(NewServerArtifact {
-                domain: "job_output".to_string(),
-                object_key,
-                sha256_hex,
-                size_bytes,
-                job_id: Some(output.job_id),
-                client_id: Some(client_id.to_string()),
-                stream: Some(output.stream.clone()),
-                seq: Some(output.seq),
-                backup_request_id: None,
-                backup_artifact_id: None,
-                release_id: None,
-                metadata: serde_json::json!({}),
-            })
-            .await?;
+            self.register_server_artifact(artifact).await?;
         }
         Ok(())
     }
@@ -1224,6 +1361,26 @@ struct StoredJobOutput {
     created_at: String,
 }
 
+fn job_output_server_artifact(
+    client_id: &str,
+    output: &StoredJobOutput,
+) -> Option<NewServerArtifact> {
+    Some(NewServerArtifact {
+        domain: "job_output".to_string(),
+        object_key: output.artifact_object_key.clone()?,
+        sha256_hex: output.artifact_sha256_hex.clone()?,
+        size_bytes: output.artifact_size_bytes?,
+        job_id: Some(output.job_id),
+        client_id: Some(client_id.to_string()),
+        stream: Some(output.stream.clone()),
+        seq: Some(output.seq),
+        backup_request_id: None,
+        backup_artifact_id: None,
+        release_id: None,
+        metadata: serde_json::json!({}),
+    })
+}
+
 impl StoredJobOutput {
     fn into_view(self) -> JobOutputView {
         JobOutputView {
@@ -1242,6 +1399,66 @@ impl StoredJobOutput {
             created_at: self.created_at,
         }
     }
+}
+
+impl JobOutputView {
+    fn into_list_item(self, include_data: bool) -> JobOutputListItemView {
+        JobOutputListItemView {
+            job_id: self.job_id,
+            client_id: self.client_id,
+            seq: self.seq,
+            stream: self.stream,
+            data_base64: include_data.then_some(self.data_base64),
+            storage: self.storage,
+            artifact_object_key: self.artifact_object_key,
+            artifact_sha256_hex: self.artifact_sha256_hex,
+            artifact_size_bytes: self.artifact_size_bytes,
+            exit_code: self.exit_code,
+            done: self.done,
+            received_at: self.received_at,
+            created_at: self.created_at,
+        }
+    }
+}
+
+fn job_output_view_from_row(row: PgRow) -> std::result::Result<JobOutputView, sqlx::Error> {
+    let data: Vec<u8> = row.try_get("data")?;
+    Ok(JobOutputView {
+        job_id: row.try_get("job_id")?,
+        client_id: row.try_get("client_id")?,
+        seq: row.try_get("seq")?,
+        stream: row.try_get("stream")?,
+        data_base64: BASE64.encode(data),
+        storage: row.try_get("storage")?,
+        artifact_object_key: row.try_get("object_key")?,
+        artifact_sha256_hex: row.try_get("data_sha256_hex")?,
+        artifact_size_bytes: row.try_get("data_size_bytes")?,
+        exit_code: row.try_get("exit_code")?,
+        done: row.try_get("done")?,
+        received_at: row.try_get("received_at")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn job_output_list_item_from_row(
+    row: PgRow,
+) -> std::result::Result<JobOutputListItemView, sqlx::Error> {
+    let data: Option<Vec<u8>> = row.try_get("data")?;
+    Ok(JobOutputListItemView {
+        job_id: row.try_get("job_id")?,
+        client_id: row.try_get("client_id")?,
+        seq: row.try_get("seq")?,
+        stream: row.try_get("stream")?,
+        data_base64: data.map(|data| BASE64.encode(data)),
+        storage: row.try_get("storage")?,
+        artifact_object_key: row.try_get("object_key")?,
+        artifact_sha256_hex: row.try_get("data_sha256_hex")?,
+        artifact_size_bytes: row.try_get("data_size_bytes")?,
+        exit_code: row.try_get("exit_code")?,
+        done: row.try_get("done")?,
+        received_at: row.try_get("received_at")?,
+        created_at: row.try_get("created_at")?,
+    })
 }
 
 fn job_output_view_matches_stored(existing: &JobOutputView, output: &StoredJobOutput) -> bool {

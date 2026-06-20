@@ -246,6 +246,31 @@ pub(crate) struct JobOutputView {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub(crate) struct JobOutputListItemView {
+    pub(crate) job_id: Uuid,
+    pub(crate) client_id: String,
+    pub(crate) seq: i32,
+    pub(crate) stream: String,
+    pub(crate) data_base64: Option<String>,
+    pub(crate) storage: String,
+    pub(crate) artifact_object_key: Option<String>,
+    pub(crate) artifact_sha256_hex: Option<String>,
+    pub(crate) artifact_size_bytes: Option<i64>,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) done: bool,
+    pub(crate) received_at: Option<String>,
+    pub(crate) created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct JobOutputListPageView {
+    pub(crate) items: Vec<JobOutputListItemView>,
+    pub(crate) limit: i64,
+    pub(crate) next_cursor: Option<String>,
+    pub(crate) has_more: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct ProcessSupervisorInventoryView {
     pub(crate) client_id: String,
     pub(crate) name: String,

@@ -1333,11 +1333,11 @@ const backupArtifacts = [
   {
     client_id: "agent-sfo-01",
     created_at: "2026-05-31T10:01:00Z",
-    encrypted: true,
     id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
-    object_key: `backups/agent-sfo-01/${backupId}.json`,
+    object_key: `backups/agent-sfo-01/${backupId}.tar`,
     sha256_hex: "b".repeat(64),
     size_bytes: 512,
+    status: "active",
   },
 ];
 
@@ -3819,9 +3819,10 @@ export async function installConsoleApiMock(
           return jsonResponse({
             id: "73737373-2222-4333-8444-555555555555",
             name: request.name ?? "source.bin",
-            object_key: `file-transfer-sources/${request.sha256_hex}.bin`,
+            object_key: `file-transfer-sources/73737373-2222-4333-8444-555555555555-${request.sha256_hex}.bin`,
             sha256_hex: request.sha256_hex,
             size_bytes: request.size_bytes,
+            status: "active",
             created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
             created_at: "2026-05-31T10:12:00Z",
             download_path:
@@ -4007,10 +4008,12 @@ export async function installConsoleApiMock(
           /^\/api\/v1\/jobs\/([^/]+)\/outputs$/,
         );
         if (outputMatch && method === "GET") {
-          return jsonResponse(
+          const items =
             createdJobOutputs.get(outputMatch[1]) ??
-              (jobOutputsFixture as Record<string, unknown[]>)[outputMatch[1]] ??
-              [],
+            (jobOutputsFixture as Record<string, unknown[]>)[outputMatch[1]] ??
+            [];
+          return jsonResponse(
+            { items, limit: 1000, next_cursor: null, has_more: false },
           );
         }
         const jobMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)$/);
@@ -4251,7 +4254,6 @@ export async function installConsoleApiMock(
             max_failures?: number;
             name?: string;
             paths?: string[];
-            recipient_public_key_hex?: string | null;
             retry_delay_secs?: number;
             retention_days?: number | null;
             rotation_generation?: string | null;
@@ -4275,7 +4277,6 @@ export async function installConsoleApiMock(
             next_run_at: "2026-06-03T03:00:00Z",
             next_runs: ["2026-06-03T03:00:00Z"],
             paths: request.paths ?? [],
-            recipient_public_key_hex: request.recipient_public_key_hex ?? null,
             retry_delay_secs: request.retry_delay_secs ?? 300,
             retention_days: request.retention_days ?? 30,
             rotation_generation: request.rotation_generation ?? null,
@@ -4301,9 +4302,8 @@ export async function installConsoleApiMock(
             artifact: {
               client_id: "agent-sfo-01",
               created_at: "1700009999",
-              encrypted: true,
               id: "dddddddd-eeee-4fff-8000-111111111111",
-              object_key: `backups/agent-sfo-01/${backupArtifactHandoffMatch[1]}.json`,
+              object_key: `backups/agent-sfo-01/${backupArtifactHandoffMatch[1]}.tar`,
               sha256_hex: "1".repeat(64),
               size_bytes: 321,
             },

@@ -282,7 +282,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
             domain: "backup_object_store",
             name: "builtin:s3_path_style_reserved",
             is_default: false,
-            description: "Reserved S3/MinIO path-style encrypted artifact adapter preset",
+            description: "Reserved S3/MinIO path-style backup artifact adapter preset",
             definition: serde_json::json!({
                 "provider": "s3_path_style",
                 "requires_server_env": [

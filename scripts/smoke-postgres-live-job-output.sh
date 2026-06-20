@@ -237,7 +237,7 @@ assert_persisted_job_state() {
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e --arg path "$destination_file" --arg sha "$payload_sha" '
-    .[] | select(.stream == "status" and .done == true and .exit_code == 0)
+    .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
     | (.data_base64 | @base64d | fromjson)
     | .type == "file_push" and .path == $path and .sha256_hex == $sha and .atomic == true
   ' <<<"$outputs_json" >/dev/null
@@ -245,7 +245,7 @@ assert_persisted_job_state() {
     <<<"$audits_json" >/dev/null
 
   decoded_outputs="$(
-    jq -r '.[].data_base64' <<<"$outputs_json" | while IFS= read -r item; do
+    jq -r '.items[].data_base64' <<<"$outputs_json" | while IFS= read -r item; do
       printf '%s' "$item" | base64 -d
       printf '\n'
     done
@@ -396,9 +396,9 @@ assert_shell_job_output() {
   jq -e --arg client "$client_id" '
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
-  jq -e '.[] | select(.stream == "status" and .done == true and .exit_code == 0)' \
+  jq -e '.items[] | select(.stream == "status" and .done == true and .exit_code == 0)' \
     <<<"$outputs_json" >/dev/null
-  decoded_stdout="$(jq -r '.[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
+  decoded_stdout="$(jq -r '.items[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
   [[ "$decoded_stdout" == "$shell_payload" ]]
   if [[ "$check_marker" == "1" ]]; then
     marker_text="$(cat "$shell_marker")"
@@ -420,11 +420,11 @@ assert_shell_pty_job_output() {
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e '
-    .[] | select(.stream == "status" and .done == true and .exit_code == 0)
+    .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
     | (.data_base64 | @base64d | fromjson)
     | .type == "shell_pty" and .pty == true
   ' <<<"$outputs_json" >/dev/null
-  decoded_pty="$(jq -r '.[] | select(.stream == "pty") | .data_base64' <<<"$outputs_json" | base64 -d)"
+  decoded_pty="$(jq -r '.items[] | select(.stream == "pty") | .data_base64' <<<"$outputs_json" | base64 -d)"
   [[ "$decoded_pty" == "$pty_payload" ]]
 }
 
@@ -442,11 +442,11 @@ assert_shell_script_job_output() {
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e '
-    .[] | select(.stream == "status" and .done == true and .exit_code == 0)
+    .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
     | (.data_base64 | @base64d | fromjson)
     | .type == "shell_script" and .shell == "/bin/sh"
   ' <<<"$outputs_json" >/dev/null
-  decoded_stdout="$(jq -r '.[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
+  decoded_stdout="$(jq -r '.items[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
   [[ "$decoded_stdout" == "$shell_script_payload" ]]
   if [[ "$check_marker" == "1" ]]; then
     marker_text="$(cat "$shell_script_marker")"
@@ -501,11 +501,11 @@ assert_live_streaming_job_output() {
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e '
-    .[] | select(.stream == "status" and .done == true and .exit_code == 0)
+    .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
     | (.data_base64 | @base64d | fromjson)
     | .type == "shell_script"
   ' <<<"$outputs_json" >/dev/null
-  decoded_stdout="$(jq -r '.[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
+  decoded_stdout="$(jq -r '.items[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
   [[ "$decoded_stdout" == "$live_stream_start$live_stream_end" ]]
 }
 
@@ -513,7 +513,7 @@ assert_large_output_artifact() {
   local outputs_json artifact_json seq object_key object_path expected_hash downloaded_hash object_hash size_bytes
   outputs_json="$(api_get "/api/v1/jobs/$large_output_job_id/outputs")"
   artifact_json="$(jq -c --arg client "$client_id" '
-    .[] | select(.client_id == $client and .stream == "stdout" and .storage == "object_store")
+    .items[] | select(.client_id == $client and .stream == "stdout" and .storage == "object_store")
     | select(.artifact_object_key != null and .artifact_sha256_hex != null and .artifact_size_bytes >= 4096)
   ' <<<"$outputs_json" | head -n 1)"
   if [[ -z "$artifact_json" ]]; then
@@ -566,7 +566,7 @@ assert_agent_timeout_shell_job() {
     length == 1 and .[0].client_id == $client and .[0].status == "agent_timeout" and .[0].exit_code == 124
   ' <<<"$targets_json" >/dev/null
   jq -e '
-    .[] | select(.stream == "status" and .done == true and .exit_code == 124)
+    .items[] | select(.stream == "status" and .done == true and .exit_code == 124)
     | (.data_base64 | @base64d | fromjson)
     | .type == "command_timeout" and .timeout_secs == 1
   ' <<<"$outputs_json" >/dev/null
@@ -589,9 +589,9 @@ assert_file_pull_output() {
   jq -e --arg client "$client_id" '
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
-  pulled_bytes="$(jq -r '.[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
+  pulled_bytes="$(jq -r '.items[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
   [[ "$pulled_bytes" == "$file_pull_payload" ]]
-  status_json="$(jq -r '.[] | select(.stream == "status" and .done == true and .exit_code == 0) | .data_base64' <<<"$outputs_json" | base64 -d)"
+  status_json="$(jq -r '.items[] | select(.stream == "status" and .done == true and .exit_code == 0) | .data_base64' <<<"$outputs_json" | base64 -d)"
   jq -e --arg path "$shell_marker" --argjson size "${#file_pull_payload}" '
     .type == "file_pull" and .path == $path and .size_bytes == $size
   ' <<<"$status_json" >/dev/null
@@ -656,7 +656,7 @@ assert_user_sessions_output() {
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e '
-    .[] | select(.stream == "status" and .done == true and .exit_code == 0)
+    .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
     | (.data_base64 | @base64d | fromjson)
     | .type == "user_sessions" and (.source == "/usr/bin/w" or .source == "/usr/bin/who")
   ' <<<"$outputs_json" >/dev/null
@@ -664,7 +664,7 @@ assert_user_sessions_output() {
     <<<"$audits_json" >/dev/null
 
   decoded_outputs="$(
-    jq -r '.[].data_base64' <<<"$outputs_json" | while IFS= read -r item; do
+    jq -r '.items[].data_base64' <<<"$outputs_json" | while IFS= read -r item; do
       printf '%s' "$item" | base64 -d
       printf '\n'
     done
@@ -708,7 +708,7 @@ assert_terminal_session_workflow() {
   close_outputs="$(api_get "/api/v1/jobs/$terminal_close_job_id/outputs")"
 
   jq -e --arg sid "$terminal_session_id" '
-    any(.[]; .stream == "status" and .done == true and .exit_code == 0 and (
+    any(.items[]; .stream == "status" and .done == true and .exit_code == 0 and (
       (.data_base64 | @base64d | fromjson)
       | .type == "terminal_open"
         and .status == "opened"
@@ -724,7 +724,7 @@ assert_terminal_session_workflow() {
     ))
   ' <<<"$open_outputs" >/dev/null
   jq -e --arg sid "$terminal_session_id" '
-    any(.[]; .stream == "status" and .done == true and .exit_code == 0 and (
+    any(.items[]; .stream == "status" and .done == true and .exit_code == 0 and (
       (.data_base64 | @base64d | fromjson)
       | .type == "terminal_resize"
         and .status == "resized"
@@ -734,7 +734,7 @@ assert_terminal_session_workflow() {
     ))
   ' <<<"$resize_outputs" >/dev/null
   jq -e --arg sid "$terminal_session_id" '
-    any(.[]; .stream == "status" and .done == true and .exit_code == 0 and (
+    any(.items[]; .stream == "status" and .done == true and .exit_code == 0 and (
       (.data_base64 | @base64d | fromjson)
       | .type == "terminal_input"
         and .status == "accepted"
@@ -747,12 +747,12 @@ assert_terminal_session_workflow() {
         and .output_replay_truncated == false
     ))
   ' <<<"$input_outputs" >/dev/null
-  decoded_pty="$(jq -r '.[] | select(.stream == "pty") | .data_base64' <<<"$input_outputs" | base64 -d)"
+  decoded_pty="$(jq -r '.items[] | select(.stream == "pty") | .data_base64' <<<"$input_outputs" | base64 -d)"
   [[ "$decoded_pty" == *"got:$terminal_payload"* ]]
-  decoded_pty="$(jq -r '.[] | select(.stream == "pty") | .data_base64' <<<"$attach_outputs" | base64 -d)"
+  decoded_pty="$(jq -r '.items[] | select(.stream == "pty") | .data_base64' <<<"$attach_outputs" | base64 -d)"
   [[ "$decoded_pty" == *"got:$terminal_payload"* ]]
   jq -e --arg sid "$terminal_session_id" '
-    any(.[]; .stream == "status" and .done == true and .exit_code == 0 and (
+    any(.items[]; .stream == "status" and .done == true and .exit_code == 0 and (
       (.data_base64 | @base64d | fromjson)
       | .type == "terminal_open"
         and .status == "attached"
@@ -763,10 +763,10 @@ assert_terminal_session_workflow() {
         and .output_replay_truncated == false
     ))
   ' <<<"$attach_outputs" >/dev/null
-  decoded_pty="$(jq -r '.[] | select(.stream == "pty") | .data_base64' <<<"$poll_outputs" | base64 -d)"
+  decoded_pty="$(jq -r '.items[] | select(.stream == "pty") | .data_base64' <<<"$poll_outputs" | base64 -d)"
   [[ "$decoded_pty" == *"got:$terminal_payload"* ]]
   jq -e --arg sid "$terminal_session_id" '
-    any(.[]; .stream == "status" and .done == true and .exit_code == 0 and (
+    any(.items[]; .stream == "status" and .done == true and .exit_code == 0 and (
       (.data_base64 | @base64d | fromjson)
       | .type == "terminal_poll"
         and .status == "polled"
@@ -779,7 +779,7 @@ assert_terminal_session_workflow() {
     ))
   ' <<<"$poll_outputs" >/dev/null
   jq -e --arg sid "$terminal_session_id" '
-    any(.[]; .stream == "status" and .done == true and .exit_code == 0 and (
+    any(.items[]; .stream == "status" and .done == true and .exit_code == 0 and (
       (.data_base64 | @base64d | fromjson)
       | .type == "terminal_close"
         and .status == "closed"

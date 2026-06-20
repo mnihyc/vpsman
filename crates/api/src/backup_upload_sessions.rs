@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     env,
     io::SeekFrom,
     path::{Path, PathBuf},
@@ -19,12 +20,13 @@ use crate::{
         BackupArtifactUploadSessionCreateRequest, BackupArtifactUploadSessionView,
     },
     routes_backups::{
-        validate_backup_artifact_object_key, validate_encrypted_backup_artifact_with_limit,
+        validate_backup_artifact_object_key, validate_plain_backup_artifact_file_with_limit,
     },
     unix_now,
 };
 
 pub(crate) const BACKUP_ARTIFACT_UPLOAD_SESSION_TTL_SECS: u64 = 24 * 60 * 60;
+const BACKUP_ARTIFACT_UPLOAD_CLEANUP_INTERVAL_SECS: u64 = 60 * 60;
 pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
 static BACKUP_UPLOAD_SESSIONS: OnceLock<BackupArtifactUploadSessions> = OnceLock::new();
@@ -36,6 +38,20 @@ pub(crate) fn backup_upload_sessions() -> &'static BackupArtifactUploadSessions 
             .unwrap_or_else(|| env::temp_dir().join("vpsman-backup-upload-sessions"));
         BackupArtifactUploadSessions::new(root)
     })
+}
+
+pub(crate) fn spawn_backup_upload_session_cleanup() {
+    let sessions = backup_upload_sessions().clone();
+    tokio::spawn(async move {
+        sessions.cleanup_expired().await;
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+            BACKUP_ARTIFACT_UPLOAD_CLEANUP_INTERVAL_SECS,
+        ));
+        loop {
+            ticker.tick().await;
+            sessions.cleanup_expired().await;
+        }
+    });
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +142,7 @@ impl BackupArtifactUploadSessions {
         upload_id: Uuid,
         request: BackupArtifactUploadChunkRequest,
     ) -> Result<BackupArtifactUploadSessionView, ApiError> {
+        self.cleanup_expired().await;
         let chunk = validate_backup_artifact_upload_chunk_request(&request)?;
         let mut session = self.load_session(upload_id).await?;
         ensure_session_matches_request(&session, backup_request_id)?;
@@ -179,6 +196,7 @@ impl BackupArtifactUploadSessions {
         expected_client_id: &str,
         request: BackupArtifactUploadCommitRequest,
     ) -> Result<PreparedBackupArtifactUpload, ApiError> {
+        self.cleanup_expired().await;
         if !request.confirmed {
             return Err(ApiError::conflict(
                 "backup_artifact_upload_commit_confirmation_required",
@@ -209,11 +227,8 @@ impl BackupArtifactUploadSessions {
         if sha256_hex != session.expected_sha256_hex {
             return Err(ApiError::conflict("backup_artifact_upload_sha256_mismatch"));
         }
-        let artifact = tokio::fs::read(&session.staging_path)
-            .await
-            .map_err(internal_error)?;
-        validate_encrypted_backup_artifact_with_limit(
-            &artifact,
+        validate_plain_backup_artifact_file_with_limit(
+            &session.staging_path,
             expected_client_id,
             backup_artifact_streaming_max_bytes(),
         )?;
@@ -240,6 +255,7 @@ impl BackupArtifactUploadSessions {
         upload_id: Uuid,
         confirmed: bool,
     ) -> Result<BackupArtifactUploadSessionView, ApiError> {
+        self.cleanup_expired().await;
         if !confirmed {
             return Err(ApiError::conflict(
                 "backup_artifact_upload_abort_confirmation_required",
@@ -289,12 +305,27 @@ impl BackupArtifactUploadSessions {
     }
 
     async fn cleanup_expired(&self) {
+        self.cleanup_expired_at(unix_now()).await;
+    }
+
+    async fn cleanup_expired_at(&self, now: u64) {
         let Ok(mut entries) = tokio::fs::read_dir(self.root.as_ref()).await else {
             return;
         };
-        let now = unix_now();
+        let mut retained_staging_paths = HashSet::<PathBuf>::new();
+        let mut orphan_staging_candidates = Vec::<PathBuf>::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) == Some("part") {
+                orphan_staging_candidates.push(path);
+                continue;
+            }
+            if is_upload_session_temp_manifest(&path) {
+                if file_is_stale(&path, now).await {
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
+                continue;
+            }
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
@@ -302,11 +333,22 @@ impl BackupArtifactUploadSessions {
                 continue;
             };
             let Ok(session) = serde_json::from_slice::<BackupArtifactUploadSession>(&bytes) else {
+                if file_is_stale(&path, now).await {
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
                 continue;
             };
+            let expected_staging_path = self.staging_path(session.upload_id);
             if session.expires_unix <= now {
-                let _ = tokio::fs::remove_file(&session.staging_path).await;
+                let _ = tokio::fs::remove_file(&expected_staging_path).await;
                 let _ = tokio::fs::remove_file(&path).await;
+            } else if session.staging_path == expected_staging_path {
+                retained_staging_paths.insert(expected_staging_path);
+            }
+        }
+        for path in orphan_staging_candidates {
+            if !retained_staging_paths.contains(&path) && file_is_stale(&path, now).await {
+                let _ = tokio::fs::remove_file(path).await;
             }
         }
     }
@@ -460,10 +502,106 @@ async fn sha256_file_hex(path: &Path) -> Result<String, ApiError> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+fn is_upload_session_temp_manifest(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.contains(".json.tmp-"))
+}
+
+async fn file_is_stale(path: &Path, now: u64) -> bool {
+    let Ok(metadata) = tokio::fs::symlink_metadata(path).await else {
+        return false;
+    };
+    if !metadata.is_file() && !metadata.file_type().is_symlink() {
+        return false;
+    }
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let Ok(modified) = modified.duration_since(std::time::UNIX_EPOCH) else {
+        return false;
+    };
+    now.saturating_sub(modified.as_secs()) >= BACKUP_ARTIFACT_UPLOAD_SESSION_TTL_SECS
+}
+
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 
 fn internal_error(error: impl Into<anyhow::Error>) -> ApiError {
     ApiError::from(error.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cleanup_removes_expired_orphaned_and_temp_upload_files() {
+        let root =
+            std::env::temp_dir().join(format!("vpsman-backup-upload-cleanup-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let sessions = BackupArtifactUploadSessions::new(root.clone());
+        let now = unix_now().saturating_add(BACKUP_ARTIFACT_UPLOAD_SESSION_TTL_SECS + 1);
+
+        let live_id = Uuid::new_v4();
+        let live_part = sessions.staging_path(live_id);
+        let live_manifest = sessions.manifest_path(live_id);
+        tokio::fs::write(&live_part, b"live").await.unwrap();
+        let live = BackupArtifactUploadSession {
+            upload_id: live_id,
+            backup_request_id: Uuid::new_v4(),
+            client_id: "edge-a".to_string(),
+            object_key: "backups/edge-a/live.tar".to_string(),
+            expected_sha256_hex: "a".repeat(64),
+            expected_size_bytes: 4,
+            received_bytes: 0,
+            chunk_count: 0,
+            created_unix: 1,
+            updated_unix: 1,
+            expires_unix: now.saturating_add(BACKUP_ARTIFACT_UPLOAD_SESSION_TTL_SECS),
+            staging_path: live_part.clone(),
+        };
+        tokio::fs::write(&live_manifest, serde_json::to_vec(&live).unwrap())
+            .await
+            .unwrap();
+
+        let expired_id = Uuid::new_v4();
+        let expired_part = sessions.staging_path(expired_id);
+        let expired_manifest = sessions.manifest_path(expired_id);
+        tokio::fs::write(&expired_part, b"expired").await.unwrap();
+        let expired = BackupArtifactUploadSession {
+            upload_id: expired_id,
+            backup_request_id: Uuid::new_v4(),
+            client_id: "edge-a".to_string(),
+            object_key: "backups/edge-a/expired.tar".to_string(),
+            expected_sha256_hex: "b".repeat(64),
+            expected_size_bytes: 7,
+            received_bytes: 0,
+            chunk_count: 0,
+            created_unix: 1,
+            updated_unix: 1,
+            expires_unix: 1,
+            staging_path: expired_part.clone(),
+        };
+        tokio::fs::write(&expired_manifest, serde_json::to_vec(&expired).unwrap())
+            .await
+            .unwrap();
+
+        let orphan_part = sessions.staging_path(Uuid::new_v4());
+        let temp_manifest = root.join(format!("{}.json.tmp-{}", Uuid::new_v4(), Uuid::new_v4()));
+        tokio::fs::write(&orphan_part, b"orphan").await.unwrap();
+        tokio::fs::write(&temp_manifest, b"partial").await.unwrap();
+
+        sessions.cleanup_expired_at(now).await;
+
+        assert!(live_part.exists());
+        assert!(live_manifest.exists());
+        assert!(!expired_part.exists());
+        assert!(!expired_manifest.exists());
+        assert!(!orphan_part.exists());
+        assert!(!temp_manifest.exists());
+
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
 }

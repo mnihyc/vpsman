@@ -21,7 +21,10 @@ use crate::{
         FileTransferSourceArtifactView, UploadFileTransferSourceArtifactRequest,
     },
     object_store::{BackupObjectStore, VerifiedObjectFile},
-    repository_file_transfer_sources::file_transfer_source_artifact_object_key,
+    repository_file_transfer_sources::{
+        file_transfer_source_artifact_download_path, file_transfer_source_artifact_object_key,
+        file_transfer_source_server_artifact,
+    },
     repository_file_transfers::{
         file_transfer_handoff_download_path, file_transfer_handoff_object_key,
     },
@@ -118,30 +121,54 @@ pub(crate) async fn upload_file_transfer_source_artifact(
         return Err(ApiError::bad_request("file_transfer_source_hash_mismatch"));
     }
     let name = safe_source_artifact_name(request.name.as_deref());
-    let object_key = file_transfer_source_artifact_object_key(&sha256_hex);
-    match store.put_new(&object_key, &bytes).await {
-        Ok(()) => {}
-        Err(error) if error.to_string().contains("object already exists") => {
-            let existing = store.get_with_limit(&object_key, bytes.len()).await?;
-            if existing.len() != bytes.len() || hex::encode(Sha256::digest(&existing)) != sha256_hex
-            {
-                return Err(ApiError::conflict(
-                    "file_transfer_source_existing_object_mismatch",
-                ));
-            }
-        }
-        Err(error) => return Err(ApiError::from(error)),
+    let artifact_id = Uuid::new_v4();
+    let object_key = file_transfer_source_artifact_object_key(artifact_id, &sha256_hex);
+    let reserved_source = FileTransferSourceArtifactView {
+        id: artifact_id,
+        name: name.clone(),
+        object_key: object_key.clone(),
+        sha256_hex: sha256_hex.clone(),
+        size_bytes: bytes.len() as i64,
+        status: "creating".to_string(),
+        created_by: Some(operator.operator.id),
+        created_at: crate::unix_now().to_string(),
+        download_path: file_transfer_source_artifact_download_path(artifact_id),
+    };
+    reserve_file_transfer_artifact(
+        &state,
+        file_transfer_source_server_artifact(&reserved_source),
+        "file_transfer_source_object_exists",
+    )
+    .await?;
+    if let Err(error) = store.put_new(&object_key, &bytes).await {
+        release_file_transfer_artifact_reservation(&state, &object_key).await;
+        return Err(ApiError::from(error));
     }
-    let artifact = state
+    let artifact = match state
         .repo
         .record_file_transfer_source_artifact(
             name,
-            object_key,
+            artifact_id,
+            object_key.clone(),
             sha256_hex,
             bytes.len() as i64,
             &operator,
         )
-        .await?;
+        .await
+    {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            cleanup_file_transfer_reserved_object_after_error(
+                &state,
+                store,
+                &object_key,
+                &error.to_string(),
+                true,
+            )
+            .await;
+            return Err(ApiError::from(error));
+        }
+    };
     Ok((axum::http::StatusCode::CREATED, Json(artifact)))
 }
 
@@ -162,6 +189,11 @@ pub(crate) async fn download_file_transfer_source_artifact(
         .get_file_transfer_source_artifact(artifact_id)
         .await?
         .ok_or_else(|| ApiError::not_found("file_transfer_source_artifact_not_found"))?;
+    if artifact.status == "deleting" || artifact.status == "creating" {
+        return Err(ApiError::conflict(
+            "file_transfer_source_artifact_delete_in_progress",
+        ));
+    }
     verified_object_artifact_response(
         store,
         &artifact.object_key,
@@ -207,47 +239,78 @@ pub(crate) async fn create_file_transfer_handoff(
         .size_bytes
         .ok_or_else(|| ApiError::conflict("file_transfer_handoff_size_missing"))?;
     let object_key = file_transfer_handoff_object_key(&client_id, session_id, sha256_hex);
+    let handoff_artifact = NewServerArtifact {
+        domain: "file_transfer_handoff".to_string(),
+        object_key: object_key.clone(),
+        sha256_hex: sha256_hex.to_string(),
+        size_bytes,
+        job_id: Some(session.last_job_id),
+        client_id: Some(client_id.clone()),
+        stream: None,
+        seq: None,
+        backup_request_id: None,
+        backup_artifact_id: None,
+        release_id: None,
+        metadata: serde_json::json!({
+            "session_id": session_id,
+            "path": &session.path,
+        }),
+    };
+    reserve_file_transfer_artifact(
+        &state,
+        handoff_artifact.clone(),
+        "file_transfer_handoff_object_exists",
+    )
+    .await?;
     let temp_path = std::env::temp_dir().join(format!(
         "vpsman-transfer-handoff-{session_id}-{}.tmp",
         Uuid::new_v4()
     ));
-    let chunk_count = write_handoff_temp_file(
+    let chunk_count = match write_handoff_temp_file(
         &state, &client_id, session_id, &temp_path, sha256_hex, size_bytes,
     )
-    .await?;
-    match store
+    .await
+    {
+        Ok(chunk_count) => chunk_count,
+        Err(error) => {
+            release_file_transfer_artifact_reservation(&state, &object_key).await;
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(error);
+        }
+    };
+    let created_object = match store
         .put_file_idempotent(&object_key, &temp_path, sha256_hex, size_bytes as u64)
         .await
     {
-        Ok(_) => {
+        Ok(created_object) => {
             let _ = tokio::fs::remove_file(&temp_path).await;
+            created_object
         }
         Err(error) => {
+            release_file_transfer_artifact_reservation(&state, &object_key).await;
             let _ = tokio::fs::remove_file(&temp_path).await;
             return Err(ApiError::from(error));
         }
+    };
+    let handoff_artifact = NewServerArtifact {
+        metadata: serde_json::json!({
+            "session_id": session_id,
+            "path": &session.path,
+            "chunk_count": chunk_count,
+        }),
+        ..handoff_artifact
+    };
+    if let Err(error) = state.repo.register_server_artifact(handoff_artifact).await {
+        cleanup_file_transfer_reserved_object_after_error(
+            &state,
+            store,
+            &object_key,
+            &error.to_string(),
+            created_object,
+        )
+        .await;
+        return Err(ApiError::from(error));
     }
-    state
-        .repo
-        .register_server_artifact(NewServerArtifact {
-            domain: "file_transfer_handoff".to_string(),
-            object_key: object_key.clone(),
-            sha256_hex: sha256_hex.to_string(),
-            size_bytes,
-            job_id: Some(session.last_job_id),
-            client_id: Some(client_id.clone()),
-            stream: None,
-            seq: None,
-            backup_request_id: None,
-            backup_artifact_id: None,
-            release_id: None,
-            metadata: serde_json::json!({
-                "session_id": session_id,
-                "path": &session.path,
-                "chunk_count": chunk_count,
-            }),
-        })
-        .await?;
     Ok(Json(FileTransferHandoffView {
         client_id,
         session_id,
@@ -483,6 +546,7 @@ async fn write_handoff_temp_file(
     if chunks.is_empty() {
         return Err(ApiError::conflict("file_transfer_handoff_chunks_missing"));
     }
+    let chunks = deduplicate_handoff_chunks(chunks)?;
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -523,6 +587,31 @@ async fn write_handoff_temp_file(
         return Err(ApiError::conflict("file_transfer_handoff_hash_mismatch"));
     }
     Ok(chunks.len())
+}
+
+fn deduplicate_handoff_chunks(
+    chunks: Vec<crate::repository_file_transfers::FileTransferDownloadHandoffChunk>,
+) -> Result<Vec<crate::repository_file_transfers::FileTransferDownloadHandoffChunk>, ApiError> {
+    let mut by_offset: std::collections::BTreeMap<
+        i64,
+        crate::repository_file_transfers::FileTransferDownloadHandoffChunk,
+    > = std::collections::BTreeMap::new();
+    for chunk in chunks {
+        match by_offset.get(&chunk.offset) {
+            Some(existing)
+                if existing.size_bytes == chunk.size_bytes
+                    && existing.sha256_hex == chunk.sha256_hex => {}
+            Some(_) => {
+                return Err(ApiError::conflict(
+                    "file_transfer_handoff_chunk_offset_conflict",
+                ))
+            }
+            None => {
+                by_offset.insert(chunk.offset, chunk);
+            }
+        }
+    }
+    Ok(by_offset.into_values().collect())
 }
 
 async fn load_handoff_chunk_bytes(
@@ -607,6 +696,67 @@ fn validate_file_transfer_source_upload_request(
         ));
     }
     Ok(())
+}
+
+async fn reserve_file_transfer_artifact(
+    state: &AppState,
+    artifact: NewServerArtifact,
+    conflict_code: &'static str,
+) -> Result<(), ApiError> {
+    state
+        .repo
+        .reserve_server_artifact(artifact)
+        .await
+        .map_err(|error| {
+            if error
+                .to_string()
+                .contains("server_artifact_object_key_conflict")
+            {
+                ApiError::conflict(conflict_code)
+            } else {
+                ApiError::from(error)
+            }
+        })
+}
+
+async fn release_file_transfer_artifact_reservation(state: &AppState, object_key: &str) {
+    let _ = state
+        .repo
+        .discard_server_artifact_reservation(object_key)
+        .await;
+}
+
+async fn cleanup_file_transfer_reserved_object_after_error(
+    state: &AppState,
+    store: &BackupObjectStore,
+    object_key: &str,
+    error: &str,
+    created_object: bool,
+) {
+    if created_object {
+        match store.delete_confirmed(object_key).await {
+            Ok(()) => {
+                let _ = state
+                    .repo
+                    .discard_server_artifact_reservation(object_key)
+                    .await;
+            }
+            Err(delete_error) => {
+                let _ = state
+                    .repo
+                    .mark_server_artifact_delete_failed(
+                        object_key,
+                        &format!("{error}; cleanup_delete_failed: {delete_error}"),
+                    )
+                    .await;
+            }
+        }
+    } else {
+        let _ = state
+            .repo
+            .discard_server_artifact_reservation(object_key)
+            .await;
+    }
 }
 
 fn is_lower_or_upper_hex_len(value: &str, len: usize) -> bool {

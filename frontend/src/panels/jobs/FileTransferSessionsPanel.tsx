@@ -3,7 +3,10 @@ import { useEffect, useState } from "react";
 import type { ArtifactDownloadMode } from "../../artifactDownload";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { CrudPager } from "../../components/CrudPager";
-import { fileTransferSessionStatusBadgeClass } from "../../jobStatusPresentation";
+import {
+  artifactLifecycleStatusBadgeClass,
+  fileTransferSessionStatusBadgeClass,
+} from "../../jobStatusPresentation";
 import type {
   FileTransferHandoffRecord,
   FileTransferSessionRecord,
@@ -295,6 +298,7 @@ export function FileTransferSessionsPanel({
           fields={[
             { label: "Name", value: (source) => source.name },
             { label: "Hash", value: (source) => source.sha256_hex },
+            { label: "Status", value: (source) => source.status },
             { label: "Size", value: (source) => source.size_bytes },
             { label: "Created", value: (source) => source.created_at },
           ]}
@@ -317,16 +321,30 @@ export function FileTransferSessionsPanel({
                     <strong>{source.name}</strong>
                     <small>{shortHash(source.sha256_hex)}</small>
                   </span>
-                  <span className="historyPrimary">
+                  <span
+                    className={`sourceArtifactStatus status ${artifactLifecycleStatusBadgeClass(source.status)}`}
+                    title={artifactLifecycleStatusTitle(source.status)}
+                  >
+                    {source.status}
+                  </span>
+                  <span className="sourceArtifactMeta historyPrimary">
                     <strong>{formatBytes(source.size_bytes)}</strong>
                     <small>{formatTime(source.created_at)}</small>
                   </span>
                   <button
                     aria-label={`Download source artifact ${source.name}`}
-                    className="iconButton"
-                    disabled={sourcePendingId === source.id}
+                    className="sourceArtifactDownload iconButton"
+                    disabled={
+                      sourcePendingId === source.id ||
+                      source.status === "creating" ||
+                      source.status === "deleting"
+                    }
                     onClick={() => void downloadSourceArtifact(source)}
-                    title="Download source artifact"
+                    title={
+                      source.status === "creating" || source.status === "deleting"
+                        ? artifactLifecycleStatusTitle(source.status)
+                        : "Download source artifact"
+                    }
                     type="button"
                   >
                     <Download size={14} />
@@ -579,6 +597,18 @@ function formatChunkInfo(transfer: FileTransferSessionRecord): string {
   const configured = transfer.chunk_size_bytes ? formatBytes(transfer.chunk_size_bytes) : "auto";
   const last = transfer.last_chunk_size_bytes ? formatBytes(transfer.last_chunk_size_bytes) : "-";
   return `chunk ${configured}, last ${last}`;
+}
+
+function artifactLifecycleStatusTitle(status: string): string {
+  const descriptions: Record<string, string> = {
+    active: "Object bytes are owned by this artifact and available.",
+    creating: "Artifact ownership is being prepared.",
+    deleting: "Object deletion is in progress; metadata remains visible until deletion finishes.",
+    delete_failed: "Object deletion failed; metadata remains visible and cleanup can be retried.",
+    tombstoned: "Metadata was retained as a tombstone.",
+    deleted: "Object bytes were deleted.",
+  };
+  return descriptions[status] ?? status.replace(/_/g, " ");
 }
 
 function formatBytes(value: number): string {

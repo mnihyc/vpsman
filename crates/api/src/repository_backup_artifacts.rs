@@ -29,7 +29,6 @@ fn compare_backup_artifact(
 ) -> Ordering {
     match sort.unwrap_or("created_at") {
         "client_id" | "client" => left.client_id.cmp(&right.client_id),
-        "encrypted" => left.encrypted.cmp(&right.encrypted),
         "object_key" | "object" => left.object_key.cmp(&right.object_key),
         "sha256_hex" | "hash" => left.sha256_hex.cmp(&right.sha256_hex),
         "size_bytes" | "size" => left.size_bytes.cmp(&right.size_bytes),
@@ -50,18 +49,16 @@ fn backup_artifact_matches_search(artifact: &BackupArtifactView, needle: &str) -
 
 fn backup_artifact_order_by(sort: Option<&str>, descending: bool) -> &'static str {
     match (sort.unwrap_or("created_at"), descending) {
-        ("client_id" | "client", true) => "client_id DESC, id DESC",
-        ("client_id" | "client", false) => "client_id ASC, id ASC",
-        ("encrypted", true) => "encrypted DESC, id DESC",
-        ("encrypted", false) => "encrypted ASC, id ASC",
-        ("object_key" | "object", true) => "object_key DESC, id DESC",
-        ("object_key" | "object", false) => "object_key ASC, id ASC",
-        ("sha256_hex" | "hash", true) => "sha256_hex DESC, id DESC",
-        ("sha256_hex" | "hash", false) => "sha256_hex ASC, id ASC",
-        ("size_bytes" | "size", true) => "size_bytes DESC, id DESC",
-        ("size_bytes" | "size", false) => "size_bytes ASC, id ASC",
-        (_, true) => "created_at DESC, id DESC",
-        (_, false) => "created_at ASC, id ASC",
+        ("client_id" | "client", true) => "artifact.client_id DESC, artifact.id DESC",
+        ("client_id" | "client", false) => "artifact.client_id ASC, artifact.id ASC",
+        ("object_key" | "object", true) => "artifact.object_key DESC, artifact.id DESC",
+        ("object_key" | "object", false) => "artifact.object_key ASC, artifact.id ASC",
+        ("sha256_hex" | "hash", true) => "artifact.sha256_hex DESC, artifact.id DESC",
+        ("sha256_hex" | "hash", false) => "artifact.sha256_hex ASC, artifact.id ASC",
+        ("size_bytes" | "size", true) => "artifact.size_bytes DESC, artifact.id DESC",
+        ("size_bytes" | "size", false) => "artifact.size_bytes ASC, artifact.id ASC",
+        (_, true) => "artifact.created_at DESC, artifact.id DESC",
+        (_, false) => "artifact.created_at ASC, artifact.id ASC",
     }
 }
 
@@ -84,15 +81,18 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT
-                        id,
-                        client_id,
-                        object_key,
-                        sha256_hex,
-                        encrypted,
-                        size_bytes,
-                        created_at::text AS created_at
-                    FROM backup_artifacts
-                    ORDER BY created_at DESC, id DESC
+                        artifact.id,
+                        artifact.client_id,
+                        artifact.object_key,
+                        artifact.sha256_hex,
+                        artifact.size_bytes,
+                        COALESCE(server_artifact.status, 'active') AS status,
+                        artifact.created_at::text AS created_at
+                    FROM backup_artifacts artifact
+                    LEFT JOIN server_artifacts server_artifact
+                      ON server_artifact.object_key = artifact.object_key
+                     AND server_artifact.status <> 'deleted'
+                    ORDER BY artifact.created_at DESC, artifact.id DESC
                     LIMIT $1
                     "#,
                 )
@@ -149,20 +149,23 @@ impl Repository {
                 let rows = sqlx::query(&format!(
                     r#"
                     SELECT
-                        id,
-                        client_id,
-                        object_key,
-                        sha256_hex,
-                        encrypted,
-                        size_bytes,
-                        created_at::text AS created_at
-                    FROM backup_artifacts
+                        artifact.id,
+                        artifact.client_id,
+                        artifact.object_key,
+                        artifact.sha256_hex,
+                        artifact.size_bytes,
+                        COALESCE(server_artifact.status, 'active') AS status,
+                        artifact.created_at::text AS created_at
+                    FROM backup_artifacts artifact
+                    LEFT JOIN server_artifacts server_artifact
+                      ON server_artifact.object_key = artifact.object_key
+                     AND server_artifact.status <> 'deleted'
                     WHERE (
                         $3::text IS NULL
-                        OR id::text ILIKE $3 ESCAPE '\'
-                        OR client_id ILIKE $3 ESCAPE '\'
-                        OR object_key ILIKE $3 ESCAPE '\'
-                        OR sha256_hex ILIKE $3 ESCAPE '\'
+                        OR artifact.id::text ILIKE $3 ESCAPE '\'
+                        OR artifact.client_id ILIKE $3 ESCAPE '\'
+                        OR artifact.object_key ILIKE $3 ESCAPE '\'
+                        OR artifact.sha256_hex ILIKE $3 ESCAPE '\'
                     )
                     ORDER BY {order_by}
                     LIMIT $1
@@ -195,15 +198,18 @@ impl Repository {
                 let row = sqlx::query(
                     r#"
                     SELECT
-                        id,
-                        client_id,
-                        object_key,
-                        sha256_hex,
-                        encrypted,
-                        size_bytes,
-                        created_at::text AS created_at
-                    FROM backup_artifacts
-                    WHERE id = $1
+                        artifact.id,
+                        artifact.client_id,
+                        artifact.object_key,
+                        artifact.sha256_hex,
+                        artifact.size_bytes,
+                        COALESCE(server_artifact.status, 'active') AS status,
+                        artifact.created_at::text AS created_at
+                    FROM backup_artifacts artifact
+                    LEFT JOIN server_artifacts server_artifact
+                      ON server_artifact.object_key = artifact.object_key
+                     AND server_artifact.status <> 'deleted'
+                    WHERE artifact.id = $1
                     "#,
                 )
                 .bind(artifact_id)
@@ -214,45 +220,20 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn backup_artifact_object_key_exists(&self, object_key: &str) -> Result<bool> {
-        match self {
-            Self::Memory(memory) => Ok(memory
-                .backup_artifacts
-                .read()
-                .await
-                .iter()
-                .any(|artifact| artifact.object_key == object_key)),
-            Self::Postgres(pool) => {
-                let exists = sqlx::query_scalar::<_, bool>(
-                    r#"
-                    SELECT EXISTS(
-                        SELECT 1
-                        FROM backup_artifacts
-                        WHERE object_key = $1
-                    )
-                    "#,
-                )
-                .bind(object_key)
-                .fetch_one(pool)
-                .await?;
-                Ok(exists)
-            }
-        }
-    }
-
     pub(crate) async fn record_backup_artifact_metadata(
         &self,
         backup_request: &BackupRequestView,
+        artifact_id: Uuid,
         request: &RecordBackupArtifactMetadataRequest,
         operator: &AuthContext,
     ) -> Result<BackupArtifactView> {
         let artifact = BackupArtifactView {
-            id: Uuid::new_v4(),
+            id: artifact_id,
             client_id: backup_request.client_id.clone(),
             object_key: request.object_key.clone(),
             sha256_hex: request.sha256_hex.clone(),
-            encrypted: request.encrypted,
             size_bytes: request.size_bytes,
+            status: "active".to_string(),
             created_at: unix_now().to_string(),
         };
         match self {
@@ -290,10 +271,9 @@ impl Repository {
                         client_id,
                         object_key,
                         sha256_hex,
-                        encrypted,
                         size_bytes
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    VALUES ($1, $2, $3, $4, $5)
                     RETURNING created_at::text AS created_at
                     "#,
                 )
@@ -301,7 +281,6 @@ impl Repository {
                 .bind(&artifact.client_id)
                 .bind(&artifact.object_key)
                 .bind(&artifact.sha256_hex)
-                .bind(artifact.encrypted)
                 .bind(artifact.size_bytes)
                 .fetch_one(&mut *tx)
                 .await?;
@@ -309,6 +288,12 @@ impl Repository {
                     created_at: row.try_get("created_at")?,
                     ..artifact
                 };
+                Repository::upsert_server_artifact_in_tx(
+                    &mut tx,
+                    &backup_server_artifact(backup_request, &persisted),
+                    "active",
+                )
+                .await?;
                 let update = sqlx::query(
                     r#"
                     UPDATE backup_requests
@@ -347,13 +332,9 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                self.register_server_artifact(backup_server_artifact(backup_request, &persisted))
-                    .await?;
                 return Ok(persisted);
             }
         }
-        self.register_server_artifact(backup_server_artifact(backup_request, &artifact))
-            .await?;
         Ok(artifact)
     }
 }
@@ -364,13 +345,13 @@ pub(crate) fn backup_artifact_from_row(row: sqlx::postgres::PgRow) -> Result<Bac
         client_id: row.try_get("client_id")?,
         object_key: row.try_get("object_key")?,
         sha256_hex: row.try_get("sha256_hex")?,
-        encrypted: row.try_get("encrypted")?,
         size_bytes: row.try_get("size_bytes")?,
+        status: row.try_get("status")?,
         created_at: row.try_get("created_at")?,
     })
 }
 
-fn backup_server_artifact(
+pub(crate) fn backup_server_artifact(
     backup_request: &BackupRequestView,
     artifact: &BackupArtifactView,
 ) -> NewServerArtifact {
@@ -389,7 +370,6 @@ fn backup_server_artifact(
         metadata: json!({
             "backup_request_id": backup_request.id,
             "backup_artifact_id": artifact.id,
-            "encrypted": artifact.encrypted,
         }),
     }
 }
@@ -423,7 +403,6 @@ fn backup_artifact_metadata(
         "client_id": &artifact.client_id,
         "object_key": &artifact.object_key,
         "sha256_hex": &artifact.sha256_hex,
-        "encrypted": artifact.encrypted,
         "size_bytes": artifact.size_bytes,
         "confirmed": confirmed,
         "operator_username": &operator.operator.username,

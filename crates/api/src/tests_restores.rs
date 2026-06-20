@@ -345,7 +345,6 @@ async fn create_source_backup(repo: &crate::repository::Repository) -> Uuid {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
-        recipient_public_key_hex: None,
         confirmed: true,
         note: Some("source".to_string()),
         privilege_assertion: None,

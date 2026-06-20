@@ -625,6 +625,7 @@ async fn main() -> Result<()> {
             actor_id: None,
         })
         .await?;
+    backup_upload_sessions::spawn_backup_upload_session_cleanup();
     job_dispatcher::spawn_job_dispatcher(state.clone());
     spawn_system_metric_sampler(state.clone());
     let listener = tokio::net::TcpListener::bind(args.bind)

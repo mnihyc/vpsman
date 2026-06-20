@@ -11,12 +11,9 @@ build = "build.rs"
 anyhow.workspace = true
 base64.workspace = true
 bytes.workspace = true
-chacha20poly1305.workspace = true
 clap.workspace = true
 hex.workspace = true
 libc.workspace = true
-lz4_flex.workspace = true
-rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -28,7 +25,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 vpsman-common = { path = "../common" }
-x25519-dalek.workspace = true
 
 [build-dependencies]
 vpsman-build-support = { path = "../../build/build-support" }

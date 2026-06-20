@@ -163,38 +163,54 @@ export function useBackupsData(
         throw new Error("Artifact file must not be empty");
       }
       const expectedSha256Hex = await sha256FileHex(artifactFile);
-      const session = await apiPost<BackupArtifactUploadSessionRecord>(
-        `/api/v1/backups/${backupRequestId}/artifact-upload-sessions`,
-        apiToken,
-        {
-          object_key: objectKey,
-          expected_sha256_hex: expectedSha256Hex,
-          expected_size_bytes: artifactFile.size,
-          confirmed,
-        },
-      );
-      const effectiveChunkSize = Math.max(1, Math.min(chunkSizeBytes, session.max_chunk_bytes));
-      let offset = session.next_offset_bytes;
-      while (offset < artifactFile.size) {
-        const end = Math.min(offset + effectiveChunkSize, artifactFile.size);
-        const chunk = await readFileSlice(artifactFile, offset, end);
-        const view = await apiPost<BackupArtifactUploadSessionRecord>(
-          `/api/v1/backups/${backupRequestId}/artifact-upload-sessions/${session.upload_id}/chunks`,
+      let session: BackupArtifactUploadSessionRecord | null = null;
+      try {
+        session = await apiPost<BackupArtifactUploadSessionRecord>(
+          `/api/v1/backups/${backupRequestId}/artifact-upload-sessions`,
           apiToken,
           {
-            offset_bytes: offset,
-            data_base64: bytesToBase64(chunk),
+            object_key: objectKey,
+            expected_sha256_hex: expectedSha256Hex,
+            expected_size_bytes: artifactFile.size,
+            confirmed,
           },
         );
-        offset = view.next_offset_bytes;
+        const effectiveChunkSize = Math.max(1, Math.min(chunkSizeBytes, session.max_chunk_bytes));
+        let offset = session.next_offset_bytes;
+        while (offset < artifactFile.size) {
+          const end = Math.min(offset + effectiveChunkSize, artifactFile.size);
+          const chunk = await readFileSlice(artifactFile, offset, end);
+          const view = await apiPost<BackupArtifactUploadSessionRecord>(
+            `/api/v1/backups/${backupRequestId}/artifact-upload-sessions/${session.upload_id}/chunks`,
+            apiToken,
+            {
+              offset_bytes: offset,
+              data_base64: bytesToBase64(chunk),
+            },
+          );
+          offset = view.next_offset_bytes;
+        }
+        const response = await apiPost<BackupArtifactRecord>(
+          `/api/v1/backups/${backupRequestId}/artifact-upload-sessions/${session.upload_id}/commit`,
+          apiToken,
+          { confirmed },
+        );
+        await Promise.all([loadBackups(), onAuditChanged()]);
+        return response;
+      } catch (error) {
+        if (session) {
+          try {
+            await apiPost<BackupArtifactUploadSessionRecord>(
+              `/api/v1/backups/${backupRequestId}/artifact-upload-sessions/${session.upload_id}/abort`,
+              apiToken,
+              { confirmed: true },
+            );
+          } catch {
+            // Best-effort cleanup; preserve the original upload failure for the operator.
+          }
+        }
+        throw error;
       }
-      const response = await apiPost<BackupArtifactRecord>(
-        `/api/v1/backups/${backupRequestId}/artifact-upload-sessions/${session.upload_id}/commit`,
-        apiToken,
-        { confirmed },
-      );
-      await Promise.all([loadBackups(), onAuditChanged()]);
-      return response;
     },
     [apiToken, loadBackups, onAuditChanged],
   );

@@ -173,7 +173,7 @@ assert_patch_persisted() {
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e --arg config_path "$agent_config" --arg rollback_path "$rollback_config" '
-    .[] | select(.stream == "status" and .done == true and .exit_code == 0)
+    .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
     | (.data_base64 | @base64d | fromjson)
     | .type == "data_source_config_patch"
       and .status == "applied"
@@ -184,7 +184,7 @@ assert_patch_persisted() {
     <<<"$audits_json" >/dev/null
 
   decoded_outputs="$(
-    jq -r '.[].data_base64' <<<"$outputs_json" | while IFS= read -r item; do
+    jq -r '.items[].data_base64' <<<"$outputs_json" | while IFS= read -r item; do
       printf '%s' "$item" | base64 -d
       printf '\n'
     done
@@ -221,13 +221,13 @@ assert_execution_policy_applied() {
   fi
   shell_outputs="$(api_get "/api/v1/jobs/$execution_policy_job_id/outputs")"
   shell_stdout="$(
-    jq -r '.[] | select(.stream == "stdout") | .data_base64' <<<"$shell_outputs" \
+    jq -r '.items[] | select(.stream == "stdout") | .data_base64' <<<"$shell_outputs" \
       | base64 -d
   )"
   grep -F "cwd=$execution_cwd" <<<"$shell_stdout" >/dev/null
   grep -F "env=$execution_env_value" <<<"$shell_stdout" >/dev/null
   jq -e --arg cwd "$execution_cwd" '
-    .[] | select(.stream == "status" and .done == true and .exit_code == 0)
+    .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
     | (.data_base64 | @base64d | fromjson)
     | .type == "shell_script"
       and .working_directory == $cwd
@@ -260,9 +260,9 @@ assert_execution_policy_applied() {
     and (. [0].status == "agent_timeout" or .[0].status == "control_timeout")
   ' <<<"$timeout_targets" >/dev/null
   timeout_outputs="$(api_get "/api/v1/jobs/$execution_timeout_job_id/outputs")"
-  if [[ "$(jq 'length' <<<"$timeout_outputs")" != "0" ]]; then
+  if [[ "$(jq '.items | length' <<<"$timeout_outputs")" != "0" ]]; then
     jq -e '
-      any(.[]; .stream == "status" and .done == true and .exit_code == 124 and (
+      any(.items[]; .stream == "status" and .done == true and .exit_code == 124 and (
         (.data_base64 | @base64d | fromjson)
         | .type == "command_timeout"
           and .mode == "shell_script"
@@ -292,7 +292,7 @@ assert_execution_policy_applied() {
     length == 1 and .[0].client_id == $client and .[0].status == "rejected" and .[0].exit_code == 126
   ' <<<"$terminal_targets" >/dev/null
   jq -e '
-    .[] | select(.stream == "status" and .done == true and .exit_code == 126)
+    .items[] | select(.stream == "status" and .done == true and .exit_code == 126)
     | (.data_base64 | @base64d | fromjson)
     | .type == "terminal_open"
       and .status == "rejected"

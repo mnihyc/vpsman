@@ -89,36 +89,55 @@ backup_request_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --confirmed)"
 backup_request_id="$(jq -r '.id' <<<"$backup_request_json")"
 
-ciphertext_file="$SMOKE_TMPDIR/ciphertext.bin"
+payload_file="$SMOKE_TMPDIR/payload.bin"
 {
-  printf 'synthetic encrypted payload for chunked upload smoke %s\n' "$(date +%s%N)"
+  printf 'synthetic plain backup payload for chunked upload smoke %s\n' "$(date +%s%N)"
   printf 'chunk-boundary-padding-'
   seq 1 50 | tr '\n' ':'
   printf '\n'
-} >"$ciphertext_file"
-ciphertext_b64="$(base64 <"$ciphertext_file" | tr -d '\n')"
-ciphertext_sha="$(sha256sum "$ciphertext_file" | awk '{print $1}')"
-artifact_file="$SMOKE_TMPDIR/artifact.json"
-jq -nc \
-  --arg client "$client_id" \
-  --arg ciphertext_b64 "$ciphertext_b64" \
-  --arg ciphertext_sha "$ciphertext_sha" \
-  --arg created "$(date +%s)" \
-  '{
-    format: "vpsman.backup_artifact.v1",
-    version: 1,
-    client_id: $client,
-    created_unix: ($created | tonumber),
-    cipher: "x25519-chacha20poly1305",
-    compression: "lz4-size-prepended",
-    recipient_public_key_sha256_hex: ("a" * 64),
-    ephemeral_public_key_hex: ("b" * 64),
-    nonce_hex: ("c" * 24),
-    ciphertext_sha256_hex: $ciphertext_sha,
-    ciphertext_base64: $ciphertext_b64
-  }' >"$artifact_file"
+} >"$payload_file"
+artifact_file="$SMOKE_TMPDIR/artifact.tar"
+python3 - "$client_id" "$payload_file" "$artifact_file" <<'PY'
+import hashlib
+import io
+import json
+import sys
+import tarfile
+import time
+
+client_id, payload_path, artifact_path = sys.argv[1:]
+with open(payload_path, "rb") as handle:
+    payload = handle.read()
+created_unix = int(time.time())
+manifest = {
+    "format": "vpsman.backup_tar.v1",
+    "client_id": client_id,
+    "created_unix": created_unix,
+    "files": [{
+        "path": "/etc/hostname",
+        "source": "selected_path",
+        "tar_path": "vpsman-backup/files/0000.bin",
+        "mode": 0o644,
+        "size_bytes": len(payload),
+        "sha256_hex": hashlib.sha256(payload).hexdigest(),
+        "mtime_unix": created_unix,
+    }],
+}
+with tarfile.open(artifact_path, "w") as archive:
+    manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+    manifest_info = tarfile.TarInfo("vpsman-backup/manifest.json")
+    manifest_info.size = len(manifest_bytes)
+    manifest_info.mode = 0o600
+    manifest_info.mtime = created_unix
+    archive.addfile(manifest_info, fileobj=io.BytesIO(manifest_bytes))
+    payload_info = tarfile.TarInfo("vpsman-backup/files/0000.bin")
+    payload_info.size = len(payload)
+    payload_info.mode = 0o644
+    payload_info.mtime = created_unix
+    archive.addfile(payload_info, fileobj=io.BytesIO(payload))
+PY
 artifact_sha="$(sha256sum "$artifact_file" | awk '{print $1}')"
-object_key="backups/$client_id/$backup_request_id-chunked.json"
+object_key="backups/$client_id/$backup_request_id-chunked.tar"
 
 upload_json="$(target/debug/vpsctl --api-url "$api_url" backup-artifact-upload-chunked \
   --backup-request-id "$backup_request_id" \
@@ -130,12 +149,12 @@ jq -e \
   --arg client "$client_id" \
   --arg object_key "$object_key" \
   --arg sha "$artifact_sha" \
-  '.client_id == $client and .object_key == $object_key and .sha256_hex == $sha and .encrypted == true and .size_bytes > 0' \
+  '.client_id == $client and .object_key == $object_key and .sha256_hex == $sha and .size_bytes > 0' \
   <<<"$upload_json" >/dev/null
 
 stored_object="$object_store_dir/$object_key"
 cmp -s "$artifact_file" "$stored_object"
-api_downloaded="$SMOKE_TMPDIR/api-downloaded-artifact.json"
+api_downloaded="$SMOKE_TMPDIR/api-downloaded-artifact.tar"
 api_auth_get "/api/v1/backups/$backup_request_id/artifact" >"$api_downloaded"
 cmp -s "$artifact_file" "$api_downloaded"
 
@@ -167,7 +186,7 @@ jq -e --arg id "$backup_request_id" --arg artifact_id "$artifact_id" '
   .[] | select(.id == $id and .status == "artifact_metadata_recorded" and .artifact_id == $artifact_id)
 ' <<<"$backups_json" >/dev/null
 jq -e --arg artifact_id "$artifact_id" --arg object_key "$object_key" '
-  .[] | select(.id == $artifact_id and .object_key == $object_key and .encrypted == true)
+  .[] | select(.id == $artifact_id and .object_key == $object_key)
 ' <<<"$artifacts_json" >/dev/null
 jq -e '[.[].action] | index("backup.artifact_metadata_recorded")' <<<"$audits_json" >/dev/null
 

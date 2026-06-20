@@ -184,15 +184,18 @@ async fn prune_backup_policy(
             .as_ref()
             .expect("object store checked before pruning");
         for candidate in &candidates {
-            let rows = prune_backup_policy_rows(pool, std::slice::from_ref(candidate)).await?;
-            pruned_rows += rows;
-            if rows == 0 {
+            if !mark_backup_artifact_deleting(pool, &candidate.object_key).await? {
                 continue;
             }
             match object_store.delete_confirmed(&candidate.object_key).await {
-                Ok(()) => {}
+                Ok(()) => {
+                    pruned_rows += finalize_backup_policy_row_delete(pool, candidate).await?;
+                }
                 Err(error) => {
-                    object_delete_errors.push(format!("{}: {error}", candidate.object_key));
+                    let error_text = error.to_string();
+                    mark_backup_artifact_delete_failed(pool, &candidate.object_key, &error_text)
+                        .await?;
+                    object_delete_errors.push(format!("{}: {error_text}", candidate.object_key));
                     break;
                 }
             }
@@ -294,6 +297,101 @@ async fn prune_backup_policy_rows(
     .bind(artifact_ids)
     .fetch_one(pool)
     .await?;
+    Ok(pruned_rows)
+}
+
+async fn mark_backup_artifact_deleting(pool: &PgPool, object_key: &str) -> Result<bool> {
+    let updated = sqlx::query(
+        r#"
+        UPDATE server_artifacts
+        SET status = 'deleting',
+            metadata = metadata - 'delete_error' - 'delete_failed_at'
+        WHERE object_key = $1
+          AND status IN ('active', 'deleting', 'delete_failed')
+        "#,
+    )
+    .bind(object_key)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() > 0)
+}
+
+async fn mark_backup_artifact_delete_failed(
+    pool: &PgPool,
+    object_key: &str,
+    error: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE server_artifacts
+        SET status = 'delete_failed',
+            metadata = metadata || jsonb_build_object(
+                'delete_error', left($2, 1000),
+                'delete_failed_at', now()::text
+            )
+        WHERE object_key = $1
+          AND status IN ('active', 'deleting', 'delete_failed')
+        "#,
+    )
+    .bind(object_key)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn finalize_backup_policy_row_delete(
+    pool: &PgPool,
+    candidate: &BackupPolicyRetentionCandidate,
+) -> Result<i64> {
+    let mut tx = pool.begin().await?;
+    let pruned_rows = sqlx::query_scalar::<_, i64>(
+        r#"
+        WITH doomed AS (
+            SELECT
+                $1::uuid AS request_id,
+                artifact.id AS artifact_id,
+                artifact.object_key
+            FROM backup_artifacts artifact
+            WHERE artifact.id = $2
+              AND artifact.object_key = $3
+        ),
+        cleared_requests AS (
+            UPDATE backup_requests request
+            SET artifact_id = NULL,
+                status = 'requested_metadata_only'
+            FROM doomed
+            WHERE request.id = doomed.request_id
+              AND request.artifact_id = doomed.artifact_id
+            RETURNING request.id
+        ),
+        deleted_artifacts AS (
+            DELETE FROM backup_artifacts artifact
+            USING doomed
+            WHERE artifact.id = doomed.artifact_id
+            RETURNING artifact.object_key
+        )
+        SELECT count(*)::bigint FROM deleted_artifacts
+        "#,
+    )
+    .bind(candidate.request_id)
+    .bind(candidate.artifact_id)
+    .bind(&candidate.object_key)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE server_artifacts
+        SET status = 'deleted',
+            deleted_at = now()
+        WHERE object_key = $1
+          AND status IN ('active', 'deleting', 'delete_failed')
+        "#,
+    )
+    .bind(&candidate.object_key)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(pruned_rows)
 }
 

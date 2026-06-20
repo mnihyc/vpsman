@@ -52,6 +52,7 @@ pub(crate) struct FileTransferSourceArtifactView {
     pub(crate) object_key: String,
     pub(crate) sha256_hex: String,
     pub(crate) size_bytes: i64,
+    pub(crate) status: String,
     pub(crate) created_by: Option<Uuid>,
     pub(crate) created_at: String,
     pub(crate) download_path: String,

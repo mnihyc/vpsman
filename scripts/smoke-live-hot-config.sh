@@ -148,7 +148,7 @@ assert_hot_config_persisted() {
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   jq -e --arg config_path "$agent_config" --arg rollback_path "$rollback_config" '
-    .[] | select(.stream == "status" and .done == true and .exit_code == 0)
+    .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
     | (.data_base64 | @base64d | fromjson)
     | .type == "hot_config"
       and .status == "applied"
@@ -159,7 +159,7 @@ assert_hot_config_persisted() {
     <<<"$audits_json" >/dev/null
 
   decoded_outputs="$(
-    jq -r '.[].data_base64' <<<"$outputs_json" | while IFS= read -r item; do
+    jq -r '.items[].data_base64' <<<"$outputs_json" | while IFS= read -r item; do
       printf '%s' "$item" | base64 -d
       printf '\n'
     done

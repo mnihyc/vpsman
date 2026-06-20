@@ -292,8 +292,6 @@ export function BackupsPanel({
     DEFAULT_BACKUP_SELECTED_PATHS,
   );
   const [policyIncludeConfig, setPolicyIncludeConfig] = useState(true);
-  const [policyRecipientPublicKeyHex, setPolicyRecipientPublicKeyHex] =
-    useState("");
   const [policyCronExpr, setPolicyCronExpr] = useState("0 3 * * *");
   const [policyRetentionDays, setPolicyRetentionDays] = useState(30);
   const [policyKeepLast, setPolicyKeepLast] = useState(7);
@@ -528,10 +526,6 @@ export function BackupsPanel({
       if (!selectorExpression) {
         throw new Error("Add at least one target selector");
       }
-      const recipient = policyRecipientPublicKeyHex.trim().toLowerCase();
-      if (recipient && !/^[0-9a-f]{64}$/.test(recipient)) {
-        throw new Error("Recipient public key must be 32-byte hex");
-      }
       const resolved = await onResolveTargets({ selector_expression: selectorExpression });
       const targetClientIds = resolved.targets.map((target) => target.id);
       if (!targetClientIds.length) {
@@ -541,7 +535,6 @@ export function BackupsPanel({
         type: "backup",
         paths: policyPaths,
         include_config: policyIncludeConfig,
-        recipient_public_key_hex: recipient || null,
       };
       const operationPayloadHash = await operationPayloadHashHex(operation);
       const request: CreateBackupPolicyRequest = {
@@ -550,7 +543,6 @@ export function BackupsPanel({
         target_client_ids: targetClientIds,
         paths: policyPaths,
         include_config: policyIncludeConfig,
-        recipient_public_key_hex: recipient || null,
         retention_days: clampInteger(policyRetentionDays, 1, 3650),
         keep_last: clampInteger(policyKeepLast, 1, 1000),
         rotation_generation: policyRotationGeneration.trim() || null,
@@ -744,7 +736,7 @@ export function BackupsPanel({
       setLastPayloadHash(snapshot.payloadHashHex);
       setLastRequest(request);
       setArtifactBackupId(request.id);
-      setArtifactObjectKey(`backups/${request.client_id}/${request.id}.json`);
+      setArtifactObjectKey(`backups/${request.client_id}/${request.id}.tar`);
       setPendingActionSnapshot(null);
     });
   }
@@ -759,7 +751,7 @@ export function BackupsPanel({
         throw new Error("Object key is required");
       }
       if (!artifactFile) {
-        throw new Error("Select an encrypted artifact file");
+        throw new Error("Select a backup artifact file");
       }
       const objectKey = artifactObjectKey.trim();
       const artifactBase64 =
@@ -837,7 +829,7 @@ export function BackupsPanel({
     setArtifactBackupId(backupId);
     const backup = backups.find((item) => item.id === backupId);
     if (backup) {
-      setArtifactObjectKey(`backups/${backup.client_id}/${backup.id}.json`);
+      setArtifactObjectKey(`backups/${backup.client_id}/${backup.id}.tar`);
     }
   }
 
@@ -1587,7 +1579,7 @@ export function BackupsPanel({
       case "backup-request":
         return "Confirm this browser-unlocked backup request before it is written.";
       case "artifact-upload":
-        return "Confirm the encrypted artifact upload for the selected backup request.";
+        return "Confirm the backup artifact upload for the selected backup request.";
       case "artifact-handoff":
         return "Confirm promoting retained job output into a backup artifact record.";
       case "restore-plan":
@@ -1855,10 +1847,6 @@ export function BackupsPanel({
                   setPolicyPathsText(value);
                   clearPolicyConfirmation();
                 }}
-                onRecipientPublicKeyHexChange={(value) => {
-                  setPolicyRecipientPublicKeyHex(value);
-                  clearPolicyConfirmation();
-                }}
                 onRetentionDaysChange={(value) => {
                   setPolicyRetentionDays(value);
                   clearPolicyConfirmation();
@@ -1876,7 +1864,6 @@ export function BackupsPanel({
                 pathsText={policyPathsText}
                 pending={pending}
                 policyEnabled={policyEnabled}
-                recipientPublicKeyHex={policyRecipientPublicKeyHex}
                 retentionDays={policyRetentionDays}
                 rotationGeneration={policyRotationGeneration}
                 targetCount={policyTargetCount}

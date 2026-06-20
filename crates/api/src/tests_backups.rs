@@ -8,6 +8,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use std::io::Write;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -56,7 +57,6 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
         client_id: "client-a".to_string(),
         paths: Vec::new(),
         include_config: false,
-        recipient_public_key_hex: None,
         confirmed: true,
         note: None,
         privilege_assertion: None,
@@ -72,7 +72,6 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
         client_id: "client-a".to_string(),
         paths: vec!["relative".to_string()],
         include_config: false,
-        recipient_public_key_hex: None,
         confirmed: true,
         note: None,
         privilege_assertion: None,
@@ -88,7 +87,6 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: false,
-        recipient_public_key_hex: None,
         confirmed: false,
         note: None,
         privilege_assertion: None,
@@ -109,7 +107,6 @@ fn backup_policy_validation_requires_targets_retention_and_confirmation() {
         target_client_ids: vec!["client-a".to_string()],
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
-        recipient_public_key_hex: Some("a".repeat(64)),
         retention_days: Some(30),
         keep_last: Some(7),
         rotation_generation: Some("keyring/v2".to_string()),
@@ -148,22 +145,13 @@ fn backup_policy_validation_requires_targets_retention_and_confirmation() {
             .code,
         "backup_policy_keep_last_out_of_range"
     );
-    request.keep_last = Some(7);
-    request.recipient_public_key_hex = Some("bad".to_string());
-    assert_eq!(
-        validate_create_backup_policy_request(&request)
-            .unwrap_err()
-            .code,
-        "backup_recipient_public_key_hex_invalid"
-    );
 }
 
 #[test]
-fn backup_artifact_metadata_validation_requires_encrypted_safe_metadata() {
+fn backup_artifact_metadata_validation_requires_safe_metadata() {
     let unconfirmed = RecordBackupArtifactMetadataRequest {
-        object_key: "backups/client-a/artifact.cbor.zst.age".to_string(),
+        object_key: "backups/client-a/artifact.tar".to_string(),
         sha256_hex: "a".repeat(64),
-        encrypted: true,
         size_bytes: 128,
         confirmed: false,
     };
@@ -177,7 +165,6 @@ fn backup_artifact_metadata_validation_requires_encrypted_safe_metadata() {
     let unsafe_key = RecordBackupArtifactMetadataRequest {
         object_key: "../artifact".to_string(),
         sha256_hex: "a".repeat(64),
-        encrypted: true,
         size_bytes: 128,
         confirmed: true,
     };
@@ -188,24 +175,9 @@ fn backup_artifact_metadata_validation_requires_encrypted_safe_metadata() {
         "backup_artifact_object_key_invalid"
     );
 
-    let unencrypted = RecordBackupArtifactMetadataRequest {
-        object_key: "backups/client-a/artifact.cbor.zst.age".to_string(),
-        sha256_hex: "a".repeat(64),
-        encrypted: false,
-        size_bytes: 128,
-        confirmed: true,
-    };
-    assert_eq!(
-        validate_backup_artifact_metadata_request(&unencrypted)
-            .unwrap_err()
-            .code,
-        "backup_artifact_must_be_encrypted"
-    );
-
     let bad_hash = RecordBackupArtifactMetadataRequest {
-        object_key: "backups/client-a/artifact.cbor.zst.age".to_string(),
+        object_key: "backups/client-a/artifact.tar".to_string(),
         sha256_hex: "not-a-hash".to_string(),
-        encrypted: true,
         size_bytes: 128,
         confirmed: true,
     };
@@ -222,14 +194,12 @@ fn backup_job_command_validates_executable_scope() {
     validate_job_command(&JobCommand::Backup {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
-        recipient_public_key_hex: None,
     })
     .unwrap();
     assert_eq!(
         validate_job_command(&JobCommand::Backup {
             paths: Vec::new(),
             include_config: false,
-            recipient_public_key_hex: None,
         })
         .unwrap_err()
         .code,
@@ -239,7 +209,6 @@ fn backup_job_command_validates_executable_scope() {
         validate_job_command(&JobCommand::Backup {
             paths: vec!["relative".to_string()],
             include_config: false,
-            recipient_public_key_hex: None,
         })
         .unwrap_err()
         .code,
@@ -260,7 +229,6 @@ async fn backup_job_dispatch_requires_confirmation() {
         operation: Some(JobCommand::Backup {
             paths: vec!["/etc/hostname".to_string()],
             include_config: true,
-            recipient_public_key_hex: None,
         }),
         timeout_secs: Some(30),
         force_unprivileged: false,
@@ -285,7 +253,7 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         "vpsman-api-backup-job-auto-record-{}",
         Uuid::new_v4()
     ));
-    let artifact_bytes = encrypted_artifact_bytes_with_ciphertext("client-a", &vec![b'x'; 48_000]);
+    let artifact_bytes = plain_backup_artifact_bytes_with_payload("client-a", &vec![b'x'; 48_000]);
     let (gateway_url, gateway_task) = spawn_backup_gateway_once(artifact_bytes.clone()).await;
     let mut state = test_state_with_store(
         repo.clone(),
@@ -297,7 +265,6 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
     let operation = JobCommand::Backup {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
-        recipient_public_key_hex: None,
     };
     let request = CreateJobRequest {
         job_id: Some(Uuid::new_v4()),
@@ -374,7 +341,6 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
-        recipient_public_key_hex: None,
         confirmed: true,
         note: Some("operator-requested".to_string()),
         privilege_assertion: None,
@@ -386,10 +352,9 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
     let operation = JobCommand::Backup {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
-        recipient_public_key_hex: None,
     };
     let (gateway_url, gateway_task) =
-        spawn_backup_gateway_once(encrypted_artifact_bytes("client-a")).await;
+        spawn_backup_gateway_once(plain_backup_artifact_bytes("client-a")).await;
     let mut state = test_state(repo.clone());
     state.gateway =
         GatewayDispatchClient::new(Some(gateway_url), Some(TEST_INTERNAL_TOKEN.to_string()))
@@ -449,13 +414,15 @@ async fn backup_request_records_metadata_and_audit_after_privilege_unlock() {
         )
         .await;
     }
-    let state = test_state(repo.clone());
+    let object_root =
+        std::env::temp_dir().join(format!("vpsman-backup-metadata-{}", uuid::Uuid::new_v4()));
+    let store = BackupObjectStore::filesystem(object_root.clone()).unwrap();
+    let state = test_state_with_store(repo.clone(), store);
     let headers = crate::test_auth_headers(&state).await;
     let request = CreateBackupRequest {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
-        recipient_public_key_hex: None,
         confirmed: true,
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,
@@ -489,16 +456,17 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     let repo = Repository::Memory(MemoryState::default());
     seed_backup_agent_id(&repo, "client-a").await;
     seed_backup_agent_id(&repo, "client-b").await;
-    let state = test_state(repo.clone());
+    let object_root =
+        std::env::temp_dir().join(format!("vpsman-backup-metadata-{}", Uuid::new_v4()));
+    let store = BackupObjectStore::filesystem(object_root.clone()).unwrap();
+    let state = test_state_with_store(repo.clone(), store);
     let headers = crate::test_auth_headers(&state).await;
-    let recipient_public_key_hex = "b".repeat(64);
     let request = CreateBackupPolicyRequest {
         name: "nightly-edge".to_string(),
         selector_expression: "id:client-a || tag:edge".to_string(),
         target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
-        recipient_public_key_hex: Some(recipient_public_key_hex.clone()),
         retention_days: Some(45),
         keep_last: Some(12),
         rotation_generation: Some("keyring/v2".to_string()),
@@ -528,10 +496,6 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     assert_eq!(view.target_client_ids, vec!["client-a", "client-b"]);
     assert_eq!(view.paths, vec!["/etc/hostname"]);
     assert!(view.include_config);
-    assert_eq!(
-        view.recipient_public_key_hex.as_deref(),
-        Some(recipient_public_key_hex.as_str())
-    );
     assert_eq!(view.retention_days, 45);
     assert_eq!(view.keep_last, 12);
     assert_eq!(view.rotation_generation.as_deref(), Some("keyring/v2"));
@@ -545,14 +509,15 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     assert!(matches!(
         &schedules[0].operation,
         JobCommand::Backup {
-            recipient_public_key_hex: Some(value),
+            paths,
+            include_config,
             ..
-        } if value == &recipient_public_key_hex
+        } if paths == &vec!["/etc/hostname".to_string()] && *include_config
     ));
     assert!(audits
         .iter()
         .any(|audit| audit.action == "backup_policy.upserted"));
-    assert!(!audit_json.contains(&recipient_public_key_hex));
+    assert!(!audit_json.contains("recipient_public_key"));
 }
 
 #[tokio::test]
@@ -575,7 +540,6 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
             target_client_ids: vec!["client-a".to_string()],
             paths: vec!["/etc/hostname".to_string()],
             include_config: true,
-            recipient_public_key_hex: None,
             retention_days: Some(1),
             keep_last: Some(1),
             rotation_generation: None,
@@ -680,7 +644,7 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
 }
 
 #[tokio::test]
-async fn backup_policy_prune_partial_error_prunes_metadata_before_delete_failure() {
+async fn backup_policy_prune_partial_error_preserves_metadata_after_delete_failure() {
     let repo = Repository::Memory(MemoryState::default());
     seed_backup_agent(&repo).await;
     let object_root = std::env::temp_dir().join(format!(
@@ -701,7 +665,6 @@ async fn backup_policy_prune_partial_error_prunes_metadata_before_delete_failure
             target_client_ids: vec!["client-a".to_string()],
             paths: vec!["/etc/hostname".to_string()],
             include_config: true,
-            recipient_public_key_hex: None,
             retention_days: Some(1),
             keep_last: Some(1),
             rotation_generation: None,
@@ -782,7 +745,7 @@ async fn backup_policy_prune_partial_error_prunes_metadata_before_delete_failure
     let policy_result = &pruned.policies[0];
     assert_eq!(policy_result.status, "partial_error");
     assert_eq!(policy_result.matched_rows, 2);
-    assert_eq!(policy_result.pruned_rows, 2);
+    assert_eq!(policy_result.pruned_rows, 1);
     assert_eq!(
         policy_result.object_keys,
         vec![missing_ok.clone(), delete_fails.clone()]
@@ -790,17 +753,20 @@ async fn backup_policy_prune_partial_error_prunes_metadata_before_delete_failure
     assert_eq!(policy_result.object_delete_errors.len(), 1);
     assert!(policy_result.object_delete_errors[0].contains(&delete_fails));
     let artifacts = repo.list_backup_artifacts(10).await.unwrap();
-    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts.len(), 2);
     assert!(artifacts
         .iter()
         .any(|artifact| artifact.object_key == retained));
+    assert!(artifacts
+        .iter()
+        .any(|artifact| artifact.object_key == delete_fails));
     let backups = repo.list_backup_requests(10).await.unwrap();
     assert_eq!(
         backups
             .iter()
             .filter(|backup| backup.artifact_id.is_some())
             .count(),
-        1
+        2
     );
 
     let _ = tokio::fs::remove_dir_all(object_root).await;
@@ -825,13 +791,15 @@ async fn backup_artifact_metadata_links_request_and_audits() {
         )
         .await;
     }
-    let state = test_state(repo.clone());
+    let object_root =
+        std::env::temp_dir().join(format!("vpsman-backup-metadata-{}", Uuid::new_v4()));
+    let store = BackupObjectStore::filesystem(object_root.clone()).unwrap();
+    let state = test_state_with_store(repo.clone(), store);
     let headers = crate::test_auth_headers(&state).await;
     let request = CreateBackupRequest {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
-        recipient_public_key_hex: None,
         confirmed: true,
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,
@@ -841,11 +809,19 @@ async fn backup_artifact_metadata_links_request_and_audits() {
             .await
             .unwrap();
 
+    let artifact_bytes = plain_backup_artifact_bytes("client-a");
+    let object_key = format!("backups/{}/{}.tar", backup.client_id, backup.id);
+    state
+        .backup_object_store
+        .as_ref()
+        .unwrap()
+        .put_new(&object_key, &artifact_bytes)
+        .await
+        .unwrap();
     let artifact_request = RecordBackupArtifactMetadataRequest {
-        object_key: format!("backups/{}/{}.cbor.zst.age", backup.client_id, backup.id),
-        sha256_hex: "b".repeat(64),
-        encrypted: true,
-        size_bytes: 4096,
+        object_key,
+        sha256_hex: payload_hash(&artifact_bytes),
+        size_bytes: artifact_bytes.len() as i64,
         confirmed: true,
     };
     let (status, Json(artifact)) = record_backup_artifact_metadata(
@@ -863,9 +839,8 @@ async fn backup_artifact_metadata_links_request_and_audits() {
 
     assert_eq!(status, axum::http::StatusCode::CREATED);
     assert_eq!(artifact.client_id, "client-a");
-    assert_eq!(artifact.sha256_hex, "b".repeat(64));
-    assert!(artifact.encrypted);
-    assert_eq!(artifact.size_bytes, 4096);
+    assert_eq!(artifact.sha256_hex, payload_hash(&artifact_bytes));
+    assert_eq!(artifact.size_bytes, artifact_bytes.len() as i64);
     assert_eq!(artifacts.len(), 1);
     assert_eq!(artifacts[0].id, artifact.id);
     assert_eq!(backups[0].id, backup.id);
@@ -876,12 +851,8 @@ async fn backup_artifact_metadata_links_request_and_audits() {
         .any(|audit| audit.action == "backup.artifact_metadata_recorded"));
 
     let duplicate = RecordBackupArtifactMetadataRequest {
-        object_key: format!(
-            "backups/{}/{}-duplicate.cbor.zst.age",
-            backup.client_id, backup.id
-        ),
+        object_key: format!("backups/{}/{}-duplicate.tar", backup.client_id, backup.id),
         sha256_hex: "c".repeat(64),
-        encrypted: true,
         size_bytes: 4096,
         confirmed: true,
     };
@@ -891,6 +862,7 @@ async fn backup_artifact_metadata_links_request_and_audits() {
             .unwrap_err();
     assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
     assert_eq!(error.code, "backup_artifact_already_recorded");
+    let _ = tokio::fs::remove_dir_all(object_root).await;
 }
 
 #[tokio::test]
@@ -904,8 +876,8 @@ async fn backup_artifact_upload_stores_bytes_and_links_metadata() {
         BackupObjectStore::filesystem(object_root.clone()).unwrap(),
     );
     let backup = create_test_backup_request(&repo, state.clone()).await;
-    let artifact_bytes = encrypted_artifact_bytes("client-a");
-    let object_key = format!("backups/{}/{}.json", backup.client_id, backup.id);
+    let artifact_bytes = plain_backup_artifact_bytes("client-a");
+    let object_key = format!("backups/{}/{}.tar", backup.client_id, backup.id);
     let headers = crate::test_auth_headers(&state).await;
 
     let (status, Json(artifact)) = upload_backup_artifact(
@@ -931,7 +903,6 @@ async fn backup_artifact_upload_stores_bytes_and_links_metadata() {
     assert_eq!(artifact.object_key, object_key);
     assert_eq!(artifact.sha256_hex, payload_hash(&artifact_bytes));
     assert_eq!(artifact.size_bytes, artifact_bytes.len() as i64);
-    assert!(artifact.encrypted);
     assert_eq!(tokio::fs::read(stored_path).await.unwrap(), artifact_bytes);
     let download = download_backup_artifact(State(state.clone()), headers.clone(), Path(backup.id))
         .await
@@ -960,8 +931,8 @@ async fn backup_artifact_upload_stores_bytes_and_links_metadata() {
         headers,
         Path(backup.id),
         Json(UploadBackupArtifactRequest {
-            object_key: format!("backups/{}/{}-duplicate.json", backup.client_id, backup.id),
-            artifact_base64: BASE64.encode(encrypted_artifact_bytes("client-a")),
+            object_key: format!("backups/{}/{}-duplicate.tar", backup.client_id, backup.id),
+            artifact_base64: BASE64.encode(plain_backup_artifact_bytes("client-a")),
             confirmed: true,
         }),
     )
@@ -986,9 +957,9 @@ async fn backup_artifact_upload_session_stages_chunks_and_commits_artifact() {
         BackupObjectStore::filesystem(object_root.clone()).unwrap(),
     );
     let backup = create_test_backup_request(&repo, state.clone()).await;
-    let artifact_bytes = encrypted_artifact_bytes("client-a");
+    let artifact_bytes = plain_backup_artifact_bytes("client-a");
     let artifact_sha = payload_hash(&artifact_bytes);
-    let object_key = format!("backups/{}/{}-chunked.json", backup.client_id, backup.id);
+    let object_key = format!("backups/{}/{}-chunked.tar", backup.client_id, backup.id);
     let headers = crate::test_auth_headers(&state).await;
 
     let (status, Json(session)) = create_backup_artifact_upload_session(
@@ -1149,7 +1120,7 @@ async fn backup_artifact_upload_session_rejects_bad_offsets_and_can_abort() {
         BackupObjectStore::filesystem(object_root.clone()).unwrap(),
     );
     let backup = create_test_backup_request(&repo, state.clone()).await;
-    let artifact_bytes = encrypted_artifact_bytes("client-a");
+    let artifact_bytes = plain_backup_artifact_bytes("client-a");
     let headers = crate::test_auth_headers(&state).await;
 
     let (_, Json(session)) = create_backup_artifact_upload_session(
@@ -1157,7 +1128,7 @@ async fn backup_artifact_upload_session_rejects_bad_offsets_and_can_abort() {
         headers.clone(),
         Path(backup.id),
         Json(BackupArtifactUploadSessionCreateRequest {
-            object_key: format!("backups/{}/{}-abort.json", backup.client_id, backup.id),
+            object_key: format!("backups/{}/{}-abort.tar", backup.client_id, backup.id),
             expected_sha256_hex: payload_hash(&artifact_bytes),
             expected_size_bytes: artifact_bytes.len() as i64,
             confirmed: true,
@@ -1209,7 +1180,7 @@ async fn backup_artifact_upload_session_rejects_bad_offsets_and_can_abort() {
 }
 
 #[tokio::test]
-async fn backup_artifact_upload_rejects_unencrypted_or_wrong_client_payloads() {
+async fn backup_artifact_upload_rejects_invalid_or_wrong_client_payloads() {
     let repo = Repository::Memory(MemoryState::default());
     seed_backup_agent(&repo).await;
     let object_root = std::env::temp_dir().join(format!(
@@ -1228,8 +1199,8 @@ async fn backup_artifact_upload_rejects_unencrypted_or_wrong_client_payloads() {
         headers.clone(),
         Path(backup.id),
         Json(UploadBackupArtifactRequest {
-            object_key: format!("backups/{}/unconfirmed.json", backup.client_id),
-            artifact_base64: BASE64.encode(encrypted_artifact_bytes("client-a")),
+            object_key: format!("backups/{}/unconfirmed.tar", backup.client_id),
+            artifact_base64: BASE64.encode(plain_backup_artifact_bytes("client-a")),
             confirmed: false,
         }),
     )
@@ -1245,8 +1216,8 @@ async fn backup_artifact_upload_rejects_unencrypted_or_wrong_client_payloads() {
         headers,
         Path(backup.id),
         Json(UploadBackupArtifactRequest {
-            object_key: format!("backups/{}/wrong-client.json", backup.client_id),
-            artifact_base64: BASE64.encode(encrypted_artifact_bytes("client-b")),
+            object_key: format!("backups/{}/wrong-client.tar", backup.client_id),
+            artifact_base64: BASE64.encode(plain_backup_artifact_bytes("client-b")),
             confirmed: true,
         }),
     )
@@ -1254,7 +1225,7 @@ async fn backup_artifact_upload_rejects_unencrypted_or_wrong_client_payloads() {
     .unwrap_err();
     assert_eq!(wrong_client.code, "backup_artifact_client_mismatch");
     assert!(
-        !tokio::fs::try_exists(object_root.join("backups/client-a/wrong-client.json"))
+        !tokio::fs::try_exists(object_root.join("backups/client-a/wrong-client.tar"))
             .await
             .unwrap()
     );
@@ -1273,7 +1244,7 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
         BackupObjectStore::filesystem(object_root.clone()).unwrap(),
     );
     let backup = create_test_backup_request(&repo, state.clone()).await;
-    let artifact_bytes = encrypted_artifact_bytes("client-a");
+    let artifact_bytes = plain_backup_artifact_bytes("client-a");
     let source_job_id = Uuid::new_v4();
     if let Repository::Memory(memory) = &repo {
         memory.jobs.write().await.push(JobHistoryView {
@@ -1292,7 +1263,6 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
             JobCommand::Backup {
                 paths: backup.paths.clone(),
                 include_config: backup.include_config,
-                recipient_public_key_hex: None,
             },
         );
         memory.job_targets.write().await.push(JobTargetView {
@@ -1370,7 +1340,7 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
     let store = BackupObjectStore::filesystem(object_root.clone()).unwrap();
     let state = test_state_with_store(repo.clone(), store.clone());
     let backup = create_test_backup_request(&repo, state.clone()).await;
-    let artifact_bytes = encrypted_artifact_bytes("client-a");
+    let artifact_bytes = plain_backup_artifact_bytes("client-a");
     let source_object_key = "job-outputs/source-backup-artifact.bin";
     store
         .put_new(source_object_key, &artifact_bytes)
@@ -1394,7 +1364,6 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
             JobCommand::Backup {
                 paths: backup.paths.clone(),
                 include_config: backup.include_config,
-                recipient_public_key_hex: None,
             },
         );
         memory.job_targets.write().await.push(JobTargetView {
@@ -1524,7 +1493,6 @@ async fn backup_request_requires_privilege_gateway_verification() {
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: false,
-        recipient_public_key_hex: None,
         confirmed: true,
         note: None,
         privilege_assertion: None,
@@ -1601,7 +1569,6 @@ async fn create_test_backup_request(
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
-        recipient_public_key_hex: None,
         confirmed: true,
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,
@@ -1626,7 +1593,6 @@ async fn seed_policy_backup_artifact(
         client_id: "client-a".to_string(),
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
-        recipient_public_key_hex: None,
         confirmed: true,
         note: Some(format!("policy artifact {label}")),
         privilege_assertion: None,
@@ -1634,10 +1600,6 @@ async fn seed_policy_backup_artifact(
     let command = JobCommand::Backup {
         paths: request.paths.clone(),
         include_config: request.include_config,
-        recipient_public_key_hex: request
-            .recipient_public_key_hex
-            .clone()
-            .map(|value| value.to_ascii_lowercase()),
     };
     let command_hash = payload_hash(&encode_json(&command).unwrap());
     let command_scope = format!("client:{}", request.client_id);
@@ -1655,16 +1617,16 @@ async fn seed_policy_backup_artifact(
         )
         .await
         .unwrap();
-    let artifact_bytes = encrypted_artifact_bytes("client-a");
-    let object_key = format!("backups/client-a/{label}.json");
+    let artifact_bytes = plain_backup_artifact_bytes("client-a");
+    let object_key = format!("backups/client-a/{label}.tar");
     store.put_new(&object_key, &artifact_bytes).await.unwrap();
     let artifact = repo
         .record_backup_artifact_metadata(
             &backup,
+            Uuid::new_v4(),
             &RecordBackupArtifactMetadataRequest {
                 object_key: object_key.clone(),
                 sha256_hex: payload_hash(&artifact_bytes),
-                encrypted: true,
                 size_bytes: artifact_bytes.len() as i64,
                 confirmed: true,
             },
@@ -1735,26 +1697,54 @@ fn backup_test_operator() -> AuthContext {
     }
 }
 
-fn encrypted_artifact_bytes(client_id: &str) -> Vec<u8> {
-    let ciphertext = format!("encrypted bytes for {client_id}").into_bytes();
-    encrypted_artifact_bytes_with_ciphertext(client_id, &ciphertext)
+fn plain_backup_artifact_bytes(client_id: &str) -> Vec<u8> {
+    let payload = format!("backup bytes for {client_id}").into_bytes();
+    plain_backup_artifact_bytes_with_payload(client_id, &payload)
 }
 
-fn encrypted_artifact_bytes_with_ciphertext(client_id: &str, ciphertext: &[u8]) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({
-        "format": "vpsman.backup_artifact.v1",
-        "version": 1,
-        "cipher": "x25519-chacha20poly1305",
-        "compression": "lz4-size-prepended",
+fn plain_backup_artifact_bytes_with_payload(client_id: &str, payload: &[u8]) -> Vec<u8> {
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "format": "vpsman.backup_tar.v1",
         "client_id": client_id,
         "created_unix": unix_now(),
-        "recipient_public_key_sha256_hex": "a".repeat(64),
-        "ephemeral_public_key_hex": "b".repeat(64),
-        "nonce_hex": "c".repeat(24),
-        "ciphertext_sha256_hex": payload_hash(ciphertext),
-        "ciphertext_base64": BASE64.encode(ciphertext),
+        "files": [{
+            "path": "/etc/hostname",
+            "source": "selected_path",
+            "tar_path": "vpsman-backup/files/0000.bin",
+            "mode": 0o644,
+            "size_bytes": payload.len(),
+            "sha256_hex": payload_hash(payload),
+            "mtime_unix": null,
+        }],
     }))
-    .unwrap()
+    .unwrap();
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        append_test_tar_entry(
+            &mut builder,
+            "vpsman-backup/manifest.json",
+            0o600,
+            &manifest,
+        );
+        append_test_tar_entry(&mut builder, "vpsman-backup/files/0000.bin", 0o644, payload);
+        builder.finish().unwrap();
+    }
+    archive
+}
+
+fn append_test_tar_entry<W: Write>(
+    builder: &mut tar::Builder<W>,
+    path: &str,
+    mode: u32,
+    bytes: &[u8],
+) {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(bytes.len() as u64);
+    header.set_mode(mode);
+    header.set_mtime(0);
+    header.set_cksum();
+    builder.append_data(&mut header, path, bytes).unwrap();
 }
 
 async fn spawn_backup_gateway_once(

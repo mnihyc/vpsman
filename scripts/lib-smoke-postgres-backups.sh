@@ -13,7 +13,7 @@ _smoke_seed_policy_prune_artifact() {
   request_id="$(jq -r '.id' <<<"$request_json")"
   artifact_json="$(vpsctl_json backup-artifact-record \
     --backup-request-id "$request_id" \
-    --object-key "backups/pg-agent-a/policy-prune-$label.cbor.zst.age" \
+    --object-key "backups/pg-agent-a/policy-prune-$label.tar" \
     --sha256-hex "$(printf "%064s" "" | tr ' ' "$sha_char")" \
     --size-bytes 4096 \
     --confirmed)"
@@ -50,9 +50,9 @@ smoke_postgres_backup_policy_prune_evidence() {
   read -r prune_retained_request_id prune_retained_artifact_id < <(_smoke_seed_policy_prune_artifact retained d)
   backup_prune_object_root="$SMOKE_TMPDIR/backup-prune-objects"
   mkdir -p "$backup_prune_object_root/backups/pg-agent-a"
-  printf 'old-a\n' >"$backup_prune_object_root/backups/pg-agent-a/policy-prune-old-a.cbor.zst.age"
-  printf 'old-b\n' >"$backup_prune_object_root/backups/pg-agent-a/policy-prune-old-b.cbor.zst.age"
-  printf 'retained\n' >"$backup_prune_object_root/backups/pg-agent-a/policy-prune-retained.cbor.zst.age"
+  printf 'old-a\n' >"$backup_prune_object_root/backups/pg-agent-a/policy-prune-old-a.tar"
+  printf 'old-b\n' >"$backup_prune_object_root/backups/pg-agent-a/policy-prune-old-b.tar"
+  printf 'retained\n' >"$backup_prune_object_root/backups/pg-agent-a/policy-prune-retained.tar"
   docker exec -i "$container_name" psql -U vpsman -d vpsman -v ON_ERROR_STOP=1 >/dev/null <<SQL
 UPDATE backup_requests
 SET source_schedule_id = '$backup_prune_policy_schedule_id'
@@ -141,12 +141,12 @@ jq -e --arg schedule_id "$backup_prune_policy_schedule_id" '
     echo "expected policy prune to keep newest artifact metadata row" >&2
     exit 1
   fi
-  if [[ -e "$backup_prune_object_root/backups/pg-agent-a/policy-prune-old-a.cbor.zst.age" || -e "$backup_prune_object_root/backups/pg-agent-a/policy-prune-old-b.cbor.zst.age" ]]; then
+  if [[ -e "$backup_prune_object_root/backups/pg-agent-a/policy-prune-old-a.tar" || -e "$backup_prune_object_root/backups/pg-agent-a/policy-prune-old-b.tar" ]]; then
     echo "expected worker object deletion to remove old local object files" >&2
     find "$backup_prune_object_root" -type f -print >&2 || true
     exit 1
   fi
-  if [[ ! -e "$backup_prune_object_root/backups/pg-agent-a/policy-prune-retained.cbor.zst.age" ]]; then
+  if [[ ! -e "$backup_prune_object_root/backups/pg-agent-a/policy-prune-retained.tar" ]]; then
     echo "expected worker object deletion to keep retained local object file" >&2
     exit 1
   fi

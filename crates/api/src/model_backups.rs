@@ -27,8 +27,8 @@ pub(crate) struct BackupArtifactView {
     pub(crate) client_id: String,
     pub(crate) object_key: String,
     pub(crate) sha256_hex: String,
-    pub(crate) encrypted: bool,
     pub(crate) size_bytes: i64,
+    pub(crate) status: String,
     pub(crate) created_at: String,
 }
 
@@ -40,7 +40,6 @@ pub(crate) struct CreateBackupRequest {
     pub(crate) paths: Vec<String>,
     #[serde(default)]
     pub(crate) include_config: bool,
-    pub(crate) recipient_public_key_hex: Option<String>,
     #[serde(default)]
     pub(crate) confirmed: bool,
     pub(crate) note: Option<String>,
@@ -57,7 +56,6 @@ pub(crate) struct BackupPolicyView {
     pub(crate) target_client_ids: Vec<String>,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
-    pub(crate) recipient_public_key_hex: Option<String>,
     pub(crate) retention_days: i32,
     pub(crate) keep_last: i32,
     pub(crate) rotation_generation: Option<String>,
@@ -97,7 +95,6 @@ pub(crate) struct CreateBackupPolicyRequest {
     pub(crate) paths: Vec<String>,
     #[serde(default)]
     pub(crate) include_config: bool,
-    pub(crate) recipient_public_key_hex: Option<String>,
     pub(crate) retention_days: Option<i32>,
     pub(crate) keep_last: Option<i32>,
     pub(crate) rotation_generation: Option<String>,
@@ -160,8 +157,6 @@ pub(crate) struct BackupPolicyPrunePolicyView {
 pub(crate) struct RecordBackupArtifactMetadataRequest {
     pub(crate) object_key: String,
     pub(crate) sha256_hex: String,
-    #[serde(default)]
-    pub(crate) encrypted: bool,
     pub(crate) size_bytes: i64,
     #[serde(default)]
     pub(crate) confirmed: bool,

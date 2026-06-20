@@ -69,9 +69,7 @@ impl FileTransferDownloadMultiTargetPolicy {
 
 #[derive(Debug, Deserialize)]
 struct JobOutputRecord {
-    client_id: String,
     seq: i32,
-    stream: String,
     data_base64: String,
     #[serde(default)]
     storage: String,
@@ -79,6 +77,13 @@ struct JobOutputRecord {
     artifact_sha256_hex: Option<String>,
     #[serde(default)]
     artifact_size_bytes: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct JobOutputListPage {
+    items: Vec<JobOutputRecord>,
+    next_cursor: Option<String>,
+    has_more: bool,
 }
 
 struct DownloadChunkStep {
@@ -414,12 +419,8 @@ fn fetch_download_stdout_chunk(
     client_id: &str,
     expected_len: usize,
 ) -> Result<Vec<u8>> {
-    let outputs_json = http_get(api_url, &format!("/api/v1/jobs/{job_id}/outputs"), token)?;
-    let mut outputs = serde_json::from_str::<Vec<JobOutputRecord>>(&outputs_json)
-        .context("failed to parse download chunk outputs")?
-        .into_iter()
-        .filter(|output| output.client_id == client_id && output.stream == "stdout")
-        .collect::<Vec<_>>();
+    let mut outputs = fetch_job_outputs(api_url, token, job_id, Some(client_id), Some("stdout"))
+        .context("failed to fetch download chunk outputs")?;
     outputs.sort_by_key(|output| output.seq);
     anyhow::ensure!(
         !outputs.is_empty(),
@@ -523,6 +524,46 @@ fn percent_encode_path_segment(value: &str) -> String {
         }
     }
     encoded
+}
+
+fn fetch_job_outputs(
+    api_url: &str,
+    token: Option<&str>,
+    job_id: Uuid,
+    client_id: Option<&str>,
+    stream: Option<&str>,
+) -> Result<Vec<JobOutputRecord>> {
+    let mut cursor = None;
+    let mut outputs = Vec::new();
+    loop {
+        let mut params = vec!["limit=1000".to_string(), "include_data=true".to_string()];
+        if let Some(cursor) = cursor.as_deref() {
+            params.push(format!("cursor={}", percent_encode_path_segment(cursor)));
+        }
+        if let Some(client_id) = client_id {
+            params.push(format!(
+                "client_id={}",
+                percent_encode_path_segment(client_id)
+            ));
+        }
+        if let Some(stream) = stream {
+            params.push(format!("stream={}", percent_encode_path_segment(stream)));
+        }
+        let page_json = http_get(
+            api_url,
+            &format!("/api/v1/jobs/{job_id}/outputs?{}", params.join("&")),
+            token,
+        )?;
+        let page = serde_json::from_str::<JobOutputListPage>(&page_json)
+            .context("failed to parse job output page")?;
+        outputs.extend(page.items);
+        if !page.has_more {
+            break;
+        }
+        cursor = page.next_cursor;
+        anyhow::ensure!(cursor.is_some(), "job output page omitted next cursor");
+    }
+    Ok(outputs)
 }
 
 fn download_destination_specs(

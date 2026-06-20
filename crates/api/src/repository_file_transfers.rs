@@ -211,7 +211,7 @@ impl Repository {
         session_id: Uuid,
     ) -> Result<Vec<FileTransferDownloadHandoffChunk>> {
         let outputs = self
-            .list_file_transfer_download_chunk_outputs(client_id)
+            .list_file_transfer_download_chunk_outputs(client_id, session_id)
             .await?;
         Ok(build_file_transfer_download_handoff_chunks(
             outputs, session_id,
@@ -221,6 +221,7 @@ impl Repository {
     async fn list_file_transfer_download_chunk_outputs(
         &self,
         client_id: &str,
+        session_id: Uuid,
     ) -> Result<Vec<FileTransferChunkOutput>> {
         match self {
             Self::Memory(memory) => {
@@ -258,8 +259,18 @@ impl Repository {
                 Ok(outputs)
             }
             Self::Postgres(pool) => {
+                let session_text = session_id.to_string();
                 let rows = sqlx::query(
                     r#"
+                    WITH chunk_jobs AS (
+                        SELECT DISTINCT output.job_id
+                        FROM job_outputs output
+                        JOIN jobs job ON job.id = output.job_id
+                        WHERE output.client_id = $1
+                          AND output.stream = 'status'
+                          AND job.command_type = 'file_transfer_download_chunk'
+                          AND convert_from(output.data, 'UTF8')::jsonb ->> 'session_id' = $2
+                    )
                     SELECT
                         output.job_id,
                         output.client_id,
@@ -274,13 +285,13 @@ impl Repository {
                         output.done,
                         output.created_at::text AS created_at
                     FROM job_outputs output
-                    JOIN jobs job ON job.id = output.job_id
+                    JOIN chunk_jobs ON chunk_jobs.job_id = output.job_id
                     WHERE output.client_id = $1
-                      AND job.command_type = 'file_transfer_download_chunk'
                     ORDER BY output.job_id, output.seq
                     "#,
                 )
                 .bind(client_id)
+                .bind(session_text)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()

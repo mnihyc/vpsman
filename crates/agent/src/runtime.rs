@@ -1326,7 +1326,6 @@ async fn execute_authorized_command(
         JobCommand::Backup {
             paths,
             include_config,
-            recipient_public_key_hex,
         } => {
             execute_backup_command(BackupCommandInput {
                 job_id: request.job_id,
@@ -1334,7 +1333,6 @@ async fn execute_authorized_command(
                 config_path: &config_path,
                 paths,
                 include_config: *include_config,
-                recipient_public_key_hex: recipient_public_key_hex.as_deref(),
                 output_tx: Some(streamed_output_tx),
                 timeout_secs,
                 cancel_token: cancel_token.clone(),

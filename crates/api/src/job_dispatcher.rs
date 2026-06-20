@@ -469,7 +469,6 @@ async fn record_backup_request_for_claim(
     let JobCommand::Backup {
         paths,
         include_config,
-        recipient_public_key_hex,
     } = &claimed.operation
     else {
         return Ok(());
@@ -502,7 +501,6 @@ async fn record_backup_request_for_claim(
         client_id: claimed.client_id.clone(),
         paths: paths.clone(),
         include_config: *include_config,
-        recipient_public_key_hex: recipient_public_key_hex.clone(),
         confirmed: true,
         note: Some(format!("auto-linked from backup job {}", claimed.job_id)),
         privilege_assertion: None,

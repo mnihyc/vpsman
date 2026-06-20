@@ -202,10 +202,8 @@ pub(crate) fn job_target_status_download(
 
 pub(crate) fn job_outputs(api_url: &str, token: Option<&str>, job_id: String) -> Result<()> {
     let job_id = Uuid::parse_str(&job_id).context("invalid --job-id UUID")?;
-    println!(
-        "{}",
-        http_get(api_url, &format!("/api/v1/jobs/{job_id}/outputs"), token)?
-    );
+    let outputs = fetch_all_job_outputs(api_url, token, job_id, None, None)?;
+    println!("{}", serde_json::to_string(&outputs_as_json(&outputs))?);
     Ok(())
 }
 
@@ -238,19 +236,22 @@ pub(crate) fn job_follow_output(
     let mut seen = BTreeSet::new();
     let mut rendered = String::new();
     let mut last_status = None;
+    let mut cursor = None;
 
     for poll in 0..max_polls {
-        let outputs_json = http_get(api_url, &format!("/api/v1/jobs/{job_id}/outputs"), token)?;
-        let mut outputs = serde_json::from_str::<Vec<JobOutputRecord>>(&outputs_json)
-            .context("failed to parse job outputs")?;
-        outputs.sort_by(|left, right| {
-            left.client_id
-                .cmp(&right.client_id)
-                .then_with(|| left.seq.cmp(&right.seq))
-        });
-        for output in &outputs {
-            if seen.insert((output.client_id.clone(), output.seq)) {
-                rendered.push_str(&render_job_output(output, json)?);
+        loop {
+            let page =
+                fetch_job_output_page(api_url, token, job_id, cursor.as_deref(), None, None)?;
+            for output in &page.items {
+                if seen.insert((output.client_id.clone(), output.seq)) {
+                    rendered.push_str(&render_job_output(output, json)?);
+                }
+            }
+            if let Some(next_cursor) = page.next_cursor {
+                cursor = Some(next_cursor);
+            }
+            if !page.has_more {
+                break;
             }
         }
 
@@ -419,6 +420,65 @@ struct JobOutputRecord {
     done: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct JobOutputListPage {
+    items: Vec<JobOutputRecord>,
+    next_cursor: Option<String>,
+    has_more: bool,
+}
+
+fn fetch_all_job_outputs(
+    api_url: &str,
+    token: Option<&str>,
+    job_id: Uuid,
+    client_id: Option<&str>,
+    stream: Option<&str>,
+) -> Result<Vec<JobOutputRecord>> {
+    let mut cursor = None;
+    let mut outputs = Vec::new();
+    loop {
+        let page =
+            fetch_job_output_page(api_url, token, job_id, cursor.as_deref(), client_id, stream)?;
+        outputs.extend(page.items);
+        if !page.has_more {
+            break;
+        }
+        cursor = page.next_cursor;
+        anyhow::ensure!(cursor.is_some(), "job output page omitted next cursor");
+    }
+    Ok(outputs)
+}
+
+fn fetch_job_output_page(
+    api_url: &str,
+    token: Option<&str>,
+    job_id: Uuid,
+    cursor: Option<&str>,
+    client_id: Option<&str>,
+    stream: Option<&str>,
+) -> Result<JobOutputListPage> {
+    let mut params = vec!["limit=1000".to_string(), "include_data=true".to_string()];
+    if let Some(cursor) = cursor {
+        params.push(format!("cursor={}", percent_encode_query_value(cursor)));
+    }
+    if let Some(client_id) = client_id {
+        params.push(format!(
+            "client_id={}",
+            percent_encode_query_value(client_id)
+        ));
+    }
+    if let Some(stream) = stream {
+        params.push(format!("stream={}", percent_encode_query_value(stream)));
+    }
+    let outputs_json = http_get(
+        api_url,
+        &format!("/api/v1/jobs/{job_id}/outputs?{}", params.join("&")),
+        token,
+    )?;
+    serde_json::from_str::<JobOutputListPage>(&outputs_json)
+        .context("failed to parse job output page")
+}
+
 fn render_job_output(output: &JobOutputRecord, json: bool) -> Result<String> {
     if json {
         return Ok(serde_json::to_string(&output_as_json(output))? + "\n");
@@ -447,6 +507,10 @@ fn render_job_output(output: &JobOutputRecord, json: bool) -> Result<String> {
         deleted,
         text.trim_end_matches(['\r', '\n'])
     ))
+}
+
+fn outputs_as_json(outputs: &[JobOutputRecord]) -> Vec<serde_json::Value> {
+    outputs.iter().map(output_as_json).collect()
 }
 
 fn output_as_json(output: &JobOutputRecord) -> serde_json::Value {

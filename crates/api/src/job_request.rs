@@ -274,8 +274,7 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
         JobCommand::Backup {
             paths,
             include_config,
-            recipient_public_key_hex,
-        } => validate_backup_operation(paths, *include_config, recipient_public_key_hex.as_deref()),
+        } => validate_backup_operation(paths, *include_config),
         JobCommand::Restore {
             paths,
             include_config,
@@ -424,11 +423,7 @@ fn validate_shell_script(script: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_backup_operation(
-    paths: &[String],
-    include_config: bool,
-    recipient_public_key_hex: Option<&str>,
-) -> Result<(), ApiError> {
+fn validate_backup_operation(paths: &[String], include_config: bool) -> Result<(), ApiError> {
     if !include_config && paths.is_empty() {
         return Err(ApiError::bad_request("backup_scope_required"));
     }
@@ -437,12 +432,6 @@ fn validate_backup_operation(
     }
     for path in paths {
         validate_file_path(path)?;
-    }
-    if let Some(recipient_public_key_hex) = recipient_public_key_hex {
-        validate_hex32(
-            recipient_public_key_hex,
-            "backup_recipient_public_key_hex_invalid",
-        )?;
     }
     Ok(())
 }
@@ -925,14 +914,6 @@ fn is_sha256_hex(value: &str) -> bool {
 
 fn validate_sha256_hex(value: &str, error_code: &'static str) -> Result<(), ApiError> {
     if is_sha256_hex(value) {
-        Ok(())
-    } else {
-        Err(ApiError::bad_request(error_code))
-    }
-}
-
-fn validate_hex32(value: &str, error_code: &'static str) -> Result<(), ApiError> {
-    if is_fixed_hex(value, 64) {
         Ok(())
     } else {
         Err(ApiError::bad_request(error_code))

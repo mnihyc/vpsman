@@ -126,6 +126,22 @@ export function fleetAlertNotificationDeliveryProcessStatusBadgeClass(
   return workflowStatusClassBadge(FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS[status]);
 }
 
+export function artifactLifecycleStatusBadgeClass(status: string): string {
+  switch (status) {
+    case "active":
+      return "ok";
+    case "creating":
+    case "deleting":
+    case "delete_failed":
+      return "warn";
+    case "tombstoned":
+    case "deleted":
+      return "neutral";
+    default:
+      return "info";
+  }
+}
+
 export function webhookRuleDeliveryStatusBadgeClass(status: GeneratedWebhookRuleDeliveryStatus): string {
   return workflowStatusClassBadge(WEBHOOK_RULE_DELIVERY_STATUS_CLASS_BY_STATUS[status]);
 }

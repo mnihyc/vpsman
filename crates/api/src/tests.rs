@@ -1756,7 +1756,6 @@ fn exclusive_dispatch_operation_cases() -> Vec<(&'static str, JobCommand)> {
             JobCommand::Backup {
                 paths: vec!["/etc/hostname".to_string()],
                 include_config: true,
-                recipient_public_key_hex: None,
             },
         ),
         (

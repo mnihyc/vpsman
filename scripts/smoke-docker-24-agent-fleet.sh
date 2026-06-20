@@ -590,7 +590,7 @@ api_get "/api/v1/jobs/$job_id/targets" | jq -e \
 ' >/dev/null
 api_get "/api/v1/jobs/$job_id/outputs" | jq -e \
   --argjson alpha_count "$provider_alpha_count" '
-  ([.[] | select(.stream == "stdout") | .data_base64 | @base64d] | map(select(. == "docker-bulk-ok\n")) | length) == $alpha_count
+  ([.items[] | select(.stream == "stdout") | .data_base64 | @base64d] | map(select(. == "docker-bulk-ok\n")) | length) == $alpha_count
 ' >/dev/null
 
 long_job_id=""
@@ -625,7 +625,7 @@ if ((long_running_secs > 0)); then
       | jq 'group_by(.status) | map({status: .[0].status, count: length, clients: map(.client_id)})' >&2 || true
     echo "long-running output summary:" >&2
     api_get "/api/v1/jobs/$long_job_id/outputs" \
-      | jq 'group_by(.client_id) | map({client_id: .[0].client_id, streams: map(.stream), done: map(select(.done)) | length})' >&2 || true
+      | jq '.items | group_by(.client_id) | map({client_id: .[0].client_id, streams: map(.stream), done: map(select(.done)) | length})' >&2 || true
     echo "long-running job follow tail:" >&2
     tail -n 20 "$SMOKE_TMPDIR/long-job-follow.jsonl" >&2 || true
     exit 1
@@ -634,7 +634,7 @@ if ((long_running_secs > 0)); then
     length == $expected and all(.[]; .status == "completed" and .exit_code == 0)
   ' >/dev/null
   api_get "/api/v1/jobs/$long_job_id/outputs" | jq -e --argjson expected "$agent_count" '
-    ([.[] | select(.stream == "stdout") | .data_base64 | @base64d] | map(select(. == "docker-long-done\n")) | length) == $expected
+    ([.items[] | select(.stream == "stdout") | .data_base64 | @base64d] | map(select(. == "docker-long-done\n")) | length) == $expected
   ' >/dev/null
   api_get "/api/v1/system/dashboard?window=1h&chart_points=120" | jq -e --argjson expected "$agent_count" '
     .current.dispatch.total_dispatch_attempts >= $expected and

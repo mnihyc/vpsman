@@ -28,8 +28,6 @@ privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password"
 gateway_keys="$(target/debug/vpsctl noise-keygen)"
 gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
 gateway_public_hex="$(jq -r '.public_key_hex' <<<"$gateway_keys")"
-backup_keys="$(target/debug/vpsctl noise-keygen)"
-backup_public_hex="$(jq -r '.public_key_hex' <<<"$backup_keys")"
 
 api_log="$SMOKE_TMPDIR/api.log"
 gateway_log="$SMOKE_TMPDIR/gateway.log"
@@ -104,12 +102,11 @@ smoke_create_direct_agent_config \
   "primary=$gateway_addr=10"
 
 if grep -q '^\[backup\]' "$agent_config"; then
-  sed -i "/^\[backup\]/a recipient_public_key_hex = \"$backup_public_hex\"" "$agent_config"
+  sed -i "/^\[backup\]/a max_plaintext_bytes = 1048576" "$agent_config"
 else
   cat >>"$agent_config" <<EOF
 
 [backup]
-recipient_public_key_hex = "$backup_public_hex"
 max_plaintext_bytes = 1048576
 EOF
 fi
@@ -132,10 +129,17 @@ until [[ "$status" == "online" ]]; do
   sleep 0.25
 done
 
+reject_job_id="$(python3 - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
+)"
 reject_body="$(jq -nc \
+  --arg job_id "$reject_job_id" \
   --arg client "$client_id" \
   --arg path "$selected_file" \
   '{
+    job_id: $job_id,
     command: "backup",
     operation: {
       type: "backup",
@@ -193,34 +197,25 @@ audits_json="$(api_auth_get "/api/v1/audit?limit=20")"
 jq -e '.status == "completed" and .command_type == "backup"' <<<"$job_json" >/dev/null
 jq -e --arg client "$client_id" '.[] | select(.client_id == $client and .status == "completed" and .exit_code == 0)' <<<"$targets_json" >/dev/null
 jq -e --arg path "$selected_file" '
-  .[] | select(.stream == "status" and .done == true and .exit_code == 0)
+  .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
   | (.data_base64 | @base64d | fromjson)
-  | .type == "backup" and .encrypted == true and .include_config == true and (.paths == [$path]) and .file_count == 2
+  | .type == "backup" and .format == "vpsman.backup_tar.v1" and .include_config == true and (.paths == [$path]) and .file_count == 2
 ' <<<"$outputs_json" >/dev/null
 jq -e '[.[].action] | index("job.dispatch_requested") and index("job.target_result")' <<<"$audits_json" >/dev/null
 
-artifact_json="$(
-  jq -r '.[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | while IFS= read -r item; do
+artifact_file="$SMOKE_TMPDIR/artifact.tar"
+jq -r '.items[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | while IFS= read -r item; do
     printf '%s' "$item" | base64 -d
-  done
-)"
-artifact_file="$SMOKE_TMPDIR/artifact.json"
-printf '%s' "$artifact_json" >"$artifact_file"
+done >"$artifact_file"
 artifact_sha="$(sha256sum "$artifact_file" | awk '{print $1}')"
+manifest_json="$(tar -xOf "$artifact_file" vpsman-backup/manifest.json)"
 jq -e --arg client "$client_id" '
-  .format == "vpsman.backup_artifact.v1" and
+  .format == "vpsman.backup_tar.v1" and
   .client_id == $client and
-  .cipher == "x25519-chacha20poly1305" and
-  .compression == "lz4-size-prepended" and
-  (.recipient_public_key_sha256_hex | test("^[0-9a-f]{64}$")) and
-  (.ciphertext_base64 | length > 0)
-' <<<"$artifact_json" >/dev/null
+  (.files | length == 2)
+' <<<"$manifest_json" >/dev/null
 
-if grep -Fq "$selected_payload" <<<"$artifact_json"; then
-  echo "backup artifact leaked selected file plaintext" >&2
-  exit 1
-fi
-jq -e --arg sha "$selected_sha" '.ciphertext_sha256_hex != $sha' <<<"$artifact_json" >/dev/null
+tar -tf "$artifact_file" | grep -Fx "vpsman-backup/files/0000.bin" >/dev/null
 
 backups_json="$(api_auth_get "/api/v1/backups?limit=20")"
 artifacts_json="$(api_auth_get "/api/v1/backup-artifacts?limit=20")"
@@ -231,71 +226,17 @@ jq -e --arg id "$backup_request_id" --arg artifact_id "$artifact_id" '
   .[] | select(.id == $id and .status == "artifact_metadata_recorded" and .artifact_id == $artifact_id)
 ' <<<"$backups_json" >/dev/null
 jq -e --arg artifact_id "$artifact_id" --arg object_key "$object_key" --arg sha "$artifact_sha" '
-  .[] | select(.id == $artifact_id and .object_key == $object_key and .sha256_hex == $sha and .encrypted == true)
+  .[] | select(.id == $artifact_id and .object_key == $object_key and .sha256_hex == $sha)
 ' <<<"$artifacts_json" >/dev/null
 stored_object="$object_store_dir/$object_key"
 cmp -s "$artifact_file" "$stored_object"
-if grep -Fq "$selected_payload" "$stored_object"; then
-  echo "stored backup object leaked selected file plaintext" >&2
-  exit 1
-fi
+stored_selected_file="$SMOKE_TMPDIR/stored-selected.txt"
+tar -xOf "$stored_object" vpsman-backup/files/0000.bin >"$stored_selected_file"
+cmp -s "$selected_file" "$stored_selected_file"
 jq -e '[.[].action] | index("backup.requested_metadata_only") and index("backup.artifact_metadata_recorded")' \
   <<<"$audits_json" >/dev/null
 
-restore_archive="$SMOKE_TMPDIR/staged-restore.tar"
-python3 - "$client_id" "$selected_file" "$agent_config" "$restore_archive" <<'PY'
-import hashlib
-import io
-import json
-import os
-import stat
-import sys
-import tarfile
-import time
-
-client_id, selected_file, agent_config, archive_path = sys.argv[1:]
-created_unix = int(time.time())
-
-def read_entry(path, source, tar_path):
-    with open(path, "rb") as handle:
-        data = handle.read()
-    mode = stat.S_IMODE(os.stat(path).st_mode) or 0o600
-    entry = {
-        "path": path if source == "selected_path" else "vpsman:agent_config",
-        "source": source,
-        "tar_path": tar_path,
-        "mode": mode,
-        "size_bytes": len(data),
-        "sha256_hex": hashlib.sha256(data).hexdigest(),
-        "mtime_unix": created_unix,
-    }
-    return entry, data
-
-entries = [
-    read_entry(selected_file, "selected_path", "vpsman-backup/files/0000.bin"),
-    read_entry(agent_config, "agent_config", "vpsman-backup/files/0001.bin"),
-]
-manifest = {
-    "format": "vpsman.backup_tar.v1",
-    "client_id": client_id,
-    "created_unix": created_unix,
-    "files": [entry for entry, _ in entries],
-}
-
-with tarfile.open(archive_path, "w") as archive:
-    manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
-    manifest_info = tarfile.TarInfo("vpsman-backup/manifest.json")
-    manifest_info.size = len(manifest_bytes)
-    manifest_info.mode = 0o600
-    manifest_info.mtime = created_unix
-    archive.addfile(manifest_info, fileobj=io.BytesIO(manifest_bytes))
-    for entry, data in entries:
-        info = tarfile.TarInfo(entry["tar_path"])
-        info.size = len(data)
-        info.mode = entry["mode"]
-        info.mtime = created_unix
-        archive.addfile(info, fileobj=io.BytesIO(data))
-PY
+restore_archive="$artifact_file"
 restore_archive_remote="/tmp/vpsman-restore-${backup_request_id}.tar"
 restore_upload_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
   target/debug/vpsctl --api-url "$api_url" file-transfer-upload \
@@ -313,13 +254,15 @@ if [[ -z "$restore_archive_transfer_session_id" || "$restore_archive_transfer_se
   exit 1
 fi
 
-restore_root="/var/lib/vpsman/restores/$backup_request_id/$client_id"
+restore_root_base="$SMOKE_TMPDIR/restores"
+restore_root="$restore_root_base/$backup_request_id/$client_id"
 restored_selected="$restore_root${selected_file}"
 restored_config="$restore_root/vpsman/agent_config.toml"
 restore_preexisting_payload="restore preexisting payload $(date +%s%N)"
 mkdir -p "${restored_selected%/*}"
 printf '%s\n' "$restore_preexisting_payload" >"$restored_selected"
-restore_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
+restore_json="$(VPSMAN_RESTORE_DESTINATION_ROOT_BASE="$restore_root_base" \
+  VPSMAN_SUPER_PASSWORD="$super_password" \
   target/debug/vpsctl --api-url "$api_url" restore-run \
     --source-backup-request-id "$backup_request_id" \
     --target-client-id "$client_id" \
@@ -335,7 +278,7 @@ cmp -s "$selected_file" "$restored_selected"
 test -s "$restored_config"
 restore_outputs_json="$(api_auth_get "/api/v1/jobs/$restore_job_id/outputs")"
 jq -e --arg path "$restored_selected" '
-  .[] | select(.stream == "status" and .done == true and .exit_code == 0)
+  .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
   | (.data_base64 | @base64d | fromjson)
   | .type == "restore" and .restored_count == 2
   and ([.restored_files[].destination_path] | index($path))
@@ -362,7 +305,7 @@ if [[ -e "$restored_config" ]]; then
 fi
 rollback_outputs_json="$(api_auth_get "/api/v1/jobs/$rollback_job_id/outputs")"
 jq -e --arg restore_job_id "$restore_job_id" '
-  .[] | select(.stream == "status" and .done == true and .exit_code == 0)
+  .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
   | (.data_base64 | @base64d | fromjson)
   | .type == "restore_rollback" and .source_restore_job_id == $restore_job_id and .rolled_back_count == 2
   and ([.rolled_back_files[].action] | index("restored_snapshot") and index("removed_restored_file"))
@@ -379,6 +322,7 @@ vty_restore_log="$SMOKE_TMPDIR/vty-restore.log"
     "$backup_request_id" "$client_id" "$restore_archive_transfer_session_id"
   printf 'exit\n'
 } | VPSMAN_SUPER_PASSWORD="$super_password" \
+  VPSMAN_RESTORE_DESTINATION_ROOT_BASE="$restore_root_base" \
   VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
   target/debug/vpsctl --api-url "$api_url" vty >"$vty_restore_log" 2>&1
 vty_restore_job_id="$(grep -Eo '"job_id":"[^"]+"' "$vty_restore_log" | head -1 | cut -d'"' -f4)"
@@ -392,7 +336,8 @@ vty_restored_selected="$vty_restore_root${selected_file}"
 cmp -s "$selected_file" "$vty_restored_selected"
 
 migration_restore_root="$restore_root"
-migration_plan_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
+migration_plan_json="$(VPSMAN_RESTORE_DESTINATION_ROOT_BASE="$restore_root_base" \
+  VPSMAN_SUPER_PASSWORD="$super_password" \
   target/debug/vpsctl --api-url "$api_url" restore-plan \
     --source-backup-request-id "$backup_request_id" \
     --target-client-id "$client_id" \
@@ -406,7 +351,8 @@ jq -e --arg id "$backup_request_id" --arg target "$client_id" '
   and .status == "planned_metadata_only"
 ' <<<"$migration_plan_json" >/dev/null
 
-migration_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
+migration_json="$(VPSMAN_RESTORE_DESTINATION_ROOT_BASE="$restore_root_base" \
+  VPSMAN_SUPER_PASSWORD="$super_password" \
   target/debug/vpsctl --api-url "$api_url" migration-run \
     --restore-plan-id "$migration_restore_plan_id" \
     --archive-transfer-session-id "$restore_archive_transfer_session_id" \
@@ -415,13 +361,13 @@ migration_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --force-unprivileged \
     --note "live migration run" \
     --confirmed)"
-migration_job_id="$(jq -r '.restore_job.job_id' <<<"$migration_json")"
-migration_link_id="$(jq -r '.migration_link.id' <<<"$migration_json")"
+migration_job_id="$(jq -r '.migration_run.restore_job.job_id' <<<"$migration_json")"
+migration_link_id="$(jq -r '.migration_run.migration_link.id' <<<"$migration_json")"
 jq -e --arg plan "$migration_restore_plan_id" --arg target "$client_id" '
   .restore_plan_id == $plan
   and .target_client_id == $target
-  and .migration_link.status == "linked_metadata_only"
-  and .restore_job.target_count == 1
+  and .migration_run.migration_link.status == "linked_metadata_only"
+  and .migration_run.restore_job.target_count == 1
 ' <<<"$migration_json" >/dev/null
 smoke_wait_api_job_status "$api_url" "$migration_job_id" completed 45 >/dev/null
 migration_restored_selected="$migration_restore_root${selected_file}"
@@ -465,5 +411,5 @@ jq -n \
     migration_restored_selected_file: $migration_restored_selected,
     staged_restore_archive: $restore_archive,
     selected_sha256_hex: $selected_sha,
-    checks: ["agent_encrypted_backup", "no_plaintext_in_artifact", "auto_object_store_link", "artifact_metadata_link", "restore_run", "restore_rollback", "vty_restore_run", "migration_run_restore", "job_output_status", "audit"]
+    checks: ["agent_plain_backup", "plain_tar_artifact_content", "auto_object_store_link", "artifact_metadata_link", "restore_run", "restore_rollback", "vty_restore_run", "migration_run_restore", "job_output_status", "audit"]
   }'

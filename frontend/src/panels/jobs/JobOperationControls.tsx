@@ -694,8 +694,8 @@ export function JobOperationEditor({
       <div className="operationNote compactOperation">
         <DatabaseBackup size={18} />
         <div>
-          <strong>Encrypted backup</strong>
-          <span>Agent encrypts selected regular files/config to its configured backup recipient key</span>
+          <strong>Backup artifact</strong>
+          <span>Agent packages selected regular files and config into a plain tar artifact</span>
         </div>
         <label className="wideField">
           <span>Selected paths</span>

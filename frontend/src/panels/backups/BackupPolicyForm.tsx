@@ -21,7 +21,6 @@ type BackupPolicyFormProps = {
   onKeepLastChange: (value: number) => void;
   onNameChange: (value: string) => void;
   onPathsTextChange: (value: string) => void;
-  onRecipientPublicKeyHexChange: (value: string) => void;
   onRetentionDaysChange: (value: number) => void;
   onRotationGenerationChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -30,7 +29,6 @@ type BackupPolicyFormProps = {
   pathsText: string;
   pending: boolean;
   policyEnabled: boolean;
-  recipientPublicKeyHex: string;
   retentionDays: number;
   rotationGeneration: string;
   targetCount: number;
@@ -52,7 +50,6 @@ export function BackupPolicyForm({
   onKeepLastChange,
   onNameChange,
   onPathsTextChange,
-  onRecipientPublicKeyHexChange,
   onRetentionDaysChange,
   onRotationGenerationChange,
   onSubmit,
@@ -61,7 +58,6 @@ export function BackupPolicyForm({
   pathsText,
   pending,
   policyEnabled,
-  recipientPublicKeyHex,
   retentionDays,
   rotationGeneration,
   targetCount,
@@ -118,17 +114,6 @@ export function BackupPolicyForm({
           <PathPresetButtons
             onApply={onPathsTextChange}
             presets={BACKUP_PATH_PRESETS}
-          />
-        </label>
-        <label>
-          <span>Recipient public key</span>
-          <input
-            aria-label="Backup recipient public key hex"
-            onChange={(event) =>
-              onRecipientPublicKeyHexChange(event.target.value)
-            }
-            placeholder="optional 32-byte hex"
-            value={recipientPublicKeyHex}
           />
         </label>
         <div className="dispatchControls">

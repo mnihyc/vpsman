@@ -202,22 +202,40 @@ async fn collect_history_retention_prune_outputs(
                     object_delete_attempted = true;
                     if let Some(store) = state.backup_object_store.as_ref() {
                         for candidate in &candidates {
-                            let rows = state
+                            let Some(object_key) = candidate.object_key() else {
+                                pruned_rows += state
+                                    .repo
+                                    .prune_history_retention_object_candidate(candidate)
+                                    .await?;
+                                continue;
+                            };
+                            if !state
                                 .repo
-                                .prune_history_retention_object_candidate(candidate)
-                                .await?;
-                            pruned_rows += rows;
-                            if rows == 0 {
+                                .begin_history_retention_object_delete(candidate)
+                                .await?
+                            {
                                 continue;
                             }
-                            if let Some(object_key) = candidate.object_key() {
-                                object_keys.push(object_key.to_string());
-                                match store.delete_confirmed(object_key).await {
-                                    Ok(()) => {}
-                                    Err(error) => {
-                                        object_delete_errors.push(format!("{object_key}: {error}"));
-                                        break;
-                                    }
+                            object_keys.push(object_key.to_string());
+                            match store.delete_confirmed(object_key).await {
+                                Ok(()) => {
+                                    pruned_rows += state
+                                        .repo
+                                        .finalize_history_retention_object_delete(candidate)
+                                        .await?;
+                                }
+                                Err(error) => {
+                                    let error_text = error.to_string();
+                                    state
+                                        .repo
+                                        .mark_history_retention_object_delete_failed(
+                                            candidate,
+                                            &error_text,
+                                        )
+                                        .await?;
+                                    object_delete_errors
+                                        .push(format!("{object_key}: {error_text}"));
+                                    break;
                                 }
                             }
                         }

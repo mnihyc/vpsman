@@ -59,14 +59,11 @@ fn rejects_vty_backup_run_without_safe_scope_or_target() {
 
 #[test]
 fn parses_vty_backup_policy_upsert() {
-    let recipient = "a".repeat(64);
     let request = parse_vty_backup_policy_upsert(&[
         "nightly-edge",
         "--path",
         "/etc/hostname",
         "--include-config",
-        "--recipient-public-key-hex",
-        &recipient,
         "--cron=0,3,*,*,*",
         "--retention-days=45",
         "--keep-last=12",
@@ -80,10 +77,6 @@ fn parses_vty_backup_policy_upsert() {
     assert_eq!(request.name, "nightly-edge");
     assert_eq!(request.paths, vec!["/etc/hostname"]);
     assert!(request.include_config);
-    assert_eq!(
-        request.recipient_public_key_hex.as_deref(),
-        Some(recipient.as_str())
-    );
     assert_eq!(request.cron_expr, "0 3 * * *");
     assert_eq!(request.retention_days, Some(45));
     assert_eq!(request.keep_last, Some(12));
@@ -94,7 +87,7 @@ fn parses_vty_backup_policy_upsert() {
 }
 
 #[test]
-fn rejects_vty_backup_policy_without_safe_recipient() {
+fn rejects_removed_vty_backup_policy_recipient_flag() {
     assert!(parse_vty_backup_policy_upsert(&[
         "nightly-edge",
         "--include-config",

@@ -2646,8 +2646,6 @@ pub enum JobCommand {
     Backup {
         paths: Vec<String>,
         include_config: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        recipient_public_key_hex: Option<String>,
     },
     Restore {
         source_backup_request_id: Uuid,

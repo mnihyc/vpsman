@@ -1600,10 +1600,19 @@
 .sourceArtifactEmpty {
   display: grid;
   align-items: center;
-  grid-template-columns: minmax(160px, 1fr) minmax(130px, 0.55fr) auto;
+  grid-template-columns: minmax(160px, 1fr) max-content minmax(130px, 0.55fr) 44px;
   gap: 12px;
   min-height: 52px;
   padding: 10px 12px;
+}
+
+.sourceArtifactStatus {
+  max-width: none;
+  justify-self: start;
+}
+
+.sourceArtifactDownload {
+  justify-self: end;
 }
 
 .sourceArtifactRow + .sourceArtifactRow {

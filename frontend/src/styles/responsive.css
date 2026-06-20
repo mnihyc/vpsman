@@ -353,7 +353,16 @@
   }
 
   .sourceArtifactRow {
-    grid-template-columns: minmax(0, 1fr) 44px;
+    grid-template-columns: minmax(0, 1fr) max-content 44px;
+  }
+
+  .sourceArtifactMeta {
+    grid-column: 1 / 3;
+  }
+
+  .sourceArtifactDownload {
+    grid-column: 3;
+    grid-row: 1 / span 2;
   }
 
   .handoffBulkBar {

@@ -258,7 +258,7 @@ status_output_for_job() {
   local job_id="$1"
   local encoded
   encoded="$(api_get "/api/v1/jobs/$job_id/outputs" \
-    | jq -er 'first(.[] | select(.stream == "status" and .done == true and .exit_code == 0) | .data_base64)')"
+    | jq -er 'first(.items[] | select(.stream == "status" and .done == true and .exit_code == 0) | .data_base64)')"
   printf '%s' "$encoded" | base64 -d >"$update_status_file"
 }
 

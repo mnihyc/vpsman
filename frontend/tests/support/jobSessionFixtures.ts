@@ -101,9 +101,10 @@ export const fileTransferSourceArtifacts = [
   {
     id: "62626262-2222-4333-8444-555555555555",
     name: "payload.bin",
-    object_key: "file-transfer-sources/18212166996cdc1b0e123404503daba5feeac0fc3ba358e338009ee018ee9580.bin",
+    object_key: "file-transfer-sources/62626262-2222-4333-8444-555555555555-18212166996cdc1b0e123404503daba5feeac0fc3ba358e338009ee018ee9580.bin",
     sha256_hex: "18212166996cdc1b0e123404503daba5feeac0fc3ba358e338009ee018ee9580",
     size_bytes: 22,
+    status: "active",
     created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
     created_at: "2026-05-31T10:10:00Z",
     download_path: "/api/v1/file-transfer-sources/62626262-2222-4333-8444-555555555555/artifact",

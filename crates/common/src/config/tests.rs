@@ -47,31 +47,17 @@ root_dir = "/tmp/vpsman-network-root"
 }
 
 #[test]
-fn validates_backup_recipient_and_limits() {
+fn validates_backup_limits() {
     let config = AgentConfig {
         backup: AgentBackupConfig {
-            recipient_public_key_hex: Some("55".repeat(32)),
             max_plaintext_bytes: 1024,
         },
         ..AgentConfig::default()
     };
     validate_agent_config_shape(&config).unwrap();
 
-    let bad_key = AgentConfig {
-        backup: AgentBackupConfig {
-            recipient_public_key_hex: Some("not-hex".to_string()),
-            max_plaintext_bytes: 1024,
-        },
-        ..AgentConfig::default()
-    };
-    assert_eq!(
-        validate_agent_config_shape(&bad_key).unwrap_err(),
-        "backup_recipient_public_key_hex_must_be_32_byte_hex"
-    );
-
     let bad_limit = AgentConfig {
         backup: AgentBackupConfig {
-            recipient_public_key_hex: Some("55".repeat(32)),
             max_plaintext_bytes: 0,
         },
         ..AgentConfig::default()

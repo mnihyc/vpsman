@@ -28,7 +28,7 @@ const artifactCleanupDomainOptions: Array<{
     value: "file_transfer",
   },
   {
-    description: "Encrypted backup artifact objects and metadata.",
+    description: "Backup artifact objects and metadata.",
     label: "Backup artifacts",
     value: "backup_artifact",
   },

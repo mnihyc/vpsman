@@ -39,7 +39,7 @@ assert_supervisor_status_job() {
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
   status_json="$(
-    jq -r '.[] | select(.stream == "status" and .done == true and .exit_code == 0) | .data_base64' \
+    jq -r '.items[] | select(.stream == "status" and .done == true and .exit_code == 0) | .data_base64' \
       <<<"$outputs_json" | base64 -d
   )"
   jq -e \
@@ -74,7 +74,7 @@ assert_supervisor_snapshot_job() {
   jq -e --arg client "$client_id" '
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
-  snapshot_json="$(jq -r '.[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
+  snapshot_json="$(jq -r '.items[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
   jq -e --arg name "$supervisor_name" '
     .type == "process_status"
     and any(.processes[]; .name == $name and .status == "running" and (.pid | type == "number"))
@@ -93,14 +93,14 @@ assert_supervisor_logs_job() {
   jq -e --arg client "$client_id" '
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
-  decoded_stdout="$(jq -r '.[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
+  decoded_stdout="$(jq -r '.items[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
   if [[ "$decoded_stdout" != *"$supervisor_payload"* ]]; then
     echo "process logs output did not include supervisor payload" >&2
     echo "$decoded_stdout" >&2
     exit 1
   fi
   status_json="$(
-    jq -r '.[] | select(.stream == "status" and .done == true and .exit_code == 0) | .data_base64' \
+    jq -r '.items[] | select(.stream == "status" and .done == true and .exit_code == 0) | .data_base64' \
       <<<"$outputs_json" | base64 -d
   )"
   jq -e --arg name "$supervisor_name" '

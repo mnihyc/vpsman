@@ -136,6 +136,13 @@ struct JobOutputRecord {
     data_base64: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct JobOutputListPage {
+    items: Vec<JobOutputRecord>,
+    next_cursor: Option<String>,
+    has_more: bool,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct TransferStatusPayload {
     #[serde(rename = "type")]
@@ -566,9 +573,8 @@ pub(crate) fn wait_for_transfer_status(
     let max_polls = max_polls.clamp(1, 100_000);
     let mut statuses = BTreeMap::new();
     for poll in 0..max_polls {
-        let outputs_json = http_get(api_url, &format!("/api/v1/jobs/{job_id}/outputs"), token)?;
-        let outputs = serde_json::from_str::<Vec<JobOutputRecord>>(&outputs_json)
-            .context("failed to parse file transfer job outputs")?;
+        let outputs = fetch_job_outputs(api_url, token, job_id, Some("status"))
+            .context("failed to fetch file transfer job outputs")?;
         for output in &outputs {
             if let Some(payload) = parse_transfer_status(output, session_id, expected_status_type)?
             {
@@ -604,6 +610,51 @@ pub(crate) fn wait_for_transfer_status(
         }
     }
     anyhow::bail!("{expected_status_type} job {job_id} exceeded max polls")
+}
+
+fn fetch_job_outputs(
+    api_url: &str,
+    token: Option<&str>,
+    job_id: Uuid,
+    stream: Option<&str>,
+) -> Result<Vec<JobOutputRecord>> {
+    let mut cursor = None;
+    let mut outputs = Vec::new();
+    loop {
+        let mut params = vec!["limit=1000".to_string(), "include_data=true".to_string()];
+        if let Some(cursor) = cursor.as_deref() {
+            params.push(format!("cursor={}", percent_encode_query_value(cursor)));
+        }
+        if let Some(stream) = stream {
+            params.push(format!("stream={}", percent_encode_query_value(stream)));
+        }
+        let page_json = http_get(
+            api_url,
+            &format!("/api/v1/jobs/{job_id}/outputs?{}", params.join("&")),
+            token,
+        )?;
+        let page = serde_json::from_str::<JobOutputListPage>(&page_json)
+            .context("failed to parse job output page")?;
+        outputs.extend(page.items);
+        if !page.has_more {
+            break;
+        }
+        cursor = page.next_cursor;
+        anyhow::ensure!(cursor.is_some(), "job output page omitted next cursor");
+    }
+    Ok(outputs)
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn parse_transfer_status(

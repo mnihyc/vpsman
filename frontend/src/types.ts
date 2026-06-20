@@ -1346,6 +1346,13 @@ export type JobOutputRecord = {
   created_at: string;
 };
 
+export type JobOutputListPageRecord = {
+  items: JobOutputRecord[];
+  limit: number;
+  next_cursor: string | null;
+  has_more: boolean;
+};
+
 export type RestoreRollbackFile = {
   archive_path: string;
   destination_path: string;
@@ -1749,7 +1756,6 @@ export type JobOperation =
       type: "backup";
       paths: string[];
       include_config: boolean;
-      recipient_public_key_hex?: string | null;
     }
   | {
       type: "network_apply";
@@ -1905,7 +1911,6 @@ export type BackupPolicyRecord = {
   target_client_ids: string[];
   paths: string[];
   include_config: boolean;
-  recipient_public_key_hex: string | null;
   retention_days: number;
   keep_last: number;
   rotation_generation: string | null;
@@ -1930,7 +1935,6 @@ export type CreateBackupPolicyRequest = {
   target_client_ids: string[];
   paths: string[];
   include_config: boolean;
-  recipient_public_key_hex?: string | null;
   retention_days?: number | null;
   keep_last?: number | null;
   rotation_generation?: string | null;
@@ -2016,8 +2020,8 @@ export type BackupArtifactRecord = {
   client_id: string;
   object_key: string;
   sha256_hex: string;
-  encrypted: boolean;
   size_bytes: number;
+  status: string;
   created_at: string;
 };
 
@@ -2025,7 +2029,6 @@ export type CreateBackupRequest = {
   client_id: string;
   paths: string[];
   include_config: boolean;
-  recipient_public_key_hex?: string | null;
   confirmed: boolean;
   note: string | null;
   privilege_assertion?: PrivilegeAssertion | null;

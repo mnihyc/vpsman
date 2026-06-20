@@ -141,7 +141,7 @@ fn supported_config_autocomplete() -> serde_json::Value {
             "tags"
         ],
         "sections": {
-            "backup": ["recipient_public_key_hex", "max_plaintext_bytes"],
+            "backup": ["max_plaintext_bytes"],
             "update": [
                 "unmanaged_enabled",
                 "unmanaged_version_url",

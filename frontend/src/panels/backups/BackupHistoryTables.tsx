@@ -4,6 +4,7 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import {
+  artifactLifecycleStatusBadgeClass,
   backupRequestStatusBadgeClass,
   migrationLinkStatusBadgeClass,
   restorePlanStatusBadgeClass,
@@ -331,8 +332,24 @@ function ArtifactHistoryTable({
       searchValue: (artifact) => artifact.id,
       cell: (artifact) => (
         <span className="historyPrimary">
-          <strong>{shortId(artifact.id)}</strong>
+          <strong title={artifact.id}>{shortId(artifact.id)}</strong>
           <small>{formatBytes(artifact.size_bytes)}</small>
+        </span>
+      ),
+    },
+    {
+      id: "status",
+      header: "Status",
+      size: 105,
+      minSize: 95,
+      sortValue: (artifact) => artifact.status,
+      searchValue: (artifact) => artifact.status,
+      cell: (artifact) => (
+        <span
+          className={`status ${artifactLifecycleStatusBadgeClass(artifact.status)}`}
+          title={artifactLifecycleStatusTitle(artifact.status)}
+        >
+          {artifact.status}
         </span>
       ),
     },
@@ -343,7 +360,11 @@ function ArtifactHistoryTable({
       minSize: 150,
       sortValue: (artifact) => clientLabel(artifact.client_id),
       searchValue: (artifact) => clientLabel(artifact.client_id),
-      cell: (artifact) => clientLabel(artifact.client_id),
+      cell: (artifact) => (
+        <span title={clientLabel(artifact.client_id)}>
+          {clientLabel(artifact.client_id)}
+        </span>
+      ),
     },
     {
       id: "object",
@@ -353,20 +374,8 @@ function ArtifactHistoryTable({
       sortValue: (artifact) => artifact.object_key,
       searchValue: (artifact) => artifact.object_key,
       cell: (artifact) => (
-        <span className="monoValue">{artifact.object_key}</span>
-      ),
-    },
-    {
-      id: "status",
-      header: "Status",
-      size: 115,
-      minSize: 105,
-      sortValue: (artifact) => (artifact.encrypted ? "encrypted" : "plaintext"),
-      searchValue: (artifact) =>
-        artifact.encrypted ? "encrypted" : "plaintext",
-      cell: (artifact) => (
-        <span className={`status ${artifact.encrypted ? "ok" : "warn"}`}>
-          {artifact.encrypted ? "encrypted" : "plaintext"}
+        <span className="monoValue" title={artifact.object_key}>
+          {artifact.object_key}
         </span>
       ),
     },
@@ -378,7 +387,9 @@ function ArtifactHistoryTable({
       sortValue: (artifact) => artifact.sha256_hex,
       searchValue: (artifact) => artifact.sha256_hex,
       cell: (artifact) => (
-        <span className="monoValue">{shortHash(artifact.sha256_hex)}</span>
+        <span className="monoValue" title={artifact.sha256_hex}>
+          {shortHash(artifact.sha256_hex)}
+        </span>
       ),
     },
     {
@@ -394,7 +405,7 @@ function ArtifactHistoryTable({
   return (
     <GridSection
       title="Artifacts"
-      summary="Encrypted artifact metadata linked to backup requests"
+      summary="Artifact metadata linked to backup requests"
     >
       <ConsoleDataGrid
         actions={[
@@ -421,11 +432,22 @@ function ArtifactHistoryTable({
         itemLabel="artifacts"
         renderExpandedRow={(artifact) => (
           <div className="gridDetailLine">
-            <strong>{clientLabel(artifact.client_id)}</strong>
-            <span>{formatBytes(artifact.size_bytes)}</span>
-            <span>{artifact.object_key}</span>
-            <span>{shortHash(artifact.sha256_hex)}</span>
-            <span>{formatTime(artifact.created_at)}</span>
+            <strong title={clientLabel(artifact.client_id)}>
+              {clientLabel(artifact.client_id)}
+            </strong>
+            <span title={String(artifact.size_bytes)}>
+              {formatBytes(artifact.size_bytes)}
+            </span>
+            <span title={artifact.object_key}>{artifact.object_key}</span>
+            <span title={artifact.sha256_hex}>
+              {shortHash(artifact.sha256_hex)}
+            </span>
+            <span title={artifactLifecycleStatusTitle(artifact.status)}>
+              {artifact.status}
+            </span>
+            <span title={artifact.created_at}>
+              {formatTime(artifact.created_at)}
+            </span>
           </div>
         )}
         rows={artifacts}
@@ -794,6 +816,18 @@ function backupStatusLabel(status: string): string {
     planned_metadata_only: "planned",
   };
   return labels[status] ?? status.replace(/_/g, " ");
+}
+
+function artifactLifecycleStatusTitle(status: string): string {
+  const descriptions: Record<string, string> = {
+    active: "Object bytes are owned by this artifact and available.",
+    creating: "Artifact ownership is being prepared.",
+    deleting: "Object deletion is in progress; metadata remains visible until deletion finishes.",
+    delete_failed: "Object deletion failed; metadata remains visible and cleanup can be retried.",
+    tombstoned: "Metadata was retained as a tombstone.",
+    deleted: "Object bytes were deleted.",
+  };
+  return descriptions[status] ?? status.replace(/_/g, " ");
 }
 
 function formatBytes(value: number): string {

@@ -2404,17 +2404,22 @@ test("dispatches executable restores with agent-local archive metadata only", as
         const pathname = new URL(url, window.location.href).pathname;
         if (pathname === `/api/v1/jobs/${restoreJobId}/outputs`) {
           return new Response(
-            JSON.stringify([
-              {
-                client_id: "agent-fra-02",
-                data_base64: restoreStatusBase64,
-                done: true,
-                exit_code: 0,
-                job_id: restoreJobId,
-                seq: 0,
-                stream: "status",
-              },
-            ]),
+            JSON.stringify({
+              items: [
+                {
+                  client_id: "agent-fra-02",
+                  data_base64: restoreStatusBase64,
+                  done: true,
+                  exit_code: 0,
+                  job_id: restoreJobId,
+                  seq: 0,
+                  stream: "status",
+                },
+              ],
+              limit: 1000,
+              next_cursor: null,
+              has_more: false,
+            }),
             { headers: { "Content-Type": "application/json" }, status: 200 },
           );
         }

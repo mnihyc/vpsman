@@ -599,7 +599,6 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["type", operation.type],
         ["paths", operation.paths],
         ["include_config", operation.include_config],
-        ["recipient_public_key_hex", optional(operation.recipient_public_key_hex)],
       ]);
     case "restore":
       return ordered([

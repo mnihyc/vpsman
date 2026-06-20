@@ -21,9 +21,6 @@ gateway_connect_timeout_secs = 10
 [backup]
 # Optional. The one-line installer does not write this section; omitted values
 # use safe defaults until backup workflows are configured.
-# X25519 public key for the panel/object-storage backup recipient. Generate a
-# keypair with `vpsctl noise-keygen` and keep the private key outside agents.
-recipient_public_key_hex = "5555555555555555555555555555555555555555555555555555555555555555"
 max_plaintext_bytes = 1048576
 
 [update]

@@ -161,7 +161,7 @@ done
 deadline=$((SECONDS + 4))
 until outputs_json="$(api_get "/api/v1/jobs/$live_stream_job_id/outputs")" \
   && jq -e --arg start "$live_stream_start" '
-    ([.[] | select(.stream == "stdout") | .data_base64 | @base64d] | join(""))
+    ([.items[] | select(.stream == "stdout") | .data_base64 | @base64d] | join(""))
     | contains($start)
   ' <<<"$outputs_json" >/dev/null; do
   if (( SECONDS >= deadline )); then

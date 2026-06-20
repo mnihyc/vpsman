@@ -162,9 +162,14 @@ api_post() {
 
 api_delete() {
   local path="$1"
+  local reviewed_name="$2"
+  local body
+  body="$(jq -n --arg reviewed_name "$reviewed_name" '{confirmed: true, reviewed_name: $reviewed_name}')"
   curl -fsS \
     -X DELETE \
     -H "Authorization: Bearer $access_token" \
+    -H "Content-Type: application/json" \
+    -d "$body" \
     "$api_url$path"
 }
 
@@ -314,8 +319,8 @@ unprivileged_capabilities='{"privilege_mode":"unprivileged","effective_uid":1000
 seed_agent "pg-agent-a" "" "$first_public_key_hex"
 seed_agent "pg-agent-b" "$unprivileged_capabilities"
 api_post "/api/v1/agents/pg-agent-b/alias" '{"display_name":"pg-edge-b"}' >/dev/null
-vpsctl_json agent-tag --client-id pg-agent-b --tag edge >/dev/null
-vpsctl_json agent-tag --client-id pg-agent-b --tag bird2 >/dev/null
+vpsctl_json agent-tag --client-id pg-agent-b --tag edge --confirmed >/dev/null
+vpsctl_json agent-tag --client-id pg-agent-b --tag bird2 --confirmed >/dev/null
 api_get "/api/v1/agents" | jq -e '
   any(.[]; .id == "pg-agent-b" and
     .capabilities.privilege_mode == "unprivileged" and
@@ -350,8 +355,8 @@ vpsctl_json telemetry-network-rates --client-id pg-agent-a --interface eth0 --bu
     .tx_bps_avg == 0)
 ' >/dev/null
 
-vpsctl_json agent-tag --client-id pg-agent-a --tag group:pg-persistent >/dev/null
-vpsctl_json agent-tag --client-id pg-agent-a --tag persistent >/dev/null
+vpsctl_json agent-tag --client-id pg-agent-a --tag group:pg-persistent --confirmed >/dev/null
+vpsctl_json agent-tag --client-id pg-agent-a --tag persistent --confirmed >/dev/null
 
 vpsctl_json agent-identity-upsert \
   --client-id pg-agent-a \
@@ -359,8 +364,8 @@ vpsctl_json agent-identity-upsert \
   --replace-existing-key \
   --confirmed | jq -e '.client_id == "pg-agent-a"' >/dev/null
 api_post "/api/v1/agents/pg-agent-a/alias" '{"display_name":"pg-edge-a-rotated"}' >/dev/null
-vpsctl_json agent-tag --client-id pg-agent-a --tag rotated >/dev/null
-vpsctl_json agent-tag --client-id pg-agent-a --tag os:debian >/dev/null
+vpsctl_json agent-tag --client-id pg-agent-a --tag rotated --confirmed >/dev/null
+vpsctl_json agent-tag --client-id pg-agent-a --tag os:debian --confirmed >/dev/null
 api_get "/api/v1/agents" | jq -e '
   any(.[]; .id == "pg-agent-a" and
     .display_name == "pg-edge-a-rotated" and
@@ -693,12 +698,10 @@ backup_id="$(jq -r '.id' <<<"$backup_json")"
 jq -e '.client_id == "pg-agent-a" and .status == "requested_metadata_only" and .include_config == true and .command_scope == "client:pg-agent-a" and .artifact_id == null' \
   <<<"$backup_json" >/dev/null
 
-backup_policy_recipient="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 backup_policy_json="$(vpsctl_json backup-policy-upsert \
   --name pg-nightly-backup \
   --paths /etc/hostname \
   --include-config \
-  --recipient-public-key-hex "$backup_policy_recipient" \
   --clients pg-agent-a \
   --tags persistent \
   --cron-expr '0 * * * *' \
@@ -707,14 +710,13 @@ backup_policy_json="$(vpsctl_json backup-policy-upsert \
   --rotation-generation keyring/v2 \
   --confirmed)"
 backup_policy_schedule_id="$(jq -r '.schedule_id' <<<"$backup_policy_json")"
-jq -e --arg recipient "$backup_policy_recipient" '
+jq -e '
   .name == "pg-nightly-backup" and
   .enabled == true and
   .selector_expression == "id:pg-agent-a || tag:persistent" and
   .cron_expr == "0 * * * *" and
   .paths == ["/etc/hostname"] and
   .include_config == true and
-  .recipient_public_key_hex == $recipient and
   .retention_days == 45 and
   .keep_last == 12 and
   .rotation_generation == "keyring/v2"
@@ -722,12 +724,12 @@ jq -e --arg recipient "$backup_policy_recipient" '
 
 artifact_json="$(vpsctl_json backup-artifact-record \
   --backup-request-id "$backup_id" \
-  --object-key backups/pg-agent-a/postgres-persistence.cbor.zst.age \
+  --object-key backups/pg-agent-a/postgres-persistence.tar \
   --sha256-hex aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   --size-bytes 4096 \
   --confirmed)"
 artifact_id="$(jq -r '.id' <<<"$artifact_json")"
-jq -e '.client_id == "pg-agent-a" and .object_key == "backups/pg-agent-a/postgres-persistence.cbor.zst.age" and .encrypted == true and .size_bytes == 4096' \
+jq -e '.client_id == "pg-agent-a" and .object_key == "backups/pg-agent-a/postgres-persistence.tar" and .size_bytes == 4096' \
   <<<"$artifact_json" >/dev/null
 api_get "/api/v1/backup-artifacts?limit=10" | jq -e --arg artifact_id "$artifact_id" '
   any(.[]; .id == $artifact_id and .client_id == "pg-agent-a" and .sha256_hex == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -757,8 +759,8 @@ wait_api_jq "/api/v1/jobs/$degraded_update_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "skipped" and .[0].completed_at != null
 ' "degraded-update-targets" >/dev/null
 wait_api_jq "/api/v1/jobs/$degraded_update_job_id/outputs" '
-  length == 1 and
-  (.[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_agent_update_capability")
+  (.items | length == 1) and
+  (.items[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_agent_update_capability")
 ' "degraded-update-outputs" >/dev/null
 
 degraded_process_json="$(vpsctl_json process-start \
@@ -775,11 +777,17 @@ wait_api_jq "/api/v1/jobs/$degraded_process_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "skipped" and .[0].completed_at != null
 ' "degraded-process-targets" >/dev/null
 wait_api_jq "/api/v1/jobs/$degraded_process_job_id/outputs" '
-  length == 1 and
-  (.[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_process_limit_capability")
+  (.items | length == 1) and
+  (.items[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_process_limit_capability")
 ' "degraded-process-outputs" >/dev/null
 
-rejected_job_json="$(api_post_expect_status "/api/v1/jobs" '{
+rejected_job_id="$(python3 - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
+)"
+rejected_job_json="$(api_post_expect_status "/api/v1/jobs" "$(jq -n --arg job_id "$rejected_job_id" '{
+  job_id: $job_id,
   "selector_expression": "id:pg-agent-a || tag:edge",
   "target_client_ids": ["pg-agent-a"],
   "command": "uptime",
@@ -788,7 +796,7 @@ rejected_job_json="$(api_post_expect_status "/api/v1/jobs" '{
   "timeout_secs": 5,
   "privileged": true,
   "confirmed": true
-}' "403")"
+}')" "403")"
 jq -e '.error == "privilege_assertion_required" and .status == 403' \
   <<<"$rejected_job_json" >/dev/null
 
@@ -831,14 +839,20 @@ immutable_template_json="$(api_post_expect_status "/api/v1/command-templates" "$
 }')" "409")"
 jq -e '.error == "command_template_builtin_immutable" and .status == 409' \
   <<<"$immutable_template_json" >/dev/null
-api_delete "/api/v1/command-templates/$command_template_id" | jq -e --arg template_id "$command_template_id" '
+api_delete "/api/v1/command-templates/$command_template_id" "pg-smoke-tag-uptime" | jq -e --arg template_id "$command_template_id" '
   .id == $template_id and .built_in == false and .name == "pg-smoke-tag-uptime"
 ' >/dev/null
 api_get "/api/v1/command-templates?limit=20&scope_kind=tag&scope_value=edge" | jq -e --arg template_id "$command_template_id" '
   all(.[]; .id != $template_id)
 ' >/dev/null
 
-rejected_job_payload="$(jq -n '{
+rejected_retry_job_id="$(python3 - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
+)"
+rejected_job_payload="$(jq -n --arg job_id "$rejected_retry_job_id" '{
+  job_id: $job_id,
   selector_expression: "id:pg-agent-a",
   target_client_ids: ["pg-agent-a"],
   command: "idempotent-uptime",
@@ -921,10 +935,10 @@ api_get "/api/v1/backups?limit=10" | jq -e --arg backup_id "$backup_id" --arg ar
   any(.[]; .id == $backup_id and .client_id == "pg-agent-a" and .status == "artifact_metadata_recorded" and .include_config == true and .command_scope == "client:pg-agent-a" and .artifact_id == $artifact_id)
 ' >/dev/null
 api_get "/api/v1/backup-artifacts?limit=10" | jq -e --arg artifact_id "$artifact_id" '
-  any(.[]; .id == $artifact_id and .client_id == "pg-agent-a" and .object_key == "backups/pg-agent-a/postgres-persistence.cbor.zst.age" and .encrypted == true and .size_bytes == 4096)
+  any(.[]; .id == $artifact_id and .client_id == "pg-agent-a" and .object_key == "backups/pg-agent-a/postgres-persistence.tar" and .size_bytes == 4096)
 ' >/dev/null
-api_get "/api/v1/backup-policies" | jq -e --arg schedule_id "$backup_policy_schedule_id" --arg recipient "$backup_policy_recipient" '
-  any(.[]; .schedule_id == $schedule_id and .name == "pg-nightly-backup" and .recipient_public_key_hex == $recipient and .retention_days == 45 and .keep_last == 12 and .rotation_generation == "keyring/v2")
+api_get "/api/v1/backup-policies" | jq -e --arg schedule_id "$backup_policy_schedule_id" '
+  any(.[]; .schedule_id == $schedule_id and .name == "pg-nightly-backup" and .retention_days == 45 and .keep_last == 12 and .rotation_generation == "keyring/v2")
 ' >/dev/null
 api_get "/api/v1/backup-policies" | jq -e --arg schedule_id "$backup_prune_policy_schedule_id" '
   any(.[]; .schedule_id == $schedule_id and .name == "pg-prune-policy" and .retention_days == 1 and .keep_last == 1 and .rotation_generation == "prune/v1")
@@ -944,7 +958,7 @@ api_get "/api/v1/backup-artifacts?limit=20" | jq -e \
   --arg old_b "$prune_old_b_artifact_id" \
   --arg retained "$prune_retained_artifact_id" '
     (all(.[]; .id != $old_a and .id != $old_b)) and
-    any(.[]; .id == $retained and .object_key == "backups/pg-agent-a/policy-prune-retained.cbor.zst.age")
+    any(.[]; .id == $retained and .object_key == "backups/pg-agent-a/policy-prune-retained.tar")
   ' >/dev/null
 api_get "/api/v1/restore-plans?limit=10" | jq -e --arg restore_id "$restore_id" --arg backup_id "$backup_id" --arg restore_root "$restore_root" '
   any(.[]; .id == $restore_id and .source_backup_request_id == $backup_id and .source_client_id == "pg-agent-a" and .target_client_id == "pg-agent-b" and .status == "planned_metadata_only" and .destination_root == $restore_root and .command_scope == "client:pg-agent-b")
@@ -961,15 +975,15 @@ wait_api_jq "/api/v1/jobs/$degraded_update_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "skipped" and .[0].completed_at != null
 ' "degraded-update-targets-restart" >/dev/null
 wait_api_jq "/api/v1/jobs/$degraded_update_job_id/outputs" '
-  length == 1 and
-  (.[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_agent_update_capability")
+  (.items | length == 1) and
+  (.items[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_agent_update_capability")
 ' "degraded-update-outputs-restart" >/dev/null
 wait_api_jq "/api/v1/jobs/$degraded_process_job_id/targets" '
   length == 1 and .[0].client_id == "pg-agent-b" and .[0].status == "skipped" and .[0].completed_at != null
 ' "degraded-process-targets-restart" >/dev/null
 wait_api_jq "/api/v1/jobs/$degraded_process_job_id/outputs" '
-  length == 1 and
-  (.[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_process_limit_capability")
+  (.items | length == 1) and
+  (.items[0].data_base64 | @base64d | fromjson | .reason == "target_agent_lacks_process_limit_capability")
 ' "degraded-process-outputs-restart" >/dev/null
 audit_json="$(api_get "/api/v1/audit?limit=200")"
 jq -e '

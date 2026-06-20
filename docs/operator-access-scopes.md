@@ -17,8 +17,8 @@ role receives the scopes needed for normal daily operation. The default
   payloads, output chunks, output comparison previews, process-supervisor
   inventory, file-transfer session records, file-transfer source artifacts, and
   file-transfer handoff downloads.
-- `backups:read`: backup requests, backup policies, restore plans, encrypted
-  backup artifact metadata/downloads, migration-link listings, fleet alert
+- `backups:read`: backup requests, backup policies, restore plans, backup
+  artifact metadata/downloads, migration-link listings, fleet alert
   evidence views/exports that include backup evidence, and backup-artifact
   history exports.
 - `terminal:read`: terminal session records and retained PTY replay bytes.

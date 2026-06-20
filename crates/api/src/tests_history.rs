@@ -148,7 +148,7 @@ async fn audit_list_query_sorts_searches_and_offsets_memory_rows() {
 }
 
 #[tokio::test]
-async fn history_retention_object_prune_partial_error_prunes_metadata_before_delete_failure() {
+async fn history_retention_object_prune_partial_error_preserves_metadata_after_delete_failure() {
     let repo = Repository::Memory(MemoryState::default());
     let object_root = std::env::temp_dir().join(format!(
         "vpsman-api-history-prune-partial-{}",
@@ -229,7 +229,7 @@ async fn history_retention_object_prune_partial_error_prunes_metadata_before_del
     assert_eq!(domain.domain, "job_outputs");
     assert_eq!(domain.status, "partial_error");
     assert_eq!(domain.matched_rows, 2);
-    assert_eq!(domain.pruned_rows, 2);
+    assert_eq!(domain.pruned_rows, 1);
     assert_eq!(
         domain.object_keys,
         vec![missing_ok_key, delete_fails_key.clone()]
@@ -238,8 +238,9 @@ async fn history_retention_object_prune_partial_error_prunes_metadata_before_del
     assert!(domain.object_delete_errors[0].contains(&delete_fails_key));
     if let Repository::Memory(memory) = &repo {
         let outputs = memory.job_outputs.read().await;
-        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs.len(), 2);
         assert!(outputs.iter().any(|output| output.job_id == retained_job));
+        assert!(outputs.iter().any(|output| output.job_id == failed_job));
     }
 
     let _ = tokio::fs::remove_dir_all(object_root).await;

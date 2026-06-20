@@ -187,7 +187,7 @@ CREATE TABLE server_artifacts (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     tombstoned_at TIMESTAMPTZ,
     deleted_at TIMESTAMPTZ,
-    CONSTRAINT server_artifacts_status_check CHECK (status IN ('active', 'deleting', 'tombstoned', 'deleted')),
+    CONSTRAINT server_artifacts_status_check CHECK (status IN ('creating', 'active', 'deleting', 'delete_failed', 'tombstoned', 'deleted')),
     CONSTRAINT server_artifacts_metadata_object CHECK (jsonb_typeof(metadata) = 'object')
 );
 
@@ -234,7 +234,7 @@ CREATE TABLE server_job_artifact_cleanup_targets (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (server_job_id, artifact_id),
     CONSTRAINT server_job_artifact_cleanup_targets_status_check
-        CHECK (status_at_review IN ('active', 'deleting', 'tombstoned', 'deleted'))
+        CHECK (status_at_review IN ('creating', 'active', 'deleting', 'delete_failed', 'tombstoned', 'deleted'))
 );
 
 CREATE INDEX server_job_artifact_cleanup_targets_job_idx

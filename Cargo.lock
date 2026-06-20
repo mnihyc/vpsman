@@ -3077,12 +3077,9 @@ dependencies = [
  "anyhow",
  "base64",
  "bytes",
- "chacha20poly1305",
  "clap",
  "hex",
  "libc",
- "lz4_flex",
- "rand 0.8.6",
  "reqwest",
  "serde",
  "serde_json",
@@ -3095,7 +3092,6 @@ dependencies = [
  "uuid",
  "vpsman-build-support",
  "vpsman-common",
- "x25519-dalek",
 ]
 
 [[package]]
@@ -3731,7 +3727,6 @@ checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
 dependencies = [
  "curve25519-dalek",
  "rand_core 0.6.4",
- "serde",
  "zeroize",
 ]
 

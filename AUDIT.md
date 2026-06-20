@@ -64,18 +64,18 @@ of the same root cause.
 | AUD-048 | High | Fixed | API/History/Auth | History retention prune can delete job and backup payload history with inventory-write only |
 | AUD-049 | High | Fixed | API/Worker/Artifact Cleanup/Auth | Server artifact cleanup can delete backup artifacts with jobs-write only |
 | AUD-050 | Critical | Fixed | API/Worker/Artifact Cleanup | Artifact cleanup jobs re-evaluate expressions instead of deleting the reviewed artifact set |
-| AUD-051 | Medium/High | Confirmed | API/History/Artifact Cleanup | History retention object prune drops metadata before object deletion succeeds |
+| AUD-051 | Medium/High | Fixed | API/History/Artifact Cleanup | History retention object prune drops metadata before object deletion succeeds |
 | AUD-052 | High | Fixed | API/Data Sources/Auth | Data-source preset and assignment mutations use inventory-write instead of config-write |
 | AUD-053 | High | Fixed | API/Frontend/Data Sources | Data-source preset create path silently updates existing presets without review |
 | AUD-054 | Medium/High | Fixed | API/Config/Hot Config | Hot-config rule-template mutations lack confirmation and audit records |
 | AUD-055 | Medium/High | Fixed | Frontend/File Browser | File save confirmation can mark unsent editor changes as saved |
-| AUD-056 | Medium/High | Confirmed | API/Worker/Backups/Retention | Backup policy retention prune drops backup metadata before object deletion succeeds |
+| AUD-056 | Medium/High | Fixed | API/Worker/Backups/Retention | Backup policy retention prune drops backup metadata before object deletion succeeds |
 | AUD-057 | High | Fixed | API/Auth/User Management | User management can remove the last active admin |
 | AUD-058 | Medium/High | Fixed | API/Integrations/Auth | Integration mutations use inventory-write instead of an integrations write boundary |
 | AUD-059 | Medium/High | Fixed | API/Command Templates/Auth | Command-template mutations use jobs-write instead of a templates write boundary |
 | AUD-060 | Medium/High | Fixed | API/Agent Updates/Auth | Update-release registry mutations use jobs-write instead of config-write |
 | AUD-061 | High | Fixed | Frontend/System Users | User-management confirmations remain armed after editor or selection changes |
-| AUD-062 | High | Confirmed | API/Object Storage/Artifacts | Artifact creation can commit metadata or bytes without cleanup-registry consistency |
+| AUD-062 | High | Fixed | API/Object Storage/Artifacts | Artifact creation can commit metadata or bytes without cleanup-registry consistency |
 | AUD-063 | High | Fixed | Frontend/Schedules | Schedule confirmations remain armed after form, defer, or table context changes |
 | AUD-064 | Medium/High | Confirmed | Frontend/Agent Updates | Release-registry manual update shortcut cannot provide the artifact URL it requires |
 | AUD-065 | High | Fixed | Frontend/Integrations | Delivery queue confirmations are not bound to previewed rows |
@@ -87,7 +87,7 @@ of the same root cause.
 | AUD-071 | Medium/High | Fixed | API/Frontend/CLI/Jobs | Job and server-job cancellation bypass the confirmation contract |
 | AUD-072 | Medium/High | Confirmed | API/Frontend/CLI/Inventory/Selectors | Non-unique VPS display names make name selectors ambiguous for production jobs |
 | AUD-073 | High | Confirmed | API/Agent/Terminal/Storage | Live terminal output can grow API job-output storage without a retention ceiling |
-| AUD-074 | Medium/High | Confirmed | API/Object Storage/Job Outputs | Job-output object artifacts can be committed without cleanup-registry repair |
+| AUD-074 | Medium/High | Fixed | API/Object Storage/Job Outputs | Job-output object artifacts can be committed without cleanup-registry repair |
 | AUD-075 | Medium/High | Fixed | API/History/Auth | Audit logs are readable and exportable with fleet-read scope |
 | AUD-076 | Medium/High | Confirmed | API/Gateway/Terminal/Reliability | Terminal stream output retries are not idempotent |
 | AUD-077 | Medium/High | Confirmed | Gateway/API/Terminal/Lifecycle | Terminal final stream status can expire as noncritical output |
@@ -119,7 +119,7 @@ of the same root cause.
 | AUD-103 | Medium/High | Confirmed | API/Auth/Deploy | Login throttling and auth history use proxy IP instead of the operator IP |
 | AUD-104 | Medium/High | Confirmed | API/Auth/TOTP | Authenticated TOTP management is an unthrottled password and code oracle |
 | AUD-105 | Medium/High | Confirmed | API/File Transfers/Terminal/Retention | Derived session records can outlive the job-output evidence they require |
-| AUD-106 | High | Confirmed | API/Backups/Object Storage | Backup artifact metadata can be recorded without object-store verification |
+| AUD-106 | High | Fixed | API/Backups/Object Storage | Backup artifact metadata can be recorded without object-store verification |
 | AUD-107 | High | Confirmed | API/Schedules/Client Lifecycle | Stale fixed targets can block schedule management and apply-now |
 | AUD-108 | High | Fixed | API/Jobs/State Machine | Terminal targets can leave the parent job active after a crash or side-effect error |
 | AUD-109 | Medium/High | Fixed | Gateway/API/Job Outputs | Gateway spool replay treats sequence existence as full output acknowledgement |
@@ -168,7 +168,7 @@ of the same root cause.
 | AUD-152 | High | Fixed | Frontend/Backups/Migrations | Migration restore runs can use stale hidden restore options |
 | AUD-153 | Medium/High | Confirmed | API/Telemetry/Retention | Per-interface network-rate telemetry has no retention path |
 | AUD-154 | High | Fixed | API/Frontend/CLI/History Retention | History retention prune reselects live rows instead of deleting the reviewed dry-run set |
-| AUD-155 | High | Confirmed | Worker/Artifact Cleanup/Observability | Failed artifact cleanup jobs can hide already-deleted artifacts |
+| AUD-155 | High | Fixed | Worker/Artifact Cleanup/Observability | Failed artifact cleanup jobs can hide already-deleted artifacts |
 | AUD-156 | High | Confirmed | Agent/Process Supervisor/Command Semantics | Process status and log reads can restart supervised processes |
 | AUD-157 | Medium/High | Confirmed | API/Gateway/Client Lifecycle/Retention | Client and gateway lifecycle histories have no retention path |
 | AUD-158 | Medium/High | Confirmed | API/Worker/Webhooks/Retention | Webhook events in the default partition bypass event retention |
@@ -181,7 +181,7 @@ of the same root cause.
 | AUD-165 | High | Confirmed | Agent/Network Apply/Rollback | Managed network rollback rewrites files non-atomically and drops original modes |
 | AUD-166 | Medium/High | Confirmed | API/File Transfers/Reliability | Duplicate resumable download chunks can poison server-side handoff |
 | AUD-167 | Medium/High | Fixed | API/Backups/Migrations/Privilege | Migration-link creation bypasses request-bound privilege verification |
-| AUD-168 | Medium/High | Confirmed | API/Backups/Resource Bounds | Chunked backup artifact commit rehydrates the whole artifact in API memory |
+| AUD-168 | Medium/High | Fixed | API/Backups/Resource Bounds | Chunked backup artifact commit rehydrates the whole artifact in API memory |
 | AUD-169 | Medium/High | Fixed | API/Backups/Restore Workflow | Agent backups can be valid above the API restore-preparation inline limit |
 | AUD-170 | High | Fixed | Frontend/API/Backups/Key Custody | Dashboard restore preparation sends the backup private key to the API |
 | AUD-171 | Critical | Fixed | API/Backups/Restore Payloads/Webhooks | Inline restore archives persist decrypted backup content in jobs and webhooks |
@@ -192,8 +192,8 @@ of the same root cause.
 | AUD-176 | High | Fixed | Frontend/Config/Data Sources | Config and data-source review requests can open stale confirmations after edits |
 | AUD-177 | Critical | Fixed | Frontend/Topology/Network | Network mutation review requests can open stale confirmations after topology edits |
 | AUD-178 | Critical | Fixed | Frontend/Backups/Restore | Backup and restore review requests can open stale confirmations after edits |
-| AUD-179 | Medium/High | Confirmed | API/Backups/Object Storage | Multiple backup artifacts can reference the same object key |
-| AUD-180 | Medium/High | Confirmed | API/File Transfers/Artifact Cleanup | Reuploaded file-transfer source artifacts can inherit stale cleanup age |
+| AUD-179 | Medium/High | Fixed | API/Backups/Object Storage | Multiple backup artifacts can reference the same object key |
+| AUD-180 | Medium/High | Fixed | API/File Transfers/Artifact Cleanup | Reuploaded file-transfer source artifacts can inherit stale cleanup age |
 | AUD-181 | High | Fixed | Frontend/Access/Keys | Key lifecycle review can open stale confirmations after key-field edits |
 | AUD-182 | Medium/High | Confirmed | API/Gateway/Terminal/Lifecycle | Terminal stream output can append after the terminal-open target is terminal |
 | AUD-183 | High | Fixed | Frontend/Fleet/Delete | VPS deletion confirmation can remain armed after fleet selection changes |
@@ -211,13 +211,13 @@ of the same root cause.
 | AUD-195 | Medium/High | Confirmed | API/Gateway/Security/Docs | Documented dev internal token bypasses placeholder startup validation |
 | AUD-196 | Medium | Confirmed | Docs/Local Control Plane | Manual quickstart no longer starts a usable Postgres-backed API |
 | AUD-197 | High | Confirmed | Deploy/API/Gateway/Secrets | API and worker containers can read gateway-only secret material |
-| AUD-198 | Medium/High | Confirmed | API/Worker/Object Storage/Security | S3-compatible object store accepts plaintext HTTP endpoints for signed requests |
-| AUD-199 | High | Confirmed | API/Frontend/Job Outputs/Resource Bounds | Job-output and file-download archive exports can exhaust API temp disk across targets |
-| AUD-200 | High | Confirmed | API/Frontend/CLI/Job Outputs/Resource Bounds | Job-output listing and chunk downloads load entire output history without pagination |
-| AUD-201 | High | Confirmed | API/Frontend/CLI/File Transfers/Resource Bounds | Server-side file-transfer handoff scans all client chunks and leaks temp files on failed assembly |
-| AUD-202 | Medium/High | Confirmed | API/Backups/Resource Cleanup | Retained backup handoff leaks staging files when assembly fails |
-| AUD-203 | Medium/High | Confirmed | API/Backups/Resource Bounds | Retained backup handoff rehydrates the whole artifact in API memory after streaming |
-| AUD-204 | Medium/High | Confirmed | API/Frontend/CLI/Backups/Resource Cleanup | Abandoned chunked backup upload sessions can leave staging files indefinitely |
+| AUD-198 | Medium/High | Fixed | API/Worker/Object Storage/Security | S3-compatible object store accepts plaintext HTTP endpoints for signed requests |
+| AUD-199 | High | Fixed | API/Frontend/Job Outputs/Resource Bounds | Job-output and file-download archive exports can exhaust API temp disk across targets |
+| AUD-200 | High | Fixed | API/Frontend/CLI/Job Outputs/Resource Bounds | Job-output listing and chunk downloads load entire output history without pagination |
+| AUD-201 | High | Fixed | API/Frontend/CLI/File Transfers/Resource Bounds | Server-side file-transfer handoff scans all client chunks and leaks temp files on failed assembly |
+| AUD-202 | Medium/High | Fixed | API/Backups/Resource Cleanup | Retained backup handoff leaks staging files when assembly fails |
+| AUD-203 | Medium/High | Fixed | API/Backups/Resource Bounds | Retained backup handoff rehydrates the whole artifact in API memory after streaming |
+| AUD-204 | Medium/High | Fixed | API/Frontend/CLI/Backups/Resource Cleanup | Abandoned chunked backup upload sessions can leave staging files indefinitely |
 | AUD-205 | High | Confirmed | Agent/Backups/Restore | Restore post-hooks can fail without making the restore target fail safely |
 | AUD-206 | Medium/High | Confirmed | API/Worker/Frontend/Alerts | Alert notification delivery kinds can be saved but cannot be delivered by the shipped worker |
 | AUD-207 | High | Fixed | API/Worker/Schedules/Auth | Schedules keep dispatching privileged jobs after owner disable/delete or scope loss |
@@ -249,6 +249,7 @@ of the same root cause.
 | AUD-233 | Medium/High | Fixed | API/Worker/Agent/Network Speed Tests | Network speed tests can dispatch one endpoint after the peer target is skipped |
 | AUD-234 | High | Skipped | API/Worker/Webhooks/Security | Job-created webhooks deliver full job operation payloads to external targets |
 | AUD-235 | High | Fixed | API/Frontend/Jobs/Idempotency | Job-create retries can dispatch the same reviewed action under a new job ID |
+| AUD-236 | Medium/High | Fixed | API/CLI/Frontend/Agent/Backups | Backup artifact encryption existed without a supported decrypt/restore product path |
 
 ## Issues
 
@@ -749,15 +750,15 @@ of the same root cause.
 - Severity: Medium/High
 - Status: Fixed
 - Area: API/Backups/Auth
-- Context: Backup requests, backup policies, restore plans, and encrypted
-  backup artifact downloads expose filesystem scope, retention policy,
+- Context: Backup requests, backup policies, restore plans, and backup
+  artifact downloads expose filesystem scope, retention policy,
   restore destination, object identifiers, hashes, sizes, and artifact bytes.
 - Root Cause: Backup/restore listing routes were readable with `fleet:read`,
   while backup artifact download required the write-oriented
   `backups:write`/operator role instead of a precise backup read scope.
 - Impact: Fleet metadata readers could inspect backup and restore plans beyond
   normal inventory/status data, and read-only backup auditors had to be granted
-  mutation authority to download encrypted artifacts.
+  mutation authority to download backup artifacts.
 - Evidence: `crates/api/src/routes_backups.rs`,
   `crates/api/src/routes_restores.rs`,
   `crates/api/src/model_backups.rs`, and `crates/api/src/model_restores.rs`.
@@ -1340,7 +1341,7 @@ of the same root cause.
   behavior, including deleting unreferenced `backup_artifacts` rows and object
   keys.
 - Impact: An operator with job-write authority but without backup authority can
-  queue deletion of backup artifact metadata and retained encrypted backup
+  queue deletion of backup artifact metadata and retained backup
   objects by using an expression such as `artifact.domain = "backup_artifact"`.
   This crosses the backup permission boundary and can remove restore material
   outside the operator's intended scope.
@@ -1399,7 +1400,7 @@ of the same root cause.
 ### AUD-051: History Retention Object Prune Drops Metadata Before Object Deletion Succeeds
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/History/Artifact Cleanup
 - Context: History retention can prune object-backed domains such as
   `job_outputs` and `backup_artifacts`. When `metadata_only` is false, the
@@ -1427,6 +1428,11 @@ of the same root cause.
   retention path should either delete objects before committing metadata
   removal, mark rows as deleting and retry them, or preserve enough durable
   metadata to retry failed object deletion.
+- Resolution: Fixed by making object-backed history prune two-phase. The API
+  first marks matching server-artifact rows `deleting`, deletes the object, and
+  only then removes job-output or backup-artifact metadata and marks the shared
+  registry row `deleted`; delete failures preserve domain metadata, mark the
+  registry row `delete_failed`, and are no longer counted as pruned rows.
 
 ### AUD-052: Data-Source Preset And Assignment Mutations Use Inventory-Write Instead Of Config-Write
 
@@ -1567,7 +1573,7 @@ of the same root cause.
 ### AUD-056: Backup Policy Retention Prune Drops Backup Metadata Before Object Deletion Succeeds
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Worker/Backups/Retention
 - Context: Backup policy retention pruning removes old backup artifacts
   according to schedule retention rules, either manually through the API or
@@ -1598,6 +1604,11 @@ of the same root cause.
   ordering problem. A clean fix should preserve normal backup metadata until
   object deletion succeeds, or introduce an explicit retryable backup artifact
   deleting state visible in backup views.
+- Resolution: Fixed by making both manual and worker backup-policy retention
+  object deletes two-phase. Backup metadata remains visible while object
+  deletion is pending; successful object deletes finalize backup metadata and
+  the shared registry in one transaction, while delete failures leave backup
+  artifact rows intact with a visible retryable `delete_failed` lifecycle.
 
 ### AUD-057: User Management Can Remove The Last Active Admin
 
@@ -1777,7 +1788,7 @@ of the same root cause.
 ### AUD-062: Artifact Creation Can Commit Metadata Or Bytes Without Cleanup-Registry Consistency
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Object Storage/Artifacts
 - Context: Backup artifact upload, chunked backup upload, retained backup
   promotion, file-transfer source upload, and file-transfer handoff all create
@@ -1819,6 +1830,14 @@ of the same root cause.
 - Notes: This is distinct from retention/delete ordering issues. It happens at
   artifact creation time, before the shared cleanup registry is guaranteed to
   contain the object.
+- Resolution: Fixed by reserving API-created artifact object keys in
+  `server_artifacts` with status `creating` before writing object-store bytes,
+  then recording backup-artifact and file-transfer source-artifact domain
+  metadata together with the same registry owner in a single repository
+  transaction. Failed pre-write attempts discard the still-creating reservation
+  so operators can retry cleanly; failed post-write finalization either
+  confirm-deletes newly created bytes and discards the reservation or leaves a
+  visible retryable `delete_failed` cleanup target.
 
 ### AUD-063: Schedule Confirmations Remain Armed After Form, Defer, Or Table Context Changes
 
@@ -2056,7 +2075,7 @@ of the same root cause.
 - Severity: Medium/High
 - Status: Fixed
 - Area: API/Backups
-- Context: Operators can upload encrypted backup artifacts into object storage
+- Context: Operators can upload backup artifacts into object storage
   and attach them to backup request records. The chunked upload path exists for
   large artifacts and ends with a commit step that records durable metadata and
   publishes the artifact as available for restore.
@@ -2287,7 +2306,7 @@ of the same root cause.
 ### AUD-074: Job-Output Object Artifacts Can Be Committed Without Cleanup-Registry Repair
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Object Storage/Job Outputs
 - Context: Large job-output chunks are externalized to the filesystem-default
   object store when they exceed `job_output_artifact_min_bytes`. This includes
@@ -2331,6 +2350,11 @@ of the same root cause.
   file-transfer source, and handoff artifact creation. This issue is specific
   to job-output object artifacts and the idempotent duplicate retry path that
   prevents later registry repair.
+- Resolution: Fixed by registering object-backed job-output artifacts inside
+  the same transaction that commits the job-output rows. Identical duplicate
+  retries now also feed the persisted object metadata through the registry
+  repair path, so a retry can restore a missing cleanup-registry row instead of
+  accepting the duplicate silently.
 
 ### AUD-075: Audit Logs Are Readable And Exportable With Fleet-Read Scope
 
@@ -2608,8 +2632,8 @@ of the same root cause.
   tooling can read object-store files directly from disk, bypassing API scopes
   such as `jobs:read`, `backups:read`, and `terminal:read`. This can expose
   plaintext job output, terminal replay chunks, file-transfer payloads, and
-  retained file downloads. Even encrypted backup artifacts still leak object
-  existence, key layout, sizes, and hashes outside the operator API boundary.
+  retained file downloads. Backup artifacts also leak object existence, key
+  layout, sizes, and hashes outside the operator API boundary.
   This matters because the deploy/default workflow intentionally uses local
   filesystem object storage unless operators configure S3.
 - Evidence: `FilesystemBackupObjectStore::put_new` creates parent directories
@@ -3061,9 +3085,9 @@ of the same root cause.
 - Evidence: `archive_bytes_from_source` calls `tokio::fs::read(path)` at
   `crates/agent/src/restore.rs:260-271`, then hashes and decodes the in-memory
   `Vec<u8>`. `validate_restore_operation` accepts path-based archives at
-  `crates/api/src/job_request.rs:497-515` without an upper bound, while inline
-  artifact preparation explicitly caps archives to `MAX_INLINE_FILE_PUSH_BYTES`
-  at `crates/api/src/backup_artifact_crypto.rs:83-88`.
+  `crates/api/src/job_request.rs:497-515` without an upper bound. The former
+  inline restore-archive path was capped to the shared inline file-push limit,
+  which is why larger restores moved to the operator-staged archive model.
 - Notes: Restore should either stream path-based archives with bounded memory
   and size accounting, or enforce a configured maximum before reading. Hash
   validation should be performed incrementally so large artifacts do not require
@@ -3581,10 +3605,10 @@ of the same root cause.
 ### AUD-106: Backup Artifact Metadata Can Be Recorded Without Object-Store Verification
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Backups/Object Storage
-- Context: Backup artifact metadata links a backup request to encrypted
-  artifact bytes that operators later download, restore, prune, and audit.
+- Context: Backup artifact metadata links a backup request to artifact bytes
+  that operators later download, restore, prune, and audit.
   The API also supports a metadata-recording route for artifact bytes that were
   placed into the configured backup object store outside the inline/chunked
   upload paths.
@@ -3624,6 +3648,10 @@ of the same root cause.
   metadata should be a validation step against the configured store. A clean
   fix should verify object existence, exact size, and exact hash before linking
   the backup request, and should prevent conflicting object-key reuse.
+- Resolution: Fixed by requiring a configured object store for direct metadata
+  recording, verifying the staged object by exact size and SHA-256 before
+  linking the backup request, and rejecting object keys already owned by another
+  shared artifact row.
 
 ### AUD-107: Stale Fixed Targets Can Block Schedule Management And Apply-Now
 
@@ -3776,19 +3804,19 @@ of the same root cause.
   side effects in order: create the migration link, then create the restore
   job. There is no server-side atomic operation that records the link only
   after the restore job is durably accepted, and there is no compensating
-  rollback if job creation fails. The CLI path is worse because it creates the
-  link before downloading/decrypting the backup artifact and before building
-  the restore operation.
+  rollback if job creation fails. The former CLI path was worse because it
+  created the link before preparing the restore artifact and before building the
+  restore operation.
 - Impact: A failed migration run can leave durable migration evidence without
   the restore job it was supposed to accompany. Practical failures include
-  wrong backup private key, missing or corrupt backup artifact, API/gateway
-  rejection during job creation, operator token expiry, network failure between
-  calls, or a frontend/browser interruption after the link call. The operator
-  then sees a `linked_metadata_only` migration record, but no restore dispatch
-  exists. Because `migration_links.restore_plan_id` is unique, retrying the
-  bundled run for the same plan can be blocked by the already-created link,
-  forcing manual cleanup or an out-of-band restore run and weakening the audit
-  story for production migrations.
+  missing or corrupt backup artifact, API/gateway rejection during job
+  creation, operator token expiry, network failure between calls, or a
+  frontend/browser interruption after the link call. The operator then sees a
+  `linked_metadata_only` migration record, but no restore dispatch exists.
+  Because `migration_links.restore_plan_id` is unique, retrying the bundled run
+  for the same plan can be blocked by the already-created link, forcing manual
+  cleanup or an out-of-band restore run and weakening the audit story for
+  production migrations.
 - Evidence: The schema enforces one link per restore plan with
   `restore_plan_id UUID NOT NULL UNIQUE` in
   `migrations/0004_backups_restores.sql:66-79`. The API creates links as
@@ -3796,7 +3824,7 @@ of the same root cause.
   `crates/api/src/repository_migrations.rs:260-340`. The CLI bundled path
   posts `/api/v1/migration-links` before calling
   `restore_run_with_credentials` at `crates/vpsctl/src/commands_migrations.rs:107-145`;
-  that restore helper downloads/decrypts the artifact and only then posts
+  that restore helper prepares the restore operation and only then posts
   `/api/v1/jobs` at `crates/vpsctl/src/commands_backups.rs:757-805`. The
   frontend bundled path also creates the link before creating the job at
   `frontend/src/panels/BackupsPanel.tsx:1126-1141`.
@@ -5707,7 +5735,7 @@ of the same root cause.
 ### AUD-155: Failed Artifact Cleanup Jobs Can Hide Already-Deleted Artifacts
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Worker/Artifact Cleanup/Observability
 - Context: Artifact cleanup is a destructive server-side maintenance job that
   deletes or tombstones retained job-output, file-transfer, and backup artifact
@@ -5743,6 +5771,10 @@ of the same root cause.
   status or update aggregate counts incrementally in the same transaction as
   each candidate mutation. Failed jobs should visibly report partial deletion,
   tombstone, and skipped counts.
+- Resolution: Fixed by persisting artifact-cleanup progress after each
+  candidate skip, tombstone, or delete, and by converting object-delete
+  failures into visible `delete_failed` lifecycle state instead of dropping the
+  already-processed aggregate evidence when the job fails later.
 
 ### AUD-156: Process Status And Log Reads Can Restart Supervised Processes
 
@@ -6246,19 +6278,17 @@ of the same root cause.
 ### AUD-168: Chunked Backup Artifact Commit Rehydrates The Whole Artifact In API Memory
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Backups/Resource Bounds
-- Context: Operators use chunked backup artifact upload when an encrypted
-  backup artifact is too large for the inline upload route. This is the
+- Context: Operators use chunked backup artifact upload when a backup artifact
+  is too large for the inline upload route. This is the
   practical path for retained backup artifacts and restore material in real
   fleet operation.
 - Root Cause: The chunked upload path limits individual chunks and stages
   bytes on disk, but the commit path reads the entire staged artifact back into
-  a `Vec<u8>` for validation. The validation then parses the whole artifact
-  JSON and decodes the full `ciphertext_base64` field into another in-memory
-  byte buffer before committing the object.
+  memory for validation before committing the object.
 - Impact: A feature intended to avoid large request bodies can still allocate
-  the full artifact, plus decoded ciphertext, in API memory at commit time.
+  the full artifact in API memory at commit time.
   With the default 128 MiB chunked-artifact limit, one or a few concurrent
   commits can create large memory spikes; if operators raise
   `VPSMAN_BACKUP_HANDOFF_MAX_BYTES`, the spike scales with that setting. At
@@ -6272,15 +6302,16 @@ of the same root cause.
   `crates/api/src/backup_handoff.rs:10-12` and environment override handling
   at `crates/api/src/backup_handoff.rs:121-127`. The commit preparation reads
   the whole staged file with `tokio::fs::read` and passes the full buffer to
-  validation at `crates/api/src/backup_upload_sessions.rs:208-219`. The
-  validation parses the full JSON and decodes the full ciphertext base64 at
-  `crates/api/src/routes_backups.rs:1102-1145`.
+  validation at `crates/api/src/backup_upload_sessions.rs:208-219`.
 - Notes: This is distinct from AUD-082, which covers temporary file
   permissions, and AUD-062, which covers artifact metadata/cleanup registry
   consistency. A clean fix should validate staged artifacts with a bounded
   streaming or incremental parser/hash path, or keep the chunked-artifact
   maximum low enough that the memory cost is explicitly within the API's
   resource budget and concurrency controls.
+- Resolution: Fixed by validating staged chunked backup uploads directly from
+  the staged tar file, including size, SHA-256, tar readability, and manifest
+  identity, without reading the full artifact into an API `Vec<u8>`.
 
 ### AUD-169: Agent Backups Can Be Valid Above The API Restore-Preparation Inline Limit
 
@@ -6292,9 +6323,9 @@ of the same root cause.
   workflow to decrypt the stored artifact and build a restore job.
 - Root Cause: The agent backup configuration accepts
   `backup.max_plaintext_bytes` up to 16 MiB, and the backup command enforces
-  that configured limit while producing a valid encrypted backup artifact. The
-  API restore-preparation endpoint decrypts the artifact and then requires the
-  restored archive to fit the shared inline file-push limit of 1 MiB. The
+  that configured limit while producing a valid backup artifact. The former
+  API restore-preparation endpoint then required the restored archive to fit
+  the shared inline file-push limit of 1 MiB. The
   restore command validator also requires inline restore archives to pass that
   same 1 MiB inline payload limit unless the operator manually supplies an
   agent-local archive path.
@@ -6313,12 +6344,11 @@ of the same root cause.
   command collects and encodes the tar archive up to
   `config.backup.max_plaintext_bytes` at
   `crates/agent/src/backup.rs:185-214` and
-  `crates/agent/src/backup.rs:372-402`. API restore preparation decrypts and
-  decompresses the artifact, then rejects archives larger than
-  `MAX_INLINE_FILE_PUSH_BYTES` at
-  `crates/api/src/backup_artifact_crypto.rs:83-89`; that constant is 1 MiB at
-  `crates/common/src/file_transfer.rs:7-8`. The restore command validation
-  calls `validate_inline_file_payload` for `archive_base64` at
+  `crates/agent/src/backup.rs:372-402`. The former API restore-preparation path
+  rejected prepared inline archives larger than the shared inline file-push
+  limit, which is 1 MiB at `crates/common/src/file_transfer.rs:7-8`. The
+  restore command validation calls `validate_inline_file_payload` for
+  `archive_base64` at
   `crates/api/src/job_request.rs:516-524`, and the inline validator rejects
   payloads above the same 1 MiB cap at
   `crates/common/src/file_transfer.rs:109-124`.
@@ -6340,16 +6370,16 @@ of the same root cause.
 - Severity: High
 - Status: Fixed
 - Area: Frontend/API/Backups/Key Custody
-- Context: Operators restore encrypted backup artifacts from the dashboard.
-  The dashboard presents the workflow as browser-held key material and
-  browser-decrypted restore preparation, while the CLI keeps the private key
-  local by reading it from an environment variable and decrypting before job
-  creation.
+- Context: Operators previously restored encrypted backup artifacts from the
+  dashboard. The dashboard presented the workflow as browser-held key material
+  and browser-decrypted restore preparation, while the CLI kept the private key
+  local before job creation.
 - Root Cause: The dashboard posts `private_key_hex` to the API
-  `/artifact/prepare-restore` route. The API accepts that key, loads or accepts
-  the encrypted artifact, decrypts it server-side, and returns an inline
-  plaintext restore archive to the browser. This is inconsistent with the CLI
-  restore path, which decrypts locally before building the restore command.
+  `/artifact/prepare-restore` route. The API accepted that key, loaded or
+  accepted the backup artifact, prepared it server-side, and returned an inline
+  plaintext restore archive to the browser. This was inconsistent with the CLI
+  restore path, which kept key material local before building the restore
+  command.
 - Impact: Backup private keys cross the operator browser/API boundary and are
   exposed to API request handling, middleware, crash dumps, reverse proxies,
   request captures, and any future logging or tracing around request bodies.
@@ -6366,11 +6396,11 @@ of the same root cause.
   `frontend/src/hooks/useBackupsData.ts:220-227`. The route requires
   `backups:write`, checks only that the key is non-empty, and passes the key
   to `prepare_backup_archive_for_restore` at
-  `crates/api/src/routes_backups.rs:806-839`. The form text says the workflow
-  runs "browser-decrypted" restores at
+  `crates/api/src/routes_backups.rs:806-839`. The form text said the workflow
+  ran browser-side restores at
   `frontend/src/panels/backups/RestoreRunForm.tsx:58-61`. The CLI restore
-  path reads `private_key_env`, decrypts locally, and then builds the restore
-  command at `crates/vpsctl/src/commands_backups.rs:967-982`.
+  path kept private-key material local before building the restore command at
+  `crates/vpsctl/src/commands_backups.rs:967-982`.
 - Notes: This is distinct from AUD-027, which covers backup read-scope
   boundaries, and AUD-169, which covers restore size mismatch. A clean fix
   should make browser restore decrypt locally or explicitly remove the
@@ -6767,7 +6797,7 @@ of the same root cause.
   One-time backup and restore-plan review build privileged snapshots at
   `frontend/src/panels/BackupsPanel.tsx:583-627` and
   `frontend/src/panels/BackupsPanel.tsx:738-795`. Live restore and migration
-  restore prepare/decrypt artifacts and build privileged job snapshots at
+  restore prepare reviewed artifacts and build privileged job snapshots at
   `frontend/src/panels/BackupsPanel.tsx:807-997` and
   `frontend/src/panels/BackupsPanel.tsx:1084-1123`. Restore rollback loads
   prior job outputs and builds a rollback operation at
@@ -6788,7 +6818,7 @@ of the same root cause.
 ### AUD-179: Multiple Backup Artifacts Can Reference The Same Object Key
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Backups/Object Storage
 - Context: Operators can record backup artifact metadata for objects that were
   uploaded outside the inline/chunked API path. Backup retention, history
@@ -6825,11 +6855,15 @@ of the same root cause.
   This issue remains even when the object exists and the submitted hash is
   correct: the missing invariant is one durable backup artifact ownership row
   per object key, or explicit reference counting before deletion.
+- Resolution: Fixed by adding a unique backup-artifact `object_key` invariant
+  to the pre-release schema and enforcing shared registry ownership checks
+  before metadata import, inline upload, chunked commit, and retained-output
+  handoff publish a backup artifact.
 
 ### AUD-180: Reuploaded File-Transfer Source Artifacts Can Inherit Stale Cleanup Age
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/File Transfers/Artifact Cleanup
 - Context: Operators can upload reusable source artifacts for resumable
   file-transfer jobs. The source object key is content-addressed by SHA-256, so
@@ -6867,6 +6901,10 @@ of the same root cause.
   domain-metadata and cleanup-registry commits. This issue occurs even when
   every insert succeeds: the retained registry timestamp no longer represents
   the currently visible source artifact's lifecycle.
+- Resolution: Fixed by changing file-transfer source artifact object keys from
+  pure content-addressed keys to artifact-id-plus-hash keys, enforcing unique
+  source artifact object keys in the pre-release schema, and registering each
+  source artifact as its own lifecycle owner with its own creation timestamp.
 
 ### AUD-181: Key Lifecycle Review Can Open Stale Confirmations After Key-Field Edits
 
@@ -7602,7 +7640,7 @@ of the same root cause.
 ### AUD-198: S3-Compatible Object Store Accepts Plaintext HTTP Endpoints For Signed Requests
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Worker/Object Storage/Security
 - Context: The default object store is local filesystem, but production
   operators can explicitly configure the documented S3/MinIO-compatible object
@@ -7642,11 +7680,15 @@ of the same root cause.
   distinct from AUD-081/AUD-082 filesystem and temp-file permission issues,
   AUD-106 backup object verification, and AUD-179/AUD-180 object-key collision
   and cleanup-order issues.
+- Resolution: Fixed by rejecting plaintext `http://` S3-compatible endpoints
+  unless the configured host is loopback/local (`localhost`, IPv4 loopback, or
+  IPv6 loopback). Local MinIO smoke tests remain supported, while remote object
+  stores must use HTTPS.
 
 ### AUD-199: Job-Output And File-Download Archive Exports Can Exhaust API Temp Disk Across Targets
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/Job Outputs/Resource Bounds
 - Context: Operators can download a job-output archive or a multi-target
   file-download bundle from normal dashboard workflows after running bulk jobs
@@ -7690,11 +7732,15 @@ of the same root cause.
   per-entry spooling and backpressure from a private spool directory. The UI
   should surface a clear error and guide operators to narrower target or stream
   selections instead of silently risking temp-disk exhaustion.
+- Resolution: Fixed by loading export rows through the paged output API,
+  enforcing a total selected-output byte budget before materialization, and
+  rejecting oversized file-download bundles or job-output archives before they
+  can fan out into unbounded temp files.
 
 ### AUD-200: Job-Output Listing And Chunk Downloads Load Entire Output History Without Pagination
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/CLI/Job Outputs/Resource Bounds
 - Context: Operators inspect job details, follow command output, download
   individual output chunks, and run resumable file-transfer downloads through
@@ -7744,11 +7790,15 @@ of the same root cause.
   follow views should poll incrementally from a cursor, and chunk/file-transfer
   download paths should fetch only the exact needed row or stream instead of
   materializing the whole job history.
+- Resolution: Fixed by making `/jobs/{id}/outputs` return cursor-paged output
+  pages with client, stream, sequence, limit, and `include_data` controls;
+  frontend and CLI callers now page explicitly, and single chunk downloads use
+  direct job-output lookup.
 
 ### AUD-201: Server-Side File-Transfer Handoff Scans All Client Chunks And Leaks Temp Files On Failed Assembly
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/CLI/File Transfers/Resource Bounds
 - Context: Operators use resumable file-transfer downloads to pull large files
   from a VPS, then create a server-side handoff artifact so the completed
@@ -7803,16 +7853,20 @@ of the same root cause.
   the requested `(client_id, session_id)`, avoid loading unrelated rows, stream
   or bound assembly memory, and wrap the handoff temp file in a cleanup guard so
   every failed assembly removes partial files before returning.
+- Resolution: Fixed by scoping the Postgres handoff query to the requested
+  download session, exact-checking chunk status JSON, deduplicating identical
+  retry chunks by offset, rejecting conflicting duplicates, and removing the
+  temporary handoff file on every assembly or object-store failure.
 
 ### AUD-202: Retained Backup Handoff Leaks Staging Files When Assembly Fails
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Backups/Resource Cleanup
 - Context: Operators promote retained backup stdout into a durable backup
   artifact through the backup handoff route. This path is intended for normal
-  recovery workflows where the agent already produced encrypted backup bytes
-  as job output and the API turns those retained outputs into an object-store
+  recovery workflows where the agent already produced backup bytes as job
+  output and the API turns those retained outputs into an object-store
   artifact.
 - Root Cause: `stage_retained_backup_artifact_stdout` creates a named
   `{uuid}.part` file in the backup handoff staging directory and streams
@@ -7822,8 +7876,8 @@ of the same root cause.
   overflow, or staging write/sync failure, return before the caller receives a
   `StagedRetainedBackupArtifact`. The route therefore has no path to remove
   the partial file.
-- Impact: A failed retained-backup handoff can leave encrypted backup artifact
-  bytes behind in the API staging directory. Repeated retries after a bad
+- Impact: A failed retained-backup handoff can leave backup artifact bytes
+  behind in the API staging directory. Repeated retries after a bad
   retained output, an object-store read problem, or an artifact larger than the
   configured limit can accumulate large partial files and fill `/tmp` or the
   configured `VPSMAN_BACKUP_HANDOFF_STAGING_DIR`. On filesystem-default
@@ -7844,22 +7898,23 @@ of the same root cause.
   permissions, AUD-168/AUD-203, which cover memory pressure, and AUD-062, which
   covers durable object metadata/cleanup-registry consistency. The clean fix is
   a cleanup guard around the staging file for every failed assembly path.
+- Resolution: Fixed by wrapping retained-backup staging in a failure cleanup
+  path that removes the `.part` file on any read, decode, size, hash, or write
+  error before the prepared artifact is returned.
 
 ### AUD-203: Retained Backup Handoff Rehydrates The Whole Artifact In API Memory After Streaming
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Backups/Resource Bounds
 - Context: Retained backup handoff streams stdout chunks into a staging file so
   an operator can promote an existing backup job output into a durable backup
   artifact without asking the agent to run the backup again.
 - Root Cause: After streaming retained outputs into the staging file, the route
-  immediately reads the entire staged artifact back into a `Vec<u8>` for
-  validation. The validator then parses the whole JSON document and decodes the
-  full `ciphertext_base64` into another in-memory buffer before the object is
-  committed.
+  immediately reads the entire staged artifact back into memory for validation
+  before the object is committed.
 - Impact: A workflow that appears disk-streamed still allocates the full
-  encrypted backup artifact, plus decoded ciphertext, in API memory. With the
+  backup artifact in API memory. With the
   default 128 MiB handoff limit, a few concurrent handoffs can create large
   memory spikes; if operators raise `VPSMAN_BACKUP_HANDOFF_MAX_BYTES`, the
   spike scales with that setting. This is practical for 20+ VPS deployments
@@ -7870,20 +7925,21 @@ of the same root cause.
   `crates/api/src/backup_handoff.rs:129-151`. The handoff route then reads the
   full staged file with `tokio::fs::read` at
   `crates/api/src/routes_backups.rs:645-653` and passes the full buffer to
-  `validate_encrypted_backup_artifact_with_limit` at
-  `crates/api/src/routes_backups.rs:654-660`. That validator parses the full
-  JSON and decodes `ciphertext_base64` at
-  `crates/api/src/routes_backups.rs:1102-1145`.
+  plain backup artifact validator at
+  `crates/api/src/routes_backups.rs:654-660`.
 - Notes: This is the retained-backup handoff analogue of AUD-168's chunked
   upload commit memory issue. A clean fix should validate retained backup
   handoff artifacts with a bounded streaming or incremental parser/hash path,
   or keep the handoff limit explicitly low enough that the memory cost is part
   of the supported API capacity model.
+- Resolution: Fixed by validating retained backup handoff artifacts directly
+  from the staged tar file, checking the manifest and limits in place before
+  committing the file to object storage.
 
 ### AUD-204: Abandoned Chunked Backup Upload Sessions Can Leave Staging Files Indefinitely
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/CLI/Backups/Resource Cleanup
 - Context: Operators use chunked backup artifact upload for artifacts larger
   than the inline request limit. Browser tab closes, network failures, CLI
@@ -7895,8 +7951,8 @@ of the same root cause.
   only opportunistically when a new upload session is created. There is no API
   startup cleanup, periodic worker cleanup, request-end cleanup, or dashboard/
   CLI abort path for interrupted uploads.
-- Impact: A failed or abandoned chunked upload can leave encrypted backup
-  artifact bytes in the API temp/staging directory indefinitely if no later
+- Impact: A failed or abandoned chunked upload can leave backup artifact bytes
+  in the API temp/staging directory indefinitely if no later
   upload session is created. Each abandoned session can be as large as the
   configured backup artifact streaming limit, 128 MiB by default. In a 20+ VPS
   deployment where operators routinely test restores, migrations, and backup
@@ -7922,6 +7978,12 @@ of the same root cause.
   reliable cleanup path for expired and orphaned upload session files, and make
   dashboard/CLI callers abort sessions on recoverable failures when they still
   know the upload ID.
+- Resolution: Fixed by invoking expired-session cleanup on upload writes,
+  commit preparation, and abort paths; starting a periodic API cleanup task;
+  removing expired manifests, expired staging files, stale orphan `.part` files,
+  and stale temp manifests; removing staging and manifest files when sessions
+  are completed or explicitly aborted; and making dashboard/CLI chunked uploads
+  abort known sessions best-effort on failure.
 
 ### AUD-205: Restore Post-Hooks Can Fail Without Making The Restore Target Fail Safely
 
@@ -8077,7 +8139,7 @@ of the same root cause.
 - Impact: An offboarded, compromised, or downgraded operator's old backup policy
   can continue deleting backup artifact metadata and, when object deletion is
   enabled, object-store bytes. In a 20+ VPS deployment this can remove restore
-  evidence and retained encrypted backups after the human owner is no longer
+  evidence and retained backups after the human owner is no longer
   permitted to manage backups. The default config leaves the worker disabled,
   but the workflow is shipped, documented in config, and covered by smoke tests;
   once enabled, the missing owner check is production-real rather than a lab-only
@@ -8463,8 +8525,8 @@ of the same root cause.
 - Severity: High
 - Status: Fixed
 - Area: API/Frontend/CLI/Backups
-- Context: Operators use chunked backup artifact upload for encrypted backup
-  artifacts that are too large for the inline upload route. This is the normal
+- Context: Operators use chunked backup artifact upload for backup artifacts
+  that are too large for the inline upload route. This is the normal
   dashboard and CLI path for retained backup artifacts above the small inline
   envelope, especially when restoring or migrating VPSs from stored artifacts.
 - Root Cause: The backup upload-session code advertises and validates 4 MiB
@@ -9341,6 +9403,37 @@ of the same root cause.
   conflicts. The shared frontend client no longer injects fallback IDs at send
   time; reviewed confirmations freeze the UUID in their snapshots, and direct
   actions generate one UUID when the action starts.
+
+### AUD-236: Backup Artifact Encryption Existed Without A Supported Decrypt/Restore Product Path
+
+- Severity: Medium/High
+- Status: Fixed
+- Area: API/CLI/Frontend/Agent/Backups
+- Context: Operators run backup jobs, promote retained backup output, upload
+  backup artifacts, and later restore or migrate from those records.
+- Root Cause: The backup command still accepted a recipient public key and the
+  agent emitted an encrypted backup envelope, but the current restore product
+  model no longer provides a supported decrypt-and-restore path for stored
+  backup artifacts. Restore now deliberately selects one completed agent-local
+  archive upload record instead of accepting inline decrypted archive bytes.
+- Impact: Operators could create durable backup artifacts that looked valid in
+  policy, CLI, and dashboard flows but were not usable by the supported restore
+  workflow without an out-of-band decrypt process. The extra key field also
+  kept unnecessary key-custody decisions in product surfaces, made backup
+  policies harder to operate, and obscured the actual security boundary: file
+  transfer, command output, and object storage already handle sensitive bytes
+  as ordinary scoped artifacts in this pre-release design.
+- Evidence: The common protocol carried `recipient_public_key_hex` on
+  `JobCommand::Backup`, agent backup execution produced the encrypted artifact
+  envelope, CLI/frontend policy and run flows exposed recipient-key fields, and
+  API upload/handoff validation expected the encrypted JSON artifact shape.
+- Resolution: Fixed by removing the backup recipient key from protocol,
+  policy, request, CLI, VTY, and dashboard surfaces; deleting backup-specific
+  artifact encryption dependencies and helpers; making the agent emit
+  `vpsman.backup_tar.v1` plain tar artifacts; validating uploaded and retained
+  artifacts as bounded tar files with a manifest; and updating docs, smoke
+  scripts, fixtures, baseline schema, and audit metadata to treat backups as
+  normal scoped artifact bytes.
 
 ## Issue Template
 

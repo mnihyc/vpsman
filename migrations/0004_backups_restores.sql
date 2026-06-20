@@ -3,10 +3,12 @@ CREATE TABLE backup_artifacts (
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     object_key TEXT NOT NULL,
     sha256_hex TEXT NOT NULL,
-    encrypted BOOLEAN NOT NULL DEFAULT TRUE,
     size_bytes BIGINT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE UNIQUE INDEX backup_artifacts_object_key_unique
+    ON backup_artifacts (object_key);
 
 CREATE TABLE backup_requests (
     id UUID PRIMARY KEY,

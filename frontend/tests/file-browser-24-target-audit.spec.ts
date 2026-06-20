@@ -184,7 +184,8 @@ async function installTwentyFourTargetFileMock(page: Page) {
 
     window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
-      const pathname = new URL(url, window.location.href).pathname;
+      const requestUrl = new URL(url, window.location.href);
+      const pathname = requestUrl.pathname;
       const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
 
       if (pathname === "/api/v1/agents" && method === "GET") {
@@ -262,12 +263,23 @@ async function installTwentyFourTargetFileMock(page: Page) {
       const outputMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/outputs$/);
       if (outputMatch && method === "GET" && jobOutputs[outputMatch[1]]) {
         const jobId = outputMatch[1];
+        const cursor = requestUrl.searchParams.get("cursor");
         const readCount = outputReads[jobId] ?? 0;
         outputReads[jobId] = readCount + 1;
-        if (readCount === 0) {
-          return jsonResponse(jobOutputs[jobId].slice(0, 10));
+        if (!cursor) {
+          return jsonResponse({
+            items: jobOutputs[jobId].slice(0, 10),
+            limit: 1000,
+            next_cursor: "next",
+            has_more: true,
+          });
         }
-        return jsonResponse(jobOutputs[jobId]);
+        return jsonResponse({
+          items: jobOutputs[jobId].slice(10),
+          limit: 1000,
+          next_cursor: null,
+          has_more: false,
+        });
       }
       const bundleMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/outputs\/download-bundle$/);
       if (bundleMatch && method === "GET" && jobOutputs[bundleMatch[1]]) {

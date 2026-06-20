@@ -1010,10 +1010,10 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
             .push(BackupArtifactView {
                 id: Uuid::new_v4(),
                 client_id: "edge-a".to_string(),
-                object_key: "backups/edge-a/artifact.json".to_string(),
+                object_key: "backups/edge-a/artifact.tar".to_string(),
                 sha256_hex: "1".repeat(64),
-                encrypted: true,
                 size_bytes: 4096,
+                status: "active".to_string(),
                 created_at: "100".to_string(),
             });
         memory

@@ -295,7 +295,7 @@ INSERT INTO data_source_presets (
         'built_in',
         TRUE,
         FALSE,
-        'Reserved S3/MinIO path-style encrypted artifact adapter preset',
+        'Reserved S3/MinIO path-style artifact adapter preset',
         '{"provider":"s3_path_style","requires_server_env":["VPSMAN_OBJECT_ENDPOINT","VPSMAN_OBJECT_BUCKET","VPSMAN_OBJECT_ACCESS_KEY","VPSMAN_OBJECT_SECRET_KEY"]}'::jsonb
     ),
     (
@@ -464,3 +464,6 @@ CREATE INDEX file_transfer_source_artifacts_created_idx
 
 CREATE INDEX file_transfer_source_artifacts_hash_idx
     ON file_transfer_source_artifacts (sha256_hex, size_bytes);
+
+CREATE UNIQUE INDEX file_transfer_source_artifacts_object_key_unique
+    ON file_transfer_source_artifacts (object_key);

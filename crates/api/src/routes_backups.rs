@@ -1,3 +1,9 @@
+use std::{
+    fs::File,
+    io::{BufReader, Cursor, Read},
+    path::Path as FsPath,
+};
+
 use anyhow::anyhow;
 use axum::{
     body::Body,
@@ -6,6 +12,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde::Deserialize;
 use vpsman_common::{encode_json, payload_hash, JobCommand, PrivilegeAssertion};
 
 use crate::{
@@ -29,6 +36,7 @@ use crate::{
         verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput,
         SchedulePrivilegeIntent, SchedulePrivilegeIntentInput,
     },
+    repository_backup_artifacts::backup_server_artifact,
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
     routes_schedules::validate_schedule_request,
     security::{operator_has_scope, SCOPE_BACKUPS_READ},
@@ -41,6 +49,9 @@ const MAX_BACKUP_PATHS: usize = 64;
 const MAX_BACKUP_NOTE_BYTES: usize = 1024;
 const MAX_BACKUP_ARTIFACT_OBJECT_KEY_BYTES: usize = 1024;
 const MAX_BACKUP_ARTIFACT_SIZE_BYTES: i64 = 1_099_511_627_776;
+const BACKUP_ARCHIVE_FORMAT: &str = "vpsman.backup_tar.v1";
+const BACKUP_ARCHIVE_MANIFEST_PATH: &str = "vpsman-backup/manifest.json";
+const MAX_BACKUP_ARCHIVE_MANIFEST_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES: usize = 24 * 1024 * 1024;
 pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 
@@ -272,20 +283,33 @@ async fn collect_backup_policy_prune_outputs(
                 object_delete_attempted = true;
                 if let Some(store) = state.backup_object_store.as_ref() {
                     for candidate in &candidates {
-                        let rows = state
+                        if !state
                             .repo
-                            .prune_backup_policy_candidate_metadata(candidate)
-                            .await?;
-                        pruned_rows += rows;
-                        if rows == 0 {
+                            .begin_backup_policy_candidate_object_delete(candidate)
+                            .await?
+                        {
                             continue;
                         }
                         object_keys.push(candidate.object_key.clone());
                         match store.delete_confirmed(&candidate.object_key).await {
-                            Ok(()) => {}
+                            Ok(()) => {
+                                let rows = state
+                                    .repo
+                                    .finalize_backup_policy_candidate_object_delete(candidate)
+                                    .await?;
+                                pruned_rows += rows;
+                            }
                             Err(error) => {
+                                let error_text = error.to_string();
+                                state
+                                    .repo
+                                    .mark_backup_policy_candidate_delete_failed(
+                                        candidate,
+                                        &error_text,
+                                    )
+                                    .await?;
                                 object_delete_errors
-                                    .push(format!("{}: {error}", candidate.object_key));
+                                    .push(format!("{}: {error_text}", candidate.object_key));
                                 break;
                             }
                         }
@@ -425,21 +449,34 @@ pub(crate) async fn record_backup_artifact_metadata(
     if backup_request.artifact_id.is_some() {
         return Err(ApiError::conflict("backup_artifact_already_recorded"));
     }
+    let store = state
+        .backup_object_store
+        .as_ref()
+        .ok_or_else(|| ApiError::conflict("backup_object_store_not_configured"))?;
+    let artifact_id = uuid::Uuid::new_v4();
+    reserve_backup_artifact_object(&state, &backup_request, artifact_id, &request).await?;
+    if let Err(error) = verify_staged_backup_artifact_object(&state, store, &request).await {
+        release_server_artifact_reservation(&state, &request.object_key).await;
+        return Err(error);
+    }
 
-    let artifact = state
+    let artifact = match state
         .repo
-        .record_backup_artifact_metadata(&backup_request, &request, &operator)
+        .record_backup_artifact_metadata(&backup_request, artifact_id, &request, &operator)
         .await
-        .map_err(|error| {
+    {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            release_server_artifact_reservation(&state, &request.object_key).await;
             if error
                 .to_string()
                 .contains("backup_artifact_already_recorded")
             {
-                ApiError::conflict("backup_artifact_already_recorded")
-            } else {
-                ApiError::from(error)
+                return Err(ApiError::conflict("backup_artifact_already_recorded"));
             }
-        })?;
+            return Err(ApiError::from(error));
+        }
+    };
     state.publish(WsEvent::BackupArtifactRecorded {
         backup_request_id,
         client_id: backup_request.client_id,
@@ -474,32 +511,33 @@ pub(crate) async fn upload_backup_artifact(
     let artifact_bytes = BASE64
         .decode(request.artifact_base64.trim())
         .map_err(|_| ApiError::bad_request("backup_artifact_base64_invalid"))?;
-    validate_encrypted_backup_artifact(&artifact_bytes, &backup_request.client_id)?;
+    validate_plain_backup_artifact(&artifact_bytes, &backup_request.client_id)?;
     let sha256_hex = payload_hash(&artifact_bytes);
     let size_bytes = i64::try_from(artifact_bytes.len())
         .map_err(|_| ApiError::bad_request("backup_artifact_size_invalid"))?;
+    let artifact_id = uuid::Uuid::new_v4();
+    let metadata_request = RecordBackupArtifactMetadataRequest {
+        object_key: request.object_key.clone(),
+        sha256_hex,
+        size_bytes,
+        confirmed: request.confirmed,
+    };
+    reserve_backup_artifact_object(&state, &backup_request, artifact_id, &metadata_request).await?;
 
-    store
-        .put_new(&request.object_key, &artifact_bytes)
-        .await
-        .map_err(|error| {
+    if let Err(error) = store.put_new(&request.object_key, &artifact_bytes).await {
+        release_server_artifact_reservation(&state, &request.object_key).await;
+        return Err({
             let error_text = error.to_string();
             if error_text.contains("object already exists") || error_text.contains("File exists") {
                 ApiError::conflict("backup_artifact_object_exists")
             } else {
                 ApiError::from(error)
             }
-        })?;
-    let metadata_request = RecordBackupArtifactMetadataRequest {
-        object_key: request.object_key.clone(),
-        sha256_hex,
-        encrypted: true,
-        size_bytes,
-        confirmed: request.confirmed,
-    };
+        });
+    }
     match state
         .repo
-        .record_backup_artifact_metadata(&backup_request, &metadata_request, &operator)
+        .record_backup_artifact_metadata(&backup_request, artifact_id, &metadata_request, &operator)
         .await
     {
         Ok(artifact) => {
@@ -511,7 +549,14 @@ pub(crate) async fn upload_backup_artifact(
             Ok((StatusCode::CREATED, Json(artifact)))
         }
         Err(error) => {
-            store.delete_best_effort(&request.object_key).await;
+            cleanup_created_reserved_artifact_after_error(
+                &state,
+                store,
+                &request.object_key,
+                &error.to_string(),
+                true,
+            )
+            .await;
             if error
                 .to_string()
                 .contains("backup_artifact_already_recorded")
@@ -607,14 +652,15 @@ pub(crate) async fn commit_backup_artifact_upload_session(
             request,
         )
         .await?;
-    if state
-        .repo
-        .backup_artifact_object_key_exists(&prepared.object_key)
-        .await?
-    {
-        return Err(ApiError::conflict("backup_artifact_object_exists"));
-    }
-    store
+    let artifact_id = uuid::Uuid::new_v4();
+    let metadata_request = RecordBackupArtifactMetadataRequest {
+        object_key: prepared.object_key.clone(),
+        sha256_hex: prepared.sha256_hex.clone(),
+        size_bytes: prepared.size_bytes,
+        confirmed: true,
+    };
+    reserve_backup_artifact_object(&state, &backup_request, artifact_id, &metadata_request).await?;
+    let created_object = match store
         .put_file_idempotent(
             &prepared.object_key,
             &prepared.staging_path,
@@ -625,24 +671,25 @@ pub(crate) async fn commit_backup_artifact_upload_session(
                 .map_err(|_| ApiError::bad_request("backup_artifact_size_invalid"))?,
         )
         .await
-        .map_err(|error| {
+    {
+        Ok(created_object) => created_object,
+        Err(error) => {
+            release_server_artifact_reservation(&state, &prepared.object_key).await;
             let error_text = error.to_string();
-            if error_text.contains("object already exists") || error_text.contains("File exists") {
-                ApiError::conflict("backup_artifact_object_exists")
-            } else {
-                ApiError::from(error)
-            }
-        })?;
-    let metadata_request = RecordBackupArtifactMetadataRequest {
-        object_key: prepared.object_key.clone(),
-        sha256_hex: prepared.sha256_hex.clone(),
-        encrypted: true,
-        size_bytes: prepared.size_bytes,
-        confirmed: true,
+            return Err(
+                if error_text.contains("object already exists")
+                    || error_text.contains("File exists")
+                {
+                    ApiError::conflict("backup_artifact_object_exists")
+                } else {
+                    ApiError::from(error)
+                },
+            );
+        }
     };
     match state
         .repo
-        .record_backup_artifact_metadata(&backup_request, &metadata_request, &operator)
+        .record_backup_artifact_metadata(&backup_request, artifact_id, &metadata_request, &operator)
         .await
     {
         Ok(artifact) => {
@@ -655,6 +702,14 @@ pub(crate) async fn commit_backup_artifact_upload_session(
             Ok((StatusCode::CREATED, Json(artifact)))
         }
         Err(error) => {
+            cleanup_created_reserved_artifact_after_error(
+                &state,
+                store,
+                &metadata_request.object_key,
+                &error.to_string(),
+                created_object,
+            )
+            .await;
             if error
                 .to_string()
                 .contains("backup_artifact_already_recorded")
@@ -715,17 +770,8 @@ pub(crate) async fn create_backup_artifact_handoff(
         .await?
         .ok_or_else(|| ApiError::conflict("backup_artifact_handoff_source_missing"))?;
     let prepared = stage_retained_backup_artifact_stdout(&state, &candidate.outputs).await?;
-    let artifact_bytes = match tokio::fs::read(&prepared.staging_path).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            let _ = tokio::fs::remove_file(&prepared.staging_path).await;
-            return Err(ApiError::conflict(
-                "backup_artifact_handoff_staging_read_failed",
-            ));
-        }
-    };
-    if let Err(error) = validate_encrypted_backup_artifact_with_limit(
-        &artifact_bytes,
+    if let Err(error) = validate_plain_backup_artifact_file_with_limit(
+        &prepared.staging_path,
         &backup_request.client_id,
         backup_artifact_streaming_max_bytes(),
     ) {
@@ -733,15 +779,15 @@ pub(crate) async fn create_backup_artifact_handoff(
         return Err(error);
     }
     let object_key = backup_artifact_object_key(&backup_request.client_id, backup_request.id);
-    if state
-        .repo
-        .backup_artifact_object_key_exists(&object_key)
-        .await?
-    {
-        let _ = tokio::fs::remove_file(&prepared.staging_path).await;
-        return Err(ApiError::conflict("backup_artifact_object_exists"));
-    }
-    if let Err(error) = store
+    let artifact_id = uuid::Uuid::new_v4();
+    let metadata_request = RecordBackupArtifactMetadataRequest {
+        object_key: object_key.clone(),
+        sha256_hex: prepared.sha256_hex.clone(),
+        size_bytes: prepared.size_bytes,
+        confirmed: true,
+    };
+    reserve_backup_artifact_object(&state, &backup_request, artifact_id, &metadata_request).await?;
+    let created_object = match store
         .put_file_idempotent(
             &object_key,
             &prepared.staging_path,
@@ -752,21 +798,17 @@ pub(crate) async fn create_backup_artifact_handoff(
                 .map_err(|_| ApiError::bad_request("backup_artifact_size_invalid"))?,
         )
         .await
-        .map_err(ApiError::from)
     {
-        let _ = tokio::fs::remove_file(&prepared.staging_path).await;
-        return Err(error);
-    }
-    let metadata_request = RecordBackupArtifactMetadataRequest {
-        object_key,
-        sha256_hex: prepared.sha256_hex.clone(),
-        encrypted: true,
-        size_bytes: prepared.size_bytes,
-        confirmed: true,
+        Ok(created_object) => created_object,
+        Err(error) => {
+            release_server_artifact_reservation(&state, &object_key).await;
+            let _ = tokio::fs::remove_file(&prepared.staging_path).await;
+            return Err(ApiError::from(error));
+        }
     };
     let result = match state
         .repo
-        .record_backup_artifact_metadata(&backup_request, &metadata_request, &operator)
+        .record_backup_artifact_metadata(&backup_request, artifact_id, &metadata_request, &operator)
         .await
     {
         Ok(artifact) => {
@@ -786,7 +828,14 @@ pub(crate) async fn create_backup_artifact_handoff(
             ))
         }
         Err(error) => {
-            store.delete_best_effort(&metadata_request.object_key).await;
+            cleanup_created_reserved_artifact_after_error(
+                &state,
+                store,
+                &metadata_request.object_key,
+                &error.to_string(),
+                created_object,
+            )
+            .await;
             if error
                 .to_string()
                 .contains("backup_artifact_already_recorded")
@@ -826,6 +875,9 @@ pub(crate) async fn download_backup_artifact(
         .find_backup_artifact(artifact_id)
         .await?
         .ok_or_else(|| ApiError::not_found("backup_artifact_not_found"))?;
+    if artifact.status == "deleting" || artifact.status == "creating" {
+        return Err(ApiError::conflict("backup_artifact_delete_in_progress"));
+    }
     if artifact.client_id != backup_request.client_id {
         return Err(ApiError::conflict("backup_artifact_client_mismatch"));
     }
@@ -891,9 +943,6 @@ pub(crate) fn validate_create_backup_request(
     for path in &request.paths {
         validate_file_path(path)?;
     }
-    if let Some(recipient_public_key_hex) = &request.recipient_public_key_hex {
-        validate_backup_recipient_public_key_hex(recipient_public_key_hex)?;
-    }
     if request
         .note
         .as_ref()
@@ -918,10 +967,6 @@ pub(crate) fn validate_create_backup_policy_request(
         operation: JobCommand::Backup {
             paths: request.paths.clone(),
             include_config: request.include_config,
-            recipient_public_key_hex: request
-                .recipient_public_key_hex
-                .clone()
-                .map(|value| value.to_ascii_lowercase()),
         },
         selector_expression: request.selector_expression.clone(),
         target_client_ids: request.target_client_ids.clone(),
@@ -961,9 +1006,6 @@ pub(crate) fn validate_backup_artifact_metadata_request(
     if !is_sha256_hex(&request.sha256_hex) {
         return Err(ApiError::bad_request("backup_artifact_invalid_sha256"));
     }
-    if !request.encrypted {
-        return Err(ApiError::bad_request("backup_artifact_must_be_encrypted"));
-    }
     if !(1..=MAX_BACKUP_ARTIFACT_SIZE_BYTES).contains(&request.size_bytes) {
         return Err(ApiError::bad_request("backup_artifact_size_invalid"));
     }
@@ -992,6 +1034,107 @@ pub(crate) fn validate_backup_artifact_upload_request(
     Ok(())
 }
 
+async fn verify_staged_backup_artifact_object(
+    state: &AppState,
+    store: &crate::object_store::BackupObjectStore,
+    request: &RecordBackupArtifactMetadataRequest,
+) -> Result<(), ApiError> {
+    let expected_size = u64::try_from(request.size_bytes)
+        .map_err(|_| ApiError::bad_request("backup_artifact_size_invalid"))?;
+    let object_file = store
+        .verified_object_file(
+            &request.object_key,
+            &request.sha256_hex,
+            expected_size,
+            state.artifact_max_bytes(),
+        )
+        .await
+        .map_err(|error| {
+            map_verified_object_error(
+                error,
+                "backup_artifact_object_not_found",
+                "backup_artifact_object_integrity_mismatch",
+            )
+        })?;
+    if object_file.cleanup_after_stream {
+        let _ = tokio::fs::remove_file(&object_file.path).await;
+    }
+    Ok(())
+}
+
+async fn reserve_backup_artifact_object(
+    state: &AppState,
+    backup_request: &BackupRequestView,
+    artifact_id: uuid::Uuid,
+    request: &RecordBackupArtifactMetadataRequest,
+) -> Result<(), ApiError> {
+    let artifact = BackupArtifactView {
+        id: artifact_id,
+        client_id: backup_request.client_id.clone(),
+        object_key: request.object_key.clone(),
+        sha256_hex: request.sha256_hex.clone(),
+        size_bytes: request.size_bytes,
+        status: "creating".to_string(),
+        created_at: unix_now().to_string(),
+    };
+    state
+        .repo
+        .reserve_server_artifact(backup_server_artifact(backup_request, &artifact))
+        .await
+        .map_err(map_backup_artifact_reservation_error)
+}
+
+fn map_backup_artifact_reservation_error(error: anyhow::Error) -> ApiError {
+    if error
+        .to_string()
+        .contains("server_artifact_object_key_conflict")
+    {
+        ApiError::conflict("backup_artifact_object_exists")
+    } else {
+        ApiError::from(error)
+    }
+}
+
+async fn release_server_artifact_reservation(state: &AppState, object_key: &str) {
+    let _ = state
+        .repo
+        .discard_server_artifact_reservation(object_key)
+        .await;
+}
+
+async fn cleanup_created_reserved_artifact_after_error(
+    state: &AppState,
+    store: &crate::object_store::BackupObjectStore,
+    object_key: &str,
+    error: &str,
+    created_object: bool,
+) {
+    if created_object {
+        match store.delete_confirmed(object_key).await {
+            Ok(()) => {
+                let _ = state
+                    .repo
+                    .discard_server_artifact_reservation(object_key)
+                    .await;
+            }
+            Err(delete_error) => {
+                let _ = state
+                    .repo
+                    .mark_server_artifact_delete_failed(
+                        object_key,
+                        &format!("{error}; cleanup_delete_failed: {delete_error}"),
+                    )
+                    .await;
+            }
+        }
+    } else {
+        let _ = state
+            .repo
+            .discard_server_artifact_reservation(object_key)
+            .await;
+    }
+}
+
 async fn ensure_single_backup_client(
     state: &AppState,
     request: &CreateBackupRequest,
@@ -1013,10 +1156,6 @@ fn backup_command(request: &CreateBackupRequest) -> JobCommand {
     JobCommand::Backup {
         paths: request.paths.clone(),
         include_config: request.include_config,
-        recipient_public_key_hex: request
-            .recipient_public_key_hex
-            .clone()
-            .map(|value| value.to_ascii_lowercase()),
     }
 }
 
@@ -1024,20 +1163,6 @@ fn backup_policy_command(request: &CreateBackupPolicyRequest) -> JobCommand {
     JobCommand::Backup {
         paths: request.paths.clone(),
         include_config: request.include_config,
-        recipient_public_key_hex: request
-            .recipient_public_key_hex
-            .clone()
-            .map(|value| value.to_ascii_lowercase()),
-    }
-}
-
-fn validate_backup_recipient_public_key_hex(value: &str) -> Result<(), ApiError> {
-    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Ok(())
-    } else {
-        Err(ApiError::bad_request(
-            "backup_recipient_public_key_hex_invalid",
-        ))
     }
 }
 
@@ -1078,18 +1203,18 @@ pub(crate) fn validate_backup_artifact_object_key(object_key: &str) -> Result<()
     Ok(())
 }
 
-pub(crate) fn validate_encrypted_backup_artifact(
+pub(crate) fn validate_plain_backup_artifact(
     bytes: &[u8],
     expected_client_id: &str,
 ) -> Result<(), ApiError> {
-    validate_encrypted_backup_artifact_with_limit(
+    validate_plain_backup_artifact_with_limit(
         bytes,
         expected_client_id,
         MAX_BACKUP_ARTIFACT_UPLOAD_BYTES,
     )
 }
 
-pub(crate) fn validate_encrypted_backup_artifact_with_limit(
+pub(crate) fn validate_plain_backup_artifact_with_limit(
     bytes: &[u8],
     expected_client_id: &str,
     max_size_bytes: usize,
@@ -1097,82 +1222,78 @@ pub(crate) fn validate_encrypted_backup_artifact_with_limit(
     if bytes.is_empty() || bytes.len() > max_size_bytes {
         return Err(ApiError::bad_request("backup_artifact_size_invalid"));
     }
-    let artifact: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|_| ApiError::bad_request("backup_artifact_json_invalid"))?;
-    if artifact.get("format").and_then(|value| value.as_str()) != Some("vpsman.backup_artifact.v1")
-    {
+    validate_plain_backup_artifact_reader(Cursor::new(bytes), expected_client_id)
+}
+
+pub(crate) fn validate_plain_backup_artifact_file_with_limit(
+    path: &FsPath,
+    expected_client_id: &str,
+    max_size_bytes: usize,
+) -> Result<(), ApiError> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|_| ApiError::bad_request("backup_artifact_size_invalid"))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_size_bytes as u64 {
+        return Err(ApiError::bad_request("backup_artifact_size_invalid"));
+    }
+    let file =
+        File::open(path).map_err(|_| ApiError::bad_request("backup_artifact_tar_invalid"))?;
+    validate_plain_backup_artifact_reader(BufReader::new(file), expected_client_id)
+}
+
+fn validate_plain_backup_artifact_reader<R: Read>(
+    reader: R,
+    expected_client_id: &str,
+) -> Result<(), ApiError> {
+    let mut archive = tar::Archive::new(reader);
+    let entries = archive
+        .entries()
+        .map_err(|_| ApiError::bad_request("backup_artifact_tar_invalid"))?;
+    let mut manifest = None;
+    for entry in entries {
+        let mut entry = entry.map_err(|_| ApiError::bad_request("backup_artifact_tar_invalid"))?;
+        let is_manifest = entry
+            .path()
+            .map_err(|_| ApiError::bad_request("backup_artifact_tar_invalid"))?
+            .as_ref()
+            == FsPath::new(BACKUP_ARCHIVE_MANIFEST_PATH);
+        if !is_manifest {
+            continue;
+        }
+        if manifest.is_some() {
+            return Err(ApiError::bad_request("backup_artifact_manifest_duplicate"));
+        }
+        let mut manifest_bytes = Vec::new();
+        let mut limited = (&mut entry).take((MAX_BACKUP_ARCHIVE_MANIFEST_BYTES + 1) as u64);
+        limited
+            .read_to_end(&mut manifest_bytes)
+            .map_err(|_| ApiError::bad_request("backup_artifact_manifest_invalid"))?;
+        if manifest_bytes.len() > MAX_BACKUP_ARCHIVE_MANIFEST_BYTES {
+            return Err(ApiError::bad_request("backup_artifact_manifest_too_large"));
+        }
+        let parsed = serde_json::from_slice::<BackupArchiveManifest>(&manifest_bytes)
+            .map_err(|_| ApiError::bad_request("backup_artifact_manifest_invalid"))?;
+        manifest = Some(parsed);
+    }
+    let manifest =
+        manifest.ok_or_else(|| ApiError::bad_request("backup_artifact_manifest_required"))?;
+    if manifest.format != BACKUP_ARCHIVE_FORMAT {
         return Err(ApiError::bad_request("backup_artifact_format_invalid"));
     }
-    if artifact.get("version").and_then(|value| value.as_u64()) != Some(1) {
-        return Err(ApiError::bad_request("backup_artifact_version_invalid"));
-    }
-    if artifact.get("client_id").and_then(|value| value.as_str()) != Some(expected_client_id) {
+    if manifest.client_id != expected_client_id {
         return Err(ApiError::bad_request("backup_artifact_client_mismatch"));
     }
-    if artifact.get("cipher").and_then(|value| value.as_str()) != Some("x25519-chacha20poly1305") {
-        return Err(ApiError::bad_request("backup_artifact_cipher_invalid"));
+    if manifest.files.is_empty() {
+        return Err(ApiError::bad_request("backup_artifact_manifest_invalid"));
     }
-    if artifact.get("compression").and_then(|value| value.as_str()) != Some("lz4-size-prepended") {
-        return Err(ApiError::bad_request("backup_artifact_compression_invalid"));
-    }
-    let ciphertext_base64 = artifact
-        .get("ciphertext_base64")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| ApiError::bad_request("backup_artifact_ciphertext_required"))?;
-    let ciphertext = BASE64
-        .decode(ciphertext_base64)
-        .map_err(|_| ApiError::bad_request("backup_artifact_ciphertext_invalid"))?;
-    if ciphertext.is_empty() {
-        return Err(ApiError::bad_request("backup_artifact_ciphertext_required"));
-    }
-    let ciphertext_sha256_hex = artifact
-        .get("ciphertext_sha256_hex")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| ApiError::bad_request("backup_artifact_ciphertext_sha256_required"))?;
-    if ciphertext_sha256_hex != payload_hash(&ciphertext) {
-        return Err(ApiError::bad_request(
-            "backup_artifact_ciphertext_sha256_mismatch",
-        ));
-    }
-    validate_hex_field(
-        &artifact,
-        "recipient_public_key_sha256_hex",
-        64,
-        "backup_artifact_recipient_public_key_sha256_hex_required",
-        "backup_artifact_recipient_public_key_sha256_hex_invalid",
-    )?;
-    validate_hex_field(
-        &artifact,
-        "ephemeral_public_key_hex",
-        64,
-        "backup_artifact_ephemeral_public_key_hex_required",
-        "backup_artifact_ephemeral_public_key_hex_invalid",
-    )?;
-    validate_hex_field(
-        &artifact,
-        "nonce_hex",
-        24,
-        "backup_artifact_nonce_hex_required",
-        "backup_artifact_nonce_hex_invalid",
-    )?;
     Ok(())
 }
 
-fn validate_hex_field(
-    artifact: &serde_json::Value,
-    field: &'static str,
-    expected_len: usize,
-    required_code: &'static str,
-    invalid_code: &'static str,
-) -> Result<(), ApiError> {
-    let value = artifact
-        .get(field)
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| ApiError::bad_request(required_code))?;
-    if value.len() != expected_len || !value.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-        return Err(ApiError::bad_request(invalid_code));
-    }
-    Ok(())
+#[derive(Debug, Deserialize)]
+struct BackupArchiveManifest {
+    format: String,
+    client_id: String,
+    #[serde(default)]
+    files: Vec<serde_json::Value>,
 }
 
 fn is_sha256_hex(value: &str) -> bool {

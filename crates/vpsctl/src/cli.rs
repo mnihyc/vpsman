@@ -814,8 +814,6 @@ pub(crate) enum Command {
         paths: Vec<String>,
         #[arg(long, default_value_t = false)]
         include_config: bool,
-        #[arg(long)]
-        recipient_public_key_hex: Option<String>,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
@@ -869,8 +867,6 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = false)]
         include_config: bool,
         #[arg(long)]
-        recipient_public_key_hex: Option<String>,
-        #[arg(long)]
         note: Option<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
         password_env: String,
@@ -886,8 +882,6 @@ pub(crate) enum Command {
         paths: Vec<String>,
         #[arg(long, default_value_t = false)]
         include_config: bool,
-        #[arg(long)]
-        recipient_public_key_hex: Option<String>,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]

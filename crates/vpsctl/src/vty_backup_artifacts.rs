@@ -269,7 +269,6 @@ pub(crate) fn submit_vty_backup_artifact_record(
         &serde_json::json!({
             "object_key": request.object_key,
             "sha256_hex": request.sha256_hex,
-            "encrypted": true,
             "size_bytes": request.size_bytes,
             "confirmed": request.confirmed,
         }),
@@ -434,7 +433,7 @@ mod tests {
         let request = parse_vty_backup_artifact_record(&[
             &backup_id,
             "--object-key",
-            "backups/client-a/artifact.cbor.zst.age",
+            "backups/client-a/artifact.tar",
             "--sha256-hex",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "--size-bytes=4096",
@@ -443,7 +442,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(request.backup_request_id.to_string(), backup_id);
-        assert_eq!(request.object_key, "backups/client-a/artifact.cbor.zst.age");
+        assert_eq!(request.object_key, "backups/client-a/artifact.tar");
         assert_eq!(
             request.sha256_hex,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -469,7 +468,7 @@ mod tests {
         assert!(parse_vty_backup_artifact_record(&[
             &backup_id,
             "--object-key",
-            "backups/client-a/artifact.cbor.zst.age",
+            "backups/client-a/artifact.tar",
             "--sha256-hex",
             "not-a-hash",
             "--size-bytes",
@@ -480,7 +479,7 @@ mod tests {
         assert!(parse_vty_backup_artifact_record(&[
             &backup_id,
             "--object-key",
-            "backups/client-a/artifact.cbor.zst.age",
+            "backups/client-a/artifact.tar",
             "--sha256-hex",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "--size-bytes",

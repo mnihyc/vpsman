@@ -1252,9 +1252,13 @@ async fn run_artifact_cleanup_job(
     let mut run = ArtifactCleanupRun::default();
     for candidate in &candidates {
         if !candidate.identity_matches_review
-            || !matches!(candidate.status.as_str(), "active" | "deleting")
+            || !matches!(
+                candidate.status.as_str(),
+                "creating" | "active" | "deleting" | "delete_failed"
+            )
         {
             run.skipped_rows += 1;
+            persist_artifact_cleanup_progress(pool, job.id, &run).await?;
             continue;
         }
         match apply_artifact_cleanup_candidate(pool, object_stores, candidate).await? {
@@ -1267,8 +1271,38 @@ async fn run_artifact_cleanup_job(
                 run.tombstoned_bytes += candidate.size_bytes;
             }
         }
+        persist_artifact_cleanup_progress(pool, job.id, &run).await?;
     }
     Ok(run)
+}
+
+async fn persist_artifact_cleanup_progress(
+    pool: &PgPool,
+    job_id: Uuid,
+    run: &ArtifactCleanupRun,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE server_jobs
+        SET deleted_count = $2,
+            deleted_bytes = $3,
+            metadata = metadata || jsonb_build_object(
+                'tombstoned_count', $4::bigint,
+                'tombstoned_bytes', $5::bigint,
+                'skipped_count', $6::bigint
+            )
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .bind(run.deleted_rows)
+    .bind(run.deleted_bytes)
+    .bind(run.tombstoned_rows)
+    .bind(run.tombstoned_bytes)
+    .bind(run.skipped_rows)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 enum ArtifactCleanupDisposition {
@@ -1311,19 +1345,17 @@ async fn delete_job_output_artifact(
     object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
-    if candidate.status == "deleting" {
-        delete_object_key_confirmed(object_store, &candidate.object_key).await?;
-        let mut tx = pool.begin().await?;
-        mark_server_artifact_deleted(&mut tx, candidate.id).await?;
-        tx.commit().await?;
-        return Ok(ArtifactCleanupDisposition::Deleted);
-    }
-
     let mut tx = pool.begin().await?;
     if !mark_server_artifact_deleting(&mut tx, candidate.id).await? {
         tx.rollback().await?;
         return Ok(ArtifactCleanupDisposition::Tombstoned);
     }
+    tx.commit().await?;
+    if let Err(error) = delete_object_key_confirmed(object_store, &candidate.object_key).await {
+        mark_server_artifact_delete_failed(pool, candidate.id, &error.to_string()).await?;
+        return Err(error);
+    }
+    let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
         UPDATE job_outputs
@@ -1334,9 +1366,6 @@ async fn delete_job_output_artifact(
     .bind(&candidate.object_key)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
-    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
-    let mut tx = pool.begin().await?;
     mark_server_artifact_deleted(&mut tx, candidate.id).await?;
     tx.commit().await?;
     Ok(ArtifactCleanupDisposition::Deleted)
@@ -1347,21 +1376,16 @@ async fn delete_unreferenced_server_artifact(
     object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
-    if candidate.status == "deleting" {
-        delete_object_key_confirmed(object_store, &candidate.object_key).await?;
-        let mut tx = pool.begin().await?;
-        mark_server_artifact_deleted(&mut tx, candidate.id).await?;
-        tx.commit().await?;
-        return Ok(ArtifactCleanupDisposition::Deleted);
-    }
-
     let mut tx = pool.begin().await?;
     if !mark_server_artifact_deleting(&mut tx, candidate.id).await? {
         tx.rollback().await?;
         return Ok(ArtifactCleanupDisposition::Tombstoned);
     }
     tx.commit().await?;
-    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
+    if let Err(error) = delete_object_key_confirmed(object_store, &candidate.object_key).await {
+        mark_server_artifact_delete_failed(pool, candidate.id, &error.to_string()).await?;
+        return Err(error);
+    }
     let mut tx = pool.begin().await?;
     mark_server_artifact_deleted(&mut tx, candidate.id).await?;
     tx.commit().await?;
@@ -1373,19 +1397,17 @@ async fn delete_file_transfer_source_artifact(
     object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
-    if candidate.status == "deleting" {
-        delete_object_key_confirmed(object_store, &candidate.object_key).await?;
-        let mut tx = pool.begin().await?;
-        mark_server_artifact_deleted(&mut tx, candidate.id).await?;
-        tx.commit().await?;
-        return Ok(ArtifactCleanupDisposition::Deleted);
-    }
-
     let mut tx = pool.begin().await?;
     if !mark_server_artifact_deleting(&mut tx, candidate.id).await? {
         tx.rollback().await?;
         return Ok(ArtifactCleanupDisposition::Tombstoned);
     }
+    tx.commit().await?;
+    if let Err(error) = delete_object_key_confirmed(object_store, &candidate.object_key).await {
+        mark_server_artifact_delete_failed(pool, candidate.id, &error.to_string()).await?;
+        return Err(error);
+    }
+    let mut tx = pool.begin().await?;
     sqlx::query(
         r#"
         DELETE FROM file_transfer_source_artifacts
@@ -1395,9 +1417,6 @@ async fn delete_file_transfer_source_artifact(
     .bind(&candidate.object_key)
     .execute(&mut *tx)
     .await?;
-    tx.commit().await?;
-    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
-    let mut tx = pool.begin().await?;
     mark_server_artifact_deleted(&mut tx, candidate.id).await?;
     tx.commit().await?;
     Ok(ArtifactCleanupDisposition::Deleted)
@@ -1408,19 +1427,17 @@ async fn delete_backup_artifact(
     object_store: &BackupObjectStore,
     candidate: &ArtifactCleanupCandidate,
 ) -> Result<ArtifactCleanupDisposition> {
-    if candidate.status == "deleting" {
-        delete_object_key_confirmed(object_store, &candidate.object_key).await?;
-        let mut tx = pool.begin().await?;
-        mark_server_artifact_deleted(&mut tx, candidate.id).await?;
-        tx.commit().await?;
-        return Ok(ArtifactCleanupDisposition::Deleted);
-    }
-
     let mut tx = pool.begin().await?;
     if !mark_server_artifact_deleting(&mut tx, candidate.id).await? {
         tx.rollback().await?;
         return Ok(ArtifactCleanupDisposition::Tombstoned);
     }
+    tx.commit().await?;
+    if let Err(error) = delete_object_key_confirmed(object_store, &candidate.object_key).await {
+        mark_server_artifact_delete_failed(pool, candidate.id, &error.to_string()).await?;
+        return Err(error);
+    }
+    let mut tx = pool.begin().await?;
     if let Some(backup_artifact_id) = candidate.backup_artifact_id {
         sqlx::query(
             r#"
@@ -1442,9 +1459,6 @@ async fn delete_backup_artifact(
         .execute(&mut *tx)
         .await?;
     }
-    tx.commit().await?;
-    delete_object_key_confirmed(object_store, &candidate.object_key).await?;
-    let mut tx = pool.begin().await?;
     mark_server_artifact_deleted(&mut tx, candidate.id).await?;
     tx.commit().await?;
     Ok(ArtifactCleanupDisposition::Deleted)
@@ -1457,9 +1471,10 @@ async fn mark_server_artifact_deleting(
     let result = sqlx::query(
         r#"
         UPDATE server_artifacts
-        SET status = 'deleting'
+        SET status = 'deleting',
+            metadata = metadata - 'delete_error' - 'delete_failed_at'
         WHERE id = $1
-          AND status = 'active'
+          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
         "#,
     )
     .bind(artifact_id)
@@ -1477,11 +1492,35 @@ async fn mark_server_artifact_deleted(
         UPDATE server_artifacts
         SET status = 'deleted', deleted_at = now()
         WHERE id = $1
-          AND status IN ('active', 'deleting')
+          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
         "#,
     )
     .bind(artifact_id)
     .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn mark_server_artifact_delete_failed(
+    pool: &PgPool,
+    artifact_id: Uuid,
+    error: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE server_artifacts
+        SET status = 'delete_failed',
+            metadata = metadata || jsonb_build_object(
+                'delete_error', left($2, 1000),
+                'delete_failed_at', now()::text
+            )
+        WHERE id = $1
+          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
+        "#,
+    )
+    .bind(artifact_id)
+    .bind(error)
+    .execute(pool)
     .await?;
     Ok(())
 }
@@ -1495,7 +1534,7 @@ async fn tombstone_server_artifact(
         UPDATE server_artifacts
         SET status = 'tombstoned', tombstoned_at = now()
         WHERE id = $1
-          AND status IN ('active', 'deleting')
+          AND status IN ('creating', 'active', 'deleting', 'delete_failed')
         "#,
     )
     .bind(artifact_id)

@@ -46,7 +46,7 @@ export function ArtifactUploadForm({
     <>
       <div className="sectionHeader compact restoreFormHeader">
         <h2>Upload artifact</h2>
-        <span>Encrypted artifact bytes for a recorded backup request</span>
+        <span>Plain tar artifact bytes for a recorded backup request</span>
       </div>
       <form className="dispatchForm" onSubmit={onSubmit}>
         <label>
@@ -65,13 +65,13 @@ export function ArtifactUploadForm({
           <input
             aria-label="Artifact object key"
             onChange={(event) => onArtifactObjectKeyChange(event.target.value)}
-            placeholder="backups/client/id.json"
+            placeholder="backups/client/id.tar"
             value={artifactObjectKey}
           />
         </label>
         <label>
           <span>Artifact file</span>
-          <input aria-label="Encrypted artifact file" onChange={(event) => onArtifactFileChange(event.target.files?.[0] ?? null)} type="file" />
+          <input aria-label="Backup artifact file" onChange={(event) => onArtifactFileChange(event.target.files?.[0] ?? null)} type="file" />
         </label>
         <label>
           <span>Upload mode</span>

@@ -748,6 +748,10 @@ impl S3Endpoint {
             "S3 endpoint authority is invalid"
         );
         let (host, port) = parse_http_authority(authority, default_port)?;
+        ensure!(
+            scheme == "https" || is_loopback_s3_host(&host),
+            "S3 http:// endpoints are allowed only for localhost or loopback addresses"
+        );
         let prefix = normalize_endpoint_prefix(raw_path)?;
         Ok(Self {
             scheme: scheme.to_string(),
@@ -791,6 +795,16 @@ impl S3Endpoint {
             self.canonical_uri(bucket, object_key)
         )
     }
+}
+
+fn is_loopback_s3_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    host == "localhost"
+        || host == "::1"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|addr| addr.is_loopback())
+            .unwrap_or(false)
 }
 
 #[derive(Debug)]

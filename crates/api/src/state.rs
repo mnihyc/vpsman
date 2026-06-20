@@ -623,8 +623,7 @@ fn enrich_backup_status_rows(
         if store.is_some() {
             row.status = "ready".to_string();
             row.status_reason =
-                "backup object store is configured; encrypted artifacts can be uploaded"
-                    .to_string();
+                "backup object store is configured; backup artifacts can be uploaded".to_string();
         } else {
             row.status = "selected_no_store".to_string();
             row.status_reason =

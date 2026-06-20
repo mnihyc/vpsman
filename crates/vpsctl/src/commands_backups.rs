@@ -1,18 +1,19 @@
 use std::{
+    env,
     fs::File,
     io::Read,
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use vpsman_common::{JobCommand, RestoreRollbackFile};
+use vpsman_common::{validate_absolute_file_path, JobCommand, RestoreRollbackFile};
 
 use crate::{
-    backup_artifact_crypto::{
+    backup_artifact_validation::{
         validate_artifact_metadata, validate_artifact_object_key, MAX_BACKUP_ARTIFACT_UPLOAD_BYTES,
     },
     commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
@@ -25,12 +26,13 @@ use crate::{
 };
 
 const DEFAULT_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+const RESTORE_DESTINATION_ROOT_BASE_ENV: &str = "VPSMAN_RESTORE_DESTINATION_ROOT_BASE";
+const DEFAULT_RESTORE_DESTINATION_ROOT_BASE: &str = "/var/lib/vpsman/restores";
 
 pub(crate) struct BackupPolicyUpsertOptions {
     pub(crate) name: String,
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
-    pub(crate) recipient_public_key_hex: Option<String>,
     pub(crate) clients: Vec<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) cron_expr: String,
@@ -82,6 +84,13 @@ struct JobOutputRecord {
 }
 
 #[derive(Debug, Deserialize)]
+struct JobOutputListPage {
+    items: Vec<JobOutputRecord>,
+    next_cursor: Option<String>,
+    has_more: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct RestoreStatusRecord {
     #[serde(rename = "type")]
     record_type: String,
@@ -118,6 +127,7 @@ struct BackupArtifactRecord {
     id: Uuid,
     sha256_hex: String,
     size_bytes: u64,
+    status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,7 +227,6 @@ pub(crate) fn backup_policy_upsert(
     options: BackupPolicyUpsertOptions,
 ) -> Result<()> {
     validate_backup_scope(&options.paths, options.include_config)?;
-    validate_backup_recipient_public_key(options.recipient_public_key_hex.as_deref())?;
     anyhow::ensure!(
         !options.clients.is_empty() || !options.tags.is_empty(),
         "backup-policy-upsert requires at least one target selector"
@@ -228,13 +237,9 @@ pub(crate) fn backup_policy_upsert(
     );
     let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
     let target_ids = resolve_schedule_target_ids(api_url, token, &selector_expression)?;
-    let recipient_public_key_hex = options
-        .recipient_public_key_hex
-        .map(|value| value.to_ascii_lowercase());
     let operation = JobCommand::Backup {
         paths: options.paths.clone(),
         include_config: options.include_config,
-        recipient_public_key_hex: recipient_public_key_hex.clone(),
     };
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
@@ -271,7 +276,6 @@ pub(crate) fn backup_policy_upsert(
                 "name": options.name,
                 "paths": options.paths,
                 "include_config": options.include_config,
-                "recipient_public_key_hex": recipient_public_key_hex,
                 "selector_expression": selector_expression,
                 "target_client_ids": target_ids,
                 "cron_expr": options.cron_expr,
@@ -325,7 +329,6 @@ pub(crate) fn backup_artifact_record(
             &serde_json::json!({
                 "object_key": object_key,
                 "sha256_hex": sha256_hex,
-                "encrypted": true,
                 "size_bytes": size_bytes,
                 "confirmed": confirmed,
             }),
@@ -439,45 +442,72 @@ pub(crate) fn backup_artifact_upload_chunked_response(
         "server returned invalid chunk size"
     );
 
-    let mut file = File::open(&artifact_file)
-        .with_context(|| format!("failed to open artifact file {}", artifact_file.display()))?;
-    let mut offset = session.next_offset_bytes;
-    let mut buffer = vec![0_u8; effective_chunk_size];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .with_context(|| format!("failed to read artifact file {}", artifact_file.display()))?;
-        if read == 0 {
-            break;
+    let upload_result = (|| -> Result<String> {
+        let mut file = File::open(&artifact_file)
+            .with_context(|| format!("failed to open artifact file {}", artifact_file.display()))?;
+        let mut offset = session.next_offset_bytes;
+        let mut buffer = vec![0_u8; effective_chunk_size];
+        loop {
+            let read = file.read(&mut buffer).with_context(|| {
+                format!("failed to read artifact file {}", artifact_file.display())
+            })?;
+            if read == 0 {
+                break;
+            }
+            let view_json = http_post_json(
+                api_url,
+                &format!(
+                    "/api/v1/backups/{backup_request_id}/artifact-upload-sessions/{}/chunks",
+                    session.upload_id
+                ),
+                token,
+                &serde_json::json!({
+                    "offset_bytes": offset,
+                    "data_base64": BASE64.encode(&buffer[..read]),
+                }),
+            )?;
+            let view = serde_json::from_str::<BackupArtifactUploadSessionRecord>(&view_json)
+                .context("invalid backup artifact upload chunk JSON")?;
+            offset = view.next_offset_bytes;
         }
-        let view_json = http_post_json(
+
+        http_post_json(
             api_url,
             &format!(
-                "/api/v1/backups/{backup_request_id}/artifact-upload-sessions/{}/chunks",
+                "/api/v1/backups/{backup_request_id}/artifact-upload-sessions/{}/commit",
                 session.upload_id
             ),
             token,
             &serde_json::json!({
-                "offset_bytes": offset,
-                "data_base64": BASE64.encode(&buffer[..read]),
+                "confirmed": confirmed,
             }),
-        )?;
-        let view = serde_json::from_str::<BackupArtifactUploadSessionRecord>(&view_json)
-            .context("invalid backup artifact upload chunk JSON")?;
-        offset = view.next_offset_bytes;
+        )
+    })();
+    if upload_result.is_err() {
+        abort_backup_artifact_upload_session_best_effort(
+            api_url,
+            token,
+            backup_request_id,
+            session.upload_id,
+        );
     }
+    upload_result
+}
 
-    http_post_json(
+fn abort_backup_artifact_upload_session_best_effort(
+    api_url: &str,
+    token: Option<&str>,
+    backup_request_id: Uuid,
+    upload_id: Uuid,
+) {
+    let _ = http_post_json(
         api_url,
-        &format!(
-            "/api/v1/backups/{backup_request_id}/artifact-upload-sessions/{}/commit",
-            session.upload_id
-        ),
+        &format!("/api/v1/backups/{backup_request_id}/artifact-upload-sessions/{upload_id}/abort"),
         token,
         &serde_json::json!({
-            "confirmed": confirmed,
+            "confirmed": true,
         }),
-    )
+    );
 }
 
 pub(crate) fn backup_artifact_handoff(
@@ -515,7 +545,6 @@ pub(crate) fn backup_run(
     token: Option<&str>,
     paths: Vec<String>,
     include_config: bool,
-    recipient_public_key_hex: Option<String>,
     clients: Vec<String>,
     tags: Vec<String>,
     password_env: String,
@@ -525,7 +554,6 @@ pub(crate) fn backup_run(
     confirmed: bool,
 ) -> Result<()> {
     validate_backup_scope(&paths, include_config)?;
-    validate_backup_recipient_public_key(recipient_public_key_hex.as_deref())?;
     anyhow::ensure!(confirmed, "backup-run requires --confirmed");
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
@@ -534,7 +562,6 @@ pub(crate) fn backup_run(
     let operation = JobCommand::Backup {
         paths: paths.clone(),
         include_config,
-        recipient_public_key_hex: recipient_public_key_hex.map(|value| value.to_ascii_lowercase()),
     };
     let privilege = build_privilege_for_job_command(
         &target_ids,
@@ -578,7 +605,6 @@ pub(crate) fn backup_request(
     client_id: String,
     paths: Vec<String>,
     include_config: bool,
-    recipient_public_key_hex: Option<String>,
     note: Option<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -586,15 +612,11 @@ pub(crate) fn backup_request(
     confirmed: bool,
 ) -> Result<()> {
     validate_backup_scope(&paths, include_config)?;
-    validate_backup_recipient_public_key(recipient_public_key_hex.as_deref())?;
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
     let operation = JobCommand::Backup {
         paths: paths.clone(),
         include_config,
-        recipient_public_key_hex: recipient_public_key_hex
-            .clone()
-            .map(|value| value.to_ascii_lowercase()),
     };
     let target_ids = vec![client_id.clone()];
     let selector_expression = selector_expression_from_targets(&target_ids, &[]);
@@ -621,23 +643,12 @@ pub(crate) fn backup_request(
                 "client_id": client_id,
                 "paths": paths,
                 "include_config": include_config,
-                "recipient_public_key_hex": recipient_public_key_hex,
                 "confirmed": confirmed,
                 "note": note,
                 "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
     );
-    Ok(())
-}
-
-fn validate_backup_recipient_public_key(value: Option<&str>) -> Result<()> {
-    if let Some(value) = value {
-        anyhow::ensure!(
-            value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "backup recipient public key must be 32-byte hex"
-        );
-    }
     Ok(())
 }
 
@@ -698,7 +709,7 @@ pub(crate) fn restore_scope_from_backup(
         destination_root: Some(generated_restore_destination_root(
             source_backup_request_id,
             target_client_id,
-        )),
+        )?),
     })
 }
 
@@ -719,12 +730,27 @@ fn find_backup_request(
 fn generated_restore_destination_root(
     source_backup_request_id: Uuid,
     target_client_id: &str,
-) -> String {
-    format!(
-        "/var/lib/vpsman/restores/{}/{}",
+) -> Result<String> {
+    let base = env::var(RESTORE_DESTINATION_ROOT_BASE_ENV)
+        .unwrap_or_else(|_| DEFAULT_RESTORE_DESTINATION_ROOT_BASE.to_string());
+    generated_restore_destination_root_with_base(&base, source_backup_request_id, target_client_id)
+}
+
+fn generated_restore_destination_root_with_base(
+    base: &str,
+    source_backup_request_id: Uuid,
+    target_client_id: &str,
+) -> Result<String> {
+    let base = base.trim_end_matches('/');
+    validate_absolute_file_path(base).with_context(|| {
+        format!("{RESTORE_DESTINATION_ROOT_BASE_ENV} must be an absolute file path")
+    })?;
+    Ok(format!(
+        "{}/{}/{}",
+        base,
         safe_restore_path_segment(&source_backup_request_id.to_string()),
         safe_restore_path_segment(target_client_id),
-    )
+    ))
 }
 
 fn safe_restore_path_segment(value: &str) -> String {
@@ -738,7 +764,7 @@ fn safe_restore_path_segment(value: &str) -> String {
         })
         .take(120)
         .collect();
-    if segment.is_empty() {
+    if segment.is_empty() || segment == "." || segment == ".." {
         "unknown".to_string()
     } else {
         segment
@@ -932,6 +958,11 @@ fn resolve_restore_archive_transfer(
         .iter()
         .find(|artifact| artifact.id == artifact_id)
         .context("source backup artifact metadata was not found in latest 200 artifacts")?;
+    ensure!(
+        !matches!(artifact.status.as_str(), "creating" | "deleting"),
+        "source backup artifact is not downloadable while status is {}",
+        artifact.status
+    );
 
     let transfers_body = http_get(api_url, "/api/v1/file-transfers?limit=200", token)?;
     let transfers: Vec<FileTransferSessionRecord> =
@@ -1038,14 +1069,67 @@ pub(crate) fn restore_rollback_operation_from_api(
     restore_job_id: Uuid,
     target_client_id: &str,
 ) -> Result<JobCommand> {
-    let outputs = http_get(
+    let outputs = fetch_job_outputs(
         api_url,
-        &format!("/api/v1/jobs/{restore_job_id}/outputs"),
         token,
-    )?;
-    let outputs = serde_json::from_str::<Vec<JobOutputRecord>>(&outputs)
-        .context("invalid job outputs JSON")?;
+        restore_job_id,
+        Some(target_client_id),
+        Some("status"),
+    )
+    .context("invalid job outputs JSON")?;
     restore_rollback_operation_from_outputs(restore_job_id, target_client_id, &outputs)
+}
+
+fn fetch_job_outputs(
+    api_url: &str,
+    token: Option<&str>,
+    job_id: Uuid,
+    client_id: Option<&str>,
+    stream: Option<&str>,
+) -> Result<Vec<JobOutputRecord>> {
+    let mut cursor = None;
+    let mut outputs = Vec::new();
+    loop {
+        let mut params = vec!["limit=1000".to_string(), "include_data=true".to_string()];
+        if let Some(cursor) = cursor.as_deref() {
+            params.push(format!("cursor={}", percent_encode_query_value(cursor)));
+        }
+        if let Some(client_id) = client_id {
+            params.push(format!(
+                "client_id={}",
+                percent_encode_query_value(client_id)
+            ));
+        }
+        if let Some(stream) = stream {
+            params.push(format!("stream={}", percent_encode_query_value(stream)));
+        }
+        let page_json = http_get(
+            api_url,
+            &format!("/api/v1/jobs/{job_id}/outputs?{}", params.join("&")),
+            token,
+        )?;
+        let page = serde_json::from_str::<JobOutputListPage>(&page_json)
+            .context("failed to parse job output page")?;
+        outputs.extend(page.items);
+        if !page.has_more {
+            break;
+        }
+        cursor = page.next_cursor;
+        anyhow::ensure!(cursor.is_some(), "job output page omitted next cursor");
+    }
+    Ok(outputs)
+}
+
+fn percent_encode_query_value(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 fn restore_rollback_operation_from_outputs(
@@ -1173,8 +1257,8 @@ pub(crate) fn restore_run_operation(
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_policy_prune_payload, restore_rollback_operation_from_outputs, JobOutputRecord,
-        BASE64,
+        backup_policy_prune_payload, generated_restore_destination_root_with_base,
+        restore_rollback_operation_from_outputs, JobOutputRecord, BASE64,
     };
     use base64::Engine as _;
     use uuid::Uuid;
@@ -1260,5 +1344,29 @@ mod tests {
             false,
         )
         .is_err());
+    }
+
+    #[test]
+    fn generated_restore_destination_root_uses_safe_base_and_segments() {
+        let backup_id = Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
+        let root = generated_restore_destination_root_with_base(
+            "/tmp/vpsman-restores/",
+            backup_id,
+            "edge a/../../ignored",
+        )
+        .unwrap();
+
+        assert_eq!(
+            root,
+            "/tmp/vpsman-restores/11111111-2222-4333-8444-555555555555/edgea....ignored"
+        );
+        assert!(
+            generated_restore_destination_root_with_base("relative", backup_id, "edge").is_err()
+        );
+        assert!(
+            generated_restore_destination_root_with_base("/tmp/root", backup_id, "..")
+                .unwrap()
+                .ends_with("/unknown")
+        );
     }
 }

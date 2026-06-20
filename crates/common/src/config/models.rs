@@ -61,7 +61,6 @@ pub struct AgentAuthConfig {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentBackupConfig {
-    pub recipient_public_key_hex: Option<String>,
     pub max_plaintext_bytes: u64,
 }
 
@@ -331,7 +330,6 @@ pub enum AgentRuntimeUnprivilegedMutationPolicy {
 impl Default for AgentBackupConfig {
     fn default() -> Self {
         Self {
-            recipient_public_key_hex: None,
             max_plaintext_bytes: 1024 * 1024,
         }
     }
