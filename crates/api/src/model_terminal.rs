@@ -48,11 +48,20 @@ pub(crate) struct TerminalReplayView {
 pub(crate) struct TerminalReplayChunkView {
     pub(crate) terminal_seq: i64,
     pub(crate) job_id: Uuid,
-    pub(crate) job_output_seq: i32,
     pub(crate) data_base64: Option<String>,
     pub(crate) size_bytes: i64,
-    pub(crate) sha256_hex: Option<String>,
-    pub(crate) storage: String,
-    pub(crate) artifact_object_key: Option<String>,
+    pub(crate) sha256_hex: String,
+    pub(crate) created_at: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalOutputChunkRecord {
+    pub(crate) client_id: String,
+    pub(crate) session_id: Uuid,
+    pub(crate) terminal_seq: i64,
+    pub(crate) job_id: Uuid,
+    pub(crate) data: Vec<u8>,
+    pub(crate) size_bytes: i64,
+    pub(crate) sha256_hex: String,
     pub(crate) created_at: String,
 }

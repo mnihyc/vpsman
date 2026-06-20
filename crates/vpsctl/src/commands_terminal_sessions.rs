@@ -262,12 +262,9 @@ struct TerminalReplayResponse {
 struct TerminalReplayChunkResponse {
     terminal_seq: i64,
     job_id: String,
-    job_output_seq: i32,
     data_base64: Option<String>,
     size_bytes: i64,
-    sha256_hex: Option<String>,
-    storage: String,
-    artifact_object_key: Option<String>,
+    sha256_hex: String,
     created_at: String,
 }
 

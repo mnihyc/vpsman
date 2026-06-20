@@ -15,6 +15,7 @@ use tokio::{
     sync::{mpsc, Mutex},
     time,
 };
+use tracing::warn;
 use vpsman_common::{
     AgentConfig, AgentExecutionEnvironmentPolicy, AgentExecutionPtyPolicy, CommandOutput,
     JobCommand, OutputStream, TerminalStreamOutput, TerminalUserPolicy, MAX_TERMINAL_INPUT_BYTES,
@@ -33,6 +34,7 @@ const TERMINAL_READ_CHUNK_BYTES: usize = 8192;
 const TERMINAL_OUTPUT_SETTLE_MS: u64 = 80;
 const TERMINAL_IDLE_SCAN_SECS: u64 = 30;
 const TERMINAL_CLOSE_GRACE_MS: u64 = 500;
+const TERMINAL_FINAL_EVENT_SEND_TIMEOUT_SECS: u64 = 5;
 
 static TERMINAL_REGISTRY: OnceLock<TerminalRegistry> = OnceLock::new();
 
@@ -560,7 +562,7 @@ impl TerminalSessionHandle {
             exit_code: None,
             done: false,
         };
-        self.try_emit_stream_output(Some(chunk.seq), range, output)
+        self.emit_stream_output(Some(chunk.seq), range, output, false)
             .await;
     }
 
@@ -588,14 +590,15 @@ impl TerminalSessionHandle {
             exit_code,
             done,
         };
-        self.try_emit_stream_output(None, range, output).await;
+        self.emit_stream_output(None, range, output, done).await;
     }
 
-    async fn try_emit_stream_output(
+    async fn emit_stream_output(
         &self,
         terminal_seq: Option<u64>,
         range: TerminalOutputRange,
         output: CommandOutput,
+        reliable: bool,
     ) {
         let Some(stream_tx) = self.stream_tx.lock().await.clone() else {
             return;
@@ -613,7 +616,30 @@ impl TerminalSessionHandle {
             output_replay_truncated: range.replay_truncated,
             output,
         };
-        let _ = stream_tx.try_send(event);
+        if reliable {
+            match time::timeout(
+                Duration::from_secs(TERMINAL_FINAL_EVENT_SEND_TIMEOUT_SECS),
+                stream_tx.send(event),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    warn!(
+                        session_id = %self.session_id,
+                        "terminal final stream status could not be queued because the stream receiver closed"
+                    );
+                }
+                Err(_) => {
+                    warn!(
+                        session_id = %self.session_id,
+                        "terminal final stream status timed out while waiting for queue capacity"
+                    );
+                }
+            }
+        } else {
+            let _ = stream_tx.try_send(event);
+        }
     }
 }
 

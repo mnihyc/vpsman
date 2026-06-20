@@ -1,15 +1,22 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use chrono::Utc;
 use serde_json::Value;
 use sqlx::{postgres::PgRow, types::Json as SqlJson, PgPool, Row};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use uuid::Uuid;
-use vpsman_common::{is_terminal_command_type, is_terminal_session_event, terminal_session_state};
+use vpsman_common::{
+    is_terminal_command_type, is_terminal_session_event, payload_hash, terminal_session_state,
+    TerminalStreamOutput, MAX_TERMINAL_FLOW_WINDOW_BYTES,
+};
 
 use crate::{
     model::JobOutputView,
-    model_terminal::{TerminalReplayChunkView, TerminalReplayView, TerminalSessionView},
+    model_terminal::{
+        TerminalOutputChunkRecord, TerminalReplayChunkView, TerminalReplayView, TerminalSessionView,
+    },
     repository::Repository,
+    repository_job_outputs::JobOutputWriteResult,
 };
 
 impl Repository {
@@ -64,7 +71,21 @@ impl Repository {
                         .then_with(|| right.job_id.cmp(&left.job_id))
                         .then_with(|| right.seq.cmp(&left.seq))
                 });
-                Ok(build_terminal_sessions(outputs, limit, session_id))
+                let mut sessions = build_terminal_sessions(outputs, limit, session_id);
+                sessions.extend(
+                    memory
+                        .terminal_sessions
+                        .read()
+                        .await
+                        .iter()
+                        .filter(|session| {
+                            client_id.is_none_or(|client_id| session.client_id == client_id)
+                                && session_id
+                                    .is_none_or(|session_id| session.session_id == session_id)
+                        })
+                        .cloned(),
+                );
+                Ok(deduplicate_terminal_sessions(sessions, limit))
             }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
@@ -121,133 +142,533 @@ impl Repository {
         session_id: Uuid,
         from_seq: Option<i64>,
         limit: i64,
+        max_bytes: i64,
+        include_data: bool,
     ) -> Result<TerminalReplayView> {
-        let outputs = self
-            .list_terminal_replay_outputs(client_id, session_id)
-            .await?;
-        Ok(build_terminal_replay(
-            client_id, session_id, outputs, from_seq, limit,
-        ))
-    }
-
-    async fn list_terminal_replay_outputs(
-        &self,
-        client_id: &str,
-        session_id: Uuid,
-    ) -> Result<Vec<TerminalReplayOutput>> {
+        let from_seq = from_seq.unwrap_or(1).max(1);
+        let limit = limit.clamp(1, 1000);
+        let max_bytes = max_bytes.max(1);
         match self {
             Self::Memory(memory) => {
-                let command_types = memory
-                    .jobs
+                let mut chunks = memory
+                    .terminal_output_chunks
                     .read()
                     .await
                     .iter()
-                    .map(|job| (job.id, job.command_type.clone()))
-                    .collect::<BTreeMap<_, _>>();
-                let mut by_job = BTreeMap::<Uuid, Vec<TerminalReplayOutput>>::new();
-                for output in memory.job_outputs.read().await.iter() {
-                    if output.client_id != client_id {
-                        continue;
-                    }
-                    let Some(command_type) = command_types.get(&output.job_id) else {
-                        continue;
-                    };
-                    if !is_terminal_command(command_type) {
-                        continue;
-                    }
-                    by_job
-                        .entry(output.job_id)
-                        .or_default()
-                        .push(TerminalReplayOutput {
-                            output: output.clone(),
-                            command_type: command_type.clone(),
-                        });
-                }
-                let mut outputs = Vec::new();
-                for (_job_id, job_outputs) in by_job {
-                    if job_outputs.iter().any(|output| {
-                        output.output.stream == "status"
-                            && parse_terminal_replay_status(&output.output, session_id).is_some()
-                    }) {
-                        outputs.extend(job_outputs);
-                    }
-                }
-                outputs.sort_by(|left, right| {
-                    left.output
-                        .created_at
-                        .cmp(&right.output.created_at)
-                        .then_with(|| left.output.job_id.cmp(&right.output.job_id))
-                        .then_with(|| left.output.seq.cmp(&right.output.seq))
+                    .filter(|chunk| {
+                        chunk.client_id == client_id
+                            && chunk.session_id == session_id
+                            && chunk.terminal_seq >= from_seq
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                chunks.sort_by_key(|chunk| chunk.terminal_seq);
+                Ok(build_terminal_replay_from_chunks(
+                    client_id,
+                    session_id,
+                    chunks,
+                    from_seq,
+                    limit,
+                    max_bytes,
+                    include_data,
+                    memory_terminal_next_seq(memory, client_id, session_id).await,
+                ))
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        client_id,
+                        session_id,
+                        terminal_seq,
+                        job_id,
+                        data,
+                        size_bytes,
+                        sha256_hex,
+                        created_at::text AS created_at
+                    FROM terminal_output_chunks
+                    WHERE client_id = $1
+                      AND session_id = $2
+                      AND terminal_seq >= $3
+                    ORDER BY terminal_seq ASC
+                    LIMIT $4
+                    "#,
+                )
+                .bind(client_id)
+                .bind(session_id)
+                .bind(from_seq)
+                .bind(limit.saturating_add(1))
+                .fetch_all(pool)
+                .await?;
+                let chunks = rows
+                    .into_iter()
+                    .map(terminal_output_chunk_from_row)
+                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
+                let next_seq =
+                    postgres_terminal_next_seq(pool, client_id, session_id, from_seq).await?;
+                Ok(build_terminal_replay_from_chunks(
+                    client_id,
+                    session_id,
+                    chunks,
+                    from_seq,
+                    limit,
+                    max_bytes,
+                    include_data,
+                    next_seq,
+                ))
+            }
+        }
+    }
+
+    pub(crate) async fn record_terminal_stream_chunk(
+        &self,
+        client_id: &str,
+        event: &TerminalStreamOutput,
+    ) -> Result<JobOutputWriteResult> {
+        let terminal_seq = terminal_seq_i64(
+            event
+                .terminal_seq
+                .context("terminal stream chunk missing terminal_seq")?,
+        )?;
+        let record = terminal_output_chunk_record(
+            client_id,
+            event.session_id,
+            terminal_seq,
+            event.job_id,
+            event.output.data.clone(),
+            None,
+        );
+        let retention = TerminalRetentionBounds::from_stream(event)?;
+        self.record_terminal_output_chunk_record(record, retention)
+            .await
+    }
+
+    pub(crate) async fn record_terminal_stream_status(
+        &self,
+        client_id: &str,
+        event: &TerminalStreamOutput,
+    ) -> Result<()> {
+        let Some(command_type) = self.terminal_job_command_type(event.job_id).await? else {
+            anyhow::bail!("terminal_stream_job_not_found");
+        };
+        let output = TerminalStatusOutput {
+            job_id: event.job_id,
+            client_id: client_id.to_string(),
+            seq: 0,
+            data: event.output.data.clone(),
+            created_at: now_rfc3339(),
+            command_type,
+        };
+        let Some(event) = parse_terminal_event(output) else {
+            anyhow::bail!("invalid_terminal_stream_status");
+        };
+        self.upsert_terminal_session_event(event).await
+    }
+
+    pub(crate) async fn record_terminal_command_replay_chunks(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+    ) -> Result<()> {
+        let outputs = self
+            .list_terminal_command_job_outputs(job_id, client_id)
+            .await?;
+        let Some(status) = terminal_replay_status_for_job_outputs(&outputs) else {
+            return Ok(());
+        };
+        let Some(first_seq) = status.first_seq else {
+            return Ok(());
+        };
+        let Some(session_id) = status.session_id else {
+            return Ok(());
+        };
+        let retention = TerminalRetentionBounds {
+            retained_first_seq: status.retained_first_seq.unwrap_or(first_seq).max(1),
+            retained_bytes: retention_cap_i64(
+                status
+                    .retained_bytes
+                    .unwrap_or(i64::from(MAX_TERMINAL_FLOW_WINDOW_BYTES)),
+            ),
+            dropped_bytes: status.dropped_bytes.unwrap_or(0),
+            dropped_chunks: status.dropped_chunks.unwrap_or(0),
+            replay_truncated: status.replay_truncated,
+        };
+        let mut pty_index = 0_i64;
+        for output in outputs.into_iter().filter(|output| output.stream == "pty") {
+            let terminal_seq = first_seq.saturating_add(pty_index);
+            pty_index = pty_index.saturating_add(1);
+            if terminal_seq < 1
+                || status
+                    .next_seq
+                    .is_some_and(|next_seq| terminal_seq >= next_seq)
+            {
+                continue;
+            }
+            let data = BASE64
+                .decode(&output.data_base64)
+                .context("terminal replay job output is not valid base64")?;
+            let record = terminal_output_chunk_record(
+                client_id,
+                session_id,
+                terminal_seq,
+                output.job_id,
+                data,
+                Some(output.created_at),
+            );
+            let result = self
+                .record_terminal_output_chunk_record(record, retention)
+                .await?;
+            if result == JobOutputWriteResult::DuplicateConflict {
+                anyhow::bail!("terminal_output_sequence_conflict");
+            }
+        }
+        Ok(())
+    }
+
+    async fn record_terminal_output_chunk_record(
+        &self,
+        record: TerminalOutputChunkRecord,
+        retention: TerminalRetentionBounds,
+    ) -> Result<JobOutputWriteResult> {
+        let result = match self {
+            Self::Memory(memory) => {
+                let mut chunks = memory.terminal_output_chunks.write().await;
+                let existing = chunks.iter().position(|chunk| {
+                    chunk.client_id == record.client_id
+                        && chunk.session_id == record.session_id
+                        && chunk.terminal_seq == record.terminal_seq
                 });
+                let result = match existing {
+                    Some(index) if terminal_output_chunk_matches(&chunks[index], &record) => {
+                        JobOutputWriteResult::DuplicateIdentical
+                    }
+                    Some(_) => JobOutputWriteResult::DuplicateConflict,
+                    None => {
+                        chunks.push(record.clone());
+                        JobOutputWriteResult::Inserted
+                    }
+                };
+                if result != JobOutputWriteResult::DuplicateConflict {
+                    prune_memory_terminal_chunks(
+                        &mut chunks,
+                        &record.client_id,
+                        record.session_id,
+                        retention,
+                    );
+                    drop(chunks);
+                    update_memory_terminal_session_range(memory, &record, retention).await;
+                }
+                result
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let inserted = sqlx::query_scalar::<_, Option<String>>(
+                    r#"
+                    INSERT INTO terminal_output_chunks (
+                        client_id,
+                        session_id,
+                        terminal_seq,
+                        job_id,
+                        data,
+                        size_bytes,
+                        sha256_hex,
+                        created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz)
+                    ON CONFLICT (client_id, session_id, terminal_seq)
+                    DO NOTHING
+                    RETURNING created_at::text
+                    "#,
+                )
+                .bind(&record.client_id)
+                .bind(record.session_id)
+                .bind(record.terminal_seq)
+                .bind(record.job_id)
+                .bind(&record.data)
+                .bind(record.size_bytes)
+                .bind(&record.sha256_hex)
+                .bind(&record.created_at)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let result = if inserted.flatten().is_some() {
+                    JobOutputWriteResult::Inserted
+                } else {
+                    let existing = sqlx::query(
+                        r#"
+                        SELECT data, size_bytes, sha256_hex, created_at::text AS created_at
+                        FROM terminal_output_chunks
+                        WHERE client_id = $1 AND session_id = $2 AND terminal_seq = $3
+                        "#,
+                    )
+                    .bind(&record.client_id)
+                    .bind(record.session_id)
+                    .bind(record.terminal_seq)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    let existing = TerminalOutputChunkRecord {
+                        client_id: record.client_id.clone(),
+                        session_id: record.session_id,
+                        terminal_seq: record.terminal_seq,
+                        job_id: record.job_id,
+                        data: existing.try_get("data")?,
+                        size_bytes: existing.try_get("size_bytes")?,
+                        sha256_hex: existing.try_get("sha256_hex")?,
+                        created_at: existing.try_get("created_at")?,
+                    };
+                    if terminal_output_chunk_matches(&existing, &record) {
+                        JobOutputWriteResult::DuplicateIdentical
+                    } else {
+                        JobOutputWriteResult::DuplicateConflict
+                    }
+                };
+                if result == JobOutputWriteResult::DuplicateConflict {
+                    tx.rollback().await?;
+                    return Ok(JobOutputWriteResult::DuplicateConflict);
+                }
+                prune_postgres_terminal_chunks(
+                    &mut tx,
+                    &record.client_id,
+                    record.session_id,
+                    retention,
+                )
+                .await?;
+                update_postgres_terminal_session_range(
+                    &mut tx,
+                    &record.client_id,
+                    record.session_id,
+                    record.terminal_seq.saturating_add(1),
+                    retention,
+                )
+                .await?;
+                tx.commit().await?;
+                result
+            }
+        };
+        Ok(result)
+    }
+
+    async fn terminal_job_command_type(&self, job_id: Uuid) -> Result<Option<String>> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .jobs
+                .read()
+                .await
+                .iter()
+                .find(|job| job.id == job_id)
+                .map(|job| job.command_type.clone())),
+            Self::Postgres(pool) => {
+                let command_type = sqlx::query_scalar(
+                    r#"
+                    SELECT command_type
+                    FROM jobs
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(job_id)
+                .fetch_optional(pool)
+                .await?;
+                Ok(command_type)
+            }
+        }
+    }
+
+    async fn list_terminal_command_job_outputs(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+    ) -> Result<Vec<JobOutputView>> {
+        match self {
+            Self::Memory(memory) => {
+                let mut outputs = memory
+                    .job_outputs
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|output| output.job_id == job_id && output.client_id == client_id)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                outputs.sort_by_key(|output| output.seq);
                 Ok(outputs)
             }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-                    WITH terminal_jobs AS (
-                        SELECT DISTINCT output.job_id
-                        FROM job_outputs output
-                        JOIN jobs job ON job.id = output.job_id
-                        WHERE output.client_id = $1
-                          AND output.stream = 'status'
-                          AND job.command_type IN (
-                            'terminal_open',
-                            'terminal_input',
-                            'terminal_poll',
-                            'terminal_resize',
-                            'terminal_close'
-                          )
-                          AND convert_from(output.data, 'UTF8')::jsonb->>'session_id' = $2
-                    )
                     SELECT
-                        output.job_id,
-                        output.client_id,
-                        output.seq,
-                        output.stream,
-                        output.data,
-                        output.storage,
-                        output.object_key,
-                        output.data_sha256_hex,
-                        output.data_size_bytes,
-                        output.exit_code,
-                        output.done,
-                        output.created_at::text AS created_at,
-                        job.command_type
-                    FROM job_outputs output
-                    JOIN jobs job ON job.id = output.job_id
-                    JOIN terminal_jobs terminal_job ON terminal_job.job_id = output.job_id
-                    WHERE output.client_id = $1
-                    ORDER BY output.created_at, output.job_id, output.seq
+                        job_id,
+                        client_id,
+                        seq,
+                        stream,
+                        data,
+                        storage,
+                        object_key,
+                        data_sha256_hex,
+                        data_size_bytes,
+                        exit_code,
+                        done,
+                        created_at::text AS created_at
+                    FROM job_outputs
+                    WHERE job_id = $1 AND client_id = $2
+                    ORDER BY seq ASC
                     "#,
                 )
+                .bind(job_id)
                 .bind(client_id)
-                .bind(session_id.to_string())
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
                     .map(|row| {
                         let data: Vec<u8> = row.try_get("data")?;
-                        Ok(TerminalReplayOutput {
-                            output: JobOutputView {
-                                job_id: row.try_get("job_id")?,
-                                client_id: row.try_get("client_id")?,
-                                seq: row.try_get("seq")?,
-                                stream: row.try_get("stream")?,
-                                data_base64: BASE64.encode(data),
-                                storage: row.try_get("storage")?,
-                                artifact_object_key: row.try_get("object_key")?,
-                                artifact_sha256_hex: row.try_get("data_sha256_hex")?,
-                                artifact_size_bytes: row.try_get("data_size_bytes")?,
-                                exit_code: row.try_get("exit_code")?,
-                                done: row.try_get("done")?,
-                                received_at: None,
-                                created_at: row.try_get("created_at")?,
-                            },
-                            command_type: row.try_get("command_type")?,
+                        Ok(JobOutputView {
+                            job_id: row.try_get("job_id")?,
+                            client_id: row.try_get("client_id")?,
+                            seq: row.try_get("seq")?,
+                            stream: row.try_get("stream")?,
+                            data_base64: BASE64.encode(data),
+                            storage: row.try_get("storage")?,
+                            artifact_object_key: row.try_get("object_key")?,
+                            artifact_sha256_hex: row.try_get("data_sha256_hex")?,
+                            artifact_size_bytes: row.try_get("data_size_bytes")?,
+                            exit_code: row.try_get("exit_code")?,
+                            done: row.try_get("done")?,
+                            received_at: None,
+                            created_at: row.try_get("created_at")?,
                         })
                     })
                     .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
                     .map_err(Into::into)
+            }
+        }
+    }
+
+    async fn upsert_terminal_session_event(&self, event: TerminalEvent) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                let mut sessions = memory.terminal_sessions.write().await;
+                upsert_memory_terminal_session(&mut sessions, event);
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO terminal_sessions (
+                        session_id,
+                        client_id,
+                        state,
+                        last_status,
+                        argv,
+                        cwd,
+                        cols,
+                        rows,
+                        idle_timeout_secs,
+                        flow_window_bytes,
+                        output_first_seq,
+                        output_next_seq,
+                        output_retained_first_seq,
+                        output_retained_bytes,
+                        output_dropped_bytes,
+                        output_dropped_chunks,
+                        output_replay_truncated,
+                        last_input_seq,
+                        session_exited,
+                        close_reason,
+                        last_event,
+                        last_job_id,
+                        last_command_type,
+                        last_seq,
+                        observed_at
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                        $21, $22, $23, $24, $25::timestamptz
+                    )
+                    ON CONFLICT (client_id, session_id)
+                    DO UPDATE SET
+                        state = EXCLUDED.state,
+                        last_status = EXCLUDED.last_status,
+                        argv = CASE
+                            WHEN jsonb_array_length(EXCLUDED.argv) > 0 THEN EXCLUDED.argv
+                            ELSE terminal_sessions.argv
+                        END,
+                        cwd = COALESCE(EXCLUDED.cwd, terminal_sessions.cwd),
+                        cols = COALESCE(EXCLUDED.cols, terminal_sessions.cols),
+                        rows = COALESCE(EXCLUDED.rows, terminal_sessions.rows),
+                        idle_timeout_secs = COALESCE(
+                            EXCLUDED.idle_timeout_secs,
+                            terminal_sessions.idle_timeout_secs
+                        ),
+                        flow_window_bytes = COALESCE(
+                            EXCLUDED.flow_window_bytes,
+                            terminal_sessions.flow_window_bytes
+                        ),
+                        output_first_seq = COALESCE(
+                            terminal_sessions.output_first_seq,
+                            EXCLUDED.output_first_seq
+                        ),
+                        output_next_seq = GREATEST(
+                            COALESCE(terminal_sessions.output_next_seq, 0),
+                            COALESCE(EXCLUDED.output_next_seq, 0)
+                        ),
+                        output_retained_first_seq = COALESCE(
+                            EXCLUDED.output_retained_first_seq,
+                            terminal_sessions.output_retained_first_seq
+                        ),
+                        output_retained_bytes = COALESCE(
+                            EXCLUDED.output_retained_bytes,
+                            terminal_sessions.output_retained_bytes
+                        ),
+                        output_dropped_bytes = COALESCE(
+                            EXCLUDED.output_dropped_bytes,
+                            terminal_sessions.output_dropped_bytes
+                        ),
+                        output_dropped_chunks = COALESCE(
+                            EXCLUDED.output_dropped_chunks,
+                            terminal_sessions.output_dropped_chunks
+                        ),
+                        output_replay_truncated =
+                            terminal_sessions.output_replay_truncated
+                            OR EXCLUDED.output_replay_truncated,
+                        last_input_seq = COALESCE(
+                            EXCLUDED.last_input_seq,
+                            terminal_sessions.last_input_seq
+                        ),
+                        session_exited = EXCLUDED.session_exited,
+                        close_reason = COALESCE(EXCLUDED.close_reason, terminal_sessions.close_reason),
+                        last_event = EXCLUDED.last_event,
+                        last_job_id = EXCLUDED.last_job_id,
+                        last_command_type = EXCLUDED.last_command_type,
+                        last_seq = EXCLUDED.last_seq,
+                        observed_at = EXCLUDED.observed_at
+                    "#,
+                )
+                .bind(event.session_id)
+                .bind(&event.client_id)
+                .bind(event.state)
+                .bind(&event.status)
+                .bind(SqlJson(&event.argv))
+                .bind(&event.cwd)
+                .bind(event.cols)
+                .bind(event.rows)
+                .bind(event.idle_timeout_secs)
+                .bind(event.flow_window_bytes)
+                .bind(event.output_first_seq)
+                .bind(event.output_next_seq)
+                .bind(event.output_retained_first_seq)
+                .bind(event.output_retained_bytes)
+                .bind(event.output_dropped_bytes)
+                .bind(event.output_dropped_chunks)
+                .bind(event.output_replay_truncated)
+                .bind(event.input_seq)
+                .bind(event.session_exited)
+                .bind(&event.close_reason)
+                .bind(&event.event_type)
+                .bind(event.job_id)
+                .bind(&event.command_type)
+                .bind(event.seq)
+                .bind(&event.created_at)
+                .execute(pool)
+                .await?;
+                Ok(())
             }
         }
     }
@@ -317,6 +738,7 @@ impl Repository {
                     last_command_type = EXCLUDED.last_command_type,
                     last_seq = EXCLUDED.last_seq,
                     observed_at = EXCLUDED.observed_at
+                WHERE EXCLUDED.observed_at >= terminal_sessions.observed_at
                 "#,
             )
             .bind(session.session_id)
@@ -434,6 +856,21 @@ fn terminal_session_from_row(row: PgRow) -> std::result::Result<TerminalSessionV
     })
 }
 
+fn terminal_output_chunk_from_row(
+    row: PgRow,
+) -> std::result::Result<TerminalOutputChunkRecord, sqlx::Error> {
+    Ok(TerminalOutputChunkRecord {
+        client_id: row.try_get("client_id")?,
+        session_id: row.try_get("session_id")?,
+        terminal_seq: row.try_get("terminal_seq")?,
+        job_id: row.try_get("job_id")?,
+        data: row.try_get("data")?,
+        size_bytes: row.try_get("size_bytes")?,
+        sha256_hex: row.try_get("sha256_hex")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
 #[derive(Clone, Debug)]
 struct TerminalStatusOutput {
     job_id: Uuid,
@@ -441,12 +878,6 @@ struct TerminalStatusOutput {
     seq: i32,
     data: Vec<u8>,
     created_at: String,
-    command_type: String,
-}
-
-#[derive(Clone, Debug)]
-struct TerminalReplayOutput {
-    output: JobOutputView,
     command_type: String,
 }
 
@@ -705,135 +1136,123 @@ fn is_terminal_status_event(event_type: &str) -> bool {
 
 #[derive(Clone, Debug)]
 struct TerminalReplayStatus {
+    session_id: Option<Uuid>,
     first_seq: Option<i64>,
     next_seq: Option<i64>,
+    retained_first_seq: Option<i64>,
+    retained_bytes: Option<i64>,
+    dropped_bytes: Option<i64>,
+    dropped_chunks: Option<i64>,
+    replay_truncated: bool,
 }
 
-fn build_terminal_replay(
+#[derive(Clone, Copy, Debug)]
+struct TerminalRetentionBounds {
+    retained_first_seq: i64,
+    retained_bytes: i64,
+    dropped_bytes: i64,
+    dropped_chunks: i64,
+    replay_truncated: bool,
+}
+
+impl TerminalRetentionBounds {
+    fn from_stream(event: &TerminalStreamOutput) -> Result<Self> {
+        Ok(Self {
+            retained_first_seq: event
+                .output_retained_first_seq
+                .map(terminal_seq_i64)
+                .transpose()?
+                .unwrap_or(1)
+                .max(1),
+            retained_bytes: retention_cap_bytes(event.output_retained_bytes),
+            dropped_bytes: u64_to_i64_saturating(event.output_dropped_bytes),
+            dropped_chunks: u64_to_i64_saturating(event.output_dropped_chunks),
+            replay_truncated: event.output_replay_truncated,
+        })
+    }
+}
+
+fn build_terminal_replay_from_chunks(
     client_id: &str,
     session_id: Uuid,
-    outputs: Vec<TerminalReplayOutput>,
-    from_seq: Option<i64>,
+    mut chunks: Vec<TerminalOutputChunkRecord>,
+    from_seq: i64,
     limit: i64,
+    max_bytes: i64,
+    include_data: bool,
+    next_seq_hint: i64,
 ) -> TerminalReplayView {
-    let from_seq = from_seq.unwrap_or(1).max(1);
     let limit = limit.clamp(1, 1000) as usize;
-    let mut by_job = BTreeMap::<Uuid, Vec<TerminalReplayOutput>>::new();
-    for output in outputs {
-        by_job.entry(output.output.job_id).or_default().push(output);
+    let mut byte_count = 0_i64;
+    let mut replay_chunks = Vec::new();
+    let mut truncated = false;
+    chunks.sort_by_key(|chunk| chunk.terminal_seq);
+    for chunk in chunks {
+        if chunk.terminal_seq < from_seq {
+            continue;
+        }
+        if replay_chunks.len() >= limit {
+            truncated = true;
+            break;
+        }
+        let size_bytes = chunk.size_bytes.max(0);
+        if byte_count.saturating_add(size_bytes) > max_bytes {
+            truncated = true;
+            break;
+        }
+        byte_count = byte_count.saturating_add(size_bytes);
+        replay_chunks.push(TerminalReplayChunkView {
+            terminal_seq: chunk.terminal_seq,
+            job_id: chunk.job_id,
+            data_base64: include_data.then(|| BASE64.encode(&chunk.data)),
+            size_bytes,
+            sha256_hex: chunk.sha256_hex,
+            created_at: chunk.created_at,
+        });
     }
-
-    let mut chunks = Vec::new();
-    let mut emitted_terminal_seqs = BTreeSet::new();
-    let mut next_seq = from_seq;
-    let mut job_groups = by_job.into_iter().collect::<Vec<_>>();
-    job_groups.sort_by(
-        |(left_job_id, left_outputs), (right_job_id, right_outputs)| {
-            let left_first = left_outputs
-                .iter()
-                .map(|output| (&output.output.created_at, output.output.seq))
-                .min();
-            let right_first = right_outputs
-                .iter()
-                .map(|output| (&output.output.created_at, output.output.seq))
-                .min();
-            left_first
-                .cmp(&right_first)
-                .then_with(|| left_job_id.cmp(right_job_id))
-        },
+    let available_first_seq = replay_chunks.first().map(|chunk| chunk.terminal_seq);
+    let next_seq = next_seq_hint.max(
+        replay_chunks
+            .last()
+            .map(|chunk| chunk.terminal_seq.saturating_add(1))
+            .unwrap_or(from_seq),
     );
-    for (_job_id, mut outputs) in job_groups {
-        outputs.sort_by_key(|output| output.output.seq);
-        let Some(status) = terminal_replay_status_for_job(&outputs, session_id) else {
-            continue;
-        };
-        if let Some(status_next_seq) = status.next_seq {
-            next_seq = next_seq.max(status_next_seq);
-        }
-        let Some(first_seq) = status.first_seq else {
-            continue;
-        };
-        for (index, output) in outputs
-            .into_iter()
-            .filter(|output| output.output.stream == "pty")
-            .enumerate()
-        {
-            let terminal_seq = first_seq.saturating_add(index as i64);
-            if terminal_seq < from_seq {
-                continue;
-            }
-            if status
-                .next_seq
-                .is_some_and(|next_seq| terminal_seq >= next_seq)
-            {
-                continue;
-            }
-            if !emitted_terminal_seqs.insert(terminal_seq) {
-                continue;
-            }
-            let size_bytes = output.output.artifact_size_bytes.unwrap_or_else(|| {
-                BASE64
-                    .decode(&output.output.data_base64)
-                    .map(|bytes| bytes.len() as i64)
-                    .unwrap_or_default()
-            });
-            chunks.push(TerminalReplayChunkView {
-                terminal_seq,
-                job_id: output.output.job_id,
-                job_output_seq: output.output.seq,
-                data_base64: Some(output.output.data_base64).filter(|value| !value.is_empty()),
-                size_bytes,
-                sha256_hex: output.output.artifact_sha256_hex,
-                storage: output.output.storage,
-                artifact_object_key: output.output.artifact_object_key,
-                created_at: output.output.created_at,
-            });
-        }
-    }
-
-    chunks.sort_by(|left, right| {
-        left.terminal_seq
-            .cmp(&right.terminal_seq)
-            .then_with(|| left.job_id.cmp(&right.job_id))
-            .then_with(|| left.job_output_seq.cmp(&right.job_output_seq))
-    });
-    let total_chunks = chunks.len();
-    chunks.truncate(limit);
-    let available_first_seq = chunks.first().map(|chunk| chunk.terminal_seq);
-    let byte_count = chunks
-        .iter()
-        .map(|chunk| chunk.size_bytes.max(0))
-        .sum::<i64>();
     TerminalReplayView {
         session_id,
         client_id: client_id.to_string(),
         from_seq,
         available_first_seq,
         next_seq,
-        chunk_count: chunks.len(),
+        chunk_count: replay_chunks.len(),
         byte_count,
-        truncated: total_chunks > chunks.len(),
-        source: "job_outputs".to_string(),
-        chunks,
+        truncated,
+        source: "terminal_output_chunks".to_string(),
+        chunks: replay_chunks,
     }
 }
 
-fn terminal_replay_status_for_job(
-    outputs: &[TerminalReplayOutput],
-    session_id: Uuid,
+fn terminal_replay_status_for_job_outputs(
+    outputs: &[JobOutputView],
 ) -> Option<TerminalReplayStatus> {
     let mut merged = TerminalReplayStatus {
+        session_id: None,
         first_seq: None,
         next_seq: None,
+        retained_first_seq: None,
+        retained_bytes: None,
+        dropped_bytes: None,
+        dropped_chunks: None,
+        replay_truncated: false,
     };
     let mut found = false;
     for status in outputs.iter().filter_map(|output| {
-        if output.output.stream != "status" || !is_terminal_command(&output.command_type) {
+        if output.stream != "status" {
             return None;
         }
-        parse_terminal_replay_status(&output.output, session_id)
+        parse_terminal_replay_status(output)
     }) {
         found = true;
+        merged.session_id = merged.session_id.or(status.session_id);
         merged.first_seq = match (merged.first_seq, status.first_seq) {
             (Some(current), Some(next)) => Some(current.min(next)),
             (None, value) | (value, None) => value,
@@ -842,14 +1261,16 @@ fn terminal_replay_status_for_job(
             (Some(current), Some(next)) => Some(current.max(next)),
             (None, value) | (value, None) => value,
         };
+        merged.retained_first_seq = status.retained_first_seq.or(merged.retained_first_seq);
+        merged.retained_bytes = status.retained_bytes.or(merged.retained_bytes);
+        merged.dropped_bytes = status.dropped_bytes.or(merged.dropped_bytes);
+        merged.dropped_chunks = status.dropped_chunks.or(merged.dropped_chunks);
+        merged.replay_truncated |= status.replay_truncated;
     }
     found.then_some(merged)
 }
 
-fn parse_terminal_replay_status(
-    output: &JobOutputView,
-    expected_session_id: Uuid,
-) -> Option<TerminalReplayStatus> {
+fn parse_terminal_replay_status(output: &JobOutputView) -> Option<TerminalReplayStatus> {
     let data = BASE64.decode(&output.data_base64).ok()?;
     let value = serde_json::from_slice::<Value>(&data).ok()?;
     if !is_terminal_status_event(value.get("type")?.as_str()?) {
@@ -859,22 +1280,338 @@ fn parse_terminal_replay_status(
         .get("session_id")
         .and_then(Value::as_str)
         .and_then(|value| Uuid::parse_str(value).ok())?;
-    if session_id != expected_session_id {
-        return None;
-    }
     Some(TerminalReplayStatus {
+        session_id: Some(session_id),
         first_seq: value.get("output_first_seq").and_then(json_i64),
         next_seq: value.get("output_next_seq").and_then(json_i64),
+        retained_first_seq: value.get("output_retained_first_seq").and_then(json_i64),
+        retained_bytes: value.get("output_retained_bytes").and_then(json_i64),
+        dropped_bytes: value.get("output_dropped_bytes").and_then(json_i64),
+        dropped_chunks: value.get("output_dropped_chunks").and_then(json_i64),
+        replay_truncated: value
+            .get("output_replay_truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
+}
+
+async fn memory_terminal_next_seq(
+    memory: &crate::repository::MemoryState,
+    client_id: &str,
+    session_id: Uuid,
+) -> i64 {
+    let session_next = memory
+        .terminal_sessions
+        .read()
+        .await
+        .iter()
+        .find(|session| session.client_id == client_id && session.session_id == session_id)
+        .and_then(|session| session.output_next_seq);
+    let chunk_next = memory
+        .terminal_output_chunks
+        .read()
+        .await
+        .iter()
+        .filter(|chunk| chunk.client_id == client_id && chunk.session_id == session_id)
+        .map(|chunk| chunk.terminal_seq.saturating_add(1))
+        .max();
+    session_next.or(chunk_next).unwrap_or(1).max(1)
+}
+
+async fn postgres_terminal_next_seq(
+    pool: &PgPool,
+    client_id: &str,
+    session_id: Uuid,
+    from_seq: i64,
+) -> Result<i64> {
+    let next_seq: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(
+            (
+                SELECT output_next_seq
+                FROM terminal_sessions
+                WHERE client_id = $1 AND session_id = $2
+            ),
+            (
+                SELECT MAX(terminal_seq) + 1
+                FROM terminal_output_chunks
+                WHERE client_id = $1 AND session_id = $2
+            )
+        )
+        "#,
+    )
+    .bind(client_id)
+    .bind(session_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(next_seq.unwrap_or(from_seq).max(1))
+}
+
+fn terminal_output_chunk_record(
+    client_id: &str,
+    session_id: Uuid,
+    terminal_seq: i64,
+    job_id: Uuid,
+    data: Vec<u8>,
+    created_at: Option<String>,
+) -> TerminalOutputChunkRecord {
+    TerminalOutputChunkRecord {
+        client_id: client_id.to_string(),
+        session_id,
+        terminal_seq,
+        job_id,
+        size_bytes: data.len() as i64,
+        sha256_hex: payload_hash(&data),
+        data,
+        created_at: created_at.unwrap_or_else(now_rfc3339),
+    }
+}
+
+fn terminal_output_chunk_matches(
+    left: &TerminalOutputChunkRecord,
+    right: &TerminalOutputChunkRecord,
+) -> bool {
+    left.size_bytes == right.size_bytes
+        && left.sha256_hex == right.sha256_hex
+        && left.data == right.data
+}
+
+fn prune_memory_terminal_chunks(
+    chunks: &mut Vec<TerminalOutputChunkRecord>,
+    client_id: &str,
+    session_id: Uuid,
+    retention: TerminalRetentionBounds,
+) {
+    let mut retained_bytes = 0_i64;
+    let mut retained = HashSet::new();
+    let mut matching = chunks
+        .iter()
+        .filter(|chunk| chunk.client_id == client_id && chunk.session_id == session_id)
+        .map(|chunk| chunk.terminal_seq)
+        .collect::<Vec<_>>();
+    matching.sort_by(|left, right| right.cmp(left));
+    for terminal_seq in matching {
+        if terminal_seq < retention.retained_first_seq {
+            continue;
+        }
+        let Some(size_bytes) = chunks
+            .iter()
+            .find(|chunk| {
+                chunk.client_id == client_id
+                    && chunk.session_id == session_id
+                    && chunk.terminal_seq == terminal_seq
+            })
+            .map(|chunk| chunk.size_bytes.max(0))
+        else {
+            continue;
+        };
+        if retained_bytes.saturating_add(size_bytes) > retention.retained_bytes {
+            continue;
+        }
+        retained_bytes = retained_bytes.saturating_add(size_bytes);
+        retained.insert(terminal_seq);
+    }
+    chunks.retain(|chunk| {
+        chunk.client_id != client_id
+            || chunk.session_id != session_id
+            || retained.contains(&chunk.terminal_seq)
+    });
+}
+
+async fn prune_postgres_terminal_chunks(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+    session_id: Uuid,
+    retention: TerminalRetentionBounds,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        WITH ranked AS (
+            SELECT
+                terminal_seq,
+                SUM(size_bytes) OVER (ORDER BY terminal_seq DESC) AS newest_bytes
+            FROM terminal_output_chunks
+            WHERE client_id = $1 AND session_id = $2
+        )
+        DELETE FROM terminal_output_chunks chunk
+        USING ranked
+        WHERE chunk.client_id = $1
+          AND chunk.session_id = $2
+          AND chunk.terminal_seq = ranked.terminal_seq
+          AND (
+              chunk.terminal_seq < $3
+              OR ranked.newest_bytes > $4
+          )
+        "#,
+    )
+    .bind(client_id)
+    .bind(session_id)
+    .bind(retention.retained_first_seq)
+    .bind(retention.retained_bytes)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn update_memory_terminal_session_range(
+    memory: &crate::repository::MemoryState,
+    record: &TerminalOutputChunkRecord,
+    retention: TerminalRetentionBounds,
+) {
+    let mut sessions = memory.terminal_sessions.write().await;
+    if let Some(session) = sessions.iter_mut().find(|session| {
+        session.client_id == record.client_id && session.session_id == record.session_id
+    }) {
+        session.output_first_seq = session.output_first_seq.or(Some(1));
+        session.output_next_seq = Some(
+            session
+                .output_next_seq
+                .unwrap_or(1)
+                .max(record.terminal_seq.saturating_add(1)),
+        );
+        session.output_retained_first_seq = Some(retention.retained_first_seq);
+        session.output_retained_bytes = Some(retention.retained_bytes);
+        session.output_dropped_bytes = Some(retention.dropped_bytes);
+        session.output_dropped_chunks = Some(retention.dropped_chunks);
+        session.output_replay_truncated |= retention.replay_truncated;
+    }
+}
+
+async fn update_postgres_terminal_session_range(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+    session_id: Uuid,
+    next_seq: i64,
+    retention: TerminalRetentionBounds,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE terminal_sessions
+        SET
+            output_first_seq = COALESCE(output_first_seq, 1),
+            output_next_seq = GREATEST(COALESCE(output_next_seq, 1), $3),
+            output_retained_first_seq = $4,
+            output_retained_bytes = $5,
+            output_dropped_bytes = $6,
+            output_dropped_chunks = $7,
+            output_replay_truncated = output_replay_truncated OR $8
+        WHERE client_id = $1 AND session_id = $2
+        "#,
+    )
+    .bind(client_id)
+    .bind(session_id)
+    .bind(next_seq.max(1))
+    .bind(retention.retained_first_seq)
+    .bind(retention.retained_bytes)
+    .bind(retention.dropped_bytes)
+    .bind(retention.dropped_chunks)
+    .bind(retention.replay_truncated)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn upsert_memory_terminal_session(sessions: &mut Vec<TerminalSessionView>, event: TerminalEvent) {
+    let next = TerminalAggregate::new(event).into_view();
+    if let Some(existing) = sessions.iter_mut().find(|session| {
+        session.client_id == next.client_id && session.session_id == next.session_id
+    }) {
+        existing.state = next.state;
+        existing.last_status = next.last_status;
+        if !next.argv.is_empty() {
+            existing.argv = next.argv;
+        }
+        existing.cwd = next.cwd.or_else(|| existing.cwd.take());
+        existing.cols = next.cols.or(existing.cols);
+        existing.rows = next.rows.or(existing.rows);
+        existing.idle_timeout_secs = next.idle_timeout_secs.or(existing.idle_timeout_secs);
+        existing.flow_window_bytes = next.flow_window_bytes.or(existing.flow_window_bytes);
+        existing.output_first_seq = existing.output_first_seq.or(next.output_first_seq);
+        existing.output_next_seq = match (existing.output_next_seq, next.output_next_seq) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (None, value) | (value, None) => value,
+        };
+        existing.output_retained_first_seq = next
+            .output_retained_first_seq
+            .or(existing.output_retained_first_seq);
+        existing.output_retained_bytes = next
+            .output_retained_bytes
+            .or(existing.output_retained_bytes);
+        existing.output_dropped_bytes = next.output_dropped_bytes.or(existing.output_dropped_bytes);
+        existing.output_dropped_chunks = next
+            .output_dropped_chunks
+            .or(existing.output_dropped_chunks);
+        existing.output_replay_truncated |= next.output_replay_truncated;
+        existing.last_input_seq = next.last_input_seq.or(existing.last_input_seq);
+        existing.session_exited = next.session_exited;
+        existing.close_reason = next.close_reason.or_else(|| existing.close_reason.take());
+        existing.last_event = next.last_event;
+        existing.last_job_id = next.last_job_id;
+        existing.last_command_type = next.last_command_type;
+        existing.last_seq = next.last_seq;
+        existing.observed_at = next.observed_at;
+    } else {
+        sessions.push(next);
+    }
+}
+
+fn deduplicate_terminal_sessions(
+    mut sessions: Vec<TerminalSessionView>,
+    limit: i64,
+) -> Vec<TerminalSessionView> {
+    sessions.sort_by(|left, right| {
+        right
+            .observed_at
+            .cmp(&left.observed_at)
+            .then_with(|| left.client_id.cmp(&right.client_id))
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    let mut emitted = HashSet::new();
+    let mut deduped = Vec::new();
+    for session in sessions {
+        if emitted.insert((session.client_id.clone(), session.session_id)) {
+            deduped.push(session);
+            if deduped.len() >= limit.clamp(1, 200) as usize {
+                break;
+            }
+        }
+    }
+    deduped
+}
+
+fn terminal_seq_i64(value: u64) -> Result<i64> {
+    i64::try_from(value).context("terminal sequence exceeds i64 range")
+}
+
+fn u64_to_i64_saturating(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn retention_cap_bytes(value: u64) -> i64 {
+    let value = value.min(u64::from(MAX_TERMINAL_FLOW_WINDOW_BYTES));
+    if value == 0 {
+        i64::from(MAX_TERMINAL_FLOW_WINDOW_BYTES)
+    } else {
+        u64_to_i64_saturating(value)
+    }
+}
+
+fn retention_cap_i64(value: i64) -> i64 {
+    if value <= 0 {
+        i64::from(MAX_TERMINAL_FLOW_WINDOW_BYTES)
+    } else {
+        value.min(i64::from(MAX_TERMINAL_FLOW_WINDOW_BYTES))
+    }
+}
+
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_terminal_replay, build_terminal_sessions, TerminalReplayOutput, TerminalStatusOutput,
-    };
-    use crate::model::JobOutputView;
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use super::{build_terminal_replay_from_chunks, build_terminal_sessions, TerminalStatusOutput};
+    use crate::model_terminal::TerminalOutputChunkRecord;
     use uuid::Uuid;
 
     #[test]
@@ -1072,72 +1809,13 @@ mod tests {
         let input_job = Uuid::new_v4();
         let poll_job = Uuid::new_v4();
         let outputs = vec![
-            replay_output(
-                input_job,
-                "edge-a",
-                0,
-                "100",
-                "terminal_input",
-                "pty",
-                b"one\n",
-            ),
-            replay_output(
-                input_job,
-                "edge-a",
-                1,
-                "100",
-                "terminal_input",
-                "pty",
-                b"two\n",
-            ),
-            replay_output(
-                input_job,
-                "edge-a",
-                2,
-                "100",
-                "terminal_input",
-                "status",
-                serde_json::to_vec(&serde_json::json!({
-                    "type": "terminal_input",
-                    "status": "accepted",
-                    "session_id": session_id,
-                    "output_first_seq": 1,
-                    "output_next_seq": 3,
-                    "session_exited": false
-                }))
-                .unwrap()
-                .as_slice(),
-            ),
-            replay_output(
-                poll_job,
-                "edge-a",
-                0,
-                "200",
-                "terminal_poll",
-                "pty",
-                b"three\n",
-            ),
-            replay_output(
-                poll_job,
-                "edge-a",
-                1,
-                "200",
-                "terminal_poll",
-                "status",
-                serde_json::to_vec(&serde_json::json!({
-                    "type": "terminal_poll",
-                    "status": "polled",
-                    "session_id": session_id,
-                    "output_first_seq": 3,
-                    "output_next_seq": 4,
-                    "session_exited": false
-                }))
-                .unwrap()
-                .as_slice(),
-            ),
+            replay_chunk(input_job, "edge-a", session_id, 1, "100", b"one\n"),
+            replay_chunk(input_job, "edge-a", session_id, 2, "100", b"two\n"),
+            replay_chunk(poll_job, "edge-a", session_id, 3, "200", b"three\n"),
         ];
 
-        let replay = build_terminal_replay("edge-a", session_id, outputs, Some(2), 10);
+        let replay =
+            build_terminal_replay_from_chunks("edge-a", session_id, outputs, 2, 10, 1000, true, 4);
 
         assert_eq!(replay.client_id, "edge-a");
         assert_eq!(replay.session_id, session_id);
@@ -1149,7 +1827,6 @@ mod tests {
         assert!(!replay.truncated);
         assert_eq!(replay.chunks[0].terminal_seq, 2);
         assert_eq!(replay.chunks[0].job_id, input_job);
-        assert_eq!(replay.chunks[0].job_output_seq, 1);
         assert_eq!(replay.chunks[0].data_base64.as_deref(), Some("dHdvCg=="));
         assert_eq!(replay.chunks[1].terminal_seq, 3);
         assert_eq!(replay.chunks[1].job_id, poll_job);
@@ -1161,29 +1838,12 @@ mod tests {
         let session_id = Uuid::new_v4();
         let job_id = Uuid::new_v4();
         let outputs = vec![
-            replay_output(job_id, "edge-a", 0, "100", "terminal_poll", "pty", b"one"),
-            replay_output(job_id, "edge-a", 1, "100", "terminal_poll", "pty", b"two"),
-            replay_output(
-                job_id,
-                "edge-a",
-                2,
-                "100",
-                "terminal_poll",
-                "status",
-                serde_json::to_vec(&serde_json::json!({
-                    "type": "terminal_poll",
-                    "status": "polled",
-                    "session_id": session_id,
-                    "output_first_seq": 1,
-                    "output_next_seq": 3,
-                    "session_exited": false
-                }))
-                .unwrap()
-                .as_slice(),
-            ),
+            replay_chunk(job_id, "edge-a", session_id, 1, "100", b"one"),
+            replay_chunk(job_id, "edge-a", session_id, 2, "100", b"two"),
         ];
 
-        let replay = build_terminal_replay("edge-a", session_id, outputs, None, 1);
+        let replay =
+            build_terminal_replay_from_chunks("edge-a", session_id, outputs, 1, 1, 1000, true, 3);
 
         assert_eq!(replay.chunk_count, 1);
         assert_eq!(replay.byte_count, 3);
@@ -1191,78 +1851,22 @@ mod tests {
     }
 
     #[test]
-    fn terminal_stream_status_extends_replay_and_deduplicates_poll_echoes() {
+    fn terminal_replay_metadata_only_omits_data_and_applies_byte_cap() {
         let session_id = Uuid::new_v4();
-        let open_job = Uuid::new_v4();
-        let poll_job = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
         let outputs = vec![
-            replay_output(open_job, "edge-a", 0, "100", "terminal_open", "pty", b"one"),
-            replay_output(
-                open_job,
-                "edge-a",
-                1,
-                "100",
-                "terminal_open",
-                "status",
-                serde_json::to_vec(&serde_json::json!({
-                    "type": "terminal_open",
-                    "status": "opened",
-                    "session_id": session_id,
-                    "output_first_seq": 1,
-                    "output_next_seq": 2,
-                    "session_exited": false
-                }))
-                .unwrap()
-                .as_slice(),
-            ),
-            replay_output(open_job, "edge-a", 2, "101", "terminal_open", "pty", b"two"),
-            replay_output(
-                open_job,
-                "edge-a",
-                3,
-                "101",
-                "terminal_open",
-                "status",
-                serde_json::to_vec(&serde_json::json!({
-                    "type": "terminal_stream",
-                    "status": "streaming",
-                    "session_id": session_id,
-                    "output_first_seq": 1,
-                    "output_next_seq": 3,
-                    "session_exited": false
-                }))
-                .unwrap()
-                .as_slice(),
-            ),
-            replay_output(poll_job, "edge-a", 0, "102", "terminal_poll", "pty", b"two"),
-            replay_output(
-                poll_job,
-                "edge-a",
-                1,
-                "102",
-                "terminal_poll",
-                "status",
-                serde_json::to_vec(&serde_json::json!({
-                    "type": "terminal_poll",
-                    "status": "polled",
-                    "session_id": session_id,
-                    "output_first_seq": 2,
-                    "output_next_seq": 3,
-                    "session_exited": false
-                }))
-                .unwrap()
-                .as_slice(),
-            ),
+            replay_chunk(job_id, "edge-a", session_id, 1, "100", b"one"),
+            replay_chunk(job_id, "edge-a", session_id, 2, "101", b"two"),
         ];
 
-        let replay = build_terminal_replay("edge-a", session_id, outputs, None, 10);
+        let replay =
+            build_terminal_replay_from_chunks("edge-a", session_id, outputs, 1, 10, 3, false, 3);
 
-        assert_eq!(replay.next_seq, 3);
-        assert_eq!(replay.chunk_count, 2);
+        assert_eq!(replay.chunk_count, 1);
+        assert_eq!(replay.byte_count, 3);
+        assert!(replay.truncated);
         assert_eq!(replay.chunks[0].terminal_seq, 1);
-        assert_eq!(replay.chunks[1].terminal_seq, 2);
-        assert_eq!(replay.chunks[1].job_id, open_job);
-        assert_eq!(replay.chunks[1].data_base64.as_deref(), Some("dHdv"));
+        assert!(replay.chunks[0].data_base64.is_none());
     }
 
     fn status_output(
@@ -1283,32 +1887,23 @@ mod tests {
         }
     }
 
-    fn replay_output(
+    fn replay_chunk(
         job_id: Uuid,
         client_id: &str,
-        seq: i32,
+        session_id: Uuid,
+        terminal_seq: i64,
         created_at: &str,
-        command_type: &str,
-        stream: &str,
         data: &[u8],
-    ) -> TerminalReplayOutput {
-        TerminalReplayOutput {
-            output: JobOutputView {
-                job_id,
-                client_id: client_id.to_string(),
-                seq,
-                stream: stream.to_string(),
-                data_base64: BASE64.encode(data),
-                storage: "inline".to_string(),
-                artifact_object_key: None,
-                artifact_sha256_hex: Some(vpsman_common::payload_hash(data)),
-                artifact_size_bytes: Some(data.len() as i64),
-                exit_code: if stream == "status" { Some(0) } else { None },
-                done: stream == "status",
-                received_at: None,
-                created_at: created_at.to_string(),
-            },
-            command_type: command_type.to_string(),
+    ) -> TerminalOutputChunkRecord {
+        TerminalOutputChunkRecord {
+            client_id: client_id.to_string(),
+            session_id,
+            terminal_seq,
+            job_id,
+            data: data.to_vec(),
+            size_bytes: data.len() as i64,
+            sha256_hex: vpsman_common::payload_hash(data),
+            created_at: created_at.to_string(),
         }
     }
 }

@@ -140,7 +140,7 @@ export function TerminalOperationControls({
               value={terminalIdleTimeoutSecs}
             />
           </label>
-          <label>
+          <label title="Bounds live terminal replay and API-retained durable replay bytes for this session.">
             <span>Window bytes</span>
             <input
               aria-label="Terminal flow window bytes"

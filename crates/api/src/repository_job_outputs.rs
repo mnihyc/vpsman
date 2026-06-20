@@ -433,6 +433,7 @@ impl Repository {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_job_output_chunk_with_config(
         &self,
         job_id: Uuid,
@@ -938,6 +939,8 @@ impl Repository {
             .await
     }
 
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) async fn append_job_output_chunk_with_config(
         &self,
         job_id: Uuid,

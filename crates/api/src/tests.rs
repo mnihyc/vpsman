@@ -1,8 +1,9 @@
 use super::*;
 use base64::Engine as _;
 use vpsman_common::{
-    job_command_type_label, plan_tunnel, AgentHello, BandwidthTier, GatewayAgentHelloIngest,
-    JobCommand, OspfCostPolicy, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+    job_command_type_label, plan_tunnel, AgentHello, BandwidthTier, CommandOutput,
+    GatewayAgentHelloIngest, GatewayTerminalOutputIngest, JobCommand, OspfCostPolicy,
+    TunnelEndpointSide, TunnelKind, TunnelPlanInput,
 };
 use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_SKIPPED};
 
@@ -1641,6 +1642,137 @@ async fn job_output_comparison_groups_artifact_backed_output_by_metadata() {
         .contains("Artifact-backed retained output"));
 }
 
+#[tokio::test]
+async fn terminal_stream_ingest_is_idempotent_and_does_not_append_job_outputs() {
+    let repo = Repository::Memory(MemoryState::default());
+    let job_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    seed_terminal_memory_job(&repo, job_id, "client-a", "completed").await;
+    let mut state = test_app_state(repo.clone());
+    state.internal_token = Some("internal-token".to_string());
+    let headers = internal_headers("internal-token");
+
+    let _ = routes_ingest::ingest_terminal_output(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::Json(terminal_stream_ingest(
+            job_id,
+            session_id,
+            Some(1),
+            vpsman_common::OutputStream::Pty,
+            b"one".to_vec(),
+            false,
+        )),
+    )
+    .await
+    .unwrap();
+    let _ = routes_ingest::ingest_terminal_output(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::Json(terminal_stream_ingest(
+            job_id,
+            session_id,
+            Some(1),
+            vpsman_common::OutputStream::Pty,
+            b"one".to_vec(),
+            false,
+        )),
+    )
+    .await
+    .unwrap();
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    assert_eq!(memory.terminal_output_chunks.read().await.len(), 1);
+    assert!(memory.job_outputs.read().await.is_empty());
+    let replay = repo
+        .terminal_session_replay("client-a", session_id, None, 10, 1000, true)
+        .await
+        .unwrap();
+    assert_eq!(replay.source, "terminal_output_chunks");
+    assert_eq!(replay.chunk_count, 1);
+    assert_eq!(replay.chunks[0].data_base64.as_deref(), Some("b25l"));
+
+    let mut conflicting_event = terminal_stream_ingest(
+        job_id,
+        session_id,
+        Some(1),
+        vpsman_common::OutputStream::Pty,
+        b"two".to_vec(),
+        false,
+    );
+    conflicting_event.output.output_retained_first_seq = Some(2);
+    conflicting_event.output.output_retained_bytes = 0;
+    let conflict = routes_ingest::ingest_terminal_output(
+        axum::extract::State(state),
+        headers,
+        axum::Json(conflicting_event),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(conflict.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(memory.terminal_output_chunks.read().await.len(), 1);
+    let replay = repo
+        .terminal_session_replay("client-a", session_id, Some(1), 10, 1000, true)
+        .await
+        .unwrap();
+    assert_eq!(replay.available_first_seq, Some(1));
+    assert_eq!(replay.chunk_count, 1);
+    assert_eq!(replay.chunks[0].data_base64.as_deref(), Some("b25l"));
+}
+
+#[tokio::test]
+async fn terminal_final_stream_status_updates_session_without_job_output_append() {
+    let repo = Repository::Memory(MemoryState::default());
+    let job_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    seed_terminal_memory_job(&repo, job_id, "client-a", "completed").await;
+    let mut state = test_app_state(repo.clone());
+    state.internal_token = Some("internal-token".to_string());
+    let headers = internal_headers("internal-token");
+
+    let _ = routes_ingest::ingest_terminal_output(
+        axum::extract::State(state),
+        headers,
+        axum::Json(terminal_stream_ingest(
+            job_id,
+            session_id,
+            None,
+            vpsman_common::OutputStream::Status,
+            serde_json::to_vec(&serde_json::json!({
+                "type": "terminal_stream",
+                "status": "exited",
+                "session_id": session_id,
+                "output_first_seq": 1,
+                "output_next_seq": 2,
+                "output_retained_first_seq": 1,
+                "output_retained_bytes": 3,
+                "output_dropped_bytes": 0,
+                "output_dropped_chunks": 0,
+                "output_replay_truncated": false,
+                "session_exited": true
+            }))
+            .unwrap(),
+            true,
+        )),
+    )
+    .await
+    .unwrap();
+
+    let sessions = repo
+        .list_terminal_sessions(10, Some("client-a"), Some(session_id))
+        .await
+        .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].state, "exited");
+    assert_eq!(sessions[0].last_status, "exited");
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    assert!(memory.job_outputs.read().await.is_empty());
+}
+
 fn test_operator() -> AuthContext {
     AuthContext {
         operator: OperatorView {
@@ -1675,6 +1807,75 @@ fn test_app_state(repo: Repository) -> AppState {
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
         dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
+    }
+}
+
+fn internal_headers(token: &str) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    headers
+}
+
+async fn seed_terminal_memory_job(repo: &Repository, job_id: Uuid, client_id: &str, status: &str) {
+    let Repository::Memory(memory) = repo else {
+        panic!("seed_terminal_memory_job supports only memory repository tests");
+    };
+    memory.jobs.write().await.push(JobHistoryView {
+        id: job_id,
+        actor_id: Some(test_operator().operator.id),
+        command_type: "terminal_open".to_string(),
+        privileged: true,
+        status: status.to_string(),
+        target_count: 1,
+        payload_hash: "terminal-test".to_string(),
+        created_at: "2026-06-20T00:00:00Z".to_string(),
+        completed_at: Some("2026-06-20T00:00:01Z".to_string()),
+    });
+    memory.job_targets.write().await.push(JobTargetView {
+        job_id,
+        client_id: client_id.to_string(),
+        status: status.to_string(),
+        message: None,
+        exit_code: Some(0),
+        started_at: Some("2026-06-20T00:00:00Z".to_string()),
+        completed_at: Some("2026-06-20T00:00:01Z".to_string()),
+        process_incarnation_id: None,
+    });
+}
+
+fn terminal_stream_ingest(
+    job_id: Uuid,
+    session_id: Uuid,
+    terminal_seq: Option<u64>,
+    stream: vpsman_common::OutputStream,
+    data: Vec<u8>,
+    done: bool,
+) -> GatewayTerminalOutputIngest {
+    GatewayTerminalOutputIngest {
+        gateway_id: "gateway-a".to_string(),
+        client_id: "client-a".to_string(),
+        output: vpsman_common::TerminalStreamOutput {
+            job_id,
+            session_id,
+            terminal_seq,
+            output_first_seq: Some(1),
+            output_next_seq: terminal_seq.unwrap_or(1).saturating_add(1),
+            output_retained_first_seq: Some(1),
+            output_retained_bytes: data.len() as u64,
+            output_dropped_bytes: 0,
+            output_dropped_chunks: 0,
+            output_replay_truncated: false,
+            output: CommandOutput {
+                job_id,
+                stream,
+                data,
+                exit_code: done.then_some(0),
+                done,
+            },
+        },
     }
 }
 

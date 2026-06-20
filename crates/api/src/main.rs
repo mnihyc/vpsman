@@ -196,7 +196,7 @@ use routes_schedules::validate_schedule_request;
 use security::{constant_time_eq, role_allows, validate_operator_role};
 use uuid::Uuid;
 #[cfg(test)]
-use vpsman_common::{encode_json, payload_hash, CommandOutput, OutputStream};
+use vpsman_common::{encode_json, payload_hash, OutputStream};
 
 #[derive(Debug, Parser)]
 #[command(name = "vpsman-api", about = "VPS control-plane API")]

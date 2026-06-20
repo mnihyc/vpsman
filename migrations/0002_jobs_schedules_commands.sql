@@ -308,6 +308,21 @@ CREATE TABLE terminal_sessions (
 CREATE INDEX terminal_sessions_observed_idx
     ON terminal_sessions (observed_at DESC, client_id, session_id);
 
+CREATE TABLE terminal_output_chunks (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    session_id UUID NOT NULL,
+    terminal_seq BIGINT NOT NULL CHECK (terminal_seq > 0),
+    job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    data BYTEA NOT NULL,
+    size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
+    sha256_hex TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (client_id, session_id, terminal_seq)
+);
+
+CREATE INDEX terminal_output_chunks_session_idx
+    ON terminal_output_chunks (client_id, session_id, terminal_seq ASC);
+
 CREATE TABLE worker_leases (
     task_name TEXT PRIMARY KEY,
     owner TEXT NOT NULL,

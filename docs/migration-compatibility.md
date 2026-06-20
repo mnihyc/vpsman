@@ -26,7 +26,7 @@ Rules enforced by `scripts/audit-migrations.sh`:
 | Migration | Schema role |
 | --- | --- |
 | `0001_identity_access.sql` | Initial identity, operator, token, agent, tag, gateway-session, key-revocation, and audit schema. Gateway lifecycle state is `active`, `ended`, or `expired`; newly imported agents may be `never` connected. |
-| `0002_jobs_schedules_commands.sql` | Initial job, fixed-target schedule, durable job-target dispatch queue, output, worker-lease, terminal-session, server-job/artifact, and command-template schema. `jobs.id` is the retry identity and `request_fingerprint` rejects accidental ID reuse with different content. |
+| `0002_jobs_schedules_commands.sql` | Initial job, fixed-target schedule, durable job-target dispatch queue, output, worker-lease, terminal-session, bounded terminal-output chunk, server-job/artifact, and command-template schema. `jobs.id` is the retry identity and `request_fingerprint` rejects accidental ID reuse with different content. |
 | `0003_telemetry_alerts_history.sql` | Initial telemetry, rollup, alert policy/state/notification, webhook, and history-retention schema. |
 | `0004_backups_restores.sql` | Initial backup artifact, backup request, restore plan, migration link, and backup-policy schema using plain request metadata scoped by client/job. |
 | `0005_network_tunnels.sql` | Initial tunnel, tunnel-plan, and network-observation schema. |

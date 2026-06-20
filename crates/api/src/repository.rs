@@ -10,8 +10,10 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::{
-    model::*, model_command_templates::CommandTemplateView,
+    model::*,
+    model_command_templates::CommandTemplateView,
     model_file_transfer::FileTransferSourceArtifactView,
+    model_terminal::{TerminalOutputChunkRecord, TerminalSessionView},
 };
 
 #[derive(Clone)]
@@ -74,6 +76,8 @@ pub(crate) struct MemoryState {
     pub(crate) command_templates: Arc<RwLock<Vec<CommandTemplateView>>>,
     pub(crate) job_targets: Arc<RwLock<Vec<JobTargetView>>>,
     pub(crate) job_outputs: Arc<RwLock<Vec<JobOutputView>>>,
+    pub(crate) terminal_sessions: Arc<RwLock<Vec<TerminalSessionView>>>,
+    pub(crate) terminal_output_chunks: Arc<RwLock<Vec<TerminalOutputChunkRecord>>>,
     pub(crate) file_transfer_source_artifacts: Arc<RwLock<Vec<FileTransferSourceArtifactView>>>,
     pub(crate) agent_update_releases: Arc<RwLock<Vec<AgentUpdateReleaseView>>>,
     pub(crate) server_jobs: Arc<RwLock<Vec<ServerJobView>>>,

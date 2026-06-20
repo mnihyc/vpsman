@@ -885,7 +885,6 @@ pub(crate) enum WsEvent {
         client_id: String,
         session_id: Uuid,
         terminal_seq: Option<u64>,
-        seq: i32,
         done: bool,
     },
     JobFinished {

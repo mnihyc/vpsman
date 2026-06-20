@@ -36,12 +36,9 @@ export type TerminalSessionRecord = {
 export type TerminalReplayChunkRecord = {
   terminal_seq: number;
   job_id: string;
-  job_output_seq: number;
   data_base64: string | null;
   size_bytes: number;
-  sha256_hex: string | null;
-  storage: string;
-  artifact_object_key: string | null;
+  sha256_hex: string;
   created_at: string;
 };
 

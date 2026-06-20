@@ -86,11 +86,11 @@ of the same root cause.
 | AUD-070 | High | Fixed | API/Frontend/CLI/Network | Tunnel-plan save and lifecycle mutations lack a backend confirmation contract |
 | AUD-071 | Medium/High | Fixed | API/Frontend/CLI/Jobs | Job and server-job cancellation bypass the confirmation contract |
 | AUD-072 | Medium/High | Confirmed | API/Frontend/CLI/Inventory/Selectors | Non-unique VPS display names make name selectors ambiguous for production jobs |
-| AUD-073 | High | Confirmed | API/Agent/Terminal/Storage | Live terminal output can grow API job-output storage without a retention ceiling |
+| AUD-073 | High | Fixed | API/Agent/Terminal/Storage | Live terminal output can grow API job-output storage without a retention ceiling |
 | AUD-074 | Medium/High | Fixed | API/Object Storage/Job Outputs | Job-output object artifacts can be committed without cleanup-registry repair |
 | AUD-075 | Medium/High | Fixed | API/History/Auth | Audit logs are readable and exportable with fleet-read scope |
-| AUD-076 | Medium/High | Confirmed | API/Gateway/Terminal/Reliability | Terminal stream output retries are not idempotent |
-| AUD-077 | Medium/High | Confirmed | Gateway/API/Terminal/Lifecycle | Terminal final stream status can expire as noncritical output |
+| AUD-076 | Medium/High | Fixed | API/Gateway/Terminal/Reliability | Terminal stream output retries are not idempotent |
+| AUD-077 | Medium/High | Fixed | Gateway/API/Terminal/Lifecycle | Terminal final stream status can expire as noncritical output |
 | AUD-078 | Medium/High | Fixed | API/Network/Auth | OSPF update-plan reads expose generated Bird2 snippets with fleet-read scope |
 | AUD-079 | High | Fixed | API/Network/Auth | Network observations expose runtime command reports with fleet-read scope |
 | AUD-080 | High | Confirmed | Gateway/Spool/Security | Gateway spool files persist the internal API bearer token |
@@ -142,7 +142,7 @@ of the same root cause.
 | AUD-126 | Medium/High | Confirmed | API/Data Sources/State | Data-source read paths persist default assignments for all clients, including hidden clients |
 | AUD-127 | High | Confirmed | Gateway/Forwarder/Shutdown | Controlled gateway shutdown can lose queued RAM forwarder events |
 | AUD-128 | High | Fixed | Agent/File Browser/Safety | Recursive file delete can escape through symlink-swap races |
-| AUD-129 | Medium/High | Confirmed | Gateway/Terminal/Resource Bounds | Terminal output forwarding bypasses the gateway RAM spool budget |
+| AUD-129 | Medium/High | Fixed | Gateway/Terminal/Resource Bounds | Terminal output forwarding bypasses the gateway RAM spool budget |
 | AUD-130 | High | Fixed | Agent/File Browser/Safety | Copy, chmod, and chown can follow symlinks after validation races |
 | AUD-131 | High | Fixed | Agent/File Read And Download/Safety | Read and download paths can dereference symlinks after validation |
 | AUD-132 | High | Fixed | API/Jobs/State Machine | Precompleted skipped targets are not atomic with job creation |
@@ -195,7 +195,7 @@ of the same root cause.
 | AUD-179 | Medium/High | Fixed | API/Backups/Object Storage | Multiple backup artifacts can reference the same object key |
 | AUD-180 | Medium/High | Fixed | API/File Transfers/Artifact Cleanup | Reuploaded file-transfer source artifacts can inherit stale cleanup age |
 | AUD-181 | High | Fixed | Frontend/Access/Keys | Key lifecycle review can open stale confirmations after key-field edits |
-| AUD-182 | Medium/High | Confirmed | API/Gateway/Terminal/Lifecycle | Terminal stream output can append after the terminal-open target is terminal |
+| AUD-182 | Medium/High | Fixed | API/Gateway/Terminal/Lifecycle | Terminal stream output can append after the terminal-open target is terminal |
 | AUD-183 | High | Fixed | Frontend/Fleet/Delete | VPS deletion confirmation can remain armed after fleet selection changes |
 | AUD-184 | Critical | Fixed | Frontend/Jobs/Multi-File | Bulk file review can open stale confirmations after selector or operation edits |
 | AUD-185 | High | Confirmed | Agent/API/Terminal | Terminal input sequencing can drop out-of-order or conflicting input |
@@ -228,8 +228,8 @@ of the same root cause.
 | AUD-212 | Medium/High | Confirmed | Agent/API/User Sessions/Job Status | User-session inventory timeouts are reported as generic failures |
 | AUD-213 | Medium/High | Fixed | API/Frontend/Backups/Job Lifecycle | Failed backup jobs leave auto-created backup requests permanently in progress |
 | AUD-214 | High | Fixed | API/Dispatcher/Auth/Job Lifecycle | Queued jobs keep dispatching after actor disable/delete or scope loss |
-| AUD-215 | High | Confirmed | API/Frontend/CLI/Terminal/Resource Bounds | Terminal replay loads full session output history before applying replay bounds |
-| AUD-216 | High | Confirmed | Gateway/Spool/Replay | Gateway spool replay can strand valid events after per-target queue saturation |
+| AUD-215 | High | Fixed | API/Frontend/CLI/Terminal/Resource Bounds | Terminal replay loads full session output history before applying replay bounds |
+| AUD-216 | High | Fixed | Gateway/Spool/Replay | Gateway spool replay can strand valid events after per-target queue saturation |
 | AUD-217 | High | Fixed | API/Frontend/CLI/Backups | Chunked backup artifact upload defaults exceed the route body limit |
 | AUD-218 | High | Fixed | API/Frontend/CLI/File Operations | Chunked file-push jobs exceed the job-create route body limit |
 | AUD-219 | Medium/High | Confirmed | API/Worker/Integrations/Delivery State | Disabled integrations can still deliver already queued outbound work |
@@ -1884,7 +1884,7 @@ of the same root cause.
 ### AUD-064: Release-Registry Manual Update Shortcut Cannot Provide The Artifact URL It Requires
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Agent Updates
 - Context: Operators use Jobs > Updates to record external agent release
   metadata and then dispatch manual update jobs or update checks across selected
@@ -2302,6 +2302,11 @@ of the same root cause.
   per-session stored-byte limits, rolling persisted windows, forced object-store
   offload, or terminal auto-closure when retained API-side bytes exceed a safe
   bound.
+- Resolution: Fixed by moving live terminal PTY persistence out of
+  `job_outputs` into a dedicated terminal-output chunk table keyed by
+  `(client_id, session_id, terminal_seq)`. API ingestion now stores only the
+  retained terminal window, prunes older chunks by sequence and retained-byte
+  bounds, and keeps command-output history reserved for command output.
 
 ### AUD-074: Job-Output Object Artifacts Can Be Committed Without Cleanup-Registry Repair
 
@@ -2402,7 +2407,7 @@ of the same root cause.
 ### AUD-076: Terminal Stream Output Retries Are Not Idempotent
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Gateway/Terminal/Reliability
 - Context: Interactive terminal sessions stream PTY output through the agent,
   gateway, and API. Gateway delivery to the API is at-least-once: API response
@@ -2442,11 +2447,15 @@ of the same root cause.
 - Notes: This is distinct from AUD-073. AUD-073 is about missing storage
   ceilings for live terminal output; this issue is about at-least-once delivery
   creating duplicate terminal output because the API has no idempotency key.
+- Resolution: Fixed by making live terminal PTY writes idempotent on
+  `(client_id, session_id, terminal_seq)`. Identical retries are accepted
+  without duplicating storage, while same-sequence byte mismatches return a
+  terminal-output sequence conflict.
 
 ### AUD-077: Terminal Final Stream Status Can Expire As Noncritical Output
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Gateway/API/Terminal/Lifecycle
 - Context: A terminal session can end without an explicit operator close
   command, for example when the shell exits, the remote command terminates, or
@@ -2492,6 +2501,11 @@ of the same root cause.
   retry after a successful append; this issue is about loss of final lifecycle
   evidence because terminal final statuses are not treated as critical control
   events.
+- Resolution: Fixed by treating terminal final status events as reliable
+  lifecycle evidence. The agent uses a bounded awaited send for final status
+  frames, the gateway marks terminal `done` status events critical with the
+  command-output TTL, and the API records stream status directly into terminal
+  session state without appending job output.
 
 ### AUD-078: OSPF Update-Plan Reads Expose Generated Bird2 Snippets With Fleet-Read Scope
 
@@ -2572,7 +2586,7 @@ of the same root cause.
 ### AUD-080: Gateway Spool Files Persist The Internal API Bearer Token
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Gateway/Spool/Security
 - Context: Gateway forwarder spool files are written during queue pressure,
   bounded graceful shutdown, and replayable delivery windows. They can contain
@@ -4682,6 +4696,10 @@ of the same root cause.
   spool policy as command output, or have an explicit smaller byte-based queue
   limit with visible dropped-output counters. The existing noncritical TTL is
   not a substitute for bounding memory while the event is queued.
+- Resolution: Fixed by routing terminal-output forward events through the
+  gateway RAM-budget and disk-spool path. Ordinary PTY chunks are still
+  noncritical, but they no longer bypass the configured byte budget; final
+  terminal status events are classified as critical lifecycle evidence.
 
 ### AUD-130: Copy, Chmod, And Chown Can Follow Symlinks After Validation Races
 
@@ -4737,7 +4755,7 @@ of the same root cause.
 ### AUD-131: Read And Download Paths Can Dereference Symlinks After Validation
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/File Read And Download/Safety
 - Context: Operators can read text files, download regular files, and start
   resumable file-transfer downloads from VPS paths. These workflows are often
@@ -7003,6 +7021,10 @@ of the same root cause.
   terminal. A clean fix should either keep terminal stream output under a
   separate session stream model or enforce an active-target/terminal-session
   lease predicate before appending to normal job-output history.
+- Resolution: Fixed by separating background terminal stream persistence from
+  terminal-open command output. Stream PTY chunks and stream status updates no
+  longer append to `job_outputs`, so terminal sessions can continue after the
+  terminal-open target completes without mutating terminal job-output history.
 
 ### AUD-183: VPS Deletion Confirmation Can Remain Armed After Fleet Selection Changes
 
@@ -8508,11 +8530,16 @@ of the same root cause.
   `limit`, metadata/data selection, and byte-budget enforcement into repository
   queries or a streaming cursor so replay requests only materialize the reviewed
   bounded slice.
+- Resolution: Fixed by serving terminal replay from the dedicated
+  `terminal_output_chunks` stream. Repository queries apply `client_id`,
+  `session_id`, `from_seq`, and chunk limits before materialization, and the
+  route passes `max_bytes` and `include_data` into repository construction so
+  replay responses stay bounded before API serialization.
 
 ### AUD-216: Gateway Spool Replay Can Strand Valid Events After Per-Target Queue Saturation
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Gateway/Spool/Replay
 - Context: Controlled gateway restart is expected to replay pending forwarder
   events from the gateway spool after API downtime, deploys, or operator
@@ -8549,6 +8576,9 @@ of the same root cause.
   self-draining: keep a pending-spool scanner or retry loop that re-enqueues
   preserved files after queue space opens, while preserving ordering per target
   and avoiding duplicate delivery beyond the existing idempotent ingest rules.
+- Resolution: Fixed by making startup spool replay self-draining. A replay pass
+  now waits for queued replay work to drain and rescans preserved pending files
+  instead of leaving queue-full files stranded until the next gateway restart.
 
 ### AUD-217: Chunked Backup Artifact Upload Defaults Exceed The Route Body Limit
 

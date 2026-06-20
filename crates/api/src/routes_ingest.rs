@@ -5,7 +5,7 @@ use chrono::{TimeZone, Utc};
 use serde::Serialize;
 use tracing::warn;
 use vpsman_common::{
-    CommandOutput, GatewayAgentHelloIngest, GatewayCommandOutputIngest,
+    is_terminal_command_type, CommandOutput, GatewayAgentHelloIngest, GatewayCommandOutputIngest,
     GatewaySessionLifecycleIngest, GatewayTelemetryIngest, GatewayTerminalOutputIngest, JobCommand,
     OutputStream,
 };
@@ -270,6 +270,12 @@ pub(crate) async fn ingest_command_output(
             .mark_job_target_running(event.job_id, &event.client_id, &message)
             .await?;
     }
+    if event.output.stream == OutputStream::Status && is_terminal_command_type(&job.command_type) {
+        state
+            .repo
+            .record_terminal_command_replay_chunks(event.job_id, &event.client_id)
+            .await?;
+    }
     Ok(Json(IngestResponse {
         accepted: true,
         message: "command output recorded".to_string(),
@@ -398,24 +404,32 @@ pub(crate) async fn ingest_terminal_output(
     {
         return Err(ApiError::not_found("job_target_not_found"));
     }
-    let seq = state
-        .repo
-        .append_job_output_chunk_with_config(
-            event.output.job_id,
-            &event.client_id,
-            &event.output.output,
-            JobOutputPersistConfig {
-                object_store: state.backup_object_store.as_ref(),
-                artifact_min_bytes: state.job_output_artifact_min_bytes(),
-            },
-        )
-        .await?;
+    match event.output.output.stream {
+        OutputStream::Pty => match state
+            .repo
+            .record_terminal_stream_chunk(&event.client_id, &event.output)
+            .await?
+        {
+            JobOutputWriteResult::DuplicateConflict => {
+                return Err(ApiError::conflict("terminal_output_sequence_conflict"));
+            }
+            JobOutputWriteResult::Inserted | JobOutputWriteResult::DuplicateIdentical => {}
+        },
+        OutputStream::Status => {
+            state
+                .repo
+                .record_terminal_stream_status(&event.client_id, &event.output)
+                .await?;
+        }
+        OutputStream::Stdout | OutputStream::Stderr => {
+            return Err(ApiError::bad_request("invalid_terminal_output_stream"));
+        }
+    }
     state.publish(WsEvent::TerminalOutputRecorded {
         job_id: event.output.job_id,
         client_id: event.client_id.clone(),
         session_id: event.output.session_id,
         terminal_seq: event.output.terminal_seq,
-        seq,
         done: event.output.output.done,
     });
     Ok(Json(IngestResponse {
@@ -484,12 +498,22 @@ fn validate_terminal_output_event(event: &GatewayTerminalOutputIngest) -> Result
         || event.client_id.len() > 128
         || event.output.output.job_id != event.output.job_id
         || event.output.output_next_seq == 0
+        || event.output.output.data.len() > vpsman_common::MAX_TERMINAL_FLOW_WINDOW_BYTES as usize
         || event
             .output
             .terminal_seq
             .is_some_and(|seq| seq == 0 || seq >= event.output.output_next_seq)
     {
         return Err(ApiError::bad_request("invalid_terminal_output_event"));
+    }
+    match event.output.output.stream {
+        OutputStream::Pty if event.output.terminal_seq.is_none() => {
+            return Err(ApiError::bad_request("invalid_terminal_output_event"));
+        }
+        OutputStream::Pty | OutputStream::Status => {}
+        OutputStream::Stdout | OutputStream::Stderr => {
+            return Err(ApiError::bad_request("invalid_terminal_output_stream"));
+        }
     }
     Ok(())
 }

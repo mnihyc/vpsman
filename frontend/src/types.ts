@@ -864,7 +864,6 @@ export type WsEvent =
       client_id: string;
       session_id: string;
       terminal_seq: number | null;
-      seq: number;
       done: boolean;
     }
   | {

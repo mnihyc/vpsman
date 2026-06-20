@@ -26,7 +26,11 @@ pub(crate) struct TerminalOpenCommand {
     pub(crate) replay_from_seq: Option<u64>,
     #[arg(long, default_value_t = default_terminal_idle_timeout_secs())]
     pub(crate) idle_timeout_secs: u32,
-    #[arg(long, default_value_t = default_terminal_flow_window_bytes())]
+    #[arg(
+        long,
+        default_value_t = default_terminal_flow_window_bytes(),
+        help = "Bytes retained for live and durable terminal replay"
+    )]
     pub(crate) flow_window_bytes: u32,
     #[arg(long, value_delimiter = ',')]
     pub(crate) clients: Vec<String>,
