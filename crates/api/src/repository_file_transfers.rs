@@ -12,6 +12,15 @@ use crate::{
     model::JobOutputView, model_file_transfer::FileTransferSessionView, repository::Repository,
 };
 
+const HANDOFF_EVIDENCE_ARTIFACT_AVAILABLE: &str = "artifact_available";
+const HANDOFF_EVIDENCE_RETAINED_OUTPUTS_AVAILABLE: &str = "retained_outputs_available";
+const HANDOFF_EVIDENCE_NOT_APPLICABLE: &str = "not_applicable";
+const HANDOFF_EVIDENCE_NOT_COMPLETED: &str = "not_completed";
+const HANDOFF_EVIDENCE_MISSING_FINAL_METADATA: &str = "missing_final_metadata";
+const HANDOFF_EVIDENCE_RETAINED_OUTPUTS_PRUNED: &str = "retained_outputs_pruned";
+const HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE: &str = "retained_outputs_incomplete";
+const HANDOFF_EVIDENCE_RETAINED_OUTPUTS_CONFLICT: &str = "retained_outputs_conflict";
+
 impl Repository {
     pub(crate) async fn list_file_transfer_sessions(
         &self,
@@ -110,6 +119,182 @@ impl Repository {
                     .map_err(Into::into)
             }
         }
+    }
+
+    pub(crate) async fn annotate_file_transfer_handoff_evidence(
+        &self,
+        sessions: &mut [FileTransferSessionView],
+    ) -> Result<()> {
+        for session in sessions {
+            let Some((sha256_hex, size_bytes)) = reset_and_validate_handoff_session(session) else {
+                continue;
+            };
+            let object_key = file_transfer_handoff_object_key(
+                &session.client_id,
+                session.session_id,
+                &sha256_hex,
+            );
+            let download_path =
+                file_transfer_handoff_download_path(&session.client_id, session.session_id);
+            if self
+                .active_server_artifact_matches(
+                    "file_transfer_handoff",
+                    &object_key,
+                    &sha256_hex,
+                    size_bytes,
+                )
+                .await?
+            {
+                set_handoff_evidence(
+                    session,
+                    true,
+                    HANDOFF_EVIDENCE_ARTIFACT_AVAILABLE,
+                    None,
+                    Some(object_key),
+                    Some(download_path),
+                );
+                continue;
+            }
+            let chunks = self
+                .list_file_transfer_download_handoff_chunks(&session.client_id, session.session_id)
+                .await?;
+            let evidence = self
+                .assess_handoff_chunk_evidence(&chunks, size_bytes)
+                .await?;
+            if evidence.available {
+                set_handoff_evidence(
+                    session,
+                    true,
+                    HANDOFF_EVIDENCE_RETAINED_OUTPUTS_AVAILABLE,
+                    None,
+                    Some(object_key),
+                    Some(download_path),
+                );
+            } else {
+                set_handoff_evidence(session, false, evidence.status, evidence.reason, None, None);
+            }
+        }
+        Ok(())
+    }
+
+    async fn assess_handoff_chunk_evidence(
+        &self,
+        chunks: &[FileTransferDownloadHandoffChunk],
+        expected_size_bytes: i64,
+    ) -> Result<HandoffChunkEvidence> {
+        if expected_size_bytes == 0 && chunks.is_empty() {
+            return Ok(HandoffChunkEvidence::available());
+        }
+        if chunks.is_empty() {
+            return Ok(HandoffChunkEvidence::unavailable(
+                HANDOFF_EVIDENCE_RETAINED_OUTPUTS_PRUNED,
+                "retained_chunk_outputs_pruned",
+            ));
+        }
+        let mut by_offset = BTreeMap::<i64, HandoffOffsetEvidence>::new();
+        for chunk in chunks {
+            if chunk.offset < 0 || chunk.size_bytes <= 0 {
+                return Ok(HandoffChunkEvidence::unavailable(
+                    HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE,
+                    "chunk_metadata_invalid",
+                ));
+            }
+            let output_available = self.handoff_chunk_outputs_available(chunk).await?;
+            match by_offset.get_mut(&chunk.offset) {
+                Some(existing) => {
+                    if existing.size_bytes != chunk.size_bytes
+                        || existing.sha256_hex != chunk.sha256_hex
+                    {
+                        return Ok(HandoffChunkEvidence::unavailable(
+                            HANDOFF_EVIDENCE_RETAINED_OUTPUTS_CONFLICT,
+                            "duplicate_offset_conflict",
+                        ));
+                    }
+                    existing.output_available |= output_available;
+                }
+                None => {
+                    by_offset.insert(
+                        chunk.offset,
+                        HandoffOffsetEvidence {
+                            size_bytes: chunk.size_bytes,
+                            sha256_hex: chunk.sha256_hex.clone(),
+                            output_available,
+                        },
+                    );
+                }
+            }
+        }
+        let mut next_offset = 0_i64;
+        for (offset, evidence) in by_offset {
+            if offset != next_offset {
+                return Ok(HandoffChunkEvidence::unavailable(
+                    HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE,
+                    "chunk_gap",
+                ));
+            }
+            if !evidence.output_available {
+                return Ok(HandoffChunkEvidence::unavailable(
+                    HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE,
+                    "chunk_output_unavailable",
+                ));
+            }
+            next_offset = next_offset.saturating_add(evidence.size_bytes);
+        }
+        if next_offset != expected_size_bytes {
+            return Ok(HandoffChunkEvidence::unavailable(
+                HANDOFF_EVIDENCE_RETAINED_OUTPUTS_INCOMPLETE,
+                "final_size_mismatch",
+            ));
+        }
+        Ok(HandoffChunkEvidence::available())
+    }
+
+    async fn handoff_chunk_outputs_available(
+        &self,
+        chunk: &FileTransferDownloadHandoffChunk,
+    ) -> Result<bool> {
+        if chunk.outputs.is_empty() {
+            return Ok(false);
+        }
+        let mut size_bytes = 0_i64;
+        for output in &chunk.outputs {
+            match output.storage.as_str() {
+                "inline" => {
+                    let Ok(data) = BASE64.decode(&output.data_base64) else {
+                        return Ok(false);
+                    };
+                    size_bytes = size_bytes.saturating_add(data.len() as i64);
+                }
+                "object_store" => {
+                    let Some(object_key) = output.artifact_object_key.as_deref() else {
+                        return Ok(false);
+                    };
+                    let Some(sha256_hex) = output.artifact_sha256_hex.as_deref() else {
+                        return Ok(false);
+                    };
+                    let Some(part_size) = output.artifact_size_bytes else {
+                        return Ok(false);
+                    };
+                    if !self
+                        .active_server_artifact_matches(
+                            "job_output",
+                            object_key,
+                            sha256_hex,
+                            part_size,
+                        )
+                        .await?
+                    {
+                        return Ok(false);
+                    }
+                    size_bytes = size_bytes.saturating_add(part_size);
+                }
+                _ => return Ok(false),
+            }
+            if size_bytes > chunk.size_bytes {
+                return Ok(false);
+            }
+        }
+        Ok(size_bytes == chunk.size_bytes)
     }
 
     pub(crate) async fn refresh_file_transfer_sessions_for_client(
@@ -399,6 +584,12 @@ fn file_transfer_session_from_row(
         last_seq: row.try_get("last_seq")?,
         observed_at: row.try_get("observed_at")?,
         handoff_available: row.try_get("handoff_available")?,
+        handoff_evidence_status: if row.try_get::<bool, _>("handoff_available")? {
+            HANDOFF_EVIDENCE_RETAINED_OUTPUTS_AVAILABLE.to_string()
+        } else {
+            HANDOFF_EVIDENCE_NOT_COMPLETED.to_string()
+        },
+        handoff_unavailable_reason: None,
         handoff_object_key: row.try_get("handoff_object_key")?,
         handoff_download_path: row.try_get("handoff_download_path")?,
     })
@@ -508,6 +699,8 @@ impl FileTransferAggregate {
             && self.sha256_hex.is_some();
         let handoff_object_key = self.handoff_object_key().filter(|_| handoff_available);
         let handoff_download_path = self.handoff_download_path().filter(|_| handoff_available);
+        let (handoff_evidence_status, handoff_unavailable_reason) =
+            initial_handoff_evidence(self.latest.direction, self.latest.status, handoff_available);
         FileTransferSessionView {
             session_id: self.latest.session_id,
             client_id: self.latest.client_id,
@@ -529,6 +722,8 @@ impl FileTransferAggregate {
             last_seq: self.latest.seq,
             observed_at: self.latest.created_at,
             handoff_available,
+            handoff_evidence_status,
+            handoff_unavailable_reason,
             handoff_object_key,
             handoff_download_path,
         }
@@ -786,6 +981,131 @@ fn percent_encode_path_segment(value: &str) -> String {
         }
     }
     encoded
+}
+
+#[derive(Clone, Debug)]
+struct HandoffChunkEvidence {
+    available: bool,
+    status: &'static str,
+    reason: Option<String>,
+}
+
+impl HandoffChunkEvidence {
+    fn available() -> Self {
+        Self {
+            available: true,
+            status: HANDOFF_EVIDENCE_RETAINED_OUTPUTS_AVAILABLE,
+            reason: None,
+        }
+    }
+
+    fn unavailable(status: &'static str, reason: &'static str) -> Self {
+        Self {
+            available: false,
+            status,
+            reason: Some(reason.to_string()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct HandoffOffsetEvidence {
+    size_bytes: i64,
+    sha256_hex: String,
+    output_available: bool,
+}
+
+fn reset_and_validate_handoff_session(
+    session: &mut FileTransferSessionView,
+) -> Option<(String, i64)> {
+    if session.direction != "download" {
+        set_handoff_evidence(
+            session,
+            false,
+            HANDOFF_EVIDENCE_NOT_APPLICABLE,
+            Some("upload_session".to_string()),
+            None,
+            None,
+        );
+        return None;
+    }
+    if session.status != "completed" {
+        set_handoff_evidence(
+            session,
+            false,
+            HANDOFF_EVIDENCE_NOT_COMPLETED,
+            Some("session_not_completed".to_string()),
+            None,
+            None,
+        );
+        return None;
+    }
+    let Some(size_bytes) = session.size_bytes else {
+        set_handoff_evidence(
+            session,
+            false,
+            HANDOFF_EVIDENCE_MISSING_FINAL_METADATA,
+            Some("missing_size_bytes".to_string()),
+            None,
+            None,
+        );
+        return None;
+    };
+    let Some(sha256_hex) = session.sha256_hex.clone() else {
+        set_handoff_evidence(
+            session,
+            false,
+            HANDOFF_EVIDENCE_MISSING_FINAL_METADATA,
+            Some("missing_sha256_hex".to_string()),
+            None,
+            None,
+        );
+        return None;
+    };
+    Some((sha256_hex, size_bytes))
+}
+
+fn initial_handoff_evidence(
+    direction: &str,
+    status: &str,
+    basic_available: bool,
+) -> (String, Option<String>) {
+    if basic_available {
+        (
+            HANDOFF_EVIDENCE_RETAINED_OUTPUTS_AVAILABLE.to_string(),
+            None,
+        )
+    } else if direction != "download" {
+        (
+            HANDOFF_EVIDENCE_NOT_APPLICABLE.to_string(),
+            Some("upload_session".to_string()),
+        )
+    } else if status != "completed" {
+        (
+            HANDOFF_EVIDENCE_NOT_COMPLETED.to_string(),
+            Some("session_not_completed".to_string()),
+        )
+    } else {
+        (
+            HANDOFF_EVIDENCE_MISSING_FINAL_METADATA.to_string(),
+            Some("missing_size_or_hash".to_string()),
+        )
+    }
+}
+
+fn set_handoff_evidence(
+    session: &mut FileTransferSessionView,
+    available: bool,
+    status: &str,
+    reason: Option<String>,
+    object_key: Option<String>,
+    download_path: Option<String>,
+) {
+    session.handoff_available = available;
+    session.handoff_evidence_status = status.to_string();
+    session.handoff_unavailable_reason = reason;
+    session.handoff_object_key = object_key;
+    session.handoff_download_path = download_path;
 }
 
 #[cfg(test)]

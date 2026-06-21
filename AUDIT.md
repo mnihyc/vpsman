@@ -49,8 +49,8 @@ of the same root cause.
 | AUD-033 | High | Fixed | Frontend/Topology/Adapters | Tunnel adapter promotion confirmation uses mutable adapter contract after review |
 | AUD-034 | Critical | Fixed | Frontend/Access/Keys | Gateway identity import and key revoke confirmations use mutable key lifecycle fields |
 | AUD-035 | Critical | Fixed | Frontend/Config | Single-VPS config apply confirmation uses mutable TOML payload after review |
-| AUD-036 | Medium/High | Confirmed | Frontend/Webhooks | Webhook queue dispatch confirmation can send a different event than reviewed |
-| AUD-037 | High | Confirmed | Frontend/Audit Retention | Audit history prune confirmation uses mutable prune domain and mode after review |
+| AUD-036 | Medium/High | Fixed | Frontend/Webhooks | Webhook queue dispatch confirmation can send a different event than reviewed |
+| AUD-037 | High | Fixed | Frontend/Audit Retention | Audit history prune confirmation uses mutable prune domain and mode after review |
 | AUD-038 | Medium/High | Fixed | Frontend/Webhook Retention | Webhook delivery cleanup deletes using live filters instead of the reviewed preview |
 | AUD-039 | High | Fixed | Frontend/Topology/Automation | Monitoring automation bulk action submits privileged config patches without review |
 | AUD-040 | High | Fixed | Frontend/Agent Updates | Update release registry records artifact hashes without a review confirmation |
@@ -118,7 +118,7 @@ of the same root cause.
 | AUD-102 | High | Fixed | API/Frontend/Suite Config/Privilege | Suite config privilege assertion is not bound to the TOML payload |
 | AUD-103 | Medium/High | Fixed | API/Auth/Deploy | Login throttling and auth history use proxy IP instead of the operator IP |
 | AUD-104 | Medium/High | Fixed | API/Auth/TOTP | Authenticated TOTP management is an unthrottled password and code oracle |
-| AUD-105 | Medium/High | Confirmed | API/File Transfers/Terminal/Retention | Derived session records can outlive the job-output evidence they require |
+| AUD-105 | Medium/High | Fixed | API/File Transfers/Terminal/Retention | Derived session records can outlive the job-output evidence they require |
 | AUD-106 | High | Fixed | API/Backups/Object Storage | Backup artifact metadata can be recorded without object-store verification |
 | AUD-107 | High | Fixed | API/Schedules/Client Lifecycle | Stale fixed targets can block schedule management and apply-now |
 | AUD-108 | High | Fixed | API/Jobs/State Machine | Terminal targets can leave the parent job active after a crash or side-effect error |
@@ -179,7 +179,7 @@ of the same root cause.
 | AUD-163 | High | Fixed | Agent/Custom Runtime Commands/Reliability | Custom JSON command timeouts can be bypassed after stdout closes |
 | AUD-164 | High | Fixed | Agent/Process Supervisor/Timeouts | Process supervisor stop and restart can mutate host state after command timeout |
 | AUD-165 | High | Fixed | Agent/Network Apply/Rollback | Managed network rollback rewrites files non-atomically and drops original modes |
-| AUD-166 | Medium/High | Confirmed | API/File Transfers/Reliability | Duplicate resumable download chunks can poison server-side handoff |
+| AUD-166 | Medium/High | Fixed | API/File Transfers/Reliability | Duplicate resumable download chunks can poison server-side handoff |
 | AUD-167 | Medium/High | Fixed | API/Backups/Migrations/Privilege | Migration-link creation bypasses request-bound privilege verification |
 | AUD-168 | Medium/High | Fixed | API/Backups/Resource Bounds | Chunked backup artifact commit rehydrates the whole artifact in API memory |
 | AUD-169 | Medium/High | Fixed | API/Backups/Restore Workflow | Agent backups can be valid above the API restore-preparation inline limit |
@@ -977,9 +977,9 @@ of the same root cause.
 - Notes: The process-queued action can remain queue-current-state if labeled
   that way, but event dispatch should freeze event kind/id and limit at review
   time or close on event edits.
-  Reconfirmed after commit `07ecbe7`: this is only partially addressed. A
-  prompt exists, but it is not a frozen dispatch snapshot; confirm still calls
-  `dispatch(false)` and reads mutable `eventKind`/`eventId`.
+- Resolution: Fixed by storing a queue snapshot with frozen event kind, event
+  ID, limit, preview hash, and confirmed dispatch request. Event input edits
+  clear the open review, and confirmation posts only the reviewed snapshot.
 
 ### AUD-037: Audit History Prune Confirmation Uses Mutable Prune Domain And Mode After Review
 
@@ -1003,9 +1003,9 @@ of the same root cause.
   metadata-only mode. If retention-day/limit are server-policy context rather
   than request fields, the UI should make that explicit and close the prompt
   when policy inputs change.
-  Reconfirmed after commit `07ecbe7`: this is only partially addressed. A
-  prompt exists, but confirm still calls `prune(false)` and submits live
-  retention state rather than a reviewed immutable request.
+- Resolution: Fixed by freezing the prune request plus preview hash in
+  `pruneSnapshot`; domain, retention, prune-limit, metadata-only, or export
+  edits clear the open review. Confirmation submits only the reviewed snapshot.
 
 ### AUD-038: Webhook Delivery Cleanup Deletes Using Live Filters Instead Of The Reviewed Preview
 
@@ -1884,7 +1884,7 @@ of the same root cause.
 ### AUD-064: Release-Registry Manual Update Shortcut Cannot Provide The Artifact URL It Requires
 
 - Severity: Medium/High
-- Status: Fixed
+- Status: Confirmed
 - Area: Frontend/Agent Updates
 - Context: Operators use Jobs > Updates to record external agent release
   metadata and then dispatch manual update jobs or update checks across selected
@@ -1916,6 +1916,9 @@ of the same root cause.
   should stay private; the frontend either needs to dispatch via manifest/check
   using the official GitHub version URL or retain an operator-safe external URL
   source for the shortcut without turning the API into public artifact hosting.
+  Audit sync on 2026-06-21 reconfirmed this remains real: the Manual update
+  shortcut still pre-fills only `updateSha256Hex`, while the dispatch form
+  still requires `updateArtifactUrl`.
 
 ### AUD-065: Delivery Queue Confirmations Are Not Bound To Previewed Rows
 
@@ -3699,6 +3702,17 @@ of the same root cause.
   truthful: either prune them with their evidence, mark replay/handoff history
   as unavailable, or preserve the minimum durable evidence needed for listed
   sessions.
+- Resolution: Fixed by making file-transfer handoff actionability an explicit
+  evidence state instead of a stale completion boolean. Completed download
+  sessions remain visible, but `handoff_available` is true only when an active
+  `file_transfer_handoff` artifact already exists or retained chunk outputs
+  are complete and contiguous. Otherwise the API returns
+  `handoff_evidence_status` plus `handoff_unavailable_reason` such as
+  `retained_outputs_pruned`, `retained_outputs_incomplete`, or
+  `retained_outputs_conflict`, and handoff creation fails with a matching
+  explicit error. Existing terminal replay already uses durable
+  `terminal_output_chunks` as its replay source, so job-output retention no
+  longer silently empties replay for retained terminal session records.
 
 ### AUD-106: Backup Artifact Metadata Can Be Recorded Without Object-Store Verification
 
@@ -4620,7 +4634,7 @@ of the same root cause.
 ### AUD-126: Data-Source Read Paths Persist Default Assignments For All Clients, Including Hidden Clients
 
 - Severity: Medium/High
-- Status: Fixed
+- Status: Confirmed
 - Area: API/Data Sources/State
 - Context: Data-source presets and assignments define generated agent hot-config
   behavior. Listing assignments or status should be a read-only inspection of
@@ -4655,7 +4669,10 @@ of the same root cause.
 - Notes: Default assignment materialization should either be explicit
   write-time/bootstrap work or be computed without mutating durable state.
   Hidden/deleted clients should be excluded from visible-fleet assignment counts
-  unless an audit/history view intentionally asks for them.
+  unless an audit/history view intentionally asks for them. Audit sync on
+  2026-06-21 reconfirmed this remains real: `list_data_source_assignments`
+  still calls `ensure_default_data_source_assignments`, and the Postgres insert
+  still selects all `clients` without a hidden-client filter.
 
 ### AUD-127: Controlled Gateway Shutdown Can Lose Queued RAM Forwarder Events
 
@@ -6409,7 +6426,7 @@ of the same root cause.
 ### AUD-166: Duplicate Resumable Download Chunks Can Poison Server-Side Handoff
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/File Transfers/Reliability
 - Context: Operators can use resumable file-transfer downloads to pull larger
   files from a VPS in chunks, then create a server-side handoff artifact from
@@ -6451,6 +6468,13 @@ of the same root cause.
   duplicate chunks, rejecting conflicting duplicates explicitly, and assembling
   exactly one contiguous byte range for each offset before marking a handoff
   available or creating the object-store artifact.
+- Resolution: Fixed by grouping retained download chunk jobs by offset before
+  handoff assembly. Duplicate offsets with different size/hash metadata are
+  rejected as `file_transfer_handoff_chunk_offset_conflict`; duplicate offsets
+  with the same metadata are treated as retry candidates, and the writer uses
+  the first byte-valid representative. Corrupt or missing retry candidates no
+  longer poison a later valid retry, while genuine conflicts disable handoff in
+  the session evidence state and fail create with an explicit conflict.
 
 ### AUD-167: Migration-Link Creation Bypasses Request-Bound Privilege Verification
 

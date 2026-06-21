@@ -165,6 +165,8 @@ const TARGET_SELECTION_USAGE: &str =
 const FILE_TRANSFERS_USAGE: &str = concat!(
     "usage: file-transfers [--limit <1-200>] [--client-id <id>] ",
     "[--session-id <uuid>]\n",
+    "       file-transfers reports handoff_evidence_status and ",
+    "handoff_unavailable_reason\n",
     "       file-transfer-handoff --client-id <id> --session-id <uuid> ",
     "[--output-file <file>] --confirmed\n",
     "       file-transfer-sources [--limit <1-200>]\n",

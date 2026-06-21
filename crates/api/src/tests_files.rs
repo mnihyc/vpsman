@@ -21,8 +21,9 @@ use crate::{
     repository_job_outputs::JobOutputPersistConfig,
     routes_file_transfers::{
         create_file_transfer_handoff, download_file_transfer_handoff,
-        download_file_transfer_source_artifact, list_file_transfer_source_artifacts,
-        upload_file_transfer_source_artifact,
+        download_file_transfer_source_artifact, list_file_transfer_sessions,
+        list_file_transfer_source_artifacts, upload_file_transfer_source_artifact,
+        FileTransferSessionQuery,
     },
     routes_job_history::{
         download_file_download_bundle, download_file_download_for_client,
@@ -295,6 +296,64 @@ fn download_chunk_outputs(
             done: true,
         },
     ]
+}
+
+fn download_chunk_outputs_with_reported_chunk(
+    job_id: uuid::Uuid,
+    session_id: uuid::Uuid,
+    path: &str,
+    offset: i64,
+    stdout_chunk: &[u8],
+    reported_chunk: &[u8],
+    file_hash: &str,
+    complete: bool,
+) -> Vec<CommandOutput> {
+    let next_offset = offset + reported_chunk.len() as i64;
+    vec![
+        CommandOutput {
+            job_id,
+            stream: OutputStream::Stdout,
+            data: stdout_chunk.to_vec(),
+            exit_code: None,
+            done: false,
+        },
+        CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "file_transfer_download_chunk",
+                "session_id": session_id,
+                "path": path,
+                "next_offset": next_offset,
+                "size_bytes": next_offset,
+                "extra": {
+                    "offset": offset,
+                    "chunk_size_bytes": reported_chunk.len(),
+                    "chunk_sha256_hex": payload_hash(reported_chunk),
+                    "complete": complete,
+                    "file_sha256_hex": file_hash,
+                }
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: true,
+        },
+    ]
+}
+
+fn download_chunk_status_only_output(
+    job_id: uuid::Uuid,
+    session_id: uuid::Uuid,
+    path: &str,
+    offset: i64,
+    chunk: &[u8],
+    file_hash: &str,
+    complete: bool,
+) -> Vec<CommandOutput> {
+    download_chunk_outputs(job_id, session_id, path, offset, chunk, file_hash, complete)
+        .into_iter()
+        .filter(|output| output.stream == OutputStream::Status)
+        .collect()
 }
 
 fn file_download_outputs(
@@ -863,8 +922,8 @@ async fn file_transfer_handoff_assembles_completed_download_from_retained_output
     assert!(handoff.object_key.starts_with("file-transfers/"));
 
     let response = download_file_transfer_handoff(
-        State(state),
-        headers,
+        State(state.clone()),
+        headers.clone(),
         Path((client_id.to_string(), session_id)),
     )
     .await
@@ -891,6 +950,327 @@ async fn file_transfer_handoff_assembles_completed_download_from_retained_output
     assert_eq!(body.as_ref(), all.as_slice());
     let stored = store.get(&handoff.object_key).await.unwrap();
     assert_eq!(stored, all);
+
+    memory
+        .job_outputs
+        .write()
+        .await
+        .retain(|output| output.stream == "status");
+    let Json(sessions) = list_file_transfer_sessions(
+        State(state.clone()),
+        headers.clone(),
+        Query(FileTransferSessionQuery {
+            limit: Some(10),
+            client_id: Some(client_id.to_string()),
+            session_id: Some(session_id),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert!(sessions[0].handoff_available);
+    assert_eq!(sessions[0].handoff_evidence_status, "artifact_available");
+
+    let Json(existing) = create_file_transfer_handoff(
+        State(state),
+        headers,
+        Path((client_id.to_string(), session_id)),
+        Json(FileTransferHandoffRequest { confirmed: true }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(existing.object_key, handoff.object_key);
+    assert_eq!(existing.chunk_count, 0);
+    assert_eq!(existing.source, "existing_handoff_artifact");
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
+async fn file_transfer_sessions_disable_handoff_when_chunk_evidence_was_pruned() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-transfer-handoff-pruned-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(store_root.clone()).unwrap(),
+    );
+    let headers = crate::test_auth_headers(&state).await;
+    let client_id = "edge-a";
+    let session_id = uuid::Uuid::new_v4();
+    let chunk = b"retained status only".to_vec();
+    let file_hash = payload_hash(&chunk);
+    let job_id = uuid::Uuid::parse_str("33333333-2222-4333-8444-000000000003").unwrap();
+
+    memory.jobs.write().await.push(transfer_job(job_id, "100"));
+    repo.record_job_outputs(
+        job_id,
+        client_id,
+        &download_chunk_status_only_output(
+            job_id,
+            session_id,
+            "/tmp/pruned.log",
+            0,
+            &chunk,
+            &file_hash,
+            true,
+        ),
+    )
+    .await
+    .unwrap();
+
+    let Json(sessions) = list_file_transfer_sessions(
+        State(state.clone()),
+        headers.clone(),
+        Query(FileTransferSessionQuery {
+            limit: Some(10),
+            client_id: Some(client_id.to_string()),
+            session_id: Some(session_id),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].status, "completed");
+    assert!(!sessions[0].handoff_available);
+    assert_eq!(
+        sessions[0].handoff_evidence_status,
+        "retained_outputs_pruned"
+    );
+    assert_eq!(
+        sessions[0].handoff_unavailable_reason.as_deref(),
+        Some("retained_chunk_outputs_pruned")
+    );
+
+    let error = create_file_transfer_handoff(
+        State(state),
+        headers,
+        Path((client_id.to_string(), session_id)),
+        Json(FileTransferHandoffRequest { confirmed: true }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "file_transfer_handoff_chunks_missing");
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
+async fn file_transfer_handoff_uses_valid_duplicate_chunk_representative() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-transfer-handoff-duplicate-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let store = BackupObjectStore::filesystem(store_root.clone()).unwrap();
+    let state = test_state_with_store(repo.clone(), store.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let client_id = "edge-a";
+    let session_id = uuid::Uuid::new_v4();
+    let first = b"hello ".to_vec();
+    let corrupt_first = b"HELLO ".to_vec();
+    let second = b"world".to_vec();
+    let mut all = first.clone();
+    all.extend_from_slice(&second);
+    let file_hash = payload_hash(&all);
+    let corrupt_job = uuid::Uuid::parse_str("44444444-2222-4333-8444-000000000004").unwrap();
+    let valid_retry_job = uuid::Uuid::parse_str("55555555-2222-4333-8444-000000000005").unwrap();
+    let second_job = uuid::Uuid::parse_str("66666666-2222-4333-8444-000000000006").unwrap();
+
+    memory.jobs.write().await.extend([
+        transfer_job(corrupt_job, "100"),
+        transfer_job(valid_retry_job, "101"),
+        transfer_job(second_job, "200"),
+    ]);
+    repo.record_job_outputs(
+        corrupt_job,
+        client_id,
+        &download_chunk_outputs_with_reported_chunk(
+            corrupt_job,
+            session_id,
+            "/tmp/app.log",
+            0,
+            &corrupt_first,
+            &first,
+            &file_hash,
+            false,
+        ),
+    )
+    .await
+    .unwrap();
+    repo.record_job_outputs(
+        valid_retry_job,
+        client_id,
+        &download_chunk_outputs(
+            valid_retry_job,
+            session_id,
+            "/tmp/app.log",
+            0,
+            &first,
+            &file_hash,
+            false,
+        ),
+    )
+    .await
+    .unwrap();
+    repo.record_job_outputs(
+        second_job,
+        client_id,
+        &download_chunk_outputs(
+            second_job,
+            session_id,
+            "/tmp/app.log",
+            first.len() as i64,
+            &second,
+            &file_hash,
+            true,
+        ),
+    )
+    .await
+    .unwrap();
+
+    let Json(sessions) = list_file_transfer_sessions(
+        State(state.clone()),
+        headers.clone(),
+        Query(FileTransferSessionQuery {
+            limit: Some(10),
+            client_id: Some(client_id.to_string()),
+            session_id: Some(session_id),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert!(sessions[0].handoff_available);
+    assert_eq!(
+        sessions[0].handoff_evidence_status,
+        "retained_outputs_available"
+    );
+
+    let Json(handoff) = create_file_transfer_handoff(
+        State(state),
+        headers,
+        Path((client_id.to_string(), session_id)),
+        Json(FileTransferHandoffRequest { confirmed: true }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(handoff.chunk_count, 2);
+    assert_eq!(store.get(&handoff.object_key).await.unwrap(), all);
+    let _ = tokio::fs::remove_dir_all(store_root).await;
+}
+
+#[tokio::test]
+async fn file_transfer_handoff_rejects_conflicting_duplicate_chunk_metadata() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let store_root = std::env::temp_dir().join(format!(
+        "vpsman-transfer-handoff-conflict-store-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let state = test_state_with_store(
+        repo.clone(),
+        BackupObjectStore::filesystem(store_root.clone()).unwrap(),
+    );
+    let headers = crate::test_auth_headers(&state).await;
+    let client_id = "edge-a";
+    let session_id = uuid::Uuid::new_v4();
+    let first = b"hello ".to_vec();
+    let conflicting_first = b"HELLO ".to_vec();
+    let second = b"world".to_vec();
+    let mut all = first.clone();
+    all.extend_from_slice(&second);
+    let file_hash = payload_hash(&all);
+    let first_job = uuid::Uuid::parse_str("77777777-2222-4333-8444-000000000007").unwrap();
+    let conflict_job = uuid::Uuid::parse_str("88888888-2222-4333-8444-000000000008").unwrap();
+    let second_job = uuid::Uuid::parse_str("99999999-2222-4333-8444-000000000009").unwrap();
+
+    memory.jobs.write().await.extend([
+        transfer_job(first_job, "100"),
+        transfer_job(conflict_job, "101"),
+        transfer_job(second_job, "200"),
+    ]);
+    repo.record_job_outputs(
+        first_job,
+        client_id,
+        &download_chunk_outputs(
+            first_job,
+            session_id,
+            "/tmp/app.log",
+            0,
+            &first,
+            &file_hash,
+            false,
+        ),
+    )
+    .await
+    .unwrap();
+    repo.record_job_outputs(
+        conflict_job,
+        client_id,
+        &download_chunk_outputs(
+            conflict_job,
+            session_id,
+            "/tmp/app.log",
+            0,
+            &conflicting_first,
+            &file_hash,
+            false,
+        ),
+    )
+    .await
+    .unwrap();
+    repo.record_job_outputs(
+        second_job,
+        client_id,
+        &download_chunk_outputs(
+            second_job,
+            session_id,
+            "/tmp/app.log",
+            first.len() as i64,
+            &second,
+            &file_hash,
+            true,
+        ),
+    )
+    .await
+    .unwrap();
+
+    let Json(sessions) = list_file_transfer_sessions(
+        State(state.clone()),
+        headers.clone(),
+        Query(FileTransferSessionQuery {
+            limit: Some(10),
+            client_id: Some(client_id.to_string()),
+            session_id: Some(session_id),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert!(!sessions[0].handoff_available);
+    assert_eq!(
+        sessions[0].handoff_evidence_status,
+        "retained_outputs_conflict"
+    );
+    assert_eq!(
+        sessions[0].handoff_unavailable_reason.as_deref(),
+        Some("duplicate_offset_conflict")
+    );
+
+    let error = create_file_transfer_handoff(
+        State(state),
+        headers,
+        Path((client_id.to_string(), session_id)),
+        Json(FileTransferHandoffRequest { confirmed: true }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "file_transfer_handoff_chunk_offset_conflict");
     let _ = tokio::fs::remove_dir_all(store_root).await;
 }
 

@@ -1482,8 +1482,10 @@
 }
 
 .fileTransferGrid {
-  grid-template-columns: 48px minmax(150px, 0.9fr) minmax(120px, 0.7fr) minmax(170px, 0.9fr) minmax(190px, 1.4fr) minmax(130px, 0.75fr) minmax(140px, 0.8fr) minmax(44px, auto);
-  min-width: max(100%, 1040px);
+  column-gap: 12px;
+  grid-template-columns: minmax(0, 0.52fr) minmax(0, 1.05fr) minmax(0, 0.9fr) minmax(0, 1.05fr) minmax(0, 1.45fr) minmax(0, 0.8fr) minmax(0, 0.85fr) minmax(0, 0.7fr);
+  min-width: 100%;
+  padding-inline: 14px;
 }
 
 .rowSelectCell {
@@ -1631,6 +1633,18 @@
 .sourceArtifactEmpty {
   grid-template-columns: auto 1fr;
   color: #5f6368;
+}
+
+@media (max-width: 920px) {
+  .fileTransferGrid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .fileTransferGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .transferProgressCell {
@@ -2247,9 +2261,4 @@
 .rowActionGroup button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
-}
-
-.fileTransferGrid {
-  grid-template-columns: minmax(68px, 0.35fr) minmax(150px, 0.85fr) minmax(120px, 0.7fr) minmax(170px, 0.9fr) minmax(190px, 1.25fr) minmax(130px, 0.75fr) minmax(140px, 0.8fr) minmax(72px, 0.35fr);
-  min-width: max(100%, 1040px);
 }

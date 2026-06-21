@@ -267,6 +267,13 @@ VPSs does not overwrite another file. Select Stream to file when the browser
 supports the File System Access API and the artifact should be written without
 retaining the whole file in browser memory.
 
+Completed download sessions remain visible after history retention, but
+handoff is actionable only when `handoff_evidence_status` is
+`artifact_available` or `retained_outputs_available`. If retained chunk output
+evidence was pruned, incomplete, or conflicting, the session stays in history
+with `handoff_available: false` and a `handoff_unavailable_reason` explaining
+why a new handoff cannot be created.
+
 Retain a local file as a verified server-side source artifact for later
 transfer reuse:
 

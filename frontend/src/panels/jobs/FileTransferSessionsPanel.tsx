@@ -24,6 +24,8 @@ type HandoffReviewItem = {
   key: string;
   path: string;
   sessionId: string;
+  evidenceReason: string | null;
+  evidenceStatus: string;
   sha256Hex: string | null;
   sizeBytes: number | null;
 };
@@ -79,6 +81,10 @@ export function FileTransferSessionsPanel({
     request: UploadFileTransferSourceArtifactRequest;
   } | null>(null);
   const handoffCandidates = transfers.filter(canCreateHandoff);
+  const completedDownloads = transfers.filter(
+    (transfer) => transfer.direction === "download" && transfer.status === "completed",
+  );
+  const unavailableCompletedDownloads = Math.max(0, completedDownloads.length - handoffCandidates.length);
   const selectedHandoffKeySet = new Set(selectedHandoffKeys);
   const selectedHandoffTransfers = handoffCandidates.filter((transfer) => selectedHandoffKeySet.has(transferKey(transfer)));
   const handoffBusy = handoffPendingKey !== null;
@@ -359,7 +365,8 @@ export function FileTransferSessionsPanel({
         <span className="historyPrimary">
           <strong>Download handoffs</strong>
           <small>
-            {handoffCandidates.length} completed downloads available, {selectedHandoffTransfers.length} selected
+            {handoffCandidates.length} handoff ready, {unavailableCompletedDownloads} unavailable,{" "}
+            {selectedHandoffTransfers.length} selected
           </small>
         </span>
         <span className="handoffBulkActions">
@@ -379,6 +386,11 @@ export function FileTransferSessionsPanel({
             className="secondaryAction compactAction"
             disabled={handoffBusy || handoffCandidates.length === 0}
             onClick={() => setAllHandoffSelection(true)}
+            title={
+              handoffCandidates.length === 0
+                ? "No completed downloads currently have retained handoff evidence."
+                : "Select every handoff-ready completed download."
+            }
             type="button"
           >
             Select all
@@ -395,6 +407,11 @@ export function FileTransferSessionsPanel({
             className="primaryAction compactAction"
             disabled={handoffBusy || selectedHandoffTransfers.length === 0}
             onClick={() => reviewSelectedHandoffs()}
+            title={
+              selectedHandoffTransfers.length === 0
+                ? "Select one or more handoff-ready downloads first."
+                : "Review selected handoff downloads before saving."
+            }
             type="button"
           >
             <Download size={14} />
@@ -413,6 +430,11 @@ export function FileTransferSessionsPanel({
             label: "Expected hashes",
             title: handoffSnapshot ? handoffFullHashSummary(handoffSnapshot.transfers) : undefined,
             value: handoffSnapshot ? handoffHashSummary(handoffSnapshot.transfers) : "-",
+          },
+          {
+            label: "Evidence",
+            title: handoffSnapshot ? handoffFullEvidenceSummary(handoffSnapshot.transfers) : undefined,
+            value: handoffSnapshot ? handoffEvidenceSummary(handoffSnapshot.transfers) : "-",
           },
         ]}
         onCancel={() => setHandoffSnapshot(null)}
@@ -457,6 +479,8 @@ export function FileTransferSessionsPanel({
             {transferRows.map((transfer) => {
               const key = transferKey(transfer);
               const selectable = canCreateHandoff(transfer);
+              const evidenceLabel = handoffEvidenceLabel(transfer);
+              const evidenceTitle = handoffEvidenceTitle(transfer);
               return (
                 <div className="historyRow fileTransferGrid" key={key}>
                   <span className="rowSelectCell">
@@ -469,7 +493,7 @@ export function FileTransferSessionsPanel({
                         type="checkbox"
                       />
                     ) : (
-                      <small title="Handoff is available only after a completed inbound transfer">No handoff</small>
+                      <small title={evidenceTitle}>{evidenceLabel}</small>
                     )}
                   </span>
                   <span className="historyPrimary">
@@ -478,7 +502,9 @@ export function FileTransferSessionsPanel({
                   </span>
                   <span className="historyPrimary">
                     <span className={`status ${fileTransferSessionStatusBadgeClass(transfer.status)}`}>{transfer.status}</span>
-                    <small>{transfer.resumed ? "resumed" : transfer.last_event}</small>
+                    <small title={transfer.direction === "download" ? evidenceTitle : transfer.last_event}>
+                      {transfer.direction === "download" ? evidenceLabel : transfer.resumed ? "resumed" : transfer.last_event}
+                    </small>
                   </span>
                   <span className="transferProgressCell">
                     <span>{formatTransferProgress(transfer)}</span>
@@ -502,13 +528,13 @@ export function FileTransferSessionsPanel({
                         className="iconButton"
                         disabled={handoffPendingKey === key || handoffPendingKey === "bulk"}
                         onClick={() => reviewHandoff(transfer)}
-                        title="Review server-side transfer handoff download"
+                        title={handoffReadyTitle(transfer)}
                         type="button"
                       >
                         <Download size={14} />
                       </button>
                     ) : (
-                      <small>{transfer.handoff_object_key ? "stored" : "no handoff"}</small>
+                      <small title={evidenceTitle}>{evidenceLabel}</small>
                     )}
                   </span>
                 </div>
@@ -540,6 +566,8 @@ function handoffReviewItem(
     key: transferKey(transfer),
     path: transfer.path,
     sessionId: transfer.session_id,
+    evidenceReason: transfer.handoff_unavailable_reason,
+    evidenceStatus: transfer.handoff_evidence_status,
     sha256Hex: transfer.sha256_hex,
     sizeBytes: transfer.size_bytes,
   };
@@ -565,6 +593,76 @@ function handoffHashSummary(transfers: HandoffReviewItem[]): string {
 function handoffFullHashSummary(transfers: HandoffReviewItem[]): string {
   const hashes = transfers.map((transfer) => transfer.sha256Hex).filter((hash): hash is string => Boolean(hash));
   return hashes.length > 0 ? hashes.join(", ") : "not reported";
+}
+
+function handoffEvidenceSummary(transfers: HandoffReviewItem[]): string {
+  const statuses = new Map<string, number>();
+  for (const transfer of transfers) {
+    statuses.set(transfer.evidenceStatus, (statuses.get(transfer.evidenceStatus) ?? 0) + 1);
+  }
+  return Array.from(statuses.entries())
+    .map(([status, count]) => `${count} ${handoffEvidenceStatusLabel(status)}`)
+    .join(", ");
+}
+
+function handoffFullEvidenceSummary(transfers: HandoffReviewItem[]): string {
+  return transfers
+    .map((transfer) => {
+      const reason = transfer.evidenceReason ? ` (${transfer.evidenceReason.replace(/_/g, " ")})` : "";
+      return `${transfer.clientLabel}/${shortId(transfer.sessionId)}: ${handoffEvidenceStatusLabel(transfer.evidenceStatus)}${reason}`;
+    })
+    .join(", ");
+}
+
+function handoffReadyTitle(transfer: FileTransferSessionRecord): string {
+  if (transfer.handoff_evidence_status === "artifact_available") {
+    return "Review handoff download from the retained server artifact.";
+  }
+  return "Review handoff download rebuilt from retained chunk outputs.";
+}
+
+function handoffEvidenceLabel(transfer: FileTransferSessionRecord): string {
+  return handoffEvidenceStatusLabel(transfer.handoff_evidence_status);
+}
+
+function handoffEvidenceStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    artifact_available: "Stored artifact",
+    retained_outputs_available: "Retained outputs",
+    retained_outputs_pruned: "Evidence pruned",
+    retained_outputs_incomplete: "Incomplete evidence",
+    retained_outputs_conflict: "Conflicting chunks",
+    missing_final_metadata: "Missing metadata",
+    not_completed: "Not completed",
+    not_applicable: "No handoff",
+  };
+  return labels[status] ?? status.replace(/_/g, " ");
+}
+
+function handoffEvidenceTitle(transfer: FileTransferSessionRecord): string {
+  const reason = transfer.handoff_unavailable_reason
+    ? ` Reason: ${transfer.handoff_unavailable_reason.replace(/_/g, " ")}.`
+    : "";
+  switch (transfer.handoff_evidence_status) {
+    case "artifact_available":
+      return "A retained server-side handoff artifact exists for this completed download.";
+    case "retained_outputs_available":
+      return "Retained chunk output evidence is complete and can rebuild a server-side handoff artifact.";
+    case "retained_outputs_pruned":
+      return `The completed download remains visible, but the retained chunk outputs needed for a new handoff were pruned.${reason}`;
+    case "retained_outputs_incomplete":
+      return `The completed download remains visible, but retained chunk output evidence is incomplete.${reason}`;
+    case "retained_outputs_conflict":
+      return `The completed download remains visible, but duplicate chunk metadata conflicts and handoff is disabled.${reason}`;
+    case "missing_final_metadata":
+      return `The completed download is missing final size or SHA-256 metadata required for verified handoff.${reason}`;
+    case "not_completed":
+      return "Handoff is available after the download session completes.";
+    case "not_applicable":
+      return "Upload sessions do not create download handoff artifacts.";
+    default:
+      return `${handoffEvidenceStatusLabel(transfer.handoff_evidence_status)}.${reason}`;
+  }
 }
 
 async function sha256HexForBytes(bytes: Uint8Array): Promise<string> {

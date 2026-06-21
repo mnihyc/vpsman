@@ -18,6 +18,7 @@ test("creates server-side handoff for a completed download session", async ({ pa
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
   await expect(panel.getByText("core-fra-02 (ra02) / 51515151")).toBeVisible();
+  await expect(panel.getByText("Retained outputs").first()).toBeVisible();
   await activate(panel.getByRole("button", { name: "Create transfer handoff session 51515151" }));
   await expect(panel.getByLabel("Confirm transfer handoff download")).toBeVisible();
   await activate(
@@ -43,9 +44,9 @@ test("downloads selected handoffs for multiple completed download sessions", asy
   await openConsoleSubpage(page, "Jobs", "Transfer history");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
-  await expect(panel.getByText("2 completed downloads available, 0 selected")).toBeVisible();
+  await expect(panel.getByText("2 handoff ready, 0 unavailable, 0 selected")).toBeVisible();
   await activate(panel.getByRole("button", { name: "Select all" }));
-  await expect(panel.getByText("2 completed downloads available, 2 selected")).toBeVisible();
+  await expect(panel.getByText("2 handoff ready, 0 unavailable, 2 selected")).toBeVisible();
   await activate(panel.getByRole("button", { name: "Review selected handoffs" }));
   await expect(panel.getByLabel("Confirm transfer handoff download")).toBeVisible();
   await activate(

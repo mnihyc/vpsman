@@ -19,23 +19,71 @@ use crate::{
 
 impl Repository {
     pub(crate) async fn register_server_artifact(&self, artifact: NewServerArtifact) -> Result<()> {
-        let Self::Postgres(pool) = self else {
-            return Ok(());
-        };
-        let mut tx = pool.begin().await?;
-        insert_server_artifact_in_tx(&mut tx, &artifact, "active").await?;
-        tx.commit().await?;
-        Ok(())
+        match self {
+            Self::Memory(memory) => upsert_memory_server_artifact(memory, artifact, "active").await,
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                insert_server_artifact_in_tx(&mut tx, &artifact, "active").await?;
+                tx.commit().await?;
+                Ok(())
+            }
+        }
     }
 
     pub(crate) async fn reserve_server_artifact(&self, artifact: NewServerArtifact) -> Result<()> {
-        let Self::Postgres(pool) = self else {
-            return Ok(());
-        };
-        let mut tx = pool.begin().await?;
-        insert_server_artifact_in_tx(&mut tx, &artifact, "creating").await?;
-        tx.commit().await?;
-        Ok(())
+        match self {
+            Self::Memory(memory) => {
+                upsert_memory_server_artifact(memory, artifact, "creating").await
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                insert_server_artifact_in_tx(&mut tx, &artifact, "creating").await?;
+                tx.commit().await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) async fn active_server_artifact_matches(
+        &self,
+        domain: &str,
+        object_key: &str,
+        sha256_hex: &str,
+        size_bytes: i64,
+    ) -> Result<bool> {
+        match self {
+            Self::Memory(memory) => {
+                Ok(memory.server_artifacts.read().await.iter().any(|artifact| {
+                    artifact.domain == domain
+                        && artifact.object_key == object_key
+                        && artifact.sha256_hex == sha256_hex
+                        && artifact.size_bytes == size_bytes
+                        && artifact.status == "active"
+                }))
+            }
+            Self::Postgres(pool) => {
+                let exists: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM server_artifacts
+                        WHERE domain = $1
+                          AND object_key = $2
+                          AND sha256_hex = $3
+                          AND size_bytes = $4
+                          AND status = 'active'
+                    )
+                    "#,
+                )
+                .bind(domain)
+                .bind(object_key)
+                .bind(sha256_hex)
+                .bind(size_bytes)
+                .fetch_one(pool)
+                .await?;
+                Ok(exists)
+            }
+        }
     }
 
     pub(crate) async fn upsert_server_artifact_in_tx(
@@ -54,19 +102,25 @@ impl Repository {
     }
 
     pub(crate) async fn discard_server_artifact_reservation(&self, object_key: &str) -> Result<()> {
-        let Self::Postgres(pool) = self else {
-            return Ok(());
-        };
-        sqlx::query(
-            r#"
-            DELETE FROM server_artifacts
-            WHERE object_key = $1
-              AND status = 'creating'
-            "#,
-        )
-        .bind(object_key)
-        .execute(pool)
-        .await?;
+        match self {
+            Self::Memory(memory) => {
+                memory.server_artifacts.write().await.retain(|artifact| {
+                    !(artifact.object_key == object_key && artifact.status == "creating")
+                });
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    DELETE FROM server_artifacts
+                    WHERE object_key = $1
+                      AND status = 'creating'
+                    "#,
+                )
+                .bind(object_key)
+                .execute(pool)
+                .await?;
+            }
+        }
         Ok(())
     }
 
@@ -75,10 +129,31 @@ impl Repository {
         object_key: &str,
         error: &str,
     ) -> Result<()> {
-        let Self::Postgres(pool) = self else {
-            return Ok(());
-        };
-        mark_server_artifact_delete_failed_in_pool(pool, object_key, error).await
+        match self {
+            Self::Memory(memory) => {
+                if let Some(artifact) =
+                    memory
+                        .server_artifacts
+                        .write()
+                        .await
+                        .iter_mut()
+                        .find(|artifact| {
+                            artifact.object_key == object_key
+                                && matches!(
+                                    artifact.status.as_str(),
+                                    "creating" | "active" | "deleting" | "delete_failed"
+                                )
+                        })
+                {
+                    artifact.status = "delete_failed".to_string();
+                }
+                let _ = error;
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                mark_server_artifact_delete_failed_in_pool(pool, object_key, error).await
+            }
+        }
     }
 
     pub(crate) async fn mark_server_artifact_delete_failed_in_pool(
@@ -379,7 +454,22 @@ impl Repository {
         domains: &[String],
     ) -> Result<Vec<ServerArtifactCleanupCandidate>> {
         match self {
-            Self::Memory(_) => Ok(Vec::new()),
+            Self::Memory(memory) => {
+                let internal_domains = artifact_cleanup_internal_domains(domains);
+                Ok(memory
+                    .server_artifacts
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|artifact| {
+                        matches!(
+                            artifact.status.as_str(),
+                            "creating" | "active" | "deleting" | "delete_failed"
+                        ) && internal_domains.contains(&artifact.domain)
+                    })
+                    .cloned()
+                    .collect())
+            }
             Self::Postgres(pool) => {
                 let internal_domains = artifact_cleanup_internal_domains(domains);
                 let rows = sqlx::query(
@@ -633,6 +723,49 @@ fn artifact_cleanup_internal_domains(domains: &[String]) -> Vec<String> {
         }
     }
     internal
+}
+
+async fn upsert_memory_server_artifact(
+    memory: &crate::repository::MemoryState,
+    artifact: NewServerArtifact,
+    status: &str,
+) -> Result<()> {
+    let mut artifacts = memory.server_artifacts.write().await;
+    if let Some(existing) = artifacts
+        .iter_mut()
+        .find(|existing| existing.object_key == artifact.object_key)
+    {
+        ensure!(
+            existing.domain == artifact.domain
+                && existing.sha256_hex == artifact.sha256_hex
+                && existing.size_bytes == artifact.size_bytes
+                && existing.job_id == artifact.job_id
+                && existing.client_id == artifact.client_id
+                && existing.stream == artifact.stream
+                && existing.seq == artifact.seq
+                && matches!(
+                    existing.status.as_str(),
+                    "creating" | "active" | "delete_failed"
+                ),
+            "server_artifact_object_key_conflict"
+        );
+        existing.status = status.to_string();
+        return Ok(());
+    }
+    artifacts.push(ServerArtifactCleanupCandidate {
+        id: Uuid::new_v4(),
+        domain: artifact.domain,
+        object_key: artifact.object_key,
+        sha256_hex: artifact.sha256_hex,
+        size_bytes: artifact.size_bytes,
+        status: status.to_string(),
+        job_id: artifact.job_id,
+        client_id: artifact.client_id,
+        stream: artifact.stream,
+        seq: artifact.seq,
+        created_at: unix_now().to_string(),
+    });
+    Ok(())
 }
 
 fn server_artifact_candidate_from_row(

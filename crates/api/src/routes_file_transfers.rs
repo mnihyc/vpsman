@@ -71,12 +71,15 @@ pub(crate) async fn list_file_transfer_sessions(
             return Err(ApiError::bad_request("file_transfer_client_id_too_long"));
         }
     }
-    Ok(Json(
-        state
-            .repo
-            .list_file_transfer_sessions(limit_or_default(query.limit), client_id, query.session_id)
-            .await?,
-    ))
+    let mut sessions = state
+        .repo
+        .list_file_transfer_sessions(limit_or_default(query.limit), client_id, query.session_id)
+        .await?;
+    state
+        .repo
+        .annotate_file_transfer_handoff_evidence(&mut sessions)
+        .await?;
+    Ok(Json(sessions))
 }
 
 pub(crate) async fn list_file_transfer_source_artifacts(
@@ -240,6 +243,35 @@ pub(crate) async fn create_file_transfer_handoff(
         .size_bytes
         .ok_or_else(|| ApiError::conflict("file_transfer_handoff_size_missing"))?;
     let object_key = file_transfer_handoff_object_key(&client_id, session_id, sha256_hex);
+    if state
+        .repo
+        .active_server_artifact_matches(
+            "file_transfer_handoff",
+            &object_key,
+            sha256_hex,
+            size_bytes,
+        )
+        .await?
+    {
+        return Ok(Json(FileTransferHandoffView {
+            client_id,
+            session_id,
+            object_key,
+            sha256_hex: sha256_hex.to_string(),
+            size_bytes,
+            chunk_count: 0,
+            source: "existing_handoff_artifact".to_string(),
+            download_path: file_transfer_handoff_download_path(
+                &session.client_id,
+                session.session_id,
+            ),
+        }));
+    }
+    if !session.handoff_available {
+        return Err(ApiError::conflict(file_transfer_handoff_unavailable_code(
+            &session,
+        )));
+    }
     let handoff_artifact = NewServerArtifact {
         domain: "file_transfer_handoff".to_string(),
         object_key: object_key.clone(),
@@ -508,9 +540,13 @@ async fn completed_download_session(
     client_id: &str,
     session_id: Uuid,
 ) -> Result<FileTransferSessionView, ApiError> {
-    let sessions = state
+    let mut sessions = state
         .repo
         .list_file_transfer_sessions(1, Some(client_id), Some(session_id))
+        .await?;
+    state
+        .repo
+        .annotate_file_transfer_handoff_evidence(&mut sessions)
         .await?;
     let session = sessions
         .into_iter()
@@ -529,6 +565,22 @@ async fn completed_download_session(
     Ok(session)
 }
 
+fn file_transfer_handoff_unavailable_code(session: &FileTransferSessionView) -> &'static str {
+    match (
+        session.handoff_evidence_status.as_str(),
+        session.handoff_unavailable_reason.as_deref(),
+    ) {
+        ("retained_outputs_conflict", _) | (_, Some("duplicate_offset_conflict")) => {
+            "file_transfer_handoff_chunk_offset_conflict"
+        }
+        ("retained_outputs_pruned", _) | (_, Some("retained_chunk_outputs_pruned")) => {
+            "file_transfer_handoff_chunks_missing"
+        }
+        ("retained_outputs_incomplete", _) => "file_transfer_handoff_evidence_incomplete",
+        _ => "file_transfer_handoff_evidence_unavailable",
+    }
+}
+
 async fn write_handoff_temp_file(
     state: &AppState,
     client_id: &str,
@@ -541,10 +593,10 @@ async fn write_handoff_temp_file(
         .repo
         .list_file_transfer_download_handoff_chunks(client_id, session_id)
         .await?;
-    if chunks.is_empty() {
+    if chunks.is_empty() && expected_size_bytes != 0 {
         return Err(ApiError::conflict("file_transfer_handoff_chunks_missing"));
     }
-    let chunks = deduplicate_handoff_chunks(chunks)?;
+    let chunks = select_valid_handoff_chunks(state, chunks).await?;
     let mut file = create_private_file_new_async(temp_path)
         .await
         .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
@@ -554,21 +606,10 @@ async fn write_handoff_temp_file(
         if chunk.offset != next_offset {
             return Err(ApiError::conflict("file_transfer_handoff_chunk_gap"));
         }
-        let bytes = load_handoff_chunk_bytes(state, &chunk.outputs, chunk.size_bytes).await?;
-        if bytes.len() as i64 != chunk.size_bytes {
-            return Err(ApiError::conflict(
-                "file_transfer_handoff_chunk_size_mismatch",
-            ));
-        }
-        if hex::encode(Sha256::digest(&bytes)) != chunk.sha256_hex {
-            return Err(ApiError::conflict(
-                "file_transfer_handoff_chunk_hash_mismatch",
-            ));
-        }
-        file.write_all(&bytes)
+        file.write_all(&chunk.bytes)
             .await
             .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
-        hasher.update(&bytes);
+        hasher.update(&chunk.bytes);
         next_offset = next_offset.saturating_add(chunk.size_bytes);
     }
     file.sync_data()
@@ -584,29 +625,75 @@ async fn write_handoff_temp_file(
     Ok(chunks.len())
 }
 
-fn deduplicate_handoff_chunks(
+struct SelectedHandoffChunk {
+    offset: i64,
+    size_bytes: i64,
+    bytes: Vec<u8>,
+}
+
+async fn select_valid_handoff_chunks(
+    state: &AppState,
     chunks: Vec<crate::repository_file_transfers::FileTransferDownloadHandoffChunk>,
-) -> Result<Vec<crate::repository_file_transfers::FileTransferDownloadHandoffChunk>, ApiError> {
+) -> Result<Vec<SelectedHandoffChunk>, ApiError> {
     let mut by_offset: std::collections::BTreeMap<
         i64,
-        crate::repository_file_transfers::FileTransferDownloadHandoffChunk,
+        Vec<crate::repository_file_transfers::FileTransferDownloadHandoffChunk>,
     > = std::collections::BTreeMap::new();
     for chunk in chunks {
-        match by_offset.get(&chunk.offset) {
-            Some(existing)
-                if existing.size_bytes == chunk.size_bytes
-                    && existing.sha256_hex == chunk.sha256_hex => {}
-            Some(_) => {
-                return Err(ApiError::conflict(
-                    "file_transfer_handoff_chunk_offset_conflict",
-                ))
-            }
-            None => {
-                by_offset.insert(chunk.offset, chunk);
+        by_offset.entry(chunk.offset).or_default().push(chunk);
+    }
+    let mut selected = Vec::new();
+    for (_offset, candidates) in by_offset {
+        let first = candidates
+            .first()
+            .ok_or_else(|| ApiError::conflict("file_transfer_handoff_chunk_unavailable"))?;
+        if candidates.iter().any(|candidate| {
+            candidate.size_bytes != first.size_bytes || candidate.sha256_hex != first.sha256_hex
+        }) {
+            return Err(ApiError::conflict(
+                "file_transfer_handoff_chunk_offset_conflict",
+            ));
+        }
+        let mut last_error = None;
+        for candidate in candidates {
+            match validate_handoff_chunk_candidate(state, candidate).await {
+                Ok(chunk) => {
+                    selected.push(chunk);
+                    last_error = None;
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                }
             }
         }
+        if let Some(error) = last_error {
+            return Err(error);
+        }
     }
-    Ok(by_offset.into_values().collect())
+    Ok(selected)
+}
+
+async fn validate_handoff_chunk_candidate(
+    state: &AppState,
+    chunk: crate::repository_file_transfers::FileTransferDownloadHandoffChunk,
+) -> Result<SelectedHandoffChunk, ApiError> {
+    let bytes = load_handoff_chunk_bytes(state, &chunk.outputs, chunk.size_bytes).await?;
+    if bytes.len() as i64 != chunk.size_bytes {
+        return Err(ApiError::conflict(
+            "file_transfer_handoff_chunk_size_mismatch",
+        ));
+    }
+    if hex::encode(Sha256::digest(&bytes)) != chunk.sha256_hex {
+        return Err(ApiError::conflict(
+            "file_transfer_handoff_chunk_hash_mismatch",
+        ));
+    }
+    Ok(SelectedHandoffChunk {
+        offset: chunk.offset,
+        size_bytes: chunk.size_bytes,
+        bytes,
+    })
 }
 
 async fn load_handoff_chunk_bytes(

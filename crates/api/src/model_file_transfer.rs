@@ -23,6 +23,8 @@ pub(crate) struct FileTransferSessionView {
     pub(crate) last_seq: i32,
     pub(crate) observed_at: String,
     pub(crate) handoff_available: bool,
+    pub(crate) handoff_evidence_status: String,
+    pub(crate) handoff_unavailable_reason: Option<String>,
     pub(crate) handoff_object_key: Option<String>,
     pub(crate) handoff_download_path: Option<String>,
 }

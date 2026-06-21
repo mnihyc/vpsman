@@ -26,6 +26,8 @@ export type FileTransferSessionRecord = {
   last_seq: number;
   observed_at: string;
   handoff_available: boolean;
+  handoff_evidence_status: string;
+  handoff_unavailable_reason: string | null;
   handoff_object_key: string | null;
   handoff_download_path: string | null;
 };
