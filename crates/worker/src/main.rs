@@ -182,7 +182,7 @@ struct Args {
     #[arg(
         long,
         env = "VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS",
-        default_value_t = 30
+        default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS
     )]
     schedule_command_timeout_secs: u64,
     #[arg(
@@ -2415,19 +2415,10 @@ fn network_speed_test_peer_schedule_skip(client_id: String) -> ScheduleTargetSki
 fn effective_schedule_timeout_secs(
     configured_timeout_secs: u64,
     max_command_timeout_secs: u64,
-    targets: &[String],
-    capabilities: &[TargetCapability],
+    _targets: &[String],
+    _capabilities: &[TargetCapability],
 ) -> u64 {
-    let configured_timeout_secs = configured_timeout_secs.clamp(1, max_command_timeout_secs);
-    targets
-        .iter()
-        .filter_map(|client_id| {
-            capabilities
-                .iter()
-                .find(|capability| capability.client_id == *client_id)
-                .map(|capability| capability.capabilities.command_timeout_secs.max(1))
-        })
-        .fold(configured_timeout_secs, u64::min)
+    configured_timeout_secs.clamp(1, max_command_timeout_secs)
 }
 
 async fn scheduled_agent_update_release_policy_allows(
@@ -3087,7 +3078,7 @@ mod schedule_tests {
     }
 
     #[test]
-    fn schedule_timeout_clamps_to_target_capabilities() {
+    fn schedule_timeout_uses_configured_value_without_agent_cap_clamp() {
         let targets = vec!["edge-a".to_string(), "edge-b".to_string()];
         let capabilities = vec![
             TargetCapability {
@@ -3113,7 +3104,7 @@ mod schedule_tests {
                 &targets,
                 &capabilities
             ),
-            20
+            90
         );
         assert_eq!(
             effective_schedule_timeout_secs(

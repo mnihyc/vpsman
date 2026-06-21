@@ -7,7 +7,7 @@ use vpsman_common::{
     backend_config_signature_payload, payload_hash, plan_tunnel,
     render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, BandwidthTier,
     JobCommand, OspfCostPolicy, TunnelAddressFamily, TunnelAddressPair, TunnelConfigBackend,
-    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
+    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput, DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
     NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
     NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
     NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
@@ -424,7 +424,7 @@ pub(crate) struct TunnelProbeCommand {
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
     pub(crate) timeout_secs: u64,
 }
 
@@ -450,7 +450,7 @@ pub(crate) struct TunnelSpeedTestCommand {
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,

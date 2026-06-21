@@ -3,6 +3,8 @@ import { parseCommandArgv } from "../privilege";
 import type { JobOperation } from "../types";
 export {
   clampCommandTimeoutSecs,
+  effectiveCommandTimeoutSecs,
+  parseOptionalCommandTimeoutSecs,
   DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
   MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
 } from "../commandTimeout";

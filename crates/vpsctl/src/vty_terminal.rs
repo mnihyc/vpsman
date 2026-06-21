@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use uuid::Uuid;
 use vpsman_common::{
     default_terminal_flow_window_bytes, default_terminal_idle_timeout_secs, payload_hash,
-    JobCommand, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+    JobCommand, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -93,7 +93,7 @@ fn parse_terminal_open(args: &[&str]) -> Result<VtyTerminalRequest> {
     let mut replay_from_seq = None;
     let mut idle_timeout_secs = default_terminal_idle_timeout_secs();
     let mut flow_window_bytes = default_terminal_flow_window_bytes();
-    let mut timeout_secs = 30;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut targets = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -167,7 +167,7 @@ fn parse_terminal_input(args: &[&str]) -> Result<VtyTerminalRequest> {
     let mut client_id = None;
     let mut session_id = None;
     let mut data_base64 = None;
-    let mut timeout_secs = 30;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut confirmed = false;
     let mut index = 0;
     while index < args.len() {
@@ -229,7 +229,7 @@ fn parse_terminal_input(args: &[&str]) -> Result<VtyTerminalRequest> {
 fn parse_terminal_poll(args: &[&str]) -> Result<VtyTerminalRequest> {
     let mut session_id = None;
     let mut replay_from_seq = None;
-    let mut timeout_secs = 30;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut targets = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -266,7 +266,7 @@ fn parse_terminal_resize(args: &[&str]) -> Result<VtyTerminalRequest> {
     let mut session_id = None;
     let mut cols = None;
     let mut rows = None;
-    let mut timeout_secs = 30;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut targets = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -307,7 +307,7 @@ fn parse_terminal_resize(args: &[&str]) -> Result<VtyTerminalRequest> {
 fn parse_terminal_close(args: &[&str]) -> Result<VtyTerminalRequest> {
     let mut session_id = None;
     let mut reason = None;
-    let mut timeout_secs = 30;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut targets = Vec::new();
     let mut index = 0;
     while index < args.len() {

@@ -5,7 +5,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 use vpsman_common::{
     validate_agent_config_shape, validate_incremental_config_patch_section, AgentConfig,
-    JobCommand, DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH,
+    JobCommand, DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH, DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
     HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE, MAX_AGENT_HOT_CONFIG_BYTES,
     MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
 };
@@ -89,7 +89,7 @@ struct VtyTarget {
 
 pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigRequest> {
     let mut config_file = None;
-    let mut timeout_secs = 30_u64;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut privilege_ttl_secs = 300_u64;
     let mut force_unprivileged = false;
     let mut target_tokens = Vec::new();
@@ -159,7 +159,7 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
     tokens: &[&str],
 ) -> Result<VtyDataSourceHotConfigApplyRequest> {
     let mut client_id = None;
-    let mut timeout_secs = 30_u64;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut privilege_ttl_secs = 300_u64;
     let mut confirmed = false;
     let mut force_unprivileged = false;

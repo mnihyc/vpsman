@@ -9,7 +9,7 @@ use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::{
     job_command_safety, job_command_safety_by_operation_type, payload_hash, CommandOutput,
-    JobCommand, JobCommandSafety, JOB_COMMAND_SAFETY_EXCLUSIVE,
+    JobCommand, JobCommandSafety, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, JOB_COMMAND_SAFETY_EXCLUSIVE,
 };
 use vpsman_server_core::{
     target_status_is_active, JOB_STATUS_CANCELED, JOB_STATUS_COMPLETED, JOB_STATUS_PARTIAL_SUCCESS,
@@ -1372,7 +1372,10 @@ impl Repository {
                     status: status.to_string(),
                     target_count: resolved_targets.len() as i32,
                     payload_hash: command_hash.to_string(),
-                    timeout_secs: request.timeout_secs.unwrap_or(30).max(1),
+                    timeout_secs: request
+                        .timeout_secs
+                        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
+                        .max(1),
                     created_at: created_at.clone(),
                     completed_at: Some(created_at.clone()),
                 });
@@ -1432,7 +1435,11 @@ impl Repository {
                 .bind(command_hash)
                 .bind(operation.clone().map(sqlx::types::Json))
                 .bind(request_fingerprint)
-                .bind(request.timeout_secs.unwrap_or(30) as i64)
+                .bind(
+                    request
+                        .timeout_secs
+                        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS) as i64,
+                )
                 .execute(&mut *tx)
                 .await?;
                 for client_id in &resolved_targets {
@@ -1621,7 +1628,10 @@ impl Repository {
                     status: JOB_STATUS_QUEUED.to_string(),
                     target_count: resolved_targets.len() as i32,
                     payload_hash: command_hash.to_string(),
-                    timeout_secs: request.timeout_secs.unwrap_or(30).max(1),
+                    timeout_secs: request
+                        .timeout_secs
+                        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
+                        .max(1),
                     created_at: created_at.clone(),
                     completed_at: None,
                 });
@@ -1635,11 +1645,13 @@ impl Repository {
                     .write()
                     .await
                     .insert(job_id, operation.clone());
-                memory
-                    .job_timeouts
-                    .write()
-                    .await
-                    .insert(job_id, request.timeout_secs.unwrap_or(30).max(1));
+                memory.job_timeouts.write().await.insert(
+                    job_id,
+                    request
+                        .timeout_secs
+                        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
+                        .max(1),
+                );
                 if let Some(schedule_id) = source_schedule_id {
                     memory
                         .job_source_schedule_ids
@@ -1784,7 +1796,7 @@ impl Repository {
                 .bind(sqlx::types::Json(operation.clone()))
                 .bind(source_schedule_id)
                 .bind(request_fingerprint)
-                .bind(request.timeout_secs.unwrap_or(30) as i64)
+                .bind(request.timeout_secs.unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS) as i64)
                 .execute(&mut *tx)
                 .await?;
                 for client_id in resolved_targets {
@@ -1948,7 +1960,11 @@ impl Repository {
                     {
                         continue;
                     }
-                    let timeout_secs = timeouts.get(&target.job_id).copied().unwrap_or(30).max(1);
+                    let timeout_secs = timeouts
+                        .get(&target.job_id)
+                        .copied()
+                        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
+                        .max(1);
                     target.status = TARGET_STATUS_DISPATCHING.to_string();
                     target.started_at.get_or_insert_with(|| now.clone());
                     if is_exclusive {
@@ -2813,7 +2829,7 @@ impl Repository {
                     let timeout_secs = timeouts
                         .get(&target.job_id)
                         .copied()
-                        .unwrap_or(30)
+                        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
                         .max(1)
                         .saturating_add(control_deadline_extra_secs);
                     if now.saturating_sub(started_at) < timeout_secs {

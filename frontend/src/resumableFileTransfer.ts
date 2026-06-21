@@ -53,6 +53,7 @@ export type ResumableUploadRequest = {
   resumeToken?: string;
   sessionId?: string;
   timeoutSecs: number;
+  timeoutOverrideSecs?: number;
   onProgress: (progress: ResumableUploadProgress) => void;
 };
 
@@ -83,6 +84,7 @@ export type ResumableDownloadRequest = {
   resumeToken?: string;
   sessionId?: string;
   timeoutSecs: number;
+  timeoutOverrideSecs?: number;
   onProgress: (progress: ResumableDownloadProgress) => void;
 };
 
@@ -480,6 +482,10 @@ async function submitTransferStep(
 ): Promise<CreateJobResponse> {
   const selectorExpression = selectorExpressionForClientIds(targetClientIds);
   const timeoutSecs = clampCommandTimeoutSecs(request.timeoutSecs);
+  const timeoutOverrideSecs =
+    request.timeoutOverrideSecs === undefined
+      ? undefined
+      : clampCommandTimeoutSecs(request.timeoutOverrideSecs);
   const built = await buildPrivilegeForJobOperation({
     clientIds: targetClientIds,
     commandType: command,
@@ -497,7 +503,7 @@ async function submitTransferStep(
     command,
     job_id: crypto.randomUUID(),
     operation,
-    timeout_secs: timeoutSecs,
+    ...(timeoutOverrideSecs !== undefined ? { timeout_secs: timeoutOverrideSecs } : {}),
     force_unprivileged: false,
     privileged: true,
     privilege_assertion: built.privilegeAssertion,

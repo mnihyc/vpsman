@@ -1853,7 +1853,7 @@ export type CreateJobRequest = {
   command: string;
   argv: string[];
   operation?: JobOperation;
-  timeout_secs: number;
+  timeout_secs?: number;
   force_unprivileged?: boolean;
   privileged: boolean;
   privilege_assertion?: PrivilegeAssertion | null;

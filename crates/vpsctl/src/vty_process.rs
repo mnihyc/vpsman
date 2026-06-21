@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use vpsman_common::{
     JobCommand, ProcessResourceLimits, ProcessRestartPolicy, ProcessRunPolicy,
-    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+    DEFAULT_MAX_COMMAND_TIMEOUT_SECS, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
 };
 
 use crate::vty_jobs::VtyJobSelection;
@@ -91,7 +91,7 @@ pub(crate) fn parse_vty_process_list(tokens: &[&str]) -> Result<VtyProcessSuperv
         command_label: "process_list",
         operation: JobCommand::ProcessList { limit },
         selection: VtyJobSelection::parse(&target_tokens)?,
-        timeout_secs: 30,
+        timeout_secs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
         force_unprivileged: false,
     })
 }
@@ -158,7 +158,7 @@ fn parse_process_start(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> {
     let mut policy = ProcessRunPolicy::default();
     let mut limits = ProcessResourceLimits::default();
     let mut target_tokens = Vec::<&str>::new();
-    let mut timeout_secs = 30_u64;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut force_unprivileged = false;
     let mut index = 1;
 
@@ -396,7 +396,7 @@ fn parse_named_process_command(
 fn parse_process_status(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> {
     let mut name = None::<String>;
     let mut target_tokens = Vec::<&str>::new();
-    let mut timeout_secs = 30_u64;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index] {
@@ -442,7 +442,7 @@ fn parse_process_logs(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> {
         .to_string();
     let mut max_bytes = 65_536_u32;
     let mut target_tokens = Vec::<&str>::new();
-    let mut timeout_secs = 30_u64;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut index = 1;
     while index < tokens.len() {
         match tokens[index] {
@@ -484,7 +484,7 @@ fn parse_selection_and_timeout(
     command_label: &str,
 ) -> Result<(VtyJobSelection, u64)> {
     let mut target_tokens = Vec::<&str>::new();
-    let mut timeout_secs = 30_u64;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index] {

@@ -7,3 +7,25 @@ export function clampCommandTimeoutSecs(value: number): number {
   }
   return Math.trunc(Math.min(Math.max(value, 1), MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS));
 }
+
+export function parseOptionalCommandTimeoutSecs(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) {
+    return undefined;
+  }
+  return clampCommandTimeoutSecs(parsed);
+}
+
+export function effectiveCommandTimeoutSecs(value: string | number | undefined): number {
+  if (typeof value === "number") {
+    return clampCommandTimeoutSecs(value);
+  }
+  if (typeof value === "string") {
+    return parseOptionalCommandTimeoutSecs(value) ?? DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
+  }
+  return DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
+}

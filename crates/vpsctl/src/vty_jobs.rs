@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use uuid::Uuid;
-use vpsman_common::JobCommand;
+use vpsman_common::{JobCommand, DEFAULT_MAX_COMMAND_TIMEOUT_SECS};
 
 use crate::{
     commands_schedules::selector_expression_from_targets,
@@ -95,7 +95,7 @@ pub(crate) fn vty_create_job(
         if pty { "shell_pty" } else { command },
         &operation,
         selection,
-        30,
+        DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
     )
 }
 
@@ -117,7 +117,7 @@ pub(crate) fn vty_create_shell_script(
         "shell_script",
         &operation,
         selection,
-        30,
+        DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
     )
 }
 

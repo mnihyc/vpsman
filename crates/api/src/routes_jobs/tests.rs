@@ -604,109 +604,40 @@ fn capability_degraded_outcome_records_operator_hint() {
 }
 
 #[test]
-fn job_timeout_must_fit_selected_agent_caps() {
-    let agents = vec![
-        test_agent(
-            "short-cap",
-            AgentCapabilitySnapshot {
-                command_timeout_secs: 30,
-                ..AgentCapabilitySnapshot::default()
-            },
-        ),
-        test_agent(
-            "long-cap",
-            AgentCapabilitySnapshot {
-                command_timeout_secs: 600,
-                ..AgentCapabilitySnapshot::default()
-            },
-        ),
-    ];
-
-    assert!(validate_agent_command_timeout_cap(
-        45,
-        &["short-cap".to_string(), "long-cap".to_string()],
-        &agents,
-    )
-    .is_err());
-    validate_agent_command_timeout_cap(45, &["long-cap".to_string()], &agents).unwrap();
-}
-
-#[test]
 fn job_timeout_accepts_configured_max_above_default() {
-    let agents = vec![test_agent(
-        "long-cap",
-        AgentCapabilitySnapshot {
-            command_timeout_secs: 7_200,
-            ..AgentCapabilitySnapshot::default()
-        },
-    )];
-
     assert_eq!(
-        effective_job_timeout_secs(
-            7_200,
-            &["long-cap".to_string()],
-            &agents,
-            7_200,
-            &JobPrivilegeSource::RequestAssertion,
-        )
-        .unwrap(),
+        effective_job_timeout_secs(Some(7_200), 7_200).unwrap(),
         7_200
     );
 }
 
 #[test]
-fn job_timeout_rejects_above_configured_max() {
-    let agents = vec![test_agent(
-        "long-cap",
-        AgentCapabilitySnapshot {
-            command_timeout_secs: 7_200,
-            ..AgentCapabilitySnapshot::default()
-        },
-    )];
+fn omitted_job_timeout_uses_default_agent_timeout() {
+    assert_eq!(
+        effective_job_timeout_secs(None, 7_200).unwrap(),
+        DEFAULT_MAX_COMMAND_TIMEOUT_SECS
+    );
+}
 
-    let error = effective_job_timeout_secs(
-        7_201,
-        &["long-cap".to_string()],
-        &agents,
-        7_200,
-        &JobPrivilegeSource::RequestAssertion,
-    )
-    .unwrap_err();
+#[test]
+fn job_timeout_rejects_above_configured_max() {
+    let error = effective_job_timeout_secs(Some(7_201), 7_200).unwrap_err();
 
     assert_eq!(error.code, "command_timeout_exceeds_configured_max");
 }
 
 #[test]
-fn saved_schedule_timeout_clamps_to_selected_agent_caps() {
-    let agents = vec![
-        test_agent(
-            "short-cap",
-            AgentCapabilitySnapshot {
-                command_timeout_secs: 12,
-                ..AgentCapabilitySnapshot::default()
-            },
-        ),
-        test_agent(
-            "long-cap",
-            AgentCapabilitySnapshot {
-                command_timeout_secs: 600,
-                ..AgentCapabilitySnapshot::default()
-            },
-        ),
-    ];
+fn explicit_job_timeout_overrides_agent_advertised_default() {
+    let agents = vec![test_agent(
+        "short-default",
+        AgentCapabilitySnapshot {
+            command_timeout_secs: 12,
+            ..AgentCapabilitySnapshot::default()
+        },
+    )];
 
-    assert_eq!(
-        clamp_timeout_to_agent_caps(
-            90,
-            &["short-cap".to_string(), "long-cap".to_string()],
-            &agents,
-        ),
-        12
-    );
-    assert_eq!(
-        clamp_timeout_to_agent_caps(90, &["long-cap".to_string()], &agents),
-        90
-    );
+    assert_eq!(effective_job_timeout_secs(Some(90), 600).unwrap(), 90);
+    assert_eq!(agents[0].capabilities.command_timeout_secs, 12);
 }
 
 #[test]

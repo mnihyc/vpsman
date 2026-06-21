@@ -11,7 +11,7 @@ use uuid::Uuid;
 use vpsman_common::{
     encode_json, job_command_requires_confirmation, payload_hash, CommandOutput,
     GatewayCommandDispatchResult, JobCancelRequest as GatewayJobCancelRequest, JobCommand,
-    OutputStream,
+    OutputStream, DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
 };
 use vpsman_server_core::{
     CapabilitySkip, TargetCapability, JOB_STATUS_FAILED, JOB_STATUS_REJECTED, JOB_STATUS_RUNNING,
@@ -274,13 +274,8 @@ async fn create_job_inner(
         JobPrivilegeSource::SavedSchedule(schedule_id) => Some(*schedule_id),
         JobPrivilegeSource::TerminalInputRoute => None,
     };
-    let effective_timeout_secs = effective_job_timeout_secs(
-        request.timeout_secs.unwrap_or(30),
-        &claimable_targets,
-        &resolved_agents,
-        state.max_command_timeout_secs(),
-        &privilege_source,
-    )?;
+    let effective_timeout_secs =
+        effective_job_timeout_secs(request.timeout_secs, state.max_command_timeout_secs())?;
     request.timeout_secs = Some(effective_timeout_secs);
     let request_fingerprint = request_fingerprint_for_job(
         &request,
@@ -343,7 +338,9 @@ async fn create_job_inner(
             command_type: request.command_type_label(),
             operation_payload_hash: &command_hash,
             resolved_targets: &resolved_targets,
-            timeout_secs: request.timeout_secs.unwrap_or(30),
+            timeout_secs: request
+                .timeout_secs
+                .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS),
             force_unprivileged: request.force_unprivileged,
             privileged: request.privileged,
         });
@@ -455,7 +452,9 @@ async fn create_job_inner(
             job_id,
             target_count: resolved_targets.len(),
             status,
-            timeout_secs: request.timeout_secs.unwrap_or(30),
+            timeout_secs: request
+                .timeout_secs
+                .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS),
             max_command_timeout_secs: state.max_command_timeout_secs(),
             control_deadline_extra_secs,
             target_counts,
@@ -709,7 +708,9 @@ fn request_fingerprint_for_job(
         "command_type": request.command_type_label(),
         "operation_payload_hash": command_hash,
         "targets": targets,
-        "timeout_secs": request.timeout_secs.unwrap_or(30),
+        "timeout_secs": request
+            .timeout_secs
+            .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS),
         "privileged": request.privileged,
         "force_unprivileged": request.force_unprivileged,
         "source_schedule_id": source_schedule_id,
@@ -1187,7 +1188,9 @@ async fn reject_job(
             job_id,
             target_count,
             status,
-            timeout_secs: request.timeout_secs.unwrap_or(30),
+            timeout_secs: request.timeout_secs.unwrap_or_else(|| {
+                DEFAULT_MAX_COMMAND_TIMEOUT_SECS.min(state.max_command_timeout_secs())
+            }),
             max_command_timeout_secs: state.max_command_timeout_secs(),
             control_deadline_extra_secs: state
                 .dispatcher_runtime_config()
@@ -1206,65 +1209,20 @@ fn validate_job_audit_selector(selector_expression: &str) -> Result<(), ApiError
 }
 
 fn effective_job_timeout_secs(
-    requested_timeout_secs: u64,
-    resolved_targets: &[String],
-    resolved_agents: &[AgentView],
+    requested_timeout_secs: Option<u64>,
     max_command_timeout_secs: u64,
-    privilege_source: &JobPrivilegeSource,
 ) -> Result<u64, ApiError> {
-    let requested_timeout_secs = requested_timeout_secs.max(1);
-    if requested_timeout_secs > max_command_timeout_secs {
+    let max_command_timeout_secs = max_command_timeout_secs.max(1);
+    let default_timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS.min(max_command_timeout_secs);
+    let timeout_secs = requested_timeout_secs
+        .unwrap_or(default_timeout_secs)
+        .max(1);
+    if timeout_secs > max_command_timeout_secs {
         return Err(ApiError::bad_request(
             "command_timeout_exceeds_configured_max",
         ));
     }
-    match privilege_source {
-        JobPrivilegeSource::RequestAssertion => {
-            validate_agent_command_timeout_cap(
-                requested_timeout_secs,
-                resolved_targets,
-                resolved_agents,
-            )?;
-            Ok(requested_timeout_secs)
-        }
-        JobPrivilegeSource::SavedSchedule(_) | JobPrivilegeSource::TerminalInputRoute => Ok(
-            clamp_timeout_to_agent_caps(requested_timeout_secs, resolved_targets, resolved_agents),
-        ),
-    }
-}
-
-fn clamp_timeout_to_agent_caps(
-    requested_timeout_secs: u64,
-    resolved_targets: &[String],
-    resolved_agents: &[AgentView],
-) -> u64 {
-    resolved_targets
-        .iter()
-        .filter_map(|client_id| {
-            resolved_agents
-                .iter()
-                .find(|agent| agent.id == *client_id)
-                .map(|agent| agent.capabilities.command_timeout_secs.max(1))
-        })
-        .fold(requested_timeout_secs.max(1), u64::min)
-}
-
-fn validate_agent_command_timeout_cap(
-    requested_timeout_secs: u64,
-    resolved_targets: &[String],
-    resolved_agents: &[AgentView],
-) -> Result<(), ApiError> {
-    let requested_timeout_secs = requested_timeout_secs.max(1);
-    let timeout_too_low = resolved_targets.iter().any(|client_id| {
-        resolved_agents
-            .iter()
-            .find(|agent| agent.id == *client_id)
-            .is_some_and(|agent| agent.capabilities.command_timeout_secs < requested_timeout_secs)
-    });
-    if timeout_too_low {
-        return Err(ApiError::conflict("agent_command_timeout_too_low"));
-    }
-    Ok(())
+    Ok(timeout_secs)
 }
 
 fn bounded_cancel_reason(reason: Option<&str>) -> Option<String> {

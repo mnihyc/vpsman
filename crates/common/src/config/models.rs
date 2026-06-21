@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     OspfCostPolicy, RuntimeTunnelCommand, TunnelConfigBackend, TunnelEndpointSide, TunnelPlan,
+    DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -521,7 +522,7 @@ fn default_execution_process_proc_root() -> String {
 impl Default for AgentAuthConfig {
     fn default() -> Self {
         Self {
-            command_timeout_secs: 30,
+            command_timeout_secs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
             gateway_retry_secs: default_agent_gateway_retry_secs(),
             gateway_connect_timeout_secs: default_agent_gateway_connect_timeout_secs(),
         }

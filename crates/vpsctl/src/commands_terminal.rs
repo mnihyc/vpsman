@@ -5,7 +5,7 @@ use serde_json::Value;
 use uuid::Uuid;
 use vpsman_common::{
     default_terminal_flow_window_bytes, default_terminal_idle_timeout_secs, payload_hash,
-    JobCommand, TerminalUserPolicy,
+    JobCommand, TerminalUserPolicy, DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -49,7 +49,7 @@ pub(crate) struct TerminalOpenCommand {
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
@@ -71,7 +71,7 @@ pub(crate) struct TerminalInputCommand {
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
@@ -93,7 +93,7 @@ pub(crate) struct TerminalPollCommand {
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
@@ -117,7 +117,7 @@ pub(crate) struct TerminalResizeCommand {
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
@@ -139,7 +139,7 @@ pub(crate) struct TerminalCloseCommand {
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,

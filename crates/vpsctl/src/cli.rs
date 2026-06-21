@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use vpsman_common::DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
 
 use crate::cli_access::{
     AgentIdentityUpsertCommand, AgentTagCommand, BootstrapCommand, BulkResolveCommand,
@@ -146,7 +147,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = true)]
         privileged: bool,
@@ -172,7 +173,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
@@ -192,7 +193,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
@@ -257,7 +258,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
@@ -389,7 +390,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
@@ -407,7 +408,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
@@ -427,7 +428,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
@@ -541,7 +542,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
@@ -583,7 +584,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
@@ -603,7 +604,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
@@ -621,7 +622,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
@@ -639,7 +640,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
@@ -659,7 +660,7 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = 30)]
+        #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,

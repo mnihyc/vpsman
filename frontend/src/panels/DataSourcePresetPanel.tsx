@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { DatabaseZap, SlidersHorizontal } from "lucide-react";
 import {
   clampCommandTimeoutSecs,
+  DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
   MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
 } from "../commandTimeout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
@@ -151,7 +152,7 @@ export function DataSourcePresetPanel({
   );
   const [renderClientId, setRenderClientId] = useState("");
   const [renderedHotConfig, setRenderedHotConfig] = useState<DataSourceHotConfigResponse | null>(null);
-  const [applyTimeoutSecs, setApplyTimeoutSecs] = useState(30);
+  const [applyTimeoutSecs, setApplyTimeoutSecs] = useState(DEFAULT_MAX_COMMAND_TIMEOUT_SECS);
   const [lastApplyJob, setLastApplyJob] = useState<CreateJobResponse | null>(null);
   const [lastApplyPayloadHash, setLastApplyPayloadHash] = useState<string | null>(null);
   const [lifecyclePresetId, setLifecyclePresetId] = useState("");

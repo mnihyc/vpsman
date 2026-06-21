@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use vpsman_common::{
     encode_chunked_file_payload, encode_inline_file_payload, payload_hash,
     validate_absolute_file_path, validate_file_mode, FileExistingPolicy, FileOwnershipPolicy,
-    JobCommand, MAX_CHUNKED_FILE_PUSH_BYTES, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
-    MAX_INLINE_FILE_PUSH_BYTES,
+    JobCommand, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, MAX_CHUNKED_FILE_PUSH_BYTES,
+    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS, MAX_INLINE_FILE_PUSH_BYTES,
 };
 
 use crate::vty_jobs::VtyJobSelection;
@@ -21,7 +21,7 @@ pub(crate) struct VtyFileOperation {
 pub(crate) fn parse_vty_file_pull(tokens: &[&str]) -> Result<VtyFileOperation> {
     let mut path = None;
     let mut follow_symlinks = false;
-    let mut timeout_secs = 30_u64;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut target_tokens = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
@@ -74,7 +74,7 @@ pub(crate) fn parse_vty_file_push(tokens: &[&str]) -> Result<VtyFileOperation> {
     let mut source = None;
     let mut path = None;
     let mut mode = 0o644_u32;
-    let mut timeout_secs = 30_u64;
+    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
     let mut target_tokens = Vec::new();
     let mut index = 0;
     while index < tokens.len() {

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 use vpsman_common::{
     canonical_terminal_input_privilege_intent, id_selector_expression, payload_hash, JobCommand,
-    TerminalInputPrivilegeIntentInput, MAX_TERMINAL_INPUT_BYTES,
+    TerminalInputPrivilegeIntentInput, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, MAX_TERMINAL_INPUT_BYTES,
 };
 
 use crate::{
@@ -118,7 +118,10 @@ pub(crate) async fn submit_terminal_session_input(
     if !request.confirmed {
         return Err(ApiError::conflict("terminal_input_confirmation_required"));
     }
-    let timeout_secs = request.timeout_secs.unwrap_or(30).max(1);
+    let timeout_secs = request
+        .timeout_secs
+        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
+        .max(1);
     if timeout_secs > state.max_command_timeout_secs() {
         return Err(ApiError::bad_request(
             "command_timeout_exceeds_configured_max",

@@ -43,6 +43,7 @@ import {
   waitForBulkJobTargets,
   type BulkJobProgress,
 } from "../bulkJobProgress";
+import { DEFAULT_MAX_COMMAND_TIMEOUT_SECS } from "../commandTimeout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -1195,7 +1196,7 @@ function FleetInstanceDetail({
         operation,
         privilegeMaterial,
         selectorExpression,
-        timeoutSecs: 30,
+        timeoutSecs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
       });
       setInterfacePayloadHash(builtPrivilege.payloadHashHex);
       setInterfaceSnapshot(null);
@@ -1204,7 +1205,7 @@ function FleetInstanceDetail({
         targetCount: 1,
         targetRecords: [],
         targets: [agent],
-        timeoutSecs: 30,
+        timeoutSecs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
       }));
       const job = await onCreateJob({
         argv: [],
@@ -1218,7 +1219,7 @@ function FleetInstanceDetail({
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: builtPrivilege.privilegeAssertion,
-        timeout_secs: 30,
+        timeout_secs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
       });
       setInterfaceJobId(job.job_id);
       const targetCount = createJobTargetCount(job);
@@ -1229,7 +1230,7 @@ function FleetInstanceDetail({
           onProgress: setInterfaceProgress,
           targetCount,
           targets: [agent],
-          timeoutSecs: 30,
+          timeoutSecs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
         },
       );
       setInterfaceProgress(progress.progress);

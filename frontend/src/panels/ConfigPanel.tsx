@@ -18,6 +18,7 @@ import { parseSearchExpression, selectorExpressionForClientIds } from "../search
 import {
   clampCommandTimeoutSecs,
   clampInteger,
+  DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
   MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
 } from "./jobDispatchModel";
 import type {
@@ -501,7 +502,7 @@ function BulkConfigApply({
   const [rendered, setRendered] = useState<HotConfigRuleTemplateRenderResponse | null>(null);
   const [applySnapshot, setApplySnapshot] = useState<BulkConfigApplySnapshot | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [timeoutSecs, setTimeoutSecs] = useState(30);
+  const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_MAX_COMMAND_TIMEOUT_SECS);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
   const {
@@ -856,7 +857,7 @@ function SingleVpsConfig({
   const [redactedToml, setRedactedToml] = useState("");
   const [baseHash, setBaseHash] = useState("");
   const [lastJobId, setLastJobId] = useState<string | null>(null);
-  const [timeoutSecs, setTimeoutSecs] = useState(30);
+  const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_MAX_COMMAND_TIMEOUT_SECS);
   const [singleApplySnapshot, setSingleApplySnapshot] = useState<SingleConfigApplySnapshot | null>(null);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);

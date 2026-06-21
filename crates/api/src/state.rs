@@ -321,7 +321,7 @@ impl AppState {
                 .or(suite.timeout.worker_schedule_command_secs)
         });
         configured
-            .unwrap_or(30)
+            .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
             .clamp(1, self.max_command_timeout_secs())
     }
 

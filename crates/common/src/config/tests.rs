@@ -9,6 +9,7 @@ use super::{
 use crate::{
     plan_tunnel, BandwidthTier, OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl,
     RuntimeTunnelManager, TunnelConfigBackend, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+    DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
 };
 
 #[test]
@@ -685,7 +686,7 @@ fn validates_network_apply_root() {
 fn rejects_hot_config_identity_and_secret_changes() {
     let current = AgentConfig {
         auth: super::AgentAuthConfig {
-            command_timeout_secs: 30,
+            command_timeout_secs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
             ..Default::default()
         },
         noise: AgentNoiseConfig {
@@ -697,7 +698,7 @@ fn rejects_hot_config_identity_and_secret_changes() {
     };
     let mut updated = current.clone();
     updated.display_name = "new display".to_string();
-    updated.auth.command_timeout_secs = 60;
+    updated.auth.command_timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS + 60;
     validate_hot_config_update(&current, &updated).unwrap();
 
     updated.client_id = "other".to_string();

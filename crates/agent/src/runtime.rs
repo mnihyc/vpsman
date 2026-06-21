@@ -18,7 +18,7 @@ use vpsman_common::{
     AgentPrivilegeMode, AgentSessionDisconnect, CommandOutput, CommandResume, Frame, JobAck,
     JobCancelAck, JobCancelRequest, JobCommand, JobCommandSafety, JobRequest, MessageKind,
     NoiseFrameStream, OutputStream, SequencedCommandOutput, ServerEndpoint, ServerHello,
-    TelemetryEnvelope, TerminalStreamOutput,
+    TelemetryEnvelope, TerminalStreamOutput, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -1192,7 +1192,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
 
     let timeout_secs = request
         .timeout_secs
-        .clamp(1, config.auth.command_timeout_secs.max(1));
+        .clamp(1, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS);
 
     if let JobCommand::ConfigRead = &request.command {
         let result = read_redacted_config(request.job_id, config, config_path);

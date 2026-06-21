@@ -45,7 +45,9 @@ import {
   buildOperation,
   clampCommandTimeoutSecs,
   clampInteger,
+  effectiveCommandTimeoutSecs,
   operationCommandLabel,
+  parseOptionalCommandTimeoutSecs,
   parseBackupPaths,
   supervisorReady,
   terminalReady,
@@ -147,6 +149,7 @@ type DispatchConfirmationSnapshot = {
   selectorExpression: string;
   targets: AgentView[];
   timeoutSecs: number;
+  timeoutOverrideSecs?: number;
 } & (
   | {
       kind: "job";
@@ -334,7 +337,7 @@ export function JobDispatchPanel({
   const [supervisorEnv, setSupervisorEnv] = useState("");
   const [supervisorLogBytes, setSupervisorLogBytes] = useState(65536);
   const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(JOB_SELECTOR_STORAGE_KEY));
-  const [timeoutSecs, setTimeoutSecs] = useState(30);
+  const [timeoutSecs, setTimeoutSecs] = useState("");
   const [forceUnprivileged, setForceUnprivileged] = useState(false);
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
   const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
@@ -365,11 +368,11 @@ export function JobDispatchPanel({
       setSelectorExpression(dispatchPreset.selectorExpression);
     }
     if (dispatchPreset.timeoutSecs !== undefined) {
-      setTimeoutSecs(clampCommandTimeoutSecs(dispatchPreset.timeoutSecs));
+      setTimeoutSecs(String(clampCommandTimeoutSecs(dispatchPreset.timeoutSecs)));
     } else if (dispatchPreset.mode === "agent_update_activate" || dispatchPreset.mode === "agent_update_rollback") {
-      setTimeoutSecs(60);
+      setTimeoutSecs("60");
     } else if (dispatchPreset.mode.startsWith("agent_update")) {
-      setTimeoutSecs(300);
+      setTimeoutSecs("300");
     }
     if (dispatchPreset.mode === "agent_update") {
       setUpdateArtifactUrl(dispatchPreset.updateArtifactUrl ?? "");
@@ -609,7 +612,7 @@ export function JobDispatchPanel({
   const dispatchConfirmationTargets =
     activeDispatchConfirmation?.targets ?? preview?.targets ?? expressionTargets;
   const dispatchConfirmationTimeoutSecs =
-    activeDispatchConfirmation?.timeoutSecs ?? clampCommandTimeoutSecs(timeoutSecs);
+    activeDispatchConfirmation?.timeoutSecs ?? effectiveCommandTimeoutSecs(timeoutSecs);
   const dispatchConfirmationForceUnprivileged =
     activeDispatchConfirmation?.forceUnprivileged ??
     (supportsForceUnprivileged ? forceUnprivileged : false);
@@ -771,7 +774,8 @@ export function JobDispatchPanel({
       throw new Error("Privilege unlock is locked");
     }
     const selector = selectorExpression.trim();
-    const timeout = clampCommandTimeoutSecs(timeoutSecs);
+    const timeoutOverride = parseOptionalCommandTimeoutSecs(timeoutSecs);
+    const timeout = timeoutOverride ?? effectiveCommandTimeoutSecs(timeoutSecs);
     const frozenForceUnprivileged = supportsForceUnprivileged ? forceUnprivileged : false;
     const operationLabel = operationCommandLabel(mode, commandText);
     const base = {
@@ -780,6 +784,7 @@ export function JobDispatchPanel({
       selectorExpression: selector,
       targets,
       timeoutSecs: timeout,
+      timeoutOverrideSecs: timeoutOverride,
     };
     if (mode === "file_transfer_upload") {
       const uploadSourceFile =
@@ -947,7 +952,7 @@ export function JobDispatchPanel({
       return;
     }
     if (typeof defaults.timeout_secs === "number") {
-      setTimeoutSecs(clampCommandTimeoutSecs(defaults.timeout_secs));
+      setTimeoutSecs(String(clampCommandTimeoutSecs(defaults.timeout_secs)));
     }
     if (typeof defaults.force_unprivileged === "boolean") {
       setForceUnprivileged(defaults.force_unprivileged);
@@ -1073,6 +1078,7 @@ export function JobDispatchPanel({
       filePushMode,
       null,
     );
+    const timeoutOverride = parseOptionalCommandTimeoutSecs(timeoutSecs);
     return {
       name,
       scope_kind: templateScopeKind,
@@ -1083,7 +1089,7 @@ export function JobDispatchPanel({
         confirmed: operationNeedsConfirmation,
         destructive: operationNeedsConfirmation,
         force_unprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
-        timeout_secs: clampCommandTimeoutSecs(timeoutSecs),
+        ...(timeoutOverride !== undefined ? { timeout_secs: timeoutOverride } : {}),
       },
       confirmed: true,
     };
@@ -1164,6 +1170,7 @@ export function JobDispatchPanel({
           resumeToken: confirmed.resumeToken,
           sessionId: confirmed.sessionId,
           timeoutSecs: confirmed.timeoutSecs,
+          timeoutOverrideSecs: confirmed.timeoutOverrideSecs,
           onProgress: (progress) => {
             setTransferProgress(progress);
             setFileTransferSessionId(progress.sessionId);
@@ -1194,6 +1201,7 @@ export function JobDispatchPanel({
           resumeToken: confirmed.resumeToken,
           sessionId: confirmed.sessionId,
           timeoutSecs: confirmed.timeoutSecs,
+          timeoutOverrideSecs: confirmed.timeoutOverrideSecs,
           onProgress: (progress) => {
             setTransferProgress(progress);
             setFileTransferSessionId(progress.sessionId);
@@ -1209,7 +1217,7 @@ export function JobDispatchPanel({
         const response = await onSubmitTerminalInput(confirmed.clientId, confirmed.sessionId, {
           job_id: confirmed.jobId,
           text: confirmed.text,
-          timeout_secs: confirmed.timeoutSecs,
+          ...(confirmed.timeoutOverrideSecs !== undefined ? { timeout_secs: confirmed.timeoutOverrideSecs } : {}),
           confirmed: true,
           privilege_assertion: confirmed.privilegeAssertion,
         });
@@ -1228,7 +1236,7 @@ export function JobDispatchPanel({
         command: confirmed.commandType,
         argv: confirmed.argv,
         operation: confirmed.operation,
-        timeout_secs: confirmed.timeoutSecs,
+        ...(confirmed.timeoutOverrideSecs !== undefined ? { timeout_secs: confirmed.timeoutOverrideSecs } : {}),
         force_unprivileged: confirmed.forceUnprivileged,
         privileged: true,
         privilege_assertion: confirmed.privilegeAssertion,
@@ -1239,9 +1247,9 @@ export function JobDispatchPanel({
     });
   }
 
-  async function trackDispatchProgress(job: CreateJobResponse, targets: AgentView[], jobTimeoutSecs = timeoutSecs) {
+  async function trackDispatchProgress(job: CreateJobResponse, targets: AgentView[], jobTimeoutSecs?: number) {
     const targetCount = createJobTargetCount(job);
-    const boundedJobTimeoutSecs = clampCommandTimeoutSecs(jobTimeoutSecs);
+    const boundedJobTimeoutSecs = clampCommandTimeoutSecs(jobTimeoutSecs ?? effectiveCommandTimeoutSecs(timeoutSecs));
     setLastDispatchProgress(null);
     setDispatchProgress(buildBulkJobProgress({
       jobId: job.job_id,

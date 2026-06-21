@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
 import { buildRestoreRollbackOperation } from "../backups/restoreRollback";
-import { clampCommandTimeoutSecs } from "../commandTimeout";
+import { clampCommandTimeoutSecs, DEFAULT_MAX_COMMAND_TIMEOUT_SECS } from "../commandTimeout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleActionDrawer } from "../components/ConsoleLayout";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
@@ -723,7 +723,7 @@ export function BackupsPanel({
         operation,
         privilegeMaterial,
         selectorExpression,
-        timeoutSecs: 30,
+        timeoutSecs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
@@ -897,7 +897,7 @@ export function BackupsPanel({
         operation,
         privilegeMaterial,
         selectorExpression,
-        timeoutSecs: 30,
+        timeoutSecs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
