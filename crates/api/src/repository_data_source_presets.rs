@@ -27,7 +27,7 @@ impl Repository {
         self.ensure_builtin_data_source_presets().await?;
         match self {
             Self::Memory(memory) => {
-                let assignments = memory.data_source_assignments.read().await;
+                let assignments = self.effective_data_source_assignments(None, domain).await?;
                 let mut presets = memory
                     .data_source_presets
                     .read()
@@ -55,6 +55,28 @@ impl Repository {
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
+                    WITH visible_clients AS (
+                        SELECT id
+                        FROM clients
+                        WHERE hidden_at IS NULL
+                          AND status NOT IN ('deleted', 'revoked')
+                    ),
+                    effective_assignments AS (
+                        SELECT a.client_id, a.domain, a.preset_id
+                        FROM client_data_source_preset_assignments a
+                        JOIN visible_clients c ON c.id = a.client_id
+                        UNION ALL
+                        SELECT c.id AS client_id, p.domain, p.id AS preset_id
+                        FROM visible_clients c
+                        CROSS JOIN data_source_presets p
+                        WHERE p.is_default
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM client_data_source_preset_assignments a
+                              WHERE a.client_id = c.id
+                                AND a.domain = p.domain
+                          )
+                    )
                     SELECT
                         p.id,
                         p.domain,
@@ -67,9 +89,9 @@ impl Repository {
                         p.definition,
                         p.created_at::text AS created_at,
                         p.updated_at::text AS updated_at,
-                        count(a.client_id)::bigint AS assigned_client_count
+                        count(e.client_id)::bigint AS assigned_client_count
                     FROM data_source_presets p
-                    LEFT JOIN client_data_source_preset_assignments a ON a.preset_id = p.id
+                    LEFT JOIN effective_assignments e ON e.preset_id = p.id
                     WHERE $1::TEXT IS NULL OR p.domain = $1
                     GROUP BY p.id
                     ORDER BY p.domain, p.is_default DESC, p.scope, p.name
@@ -479,20 +501,66 @@ impl Repository {
         client_id: Option<&str>,
         domain: Option<&str>,
     ) -> Result<Vec<DataSourcePresetAssignmentView>> {
-        self.ensure_default_data_source_assignments().await?;
+        self.ensure_builtin_data_source_presets().await?;
+        self.effective_data_source_assignments(client_id, domain)
+            .await
+    }
+
+    async fn effective_data_source_assignments(
+        &self,
+        client_id: Option<&str>,
+        domain: Option<&str>,
+    ) -> Result<Vec<DataSourcePresetAssignmentView>> {
         match self {
             Self::Memory(memory) => {
-                let mut assignments = memory
+                let hidden = memory.hidden_clients.read().await;
+                let visible_clients = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|agent| {
+                        !hidden.contains(&agent.id)
+                            && agent.status != "deleted"
+                            && agent.status != "revoked"
+                            && client_id.is_none_or(|client_id| agent.id == client_id)
+                    })
+                    .map(|agent| agent.id.clone())
+                    .collect::<BTreeSet<_>>();
+                let presets = memory.data_source_presets.read().await.clone();
+                let explicit = memory
                     .data_source_assignments
                     .read()
                     .await
                     .iter()
                     .filter(|assignment| {
-                        client_id.is_none_or(|client_id| assignment.client_id == client_id)
+                        visible_clients.contains(&assignment.client_id)
                             && domain.is_none_or(|domain| assignment.domain == domain)
                     })
                     .cloned()
                     .collect::<Vec<_>>();
+                let mut assignments = explicit.clone();
+                for client_id in &visible_clients {
+                    for preset in presets
+                        .iter()
+                        .filter(|preset| preset.is_default)
+                        .filter(|preset| domain.is_none_or(|domain| preset.domain == domain))
+                    {
+                        if explicit.iter().any(|assignment| {
+                            assignment.client_id == *client_id && assignment.domain == preset.domain
+                        }) {
+                            continue;
+                        }
+                        assignments.push(DataSourcePresetAssignmentView {
+                            client_id: client_id.clone(),
+                            domain: preset.domain.clone(),
+                            preset_id: preset.id,
+                            preset_name: preset.name.clone(),
+                            preset_scope: preset.scope.clone(),
+                            assigned_at: preset.created_at.clone(),
+                        });
+                    }
+                }
                 assignments.sort_by(|left, right| {
                     left.client_id
                         .cmp(&right.client_id)
@@ -503,18 +571,63 @@ impl Repository {
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
+                    WITH visible_clients AS (
+                        SELECT id
+                        FROM clients
+                        WHERE hidden_at IS NULL
+                          AND status NOT IN ('deleted', 'revoked')
+                          AND ($1::TEXT IS NULL OR id = $1)
+                    ),
+                    explicit AS (
+                        SELECT
+                            a.client_id,
+                            a.domain,
+                            a.preset_id,
+                            p.name AS preset_name,
+                            p.scope AS preset_scope,
+                            a.assigned_at::text AS assigned_at
+                        FROM client_data_source_preset_assignments a
+                        JOIN visible_clients c ON c.id = a.client_id
+                        JOIN data_source_presets p ON p.id = a.preset_id
+                        WHERE $2::TEXT IS NULL OR a.domain = $2
+                    ),
+                    effective_defaults AS (
+                        SELECT
+                            c.id AS client_id,
+                            p.domain,
+                            p.id AS preset_id,
+                            p.name AS preset_name,
+                            p.scope AS preset_scope,
+                            p.created_at::text AS assigned_at
+                        FROM visible_clients c
+                        CROSS JOIN data_source_presets p
+                        WHERE p.is_default
+                          AND ($2::TEXT IS NULL OR p.domain = $2)
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM client_data_source_preset_assignments a
+                              WHERE a.client_id = c.id
+                                AND a.domain = p.domain
+                          )
+                    )
                     SELECT
-                        a.client_id,
-                        a.domain,
-                        a.preset_id,
-                        p.name AS preset_name,
-                        p.scope AS preset_scope,
-                        a.assigned_at::text AS assigned_at
-                    FROM client_data_source_preset_assignments a
-                    JOIN data_source_presets p ON p.id = a.preset_id
-                    WHERE ($1::TEXT IS NULL OR a.client_id = $1)
-                      AND ($2::TEXT IS NULL OR a.domain = $2)
-                    ORDER BY a.client_id, a.domain
+                        client_id,
+                        domain,
+                        preset_id,
+                        preset_name,
+                        preset_scope,
+                        assigned_at
+                    FROM explicit
+                    UNION ALL
+                    SELECT
+                        client_id,
+                        domain,
+                        preset_id,
+                        preset_name,
+                        preset_scope,
+                        assigned_at
+                    FROM effective_defaults
+                    ORDER BY client_id, domain
                     "#,
                 )
                 .bind(client_id)
@@ -533,7 +646,7 @@ impl Repository {
         request: &AssignDataSourcePresetRequest,
         operator: &AuthContext,
     ) -> Result<AssignDataSourcePresetResponse> {
-        self.ensure_default_data_source_assignments().await?;
+        self.ensure_builtin_data_source_presets().await?;
         let preset = self
             .data_source_preset_by_id(request.preset_id)
             .await?
@@ -717,54 +830,6 @@ impl Repository {
                     .execute(pool)
                     .await?;
                 }
-            }
-        }
-        Ok(())
-    }
-
-    async fn ensure_default_data_source_assignments(&self) -> Result<()> {
-        self.ensure_builtin_data_source_presets().await?;
-        match self {
-            Self::Memory(memory) => {
-                let agents = memory.agents.read().await.clone();
-                let presets = memory.data_source_presets.read().await.clone();
-                let defaults = presets
-                    .iter()
-                    .filter(|preset| preset.is_default)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let mut assignments = memory.data_source_assignments.write().await;
-                for agent in agents {
-                    for preset in &defaults {
-                        if assignments.iter().any(|assignment| {
-                            assignment.client_id == agent.id && assignment.domain == preset.domain
-                        }) {
-                            continue;
-                        }
-                        assignments.push(DataSourcePresetAssignmentView {
-                            client_id: agent.id.clone(),
-                            domain: preset.domain.clone(),
-                            preset_id: preset.id,
-                            preset_name: preset.name.clone(),
-                            preset_scope: preset.scope.clone(),
-                            assigned_at: unix_now().to_string(),
-                        });
-                    }
-                }
-            }
-            Self::Postgres(pool) => {
-                sqlx::query(
-                    r#"
-                    INSERT INTO client_data_source_preset_assignments (client_id, domain, preset_id)
-                    SELECT c.id, p.domain, p.id
-                    FROM clients c
-                    CROSS JOIN data_source_presets p
-                    WHERE p.is_default
-                    ON CONFLICT (client_id, domain) DO NOTHING
-                    "#,
-                )
-                .execute(pool)
-                .await?;
             }
         }
         Ok(())

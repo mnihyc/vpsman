@@ -261,6 +261,7 @@ pub(crate) struct SystemDashboardTargetsView {
     pub(crate) deadline_expired_active: i64,
     pub(crate) control_timeout_last_24h: i64,
     pub(crate) agent_timeout_last_24h: i64,
+    pub(crate) agent_lost_last_24h: i64,
     pub(crate) canceled_last_24h: i64,
 }
 

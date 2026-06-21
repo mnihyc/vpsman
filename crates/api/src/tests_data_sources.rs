@@ -1246,6 +1246,61 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
     assert_eq!(update.evidence["external_release_count"], 1);
 }
 
+#[tokio::test]
+async fn data_source_assignment_reads_compute_defaults_without_persisting_hidden_clients() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        for client_id in ["edge-a", "edge-hidden"] {
+            upsert_memory_agent(
+                &memory.agents,
+                &AgentHello {
+                    client_id: client_id.to_string(),
+                    process_incarnation_id: uuid::Uuid::new_v4(),
+                    agent_version: "test".to_string(),
+                    os_release: "test".to_string(),
+                    arch: "x86_64".to_string(),
+                    update_heartbeat: None,
+                    internal_build_number: 1,
+                    capabilities: Default::default(),
+                },
+            )
+            .await;
+        }
+        memory
+            .hidden_clients
+            .write()
+            .await
+            .insert("edge-hidden".to_string());
+    }
+
+    let assignments = repo.list_data_source_assignments(None, None).await.unwrap();
+    assert!(assignments.iter().any(|assignment| {
+        assignment.client_id == "edge-a"
+            && assignment.domain == "runtime_traffic_accounting_source"
+            && assignment.preset_name == "builtin:interface_counters"
+    }));
+    assert!(assignments
+        .iter()
+        .all(|assignment| assignment.client_id != "edge-hidden"));
+
+    let presets = repo.list_data_source_presets(None).await.unwrap();
+    let default_preset = presets
+        .iter()
+        .find(|preset| {
+            preset.domain == "runtime_traffic_accounting_source"
+                && preset.name == "builtin:interface_counters"
+        })
+        .unwrap();
+    assert_eq!(default_preset.assigned_client_count, 1);
+
+    if let Repository::Memory(memory) = &repo {
+        assert!(
+            memory.data_source_assignments.read().await.is_empty(),
+            "default assignment reads must not persist durable rows"
+        );
+    }
+}
+
 fn data_source_test_state(
     repo: Repository,
     backup_object_store: Option<BackupObjectStore>,

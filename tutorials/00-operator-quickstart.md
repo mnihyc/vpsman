@@ -8,8 +8,20 @@ assumes a local development control plane and one test VPS or VM.
 Use local disk object storage first:
 
 ```sh
+docker run --rm --name vpsman-quickstart-postgres \
+  -e POSTGRES_DB=vpsman \
+  -e POSTGRES_USER=vpsman \
+  -e POSTGRES_PASSWORD=vpsman \
+  -p 127.0.0.1:5432:5432 \
+  postgres:16-alpine
+```
+
+In the service shells, point API and worker at that Postgres instance:
+
+```sh
 export VPSMAN_API_BIND=127.0.0.1:8080
 export VPSMAN_API_URL=http://127.0.0.1:8080
+export VPSMAN_POSTGRES_URL=postgres://vpsman:vpsman@127.0.0.1:5432/vpsman
 export VPSMAN_GATEWAY_BIND=127.0.0.1:9443
 export VPSMAN_GATEWAY_CONTROL_BIND=127.0.0.1:9444
 export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444

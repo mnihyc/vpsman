@@ -63,6 +63,10 @@ impl Repository {
                     .iter()
                     .filter(|target| target.status == "agent_timeout")
                     .count() as i64;
+                let agent_lost = targets
+                    .iter()
+                    .filter(|target| target.status == "agent_lost")
+                    .count() as i64;
                 let canceled = targets
                     .iter()
                     .filter(|target| target.status == "canceled")
@@ -90,6 +94,7 @@ impl Repository {
                         deadline_expired_active: 0,
                         control_timeout_last_24h: control_timeout,
                         agent_timeout_last_24h: agent_timeout,
+                        agent_lost_last_24h: agent_lost,
                         canceled_last_24h: canceled,
                     },
                     cancellations: SystemDashboardCancellationsView::default(),
@@ -117,6 +122,10 @@ impl Repository {
                             WHERE status = 'agent_timeout'
                               AND COALESCE(completed_at, result_received_at, started_at) >= now() - interval '24 hours'
                         )::bigint AS agent_timeout_last_24h,
+                        COUNT(*) FILTER (
+                            WHERE status = 'agent_lost'
+                              AND COALESCE(completed_at, result_received_at, started_at) >= now() - interval '24 hours'
+                        )::bigint AS agent_lost_last_24h,
                         COUNT(*) FILTER (
                             WHERE status = 'canceled'
                               AND COALESCE(completed_at, cancel_acked_at, cancel_sent_at, cancel_requested_at, started_at) >= now() - interval '24 hours'
@@ -174,6 +183,7 @@ impl Repository {
                         deadline_expired_active: target_row.try_get("deadline_expired_active")?,
                         control_timeout_last_24h: target_row.try_get("control_timeout_last_24h")?,
                         agent_timeout_last_24h: target_row.try_get("agent_timeout_last_24h")?,
+                        agent_lost_last_24h: target_row.try_get("agent_lost_last_24h")?,
                         canceled_last_24h: target_row.try_get("canceled_last_24h")?,
                     },
                     cancellations: SystemDashboardCancellationsView {
@@ -413,6 +423,10 @@ pub(crate) fn system_metric_samples_from_snapshot(
         sample(
             "targets.agent_timeout_last_24h",
             snapshot.targets.agent_timeout_last_24h as f64,
+        ),
+        sample(
+            "targets.agent_lost_last_24h",
+            snapshot.targets.agent_lost_last_24h as f64,
         ),
         sample(
             "targets.canceled_last_24h",

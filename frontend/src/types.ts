@@ -162,6 +162,7 @@ export type SystemDashboardTargetsRecord = {
   deadline_expired_active: number;
   control_timeout_last_24h: number;
   agent_timeout_last_24h: number;
+  agent_lost_last_24h: number;
   canceled_last_24h: number;
 };
 

@@ -82,8 +82,8 @@ Then run:
 ```sh
 cd deploy
 cp .env.example .env
-# edit .env before real deployment; VPSMAN_INTERNAL_TOKEN is mandatory and
-# must be a random non-placeholder value of at least 32 characters
+# edit .env before real deployment; use a URL-safe random hex
+# POSTGRES_PASSWORD because compose derives the API/worker Postgres URL from it
 docker compose up -d
 ```
 
@@ -95,15 +95,17 @@ Persistent runtime data stays in checkout-local paths:
 
 In Docker, keep the `.env` object-store paths under `/var/lib/vpsman`
 unchanged; compose maps them to `deploy/runtime/data`.
-Compose also sets `VPSMAN_SUITE_CONFIG=/etc/vpsman/vpsman.toml` and mounts
+Compose also sets `VPSMAN_SUITE_CONFIG=/etc/vpsman/vpsman.toml`,
+derives `VPSMAN_POSTGRES_URL` for API and worker from `deploy/.env`, and mounts
 `deploy/config` at `/etc/vpsman`. `deploy/config/vpsman.toml` remains the single
-authoritative compose suite config; the API receives that config directory as
+authoritative compose suite config for non-secret runtime settings; the
+database password stays in `.env`. The API receives that config directory as
 writable so dashboard saves can atomically replace the TOML, while gateway,
 worker, and secret mounts stay read-only. Compose mounts secret files per
 service under `/run/secrets`; API and worker containers do not receive
 gateway-only private-key or privilege-verifier material. Direct binary runs are
-independent of the compose layout; set `VPSMAN_SUITE_CONFIG` yourself when you
-want a specific operator config file.
+independent of the compose layout; set `VPSMAN_SUITE_CONFIG` and
+`VPSMAN_POSTGRES_URL` yourself when you want a specific operator config file.
 
 Long-running job control uses `timeout_secs` as the agent execution budget.
 The API adds dispatch/event grace through `timeout.control_deadline_grace_secs`,

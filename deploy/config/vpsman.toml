@@ -52,7 +52,6 @@ schedule_command_timeout_secs = 30
 require_registered_agent_updates = false
 
 [database]
-postgres_url = "postgres://vpsman:vpsman@postgres:5432/vpsman"
 migrations_dir = "/opt/vpsman/migrations"
 
 [storage]

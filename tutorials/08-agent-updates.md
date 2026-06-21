@@ -116,9 +116,11 @@ cargo run -p vpsctl -- agent-update-check \
 ```
 
 Manual update jobs download from the supplied external HTTPS URL, verify
-SHA-256, stage the binary, and create local rollback material. Use the dashboard
-Manual update operation or the CLI when the operator wants to pin an exact
-artifact URL and digest instead of using the release manifest.
+SHA-256, stage the binary, and create local rollback material. Use Jobs ->
+Command dispatch -> Manual update or the CLI when the operator wants to pin an
+exact artifact URL and digest instead of using the release manifest. The release
+registry stores URL hashes for admission/audit and does not expose raw artifact
+URLs back into dispatch shortcuts.
 
 ```sh
 cargo run -p vpsctl -- agent-update \

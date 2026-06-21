@@ -310,13 +310,6 @@ INSERT INTO data_source_presets (
     )
 ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO client_data_source_preset_assignments (client_id, domain, preset_id)
-SELECT clients.id, presets.domain, presets.id
-FROM clients
-CROSS JOIN data_source_presets presets
-WHERE presets.is_default
-ON CONFLICT (client_id, domain) DO NOTHING;
-
 CREATE TABLE hot_config_rule_templates (
     id UUID PRIMARY KEY,
     name TEXT NOT NULL,

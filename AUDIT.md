@@ -77,7 +77,7 @@ of the same root cause.
 | AUD-061 | High | Fixed | Frontend/System Users | User-management confirmations remain armed after editor or selection changes |
 | AUD-062 | High | Fixed | API/Object Storage/Artifacts | Artifact creation can commit metadata or bytes without cleanup-registry consistency |
 | AUD-063 | High | Fixed | Frontend/Schedules | Schedule confirmations remain armed after form, defer, or table context changes |
-| AUD-064 | Medium/High | Confirmed | Frontend/Agent Updates | Release-registry manual update shortcut cannot provide the artifact URL it requires |
+| AUD-064 | Medium/High | Fixed | Frontend/Agent Updates | Release-registry manual update shortcut cannot provide the artifact URL it requires |
 | AUD-065 | High | Fixed | Frontend/Integrations | Delivery queue confirmations are not bound to previewed rows |
 | AUD-066 | High | Fixed | API/Deploy/Security | API binary and suite config default to all-interface binding |
 | AUD-067 | High | Fixed | Deploy/Nginx/API Boundary | Public frontend proxy exposes private API and WebSocket routes |
@@ -139,7 +139,7 @@ of the same root cause.
 | AUD-123 | Medium/High | Fixed | API/Process Supervisor/Auth | Process-supervisor inventory exposes job-output-derived process details with fleet-read scope |
 | AUD-124 | Medium/High | Fixed | API/Fleet Alerts/Auth | Fleet alert evidence exposes backup paths and artifact IDs with fleet-read scope |
 | AUD-125 | High | Fixed | API/Fleet Alerts/Webhooks | Fleet alert read routes can enqueue webhook integration events |
-| AUD-126 | Medium/High | Confirmed | API/Data Sources/State | Data-source read paths persist default assignments for all clients, including hidden clients |
+| AUD-126 | Medium/High | Fixed | API/Data Sources/State | Data-source read paths persist default assignments for all clients, including hidden clients |
 | AUD-127 | High | Fixed | Gateway/Forwarder/Shutdown | Controlled gateway shutdown can lose queued RAM forwarder events |
 | AUD-128 | High | Fixed | Agent/File Browser/Safety | Recursive file delete can escape through symlink-swap races |
 | AUD-129 | Medium/High | Fixed | Gateway/Terminal/Resource Bounds | Terminal output forwarding bypasses the gateway RAM spool budget |
@@ -203,13 +203,13 @@ of the same root cause.
 | AUD-187 | Medium/High | Fixed | API/Frontend/History Retention | History retention policy saves ignore the confirmation contract |
 | AUD-188 | High | Fixed | Agent/File Browser/Safety | File rename and move can follow path races outside the reviewed source or destination |
 | AUD-189 | Medium/High | Fixed | Deploy/Agent Install/Docs | Official agent install examples do not start the service they claim to start |
-| AUD-190 | Medium/High | Confirmed | Deploy/Compose/Database | Secure compose password edits leave API and worker using the wrong Postgres credentials |
+| AUD-190 | Medium/High | Fixed | Deploy/Compose/Database | Secure compose password edits leave API and worker using the wrong Postgres credentials |
 | AUD-191 | High | Skipped | API/Gateway/Dispatch | Backup gateway endpoints cannot receive API dispatch, cancel, or lifecycle disconnect control |
 | AUD-192 | Medium/High | Fixed | Gateway/Deploy/Security | Gateway agent TCP listener still defaults to all-interface binding |
 | AUD-193 | High | Fixed | Gateway/API/Lifecycle | Gateway lifecycle events can expire before API accepts a new process incarnation |
 | AUD-194 | High | Fixed | Release/Updates/Supply Chain | Manual release workflow can publish tag-named update assets from the wrong commit |
 | AUD-195 | Medium/High | Fixed | API/Gateway/Security/Docs | Documented dev internal token bypasses placeholder startup validation |
-| AUD-196 | Medium | Confirmed | Docs/Local Control Plane | Manual quickstart no longer starts a usable Postgres-backed API |
+| AUD-196 | Medium | Fixed | Docs/Local Control Plane | Manual quickstart no longer starts a usable Postgres-backed API |
 | AUD-197 | High | Fixed | Deploy/API/Gateway/Secrets | API and worker containers can read gateway-only secret material |
 | AUD-198 | Medium/High | Fixed | API/Worker/Object Storage/Security | S3-compatible object store accepts plaintext HTTP endpoints for signed requests |
 | AUD-199 | High | Fixed | API/Frontend/Job Outputs/Resource Bounds | Job-output and file-download archive exports can exhaust API temp disk across targets |
@@ -234,7 +234,7 @@ of the same root cause.
 | AUD-218 | High | Fixed | API/Frontend/CLI/File Operations | Chunked file-push jobs exceed the job-create route body limit |
 | AUD-219 | Medium/High | Fixed | API/Worker/Integrations/Delivery State | Disabled integrations can still deliver already queued outbound work |
 | AUD-220 | High | Fixed | API/Worker/Integrations/Auth | Queued integration deliveries are not bound to the originating actor authority |
-| AUD-221 | Medium/High | Confirmed | API/Frontend/System Dashboard | System dashboard omits agent-lost lifecycle failures |
+| AUD-221 | Medium/High | Fixed | API/Frontend/System Dashboard | System dashboard omits agent-lost lifecycle failures |
 | AUD-222 | Medium | Fixed | Frontend/System Config/Security | Suite config editor still presents the private API bind as a public API setting |
 | AUD-223 | High | Fixed | API/Gateway/Client Lifecycle | Lifecycle disconnect can report success while older queued commands still deliver |
 | AUD-224 | Medium/High | Fixed | Agent/CLI/Frontend/File Pull | File pull byte caps can be bypassed when a file grows after stat |
@@ -1884,7 +1884,7 @@ of the same root cause.
 ### AUD-064: Release-Registry Manual Update Shortcut Cannot Provide The Artifact URL It Requires
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Frontend/Agent Updates
 - Context: Operators use Jobs > Updates to record external agent release
   metadata and then dispatch manual update jobs or update checks across selected
@@ -1919,6 +1919,11 @@ of the same root cause.
   Audit sync on 2026-06-21 reconfirmed this remains real: the Manual update
   shortcut still pre-fills only `updateSha256Hex`, while the dispatch form
   still requires `updateArtifactUrl`.
+- Resolution: Fixed by removing the release-registry "Manual update" shortcut
+  that could only supply a SHA-256 digest. The registry remains a metadata and
+  admission surface that exposes URL hashes, while exact manual update dispatch
+  stays in Jobs -> Command dispatch and the CLI where operators provide both the
+  external HTTPS artifact URL and digest.
 
 ### AUD-065: Delivery Queue Confirmations Are Not Bound To Previewed Rows
 
@@ -4634,7 +4639,7 @@ of the same root cause.
 ### AUD-126: Data-Source Read Paths Persist Default Assignments For All Clients, Including Hidden Clients
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Data Sources/State
 - Context: Data-source presets and assignments define generated agent hot-config
   behavior. Listing assignments or status should be a read-only inspection of
@@ -4673,6 +4678,12 @@ of the same root cause.
   2026-06-21 reconfirmed this remains real: `list_data_source_assignments`
   still calls `ensure_default_data_source_assignments`, and the Postgres insert
   still selects all `clients` without a hidden-client filter.
+- Resolution: Fixed by removing read-path default assignment materialization.
+  Assignment listings and preset counts now compute effective defaults from
+  explicit assignments plus default presets for visible clients only, excluding
+  hidden, deleted, and revoked clients without inserting durable rows. The
+  canonical pre-release data-source migration no longer seeds durable default
+  assignment rows.
 
 ### AUD-127: Controlled Gateway Shutdown Can Lose Queued RAM Forwarder Events
 
@@ -7565,7 +7576,7 @@ of the same root cause.
 ### AUD-190: Secure Compose Password Edits Leave API And Worker Using The Wrong Postgres Credentials
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Deploy/Compose/Database
 - Context: Operators bootstrap the released Docker Compose deployment by
   copying `deploy/.env.example` to `deploy/.env`, editing secrets, and running
@@ -7602,6 +7613,10 @@ of the same root cause.
   config before start, or documenting and validating an explicit database URL
   setting so secure deploys fail fast with a clear message instead of a stale
   credential.
+- Resolution: Fixed by making compose derive `VPSMAN_POSTGRES_URL` for API and
+  worker directly from `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB`
+  in `deploy/.env`. The shipped suite TOML no longer hardcodes the compose
+  Postgres password, keeping `.env` as the database credential source of truth.
 
 ### AUD-191: Backup Gateway Endpoints Cannot Receive API Dispatch, Cancel, Or Lifecycle Disconnect Control
 
@@ -7843,7 +7858,7 @@ of the same root cause.
 ### AUD-196: Manual Quickstart No Longer Starts A Usable Postgres-Backed API
 
 - Severity: Medium
-- Status: Confirmed
+- Status: Fixed
 - Area: Docs/Local Control Plane
 - Context: The operator quickstart and local-control-plane tutorial are the
   shortest documented path for starting API, gateway, worker, frontend, and one
@@ -7874,6 +7889,9 @@ of the same root cause.
   edits diverging from the suite-config Postgres URL. This issue is the manual
   tutorial path omitting Postgres entirely after the memory repository stopped
   being a production startup mode.
+- Resolution: Fixed by adding explicit local Postgres startup commands to the
+  quickstart and local-control-plane tutorials and exporting
+  `VPSMAN_POSTGRES_URL` for the manual API and worker shells.
 
 ### AUD-197: API And Worker Containers Can Read Gateway-Only Secret Material
 
@@ -9048,7 +9066,7 @@ of the same root cause.
 ### AUD-221: System Dashboard Omits Agent-Lost Lifecycle Failures
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/System Dashboard/Job Lifecycle
 - Context: `agent_lost` is the terminal target status used when the control
   plane has positive evidence that the executing agent process was lost or
@@ -9081,6 +9099,10 @@ of the same root cause.
   label it distinctly from `agent_timeout`, and include it in the frontend
   lifecycle failure summary. Keep `agent_lost` distinct from `control_timeout`;
   do not relabel it as a timeout.
+- Resolution: Fixed by adding `agent_lost_last_24h` to the System Dashboard
+  target snapshot, metric samples, API labels, frontend types, and dashboard
+  card/chart. The lifecycle failure total now includes control timeouts, agent
+  timeouts, and agent-lost outcomes while keeping the three reasons distinct.
 
 ### AUD-222: Suite Config Editor Still Presents The Private API Bind As A Public API Setting
 

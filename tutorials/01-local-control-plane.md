@@ -22,6 +22,8 @@ Then start the stack:
 ```sh
 cd deploy
 cp .env.example .env
+# Edit POSTGRES_PASSWORD before real deployment. Use URL-safe random hex,
+# because compose derives the API/worker Postgres URL from this value.
 docker compose up -d
 ```
 
@@ -54,8 +56,20 @@ Docker-managed named volumes.
 Manual startup is useful while iterating:
 
 ```sh
+docker run --rm --name vpsman-local-postgres \
+  -e POSTGRES_DB=vpsman \
+  -e POSTGRES_USER=vpsman \
+  -e POSTGRES_PASSWORD=vpsman \
+  -p 127.0.0.1:5432:5432 \
+  postgres:16-alpine
+```
+
+Run each control-plane process in its own shell with the same environment:
+
+```sh
 export VPSMAN_API_BIND=127.0.0.1:8080
 export VPSMAN_API_URL=http://127.0.0.1:8080
+export VPSMAN_POSTGRES_URL=postgres://vpsman:vpsman@127.0.0.1:5432/vpsman
 export VPSMAN_GATEWAY_BIND=127.0.0.1:9443
 export VPSMAN_GATEWAY_CONTROL_BIND=127.0.0.1:9444
 export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444
@@ -72,7 +86,6 @@ export VPSMAN_ALERT_CPU_LOAD_CRITICAL=4.0
 # to use; compose sets its own container path.
 # export VPSMAN_SUITE_CONFIG=.tmp/local-vpsman.toml
 
-# Run each service in its own shell with the same environment.
 cargo run -p vpsman-api
 cargo run -p vpsman-gateway
 cargo run -p vpsman-worker

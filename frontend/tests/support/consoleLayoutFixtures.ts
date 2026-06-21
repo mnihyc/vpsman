@@ -619,6 +619,7 @@ const systemDashboard = {
     },
     targets: {
       active: 3,
+      agent_lost_last_24h: 1,
       agent_timeout_last_24h: 1,
       canceled_last_24h: 1,
       control_timeout_last_24h: 1,
@@ -642,6 +643,7 @@ const systemDashboard = {
     systemSeries("targets.deadline_expired_active", "Expired active targets", "targets", [0, 0, 0]),
     systemSeries("targets.control_timeout_last_24h", "Control timeouts", "targets", [0, 1, 1]),
     systemSeries("targets.agent_timeout_last_24h", "Agent timeouts", "targets", [0, 0, 1]),
+    systemSeries("targets.agent_lost_last_24h", "Agent lost", "targets", [0, 0, 1]),
     systemSeries("targets.canceled_last_24h", "Canceled targets", "targets", [0, 1, 1]),
     systemSeries("gateway_events.queued_events", "Gateway queued events", "events", [2, 1, 0]),
     systemSeries("gateway_events.delivered_events", "Gateway delivered events", "events", [900, 918, 928]),

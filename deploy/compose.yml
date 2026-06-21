@@ -18,6 +18,7 @@ services:
     command: ./bin/vpsman-api
     environment:
       VPSMAN_SUITE_CONFIG: /etc/vpsman/vpsman.toml
+      VPSMAN_POSTGRES_URL: "postgres://${POSTGRES_USER:-vpsman}:${POSTGRES_PASSWORD:-vpsman}@postgres:5432/${POSTGRES_DB:-vpsman}"
       # Container-internal only; this service intentionally has no host API port.
       VPSMAN_API_BIND: 0.0.0.0:8080
     volumes:
@@ -83,6 +84,7 @@ services:
     command: ./bin/vpsman-worker
     environment:
       VPSMAN_SUITE_CONFIG: /etc/vpsman/vpsman.toml
+      VPSMAN_POSTGRES_URL: "postgres://${POSTGRES_USER:-vpsman}:${POSTGRES_PASSWORD:-vpsman}@postgres:5432/${POSTGRES_DB:-vpsman}"
     volumes:
       - ./runtime/server/current:/opt/vpsman:ro
       - ./runtime/data:/var/lib/vpsman

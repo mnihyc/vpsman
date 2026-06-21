@@ -221,6 +221,7 @@ fn system_metric_label_unit(metric: &str) -> (&'static str, &'static str) {
         "targets.deadline_expired_active" => ("Expired active targets", "targets"),
         "targets.control_timeout_last_24h" => ("Control timeouts", "targets"),
         "targets.agent_timeout_last_24h" => ("Agent timeouts", "targets"),
+        "targets.agent_lost_last_24h" => ("Agent lost", "targets"),
         "targets.canceled_last_24h" => ("Canceled targets", "targets"),
         "cancellations.requested" => ("Cancel requested", "targets"),
         "cancellations.sent" => ("Cancel sent", "targets"),

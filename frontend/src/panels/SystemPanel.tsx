@@ -1476,9 +1476,10 @@ function SystemDashboardPanel({
   const dbPressure = dashboard?.current.db_pool.max_connections
     ? dashboard.current.db_pool.in_use_connections / dashboard.current.db_pool.max_connections
     : 0;
-  const deadlineTimeouts =
+  const lifecycleFailures =
     (dashboard?.current.targets.control_timeout_last_24h ?? 0) +
-    (dashboard?.current.targets.agent_timeout_last_24h ?? 0);
+    (dashboard?.current.targets.agent_timeout_last_24h ?? 0) +
+    (dashboard?.current.targets.agent_lost_last_24h ?? 0);
   return (
     <div className="workspace singleColumn systemWorkspace">
       <div className="workspaceStack">
@@ -1570,17 +1571,19 @@ function SystemDashboardPanel({
           badge={`${dashboard?.current.targets.deadline_expired_active ?? 0} expired`}
           icon={<AlertTriangle size={18} />}
           title="Deadlines"
-          subtitle="Control deadline expiry, agent timeouts, and canceled outcomes."
+          subtitle="Control deadline expiry, agent timeouts, agent loss, and canceled outcomes."
           metrics={[
-            { label: "Deadline timeouts", value: String(deadlineTimeouts) },
+            { label: "Lifecycle failures", value: String(lifecycleFailures) },
             { label: "Control timed out", value: String(dashboard?.current.targets.control_timeout_last_24h ?? 0) },
             { label: "Agent timed out", value: String(dashboard?.current.targets.agent_timeout_last_24h ?? 0) },
+            { label: "Agent lost", value: String(dashboard?.current.targets.agent_lost_last_24h ?? 0) },
             { label: "Agent offline timeout", value: secondsOrUnset(dashboard?.capacity.agent_offline_secs) },
           ]}
           lines={chartLines(series, [
             "targets.deadline_expired_active",
             "targets.control_timeout_last_24h",
             "targets.agent_timeout_last_24h",
+            "targets.agent_lost_last_24h",
             "targets.canceled_last_24h",
           ])}
           valueFormatter={(value) => formatNumber(value)}

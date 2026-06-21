@@ -179,19 +179,6 @@ export function AgentUpdateReleasesPanel({
             className="secondaryAction compactAction"
             onClick={() =>
               onOpenDispatchPreset({
-                mode: "agent_update",
-                selectorExpression: "",
-                updateSha256Hex: latestRelease?.artifact_sha256_hex ?? "",
-              })
-            }
-            type="button"
-          >
-            Manual update
-          </button>
-          <button
-            className="secondaryAction compactAction"
-            onClick={() =>
-              onOpenDispatchPreset({
                 mode: "agent_update_activate",
                 selectorExpression: "",
                 updateActivationSha256Hex: latestRelease?.artifact_sha256_hex ?? "",

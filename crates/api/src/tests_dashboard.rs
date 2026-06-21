@@ -27,6 +27,47 @@ async fn dashboard_overview_rejects_invalid_window() {
 }
 
 #[tokio::test]
+async fn system_dashboard_counts_agent_lost_lifecycle_failures() {
+    let repo = Repository::Memory(MemoryState::default());
+    let now = unix_now().to_string();
+    if let Repository::Memory(memory) = &repo {
+        memory.job_targets.write().await.push(JobTargetView {
+            job_id: Uuid::new_v4(),
+            client_id: "edge-a".to_string(),
+            status: "agent_lost".to_string(),
+            message: Some("agent process lost".to_string()),
+            exit_code: None,
+            started_at: Some(now.clone()),
+            completed_at: Some(now),
+            process_incarnation_id: None,
+        });
+    }
+    let state = dashboard_test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+
+    routes_system::record_system_dashboard_sample(&state)
+        .await
+        .unwrap();
+    let Json(view) = routes_system::system_dashboard(
+        State(state),
+        headers,
+        Query(routes_system::SystemDashboardQuery {
+            window: Some("24h".to_string()),
+            chart_points: Some(120),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(view.current.targets.agent_lost_last_24h, 1);
+    assert!(view.series.iter().any(|series| {
+        series.metric == "targets.agent_lost_last_24h"
+            && series.label == "Agent lost"
+            && series.points.iter().any(|point| point.latest_value == 1.0)
+    }));
+}
+
+#[tokio::test]
 async fn dashboard_overview_aggregates_memory_state() {
     let repo = Repository::Memory(MemoryState::default());
     let now_unix = unix_now();
