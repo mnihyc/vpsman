@@ -1,4 +1,4 @@
-name: Full Release Check
+name: Release Check
 
 on:
   workflow_dispatch:

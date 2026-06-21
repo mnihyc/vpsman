@@ -71,6 +71,27 @@ require_regex "$noise_out" '"public_key_hex":"[0-9a-f]{64}"' "noise-keygen"
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/vpsctl-cli-semantics.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
+compose_secret_dir="$tmp_dir/compose-secrets"
+compose_secret_out="$(VPSMAN_SUPER_PASSWORD="correct horse battery staple" "$bin" compose-secrets \
+  --secrets-dir "$compose_secret_dir" \
+  --super-salt-hex 01020304)"
+require_contains "$compose_secret_out" '"compose_secrets":"ok"' "compose-secrets"
+for secret_name in vpsman_internal_token vpsman_gateway_private_key_hex vpsman_privilege_verifier_key_hex vpsman_gateway_public_key_hex operator-privilege.env; do
+  [[ -f "$compose_secret_dir/$secret_name" ]] || fail "compose-secrets did not create $secret_name"
+done
+require_regex "$(cat "$compose_secret_dir/vpsman_internal_token")" '^[0-9a-f]{64}$' "compose internal token"
+require_regex "$(cat "$compose_secret_dir/vpsman_gateway_private_key_hex")" '^[0-9a-f]{64}$' "compose gateway private key"
+require_regex "$(cat "$compose_secret_dir/vpsman_gateway_public_key_hex")" '^[0-9a-f]{64}$' "compose gateway public key"
+expected_verifier="$(smoke_privilege_verifier_key_hex "correct horse battery staple" "01020304")"
+[[ "$(cat "$compose_secret_dir/vpsman_privilege_verifier_key_hex")" == "$expected_verifier" ]] \
+  || fail "compose-secrets wrote unexpected privilege verifier key"
+require_contains "$(cat "$compose_secret_dir/operator-privilege.env")" "VPSMAN_SUPER_SALT_HEX=01020304" "compose operator salt"
+if VPSMAN_SUPER_PASSWORD="correct horse battery staple" "$bin" compose-secrets \
+  --secrets-dir "$compose_secret_dir" \
+  --super-salt-hex 01020304 \
+  >"$tmp_dir/compose-overwrite.out" 2>"$tmp_dir/compose-overwrite.err"; then
+  fail "compose-secrets overwrote existing files without --force"
+fi
 update_help="$("$bin" agent-update --help)"
 require_contains "$update_help" "--artifact-url" "agent-update help"
 require_contains "$update_help" "--sha256-hex" "agent-update help"
@@ -111,6 +132,7 @@ printf '  "vpsctl_cli_semantics_smoke": "ok",\n'
 printf '  "checks": [\n'
 printf '    "local_tunnel_plan_all_kinds",\n'
 printf '    "noise_keygen_shape",\n'
+printf '    "compose_secret_generation",\n'
 printf '    "agent_update_external_url_shape",\n'
 printf '    "config_patch_bounds_rejected",\n'
 printf '    "network_probe_bounds_rejected",\n'

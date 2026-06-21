@@ -85,6 +85,7 @@ pub(crate) enum Command {
     ClientKeyRevocations(LimitCommand),
     ClientKeyRevoke(ClientKeyRevokeCommand),
     KeyLifecycleReport,
+    ComposeSecrets(crate::cli_access::ComposeSecretsCommand),
     Summary,
     Agents,
     FleetAlerts(FleetAlertsCommand),

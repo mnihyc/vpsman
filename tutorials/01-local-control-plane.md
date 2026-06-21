@@ -15,7 +15,8 @@ First place release assets into the checkout-local runtime layout:
 - migration SQL files: `deploy/runtime/server/current/migrations/`
 - extracted Vite frontend `dist/`: `deploy/runtime/frontend/current/dist/`
 - suite config: `deploy/config/vpsman.toml`
-- secret files referenced by suite config: `deploy/config/secrets/`
+- secret files referenced by suite config: generated under
+  `deploy/config/secrets/`
 
 Then start the stack:
 
@@ -24,8 +25,16 @@ cd deploy
 cp .env.example .env
 # Edit POSTGRES_PASSWORD before real deployment. Use URL-safe random hex,
 # because compose derives the API/worker Postgres URL from this value.
+export VPSMAN_SUPER_PASSWORD='<local_super_password>'
+vpsctl compose-secrets --secrets-dir config/secrets
 docker compose up -d
 ```
+
+If `vpsctl` is not installed yet, run the same helper from the source checkout
+instead: `cargo run -p vpsctl -- compose-secrets --secrets-dir deploy/config/secrets`.
+It writes the mounted internal token, gateway private key, privilege verifier
+key, a gateway public-key file for agent installs, and
+`operator-privilege.env` with the generated `VPSMAN_SUPER_SALT_HEX`.
 
 The default compose shape uses:
 

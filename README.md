@@ -6,10 +6,10 @@
 headless agents, a raw TCP gateway, an HTTP control plane, a CLI/VTY operator
 tool, and a Vite-built web panel.
 
-The public repository intentionally keeps only source, migrations, deployment
-templates, and GitHub Actions build definitions. Local planning notes,
-operator tutorials, private smoke harnesses, and generated build artifacts are
-ignored and are not part of the public tree.
+The public repository intentionally keeps source, migrations, deployment
+templates, GitHub Actions build definitions, and operator tutorials. Local
+planning notes, private smoke harnesses, runtime state, generated secrets, and
+build artifacts are ignored and are not part of the public tree.
 
 ## Components
 
@@ -75,7 +75,8 @@ Place release files into this checkout-local layout:
 - server ZIP contents: `deploy/runtime/server/current/`
 - extracted frontend `dist/`: `deploy/runtime/frontend/current/dist/`
 - suite config: `deploy/config/vpsman.toml`
-- secret files referenced by suite config: `deploy/config/secrets/`
+- secret files referenced by suite config: generated under
+  `deploy/config/secrets/`
 
 Then run:
 
@@ -84,8 +85,17 @@ cd deploy
 cp .env.example .env
 # edit .env before real deployment; use a URL-safe random hex
 # POSTGRES_PASSWORD because compose derives the API/worker Postgres URL from it
+export VPSMAN_SUPER_PASSWORD='<local_super_password>'
+vpsctl compose-secrets --secrets-dir config/secrets
 docker compose up -d
 ```
+
+Run `cargo run -p vpsctl -- compose-secrets --secrets-dir deploy/config/secrets`
+from a source checkout if the release `vpsctl` binary is not installed yet. The
+command writes the three mounted compose secret files, a gateway public-key file
+for agent installs, and `operator-privilege.env` containing the generated
+`VPSMAN_SUPER_SALT_HEX`. Keep the super password in your operator password
+manager; the API never receives it.
 
 Persistent runtime data stays in checkout-local paths:
 

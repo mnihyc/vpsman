@@ -16,7 +16,7 @@ const goldenOperations: Record<string, JobOperation> = {
     argv: ["/bin/sh", "-l"],
     cols: 120,
     rows: 30,
-    idle_timeout_secs: 1800,
+    idle_timeout_secs: 3600,
     flow_window_bytes: 65536,
   },
   file_transfer_start: {

@@ -11,6 +11,8 @@
 /deploy/.env
 /deploy/.env.*
 !/deploy/.env.example
+/deploy/config/secrets/*
+!/deploy/config/secrets/.gitkeep
 /pid
 /.env
 /.env.*

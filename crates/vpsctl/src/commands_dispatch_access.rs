@@ -190,6 +190,15 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_keys::key_lifecycle_report(api_url, token)?;
             Ok(None)
         }
+        Command::ComposeSecrets(command) => {
+            commands_keys::compose_secrets(commands_keys::ComposeSecretsOptions {
+                secrets_dir: command.secrets_dir,
+                password_env: command.password_env,
+                super_salt_hex: command.super_salt_hex,
+                force: command.force,
+            })?;
+            Ok(None)
+        }
         Command::Summary => {
             commands_inventory::summary(api_url, token)?;
             Ok(None)

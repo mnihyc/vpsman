@@ -18,7 +18,7 @@ fi
 
 commands=(
   health bootstrap login refresh me operators operator-create operator-update operator-disable operator-enable operator-delete operator-password-reset operator-totp-clear operator-sessions operator-session-revoke operator-auth-events totp-setup totp-confirm totp-disable
-  agent-identity-upsert client-key-revocations client-key-revoke key-lifecycle-report
+  agent-identity-upsert client-key-revocations client-key-revoke key-lifecycle-report compose-secrets
   summary agents fleet-alerts fleet-alert-export fleet-alert-states fleet-alert-state-update fleet-alert-policies fleet-alert-policy-upsert fleet-alert-notification-channels fleet-alert-notification-channel-upsert fleet-alert-notifications fleet-alert-notification-dispatch fleet-alert-notification-process gateway-sessions telemetry-rollups telemetry-network-rates telemetry-tunnels tags tag-create agent-tag
   data-source-presets data-source-preset-create data-source-preset-clone data-source-preset-diff data-source-preset-test data-source-preset-update data-source-status data-source-assignments data-source-hot-config data-source-hot-config-apply data-source-preset-assign
   jobs schedules schedule-create schedule-update schedule-enable schedule-disable schedule-defer schedule-apply-now schedule-delete job-create job-shell
@@ -100,7 +100,7 @@ workflow_for_command() {
     network-observations|network-trends|network-ospf-recommendations|network-ospf-update-plans|topology-graph|tunnel-plans|tunnel-allocate|tunnel-plan|tunnel-promote-telemetry|tunnel-promote-adapter|tunnel-apply|tunnel-ospf-cost-update|tunnel-rollback|tunnel-status|tunnel-probe|tunnel-speed-test)
       printf 'topology_and_network_operations\n'
       ;;
-    noise-keygen|vty)
+    compose-secrets|noise-keygen|vty)
       printf 'local_operator_utilities\n'
       ;;
     *)

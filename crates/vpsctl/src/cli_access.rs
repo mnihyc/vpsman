@@ -159,6 +159,33 @@ pub(crate) struct ClientKeyRevokeCommand {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct ComposeSecretsCommand {
+    #[arg(
+        long,
+        default_value = "deploy/config/secrets",
+        help = "Directory where Docker Compose secret files are created"
+    )]
+    pub(crate) secrets_dir: PathBuf,
+    #[arg(
+        long,
+        default_value = "VPSMAN_SUPER_PASSWORD",
+        help = "Environment variable containing the local super password"
+    )]
+    pub(crate) password_env: String,
+    #[arg(
+        long,
+        help = "Existing super-password salt hex; generated and written to operator-privilege.env when omitted"
+    )]
+    pub(crate) super_salt_hex: Option<String>,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Replace an existing compose secret set"
+    )]
+    pub(crate) force: bool,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct DataSourcePresetListCommand {
     #[arg(long)]
     pub(crate) domain: Option<String>,
