@@ -8,7 +8,6 @@ import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { VpsCombobox } from "../components/VpsCombobox";
 import {
   buildBulkJobProgress,
-  bulkProgressTimeoutMs,
   createJobTargetCount,
   waitForBulkJobTargets,
   type BulkJobProgress,
@@ -678,17 +677,15 @@ function BulkConfigApply({
         jobId: response.job_id,
         targetRecords: [],
         targets: snapshot.targets,
+        timeoutSecs: snapshot.timeoutSecs,
       });
       setProgress(initial);
       const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: snapshot.targets,
-        timeoutMs: bulkProgressTimeoutMs(snapshot.timeoutSecs, response.control_deadline_extra_secs),
+        timeoutSecs: snapshot.timeoutSecs,
       });
-      if (waited.timedOut) {
-        throw new Error("Timed out waiting for bulk config apply targets");
-      }
       const outputs = await onLoadJobOutputs(response.job_id).catch(() => []);
       setProgress(
         buildBulkJobProgress({
@@ -697,6 +694,7 @@ function BulkConfigApply({
           outputs,
           targetRecords: waited.targets,
           targets: snapshot.targets,
+          timeoutSecs: snapshot.timeoutSecs,
         }),
       );
       setApplySnapshot(null);
@@ -923,13 +921,10 @@ function SingleVpsConfig({
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: [frozenTarget],
-        timeoutMs: bulkProgressTimeoutMs(boundedTimeoutSecs, response.control_deadline_extra_secs),
+        timeoutSecs: boundedTimeoutSecs,
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
-      }
-      if (waited.timedOut) {
-        throw new Error("Timed out waiting for config read target");
       }
       const outputs = await onLoadJobOutputs(response.job_id);
       setProgress(
@@ -939,6 +934,7 @@ function SingleVpsConfig({
           outputs,
           targetRecords: waited.targets,
           targets: [frozenTarget],
+          timeoutSecs: boundedTimeoutSecs,
         }),
       );
       const config = extractConfigRead(outputs);
@@ -1024,11 +1020,8 @@ function SingleVpsConfig({
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: [snapshot.target],
-        timeoutMs: bulkProgressTimeoutMs(snapshot.timeoutSecs, response.control_deadline_extra_secs),
+        timeoutSecs: snapshot.timeoutSecs,
       });
-      if (waited.timedOut) {
-        throw new Error("Timed out waiting for config apply target");
-      }
       const outputs = await onLoadJobOutputs(response.job_id).catch(() => []);
       setProgress(
         buildBulkJobProgress({
@@ -1037,6 +1030,7 @@ function SingleVpsConfig({
           outputs,
           targetRecords: waited.targets,
           targets: [snapshot.target],
+          timeoutSecs: snapshot.timeoutSecs,
         }),
       );
     });

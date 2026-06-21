@@ -2,7 +2,6 @@ import { useEffect, useLayoutEffect, useMemo, useState, type FormEvent } from "r
 import { CheckCircle2, LockKeyhole, Play, ShieldCheck } from "lucide-react";
 import {
   buildBulkJobProgress,
-  bulkProgressTimeoutMs,
   createJobTargetCount,
   formatTargetAvailabilitySummary,
   waitForBulkJobTargets,
@@ -1241,24 +1240,23 @@ export function JobDispatchPanel({
 
   async function trackDispatchProgress(job: CreateJobResponse, targets: AgentView[], jobTimeoutSecs = timeoutSecs) {
     const targetCount = createJobTargetCount(job);
+    const boundedJobTimeoutSecs = clampInteger(jobTimeoutSecs, 1, 3600);
     setLastDispatchProgress(null);
     setDispatchProgress(buildBulkJobProgress({
       jobId: job.job_id,
       targetCount,
       targetRecords: [],
       targets,
+      timeoutSecs: boundedJobTimeoutSecs,
     }));
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
         onProgress: setDispatchProgress,
         targetCount,
         targets,
-        timeoutMs: bulkProgressTimeoutMs(clampInteger(jobTimeoutSecs, 1, 3600), job.control_deadline_extra_secs),
+        timeoutSecs: boundedJobTimeoutSecs,
       });
       setLastDispatchProgress(result.progress);
-      if (result.timedOut) {
-        throw new Error("Timed out waiting for job targets");
-      }
     } finally {
       setDispatchProgress(null);
     }

@@ -48,7 +48,7 @@ import {
 import { base64ToBytes, parseFileMode } from "../../fileTransfer";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
-import { bulkProgressTimeoutMs, targetRecordTerminal } from "../../bulkJobProgress";
+import { targetRecordTerminal } from "../../bulkJobProgress";
 import type {
   AgentView,
   CreateJobRequest,
@@ -253,8 +253,6 @@ export function FileBrowserPanel({
       job.job_id,
       onLoadOutputs,
       onLoadTargets,
-      timeoutSecs,
-      job.control_deadline_extra_secs,
       options.expectedType,
     );
     return { job, outputs };
@@ -1240,13 +1238,10 @@ async function waitForOutputs(
   jobId: string,
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>,
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>,
-  timeoutSecs: number,
-  controlDeadlineExtraSecs: number | undefined,
   expectedType?: string,
 ): Promise<JobOutputRecord[]> {
   let last: JobOutputRecord[] = [];
-  const deadline = Date.now() + bulkProgressTimeoutMs(timeoutSecs, controlDeadlineExtraSecs);
-  while (Date.now() <= deadline) {
+  for (;;) {
     let terminal = false;
     try {
       const targets = await onLoadTargets(jobId);
@@ -1265,12 +1260,6 @@ async function waitForOutputs(
     }
     await delay(500);
   }
-  try {
-    last = await onLoadOutputs(jobId);
-  } catch {
-    // Preserve the timeout error below.
-  }
-  throw new Error("Timed out waiting for file operation target");
 }
 
 function concatenateStdout(outputs: JobOutputRecord[]): Uint8Array {

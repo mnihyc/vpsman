@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { Gauge, ShieldCheck } from "lucide-react";
 import {
   buildBulkJobProgress,
-  bulkProgressTimeoutMs,
   createJobTargetCount,
   formatTargetAvailabilitySummary,
   waitForBulkJobTargets,
@@ -215,18 +214,16 @@ export function TopologyOspfUpdateControls({
       targetCount,
       targetRecords: [],
       targets,
+      timeoutSecs: timeoutSecsForSnapshot,
     }));
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
         onProgress: setJobProgress,
         targetCount,
         targets,
-        timeoutMs: bulkProgressTimeoutMs(timeoutSecsForSnapshot, job.control_deadline_extra_secs),
+        timeoutSecs: timeoutSecsForSnapshot,
       });
       setLastJobProgress(result.progress);
-      if (result.timedOut) {
-        throw new Error("Timed out waiting for OSPF update targets");
-      }
     } finally {
       setJobProgress(null);
     }

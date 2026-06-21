@@ -1,9 +1,66 @@
 import { expect, test } from "@playwright/test";
 
-import { resumableTransferWaitTimeoutMs } from "../src/resumableFileTransfer";
+import { buildBulkJobProgress, bulkProgressLabel } from "../src/bulkJobProgress";
+import type { AgentView, JobTargetRecord, JobTargetStatus } from "../src/types";
 
-test("resumable transfer wait budget follows backend command timeout", () => {
-  expect(resumableTransferWaitTimeoutMs(120)).toBe(155_000);
-  expect(resumableTransferWaitTimeoutMs(30)).toBe(90_000);
-  expect(resumableTransferWaitTimeoutMs(0)).toBe(90_000);
+const TARGET: AgentView = {
+  display_name: "vps-a",
+  id: "client-a",
+  status: "online",
+} as AgentView;
+
+function runningTarget(startedAt: string, deadlineAt: string): JobTargetRecord {
+  return {
+    job_id: "job-a",
+    client_id: "client-a",
+    status: "running" as JobTargetStatus,
+    message: null,
+    exit_code: null,
+    started_at: startedAt,
+    deadline_at: deadlineAt,
+    completed_at: null,
+  };
+}
+
+test("bulk progress does not mark grace before command timeout", () => {
+  const progress = buildBulkJobProgress({
+    jobId: "job-a",
+    nowMs: 1_700_000_020_000,
+    targetRecords: [runningTarget("1700000000", "1700000120")],
+    targets: [TARGET],
+    timeoutSecs: 60,
+  });
+
+  expect(progress.control_grace).toBe(0);
+  expect(progress.deadline_overdue).toBe(0);
+  expect(bulkProgressLabel(progress)).not.toContain("control grace");
+  expect(bulkProgressLabel(progress)).not.toContain("deadline overdue");
+});
+
+test("bulk progress labels backend control grace after command timeout", () => {
+  const progress = buildBulkJobProgress({
+    jobId: "job-a",
+    nowMs: 1_700_000_070_000,
+    targetRecords: [runningTarget("1700000000", "1700000120")],
+    targets: [TARGET],
+    timeoutSecs: 60,
+  });
+
+  expect(progress.control_grace).toBe(1);
+  expect(progress.deadline_overdue).toBe(0);
+  expect(bulkProgressLabel(progress)).toContain("control grace 1");
+});
+
+test("bulk progress labels backend deadline overdue active targets", () => {
+  const progress = buildBulkJobProgress({
+    jobId: "job-a",
+    nowMs: 1_700_000_121_000,
+    targetRecords: [runningTarget("1700000000", "1700000120")],
+    targets: [TARGET],
+    timeoutSecs: 60,
+  });
+
+  expect(progress.control_grace).toBe(0);
+  expect(progress.deadline_overdue).toBe(1);
+  expect(bulkProgressLabel(progress)).toContain("deadline overdue 1");
 });

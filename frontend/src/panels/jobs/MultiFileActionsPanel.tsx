@@ -7,7 +7,6 @@ import { SearchExpressionInput } from "../../components/SearchExpressionInput";
 import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
 import {
   buildBulkJobProgress,
-  bulkProgressTimeoutMs,
   createJobTargetCount,
   targetPreflightUnavailable,
   waitForBulkJobTargets,
@@ -328,6 +327,7 @@ export function MultiFileActionsPanel({
         outputs,
         targetRecords: targets,
         targets: confirmation.targets,
+        timeoutSecs: BULK_JOB_TIMEOUT_SECS,
       });
       setBulkProgress(finalProgress);
       try {
@@ -338,12 +338,9 @@ export function MultiFileActionsPanel({
             finalProgress = progress;
             setBulkProgress(progress);
           },
-          timeoutMs: bulkProgressTimeoutMs(BULK_JOB_TIMEOUT_SECS, job.control_deadline_extra_secs),
+          timeoutSecs: BULK_JOB_TIMEOUT_SECS,
         });
         targets = result.targets;
-        if (result.timedOut) {
-          throw new Error("Timed out waiting for bulk file action targets");
-        }
         outputs = await loadOutputsForSummary(job.job_id, onLoadOutputs, targets);
         finalProgress = buildBulkJobProgress({
           jobId: job.job_id,
@@ -351,6 +348,7 @@ export function MultiFileActionsPanel({
           outputs,
           targetRecords: targets,
           targets: confirmation.targets,
+          timeoutSecs: BULK_JOB_TIMEOUT_SECS,
         });
       } finally {
         setBulkProgress(null);

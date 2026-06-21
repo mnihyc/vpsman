@@ -2,7 +2,6 @@ import { useMemo, useState, type FormEvent } from "react";
 import { Activity, Play, RotateCcw, Search, ShieldCheck } from "lucide-react";
 import {
   buildBulkJobProgress,
-  bulkProgressTimeoutMs,
   createJobTargetCount,
   formatTargetAvailabilitySummary,
   waitForBulkJobTargets,
@@ -269,18 +268,16 @@ export function TopologyApplyControls({
       targetCount,
       targetRecords: [],
       targets,
+      timeoutSecs: timeoutSecsForSnapshot,
     }));
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
         onProgress: setJobProgress,
         targetCount,
         targets,
-        timeoutMs: bulkProgressTimeoutMs(timeoutSecsForSnapshot, job.control_deadline_extra_secs),
+        timeoutSecs: timeoutSecsForSnapshot,
       });
       setLastJobProgress(result.progress);
-      if (result.timedOut) {
-        throw new Error("Timed out waiting for network apply targets");
-      }
     } finally {
       setJobProgress(null);
     }

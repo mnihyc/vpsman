@@ -20,6 +20,8 @@ export type BulkJobProgress = {
   canceled: number;
   completed: number;
   control_timeout: number;
+  control_grace: number;
+  deadline_overdue: number;
   dispatching: number;
   failed: number;
   failureReasons?: BulkFailureReason[];
@@ -38,42 +40,38 @@ export type BulkJobProgress = {
 };
 
 export const DEFAULT_BULK_PROGRESS_POLL_INTERVAL_MS = 500;
-export const DEFAULT_BULK_PROGRESS_TIMEOUT_MS = 90_000;
-export const BULK_PROGRESS_TIMEOUT_MARGIN_MS = 35_000;
-export const BULK_PROGRESS_FRONTEND_MARGIN_MS = 10_000;
-
-export function bulkProgressTimeoutMs(timeoutSecs: number | undefined, controlDeadlineExtraSecs?: number): number {
-  if (!Number.isFinite(timeoutSecs ?? NaN)) {
-    return DEFAULT_BULK_PROGRESS_TIMEOUT_MS;
-  }
-  const controlExtraMs = Number.isFinite(controlDeadlineExtraSecs ?? NaN)
-    ? Math.ceil(Math.max(0, controlDeadlineExtraSecs ?? 0)) * 1000 + BULK_PROGRESS_FRONTEND_MARGIN_MS
-    : BULK_PROGRESS_TIMEOUT_MARGIN_MS;
-  return Math.max(DEFAULT_BULK_PROGRESS_TIMEOUT_MS, Math.ceil(Math.max(1, timeoutSecs ?? 1)) * 1000 + controlExtraMs);
-}
 
 export function buildBulkJobProgress({
   jobId,
+  nowMs = Date.now(),
   outputs = [],
   targetCount,
   targetRecords,
   targets,
+  timeoutSecs,
 }: {
   jobId: string;
+  nowMs?: number;
   outputs?: JobOutputRecord[];
   targetCount?: number;
   targetRecords: JobTargetRecord[];
   targets: AgentView[];
+  timeoutSecs?: number;
 }): BulkJobProgress {
   const targetRecordByClient = new Map(targetRecords.map((target) => [target.client_id, target]));
   const targetByClient = new Map(targets.map((target) => [target.id, target]));
   const outputClientIds = new Set(outputs.filter((output) => output.done).map((output) => output.client_id));
   const total = Math.max(0, targetCount ?? targets.length, targets.length, targetRecords.length);
+  const commandTimeoutMs = Number.isFinite(timeoutSecs ?? NaN)
+    ? Math.ceil(Math.max(1, timeoutSecs ?? 1)) * 1000
+    : null;
   let agent_timeout = 0;
   let agent_lost = 0;
   let canceled = 0;
   let completed = 0;
   let control_timeout = 0;
+  let control_grace = 0;
+  let deadline_overdue = 0;
   let dispatching = 0;
   let failed = 0;
   const failureReasons: BulkFailureReason[] = [];
@@ -141,6 +139,20 @@ export function buildBulkJobProgress({
     if (targetRecordTerminal(targetRecord.status) || outputClientIds.has(targetRecord.client_id)) {
       retrieved += 1;
     }
+    if (
+      commandTimeoutMs !== null &&
+      (targetRecord.status === "dispatching" || targetRecord.status === "running")
+    ) {
+      const startedAtMs = parseBackendTimestampMs(targetRecord.started_at);
+      const deadlineAtMs = parseBackendTimestampMs(targetRecord.deadline_at);
+      if (startedAtMs !== null && deadlineAtMs !== null && nowMs >= startedAtMs + commandTimeoutMs) {
+        if (nowMs >= deadlineAtMs) {
+          deadline_overdue += 1;
+        } else {
+          control_grace += 1;
+        }
+      }
+    }
   }
 
   for (const clientId of outputClientIds) {
@@ -160,6 +172,8 @@ export function buildBulkJobProgress({
     canceled,
     completed,
     control_timeout,
+    control_grace,
+    deadline_overdue,
     dispatching,
     failed,
     failureReasons,
@@ -213,19 +227,19 @@ export async function waitForBulkJobTargets(
     onProgress?: (progress: BulkJobProgress) => void;
     targetCount?: number;
     targets: AgentView[];
-    timeoutMs?: number;
+    timeoutSecs?: number;
   },
-): Promise<{ progress: BulkJobProgress; targets: JobTargetRecord[]; timedOut: boolean }> {
+): Promise<{ progress: BulkJobProgress; targets: JobTargetRecord[] }> {
   let lastTargets: JobTargetRecord[] = [];
   let progress = buildBulkJobProgress({
     jobId,
     targetCount: options.targetCount,
     targetRecords: lastTargets,
     targets: options.targets,
+    timeoutSecs: options.timeoutSecs,
   });
-  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_BULK_PROGRESS_TIMEOUT_MS);
   const intervalMs = options.intervalMs ?? DEFAULT_BULK_PROGRESS_POLL_INTERVAL_MS;
-  while (Date.now() <= deadline) {
+  for (;;) {
     try {
       lastTargets = await onLoadTargets(jobId);
     } catch {
@@ -236,14 +250,14 @@ export async function waitForBulkJobTargets(
       targetCount: options.targetCount,
       targetRecords: lastTargets,
       targets: options.targets,
+      timeoutSecs: options.timeoutSecs,
     });
     options.onProgress?.(progress);
     if (progress.total === 0 || progress.terminal >= progress.total) {
-      return { progress, targets: lastTargets, timedOut: false };
+      return { progress, targets: lastTargets };
     }
     await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
   }
-  return { progress, targets: lastTargets, timedOut: true };
 }
 
 export function bulkProgressLabel(progress: BulkJobProgress): string {
@@ -257,6 +271,8 @@ export function bulkProgressLabel(progress: BulkJobProgress): string {
     progress.unsuccessful > 0 ? `unsuccessful ${progress.unsuccessful}` : "",
     progress.rejected > 0 ? `rejected ${progress.rejected}` : "",
     progress.failed > 0 ? `failed ${progress.failed}` : "",
+    progress.control_grace > 0 ? `control grace ${progress.control_grace}` : "",
+    progress.deadline_overdue > 0 ? `deadline overdue ${progress.deadline_overdue}` : "",
     progress.agent_lost > 0 ? `agent_lost ${progress.agent_lost}` : "",
     progress.agent_timeout > 0 ? `agent_timeout ${progress.agent_timeout}` : "",
     progress.control_timeout > 0 ? `control_timeout ${progress.control_timeout}` : "",
@@ -320,6 +336,22 @@ export function bulkOutcomeSummary(progress: BulkJobProgress): string {
 
 function vpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
+}
+
+function parseBackendTimestampMs(value: string | null | undefined): number | null {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (/^\d+$/.test(trimmed)) {
+    const parsed = Number.parseInt(trimmed, 10);
+    if (!Number.isFinite(parsed)) {
+      return null;
+    }
+    return trimmed.length <= 10 ? parsed * 1000 : parsed;
+  }
+  const parsed = Date.parse(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function targetFailureReason(target: Pick<AgentView, "display_name" | "id" | "status">, targetRecord: JobTargetRecord): BulkFailureReason {

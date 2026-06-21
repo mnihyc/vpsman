@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, RwLock as StdRwLock,
+        Arc, Mutex as StdMutex, RwLock as StdRwLock,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -282,6 +282,7 @@ struct GatewayForwardSpool {
     config: GatewaySpoolConfig,
     ram_bytes: AtomicU64,
     disk_bytes: AtomicU64,
+    accounted_spool_files: StdMutex<HashMap<PathBuf, u64>>,
     shutdown_requested: AtomicBool,
     shutdown_notify: Notify,
 }
@@ -387,6 +388,15 @@ enum GatewayForwardQueueItem {
     Telemetry {
         created_unix: u64,
     },
+}
+
+struct GatewayPendingSpoolCandidate {
+    target_key: String,
+    path: PathBuf,
+    created_unix: u64,
+    disk_bytes: u64,
+    kind: GatewayForwardEventKind,
+    critical: bool,
 }
 
 struct GatewayForwardEventHandle {
@@ -868,7 +878,6 @@ impl GatewayEventForwarder {
                     }
                     GatewayForwardQueueItem::Spooled {
                         path,
-                        disk_bytes,
                         kind,
                         critical,
                         ..
@@ -882,7 +891,6 @@ impl GatewayEventForwarder {
                                 GatewayForwardDropReason::TargetQueueFull,
                             );
                         }
-                        self.spool.release_disk(disk_bytes);
                         warn!(
                             path = %path.display(),
                             kind = ?kind,
@@ -968,6 +976,7 @@ impl GatewayForwardSpool {
             config,
             ram_bytes: AtomicU64::new(0),
             disk_bytes: AtomicU64::new(0),
+            accounted_spool_files: StdMutex::new(HashMap::new()),
             shutdown_requested: AtomicBool::new(false),
             shutdown_notify: Notify::new(),
         }
@@ -1118,6 +1127,16 @@ impl GatewayForwardSpool {
             });
         }
         fsync_dir_best_effort(&pending_dir, "gateway spool pending dir").await;
+        if let Err(error) = self.account_spooled_file_after_reserve(&final_path, disk_bytes) {
+            let _ = tokio::fs::remove_file(&final_path).await;
+            self.release_disk(disk_bytes);
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to account gateway spool file {}",
+                    final_path.display()
+                )
+            });
+        }
         Ok(GatewayForwardQueueItem::Spooled {
             path: final_path,
             created_unix: event.created_unix,
@@ -1128,10 +1147,10 @@ impl GatewayForwardSpool {
     }
 
     async fn pending_items(&self) -> Vec<(String, GatewayForwardQueueItem)> {
-        let mut items = Vec::new();
+        let mut candidates = Vec::new();
         let pending_dir = self.pending_dir();
         let Ok(mut entries) = tokio::fs::read_dir(&pending_dir).await else {
-            return items;
+            return Vec::new();
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
@@ -1166,27 +1185,40 @@ impl GatewayForwardSpool {
                     continue;
                 }
             };
-            let kind = event.kind;
-            if self.try_reserve_disk(disk_bytes).is_err() {
+            candidates.push(GatewayPendingSpoolCandidate {
+                target_key,
+                path,
+                created_unix,
+                disk_bytes,
+                kind: event.kind,
+                critical: event.critical,
+            });
+        }
+        candidates.sort_by_key(|candidate| candidate.created_unix);
+        let mut items = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if let Err(error) =
+                self.account_existing_spooled_file(&candidate.path, candidate.disk_bytes)
+            {
                 warn!(
-                    path = %path.display(),
-                    disk_bytes,
-                    "ignoring gateway spool file because disk cap is already exhausted"
+                    %error,
+                    path = %candidate.path.display(),
+                    disk_bytes = candidate.disk_bytes,
+                    "ignoring gateway spool file because disk accounting failed"
                 );
                 continue;
             }
             items.push((
-                target_key,
+                candidate.target_key,
                 GatewayForwardQueueItem::Spooled {
-                    path,
-                    created_unix,
-                    disk_bytes,
-                    kind,
-                    critical: event.critical,
+                    path: candidate.path,
+                    created_unix: candidate.created_unix,
+                    disk_bytes: candidate.disk_bytes,
+                    kind: candidate.kind,
+                    critical: candidate.critical,
                 },
             ));
         }
-        items.sort_by_key(|(_, item)| item.created_unix());
         items
     }
 
@@ -1259,11 +1291,12 @@ impl GatewayForwardSpool {
     }
 
     async fn remove_spooled_file(&self, path: &Path, disk_bytes: u64) {
-        if disk_bytes > 0 {
-            self.release_disk(disk_bytes);
-        }
-        if let Err(error) = tokio::fs::remove_file(path).await {
-            if error.kind() != std::io::ErrorKind::NotFound {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => self.unaccount_spooled_file(path, disk_bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.unaccount_spooled_file(path, disk_bytes);
+            }
+            Err(error) => {
                 warn!(
                     %error,
                     path = %path.display(),
@@ -1308,6 +1341,7 @@ impl GatewayForwardSpool {
             );
             return;
         }
+        self.unaccount_spooled_file(path, 0);
         if let Err(error) = repair_private_file_permissions_async(&quarantine_path).await {
             warn!(
                 %error,
@@ -1318,6 +1352,108 @@ impl GatewayForwardSpool {
         fsync_dir_best_effort(&quarantine_dir, "gateway spool corrupt dir").await;
         if let Some(parent) = path.parent() {
             fsync_dir_best_effort(parent, "gateway spool pending dir").await;
+        }
+    }
+
+    fn account_spooled_file_after_reserve(&self, path: &Path, disk_bytes: u64) -> Result<()> {
+        let disk_bytes = disk_bytes.max(1);
+        let mut accounted = self
+            .accounted_spool_files
+            .lock()
+            .map_err(|_| anyhow!("gateway spool accounting lock poisoned"))?;
+        if let Some(previous_bytes) = accounted.insert(path.to_path_buf(), disk_bytes) {
+            self.release_disk(previous_bytes);
+            warn!(
+                path = %path.display(),
+                previous_bytes,
+                disk_bytes,
+                "replaced existing gateway spool disk accounting entry"
+            );
+        }
+        Ok(())
+    }
+
+    fn account_existing_spooled_file(&self, path: &Path, disk_bytes: u64) -> Result<()> {
+        let disk_bytes = disk_bytes.max(1);
+        let mut accounted = self
+            .accounted_spool_files
+            .lock()
+            .map_err(|_| anyhow!("gateway spool accounting lock poisoned"))?;
+        match accounted.get(path).copied() {
+            Some(current_bytes) if current_bytes == disk_bytes => Ok(()),
+            Some(current_bytes) => {
+                if disk_bytes > current_bytes {
+                    self.add_disk_accounting(disk_bytes - current_bytes)?;
+                } else {
+                    self.release_disk(current_bytes - disk_bytes);
+                }
+                accounted.insert(path.to_path_buf(), disk_bytes);
+                warn!(
+                    path = %path.display(),
+                    previous_bytes = current_bytes,
+                    disk_bytes,
+                    "adjusted gateway spool disk accounting for changed pending file size"
+                );
+                Ok(())
+            }
+            None => {
+                self.add_disk_accounting(disk_bytes)?;
+                accounted.insert(path.to_path_buf(), disk_bytes);
+                let accounted_bytes = self.disk_bytes.load(Ordering::Relaxed);
+                if accounted_bytes > self.config.disk_max_bytes {
+                    warn!(
+                        path = %path.display(),
+                        accounted_bytes,
+                        disk_max_bytes = self.config.disk_max_bytes,
+                        "existing gateway spool files exceed configured disk cap"
+                    );
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn unaccount_spooled_file(&self, path: &Path, fallback_bytes: u64) {
+        let accounted_bytes = match self.accounted_spool_files.lock() {
+            Ok(mut accounted) => accounted.remove(path),
+            Err(_) => {
+                warn!(
+                    path = %path.display(),
+                    fallback_bytes,
+                    "failed to unaccount gateway spool file because accounting lock is poisoned"
+                );
+                None
+            }
+        };
+        if let Some(accounted_bytes) = accounted_bytes {
+            self.release_disk(accounted_bytes);
+        } else if fallback_bytes > 0 {
+            warn!(
+                path = %path.display(),
+                fallback_bytes,
+                "gateway spool file cleanup found no disk accounting entry"
+            );
+        }
+    }
+
+    fn add_disk_accounting(&self, bytes: u64) -> Result<()> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        let mut current = self.disk_bytes.load(Ordering::Relaxed);
+        loop {
+            let next = current
+                .checked_add(bytes)
+                .context("gateway spool disk byte counter overflow")?;
+            match self.disk_bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(actual) => current = actual,
+            }
         }
     }
 
@@ -1347,7 +1483,19 @@ impl GatewayForwardSpool {
 
     fn release_disk(&self, bytes: u64) {
         if bytes > 0 {
-            self.disk_bytes.fetch_sub(bytes, Ordering::Relaxed);
+            let mut current = self.disk_bytes.load(Ordering::Relaxed);
+            loop {
+                let next = current.saturating_sub(bytes);
+                match self.disk_bytes.compare_exchange_weak(
+                    current,
+                    next,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return,
+                    Err(actual) => current = actual,
+                }
+            }
         }
     }
 }
@@ -1687,10 +1835,7 @@ async fn spool_event_for_later_replay(
     event: &GatewayForwardEvent,
     reason: GatewayForwardDropReason,
 ) -> Result<()> {
-    let item = spool.spool_event(target_key, event).await?;
-    if let GatewayForwardQueueItem::Spooled { disk_bytes, .. } = item {
-        spool.release_disk(disk_bytes);
-    }
+    let _ = spool.spool_event(target_key, event).await?;
     warn!(
         path = %event.path,
         kind = ?event.kind,
@@ -2678,10 +2823,15 @@ mod tests {
             .spool_event("client-a", &event)
             .await
             .unwrap();
-        let GatewayForwardQueueItem::Spooled { path, .. } = &item else {
+        let GatewayForwardQueueItem::Spooled {
+            path, disk_bytes, ..
+        } = &item
+        else {
             panic!("spool_event must return a spooled item");
         };
         let path = path.clone();
+        let disk_bytes = *disk_bytes;
+        let accounted_before = forwarder.spool.disk_bytes.load(Ordering::Relaxed);
 
         let result = forwarder
             .enqueue_queue_item("client-a".to_string(), item, test_timeouts())
@@ -2689,7 +2839,100 @@ mod tests {
 
         assert!(result.is_err());
         assert!(path.exists());
-        tokio::fs::remove_file(&path).await.unwrap();
+        assert_eq!(
+            forwarder.spool.disk_bytes.load(Ordering::Relaxed),
+            accounted_before
+        );
+        forwarder.spool.remove_spooled_file(&path, disk_bytes).await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pressure_spooled_output_counts_against_disk_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "vpsman-gateway-spool-disk-cap-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let forwarder = GatewayEventForwarder::with_spool_config(GatewaySpoolConfig::enabled(
+            dir.clone(),
+            1024 * 1024,
+            1024 * 1024,
+            30,
+        ));
+        let event = test_event(COMMAND_OUTPUT_PATH, &vec![b'x'; 700 * 1024]);
+
+        spool_event_for_later_replay(
+            &forwarder.spool,
+            "client-a",
+            &event,
+            GatewayForwardDropReason::GlobalQueueFull,
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending_spool_file_count(&dir), 1);
+        assert!(forwarder.spool.disk_bytes.load(Ordering::Relaxed) > 0);
+
+        let error = spool_event_for_later_replay(
+            &forwarder.spool,
+            "client-a",
+            &event,
+            GatewayForwardDropReason::GlobalQueueFull,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("gateway spool disk cap exceeded"));
+        assert_eq!(pending_spool_file_count(&dir), 1);
+        let replay = forwarder.spool.pending_items().await;
+        assert_eq!(replay.len(), 1);
+        if let GatewayForwardQueueItem::Spooled {
+            path, disk_bytes, ..
+        } = &replay[0].1
+        {
+            forwarder.spool.remove_spooled_file(path, *disk_bytes).await;
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pending_spool_items_do_not_double_count_accounted_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "vpsman-gateway-spool-accounted-replay-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let forwarder = GatewayEventForwarder::with_spool_config(GatewaySpoolConfig::enabled(
+            dir.clone(),
+            1024 * 1024,
+            8 * 1024 * 1024,
+            30,
+        ));
+        let event = test_event(COMMAND_OUTPUT_PATH, br#"{"seq":1}"#);
+        spool_event_for_later_replay(
+            &forwarder.spool,
+            "client-a",
+            &event,
+            GatewayForwardDropReason::TargetQueueFull,
+        )
+        .await
+        .unwrap();
+        let accounted_before = forwarder.spool.disk_bytes.load(Ordering::Relaxed);
+
+        let first = forwarder.spool.pending_items().await;
+        let after_first = forwarder.spool.disk_bytes.load(Ordering::Relaxed);
+        let second = forwarder.spool.pending_items().await;
+        let after_second = forwarder.spool.disk_bytes.load(Ordering::Relaxed);
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(after_first, accounted_before);
+        assert_eq!(after_second, accounted_before);
+        if let GatewayForwardQueueItem::Spooled {
+            path, disk_bytes, ..
+        } = &first[0].1
+        {
+            forwarder.spool.remove_spooled_file(path, *disk_bytes).await;
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -2768,6 +3011,23 @@ mod tests {
         assert_eq!(mode(&dir.join("corrupt")), 0o700);
         assert_eq!(mode(&quarantined_path), 0o600);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn pending_spool_file_count(dir: &Path) -> usize {
+        std::fs::read_dir(dir.join("pending"))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .path()
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            == Some("spool")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     fn mode(path: &Path) -> u32 {
