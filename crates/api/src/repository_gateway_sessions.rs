@@ -63,6 +63,47 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn gateway_session_was_seen(
+        &self,
+        gateway_id: &str,
+        client_id: &str,
+        session_id: uuid::Uuid,
+    ) -> Result<bool> {
+        match self {
+            Self::Memory(memory) => {
+                if memory.hidden_clients.read().await.contains(client_id) {
+                    return Ok(false);
+                }
+                Ok(memory.gateway_sessions.read().await.iter().any(|session| {
+                    session.gateway_id == gateway_id
+                        && session.client_id == client_id
+                        && session.id == session_id
+                }))
+            }
+            Self::Postgres(pool) => {
+                let matches: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM gateway_sessions session
+                        JOIN clients client ON client.id = session.client_id
+                        WHERE session.gateway_id = $1
+                          AND session.client_id = $2
+                          AND session.id = $3
+                          AND client.hidden_at IS NULL
+                    )
+                    "#,
+                )
+                .bind(gateway_id)
+                .bind(client_id)
+                .bind(session_id)
+                .fetch_one(pool)
+                .await?;
+                Ok(matches)
+            }
+        }
+    }
+
     pub(crate) async fn record_gateway_session_started(
         &self,
         event: &GatewaySessionLifecycleIngest,

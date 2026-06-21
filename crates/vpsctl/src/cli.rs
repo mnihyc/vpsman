@@ -687,8 +687,8 @@ pub(crate) enum Command {
         job_id: String,
         #[arg(long, default_value_t = 1000)]
         interval_ms: u64,
-        #[arg(long, default_value_t = 120)]
-        max_polls: u16,
+        #[arg(long, default_value_t = 0)]
+        max_polls: u32,
         #[arg(long, default_value_t = false)]
         json: bool,
     },

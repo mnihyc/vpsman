@@ -1327,6 +1327,7 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
             status: "completed".to_string(),
             target_count: 1,
             payload_hash: backup.payload_hash.clone(),
+            timeout_secs: 30,
             created_at: unix_now().to_string(),
             completed_at: Some(unix_now().to_string()),
         });
@@ -1345,6 +1346,7 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
             message: None,
             exit_code: Some(0),
             started_at: Some(unix_now().to_string()),
+            deadline_at: None,
             completed_at: Some(unix_now().to_string()),
             process_incarnation_id: None,
         });
@@ -1429,6 +1431,7 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
             status: "completed".to_string(),
             target_count: 1,
             payload_hash: backup.payload_hash.clone(),
+            timeout_secs: 30,
             created_at: unix_now().to_string(),
             completed_at: Some(unix_now().to_string()),
         });
@@ -1447,6 +1450,7 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
             message: None,
             exit_code: Some(0),
             started_at: Some(unix_now().to_string()),
+            deadline_at: None,
             completed_at: Some(unix_now().to_string()),
             process_incarnation_id: None,
         });

@@ -684,7 +684,7 @@ function BulkConfigApply({
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: snapshot.targets,
-        timeoutMs: bulkProgressTimeoutMs(snapshot.timeoutSecs),
+        timeoutMs: bulkProgressTimeoutMs(snapshot.timeoutSecs, response.control_deadline_extra_secs),
       });
       if (waited.timedOut) {
         throw new Error("Timed out waiting for bulk config apply targets");
@@ -923,7 +923,7 @@ function SingleVpsConfig({
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: [frozenTarget],
-        timeoutMs: bulkProgressTimeoutMs(boundedTimeoutSecs),
+        timeoutMs: bulkProgressTimeoutMs(boundedTimeoutSecs, response.control_deadline_extra_secs),
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
@@ -1024,7 +1024,7 @@ function SingleVpsConfig({
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: [snapshot.target],
-        timeoutMs: bulkProgressTimeoutMs(snapshot.timeoutSecs),
+        timeoutMs: bulkProgressTimeoutMs(snapshot.timeoutSecs, response.control_deadline_extra_secs),
       });
       if (waited.timedOut) {
         throw new Error("Timed out waiting for config apply target");

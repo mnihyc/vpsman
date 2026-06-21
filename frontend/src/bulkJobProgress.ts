@@ -40,12 +40,16 @@ export type BulkJobProgress = {
 export const DEFAULT_BULK_PROGRESS_POLL_INTERVAL_MS = 500;
 export const DEFAULT_BULK_PROGRESS_TIMEOUT_MS = 90_000;
 export const BULK_PROGRESS_TIMEOUT_MARGIN_MS = 35_000;
+export const BULK_PROGRESS_FRONTEND_MARGIN_MS = 10_000;
 
-export function bulkProgressTimeoutMs(timeoutSecs: number | undefined): number {
+export function bulkProgressTimeoutMs(timeoutSecs: number | undefined, controlDeadlineExtraSecs?: number): number {
   if (!Number.isFinite(timeoutSecs ?? NaN)) {
     return DEFAULT_BULK_PROGRESS_TIMEOUT_MS;
   }
-  return Math.max(DEFAULT_BULK_PROGRESS_TIMEOUT_MS, Math.ceil(Math.max(1, timeoutSecs ?? 1)) * 1000 + BULK_PROGRESS_TIMEOUT_MARGIN_MS);
+  const controlExtraMs = Number.isFinite(controlDeadlineExtraSecs ?? NaN)
+    ? Math.ceil(Math.max(0, controlDeadlineExtraSecs ?? 0)) * 1000 + BULK_PROGRESS_FRONTEND_MARGIN_MS
+    : BULK_PROGRESS_TIMEOUT_MARGIN_MS;
+  return Math.max(DEFAULT_BULK_PROGRESS_TIMEOUT_MS, Math.ceil(Math.max(1, timeoutSecs ?? 1)) * 1000 + controlExtraMs);
 }
 
 export function buildBulkJobProgress({

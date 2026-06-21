@@ -338,7 +338,7 @@ export function MultiFileActionsPanel({
             finalProgress = progress;
             setBulkProgress(progress);
           },
-          timeoutMs: bulkProgressTimeoutMs(BULK_JOB_TIMEOUT_SECS),
+          timeoutMs: bulkProgressTimeoutMs(BULK_JOB_TIMEOUT_SECS, job.control_deadline_extra_secs),
         });
         targets = result.targets;
         if (result.timedOut) {

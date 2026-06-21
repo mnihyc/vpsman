@@ -212,7 +212,7 @@ pub(crate) fn job_follow(
     token: Option<&str>,
     job_id: String,
     interval_ms: u64,
-    max_polls: u16,
+    max_polls: u32,
     json: bool,
 ) -> Result<()> {
     print!(
@@ -227,18 +227,22 @@ pub(crate) fn job_follow_output(
     token: Option<&str>,
     job_id: String,
     interval_ms: u64,
-    max_polls: u16,
+    max_polls: u32,
     json: bool,
 ) -> Result<String> {
     let job_id = Uuid::parse_str(&job_id).context("invalid --job-id UUID")?;
     let interval = Duration::from_millis(interval_ms.clamp(100, 10_000));
-    let max_polls = max_polls.clamp(1, 10_000);
+    let max_polls = if max_polls == 0 {
+        None
+    } else {
+        Some(max_polls.clamp(1, 100_000))
+    };
     let mut seen = BTreeSet::new();
     let mut rendered = String::new();
-    let mut last_status = None;
     let mut cursor = None;
 
-    for poll in 0..max_polls {
+    let mut poll = 0_u32;
+    loop {
         loop {
             let page =
                 fetch_job_output_page(api_url, token, job_id, cursor.as_deref(), None, None)?;
@@ -258,7 +262,6 @@ pub(crate) fn job_follow_output(
         let job_json = http_get(api_url, &format!("/api/v1/jobs/{job_id}"), token)?;
         let job =
             serde_json::from_str::<JobHistoryRecord>(&job_json).context("failed to parse job")?;
-        last_status = Some(job.status.clone());
         if JobStatus::parse(&job.status).is_some_and(JobStatus::is_terminal) {
             if json {
                 rendered.push_str(
@@ -281,14 +284,15 @@ pub(crate) fn job_follow_output(
             }
             return Ok(rendered);
         }
-        if poll + 1 < max_polls {
-            thread::sleep(interval);
+        poll = poll.saturating_add(1);
+        if max_polls.is_some_and(|max_polls| poll >= max_polls) {
+            anyhow::bail!(
+                "job-follow exceeded max polls; last status was {}",
+                job.status
+            );
         }
+        thread::sleep(interval);
     }
-    anyhow::bail!(
-        "job-follow exceeded max polls; last status was {}",
-        last_status.unwrap_or_else(|| "unknown".to_string())
-    );
 }
 
 pub(crate) fn job_output_download(

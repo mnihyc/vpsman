@@ -236,6 +236,22 @@ fn target_skipped_status_output_value(
     })
 }
 
+fn command_canceled_status_output_value(
+    job_id: Uuid,
+    client_id: &str,
+    message: &str,
+) -> serde_json::Value {
+    json!({
+        "type": "command_canceled",
+        "status": TARGET_STATUS_CANCELED,
+        "code": "operator_cancel_requested",
+        "reason": "operator_cancel_requested",
+        "message": message,
+        "job_id": job_id,
+        "client_id": client_id,
+    })
+}
+
 pub(crate) async fn append_synthetic_status_output_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     job_id: Uuid,
@@ -802,6 +818,7 @@ impl Repository {
                         status,
                         target_count,
                         payload_hash,
+                        timeout_secs,
                         created_at::text AS created_at,
                         completed_at::text AS completed_at
                     FROM jobs
@@ -822,6 +839,7 @@ impl Repository {
                     status: row.try_get("status")?,
                     target_count: row.try_get("target_count")?,
                     payload_hash: row.try_get("payload_hash")?,
+                    timeout_secs: row.try_get::<i64, _>("timeout_secs")?.clamp(1, 3600) as u64,
                     created_at: row.try_get("created_at")?,
                     completed_at: row.try_get("completed_at")?,
                 }))
@@ -918,6 +936,7 @@ impl Repository {
                         status,
                         target_count,
                         payload_hash,
+                        timeout_secs,
                         created_at::text AS created_at,
                         completed_at::text AS completed_at
                     FROM jobs
@@ -938,6 +957,8 @@ impl Repository {
                             status: row.try_get("status")?,
                             target_count: row.try_get("target_count")?,
                             payload_hash: row.try_get("payload_hash")?,
+                            timeout_secs: row.try_get::<i64, _>("timeout_secs")?.clamp(1, 3600)
+                                as u64,
                             created_at: row.try_get("created_at")?,
                             completed_at: row.try_get("completed_at")?,
                         })
@@ -996,6 +1017,7 @@ impl Repository {
                         status,
                         target_count,
                         payload_hash,
+                        timeout_secs,
                         created_at::text AS created_at,
                         completed_at::text AS completed_at
                     FROM jobs
@@ -1027,6 +1049,8 @@ impl Repository {
                             status: row.try_get("status")?,
                             target_count: row.try_get("target_count")?,
                             payload_hash: row.try_get("payload_hash")?,
+                            timeout_secs: row.try_get::<i64, _>("timeout_secs")?.clamp(1, 3600)
+                                as u64,
                             created_at: row.try_get("created_at")?,
                             completed_at: row.try_get("completed_at")?,
                         })
@@ -1056,6 +1080,7 @@ impl Repository {
                         message,
                         exit_code,
                         started_at::text AS started_at,
+                        deadline_at::text AS deadline_at,
                         completed_at::text AS completed_at,
                         process_incarnation_id
                     FROM job_targets
@@ -1075,6 +1100,7 @@ impl Repository {
                             message: row.try_get("message")?,
                             exit_code: row.try_get("exit_code")?,
                             started_at: row.try_get("started_at")?,
+                            deadline_at: row.try_get("deadline_at")?,
                             completed_at: row.try_get("completed_at")?,
                             process_incarnation_id: row.try_get("process_incarnation_id")?,
                         })
@@ -1296,6 +1322,7 @@ impl Repository {
                     status: status.to_string(),
                     target_count: resolved_targets.len() as i32,
                     payload_hash: command_hash.to_string(),
+                    timeout_secs: request.timeout_secs.unwrap_or(30).clamp(1, 3600),
                     created_at: created_at.clone(),
                     completed_at: Some(created_at.clone()),
                 });
@@ -1319,6 +1346,7 @@ impl Repository {
                                 message: Some(reason.to_string()),
                                 exit_code: None,
                                 started_at: None,
+                                deadline_at: None,
                                 completed_at: Some(created_at.clone()),
                                 process_incarnation_id: None,
                             }),
@@ -1543,6 +1571,7 @@ impl Repository {
                     status: JOB_STATUS_QUEUED.to_string(),
                     target_count: resolved_targets.len() as i32,
                     payload_hash: command_hash.to_string(),
+                    timeout_secs: request.timeout_secs.unwrap_or(30).clamp(1, 3600),
                     created_at: created_at.clone(),
                     completed_at: None,
                 });
@@ -1588,6 +1617,7 @@ impl Repository {
                             started_at: precompleted_by_client
                                 .contains_key(client_id.as_str())
                                 .then_some(created_at.clone()),
+                            deadline_at: None,
                             completed_at: precompleted_by_client
                                 .contains_key(client_id.as_str())
                                 .then_some(created_at.clone()),
@@ -2074,7 +2104,7 @@ impl Repository {
                     "#,
                 )
                 .bind(limit.clamp(1, 500))
-                .bind(lease_secs.clamp(1, 3600) as i32)
+                .bind(lease_secs.clamp(1, 7200) as i32)
                 .bind(exclusive_operation_types())
                 .bind(EXCLUSIVE_DISPATCH_ADVISORY_LOCK_CLASS)
                 .bind(control_deadline_extra_secs.min(i32::MAX as u64) as i32)
@@ -2942,28 +2972,69 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let now = unix_now().to_string();
-                let mut pending_canceled = 0_usize;
                 let mut cancel_targets = Vec::new();
                 let mut canceled_targets = Vec::new();
-                for target in memory
-                    .job_targets
-                    .write()
-                    .await
-                    .iter_mut()
-                    .filter(|target| target.job_id == job_id && target.completed_at.is_none())
                 {
-                    match target.status.as_str() {
-                        TARGET_STATUS_QUEUED => {
-                            target.status = TARGET_STATUS_CANCELED.to_string();
-                            target.message = Some(message.to_string());
-                            target.completed_at = Some(now.clone());
-                            pending_canceled += 1;
-                            canceled_targets.push(target.client_id.clone());
+                    let targets = memory.job_targets.read().await;
+                    for target in targets
+                        .iter()
+                        .filter(|target| target.job_id == job_id && target.completed_at.is_none())
+                    {
+                        match target.status.as_str() {
+                            TARGET_STATUS_QUEUED => {
+                                canceled_targets.push(target.client_id.clone());
+                            }
+                            TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING => {
+                                cancel_targets.push(target.client_id.clone());
+                            }
+                            _ => {}
                         }
-                        TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING => {
-                            cancel_targets.push(target.client_id.clone());
-                        }
-                        _ => {}
+                    }
+                }
+                if !canceled_targets.is_empty() {
+                    let mut outputs = memory.job_outputs.write().await;
+                    for client_id in &canceled_targets {
+                        let value =
+                            command_canceled_status_output_value(job_id, client_id, message);
+                        let data = serde_json::to_vec(&value)?;
+                        let seq = outputs
+                            .iter()
+                            .filter(|output| {
+                                output.job_id == job_id && output.client_id == *client_id
+                            })
+                            .map(|output| output.seq)
+                            .max()
+                            .unwrap_or(-1)
+                            .saturating_add(1);
+                        outputs.push(JobOutputView {
+                            job_id,
+                            client_id: client_id.clone(),
+                            seq,
+                            stream: "status".to_string(),
+                            data_base64: base64::engine::general_purpose::STANDARD.encode(&data),
+                            storage: "inline".to_string(),
+                            artifact_object_key: None,
+                            artifact_sha256_hex: None,
+                            artifact_size_bytes: None,
+                            exit_code: None,
+                            done: true,
+                            received_at: Some(now.clone()),
+                            created_at: now.clone(),
+                        });
+                    }
+                }
+                let canceled_target_set = canceled_targets.iter().cloned().collect::<HashSet<_>>();
+                if !canceled_target_set.is_empty() {
+                    let mut targets = memory.job_targets.write().await;
+                    for target in targets.iter_mut().filter(|target| {
+                        target.job_id == job_id
+                            && target.completed_at.is_none()
+                            && target.status == TARGET_STATUS_QUEUED
+                            && canceled_target_set.contains(&target.client_id)
+                    }) {
+                        target.status = TARGET_STATUS_CANCELED.to_string();
+                        target.message = Some(message.to_string());
+                        target.completed_at = Some(now.clone());
                     }
                 }
                 for client_id in &canceled_targets {
@@ -2974,6 +3045,7 @@ impl Repository {
                     )
                     .await?;
                 }
+                let pending_canceled = canceled_targets.len();
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: Some(actor_id),
@@ -2997,23 +3069,52 @@ impl Repository {
                 let mut tx = pool.begin().await?;
                 let pending_rows = sqlx::query(
                     r#"
-                    UPDATE job_targets
-                    SET
-                        status = 'canceled',
-                        message = $2,
-                        completed_at = now(),
-                        dispatch_lease_until = NULL,
-                        cancel_requested_at = COALESCE(cancel_requested_at, now())
+                    SELECT client_id
+                    FROM job_targets
                     WHERE job_id = $1
                       AND completed_at IS NULL
                       AND status = 'queued'
-                    RETURNING client_id
+                    ORDER BY client_id
+                    FOR UPDATE
                     "#,
                 )
                 .bind(job_id)
-                .bind(message)
                 .fetch_all(&mut *tx)
                 .await?;
+                for row in &pending_rows {
+                    let client_id: String = row.try_get("client_id")?;
+                    append_synthetic_status_output_in_tx(
+                        &mut tx,
+                        job_id,
+                        &client_id,
+                        command_canceled_status_output_value(job_id, &client_id, message),
+                        None,
+                    )
+                    .await?;
+                }
+                if !pending_rows.is_empty() {
+                    let updated = sqlx::query(
+                        r#"
+                        UPDATE job_targets
+                        SET
+                            status = 'canceled',
+                            message = $2,
+                            completed_at = now(),
+                            dispatch_lease_until = NULL,
+                            cancel_requested_at = COALESCE(cancel_requested_at, now())
+                        WHERE job_id = $1
+                          AND completed_at IS NULL
+                          AND status = 'queued'
+                        "#,
+                    )
+                    .bind(job_id)
+                    .bind(message)
+                    .execute(&mut *tx)
+                    .await?;
+                    if updated.rows_affected() != pending_rows.len() as u64 {
+                        anyhow::bail!("queued_cancel_target_cas_lost:{job_id}");
+                    }
+                }
                 let active_rows = sqlx::query(
                     r#"
                     UPDATE job_targets

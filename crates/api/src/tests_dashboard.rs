@@ -38,6 +38,7 @@ async fn system_dashboard_counts_agent_lost_lifecycle_failures() {
             message: Some("agent process lost".to_string()),
             exit_code: None,
             started_at: Some(now.clone()),
+            deadline_at: None,
             completed_at: Some(now),
             process_incarnation_id: None,
         });
@@ -131,6 +132,7 @@ async fn dashboard_overview_aggregates_memory_state() {
             status: "running".to_string(),
             target_count: 1,
             payload_hash: "aa".repeat(32),
+            timeout_secs: 30,
             created_at: now.clone(),
             completed_at: None,
         });
@@ -141,6 +143,7 @@ async fn dashboard_overview_aggregates_memory_state() {
             message: None,
             exit_code: None,
             started_at: Some(now.clone()),
+            deadline_at: None,
             completed_at: None,
             process_incarnation_id: None,
         });

@@ -146,14 +146,6 @@ pub(crate) async fn ingest_command_output(
 ) -> Result<Json<IngestResponse>, ApiError> {
     state.require_internal_gateway(&headers)?;
     validate_command_output_event(&event)?;
-    ensure_active_gateway_session(
-        &state,
-        &event.gateway_id,
-        &event.client_id,
-        event.gateway_session_id,
-        event.process_incarnation_id,
-    )
-    .await?;
     let Some(job) = state.repo.get_job(event.job_id).await? else {
         return Err(ApiError::not_found("job_not_found"));
     };
@@ -167,6 +159,7 @@ pub(crate) async fn ingest_command_output(
     else {
         return Err(ApiError::not_found("job_target_not_found"));
     };
+    ensure_command_output_gateway_session(&state, &event, target.process_incarnation_id).await?;
     let persist_config = JobOutputPersistConfig {
         object_store: state.backup_object_store.as_ref(),
         artifact_min_bytes: state.job_output_artifact_min_bytes(),
@@ -426,21 +419,14 @@ pub(crate) async fn ingest_terminal_output(
 ) -> Result<Json<IngestResponse>, ApiError> {
     state.require_internal_gateway(&headers)?;
     validate_terminal_output_event(&event)?;
-    ensure_active_gateway_session(
-        &state,
-        &event.gateway_id,
-        &event.client_id,
-        event.gateway_session_id,
-        event.process_incarnation_id,
-    )
-    .await?;
     let targets = state.repo.list_job_targets(event.output.job_id).await?;
-    if !targets
+    let Some(target) = targets
         .iter()
-        .any(|target| target.client_id == event.client_id)
-    {
+        .find(|target| target.client_id == event.client_id)
+    else {
         return Err(ApiError::not_found("job_target_not_found"));
-    }
+    };
+    ensure_terminal_output_gateway_session(&state, &event, target.process_incarnation_id).await?;
     match event.output.output.stream {
         OutputStream::Pty => match state
             .repo
@@ -601,6 +587,73 @@ async fn ensure_active_gateway_session(
     if state
         .repo
         .active_gateway_session_matches(gateway_id, client_id, session_id, process_incarnation_id)
+        .await?
+    {
+        Ok(())
+    } else {
+        Err(ApiError::conflict("gateway_session_not_active"))
+    }
+}
+
+async fn ensure_command_output_gateway_session(
+    state: &AppState,
+    event: &GatewayCommandOutputIngest,
+    target_process_incarnation_id: Option<uuid::Uuid>,
+) -> Result<(), ApiError> {
+    ensure_output_gateway_session(
+        state,
+        &event.gateway_id,
+        &event.client_id,
+        event.gateway_session_id,
+        event.process_incarnation_id,
+        event.spooled_replay,
+        target_process_incarnation_id,
+    )
+    .await
+}
+
+async fn ensure_terminal_output_gateway_session(
+    state: &AppState,
+    event: &GatewayTerminalOutputIngest,
+    target_process_incarnation_id: Option<uuid::Uuid>,
+) -> Result<(), ApiError> {
+    ensure_output_gateway_session(
+        state,
+        &event.gateway_id,
+        &event.client_id,
+        event.gateway_session_id,
+        event.process_incarnation_id,
+        event.spooled_replay,
+        target_process_incarnation_id,
+    )
+    .await
+}
+
+async fn ensure_output_gateway_session(
+    state: &AppState,
+    gateway_id: &str,
+    client_id: &str,
+    session_id: uuid::Uuid,
+    process_incarnation_id: uuid::Uuid,
+    spooled_replay: bool,
+    target_process_incarnation_id: Option<uuid::Uuid>,
+) -> Result<(), ApiError> {
+    if !spooled_replay {
+        return ensure_active_gateway_session(
+            state,
+            gateway_id,
+            client_id,
+            session_id,
+            process_incarnation_id,
+        )
+        .await;
+    }
+    if target_process_incarnation_id != Some(process_incarnation_id) {
+        return Err(ApiError::conflict("gateway_session_not_active"));
+    }
+    if state
+        .repo
+        .gateway_session_was_seen(gateway_id, client_id, session_id)
         .await?
     {
         Ok(())

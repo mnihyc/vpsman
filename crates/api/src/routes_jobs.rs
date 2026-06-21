@@ -445,12 +445,17 @@ async fn create_job_inner(
         .unwrap_or_else(|| JOB_STATUS_RUNNING.to_string());
     crate::job_dispatcher::wake_job_dispatcher(state.clone());
     let target_counts = create_job_target_counts(state, job_id).await?;
+    let control_deadline_extra_secs = state
+        .dispatcher_runtime_config()
+        .control_deadline_extra_secs();
     Ok((
         StatusCode::ACCEPTED,
         Json(CreateJobResponse {
             job_id,
             target_count: resolved_targets.len(),
             status,
+            timeout_secs: request.timeout_secs.unwrap_or(30),
+            control_deadline_extra_secs,
             target_counts,
         }),
     ))
@@ -735,6 +740,10 @@ async fn existing_job_response_for_id(
         job_id: existing.id,
         target_count: existing.target_count.max(0) as usize,
         status: existing.status,
+        timeout_secs: existing.timeout_secs,
+        control_deadline_extra_secs: state
+            .dispatcher_runtime_config()
+            .control_deadline_extra_secs(),
         target_counts: create_job_target_counts(state, existing.id).await?,
     }))
 }
@@ -1175,6 +1184,10 @@ async fn reject_job(
             job_id,
             target_count,
             status,
+            timeout_secs: request.timeout_secs.unwrap_or(30),
+            control_deadline_extra_secs: state
+                .dispatcher_runtime_config()
+                .control_deadline_extra_secs(),
             target_counts,
         }),
     ))

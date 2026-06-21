@@ -23,6 +23,7 @@ use vpsman_common::{
 
 use crate::{
     backup::{execute_backup_command, BackupCommandInput},
+    command_ledger::{compact_ledger_terminal_output, CommandLedger},
     command_worker::{
         command_canceled_output, command_timeout_output, run_cancelable, CommandCancelToken,
         CommandCanceled,
@@ -63,7 +64,8 @@ pub(crate) async fn run_agent(
         tcp_addr,
         priority: 0,
     });
-    let mut command_runtime = AgentCommandRuntime::default();
+    let command_ledger = CommandLedger::open_default().await?;
+    let mut command_runtime = AgentCommandRuntime::with_command_ledger(command_ledger);
     let process_incarnation_id = uuid::Uuid::new_v4();
     match reconcile_supervised_processes_on_start().await {
         Ok(report) => log_supervisor_startup_reconcile(&report),
@@ -251,8 +253,7 @@ async fn connect_and_stream(
                             finish_active_command(
                                 &mut stream,
                                 &mut seq,
-                                &mut command_runtime.active_commands,
-                                &mut command_runtime.recent_commands,
+                                &mut *command_runtime,
                                 result,
                             )
                             .await?;
@@ -678,6 +679,7 @@ struct CommandFrameContext<'a> {
 struct AgentCommandRuntime {
     active_commands: HashMap<uuid::Uuid, ActiveCommand>,
     recent_commands: RecentCommandCache,
+    command_ledger: Option<CommandLedger>,
     command_event_tx: mpsc::Sender<CommandExecutionEvent>,
     command_event_rx: mpsc::Receiver<CommandExecutionEvent>,
     terminal_stream_tx: mpsc::Sender<TerminalStreamOutput>,
@@ -691,10 +693,20 @@ impl Default for AgentCommandRuntime {
         Self {
             active_commands: HashMap::new(),
             recent_commands: RecentCommandCache::default(),
+            command_ledger: None,
             command_event_tx,
             command_event_rx,
             terminal_stream_tx,
             terminal_stream_rx,
+        }
+    }
+}
+
+impl AgentCommandRuntime {
+    fn with_command_ledger(command_ledger: CommandLedger) -> Self {
+        Self {
+            command_ledger: Some(command_ledger),
+            ..Self::default()
         }
     }
 }
@@ -890,6 +902,7 @@ fn fallback_failed_output(job_id: uuid::Uuid, error: &anyhow::Error) -> Vec<Comm
     }]
 }
 
+#[cfg(test)]
 fn remember_recent_command_outputs(
     cache: &mut RecentCommandCache,
     job_id: uuid::Uuid,
@@ -899,6 +912,53 @@ fn remember_recent_command_outputs(
     let replay_outputs = sequenced_outputs_starting_at(0, outputs);
     let terminal_output = terminal_replay_output_from(&replay_outputs);
     cache.remember(job_id, payload_hash, replay_outputs, terminal_output, false);
+}
+
+async fn remember_completed_command_outputs(
+    command_runtime: &mut AgentCommandRuntime,
+    job_id: uuid::Uuid,
+    payload_hash: String,
+    outputs: &[CommandOutput],
+) -> Result<()> {
+    let replay_outputs = sequenced_outputs_starting_at(0, outputs);
+    let terminal_output = terminal_replay_output_from(&replay_outputs);
+    remember_completed_replay_outputs(
+        command_runtime,
+        job_id,
+        payload_hash,
+        replay_outputs,
+        terminal_output,
+        false,
+    )
+    .await
+}
+
+async fn remember_completed_replay_outputs(
+    command_runtime: &mut AgentCommandRuntime,
+    job_id: uuid::Uuid,
+    payload_hash: String,
+    replay_outputs: Vec<SequencedCommandOutput>,
+    terminal_output: Option<SequencedCommandOutput>,
+    replay_truncated: bool,
+) -> Result<()> {
+    command_runtime.recent_commands.remember(
+        job_id,
+        payload_hash.clone(),
+        replay_outputs,
+        terminal_output.clone(),
+        replay_truncated,
+    );
+    if let Some(ledger) = command_runtime.command_ledger.as_ref() {
+        ledger
+            .record(
+                job_id,
+                payload_hash,
+                compact_ledger_terminal_output(terminal_output),
+                true,
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 fn sequenced_outputs_starting_at(
@@ -1002,13 +1062,15 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         )?;
         let replay_outputs = sequenced_outputs_starting_at(0, std::slice::from_ref(&output));
         let terminal_output = terminal_replay_output_from(&replay_outputs);
-        command_runtime.recent_commands.remember(
+        remember_completed_replay_outputs(
+            command_runtime,
             request.job_id,
             request_payload_hash,
             replay_outputs,
             terminal_output,
             false,
-        );
+        )
+        .await?;
         send_unsupported_command_version(stream, frame.stream_id, seq, request.job_id, output)
             .await?;
         return Ok(false);
@@ -1073,6 +1135,35 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         *seq += 1;
         return Ok(false);
     }
+    if let Some(ledger) = command_runtime.command_ledger.as_ref() {
+        if let Some(completed) = ledger.lookup(request.job_id).await? {
+            if completed.payload_hash == request_payload_hash {
+                let ack = JobAck {
+                    job_id: request.job_id,
+                    accepted: true,
+                    message: "duplicate completed job replayed from ledger".to_string(),
+                };
+                send_json_frame(stream, MessageKind::CommandAck, frame.stream_id, *seq, &ack)
+                    .await?;
+                *seq += 1;
+                if let Some(output) = completed.terminal_output.as_ref() {
+                    send_sequenced_command_payload(stream, frame.stream_id, seq, output).await?;
+                } else {
+                    let output = duplicate_replay_unknown_terminal_output(request.job_id)?;
+                    send_sequenced_command_output(stream, frame.stream_id, seq, 0, &output).await?;
+                }
+                return Ok(false);
+            }
+            let ack = JobAck {
+                job_id: request.job_id,
+                accepted: false,
+                message: "duplicate completed job id has different payload".to_string(),
+            };
+            send_json_frame(stream, MessageKind::CommandAck, frame.stream_id, *seq, &ack).await?;
+            *seq += 1;
+            return Ok(false);
+        }
+    }
     let safety = job_command_safety(&request.command);
     if safety == JobCommandSafety::Exclusive
         && command_runtime
@@ -1104,12 +1195,13 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
     if let JobCommand::ConfigRead = &request.command {
         let result = read_redacted_config(request.job_id, config, config_path);
         let outputs = command_result_outputs(request.job_id, "config_read", timeout_secs, result);
-        remember_recent_command_outputs(
-            &mut command_runtime.recent_commands,
+        remember_completed_command_outputs(
+            command_runtime,
             request.job_id,
             request_payload_hash,
             &outputs,
-        );
+        )
+        .await?;
         send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
         return Ok(true);
     }
@@ -1141,12 +1233,13 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 command_result_outputs(request.job_id, "hot_config", timeout_secs, Err(error))
             }
         };
-        remember_recent_command_outputs(
-            &mut command_runtime.recent_commands,
+        remember_completed_command_outputs(
+            command_runtime,
             request.job_id,
             request_payload_hash,
             &outputs,
-        );
+        )
+        .await?;
         send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
         return Ok(true);
     }
@@ -1177,12 +1270,13 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 Err(error),
             ),
         };
-        remember_recent_command_outputs(
-            &mut command_runtime.recent_commands,
+        remember_completed_command_outputs(
+            command_runtime,
             request.job_id,
             request_payload_hash,
             &outputs,
-        );
+        )
+        .await?;
         send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
         return Ok(true);
     }
@@ -1768,35 +1862,54 @@ fn remove_finished_flushed_commands(active_commands: &mut HashMap<uuid::Uuid, Ac
 async fn finish_active_command(
     stream: &mut NoiseFrameStream<TcpStream>,
     seq: &mut u64,
-    active_commands: &mut HashMap<uuid::Uuid, ActiveCommand>,
-    recent_commands: &mut RecentCommandCache,
+    command_runtime: &mut AgentCommandRuntime,
     result: CommandExecutionResult,
 ) -> Result<()> {
-    let Some(active) = active_commands.get_mut(&result.job_id) else {
-        return Ok(());
+    let (payload_hash, replay_outputs, terminal_output, replay_truncated) = {
+        let Some(active) = command_runtime.active_commands.get_mut(&result.job_id) else {
+            return Ok(());
+        };
+        let final_outputs = command_result_outputs(
+            result.job_id,
+            result.operation_type,
+            result.timeout_secs,
+            result.result,
+        );
+        for output in final_outputs {
+            enqueue_active_command_output(active, output);
+        }
+        active.finished = true;
+        let replay_outputs = active.replay_outputs.clone();
+        let replay_truncated = active.replay_truncated
+            || sequenced_command_outputs_bytes(&replay_outputs) > 1024 * 1024;
+        (
+            active.payload_hash.clone(),
+            replay_outputs,
+            active.terminal_output.clone(),
+            replay_truncated,
+        )
     };
-    let final_outputs = command_result_outputs(
+    command_runtime.recent_commands.remember(
         result.job_id,
-        result.operation_type,
-        result.timeout_secs,
-        result.result,
-    );
-    for output in final_outputs {
-        enqueue_active_command_output(active, output);
-    }
-    active.finished = true;
-    let replay_outputs = active.replay_outputs.clone();
-    let replay_truncated =
-        active.replay_truncated || sequenced_command_outputs_bytes(&replay_outputs) > 1024 * 1024;
-    recent_commands.remember(
-        result.job_id,
-        active.payload_hash.clone(),
+        payload_hash.clone(),
         replay_outputs,
-        active.terminal_output.clone(),
+        terminal_output.clone(),
         replay_truncated,
     );
-    flush_pending_command_outputs(stream, seq, active).await?;
-    remove_finished_flushed_commands(active_commands);
+    if let Some(ledger) = command_runtime.command_ledger.as_ref() {
+        ledger
+            .record(
+                result.job_id,
+                payload_hash,
+                compact_ledger_terminal_output(terminal_output),
+                true,
+            )
+            .await?;
+    }
+    if let Some(active) = command_runtime.active_commands.get_mut(&result.job_id) {
+        flush_pending_command_outputs(stream, seq, active).await?;
+    }
+    remove_finished_flushed_commands(&mut command_runtime.active_commands);
     Ok(())
 }
 

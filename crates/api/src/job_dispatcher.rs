@@ -28,7 +28,6 @@ use crate::{
     TargetDispatchOutcome,
 };
 
-const DISPATCH_LEASE_SECS: i64 = 30;
 const DISPATCH_INTERVAL_SECS: u64 = 1;
 const DEADLINE_EXPIRE_LIMIT: i64 = 128;
 
@@ -181,7 +180,7 @@ pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> 
         .repo
         .claim_due_job_targets(
             dispatcher_config.batch_limit,
-            DISPATCH_LEASE_SECS,
+            dispatcher_config.dispatch_lease_secs() as i64,
             dispatcher_config.control_deadline_extra_secs(),
         )
         .await?;

@@ -1253,7 +1253,7 @@ export function JobDispatchPanel({
         onProgress: setDispatchProgress,
         targetCount,
         targets,
-        timeoutMs: bulkProgressTimeoutMs(clampInteger(jobTimeoutSecs, 1, 3600)),
+        timeoutMs: bulkProgressTimeoutMs(clampInteger(jobTimeoutSecs, 1, 3600), job.control_deadline_extra_secs),
       });
       setLastDispatchProgress(result.progress);
       if (result.timedOut) {

@@ -536,6 +536,7 @@ async fn seed_completed_archive_upload(
             status: "completed".to_string(),
             target_count: 1,
             payload_hash: "1".repeat(64),
+            timeout_secs: 30,
             created_at: crate::unix_now().to_string(),
             completed_at: Some(crate::unix_now().to_string()),
         });

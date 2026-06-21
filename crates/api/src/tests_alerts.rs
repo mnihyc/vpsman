@@ -112,6 +112,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
             status: "failed".to_string(),
             target_count: 1,
             payload_hash: "aa".repeat(32),
+            timeout_secs: 30,
             created_at: "100".to_string(),
             completed_at: Some("110".to_string()),
         });
@@ -122,6 +123,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
             message: None,
             exit_code: None,
             started_at: Some("105".to_string()),
+            deadline_at: None,
             completed_at: Some("110".to_string()),
             process_incarnation_id: None,
         });

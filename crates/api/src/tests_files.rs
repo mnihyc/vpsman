@@ -251,6 +251,7 @@ fn transfer_job(id: uuid::Uuid, created_at: &str) -> JobHistoryView {
         status: "completed".to_string(),
         target_count: 1,
         payload_hash: "aa".repeat(32),
+        timeout_secs: 30,
         created_at: created_at.to_string(),
         completed_at: Some(created_at.to_string()),
     }
@@ -1651,6 +1652,7 @@ async fn job_target_status_download_returns_targets_and_per_target_status_archiv
             message: Some("ok".to_string()),
             exit_code: Some(0),
             started_at: Some("1700000000".to_string()),
+            deadline_at: None,
             completed_at: Some("1700000001".to_string()),
             process_incarnation_id: None,
         },
@@ -1661,6 +1663,7 @@ async fn job_target_status_download_returns_targets_and_per_target_status_archiv
             message: Some("exit 2".to_string()),
             exit_code: Some(2),
             started_at: Some("1700000002".to_string()),
+            deadline_at: None,
             completed_at: Some("1700000003".to_string()),
             process_incarnation_id: None,
         },

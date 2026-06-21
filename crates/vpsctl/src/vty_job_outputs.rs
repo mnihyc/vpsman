@@ -49,7 +49,7 @@ pub(crate) fn submit_vty_job_output_command(
         Some("job-follow") if parts.len() >= 2 => {
             let job_id = parts[1].to_string();
             let mut interval_ms = 1000_u64;
-            let mut max_polls = 120_u16;
+            let mut max_polls = 0_u32;
             let mut json = false;
             let mut index = 2;
             while index < parts.len() {
@@ -66,12 +66,12 @@ pub(crate) fn submit_vty_job_output_command(
                     }
                     "--max-polls" if index + 1 < parts.len() => {
                         max_polls = parts[index + 1]
-                            .parse::<u16>()
+                            .parse::<u32>()
                             .context("invalid job-follow max polls")?;
                         index += 2;
                     }
                     _ => anyhow::bail!(
-                        "usage: job-follow <job_uuid> [--interval-ms <100-10000>] [--max-polls <1-10000>] [--json]"
+                        "usage: job-follow <job_uuid> [--interval-ms <100-10000>] [--max-polls <0-100000>] [--json]"
                     ),
                 }
             }

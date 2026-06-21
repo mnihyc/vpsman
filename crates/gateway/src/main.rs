@@ -959,6 +959,7 @@ async fn handle_agent_frame(
                     gateway_id: context.args.gateway_id.clone(),
                     gateway_session_id: context.session_id,
                     process_incarnation_id: active_process_incarnation_id,
+                    spooled_replay: false,
                     client_id: pending.client_id.clone(),
                     job_id: output.job_id,
                     payload_hash: pending.payload_hash.clone(),
@@ -1000,6 +1001,7 @@ async fn handle_agent_frame(
                 gateway_id: context.args.gateway_id.clone(),
                 gateway_session_id: context.session_id,
                 process_incarnation_id: active_process_incarnation_id,
+                spooled_replay: false,
                 client_id,
                 output,
             };

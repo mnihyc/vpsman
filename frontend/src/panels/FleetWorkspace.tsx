@@ -1229,7 +1229,7 @@ function FleetInstanceDetail({
           onProgress: setInterfaceProgress,
           targetCount,
           targets: [agent],
-          timeoutMs: bulkProgressTimeoutMs(30),
+          timeoutMs: bulkProgressTimeoutMs(30, job.control_deadline_extra_secs),
         },
       );
       setInterfaceProgress(progress.progress);

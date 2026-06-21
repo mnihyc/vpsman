@@ -209,6 +209,7 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
             status: "running".to_string(),
             target_count: 1,
             payload_hash: "rotation-active-target".to_string(),
+            timeout_secs: 30,
             created_at: "1700000000".to_string(),
             completed_at: None,
         });
@@ -219,6 +220,7 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
             message: None,
             exit_code: None,
             started_at: Some("1700000001".to_string()),
+            deadline_at: None,
             completed_at: None,
             process_incarnation_id: Some(process_incarnation_id),
         });
@@ -293,6 +295,7 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
             status: "queued".to_string(),
             target_count: 1,
             payload_hash: "revocation-test".to_string(),
+            timeout_secs: 30,
             created_at: "1700000000".to_string(),
             completed_at: None,
         });
@@ -303,6 +306,7 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
             message: None,
             exit_code: None,
             started_at: None,
+            deadline_at: None,
             completed_at: None,
             process_incarnation_id: None,
         });

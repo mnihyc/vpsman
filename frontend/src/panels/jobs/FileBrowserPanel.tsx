@@ -249,7 +249,14 @@ export function FileBrowserPanel({
       privileged: true,
       privilege_assertion: built.privilegeAssertion,
     });
-    const outputs = await waitForOutputs(job.job_id, onLoadOutputs, onLoadTargets, timeoutSecs, options.expectedType);
+    const outputs = await waitForOutputs(
+      job.job_id,
+      onLoadOutputs,
+      onLoadTargets,
+      timeoutSecs,
+      job.control_deadline_extra_secs,
+      options.expectedType,
+    );
     return { job, outputs };
   }
 
@@ -1234,10 +1241,11 @@ async function waitForOutputs(
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>,
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>,
   timeoutSecs: number,
+  controlDeadlineExtraSecs: number | undefined,
   expectedType?: string,
 ): Promise<JobOutputRecord[]> {
   let last: JobOutputRecord[] = [];
-  const deadline = Date.now() + bulkProgressTimeoutMs(timeoutSecs);
+  const deadline = Date.now() + bulkProgressTimeoutMs(timeoutSecs, controlDeadlineExtraSecs);
   while (Date.now() <= deadline) {
     let terminal = false;
     try {

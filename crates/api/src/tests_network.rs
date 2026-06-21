@@ -789,6 +789,7 @@ async fn seed_completed_network_job(memory: &MemoryState, job_id: Uuid, operatio
         status: "completed".to_string(),
         target_count: 1,
         payload_hash: payload_hash(format!("{operation:?}").as_bytes()),
+        timeout_secs: 30,
         created_at: completed_at.clone(),
         completed_at: Some(completed_at.clone()),
     });
@@ -804,6 +805,7 @@ async fn seed_completed_network_job(memory: &MemoryState, job_id: Uuid, operatio
         message: None,
         exit_code: Some(0),
         started_at: Some(completed_at.clone()),
+        deadline_at: None,
         completed_at: Some(completed_at),
         process_incarnation_id: None,
     });

@@ -974,6 +974,7 @@ export type JobHistoryRecord = {
   status: JobStatus;
   target_count: number;
   payload_hash: string;
+  timeout_secs: number;
   created_at: string;
   completed_at: string | null;
 };
@@ -1333,6 +1334,7 @@ export type JobTargetRecord = {
   message?: string | null;
   exit_code: number | null;
   started_at: string | null;
+  deadline_at?: string | null;
   completed_at: string | null;
   process_incarnation_id?: string | null;
 };
@@ -1863,6 +1865,8 @@ export type CreateJobResponse = {
   job_id: string;
   target_count: number;
   status: JobStatus;
+  timeout_secs: number;
+  control_deadline_extra_secs: number;
   target_counts: {
     total: number;
     queued: number;

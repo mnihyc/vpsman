@@ -968,6 +968,8 @@ pub struct GatewayCommandOutputIngest {
     pub gateway_id: String,
     pub gateway_session_id: Uuid,
     pub process_incarnation_id: Uuid,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub spooled_replay: bool,
     pub client_id: String,
     pub job_id: Uuid,
     pub payload_hash: String,
@@ -982,6 +984,8 @@ pub struct GatewayTerminalOutputIngest {
     pub gateway_id: String,
     pub gateway_session_id: Uuid,
     pub process_incarnation_id: Uuid,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub spooled_replay: bool,
     pub client_id: String,
     pub output: TerminalStreamOutput,
 }

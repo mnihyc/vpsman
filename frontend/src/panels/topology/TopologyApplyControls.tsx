@@ -275,7 +275,7 @@ export function TopologyApplyControls({
         onProgress: setJobProgress,
         targetCount,
         targets,
-        timeoutMs: bulkProgressTimeoutMs(timeoutSecsForSnapshot),
+        timeoutMs: bulkProgressTimeoutMs(timeoutSecsForSnapshot, job.control_deadline_extra_secs),
       });
       setLastJobProgress(result.progress);
       if (result.timedOut) {

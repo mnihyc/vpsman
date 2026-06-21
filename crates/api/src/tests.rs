@@ -244,6 +244,7 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
             status: "queued".to_string(),
             target_count: 1,
             payload_hash: "delete-test".to_string(),
+            timeout_secs: 30,
             created_at: "1700000000".to_string(),
             completed_at: None,
         });
@@ -254,6 +255,7 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
             message: None,
             exit_code: None,
             started_at: None,
+            deadline_at: None,
             completed_at: None,
             process_incarnation_id: None,
         });
@@ -266,6 +268,7 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
             status: "running".to_string(),
             target_count: 1,
             payload_hash: "delete-running-test".to_string(),
+            timeout_secs: 30,
             created_at: "1700000000".to_string(),
             completed_at: None,
         });
@@ -276,6 +279,7 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
             message: None,
             exit_code: None,
             started_at: Some("1700000001".to_string()),
+            deadline_at: None,
             completed_at: None,
             process_incarnation_id: Some(process_incarnation_id),
         });
@@ -1437,6 +1441,18 @@ async fn memory_terminal_input_queued_cancel_releases_reservation() {
         terminal_input_request_status(&repo, job_id).await,
         Some(("canceled".to_string(), true))
     );
+    let outputs = repo.list_job_outputs(job_id).await.unwrap();
+    let cancel_output = outputs
+        .iter()
+        .find(|output| output.client_id == "client-a" && output.done)
+        .expect("queued cancel writes final output");
+    let cancel_payload: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(&cancel_output.data_base64)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cancel_payload["type"], "command_canceled");
 
     let next_payload = b"b\n";
     let next = repo
@@ -1450,6 +1466,119 @@ async fn memory_terminal_input_queued_cancel_releases_reservation() {
         .await
         .unwrap();
     assert_eq!(next.input_seq, 2);
+}
+
+#[tokio::test]
+async fn spooled_command_output_accepts_seen_inactive_gateway_session() {
+    let repo = Repository::Memory(MemoryState::default());
+    let mut state = test_app_state(repo.clone());
+    state.internal_token = Some("test-token".to_string());
+    let operator = test_operator();
+    let client_id = "client-a";
+    let gateway_id = "gateway-a";
+    let gateway_session_id = Uuid::new_v4();
+    let process_incarnation_id = Uuid::new_v4();
+    let lifecycle = vpsman_common::GatewaySessionLifecycleIngest {
+        gateway_id: gateway_id.to_string(),
+        client_id: client_id.to_string(),
+        session_id: gateway_session_id,
+        noise_public_key_hex: None,
+        remote_ip: None,
+        reason: None,
+    };
+    repo.record_gateway_session_started(&lifecycle)
+        .await
+        .unwrap();
+    repo.record_gateway_session_ended(&vpsman_common::GatewaySessionLifecycleIngest {
+        reason: Some("rotated".to_string()),
+        ..lifecycle.clone()
+    })
+    .await
+    .unwrap();
+
+    let request = CreateJobRequest {
+        job_id: Some(Uuid::new_v4()),
+        selector_expression: format!("id:{client_id}"),
+        target_client_ids: vec![client_id.to_string()],
+        destructive: true,
+        confirmed: true,
+        command: "true".to_string(),
+        argv: vec!["true".to_string()],
+        operation: None,
+        timeout_secs: Some(5),
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: None,
+    };
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let job_id = repo
+        .record_dispatching_job(
+            request.job_id.unwrap(),
+            &request,
+            &command_hash,
+            "spooled_replay_test",
+            &operator,
+            &[client_id.to_string()],
+        )
+        .await
+        .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        let mut targets = memory.job_targets.write().await;
+        let target = targets
+            .iter_mut()
+            .find(|target| target.job_id == job_id && target.client_id == client_id)
+            .unwrap();
+        target.status = "running".to_string();
+        target.started_at = Some(unix_now().to_string());
+        target.process_incarnation_id = Some(process_incarnation_id);
+    }
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        axum::http::HeaderValue::from_static("Bearer test-token"),
+    );
+    let event = vpsman_common::GatewayCommandOutputIngest {
+        gateway_id: gateway_id.to_string(),
+        gateway_session_id,
+        process_incarnation_id,
+        spooled_replay: false,
+        client_id: client_id.to_string(),
+        job_id,
+        payload_hash: command_hash,
+        seq: 0,
+        received_unix: Some(unix_now()),
+        output: CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: br#"{"type":"completed"}"#.to_vec(),
+            exit_code: Some(0),
+            done: true,
+        },
+    };
+    let live_error = crate::routes_ingest::ingest_command_output(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::Json(event.clone()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(live_error.code, "gateway_session_not_active");
+
+    let _accepted = crate::routes_ingest::ingest_command_output(
+        axum::extract::State(state),
+        headers,
+        axum::Json(vpsman_common::GatewayCommandOutputIngest {
+            spooled_replay: true,
+            ..event
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        repo.list_job_targets(job_id).await.unwrap()[0].status,
+        "completed"
+    );
 }
 
 #[tokio::test]
@@ -2144,6 +2273,7 @@ async fn seed_terminal_memory_job(repo: &Repository, job_id: Uuid, client_id: &s
         status: status.to_string(),
         target_count: 1,
         payload_hash: "terminal-test".to_string(),
+        timeout_secs: 30,
         created_at: "2026-06-20T00:00:00Z".to_string(),
         completed_at: Some("2026-06-20T00:00:01Z".to_string()),
     });
@@ -2154,6 +2284,7 @@ async fn seed_terminal_memory_job(repo: &Repository, job_id: Uuid, client_id: &s
         message: None,
         exit_code: Some(0),
         started_at: Some("2026-06-20T00:00:00Z".to_string()),
+        deadline_at: None,
         completed_at: Some("2026-06-20T00:00:01Z".to_string()),
         process_incarnation_id: Some(terminal_gateway_process_incarnation_id()),
     });
@@ -2179,6 +2310,7 @@ fn terminal_stream_ingest(
         gateway_id: "gateway-a".to_string(),
         gateway_session_id: terminal_gateway_session_id(),
         process_incarnation_id: terminal_gateway_process_incarnation_id(),
+        spooled_replay: false,
         client_id: "client-a".to_string(),
         output: vpsman_common::TerminalStreamOutput {
             job_id,

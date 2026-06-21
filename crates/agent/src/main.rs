@@ -3,6 +3,7 @@ mod backup;
 mod build_info;
 mod child_process;
 mod cli;
+mod command_ledger;
 mod command_worker;
 mod config_update;
 mod executor;

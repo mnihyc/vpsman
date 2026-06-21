@@ -96,6 +96,13 @@ impl DispatcherRuntimeConfig {
             .saturating_add(self.event_post_secs)
             .saturating_add(self.control_deadline_grace_secs)
     }
+
+    pub(crate) fn dispatch_lease_secs(&self) -> u64 {
+        self.dispatch_ack_secs
+            .max(self.internal_http_read_secs)
+            .saturating_add(5)
+            .clamp(1, 7200)
+    }
 }
 
 impl AppState {
