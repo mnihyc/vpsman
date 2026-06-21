@@ -1720,6 +1720,7 @@ async fn job_target_status_download_returns_targets_and_per_target_status_archiv
                 "exit_code": 0,
                 "started_at": "1700000000",
                 "completed_at": "1700000001",
+                "deadline_at": null,
                 "process_incarnation_id": null
             },
             {
@@ -1730,6 +1731,7 @@ async fn job_target_status_download_returns_targets_and_per_target_status_archiv
                 "exit_code": 2,
                 "started_at": "1700000002",
                 "completed_at": "1700000003",
+                "deadline_at": null,
                 "process_incarnation_id": null
             }
         ])
@@ -1752,6 +1754,7 @@ async fn job_target_status_download_returns_targets_and_per_target_status_archiv
             "exit_code": 0,
             "started_at": "1700000000",
             "completed_at": "1700000001",
+            "deadline_at": null,
             "process_incarnation_id": null
         })
     );
