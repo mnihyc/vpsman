@@ -94,8 +94,10 @@ comma-separated; quoted list values preserve commas, for example
 `["abc, def"]`. Regex list values use slash delimiters and are case-sensitive.
 Regex flags are not supported.
 
-Literal matching is case-insensitive. Bare text still searches VPS id and
-display name by contains for operator convenience.
+Literal matching is case-insensitive. Visible VPS display names are unique
+case-insensitively, while hidden/deleted VPS records do not reserve names. Bare
+text still searches VPS id and display name by contains for operator
+convenience.
 The bare wildcard `*` is supported as the concise all-VPS selector, equivalent
 in practice to `id:*` for target selection.
 

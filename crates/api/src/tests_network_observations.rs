@@ -334,6 +334,123 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
 }
 
 #[tokio::test]
+async fn topology_graph_ignores_observations_from_reused_plan_name_with_different_identity() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.extend([
+            AgentView {
+                id: "left-a".to_string(),
+                display_name: "left-a".to_string(),
+                status: "online".to_string(),
+                tags: vec!["bgp".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                process_incarnation_id: None,
+                stale_since: None,
+                stale_reason: None,
+                capabilities: Default::default(),
+            },
+            AgentView {
+                id: "right-b".to_string(),
+                display_name: "right-b".to_string(),
+                status: "online".to_string(),
+                tags: vec!["bgp".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                process_incarnation_id: None,
+                stale_since: None,
+                stale_reason: None,
+                capabilities: Default::default(),
+            },
+            AgentView {
+                id: "right-c".to_string(),
+                display_name: "right-c".to_string(),
+                status: "online".to_string(),
+                tags: vec!["bgp".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                internal_build_number: 1,
+                process_incarnation_id: None,
+                stale_since: None,
+                stale_reason: None,
+                capabilities: Default::default(),
+            },
+        ]);
+    }
+    let operator = AuthContext {
+        operator: OperatorView {
+            id: Uuid::nil(),
+            username: "test-operator".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
+            totp_enabled: false,
+            status: "active".to_string(),
+            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            created_at: crate::unix_now().to_string(),
+            disabled_at: None,
+            deleted_at: None,
+        },
+        session_id: Uuid::nil(),
+    };
+    let original = test_plan();
+    repo.record_tunnel_plan(&test_plan_input("right-b"), &original, &operator)
+        .await
+        .unwrap();
+
+    let job_id = Uuid::new_v4();
+    repo.record_network_observations(
+        job_id,
+        "left-a",
+        &[CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "network_probe",
+                "plan": "edge-a-edge-b",
+                "interface": "tunab",
+                "peer_client_id": "right-b",
+                "target": "10.255.0.1",
+                "parsed": {
+                    "healthy": false,
+                    "latency_avg_ms": 75.0,
+                    "packet_loss_ratio": 0.05
+                }
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: true,
+        }],
+    )
+    .await
+    .unwrap();
+    let old_observation = repo.list_network_observations(10).await.unwrap().remove(0);
+    assert!(old_observation.plan_id.is_some());
+    assert!(old_observation.topology_identity_hash.is_some());
+
+    let replacement = plan_tunnel(&test_plan_input("right-c")).unwrap();
+    repo.record_tunnel_plan(&test_plan_input("right-c"), &replacement, &operator)
+        .await
+        .unwrap();
+
+    let graph = repo.topology_graph(10).await.unwrap();
+    assert_eq!(graph.edges.len(), 1);
+    assert_eq!(graph.edges[0].right_client_id, "right-c");
+    assert_eq!(graph.edges[0].sample_count, 0);
+    assert_eq!(graph.edges[0].degraded_count, 0);
+    assert_eq!(graph.edges[0].latency_avg_ms, None);
+    assert_ne!(
+        old_observation.topology_identity_hash.as_deref(),
+        Some(graph.edges[0].topology_identity_hash.as_str())
+    );
+}
+
+#[tokio::test]
 async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
@@ -714,14 +831,18 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
 }
 
 fn test_plan() -> TunnelPlan {
-    plan_tunnel(&TunnelPlanInput {
+    plan_tunnel(&test_plan_input("right-b")).unwrap()
+}
+
+fn test_plan_input(right_client_id: &str) -> TunnelPlanInput {
+    TunnelPlanInput {
         name: "edge-a-edge-b".to_string(),
         interface_name: "tunab".to_string(),
         kind: TunnelKind::Gre,
         runtime_control: Default::default(),
         runtime_topology: Default::default(),
         left_client_id: "left-a".to_string(),
-        right_client_id: "right-b".to_string(),
+        right_client_id: right_client_id.to_string(),
         left_underlay: "198.51.100.10".to_string(),
         right_underlay: "203.0.113.20".to_string(),
         address_pool_cidr: "10.255.0.0/30".to_string(),
@@ -739,8 +860,7 @@ fn test_plan() -> TunnelPlan {
         packet_loss_ratio: 0.0,
         preference: 1.0,
         ospf_policy: OspfCostPolicy::default(),
-    })
-    .unwrap()
+    }
 }
 
 fn test_state(repo: Repository) -> AppState {

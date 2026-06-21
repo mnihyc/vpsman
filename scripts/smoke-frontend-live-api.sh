@@ -92,7 +92,7 @@ assign_agent_alias() {
   curl -fsS \
     -H "Authorization: Bearer $access_token" \
     -H "Content-Type: application/json" \
-    -d "{\"display_name\":\"$display_name\"}" \
+    -d "{\"display_name\":\"$display_name\",\"confirmed\":true}" \
     "$api_url/api/v1/agents/$client_id/alias" >/dev/null
 }
 

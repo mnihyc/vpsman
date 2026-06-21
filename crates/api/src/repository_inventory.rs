@@ -15,7 +15,53 @@ use crate::unix_now;
 
 const TAG_DISPLAY_ORDER_STEP: i64 = 1024;
 
+pub(crate) fn display_name_key(display_name: &str) -> String {
+    display_name.trim().to_lowercase()
+}
+
 impl Repository {
+    pub(crate) async fn ensure_visible_display_name_available(
+        &self,
+        display_name: &str,
+        except_client_id: Option<&str>,
+    ) -> Result<()> {
+        let key = display_name_key(display_name);
+        match self {
+            Self::Memory(memory) => {
+                let hidden = memory.hidden_clients.read().await;
+                let agents = memory.agents.read().await;
+                if agents.iter().any(|agent| {
+                    except_client_id.is_none_or(|except| agent.id != except)
+                        && !hidden.contains(&agent.id)
+                        && display_name_key(&agent.display_name) == key
+                }) {
+                    anyhow::bail!("display_name_already_exists");
+                }
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT id
+                    FROM clients
+                    WHERE hidden_at IS NULL
+                      AND lower(btrim(display_name)) = lower(btrim($1))
+                      AND ($2::text IS NULL OR id <> $2)
+                    LIMIT 1
+                    "#,
+                )
+                .bind(display_name)
+                .bind(except_client_id)
+                .fetch_optional(pool)
+                .await?;
+                if row.is_some() {
+                    anyhow::bail!("display_name_already_exists");
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub(crate) async fn fixed_target_agents(
         &self,
         target_client_ids: &[String],
@@ -1019,7 +1065,10 @@ impl Repository {
         &self,
         client_id: &str,
         display_name: &str,
+        operator: &AuthContext,
     ) -> Result<AgentView> {
+        self.ensure_visible_display_name_available(display_name, Some(client_id))
+            .await?;
         match self {
             Self::Memory(memory) => {
                 if memory.hidden_clients.read().await.contains(client_id) {
@@ -1029,24 +1078,75 @@ impl Repository {
                 let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) else {
                     anyhow::bail!("agent_not_found");
                 };
+                let old_display_name = agent.display_name.clone();
                 agent.display_name = display_name.to_string();
                 let updated = agent.clone();
                 drop(agents);
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: Some(operator.operator.id),
+                    action: "agent.alias_updated".to_string(),
+                    target: format!("client:{client_id}"),
+                    command_hash: None,
+                    metadata: json!({
+                        "client_id": client_id,
+                        "old_display_name": old_display_name,
+                        "new_display_name": display_name,
+                    }),
+                    created_at: unix_now().to_string(),
+                });
                 Ok(updated)
             }
             Self::Postgres(pool) => {
-                let result = sqlx::query(
+                let mut tx = pool.begin().await?;
+                let Some(existing) = sqlx::query(
+                    r#"
+                    SELECT display_name
+                    FROM clients
+                    WHERE id = $1 AND hidden_at IS NULL
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(client_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                else {
+                    anyhow::bail!("agent_not_found");
+                };
+                let old_display_name: String = existing.try_get("display_name")?;
+                let row = sqlx::query(
                     r#"
                     UPDATE clients
                     SET display_name = $2
                     WHERE id = $1 AND hidden_at IS NULL
+                    RETURNING display_name AS new_display_name
                     "#,
                 )
                 .bind(client_id)
                 .bind(display_name)
-                .execute(pool)
+                .fetch_optional(&mut *tx)
                 .await?;
-                anyhow::ensure!(result.rows_affected() > 0, "agent_not_found");
+                let Some(row) = row else {
+                    anyhow::bail!("agent_not_found");
+                };
+                let new_display_name: String = row.try_get("new_display_name")?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+                    VALUES ($1, $2, 'agent.alias_updated', $3, NULL, $4)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.operator.id)
+                .bind(format!("client:{client_id}"))
+                .bind(sqlx::types::Json(json!({
+                    "client_id": client_id,
+                    "old_display_name": old_display_name,
+                    "new_display_name": new_display_name,
+                })))
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
                 self.agent_by_id(client_id).await
             }
         }

@@ -185,6 +185,11 @@ enum JobPrivilegeSource {
     TerminalInputRoute,
 }
 
+#[derive(Clone, Debug)]
+struct FixedTargetUnavailableSkip {
+    client_id: String,
+}
+
 async fn create_job_inner(
     state: &AppState,
     operator: &AuthContext,
@@ -221,12 +226,32 @@ async fn create_job_inner(
         .await?
         .targets;
     let resolved_targets = fixed_target_ids;
-    if resolved_targets
+    let missing_fixed_targets = resolved_targets
         .iter()
-        .any(|client_id| !resolved_agents.iter().any(|agent| agent.id == *client_id))
-    {
+        .filter(|client_id| {
+            !resolved_agents
+                .iter()
+                .any(|agent| agent.id == client_id.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let allow_unavailable_fixed_targets =
+        matches!(&privilege_source, JobPrivilegeSource::SavedSchedule(_));
+    if !allow_unavailable_fixed_targets && !missing_fixed_targets.is_empty() {
         return Err(ApiError::conflict("fixed_target_not_found"));
     }
+    let fixed_target_unavailable_skips = if allow_unavailable_fixed_targets {
+        missing_fixed_targets
+            .into_iter()
+            .map(|client_id| FixedTargetUnavailableSkip { client_id })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let fixed_target_unavailable_skip_set = fixed_target_unavailable_skips
+        .iter()
+        .map(|skip| skip.client_id.clone())
+        .collect::<HashSet<_>>();
     let never_connected_skips = never_connected_target_skips(&resolved_targets, &resolved_agents);
     let never_connected_skip_set = never_connected_skips
         .iter()
@@ -234,7 +259,10 @@ async fn create_job_inner(
         .collect::<HashSet<_>>();
     let claimable_targets = resolved_targets
         .iter()
-        .filter(|client_id| !never_connected_skip_set.contains(*client_id))
+        .filter(|client_id| {
+            !never_connected_skip_set.contains(client_id.as_str())
+                && !fixed_target_unavailable_skip_set.contains(client_id.as_str())
+        })
         .cloned()
         .collect::<Vec<_>>();
     if matches!(job_command, JobCommand::ConfigRead) && resolved_targets.len() != 1 {
@@ -354,6 +382,7 @@ async fn create_job_inner(
         job_id,
         &job_command,
         never_connected_skips,
+        fixed_target_unavailable_skips,
         capability_skips,
         busy_update_skips,
         network_speed_peer_skips,
@@ -784,15 +813,27 @@ fn precompleted_target_outcomes(
     job_id: Uuid,
     job_command: &JobCommand,
     never_connected_skips: Vec<NeverConnectedSkip>,
+    fixed_target_unavailable_skips: Vec<FixedTargetUnavailableSkip>,
     capability_skips: Vec<CapabilitySkip>,
     busy_skips: Vec<BusyUpdateSkip>,
     peer_skips: Vec<NetworkSpeedPeerSkip>,
 ) -> Result<Vec<PrecompletedJobTarget>, ApiError> {
     let mut targets = Vec::with_capacity(
-        never_connected_skips.len() + capability_skips.len() + busy_skips.len() + peer_skips.len(),
+        never_connected_skips.len()
+            + fixed_target_unavailable_skips.len()
+            + capability_skips.len()
+            + busy_skips.len()
+            + peer_skips.len(),
     );
     for skip in never_connected_skips {
         let outcome = never_connected_skip_outcome(job_id, &skip, job_command)?;
+        targets.push(PrecompletedJobTarget {
+            client_id: skip.client_id,
+            outcome,
+        });
+    }
+    for skip in fixed_target_unavailable_skips {
+        let outcome = fixed_target_unavailable_skip_outcome(job_id, &skip, job_command)?;
         targets.push(PrecompletedJobTarget {
             client_id: skip.client_id,
             outcome,
@@ -1042,6 +1083,39 @@ fn never_connected_skip_outcome(
         command_version: None,
         accepted: false,
         message: "target_never_connected: target has never connected; job skipped".to_string(),
+        received_at: None,
+        outputs: vec![CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&status).map_err(|error| ApiError::from(anyhow!(error)))?,
+            exit_code: Some(0),
+            done: true,
+        }],
+    })
+}
+
+fn fixed_target_unavailable_skip_outcome(
+    job_id: Uuid,
+    skip: &FixedTargetUnavailableSkip,
+    command: &JobCommand,
+) -> Result<TargetDispatchOutcome, ApiError> {
+    let message = "fixed_target_unavailable: saved schedule target no longer resolves to a dispatchable VPS; target skipped";
+    let status = serde_json::json!({
+        "type": "fixed_target_unavailable",
+        "status": TARGET_STATUS_SKIPPED,
+        "client_id": skip.client_id,
+        "command_type": crate::job_request::job_command_type_label(command),
+        "reason": "fixed_target_unavailable",
+        "hint": "review the saved schedule target list before the next run",
+        "message": message,
+    });
+    Ok(TargetDispatchOutcome {
+        status: TARGET_STATUS_SKIPPED.to_string(),
+        exit_code: Some(0),
+        #[cfg(test)]
+        command_version: None,
+        accepted: false,
+        message: message.to_string(),
         received_at: None,
         outputs: vec![CommandOutput {
             job_id,

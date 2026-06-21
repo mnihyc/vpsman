@@ -64,6 +64,10 @@ CREATE INDEX clients_visible_status_idx
     ON clients (status, last_seen_at DESC)
     WHERE hidden_at IS NULL;
 
+CREATE UNIQUE INDEX clients_visible_display_name_key_idx
+    ON clients (lower(btrim(display_name)))
+    WHERE hidden_at IS NULL;
+
 CREATE INDEX clients_visible_last_ip_idx
     ON clients (last_ip)
     WHERE hidden_at IS NULL;

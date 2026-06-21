@@ -39,11 +39,16 @@ pub(crate) async fn upsert_agent_identity(
     };
     let intent = DbPrivilegeIntent::new(action, client_id, None, &targets, true, None);
     verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
-    state.repo.preflight_agent_identity_upsert(&request).await?;
+    state
+        .repo
+        .preflight_agent_identity_upsert(&request)
+        .await
+        .map_err(agent_identity_mutation_error)?;
     let view = state
         .repo
         .upsert_agent_identity(&request, &operator)
-        .await?;
+        .await
+        .map_err(agent_identity_mutation_error)?;
     if request.replace_existing_key {
         if let Err(error) = state
             .disconnect_gateway_session_for_lifecycle(client_id, "client_key_replaced")
@@ -117,6 +122,25 @@ pub(crate) async fn revoke_current_client_key(
         gateway_id: "key_lifecycle".to_string(),
     });
     Ok((StatusCode::CREATED, Json(record)))
+}
+
+fn agent_identity_mutation_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("display_name_already_exists")
+        || message.contains("clients_visible_display_name_key_idx")
+    {
+        ApiError::conflict("display_name_already_exists")
+    } else if message.contains("agent_identity_deactivated") {
+        ApiError::gone("agent_identity_deactivated")
+    } else if message.contains("client_not_found_or_no_key") {
+        ApiError::not_found("client_not_found_or_no_key")
+    } else if message.contains("client_id_already_registered") {
+        ApiError::conflict("client_id_already_registered")
+    } else if message.contains("agent_identity_key_revoked") {
+        ApiError::conflict("agent_identity_key_revoked")
+    } else {
+        error.into()
+    }
 }
 
 pub(crate) async fn key_lifecycle_report(

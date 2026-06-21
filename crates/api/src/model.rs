@@ -314,6 +314,8 @@ pub(crate) struct NetworkObservationView {
     pub(crate) seq: i32,
     pub(crate) kind: String,
     pub(crate) role: Option<String>,
+    pub(crate) plan_id: Option<Uuid>,
+    pub(crate) topology_identity_hash: Option<String>,
     pub(crate) plan_name: Option<String>,
     pub(crate) interface_name: Option<String>,
     pub(crate) peer_client_id: Option<String>,
@@ -330,6 +332,8 @@ pub(crate) struct NetworkObservationView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct NetworkObservationTrendView {
     pub(crate) kind: String,
+    pub(crate) plan_id: Option<Uuid>,
+    pub(crate) topology_identity_hash: Option<String>,
     pub(crate) plan_name: Option<String>,
     pub(crate) interface_name: Option<String>,
     pub(crate) client_id: String,
@@ -846,6 +850,8 @@ pub(crate) struct ScheduleImpactView {
 #[derive(Debug, Deserialize)]
 pub(crate) struct UpdateAgentAliasRequest {
     pub(crate) display_name: String,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Deserialize)]

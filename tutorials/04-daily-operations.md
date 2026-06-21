@@ -353,6 +353,11 @@ set of VPSs, the schedule shows **Update targets**; use it to deliberately
 replace the saved fixed snapshot. Tag mutation dialogs show this as a target
 update notice, not as an automatic schedule edit.
 
+If a saved fixed target is later hidden, deleted, revoked, or otherwise no
+longer resolves, due runs and Apply now keep the reviewed schedule runnable by
+recording that fixed ID as skipped and dispatching the remaining available
+targets.
+
 Manual **Apply now** runs use the same schedule command timeout source as the
 worker: `worker.schedule_command_timeout_secs`, then legacy
 `timeout.worker_schedule_command_secs`, then the 30 second default, with the

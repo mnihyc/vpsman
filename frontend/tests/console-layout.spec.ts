@@ -315,6 +315,25 @@ test("renders an operational cloud-console fleet workspace", async ({
   await expect(
     coreDetail.getByRole("tabpanel").getByText("agent-fra-02"),
   ).toBeVisible();
+  await coreDetail.getByLabel("VPS display name").fill("core-fra-renamed");
+  await activate(coreDetail.getByRole("button", { name: "Rename" }));
+  const aliasPrompt = coreDetail.locator(".confirmationPrompt", {
+    hasText: "Confirm VPS rename",
+  });
+  await expect(aliasPrompt).toBeVisible();
+  await expect(aliasPrompt).toContainText("Current name");
+  await expect(aliasPrompt).toContainText("core-fra-02");
+  await expect(aliasPrompt).toContainText("New name");
+  await expect(aliasPrompt).toContainText("core-fra-renamed");
+  await expect(
+    aliasPrompt.locator("dd", { hasText: "core-fra-renamed" }),
+  ).toHaveAttribute("title", "core-fra-renamed");
+  await page.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("fleet-alias-confirmation.png"),
+  });
+  await activate(aliasPrompt.getByRole("button", { name: "Cancel" }));
+  await expect(aliasPrompt).toHaveCount(0);
 
   await activate(coreDetail.getByRole("tab", { name: "Network" }));
   await expect(coreDetail.getByText("BGP/OSPF")).toBeVisible();

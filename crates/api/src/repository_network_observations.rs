@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use anyhow::Result;
 use sqlx::{types::Json as SqlJson, Row};
 use uuid::Uuid;
-use vpsman_common::{CommandOutput, OutputStream};
+use vpsman_common::{payload_hash, CommandOutput, OutputStream};
 
 use crate::{
-    model::{NetworkObservationTrendView, NetworkObservationView},
+    model::{NetworkObservationTrendView, NetworkObservationView, TunnelPlanView},
     repository::Repository,
     unix_now,
 };
@@ -37,6 +37,8 @@ impl Repository {
                         seq,
                         kind,
                         role,
+                        plan_id,
+                        topology_identity_hash,
                         plan_name,
                         interface_name,
                         peer_client_id,
@@ -66,6 +68,8 @@ impl Repository {
                             seq: row.try_get("seq")?,
                             kind: row.try_get("kind")?,
                             role: row.try_get("role")?,
+                            plan_id: row.try_get("plan_id")?,
+                            topology_identity_hash: row.try_get("topology_identity_hash")?,
                             plan_name: row.try_get("plan_name")?,
                             interface_name: row.try_get("interface_name")?,
                             peer_client_id: row.try_get("peer_client_id")?,
@@ -106,6 +110,8 @@ impl Repository {
                     r#"
                     SELECT
                         kind,
+                        plan_id,
+                        topology_identity_hash,
                         plan_name,
                         interface_name,
                         client_id,
@@ -122,7 +128,7 @@ impl Repository {
                         COALESCE(SUM(bytes), 0)::BIGINT AS bytes_total,
                         MAX(observed_at)::text AS latest_observed_at
                     FROM network_observations
-                    GROUP BY kind, plan_name, interface_name, client_id, peer_client_id
+                    GROUP BY kind, plan_id, topology_identity_hash, plan_name, interface_name, client_id, peer_client_id
                     ORDER BY MAX(observed_at) DESC, kind ASC, client_id ASC
                     LIMIT $1
                     "#,
@@ -134,6 +140,8 @@ impl Repository {
                     .map(|row| {
                         Ok(NetworkObservationTrendView {
                             kind: row.try_get("kind")?,
+                            plan_id: row.try_get("plan_id")?,
+                            topology_identity_hash: row.try_get("topology_identity_hash")?,
                             plan_name: row.try_get("plan_name")?,
                             interface_name: row.try_get("interface_name")?,
                             client_id: row.try_get("client_id")?,
@@ -156,6 +164,24 @@ impl Repository {
         }
     }
 
+    async fn bind_network_observations_to_current_topology(
+        &self,
+        observations: &mut [NetworkObservationView],
+    ) -> Result<()> {
+        let plans = self.list_tunnel_plans().await?;
+        for observation in observations {
+            let Some(plan) = plans
+                .iter()
+                .find(|plan| observation_matches_plan(observation, plan))
+            else {
+                continue;
+            };
+            observation.plan_id = Some(plan.id);
+            observation.topology_identity_hash = Some(topology_identity_hash_for_plan(plan));
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) async fn record_network_observations(
         &self,
@@ -175,7 +201,7 @@ impl Repository {
         outputs: &[CommandOutput],
     ) -> Result<()> {
         let observed_at = unix_now().to_string();
-        let observations = outputs
+        let mut observations = outputs
             .iter()
             .enumerate()
             .filter_map(|(seq, output)| {
@@ -186,6 +212,8 @@ impl Repository {
         if observations.is_empty() {
             return Ok(());
         }
+        self.bind_network_observations_to_current_topology(&mut observations)
+            .await?;
         match self {
             Self::Memory(memory) => {
                 let mut stored = memory.network_observations.write().await;
@@ -213,6 +241,8 @@ impl Repository {
                             seq,
                             kind,
                             role,
+                            plan_id,
+                            topology_identity_hash,
                             plan_name,
                             interface_name,
                             peer_client_id,
@@ -224,11 +254,13 @@ impl Repository {
                             bytes,
                             metadata
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                         ON CONFLICT (job_id, client_id, seq)
                         DO UPDATE SET
                             kind = EXCLUDED.kind,
                             role = EXCLUDED.role,
+                            plan_id = EXCLUDED.plan_id,
+                            topology_identity_hash = EXCLUDED.topology_identity_hash,
                             plan_name = EXCLUDED.plan_name,
                             interface_name = EXCLUDED.interface_name,
                             peer_client_id = EXCLUDED.peer_client_id,
@@ -248,6 +280,8 @@ impl Repository {
                     .bind(observation.seq)
                     .bind(&observation.kind)
                     .bind(&observation.role)
+                    .bind(observation.plan_id)
+                    .bind(&observation.topology_identity_hash)
                     .bind(&observation.plan_name)
                     .bind(&observation.interface_name)
                     .bind(&observation.peer_client_id)
@@ -271,6 +305,8 @@ impl Repository {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct TrendKey {
     kind: String,
+    plan_id: Option<Uuid>,
+    topology_identity_hash: Option<String>,
     plan_name: Option<String>,
     interface_name: Option<String>,
     client_id: String,
@@ -301,6 +337,8 @@ impl TrendAccumulator {
         Self {
             key: TrendKey {
                 kind: observation.kind.clone(),
+                plan_id: observation.plan_id,
+                topology_identity_hash: observation.topology_identity_hash.clone(),
                 plan_name: observation.plan_name.clone(),
                 interface_name: observation.interface_name.clone(),
                 client_id: observation.client_id.clone(),
@@ -365,6 +403,8 @@ impl TrendAccumulator {
     fn into_view(self) -> NetworkObservationTrendView {
         NetworkObservationTrendView {
             kind: self.key.kind,
+            plan_id: self.key.plan_id,
+            topology_identity_hash: self.key.topology_identity_hash,
             plan_name: self.key.plan_name,
             interface_name: self.key.interface_name,
             client_id: self.key.client_id,
@@ -391,6 +431,8 @@ fn summarize_network_observation_trends(
     for observation in observations {
         let key = TrendKey {
             kind: observation.kind.clone(),
+            plan_id: observation.plan_id,
+            topology_identity_hash: observation.topology_identity_hash.clone(),
             plan_name: observation.plan_name.clone(),
             interface_name: observation.interface_name.clone(),
             client_id: observation.client_id.clone(),
@@ -412,6 +454,51 @@ fn average(sum: f64, count: i64) -> Option<f64> {
         Some(sum / count as f64)
     } else {
         None
+    }
+}
+
+pub(crate) fn topology_identity_hash_for_plan(plan: &TunnelPlanView) -> String {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "plan_id": plan.id.to_string(),
+        "name": &plan.name,
+        "kind": format!("{:?}", plan.kind),
+        "left_client_id": &plan.left_client_id,
+        "right_client_id": &plan.right_client_id,
+        "interface_name": &plan.plan.interface_name,
+        "left_tunnel_address": &plan.plan.left_tunnel_address,
+        "right_tunnel_address": &plan.plan.right_tunnel_address,
+        "ipv4_tunnel": &plan.plan.ipv4_tunnel,
+        "ipv6_tunnel": &plan.plan.ipv6_tunnel,
+        "latency_primary_family": format!("{:?}", plan.plan.latency_primary_family),
+    }))
+    .expect("topology identity payload serializes");
+    payload_hash(&payload)
+}
+
+fn observation_matches_plan(observation: &NetworkObservationView, plan: &TunnelPlanView) -> bool {
+    if observation.plan_name.as_deref() != Some(plan.name.as_str()) {
+        return false;
+    }
+    if observation.interface_name.as_deref() != Some(plan.plan.interface_name.as_str()) {
+        return false;
+    }
+    match (
+        observation.client_id.as_str(),
+        observation.peer_client_id.as_deref(),
+    ) {
+        (client_id, Some(peer_client_id))
+            if client_id == plan.left_client_id.as_str()
+                && peer_client_id == plan.right_client_id.as_str() =>
+        {
+            true
+        }
+        (client_id, Some(peer_client_id))
+            if client_id == plan.right_client_id.as_str()
+                && peer_client_id == plan.left_client_id.as_str() =>
+        {
+            true
+        }
+        _ => false,
     }
 }
 
@@ -446,6 +533,8 @@ fn parse_network_observation(
         seq,
         kind,
         role: as_string(metadata.get("role")),
+        plan_id: None,
+        topology_identity_hash: None,
         plan_name: as_string(metadata.get("plan")),
         interface_name: as_string(metadata.get("interface")),
         peer_client_id: as_string(metadata.get("peer_client_id")),

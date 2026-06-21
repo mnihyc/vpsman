@@ -318,7 +318,7 @@ api_get "/api/v1/agents" | jq -e '
 unprivileged_capabilities='{"privilege_mode":"unprivileged","effective_uid":1000,"can_attempt_privileged_ops":true,"can_manage_runtime_tunnels":false,"can_apply_process_limits":false,"unprivileged_hint":"postgres smoke agent is running without root"}'
 seed_agent "pg-agent-a" "" "$first_public_key_hex"
 seed_agent "pg-agent-b" "$unprivileged_capabilities"
-api_post "/api/v1/agents/pg-agent-b/alias" '{"display_name":"pg-edge-b"}' >/dev/null
+api_post "/api/v1/agents/pg-agent-b/alias" '{"display_name":"pg-edge-b","confirmed":true}' >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-b --tag edge --confirmed >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-b --tag bird2 --confirmed >/dev/null
 api_get "/api/v1/agents" | jq -e '
@@ -363,7 +363,7 @@ vpsctl_json agent-identity-upsert \
   --client-public-key-hex "$second_public_key_hex" \
   --replace-existing-key \
   --confirmed | jq -e '.client_id == "pg-agent-a"' >/dev/null
-api_post "/api/v1/agents/pg-agent-a/alias" '{"display_name":"pg-edge-a-rotated"}' >/dev/null
+api_post "/api/v1/agents/pg-agent-a/alias" '{"display_name":"pg-edge-a-rotated","confirmed":true}' >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-a --tag rotated --confirmed >/dev/null
 vpsctl_json agent-tag --client-id pg-agent-a --tag os:debian --confirmed >/dev/null
 api_get "/api/v1/agents" | jq -e '

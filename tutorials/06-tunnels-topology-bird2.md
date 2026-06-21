@@ -113,6 +113,11 @@ cargo run -p vpsctl -- network-observations --limit 50
 cargo run -p vpsctl -- network-trends --limit 50
 ```
 
+Observation rows are retained as operational history, but topology health and
+OSPF recommendations only use rows bound to the current saved plan ID and
+endpoint identity hash. Reusing a plan name for different endpoints does not
+carry old probe or speed-test evidence into the new topology edge.
+
 ## Bird2 OSPF Cost Updates
 
 Generate recommendations from saved plans plus probe/speed trends:

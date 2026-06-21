@@ -32,6 +32,18 @@ impl Repository {
             .filter(|value| !value.is_empty())
             .context("client_id_required")?;
         let public_key = decode_public_key_hex(&request.client_public_key_hex)?;
+        let requested_display_name = request
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if !request.replace_existing_key || requested_display_name.is_some() {
+            self.ensure_visible_display_name_available(
+                requested_display_name.unwrap_or(client_id),
+                request.replace_existing_key.then_some(client_id),
+            )
+            .await?;
+        }
 
         if self
             .is_client_key_revoked(client_id, &public_key)
@@ -128,6 +140,18 @@ impl Repository {
             .filter(|value| !value.is_empty())
             .unwrap_or(client_id.as_str())
             .to_string();
+        if !request.replace_existing_key
+            || request
+                .display_name
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        {
+            self.ensure_visible_display_name_available(
+                &display_name,
+                request.replace_existing_key.then_some(client_id.as_str()),
+            )
+            .await?;
+        }
         let tags = normalize_tags(&request.tags);
 
         if self

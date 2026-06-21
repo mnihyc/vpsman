@@ -9,6 +9,7 @@ use crate::{
         NetworkOspfUpdatePlanView, TunnelPlanView,
     },
     repository::Repository,
+    repository_network_observations::topology_identity_hash_for_plan,
 };
 
 impl Repository {
@@ -239,19 +240,9 @@ fn update_plan_priority(plan: &NetworkOspfUpdatePlanView) -> i32 {
 }
 
 fn trend_matches_plan(plan: &TunnelPlanView, trend: &NetworkObservationTrendView) -> bool {
-    if trend.plan_name.as_deref() != Some(plan.name.as_str()) {
-        return false;
-    }
-    if let Some(interface_name) = trend.interface_name.as_deref() {
-        if interface_name != plan.plan.interface_name {
-            return false;
-        }
-    }
-    let client_pair_matches = trend.client_id == plan.left_client_id
-        || trend.client_id == plan.right_client_id
-        || trend.peer_client_id.as_deref() == Some(plan.left_client_id.as_str())
-        || trend.peer_client_id.as_deref() == Some(plan.right_client_id.as_str());
-    client_pair_matches
+    let topology_identity_hash = topology_identity_hash_for_plan(plan);
+    trend.plan_id == Some(plan.id)
+        && trend.topology_identity_hash.as_deref() == Some(topology_identity_hash.as_str())
 }
 
 fn weighted_average<F>(trends: &[&NetworkObservationTrendView], value: F) -> Option<f64>

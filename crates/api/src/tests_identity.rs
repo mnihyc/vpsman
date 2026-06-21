@@ -47,6 +47,126 @@ async fn direct_agent_identity_imports_key_and_tags_without_panel_token() {
 }
 
 #[tokio::test]
+async fn visible_agent_display_names_are_unique_and_hidden_names_are_reusable() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = identity_operator();
+
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some("edge-direct-unique-01".to_string()),
+            client_public_key_hex: "12".repeat(32),
+            display_name: Some("Edge Unique".to_string()),
+            tags: Vec::new(),
+            replace_existing_key: false,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let duplicate = repo
+        .upsert_agent_identity(
+            &UpsertAgentIdentityRequest {
+                client_id: Some("edge-direct-unique-02".to_string()),
+                client_public_key_hex: "13".repeat(32),
+                display_name: Some(" edge unique ".to_string()),
+                tags: Vec::new(),
+                replace_existing_key: false,
+                confirmed: true,
+                privilege_assertion: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert!(duplicate
+        .to_string()
+        .contains("display_name_already_exists"));
+
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some("edge-direct-unique-03".to_string()),
+            client_public_key_hex: "14".repeat(32),
+            display_name: Some("Spare Unique".to_string()),
+            tags: Vec::new(),
+            replace_existing_key: false,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+    let alias_collision = repo
+        .update_agent_alias("edge-direct-unique-03", "EDGE UNIQUE", &operator)
+        .await
+        .unwrap_err();
+    assert!(alias_collision
+        .to_string()
+        .contains("display_name_already_exists"));
+
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some("edge-direct-unique-05".to_string()),
+            client_public_key_hex: "16".repeat(32),
+            display_name: Some("Ünicode Edge".to_string()),
+            tags: Vec::new(),
+            replace_existing_key: false,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+    let unicode_collision = repo
+        .upsert_agent_identity(
+            &UpsertAgentIdentityRequest {
+                client_id: Some("edge-direct-unique-06".to_string()),
+                client_public_key_hex: "17".repeat(32),
+                display_name: Some("ünicode edge".to_string()),
+                tags: Vec::new(),
+                replace_existing_key: false,
+                confirmed: true,
+                privilege_assertion: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert!(unicode_collision
+        .to_string()
+        .contains("display_name_already_exists"));
+
+    if let Repository::Memory(memory) = &repo {
+        memory
+            .hidden_clients
+            .write()
+            .await
+            .insert("edge-direct-unique-01".to_string());
+    }
+    let reused = repo
+        .upsert_agent_identity(
+            &UpsertAgentIdentityRequest {
+                client_id: Some("edge-direct-unique-04".to_string()),
+                client_public_key_hex: "15".repeat(32),
+                display_name: Some("edge unique".to_string()),
+                tags: Vec::new(),
+                replace_existing_key: false,
+                confirmed: true,
+                privilege_assertion: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(reused.display_name, "edge unique");
+}
+
+#[tokio::test]
 async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_revoked_key() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = identity_operator();

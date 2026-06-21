@@ -69,14 +69,16 @@ pub(crate) async fn update_agent_alias(
     Path(client_id): Path<String>,
     Json(request): Json<UpdateAgentAliasRequest>,
 ) -> Result<Json<AgentView>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
     validate_agent_alias(&request.display_name)?;
+    validate_agent_alias_confirmation(&request)?;
     let agent = state
         .repo
-        .update_agent_alias(&client_id, request.display_name.trim())
-        .await?;
+        .update_agent_alias(&client_id, request.display_name.trim(), &operator)
+        .await
+        .map_err(agent_mutation_error)?;
     state.publish(WsEvent::AgentUpdated {
         client_id,
         gateway_id: "inventory_alias".to_string(),
@@ -988,6 +990,13 @@ fn validate_agent_alias(display_name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn validate_agent_alias_confirmation(request: &UpdateAgentAliasRequest) -> Result<(), ApiError> {
+    if !request.confirmed {
+        return Err(ApiError::conflict("agent_alias_confirmation_required"));
+    }
+    Ok(())
+}
+
 fn validate_delete_agent_request(request: &DeleteAgentRequest) -> Result<(), ApiError> {
     if !request.confirmed {
         return Err(ApiError::conflict("agent_delete_confirmation_required"));
@@ -1003,8 +1012,13 @@ fn validate_delete_agent_request(request: &DeleteAgentRequest) -> Result<(), Api
 }
 
 fn agent_mutation_error(error: anyhow::Error) -> ApiError {
-    if error.to_string().contains("agent_not_found") {
+    let message = error.to_string();
+    if message.contains("agent_not_found") {
         ApiError::not_found("agent_not_found")
+    } else if message.contains("display_name_already_exists")
+        || message.contains("clients_visible_display_name_key_idx")
+    {
+        ApiError::conflict("display_name_already_exists")
     } else {
         ApiError::from(error)
     }

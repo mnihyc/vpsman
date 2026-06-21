@@ -517,6 +517,56 @@ async fn schedule_apply_now_uses_saved_schedule_without_advancing_next_run() {
 }
 
 #[tokio::test]
+async fn schedule_apply_now_skips_saved_fixed_target_that_no_longer_resolves() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    seed_unprivileged_agent(&repo, "client-a").await;
+
+    let mut request = shell_schedule_request("stale-target-window", true);
+    request.selector_expression = "id:client-a".to_string();
+    let schedule = repo.create_schedule(request, &operator).await.unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory
+            .hidden_clients
+            .write()
+            .await
+            .insert("client-a".to_string());
+    }
+
+    let state = schedule_test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (status, Json(response)) = apply_schedule_now(
+        State(state),
+        headers,
+        Path(schedule.id),
+        Json(SchedulePrivilegeMutationRequest {
+            privilege_assertion: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(response.status, "skipped");
+    assert_eq!(response.target_counts.total, 1);
+    assert_eq!(response.target_counts.skipped, 1);
+    let targets = repo.list_job_targets(response.job_id).await.unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].client_id, "client-a");
+    assert_eq!(targets[0].status, "skipped");
+    assert_eq!(
+        targets[0].message.as_deref(),
+        Some("fixed_target_unavailable: saved schedule target no longer resolves to a dispatchable VPS; target skipped")
+    );
+    let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
+    let output_bytes = BASE64_STANDARD.decode(&outputs[0].data_base64).unwrap();
+    let output: serde_json::Value = serde_json::from_slice(&output_bytes).unwrap();
+    assert_eq!(output["type"], "fixed_target_unavailable");
+    assert_eq!(output["reason"], "fixed_target_unavailable");
+}
+
+#[tokio::test]
 async fn saved_schedule_job_skips_never_connected_targets_immediately() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = schedule_test_operator();

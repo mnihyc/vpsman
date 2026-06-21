@@ -160,6 +160,12 @@ type DeleteAgentConfirmationSnapshot = {
   privilegeAssertion: PrivilegeAssertion;
 };
 
+type AliasConfirmationSnapshot = {
+  clientId: string;
+  oldDisplayName: string;
+  newDisplayName: string;
+};
+
 type AlertDeliveryQueueSnapshot =
   | {
       action: "dispatch";
@@ -331,6 +337,7 @@ export function FleetWorkspace({
   onUpdateAgentAlias: (
     clientId: string,
     displayName: string,
+    confirmed: boolean,
   ) => Promise<AgentView>;
   onUpdateFleetAlertState: (
     request: FleetAlertStateRequest,
@@ -1066,6 +1073,7 @@ function FleetInstanceDetail({
   onUpdateAgentAlias: (
     clientId: string,
     displayName: string,
+    confirmed: boolean,
   ) => Promise<AgentView>;
   privilegeMaterial: PrivilegeMaterial | null;
   showCountryFlags: boolean;
@@ -1082,6 +1090,8 @@ function FleetInstanceDetail({
   const [aliasDraft, setAliasDraft] = useState(agent.display_name ?? "");
   const [aliasPending, setAliasPending] = useState(false);
   const [aliasError, setAliasError] = useState<string | null>(null);
+  const [aliasSnapshot, setAliasSnapshot] =
+    useState<AliasConfirmationSnapshot | null>(null);
   const [tagDraft, setTagDraft] = useState("");
   const [tagPending, setTagPending] = useState(false);
   const [tagStatus, setTagStatus] = useState<string | null>(null);
@@ -1118,6 +1128,7 @@ function FleetInstanceDetail({
   useEffect(() => {
     setAliasDraft(agent.display_name ?? "");
     setAliasError(null);
+    setAliasSnapshot(null);
     setTagDraft("");
     setTagError(null);
     setTagStatus(null);
@@ -1130,17 +1141,38 @@ function FleetInstanceDetail({
     setConfigPreview(null);
   }, [agent.display_name, agent.id]);
 
-  async function submitAlias(event: FormEvent<HTMLFormElement>) {
+  function submitAlias(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const displayName = aliasDraft.trim();
     if (!displayName) {
       setAliasError("Alias is required");
       return;
     }
+    if (displayName === agent.display_name.trim()) {
+      setAliasSnapshot(null);
+      return;
+    }
+    setAliasError(null);
+    setAliasSnapshot({
+      clientId: agent.id,
+      oldDisplayName: agent.display_name,
+      newDisplayName: displayName,
+    });
+  }
+
+  async function confirmAliasUpdate() {
+    if (!aliasSnapshot) {
+      return;
+    }
     setAliasPending(true);
     setAliasError(null);
     try {
-      await onUpdateAgentAlias(agent.id, displayName);
+      await onUpdateAgentAlias(
+        aliasSnapshot.clientId,
+        aliasSnapshot.newDisplayName,
+        true,
+      );
+      setAliasSnapshot(null);
     } catch (error) {
       setAliasError(
         error instanceof Error ? error.message : "Alias update failed",
@@ -1244,7 +1276,10 @@ function FleetInstanceDetail({
             <span>Display name</span>
             <input
               aria-label="VPS display name"
-              onChange={(event) => setAliasDraft(event.target.value)}
+              onChange={(event) => {
+                setAliasDraft(event.target.value);
+                setAliasSnapshot(null);
+              }}
               value={aliasDraft}
             />
           </label>
@@ -1257,6 +1292,28 @@ function FleetInstanceDetail({
           </button>
           {aliasError && <small className="errorText">{aliasError}</small>}
         </form>
+        <ConfirmationPrompt
+          confirmLabel="Rename VPS"
+          detail="Renames this visible VPS record exactly as reviewed. Display names must be unique across visible VPS records."
+          error={aliasError}
+          items={
+            aliasSnapshot
+              ? [
+                  { label: "Client ID", value: aliasSnapshot.clientId },
+                  { label: "Current name", value: aliasSnapshot.oldDisplayName },
+                  { label: "New name", value: aliasSnapshot.newDisplayName },
+                ]
+              : []
+          }
+          onCancel={() => {
+            setAliasError(null);
+            setAliasSnapshot(null);
+          }}
+          onConfirm={() => void confirmAliasUpdate()}
+          open={Boolean(aliasSnapshot)}
+          pending={aliasPending}
+          title="Confirm VPS rename"
+        />
         <form
           className="fleetInlineTagForm"
           onSubmit={(event) => {

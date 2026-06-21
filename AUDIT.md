@@ -85,7 +85,7 @@ of the same root cause.
 | AUD-069 | Medium/High | Fixed | API/Backups | Chunked backup artifact commit ignores the confirmation flag |
 | AUD-070 | High | Fixed | API/Frontend/CLI/Network | Tunnel-plan save and lifecycle mutations lack a backend confirmation contract |
 | AUD-071 | Medium/High | Fixed | API/Frontend/CLI/Jobs | Job and server-job cancellation bypass the confirmation contract |
-| AUD-072 | Medium/High | Confirmed | API/Frontend/CLI/Inventory/Selectors | Non-unique VPS display names make name selectors ambiguous for production jobs |
+| AUD-072 | Medium/High | Fixed | API/Frontend/CLI/Inventory/Selectors | Non-unique VPS display names make name selectors ambiguous for production jobs |
 | AUD-073 | High | Fixed | API/Agent/Terminal/Storage | Live terminal output can grow API job-output storage without a retention ceiling |
 | AUD-074 | Medium/High | Fixed | API/Object Storage/Job Outputs | Job-output object artifacts can be committed without cleanup-registry repair |
 | AUD-075 | Medium/High | Fixed | API/History/Auth | Audit logs are readable and exportable with fleet-read scope |
@@ -120,7 +120,7 @@ of the same root cause.
 | AUD-104 | Medium/High | Fixed | API/Auth/TOTP | Authenticated TOTP management is an unthrottled password and code oracle |
 | AUD-105 | Medium/High | Confirmed | API/File Transfers/Terminal/Retention | Derived session records can outlive the job-output evidence they require |
 | AUD-106 | High | Fixed | API/Backups/Object Storage | Backup artifact metadata can be recorded without object-store verification |
-| AUD-107 | High | Confirmed | API/Schedules/Client Lifecycle | Stale fixed targets can block schedule management and apply-now |
+| AUD-107 | High | Fixed | API/Schedules/Client Lifecycle | Stale fixed targets can block schedule management and apply-now |
 | AUD-108 | High | Fixed | API/Jobs/State Machine | Terminal targets can leave the parent job active after a crash or side-effect error |
 | AUD-109 | Medium/High | Fixed | Gateway/API/Job Outputs | Gateway spool replay treats sequence existence as full output acknowledgement |
 | AUD-110 | High | Fixed | Frontend/CLI/Backups/Migrations | Bundled migration-run can persist a migration link before restore dispatch succeeds |
@@ -242,7 +242,7 @@ of the same root cause.
 | AUD-226 | High | Fixed | API/Job Outputs/State Machine | Final output insertion is not atomic with target terminalization |
 | AUD-227 | Medium/High | Fixed | Agent/Frontend/File Browser/Resource Bounds | Directory listing reads and sorts every entry before applying the page limit |
 | AUD-228 | Medium/High | Fixed | Agent/API/Network Speed Tests | Network speed-test server accepts the first TCP peer without verifying the expected tunnel peer |
-| AUD-229 | High | Confirmed | API/Frontend/Network Topology | Topology evidence and OSPF recommendations are keyed by mutable tunnel-plan names |
+| AUD-229 | High | Fixed | API/Frontend/Network Topology | Topology evidence and OSPF recommendations are keyed by mutable tunnel-plan names |
 | AUD-230 | Medium/High | Fixed | Agent/Telemetry/Network Probes | Autonomous latency monitoring captures custom probe output without a byte limit |
 | AUD-231 | Medium/High | Fixed | API/CLI/Agent/Network Speed Tests | Network speed tests are treated as confirmation-free read-only jobs despite opening listeners and sending traffic |
 | AUD-232 | Medium/High | Fixed | API/Dispatcher/Agent/Network Speed Tests | Network speed tests bypass exclusive dispatch serialization and can overlap on the same tunnel endpoints |
@@ -2207,7 +2207,7 @@ of the same root cause.
 ### AUD-072: Non-Unique VPS Display Names Make Name Selectors Ambiguous For Production Jobs
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/CLI/Inventory/Selectors
 - Context: Operators can target jobs, schedule target updates, VTY commands,
   and dashboard previews with selectors such as `name:<display-name>` or
@@ -2250,14 +2250,15 @@ of the same root cause.
   use explicit IDs/tags. Rename/import paths should also use the same
   confirmation and collision-preview discipline as other target-affecting
   inventory changes.
-  Reconfirmed after commit `07ecbe7`: this is not fixed. Display names remain
-  non-unique in the canonical schema and rename/import paths, while `name:`
-  selectors still resolve through `vps.display_name`.
+  Fixed by enforcing a case-insensitive visible-client display-name uniqueness
+  contract in canonical schema, identity import, and alias update. Hidden or
+  deleted clients no longer reserve display names, and Fleet rename now uses an
+  explicit reviewed confirmation snapshot.
 
 ### AUD-073: Live Terminal Output Can Grow API Job-Output Storage Without A Retention Ceiling
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Agent/Terminal/Storage
 - Context: Operators can open interactive terminal sessions from the dashboard
   or CLI. Those sessions may run noisy commands such as `tail -f`, package
@@ -3753,7 +3754,7 @@ of the same root cause.
 ### AUD-107: Stale Fixed Targets Can Block Schedule Management And Apply-Now
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Schedules/Client Lifecycle
 - Context: Schedules store a fixed target snapshot so long-lived recurring
   work does not silently change when tags, display names, or inventory state
@@ -3794,6 +3795,10 @@ of the same root cause.
   management actions. Apply-now should share the worker's fixed-snapshot
   materialization semantics or call a backend helper that records stale targets
   as skipped.
+  Fixed by verifying saved schedule management intents against the saved target
+  snapshot instead of live resolver availability, while create/update target
+  changes still require live targets. Apply-now now precompletes saved fixed
+  IDs that no longer resolve as skipped `fixed_target_unavailable` targets.
 
 ### AUD-108: Terminal Targets Can Leave The Parent Job Active After A Crash Or Side-Effect Error
 
@@ -4615,7 +4620,7 @@ of the same root cause.
 ### AUD-126: Data-Source Read Paths Persist Default Assignments For All Clients, Including Hidden Clients
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Data Sources/State
 - Context: Data-source presets and assignments define generated agent hot-config
   behavior. Listing assignments or status should be a read-only inspection of
@@ -4747,7 +4752,7 @@ of the same root cause.
 ### AUD-129: Terminal Output Forwarding Bypasses The Gateway RAM Spool Budget
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Gateway/Terminal/Resource Bounds
 - Context: Gateway spool settings expose a RAM budget intended to keep the
   forwarder bounded while the API is slow or unavailable. Terminal output is a
@@ -7157,7 +7162,7 @@ of the same root cause.
 ### AUD-182: Terminal Stream Output Can Append After The Terminal-Open Target Is Terminal
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Gateway/Terminal/Lifecycle
 - Context: Terminal-open jobs return an immediate command result, but the agent
   keeps a background PTY stream for the same session and forwards PTY chunks
@@ -9143,7 +9148,7 @@ of the same root cause.
 ### AUD-224: File Pull Byte Caps Can Be Bypassed When A File Grows After Stat
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Agent/CLI/Frontend/File Pull
 - Context: Operators can run the `file_pull` job from the dashboard, CLI, and
   VTY to retrieve a file from one or many VPSs. This is commonly pointed at
@@ -9371,7 +9376,7 @@ of the same root cause.
 ### AUD-229: Topology Evidence And OSPF Recommendations Are Keyed By Mutable Tunnel-Plan Names
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Frontend/Network Topology
 - Context: Operators save tunnel plans, run network status/probe/speed-test
   jobs, and then use the topology graph, evidence table, OSPF recommendation
@@ -9421,6 +9426,11 @@ of the same root cause.
   addresses, and endpoint side. Recommendations and graph summaries should
   require an exact current identity match and should either ignore old evidence
   or label it as historical after a plan is overwritten or recreated.
+  Fixed by adding nullable `plan_id` and `topology_identity_hash` bindings to
+  network observations and trends. Observation ingestion binds rows only when
+  plan name, interface, local client, and peer client match a current saved
+  plan; topology graph and OSPF recommendations require the current plan ID and
+  endpoint identity hash before using evidence.
 
 ### AUD-230: Autonomous Latency Monitoring Captures Custom Probe Output Without A Byte Limit
 

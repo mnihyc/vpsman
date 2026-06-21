@@ -716,6 +716,11 @@ export type DeleteAgentRequest = {
   privilege_assertion?: PrivilegeAssertion | null;
 };
 
+export type UpdateAgentAliasRequest = {
+  display_name: string;
+  confirmed: boolean;
+};
+
 export type DeleteAgentResponse = {
   client_id: string;
   deleted: boolean;
@@ -1265,6 +1270,7 @@ export type TopologyGraphNode = {
 
 export type TopologyGraphEdge = {
   plan_id: string;
+  topology_identity_hash: string;
   plan_name: string;
   interface_name: string;
   kind: TunnelKind;
@@ -1423,6 +1429,8 @@ export type NetworkObservationRecord = {
   seq: number;
   kind: string;
   role: string | null;
+  plan_id: string | null;
+  topology_identity_hash: string | null;
   plan_name: string | null;
   interface_name: string | null;
   peer_client_id: string | null;
@@ -1438,6 +1446,8 @@ export type NetworkObservationRecord = {
 
 export type NetworkObservationTrendRecord = {
   kind: string;
+  plan_id: string | null;
+  topology_identity_hash: string | null;
   plan_name: string | null;
   interface_name: string | null;
   client_id: string;

@@ -1832,6 +1832,9 @@ const networkJobOutputs = {
   ],
 };
 
+const sfoFraTopologyIdentityHash = "a".repeat(64);
+const externalTopologyIdentityHash = "b".repeat(64);
+
 const networkObservations = [
   {
     bytes: 4194304,
@@ -1846,10 +1849,12 @@ const networkObservations = [
     observed_at: "2026-05-31T10:09:00Z",
     packet_loss_ratio: null,
     peer_client_id: "agent-sfo-01",
+    plan_id: tunnelPlans[0].id,
     plan_name: "sfo-fra-gre",
     role: "client",
     seq: 1,
     target: "10.255.0.0:5201",
+    topology_identity_hash: sfoFraTopologyIdentityHash,
     throughput_mbps: 10.1,
   },
   {
@@ -1865,10 +1870,12 @@ const networkObservations = [
     observed_at: "2026-05-31T10:08:00Z",
     packet_loss_ratio: 0.0025,
     peer_client_id: "agent-fra-02",
+    plan_id: tunnelPlans[0].id,
     plan_name: "sfo-fra-gre",
     role: null,
     seq: 0,
     target: "10.255.0.1",
+    topology_identity_hash: sfoFraTopologyIdentityHash,
     throughput_mbps: null,
   },
   {
@@ -1896,10 +1903,12 @@ const networkObservations = [
     observed_at: "2026-05-31T10:07:30Z",
     packet_loss_ratio: null,
     peer_client_id: "agent-sfo-01",
+    plan_id: tunnelPlans[1].id,
     plan_name: "external-openvpn",
     role: null,
     seq: 0,
     target: null,
+    topology_identity_hash: externalTopologyIdentityHash,
     throughput_mbps: null,
   },
 ];
@@ -1918,8 +1927,10 @@ const networkTrends = [
     latest_observed_at: "2026-05-31T10:09:00Z",
     packet_loss_avg_ratio: null,
     peer_client_id: "agent-sfo-01",
+    plan_id: tunnelPlans[0].id,
     plan_name: "sfo-fra-gre",
     sample_count: 2,
+    topology_identity_hash: sfoFraTopologyIdentityHash,
     throughput_avg_mbps: 10.1,
     throughput_max_mbps: 11.8,
   },
@@ -1936,8 +1947,10 @@ const networkTrends = [
     latest_observed_at: "2026-05-31T10:08:00Z",
     packet_loss_avg_ratio: 0.0025,
     peer_client_id: "agent-fra-02",
+    plan_id: tunnelPlans[0].id,
     plan_name: "sfo-fra-gre",
     sample_count: 3,
+    topology_identity_hash: sfoFraTopologyIdentityHash,
     throughput_avg_mbps: null,
     throughput_max_mbps: null,
   },
@@ -1970,6 +1983,7 @@ const topologyGraph = {
       status: "applied",
       throughput_avg_mbps: 10.1,
       throughput_max_mbps: 11.8,
+      topology_identity_hash: sfoFraTopologyIdentityHash,
       latest_observed_at: "2026-05-31T10:09:00Z",
     },
   ],

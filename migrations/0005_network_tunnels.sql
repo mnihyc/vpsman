@@ -61,6 +61,8 @@ CREATE TABLE network_observations (
     seq INTEGER NOT NULL,
     kind TEXT NOT NULL,
     role TEXT,
+    plan_id UUID REFERENCES tunnel_plans(id) ON DELETE SET NULL,
+    topology_identity_hash TEXT,
     plan_name TEXT,
     interface_name TEXT,
     peer_client_id TEXT,
@@ -81,3 +83,7 @@ CREATE INDEX network_observations_kind_observed_idx
 
 CREATE INDEX network_observations_plan_observed_idx
     ON network_observations (plan_name, observed_at DESC, id DESC);
+
+CREATE INDEX network_observations_plan_identity_observed_idx
+    ON network_observations (plan_id, topology_identity_hash, observed_at DESC, id DESC)
+    WHERE plan_id IS NOT NULL AND topology_identity_hash IS NOT NULL;

@@ -27,6 +27,12 @@ use crate::{
 };
 use vpsman_common::{encode_json, payload_hash, PrivilegeAssertion};
 
+#[derive(Clone, Copy)]
+enum ScheduleTargetResolutionMode {
+    RequireLiveTargets,
+    SavedSnapshot,
+}
+
 pub(crate) async fn list_schedules(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -57,6 +63,7 @@ pub(crate) async fn create_schedule(
         None,
         false,
         request.privilege_assertion.clone(),
+        ScheduleTargetResolutionMode::RequireLiveTargets,
     )
     .await?;
     Ok((
@@ -85,6 +92,7 @@ pub(crate) async fn update_schedule(
         None,
         false,
         request.privilege_assertion.clone(),
+        ScheduleTargetResolutionMode::RequireLiveTargets,
     )
     .await?;
     Ok(Json(
@@ -132,6 +140,7 @@ pub(crate) async fn update_schedule_targets(
         schedule.deferred_until.as_deref(),
         false,
         request.privilege_assertion.clone(),
+        ScheduleTargetResolutionMode::RequireLiveTargets,
     )
     .await?;
     Ok(Json(
@@ -394,8 +403,16 @@ async fn verify_schedule_privilege_for_definition(
     deferred_until: Option<&str>,
     deleted: bool,
     assertion: Option<PrivilegeAssertion>,
+    target_resolution_mode: ScheduleTargetResolutionMode,
 ) -> Result<(), ApiError> {
-    let resolved_targets = resolved_schedule_targets(state, request.target_client_ids).await?;
+    let resolved_targets = match target_resolution_mode {
+        ScheduleTargetResolutionMode::RequireLiveTargets => {
+            resolved_schedule_targets(state, request.target_client_ids).await?
+        }
+        ScheduleTargetResolutionMode::SavedSnapshot => {
+            normalized_target_client_ids(request.target_client_ids)?
+        }
+    };
     let operation_payload = encode_json(request.operation)
         .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
     let operation_payload_hash = payload_hash(&operation_payload);
@@ -439,6 +456,7 @@ async fn verify_schedule_privilege_for_view(
         deferred_until,
         deleted,
         assertion,
+        ScheduleTargetResolutionMode::SavedSnapshot,
     )
     .await
 }

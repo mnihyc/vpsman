@@ -24,6 +24,7 @@ pub(crate) struct TopologyGraphNodeView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct TopologyGraphEdgeView {
     pub(crate) plan_id: Uuid,
+    pub(crate) topology_identity_hash: String,
     pub(crate) plan_name: String,
     pub(crate) interface_name: String,
     pub(crate) kind: String,

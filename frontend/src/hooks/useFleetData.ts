@@ -182,12 +182,13 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   );
 
   const updateAgentAlias = useCallback(
-    async (clientId: string, displayName: string) => {
+    async (clientId: string, displayName: string, confirmed: boolean) => {
       const agent = await apiPost<AgentView>(
         `/api/v1/agents/${encodeURIComponent(clientId)}/alias`,
         apiToken,
         {
           display_name: displayName,
+          confirmed,
         },
       );
       setAgents((current) =>

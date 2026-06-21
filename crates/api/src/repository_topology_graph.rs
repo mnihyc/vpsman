@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{ensure, Result};
+use uuid::Uuid;
 use vpsman_common::{
     aggregate_topology_probe_state, aggregate_topology_runtime_state, is_topology_drift_action,
     is_topology_drift_policy, is_topology_edge_health_status, is_topology_neighbor_state,
@@ -12,6 +13,7 @@ use crate::{
     model::{AgentView, NetworkObservationTrendView, NetworkObservationView},
     model_topology::{TopologyGraphEdgeView, TopologyGraphNodeView, TopologyGraphView},
     repository::Repository,
+    repository_network_observations::topology_identity_hash_for_plan,
     unix_now,
 };
 
@@ -44,8 +46,10 @@ impl Repository {
                 .entry(plan.right_client_id.clone())
                 .or_insert_with(|| synthetic_node(&plan.right_client_id));
 
-            let summary = summarize_edge_trends(&plan.name, &trends);
-            let evidence = summarize_edge_observations(&plan.name, &observations);
+            let topology_identity_hash = topology_identity_hash_for_plan(&plan);
+            let summary = summarize_edge_trends(plan.id, &topology_identity_hash, &trends);
+            let evidence =
+                summarize_edge_observations(plan.id, &topology_identity_hash, &observations);
             let drift =
                 summarize_server_drift(&plan.left_client_id, &plan.right_client_id, &agent_status);
             let recommendation = recommendation_by_plan.get(&plan.id).copied();
@@ -58,6 +62,7 @@ impl Repository {
             );
             let edge = TopologyGraphEdgeView {
                 plan_id: plan.id,
+                topology_identity_hash,
                 plan_name: plan.name.clone(),
                 interface_name: plan.plan.interface_name.clone(),
                 kind: tunnel_kind_label(plan.kind),
@@ -286,12 +291,16 @@ fn update_node_from_edge(
 }
 
 fn summarize_edge_trends(
-    plan_name: &str,
+    plan_id: Uuid,
+    topology_identity_hash: &str,
     trends: &[NetworkObservationTrendView],
 ) -> EdgeTrendSummary {
     let matching = trends
         .iter()
-        .filter(|trend| trend.plan_name.as_deref() == Some(plan_name))
+        .filter(|trend| {
+            trend.plan_id == Some(plan_id)
+                && trend.topology_identity_hash.as_deref() == Some(topology_identity_hash)
+        })
         .collect::<Vec<_>>();
     let sample_count = matching.iter().map(|trend| trend.sample_count).sum();
     let degraded_count = matching.iter().map(|trend| trend.degraded_count).sum();
@@ -326,13 +335,15 @@ fn summarize_edge_trends(
 }
 
 fn summarize_edge_observations(
-    plan_name: &str,
+    plan_id: Uuid,
+    topology_identity_hash: &str,
     observations: &[NetworkObservationView],
 ) -> EdgeObservationSummary {
     let mut latency_rows = observations
         .iter()
         .filter(|observation| {
-            observation.plan_name.as_deref() == Some(plan_name)
+            observation.plan_id == Some(plan_id)
+                && observation.topology_identity_hash.as_deref() == Some(topology_identity_hash)
                 && observation.kind == "network_probe"
                 && observation.latency_avg_ms.is_some()
         })
@@ -351,7 +362,8 @@ fn summarize_edge_observations(
     let matching_probe = observations
         .iter()
         .filter(|observation| {
-            observation.plan_name.as_deref() == Some(plan_name)
+            observation.plan_id == Some(plan_id)
+                && observation.topology_identity_hash.as_deref() == Some(topology_identity_hash)
                 && observation.kind == "network_probe"
         })
         .collect::<Vec<_>>();
@@ -385,7 +397,9 @@ fn summarize_edge_observations(
     let mut stale_present_count = 0_i64;
     let mut import_candidate_count = 0_i64;
     for observation in observations.iter().filter(|observation| {
-        observation.plan_name.as_deref() == Some(plan_name) && observation.kind == "network_status"
+        observation.plan_id == Some(plan_id)
+            && observation.topology_identity_hash.as_deref() == Some(topology_identity_hash)
+            && observation.kind == "network_status"
     }) {
         let summary = observation
             .metadata
