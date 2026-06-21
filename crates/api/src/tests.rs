@@ -1,4 +1,5 @@
 use super::*;
+use crate::model_terminal::TerminalSessionView;
 use base64::Engine as _;
 use vpsman_common::{
     job_command_type_label, plan_tunnel, AgentHello, BandwidthTier, CommandOutput,
@@ -1355,6 +1356,160 @@ async fn late_final_output_does_not_rewrite_control_timeout_target() {
 }
 
 #[tokio::test]
+async fn memory_terminal_input_control_timeout_releases_reservation() {
+    let repo = Repository::Memory(MemoryState::default());
+    let session_id = Uuid::new_v4();
+    let job_id =
+        record_memory_terminal_input_dispatch_job(&repo, "client-a", session_id, b"a\n").await;
+    assert_eq!(
+        repo.claim_due_job_targets(10, 30, 0).await.unwrap().len(),
+        1
+    );
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    {
+        let mut targets = memory.job_targets.write().await;
+        let target = targets
+            .iter_mut()
+            .find(|target| target.job_id == job_id && target.client_id == "client-a")
+            .unwrap();
+        target.started_at = Some("0".to_string());
+    }
+
+    let expired = repo.expire_control_timeout_targets(10, 0).await.unwrap();
+    assert_eq!(expired.len(), 1);
+    assert_eq!(
+        terminal_input_request_status(&repo, job_id).await,
+        Some(("control_timeout".to_string(), true))
+    );
+
+    let next_payload = b"b\n";
+    let next = repo
+        .reserve_terminal_input_request(
+            "client-a",
+            session_id,
+            Uuid::new_v4(),
+            &payload_hash(next_payload),
+            next_payload.len() as i64,
+        )
+        .await
+        .unwrap();
+    assert_eq!(next.input_seq, 2);
+}
+
+#[tokio::test]
+async fn memory_terminal_input_agent_lost_releases_reservation() {
+    let repo = Repository::Memory(MemoryState::default());
+    let session_id = Uuid::new_v4();
+    let job_id =
+        record_memory_terminal_input_dispatch_job(&repo, "client-a", session_id, b"a\n").await;
+    assert_eq!(
+        repo.claim_due_job_targets(10, 30, 0).await.unwrap().len(),
+        1
+    );
+
+    let status = repo
+        .record_agent_lost_target(job_id, "client-a", "agent lost", None, None)
+        .await
+        .unwrap();
+    assert_eq!(status, Some("failed".to_string()));
+    assert_eq!(
+        terminal_input_request_status(&repo, job_id).await,
+        Some(("agent_lost".to_string(), true))
+    );
+}
+
+#[tokio::test]
+async fn memory_terminal_input_queued_cancel_releases_reservation() {
+    let repo = Repository::Memory(MemoryState::default());
+    let session_id = Uuid::new_v4();
+    let job_id =
+        record_memory_terminal_input_dispatch_job(&repo, "client-a", session_id, b"a\n").await;
+
+    let plan = repo
+        .request_job_cancel(job_id, test_operator().operator.id, Some("operator"))
+        .await
+        .unwrap();
+    assert_eq!(plan.pending_canceled, 1);
+    assert!(plan.cancel_targets.is_empty());
+    assert_eq!(
+        terminal_input_request_status(&repo, job_id).await,
+        Some(("canceled".to_string(), true))
+    );
+
+    let next_payload = b"b\n";
+    let next = repo
+        .reserve_terminal_input_request(
+            "client-a",
+            session_id,
+            Uuid::new_v4(),
+            &payload_hash(next_payload),
+            next_payload.len() as i64,
+        )
+        .await
+        .unwrap();
+    assert_eq!(next.input_seq, 2);
+}
+
+#[tokio::test]
+async fn memory_terminal_input_final_output_preserves_precise_status() {
+    let repo = Repository::Memory(MemoryState::default());
+    let session_id = Uuid::new_v4();
+    let job_id =
+        record_memory_terminal_input_dispatch_job(&repo, "client-a", session_id, b"a\n").await;
+    assert_eq!(
+        repo.claim_due_job_targets(10, 30, 0).await.unwrap().len(),
+        1
+    );
+    let output = CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: serde_json::to_vec(&serde_json::json!({
+            "type": "terminal_input",
+            "status": "accepted",
+            "session_id": session_id,
+            "input_seq": 1,
+            "written_bytes": 2
+        }))
+        .unwrap(),
+        exit_code: Some(0),
+        done: true,
+    };
+    let outcome = TargetDispatchOutcome {
+        status: "completed".to_string(),
+        exit_code: Some(0),
+        command_version: Some(1),
+        accepted: true,
+        message: "ok".to_string(),
+        received_at: None,
+        outputs: vec![output.clone()],
+    };
+
+    let result = repo
+        .record_active_final_job_output_and_target_result_with_config(
+            job_id,
+            "client-a",
+            0,
+            &output,
+            Some("1700000000".to_string()),
+            repository_job_outputs::JobOutputPersistConfig {
+                object_store: None,
+                artifact_min_bytes: usize::MAX,
+            },
+            &outcome,
+        )
+        .await
+        .unwrap();
+
+    assert!(result.target_terminalized);
+    assert_eq!(
+        terminal_input_request_status(&repo, job_id).await,
+        Some(("accepted".to_string(), true))
+    );
+}
+
+#[tokio::test]
 async fn memory_dispatch_exclusivity_uses_operation_for_scheduled_labels() {
     for (case, operation) in exclusive_dispatch_operation_cases() {
         let scheduled_label = format!("scheduled_{}", job_command_type_label(&operation));
@@ -1833,6 +1988,110 @@ fn test_app_state(repo: Repository) -> AppState {
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
         dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
     }
+}
+
+async fn record_memory_terminal_input_dispatch_job(
+    repo: &Repository,
+    client_id: &str,
+    session_id: Uuid,
+    input: &[u8],
+) -> Uuid {
+    seed_open_terminal_session(repo, client_id, session_id).await;
+    let job_id = Uuid::new_v4();
+    let reservation = repo
+        .reserve_terminal_input_request(
+            client_id,
+            session_id,
+            job_id,
+            &payload_hash(input),
+            input.len() as i64,
+        )
+        .await
+        .unwrap();
+    let request = CreateJobRequest {
+        job_id: Some(job_id),
+        selector_expression: format!("id:{client_id}"),
+        target_client_ids: vec![client_id.to_string()],
+        destructive: true,
+        confirmed: true,
+        command: "terminal_input".to_string(),
+        argv: Vec::new(),
+        operation: Some(JobCommand::TerminalInput {
+            session_id,
+            input_seq: u64::try_from(reservation.input_seq).unwrap(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(input),
+        }),
+        timeout_secs: Some(5),
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: None,
+    };
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    repo.record_dispatching_job(
+        job_id,
+        &request,
+        &command_hash,
+        "terminal_input_test",
+        &test_operator(),
+        &[client_id.to_string()],
+    )
+    .await
+    .unwrap();
+    repo.mark_terminal_input_request_status(job_id, "queued")
+        .await
+        .unwrap();
+    job_id
+}
+
+async fn seed_open_terminal_session(repo: &Repository, client_id: &str, session_id: Uuid) {
+    let Repository::Memory(memory) = repo else {
+        panic!("seed_open_terminal_session supports only memory repository tests");
+    };
+    memory
+        .terminal_sessions
+        .write()
+        .await
+        .push(TerminalSessionView {
+            session_id,
+            client_id: client_id.to_string(),
+            state: "open".to_string(),
+            last_status: "accepted".to_string(),
+            argv: vec!["/bin/sh".to_string(), "-l".to_string()],
+            cwd: Some("/root".to_string()),
+            cols: Some(120),
+            rows: Some(40),
+            idle_timeout_secs: Some(3600),
+            flow_window_bytes: Some(65_536),
+            output_first_seq: Some(1),
+            output_next_seq: Some(1),
+            output_retained_first_seq: Some(1),
+            output_retained_bytes: Some(0),
+            output_dropped_bytes: Some(0),
+            output_dropped_chunks: Some(0),
+            output_replay_truncated: false,
+            last_input_seq: None,
+            session_exited: false,
+            close_reason: None,
+            last_event: "open".to_string(),
+            last_job_id: Uuid::new_v4(),
+            last_command_type: "terminal_open".to_string(),
+            last_seq: 0,
+            observed_at: "2026-06-21T00:00:00Z".to_string(),
+        });
+}
+
+async fn terminal_input_request_status(repo: &Repository, job_id: Uuid) -> Option<(String, bool)> {
+    let Repository::Memory(memory) = repo else {
+        panic!("terminal_input_request_status supports only memory repository tests");
+    };
+    memory
+        .terminal_input_requests
+        .read()
+        .await
+        .iter()
+        .find(|request| request.job_id == job_id)
+        .map(|request| (request.status.clone(), request.completed_at.is_some()))
 }
 
 fn internal_headers(token: &str) -> axum::http::HeaderMap {

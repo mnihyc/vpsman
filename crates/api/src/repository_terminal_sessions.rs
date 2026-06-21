@@ -23,6 +23,34 @@ use crate::{
 
 const TERMINAL_INPUT_ACTIVE_STATUSES: &[&str] = &["reserved", "queued", "dispatching", "running"];
 
+pub(crate) async fn finalize_active_terminal_input_request_for_terminal_target_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    client_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE terminal_input_requests request
+        SET status = target.status,
+            updated_at = now(),
+            completed_at = COALESCE(request.completed_at, now())
+        FROM job_targets target
+        WHERE request.job_id = $1
+          AND request.client_id = $2
+          AND target.job_id = request.job_id
+          AND target.client_id = request.client_id
+          AND target.completed_at IS NOT NULL
+          AND target.status NOT IN ('queued', 'dispatching', 'running')
+          AND request.status IN ('reserved', 'queued', 'dispatching', 'running')
+        "#,
+    )
+    .bind(job_id)
+    .bind(client_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 impl Repository {
     pub(crate) async fn reserve_terminal_input_request(
         &self,
@@ -245,6 +273,57 @@ impl Repository {
                 .bind(job_id)
                 .bind(status)
                 .bind(completed)
+                .execute(pool)
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) async fn finalize_active_terminal_input_request_for_target_status(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        status: &str,
+    ) -> Result<()> {
+        if TERMINAL_INPUT_ACTIVE_STATUSES.contains(&status) {
+            return Ok(());
+        }
+        match self {
+            Self::Memory(memory) => {
+                let now = now_rfc3339();
+                if let Some(request) = memory
+                    .terminal_input_requests
+                    .write()
+                    .await
+                    .iter_mut()
+                    .find(|request| {
+                        request.job_id == job_id
+                            && request.client_id == client_id
+                            && TERMINAL_INPUT_ACTIVE_STATUSES.contains(&request.status.as_str())
+                    })
+                {
+                    request.status = status.to_string();
+                    request.updated_at = now.clone();
+                    request.completed_at = Some(now);
+                }
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE terminal_input_requests
+                    SET status = $3,
+                        updated_at = now(),
+                        completed_at = COALESCE(completed_at, now())
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND status IN ('reserved', 'queued', 'dispatching', 'running')
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(status)
                 .execute(pool)
                 .await?;
                 Ok(())
