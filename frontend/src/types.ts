@@ -241,6 +241,7 @@ export type SystemDashboardCapacityRecord = {
   event_post_secs: number | null;
   internal_http_read_secs: number | null;
   control_deadline_grace_secs: number | null;
+  max_command_timeout_secs: number | null;
   worker_schedule_command_secs: number | null;
   agent_offline_secs: number | null;
 };
@@ -1866,6 +1867,7 @@ export type CreateJobResponse = {
   target_count: number;
   status: JobStatus;
   timeout_secs: number;
+  max_command_timeout_secs: number;
   control_deadline_extra_secs: number;
   target_counts: {
     total: number;

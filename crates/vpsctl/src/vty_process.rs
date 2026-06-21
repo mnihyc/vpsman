@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use vpsman_common::{JobCommand, ProcessResourceLimits, ProcessRestartPolicy, ProcessRunPolicy};
+use vpsman_common::{
+    JobCommand, ProcessResourceLimits, ProcessRestartPolicy, ProcessRunPolicy,
+    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+};
 
 use crate::vty_jobs::VtyJobSelection;
 
@@ -526,8 +529,8 @@ fn parse_timeout(value: &str) -> Result<u64> {
         .parse::<u64>()
         .context("--timeout must be an integer")?;
     anyhow::ensure!(
-        (1..=3600).contains(&timeout),
-        "--timeout must be between 1 and 3600"
+        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&timeout),
+        "--timeout must be between 1 and {MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}"
     );
     Ok(timeout)
 }

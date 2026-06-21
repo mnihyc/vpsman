@@ -1,4 +1,5 @@
 import { Play } from "lucide-react";
+import { MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS } from "../../commandTimeout";
 import type { AgentView } from "../../types";
 import { TargetImpactPreview } from "../TargetImpactPreview";
 import {
@@ -79,7 +80,7 @@ export function RestoreRunForm({
           <span>Timeout seconds</span>
           <input
             aria-label="Restore timeout seconds"
-            max={3600}
+            max={MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}
             min={1}
             onChange={(event) => onRestoreTimeoutSecsChange(Number(event.target.value))}
             type="number"

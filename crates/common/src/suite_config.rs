@@ -2,6 +2,8 @@ use std::{fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 
+use crate::{DEFAULT_MAX_COMMAND_TIMEOUT_SECS, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS};
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SuiteConfig {
@@ -109,6 +111,7 @@ pub struct SuiteCapacityConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SuiteTimeoutConfig {
+    pub max_command_timeout_secs: Option<u64>,
     pub worker_schedule_command_secs: Option<u64>,
     pub agent_offline_secs: Option<i64>,
     pub gateway_reconnect_grace_secs: Option<u64>,
@@ -178,15 +181,25 @@ impl SuiteConfig {
         }
         validate_optional_u64(self.worker.tick_secs, 1, 3600, "worker.tick_secs")?;
         validate_optional_u64(
+            self.timeout.max_command_timeout_secs,
+            1,
+            MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+            "timeout.max_command_timeout_secs",
+        )?;
+        validate_optional_u64(
             self.worker.schedule_command_timeout_secs,
             1,
-            3600,
+            self.timeout
+                .max_command_timeout_secs
+                .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS),
             "worker.schedule_command_timeout_secs",
         )?;
         validate_optional_u64(
             self.timeout.worker_schedule_command_secs,
             1,
-            3600,
+            self.timeout
+                .max_command_timeout_secs
+                .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS),
             "timeout.worker_schedule_command_secs",
         )?;
         validate_optional_i64(
@@ -351,6 +364,7 @@ impl SuiteConfig {
                 "gateway.reconnect_grace_secs".to_string(),
                 "gateway.command_output_event_ttl_secs".to_string(),
                 "timeout.gateway_reconnect_grace_secs".to_string(),
+                "timeout.max_command_timeout_secs".to_string(),
                 "api.job_output_artifact_min_bytes".to_string(),
                 "api.artifact_max_bytes".to_string(),
                 "api.require_registered_agent_updates".to_string(),

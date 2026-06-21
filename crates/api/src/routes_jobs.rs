@@ -278,6 +278,7 @@ async fn create_job_inner(
         request.timeout_secs.unwrap_or(30),
         &claimable_targets,
         &resolved_agents,
+        state.max_command_timeout_secs(),
         &privilege_source,
     )?;
     request.timeout_secs = Some(effective_timeout_secs);
@@ -455,6 +456,7 @@ async fn create_job_inner(
             target_count: resolved_targets.len(),
             status,
             timeout_secs: request.timeout_secs.unwrap_or(30),
+            max_command_timeout_secs: state.max_command_timeout_secs(),
             control_deadline_extra_secs,
             target_counts,
         }),
@@ -741,6 +743,7 @@ async fn existing_job_response_for_id(
         target_count: existing.target_count.max(0) as usize,
         status: existing.status,
         timeout_secs: existing.timeout_secs,
+        max_command_timeout_secs: state.max_command_timeout_secs(),
         control_deadline_extra_secs: state
             .dispatcher_runtime_config()
             .control_deadline_extra_secs(),
@@ -1185,6 +1188,7 @@ async fn reject_job(
             target_count,
             status,
             timeout_secs: request.timeout_secs.unwrap_or(30),
+            max_command_timeout_secs: state.max_command_timeout_secs(),
             control_deadline_extra_secs: state
                 .dispatcher_runtime_config()
                 .control_deadline_extra_secs(),
@@ -1205,9 +1209,15 @@ fn effective_job_timeout_secs(
     requested_timeout_secs: u64,
     resolved_targets: &[String],
     resolved_agents: &[AgentView],
+    max_command_timeout_secs: u64,
     privilege_source: &JobPrivilegeSource,
 ) -> Result<u64, ApiError> {
-    let requested_timeout_secs = requested_timeout_secs.clamp(1, 3600);
+    let requested_timeout_secs = requested_timeout_secs.max(1);
+    if requested_timeout_secs > max_command_timeout_secs {
+        return Err(ApiError::bad_request(
+            "command_timeout_exceeds_configured_max",
+        ));
+    }
     match privilege_source {
         JobPrivilegeSource::RequestAssertion => {
             validate_agent_command_timeout_cap(
@@ -1234,9 +1244,9 @@ fn clamp_timeout_to_agent_caps(
             resolved_agents
                 .iter()
                 .find(|agent| agent.id == *client_id)
-                .map(|agent| agent.capabilities.command_timeout_secs.clamp(1, 3600))
+                .map(|agent| agent.capabilities.command_timeout_secs.max(1))
         })
-        .fold(requested_timeout_secs.clamp(1, 3600), u64::min)
+        .fold(requested_timeout_secs.max(1), u64::min)
 }
 
 fn validate_agent_command_timeout_cap(
@@ -1244,7 +1254,7 @@ fn validate_agent_command_timeout_cap(
     resolved_targets: &[String],
     resolved_agents: &[AgentView],
 ) -> Result<(), ApiError> {
-    let requested_timeout_secs = requested_timeout_secs.clamp(1, 3600);
+    let requested_timeout_secs = requested_timeout_secs.max(1);
     let timeout_too_low = resolved_targets.iter().any(|client_id| {
         resolved_agents
             .iter()

@@ -21,7 +21,8 @@ use vpsman_common::{
 };
 use vpsman_common::{
     payload_hash, read_secret_file_ref, AgentCapabilitySnapshot, JobCommand, SuiteConfig,
-    ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS, SERVER_JOB_STATUS_COMPLETED, SERVER_JOB_STATUS_FAILED,
+    ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS, DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
+    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS, SERVER_JOB_STATUS_COMPLETED, SERVER_JOB_STATUS_FAILED,
     SERVER_JOB_STATUS_QUEUED, SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 use vpsman_object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
@@ -186,6 +187,12 @@ struct Args {
     schedule_command_timeout_secs: u64,
     #[arg(
         long,
+        env = "VPSMAN_MAX_COMMAND_TIMEOUT_SECS",
+        default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS
+    )]
+    max_command_timeout_secs: u64,
+    #[arg(
+        long,
         env = "VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES",
         default_value_t = false
     )]
@@ -241,6 +248,7 @@ impl WorkerRuntimeConfig {
             ),
             schedule_dispatch_config: ScheduleDispatchConfig::new(
                 args.schedule_command_timeout_secs,
+                args.max_command_timeout_secs,
                 args.require_registered_agent_updates,
             ),
             backup_object_store,
@@ -416,6 +424,11 @@ impl Args {
                 .worker
                 .schedule_command_timeout_secs
                 .or(config.timeout.worker_schedule_command_secs),
+        );
+        apply_u64_default(
+            &mut self.max_command_timeout_secs,
+            "VPSMAN_MAX_COMMAND_TIMEOUT_SECS",
+            config.timeout.max_command_timeout_secs,
         );
         apply_bool_default(
             &mut self.require_registered_agent_updates,
@@ -1833,13 +1846,21 @@ struct DueSchedule {
 #[derive(Clone)]
 struct ScheduleDispatchConfig {
     timeout_secs: u64,
+    max_command_timeout_secs: u64,
     require_registered_agent_updates: bool,
 }
 
 impl ScheduleDispatchConfig {
-    fn new(timeout_secs: u64, require_registered_agent_updates: bool) -> Self {
+    fn new(
+        timeout_secs: u64,
+        max_command_timeout_secs: u64,
+        require_registered_agent_updates: bool,
+    ) -> Self {
+        let max_command_timeout_secs =
+            max_command_timeout_secs.clamp(1, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS);
         Self {
-            timeout_secs: timeout_secs.clamp(1, 3600),
+            timeout_secs: timeout_secs.clamp(1, max_command_timeout_secs),
+            max_command_timeout_secs,
             require_registered_agent_updates,
         }
     }
@@ -1908,6 +1929,7 @@ async fn materialize_due_schedule(
     let available_targets = available_schedule_targets(&targets, &target_availability);
     let timeout_secs = effective_schedule_timeout_secs(
         dispatch_config.timeout_secs,
+        dispatch_config.max_command_timeout_secs,
         &available_targets,
         &target_availability.capabilities,
     );
@@ -2123,7 +2145,8 @@ async fn materialize_due_schedule(
             last_job_status = $3,
             last_job_completed_at = CASE WHEN $4 THEN now() ELSE NULL END,
             last_job_error = CASE
-                WHEN $3 IN ('completed', 'partial_success', 'skipped') THEN NULL
+                WHEN NOT $4 THEN NULL
+                WHEN $3 IN ('completed', 'skipped') THEN NULL
                 ELSE $3
             END,
             failure_count = CASE
@@ -2391,18 +2414,20 @@ fn network_speed_test_peer_schedule_skip(client_id: String) -> ScheduleTargetSki
 
 fn effective_schedule_timeout_secs(
     configured_timeout_secs: u64,
+    max_command_timeout_secs: u64,
     targets: &[String],
     capabilities: &[TargetCapability],
 ) -> u64 {
+    let configured_timeout_secs = configured_timeout_secs.clamp(1, max_command_timeout_secs);
     targets
         .iter()
         .filter_map(|client_id| {
             capabilities
                 .iter()
                 .find(|capability| capability.client_id == *client_id)
-                .map(|capability| capability.capabilities.command_timeout_secs.clamp(1, 3600))
+                .map(|capability| capability.capabilities.command_timeout_secs.max(1))
         })
-        .fold(configured_timeout_secs.clamp(1, 3600), u64::min)
+        .fold(configured_timeout_secs, u64::min)
 }
 
 async fn scheduled_agent_update_release_policy_allows(
@@ -3082,14 +3107,31 @@ mod schedule_tests {
         ];
 
         assert_eq!(
-            effective_schedule_timeout_secs(90, &targets, &capabilities),
+            effective_schedule_timeout_secs(
+                90,
+                DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
+                &targets,
+                &capabilities
+            ),
             20
         );
         assert_eq!(
-            effective_schedule_timeout_secs(10, &targets, &capabilities),
+            effective_schedule_timeout_secs(
+                10,
+                DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
+                &targets,
+                &capabilities
+            ),
             10
         );
-        assert_eq!(effective_schedule_timeout_secs(90, &[], &[]), 90);
+        assert_eq!(
+            effective_schedule_timeout_secs(90, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, &[], &[]),
+            90
+        );
+        assert_eq!(
+            effective_schedule_timeout_secs(7_200, 7_200, &[], &[]),
+            7_200
+        );
     }
 
     #[test]
@@ -3126,7 +3168,7 @@ mod schedule_tests {
         let processed = process_due_schedule(
             &db.pool,
             schedule_id,
-            &ScheduleDispatchConfig::new(60, false),
+            &ScheduleDispatchConfig::new(60, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, false),
         )
         .await
         .unwrap();
@@ -3174,7 +3216,7 @@ mod schedule_tests {
         let processed = process_due_schedule(
             &db.pool,
             schedule_id,
-            &ScheduleDispatchConfig::new(60, false),
+            &ScheduleDispatchConfig::new(60, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, false),
         )
         .await
         .unwrap();
@@ -3221,7 +3263,7 @@ mod schedule_tests {
         let processed = process_due_schedule(
             &db.pool,
             schedule_id,
-            &ScheduleDispatchConfig::new(60, false),
+            &ScheduleDispatchConfig::new(60, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, false),
         )
         .await
         .unwrap();
@@ -3274,7 +3316,7 @@ mod schedule_tests {
         let processed = process_due_schedule(
             &db.pool,
             schedule_id,
-            &ScheduleDispatchConfig::new(60, false),
+            &ScheduleDispatchConfig::new(60, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, false),
         )
         .await
         .unwrap();
@@ -3321,7 +3363,7 @@ mod schedule_tests {
         let processed = process_due_schedule(
             &db.pool,
             schedule_id,
-            &ScheduleDispatchConfig::new(60, false),
+            &ScheduleDispatchConfig::new(60, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, false),
         )
         .await
         .unwrap();
@@ -3362,7 +3404,7 @@ mod schedule_tests {
         let processed = process_due_schedule(
             &db.pool,
             schedule_id,
-            &ScheduleDispatchConfig::new(60, false),
+            &ScheduleDispatchConfig::new(60, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, false),
         )
         .await
         .unwrap();
@@ -3416,7 +3458,7 @@ mod schedule_tests {
         let processed = process_due_schedule(
             &db.pool,
             schedule_id,
-            &ScheduleDispatchConfig::new(60, false),
+            &ScheduleDispatchConfig::new(60, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, false),
         )
         .await
         .unwrap();

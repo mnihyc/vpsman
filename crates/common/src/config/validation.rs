@@ -6,7 +6,7 @@ use super::models::{
 };
 use crate::{
     validate_runtime_topology_intent, validate_runtime_tunnel_control, RuntimeTunnelManager,
-    TunnelConfigBackend, TunnelEndpointSide,
+    TunnelConfigBackend, TunnelEndpointSide, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
 };
 
 pub const INCREMENTAL_CONFIG_PATCH_SECTIONS: &[&str] =
@@ -114,7 +114,7 @@ fn validate_noise_config(config: &AgentNoiseConfig) -> Result<(), String> {
 }
 
 fn validate_auth_config(config: &AgentAuthConfig) -> Result<(), String> {
-    if !(1..=3600).contains(&config.command_timeout_secs) {
+    if !(1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&config.command_timeout_secs) {
         return Err("command_timeout_secs_out_of_range".to_string());
     }
     if !(1..=3600).contains(&config.gateway_retry_secs) {
@@ -127,8 +127,14 @@ fn validate_auth_config(config: &AgentAuthConfig) -> Result<(), String> {
 }
 
 fn validate_backup_config(config: &AgentBackupConfig) -> Result<(), String> {
-    if !(1..=16 * 1024 * 1024).contains(&config.max_plaintext_bytes) {
-        return Err("backup_max_plaintext_bytes_out_of_range".to_string());
+    if !(1..=16 * 1024 * 1024).contains(&config.max_uncompressed_bytes) {
+        return Err("backup_max_uncompressed_bytes_out_of_range".to_string());
+    }
+    if !(1..=32 * 1024 * 1024).contains(&config.max_archive_bytes) {
+        return Err("backup_max_archive_bytes_out_of_range".to_string());
+    }
+    if config.max_archive_bytes < config.max_uncompressed_bytes {
+        return Err("backup_max_archive_bytes_below_uncompressed_limit".to_string());
     }
     Ok(())
 }

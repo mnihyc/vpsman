@@ -630,7 +630,7 @@ fn agent_capabilities(config: &AgentConfig) -> AgentCapabilitySnapshot {
             AgentPrivilegeMode::Unprivileged
         },
         effective_uid: Some(effective_uid),
-        command_timeout_secs: config.auth.command_timeout_secs.clamp(1, 3600),
+        command_timeout_secs: config.auth.command_timeout_secs.max(1),
         can_attempt_privileged_ops: true,
         can_manage_runtime_tunnels: root,
         can_apply_process_limits: root,
@@ -828,16 +828,14 @@ fn capture_replay_output(active: &mut ActiveCommand, output: &SequencedCommandOu
 }
 
 fn compact_terminal_replay_output(output: &SequencedCommandOutput) -> SequencedCommandOutput {
-    let status = match output.output.exit_code {
-        Some(0) => "completed",
-        Some(_) | None => "failed",
-    };
     let data = serde_json::to_vec(&serde_json::json!({
         "type": "duplicate_job_replay_unavailable",
-        "status": status,
+        "status": "failed",
         "job_id": output.output.job_id,
         "reason": "recent_command_replay_truncated",
+        "message": "duplicate command replay is lossy; original terminal output requires human review",
         "original_stream": output_stream_name(output.output.stream),
+        "original_exit_code": output.output.exit_code,
         "original_data_size_bytes": output.output.data.len(),
         "original_data_sha256_hex": payload_hash(&output.output.data),
     }))
@@ -848,7 +846,7 @@ fn compact_terminal_replay_output(output: &SequencedCommandOutput) -> SequencedC
             job_id: output.output.job_id,
             stream: OutputStream::Status,
             data,
-            exit_code: output.output.exit_code,
+            exit_code: Some(75),
             done: true,
         },
     }
@@ -1165,12 +1163,16 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         }
     }
     let safety = job_command_safety(&request.command);
-    if safety == JobCommandSafety::Exclusive
-        && command_runtime
-            .active_commands
-            .values()
-            .any(|active| active.safety == JobCommandSafety::Exclusive)
-    {
+    let active_exclusive = command_runtime
+        .active_commands
+        .values()
+        .any(|active| active.safety == JobCommandSafety::Exclusive);
+    let exclusive_conflict = if safety == JobCommandSafety::Exclusive {
+        !command_runtime.active_commands.is_empty()
+    } else {
+        active_exclusive
+    };
+    if exclusive_conflict {
         let ack = JobAck {
             job_id: request.job_id,
             accepted: false,
@@ -1483,7 +1485,7 @@ async fn execute_authorized_command(
                 archive_path: archive_path.as_deref(),
                 archive_size_bytes: *archive_size_bytes,
                 archive_sha256_hex: archive_sha256_hex.as_deref(),
-                max_archive_bytes: config.backup.max_plaintext_bytes,
+                max_archive_bytes: config.backup.max_archive_bytes,
                 dry_run: *dry_run,
                 post_restore_argv,
                 timeout_secs,
@@ -2000,8 +2002,12 @@ mod tests {
                 .terminal_output
                 .as_ref()
                 .and_then(|output| output.output.exit_code),
-            Some(0)
+            Some(75)
         );
+        let status: serde_json::Value =
+            serde_json::from_slice(&entry.terminal_output.as_ref().unwrap().output.data).unwrap();
+        assert_eq!(status["type"], "duplicate_job_replay_unavailable");
+        assert_eq!(status["status"], "failed");
     }
 
     #[tokio::test]
@@ -2042,7 +2048,7 @@ mod tests {
             payload_hash: "payload-hash".to_string(),
             cancel_token: CommandCancelToken::default(),
             command_version: CURRENT_COMMAND_PROTOCOL_VERSION,
-            safety: JobCommandSafety::ReadOnly,
+            safety: JobCommandSafety::Read,
             stream_id: 1,
             replay_outputs: Vec::new(),
             terminal_output: None,

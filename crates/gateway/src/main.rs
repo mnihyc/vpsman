@@ -472,11 +472,16 @@ fn validate_gateway_runtime_mode(args: &Args) -> Result<()> {
             "VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX must be a 32-byte hex key"
         );
     }
-    args.api_url
+    let api_url = args
+        .api_url
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .context("VPSMAN_API_URL is required")?;
+    anyhow::ensure!(
+        api_url.starts_with("http://"),
+        "VPSMAN_API_URL must use http://; gateway internal API forwarding is intentionally plaintext for localhost/private-network deployments"
+    );
     Ok(())
 }
 
@@ -1242,6 +1247,12 @@ mod tests {
 
         args.api_url = Some("http://127.0.0.1:8080".to_string());
         validate_gateway_runtime_mode(&args).unwrap();
+
+        args.api_url = Some("https://127.0.0.1:8080".to_string());
+        assert!(validate_gateway_runtime_mode(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("must use http://"));
     }
 
     #[test]

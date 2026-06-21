@@ -238,7 +238,7 @@ wait_job_terminal() {
     job_json="$(api_get "/api/v1/jobs/$job_id")"
     status="$(jq -r '.status' <<<"$job_json")"
     case "$status" in
-      completed|partial_success|partial_success|failed|agent_lost|agent_timeout|control_timeout|skipped|rejected|canceled)
+      completed|partial_success|failed|agent_lost|agent_timeout|control_timeout|skipped|rejected|canceled)
         printf '%s' "$job_json"
         return
         ;;

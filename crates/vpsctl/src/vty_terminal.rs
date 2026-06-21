@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use uuid::Uuid;
 use vpsman_common::{
     default_terminal_flow_window_bytes, default_terminal_idle_timeout_secs, payload_hash,
-    JobCommand,
+    JobCommand, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -416,7 +416,12 @@ where
 }
 
 fn parse_timeout(value: Option<&&str>) -> Result<u64> {
-    Ok(parse_value::<u64>(value, "--timeout")?.clamp(1, 3600))
+    let timeout = parse_value::<u64>(value, "--timeout")?;
+    anyhow::ensure!(
+        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&timeout),
+        "--timeout must be between 1 and {MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}"
+    );
+    Ok(timeout)
 }
 
 fn split_csv(value: &str) -> Vec<String> {

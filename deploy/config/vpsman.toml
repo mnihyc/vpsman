@@ -66,6 +66,7 @@ dispatcher_batch = 128
 dispatcher_in_flight = 64
 
 [timeout]
+max_command_timeout_secs = 3600
 worker_schedule_command_secs = 30
 agent_offline_secs = 300
 gateway_reconnect_grace_secs = 60

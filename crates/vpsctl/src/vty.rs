@@ -116,16 +116,16 @@ Files, terminals, and processes:
 
 Agent updates:
   agent-update-check [--version-url <https-url>] <target ...> [--no-activate]
-    [--no-restart-agent] [--timeout <1-3600>] [--privilege-ttl <15-300>]
+    [--no-restart-agent] [--timeout <secs>] [--privilege-ttl <15-300>]
     [--force-unprivileged] --confirmed
   agent-update --artifact-url <https-url> --sha256-hex <sha256> <target ...>
-    [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged]
+    [--timeout <secs>] [--privilege-ttl <15-300>] [--force-unprivileged]
     --confirmed
   agent-update-activate --staged-sha256-hex <sha256> <target ...>
-    [--restart-agent] [--timeout <1-3600>] [--privilege-ttl <15-300>]
+    [--restart-agent] [--timeout <secs>] [--privilege-ttl <15-300>]
     [--force-unprivileged] --confirmed
   agent-update-rollback [--rollback-sha256-hex <sha256>] <target ...>
-    [--timeout <1-3600>] [--privilege-ttl <15-300>] [--force-unprivileged]
+    [--timeout <secs>] [--privilege-ttl <15-300>] [--force-unprivileged]
     --confirmed
   agent-update-releases | agent-update-release-latest | agent-update-release-record
 
@@ -202,7 +202,7 @@ const TERMINAL_COMMAND_USAGE: &str = concat!(
 
 const FILE_PUSH_USAGE: &str = concat!(
     "usage: file-push --source <local-file> --path <remote-abs> <target ...> ",
-    "[--mode <0644>] [--timeout <1-3600>] --confirmed"
+    "[--mode <0644>] [--timeout <secs>] --confirmed"
 );
 
 const FILE_TRANSFER_UPLOAD_USAGE: &str = concat!(
@@ -211,7 +211,7 @@ const FILE_TRANSFER_UPLOAD_USAGE: &str = concat!(
     "[--resume-token <token>] [--chunk-size-bytes <1-65536>] ",
     "[--rate-limit-kbps <0-1000000>] ",
     "[--multi-target-policy same-offset|independent-offsets] ",
-    "[--timeout <1-3600>] [--privilege-ttl <15-300>] --confirmed"
+    "[--timeout <secs>] [--privilege-ttl <15-300>] --confirmed"
 );
 
 const FILE_TRANSFER_DOWNLOAD_USAGE: &str = concat!(
@@ -220,36 +220,36 @@ const FILE_TRANSFER_DOWNLOAD_USAGE: &str = concat!(
     "[--resume-token <token>] [--chunk-size-bytes <1-65536>] ",
     "[--rate-limit-kbps <0-1000000>] ",
     "[--multi-target-policy single-target|per-target-files] ",
-    "[--timeout <1-3600>] [--privilege-ttl <15-300>] --confirmed"
+    "[--timeout <secs>] [--privilege-ttl <15-300>] --confirmed"
 );
 
 const HOT_CONFIG_USAGE: &str = concat!(
     "usage: hot-config --config-file <path> <target ...> ",
-    "[--timeout <1-3600>] [--privilege-ttl <15-300>] ",
+    "[--timeout <secs>] [--privilege-ttl <15-300>] ",
     "[--force-unprivileged] --confirmed"
 );
 
 const DATA_SOURCE_HOT_CONFIG_USAGE: &str = concat!(
     "usage: data-source-hot-config-apply --client-id <id> ",
-    "[--timeout <1-3600>] [--privilege-ttl <15-300>] ",
+    "[--timeout <secs>] [--privilege-ttl <15-300>] ",
     "[--force-unprivileged] --confirmed"
 );
 
 const RESTORE_RUN_USAGE: &str = concat!(
     "usage: restore-run <backup_uuid> <target_client_id> ",
-    "--archive-transfer-session-id <uuid> [--timeout <1-3600>] ",
+    "--archive-transfer-session-id <uuid> [--timeout <secs>] ",
     "[--force-unprivileged] --confirmed"
 );
 
 const RESTORE_ROLLBACK_USAGE: &str = concat!(
     "usage: restore-rollback <restore_job_uuid> <target_client_id> ",
-    "[--timeout <1-3600>] [--force-unprivileged] --confirmed"
+    "[--timeout <secs>] [--force-unprivileged] --confirmed"
 );
 
 const MIGRATION_RUN_USAGE: &str = concat!(
     "usage: migration-run <restore_plan_uuid> --archive-transfer-session-id <uuid> ",
     "[--note <text>] ",
-    "[--timeout <1-3600>] [--force-unprivileged] --confirmed"
+    "[--timeout <secs>] [--force-unprivileged] --confirmed"
 );
 
 fn render_vty_help() -> String {
@@ -491,7 +491,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                         Err(error) => {
                             println!("usage error: {error}");
                             println!(
-                                "usage: file-pull --path <remote-abs> <target ...> [--timeout <1-3600>] [--confirmed]"
+                                "usage: file-pull --path <remote-abs> <target ...> [--timeout <secs>] [--confirmed]"
                             );
                             continue;
                         }
@@ -639,7 +639,7 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                     Err(error) => {
                         println!("usage error: {error}");
                         println!(
-                            "usage: user-sessions <target ...> [--timeout <1-3600>] [--confirmed]"
+                            "usage: user-sessions <target ...> [--timeout <secs>] [--confirmed]"
                         );
                         continue;
                     }

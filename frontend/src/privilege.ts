@@ -1,4 +1,5 @@
 import type { JobOperation } from "./types";
+import { clampCommandTimeoutSecs } from "./commandTimeout";
 import { FILE_BROWSER_ARCHIVE_LIMIT_BYTES } from "./fileBrowser";
 import {
   DB_PRIVILEGE_INTENT_FIELDS,
@@ -298,7 +299,7 @@ export function canonicalJobPrivilegeIntent(input: JobPrivilegeIntentInput): str
     ["command_type", input.commandType],
     ["operation_payload_hash", normalizeSha256Hex(input.operationPayloadHash)],
     ["resolved_targets", [...input.resolvedTargets].sort()],
-    ["timeout_secs", clampInteger(input.timeoutSecs, 1, 3600)],
+    ["timeout_secs", clampCommandTimeoutSecs(input.timeoutSecs)],
     ["force_unprivileged", input.forceUnprivileged],
     ["privileged", input.privileged],
   ];
@@ -351,7 +352,7 @@ export function canonicalTerminalInputPrivilegeIntent(input: TerminalInputPrivil
     ["client_id", input.clientId.trim()],
     ["session_id", input.sessionId.trim()],
     ["input_payload_hash", normalizeSha256Hex(input.inputPayloadHash)],
-    ["timeout_secs", clampInteger(input.timeoutSecs, 1, 3600)],
+    ["timeout_secs", clampCommandTimeoutSecs(input.timeoutSecs)],
     ["confirmed", input.confirmed],
   ];
   assertGeneratedFieldOrder("terminal input privilege", entries, TERMINAL_INPUT_PRIVILEGE_INTENT_FIELDS);
@@ -841,13 +842,6 @@ function concatBytes(parts: Uint8Array[]): Uint8Array {
 
 function bufferSource(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-}
-
-function clampInteger(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) {
-    return min;
-  }
-  return Math.trunc(Math.min(Math.max(value, min), max));
 }
 
 function cryptoProvider(): Crypto {

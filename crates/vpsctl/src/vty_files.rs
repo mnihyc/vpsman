@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use vpsman_common::{
     encode_chunked_file_payload, encode_inline_file_payload, payload_hash,
     validate_absolute_file_path, validate_file_mode, FileExistingPolicy, FileOwnershipPolicy,
-    JobCommand, MAX_CHUNKED_FILE_PUSH_BYTES, MAX_INLINE_FILE_PUSH_BYTES,
+    JobCommand, MAX_CHUNKED_FILE_PUSH_BYTES, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+    MAX_INLINE_FILE_PUSH_BYTES,
 };
 
 use crate::vty_jobs::VtyJobSelection;
@@ -204,13 +205,13 @@ fn build_file_push_operation(
 }
 
 fn parse_timeout(value: Option<&str>) -> Result<u64> {
-    let value = value.context("--timeout requires a value between 1 and 3600")?;
+    let value = value.context("--timeout requires a value")?;
     let timeout = value
         .parse::<u64>()
         .context("--timeout must be an integer")?;
     anyhow::ensure!(
-        (1..=3600).contains(&timeout),
-        "--timeout must be between 1 and 3600"
+        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&timeout),
+        "--timeout must be between 1 and {MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}"
     );
     Ok(timeout)
 }

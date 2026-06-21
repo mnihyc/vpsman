@@ -210,10 +210,12 @@ pub(crate) fn compact_ledger_terminal_output(
     output.map(|output| {
         let data = serde_json::to_vec(&serde_json::json!({
             "type": "duplicate_job_replay_unavailable",
-            "status": if output.output.exit_code == Some(0) { "completed" } else { "failed" },
+            "status": "failed",
             "job_id": output.output.job_id,
             "reason": "command_ledger_replay",
+            "message": "duplicate command replay is lossy; original terminal output requires human review",
             "original_stream": output_stream_name(output.output.stream),
+            "original_exit_code": output.output.exit_code,
             "original_data_size_bytes": output.output.data.len(),
             "original_data_sha256_hex": payload_hash(&output.output.data),
         }))
@@ -224,7 +226,7 @@ pub(crate) fn compact_ledger_terminal_output(
                 job_id: output.output.job_id,
                 stream: OutputStream::Status,
                 data,
-                exit_code: output.output.exit_code,
+                exit_code: Some(75),
                 done: true,
             },
         }
@@ -313,7 +315,12 @@ mod tests {
         let loaded = ledger.lookup(job_id).await.unwrap().unwrap();
         assert_eq!(loaded.job_id, job_id);
         assert_eq!(loaded.payload_hash, "a".repeat(64));
-        assert!(loaded.terminal_output.unwrap().output.done);
+        let terminal = loaded.terminal_output.unwrap().output;
+        assert!(terminal.done);
+        assert_eq!(terminal.exit_code, Some(75));
+        let status: serde_json::Value = serde_json::from_slice(&terminal.data).unwrap();
+        assert_eq!(status["type"], "duplicate_job_replay_unavailable");
+        assert_eq!(status["status"], "failed");
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 }

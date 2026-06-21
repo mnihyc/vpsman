@@ -1,9 +1,10 @@
 use super::{
-    validate_agent_config_shape, validate_hot_config_update, AgentBackupConfig, AgentConfig,
-    AgentExecutionConfig, AgentExecutionEnvironmentPolicy, AgentExecutionProcessCleanupPolicy,
-    AgentExecutionPtyPolicy, AgentNetworkConfig, AgentNetworkPreset, AgentNoiseConfig,
-    AgentNoiseMode, AgentProcessInventorySource, AgentRuntimeStatusTelemetryPlan,
-    AgentRuntimeTrafficSource, AgentTelemetryConfig, AgentTelemetrySource, AgentUserSessionsSource,
+    default_agent_backup_max_archive_bytes, validate_agent_config_shape,
+    validate_hot_config_update, AgentBackupConfig, AgentConfig, AgentExecutionConfig,
+    AgentExecutionEnvironmentPolicy, AgentExecutionProcessCleanupPolicy, AgentExecutionPtyPolicy,
+    AgentNetworkConfig, AgentNetworkPreset, AgentNoiseConfig, AgentNoiseMode,
+    AgentProcessInventorySource, AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource,
+    AgentTelemetryConfig, AgentTelemetrySource, AgentUserSessionsSource,
 };
 use crate::{
     plan_tunnel, BandwidthTier, OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl,
@@ -50,7 +51,8 @@ root_dir = "/tmp/vpsman-network-root"
 fn validates_backup_limits() {
     let config = AgentConfig {
         backup: AgentBackupConfig {
-            max_plaintext_bytes: 1024,
+            max_uncompressed_bytes: 1024,
+            max_archive_bytes: 4096,
         },
         ..AgentConfig::default()
     };
@@ -58,14 +60,79 @@ fn validates_backup_limits() {
 
     let bad_limit = AgentConfig {
         backup: AgentBackupConfig {
-            max_plaintext_bytes: 0,
+            max_uncompressed_bytes: 0,
+            max_archive_bytes: 4096,
         },
         ..AgentConfig::default()
     };
     assert_eq!(
         validate_agent_config_shape(&bad_limit).unwrap_err(),
-        "backup_max_plaintext_bytes_out_of_range"
+        "backup_max_uncompressed_bytes_out_of_range"
     );
+
+    let archive_below_payload = AgentConfig {
+        backup: AgentBackupConfig {
+            max_uncompressed_bytes: 4096,
+            max_archive_bytes: 1024,
+        },
+        ..AgentConfig::default()
+    };
+    assert_eq!(
+        validate_agent_config_shape(&archive_below_payload).unwrap_err(),
+        "backup_max_archive_bytes_below_uncompressed_limit"
+    );
+}
+
+#[test]
+fn backup_config_accepts_legacy_plaintext_alias() {
+    let config: AgentConfig = toml::from_str(
+        r#"
+client_id = "agent-a"
+display_name = "agent-a"
+telemetry_light_secs = 15
+telemetry_full_secs = 60
+tags = []
+
+[[tcp_endpoints]]
+label = "primary"
+tcp_addr = "127.0.0.1:9443"
+priority = 10
+
+[backup]
+max_plaintext_bytes = 2048
+"#,
+    )
+    .unwrap();
+    assert_eq!(config.backup.max_uncompressed_bytes, 2048);
+    assert_eq!(
+        config.backup.max_archive_bytes,
+        default_agent_backup_max_archive_bytes()
+    );
+}
+
+#[test]
+fn backup_config_rejects_mixed_legacy_and_current_size_keys() {
+    let result = toml::from_str::<AgentConfig>(
+        r#"
+client_id = "agent-a"
+display_name = "agent-a"
+telemetry_light_secs = 15
+telemetry_full_secs = 60
+tags = []
+
+[[tcp_endpoints]]
+label = "primary"
+tcp_addr = "127.0.0.1:9443"
+priority = 10
+
+[backup]
+max_plaintext_bytes = 2048
+max_uncompressed_bytes = 2048
+max_archive_bytes = 4096
+"#,
+    );
+
+    assert!(result.is_err());
 }
 
 #[test]

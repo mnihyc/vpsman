@@ -52,7 +52,10 @@ Target statuses are:
 - `timeout_secs` is the agent execution budget. The API control deadline adds
   dispatch/ACK, internal HTTP/event-post, and `control_deadline_grace_secs`
   grace time so healthy long-running commands near their own timeout are not
-  mislabeled as `control_timeout` because of gateway/API latency.
+  mislabeled as `control_timeout` because of gateway/API latency. The accepted
+  execution-budget maximum is `timeout.max_command_timeout_secs`, exposed to
+  the frontend/CLI and enforced by API request validation rather than silent
+  truncation.
 - `agent_lost` and `control_timeout` are deliberately separate. `agent_lost`
   requires positive restart/loss evidence such as a changed agent process
   incarnation or a missing expected update activation heartbeat. `control_timeout`
@@ -107,9 +110,17 @@ Target statuses are:
   completed.
 - Job output rows are first-writer-wins by `(job_id, client_id, seq)`. Same
   duplicate rows are no-ops; conflicting replay rows are audit evidence and do
-  not overwrite previously durable output. Agent duplicate replay preserves the
-  original terminal status/result even when cached replay bytes are no longer
-  retained.
+  not overwrite previously durable output. Agent duplicate replay uses exact
+  in-memory output when still retained. Once only the compact disk ledger
+  remains, the agent does not pretend exact artifacts or terminal status bytes
+  are available; it emits a distinct `duplicate_job_replay_unavailable` failed
+  status that includes original-output metadata for operator review.
+- Schedule failure controls distinguish neutral aggregate states from target
+  operational failures. `completed` clears failure controls. `skipped` and
+  `canceled` are neutral. `partial_success` preserves existing failure state
+  unless one or more targets ended as `failed`, `rejected`, `agent_lost`,
+  `agent_timeout`, or `control_timeout`, in which case the schedule records the
+  operational failure instead of treating the run as healthy.
 - Frontend TypeScript status unions come from `vpsman_common` via `frontend/src/generated/protocolContracts.ts`; frontend code must not maintain separate status alias lists.
 
 ## Download Archives

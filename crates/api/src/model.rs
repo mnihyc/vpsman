@@ -965,6 +965,7 @@ pub(crate) struct CreateJobResponse {
     pub(crate) target_count: usize,
     pub(crate) status: String,
     pub(crate) timeout_secs: u64,
+    pub(crate) max_command_timeout_secs: u64,
     pub(crate) control_deadline_extra_secs: u64,
     pub(crate) target_counts: CreateJobTargetCounts,
 }

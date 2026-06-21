@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { DatabaseZap, SlidersHorizontal } from "lucide-react";
+import {
+  clampCommandTimeoutSecs,
+  MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+} from "../commandTimeout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { CrudPager } from "../components/CrudPager";
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
@@ -387,7 +391,7 @@ export function DataSourcePresetPanel({
     const frozenClientId = renderClientId;
     const frozenRendered = renderedHotConfig?.client_id === renderClientId ? renderedHotConfig : null;
     const frozenPrivilegeMaterial = privilegeMaterial;
-    const timeoutSecs = clampInteger(applyTimeoutSecs, 1, 3600);
+    const timeoutSecs = clampCommandTimeoutSecs(applyTimeoutSecs);
     setReviewStatus("Preparing data-source apply review");
     try {
       await runPanelAction(setPending, setActionError, async () => {
@@ -849,7 +853,7 @@ export function DataSourcePresetPanel({
               <input
                 aria-label="Data-source apply timeout"
                 min={1}
-                max={3600}
+                max={MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}
                 onChange={(event) => {
                   setApplyTimeoutSecs(Number(event.target.value));
                   clearApplyConfirmation();

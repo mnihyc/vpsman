@@ -51,7 +51,7 @@ impl Write for LimitedVecWriter {
             .ok_or_else(|| io::Error::other("backup archive size overflow"))?;
         if next > self.max_bytes {
             return Err(io::Error::other(
-                "backup archive exceeds configured plaintext byte limit",
+                "backup archive exceeds configured archive byte limit",
             ));
         }
         self.inner.extend_from_slice(buf);
@@ -158,7 +158,7 @@ async fn create_backup_archive_artifact(
         paths,
         include_config,
         follow_symlinks,
-        config.backup.max_plaintext_bytes,
+        config.backup.max_uncompressed_bytes,
         &cancel_token,
     )
     .await?;
@@ -171,14 +171,14 @@ async fn create_backup_archive_artifact(
         created_unix,
         files: files.iter().map(|file| file.entry.clone()).collect(),
     };
-    let plaintext = encode_backup_tar_archive(&archive, &files, config.backup.max_plaintext_bytes)
+    let plaintext = encode_backup_tar_archive(&archive, &files, config.backup.max_archive_bytes)
         .context("failed to encode backup tar archive")?;
     cancel_token.check("backup")?;
-    if plaintext.len() as u64 > config.backup.max_plaintext_bytes {
+    if plaintext.len() as u64 > config.backup.max_archive_bytes {
         anyhow::bail!(
-            "backup archive exceeds plaintext limit: {} > {} bytes",
+            "backup archive exceeds archive limit: {} > {} bytes",
             plaintext.len(),
-            config.backup.max_plaintext_bytes
+            config.backup.max_archive_bytes
         );
     }
     let artifact_bytes = plaintext;
@@ -240,7 +240,7 @@ async fn collect_backup_files(
     paths: &[String],
     include_config: bool,
     follow_symlinks: bool,
-    max_plaintext_bytes: u64,
+    max_uncompressed_bytes: u64,
     cancel_token: &CommandCancelToken,
 ) -> Result<Vec<BackupFilePayload>> {
     let mut files = Vec::new();
@@ -255,7 +255,7 @@ async fn collect_backup_files(
                 index,
                 follow_symlinks,
                 &mut total_bytes,
-                max_plaintext_bytes,
+                max_uncompressed_bytes,
                 cancel_token,
             )
             .await?,
@@ -271,7 +271,7 @@ async fn collect_backup_files(
                 files.len(),
                 true,
                 &mut total_bytes,
-                max_plaintext_bytes,
+                max_uncompressed_bytes,
                 cancel_token,
             )
             .await?,
@@ -287,7 +287,7 @@ async fn read_backup_file(
     tar_index: usize,
     follow_symlinks: bool,
     total_bytes: &mut u64,
-    max_plaintext_bytes: u64,
+    max_uncompressed_bytes: u64,
     cancel_token: &CommandCancelToken,
 ) -> Result<BackupFilePayload> {
     cancel_token.check("backup")?;
@@ -302,12 +302,12 @@ async fn read_backup_file(
     if !metadata.is_file() {
         anyhow::bail!("backup path is not a regular file: {}", path.display());
     }
-    let remaining = max_plaintext_bytes.saturating_sub(*total_bytes);
+    let remaining = max_uncompressed_bytes.saturating_sub(*total_bytes);
     if metadata.len() > remaining {
         anyhow::bail!(
-            "backup scope exceeds plaintext limit: {} > {} bytes",
+            "backup scope exceeds uncompressed payload limit: {} > {} bytes",
             (*total_bytes).saturating_add(metadata.len()),
-            max_plaintext_bytes
+            max_uncompressed_bytes
         );
     }
     let data = read_backup_file_bounded(path, remaining, follow_symlinks).await?;
@@ -337,9 +337,9 @@ async fn read_backup_file(
 fn encode_backup_tar_archive(
     archive: &BackupArchive,
     files: &[BackupFilePayload],
-    max_plaintext_bytes: u64,
+    max_archive_bytes: u64,
 ) -> Result<Vec<u8>> {
-    let mut builder = tar::Builder::new(LimitedVecWriter::new(max_plaintext_bytes));
+    let mut builder = tar::Builder::new(LimitedVecWriter::new(max_archive_bytes));
     let manifest =
         serde_json::to_vec(archive).context("failed to encode backup archive manifest")?;
     append_tar_bytes(
@@ -414,7 +414,7 @@ async fn read_backup_file_bounded(
             .checked_add(read as u64)
             .context("backup file size overflow")?;
         if total > max_bytes {
-            anyhow::bail!("backup file exceeds remaining plaintext limit while reading");
+            anyhow::bail!("backup file exceeds remaining uncompressed payload limit while reading");
         }
         data.extend_from_slice(&buffer[..read]);
     }
@@ -474,7 +474,8 @@ mod tests {
         let mut config = AgentConfig {
             client_id: "client-a".to_string(),
             backup: AgentBackupConfig {
-                max_plaintext_bytes: 8192,
+                max_uncompressed_bytes: 8192,
+                max_archive_bytes: 16 * 1024,
             },
             ..AgentConfig::default()
         };
@@ -535,7 +536,8 @@ mod tests {
         let config = AgentConfig {
             client_id: "client-a".to_string(),
             backup: AgentBackupConfig {
-                max_plaintext_bytes: 8192,
+                max_uncompressed_bytes: 8192,
+                max_archive_bytes: 16 * 1024,
             },
             ..AgentConfig::default()
         };
@@ -606,7 +608,8 @@ mod tests {
         let mut config = AgentConfig {
             client_id: "client-stream".to_string(),
             backup: AgentBackupConfig {
-                max_plaintext_bytes: 64 * 1024,
+                max_uncompressed_bytes: 64 * 1024,
+                max_archive_bytes: 128 * 1024,
             },
             ..AgentConfig::default()
         };
@@ -662,7 +665,8 @@ mod tests {
         let paths = vec![file_path.to_string_lossy().to_string()];
         let config = AgentConfig {
             backup: AgentBackupConfig {
-                max_plaintext_bytes: 4,
+                max_uncompressed_bytes: 4,
+                max_archive_bytes: 1024,
             },
             ..AgentConfig::default()
         };
@@ -695,7 +699,44 @@ mod tests {
         })
         .await
         .unwrap_err();
-        assert!(too_large.to_string().contains("plaintext limit"));
+        assert!(too_large.to_string().contains("uncompressed payload limit"));
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn backup_rejects_archive_overhead_above_archive_limit() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-backup-archive-{job_id}"));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let file_path = dir.join("selected.txt");
+        tokio::fs::write(&file_path, b"small").await.unwrap();
+
+        let paths = vec![file_path.to_string_lossy().to_string()];
+        let config = AgentConfig {
+            backup: AgentBackupConfig {
+                max_uncompressed_bytes: 512,
+                max_archive_bytes: 512,
+            },
+            ..AgentConfig::default()
+        };
+
+        let archive_too_large = execute_backup_command(BackupCommandInput {
+            job_id,
+            config: &config,
+            config_path: &file_path,
+            paths: &paths,
+            include_config: false,
+            follow_symlinks: false,
+            output_tx: None,
+            timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
+        })
+        .await
+        .unwrap_err();
+        assert!(archive_too_large
+            .chain()
+            .any(|cause| cause.to_string().contains("archive byte limit")));
 
         let _ = tokio::fs::remove_dir_all(dir).await;
     }

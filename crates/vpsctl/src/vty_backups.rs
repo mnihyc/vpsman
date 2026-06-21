@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use uuid::Uuid;
-use vpsman_common::JobCommand;
+use vpsman_common::{JobCommand, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS};
 
 use crate::{
     commands_backups::{
@@ -207,7 +207,7 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
     }
     ensure_backup_scope(&paths, include_config, "backup-run")?;
     anyhow::ensure!(
-        (1..=3600).contains(&timeout_secs),
+        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&timeout_secs),
         "backup timeout out of range"
     );
     Ok(VtyBackupRunRequest {
@@ -498,9 +498,9 @@ pub(crate) fn parse_vty_restore_plan(tokens: &[&str]) -> Result<VtyRestorePlanRe
 pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequest> {
     let source_backup_request_id = tokens
         .first()
-        .context("usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
+        .context("usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--timeout <secs>] [--force-unprivileged] --confirmed")?;
     let target_client_id = tokens.get(1).context(
-        "usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--timeout <1-3600>] [--force-unprivileged] --confirmed",
+        "usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--timeout <secs>] [--force-unprivileged] --confirmed",
     )?;
     let mut request = VtyRestoreRunRequest {
         source_backup_request_id: Uuid::parse_str(source_backup_request_id)
@@ -586,7 +586,7 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
         "restore-run requires --archive-transfer-session-id"
     );
     anyhow::ensure!(
-        (1..=3600).contains(&request.timeout_secs),
+        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&request.timeout_secs),
         "restore timeout out of range"
     );
     anyhow::ensure!(request.confirmed, "restore-run requires --confirmed");
@@ -596,9 +596,9 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
 pub(crate) fn parse_vty_restore_rollback(tokens: &[&str]) -> Result<VtyRestoreRollbackRequest> {
     let restore_job_id = tokens
         .first()
-        .context("usage: restore-rollback <restore_job_uuid> <target_client_id> [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
+        .context("usage: restore-rollback <restore_job_uuid> <target_client_id> [--timeout <secs>] [--force-unprivileged] --confirmed")?;
     let target_client_id = tokens.get(1).context(
-        "usage: restore-rollback <restore_job_uuid> <target_client_id> [--timeout <1-3600>] [--force-unprivileged] --confirmed",
+        "usage: restore-rollback <restore_job_uuid> <target_client_id> [--timeout <secs>] [--force-unprivileged] --confirmed",
     )?;
     let mut request = VtyRestoreRollbackRequest {
         restore_job_id: Uuid::parse_str(restore_job_id).context("invalid restore job UUID")?,
@@ -637,7 +637,7 @@ pub(crate) fn parse_vty_restore_rollback(tokens: &[&str]) -> Result<VtyRestoreRo
         }
     }
     anyhow::ensure!(
-        (1..=3600).contains(&request.timeout_secs),
+        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&request.timeout_secs),
         "restore rollback timeout out of range"
     );
     anyhow::ensure!(request.confirmed, "restore-rollback requires --confirmed");

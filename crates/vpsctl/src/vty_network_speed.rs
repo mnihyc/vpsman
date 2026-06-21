@@ -4,11 +4,12 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
     render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide, TunnelPlan,
-    NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
-    NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
-    NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
-    NETWORK_SPEED_TEST_MIN_DURATION_SECS, NETWORK_SPEED_TEST_MIN_MAX_BYTES,
-    NETWORK_SPEED_TEST_MIN_PORT, NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
+    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
+    NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
+    NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
+    NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
+    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
 };
 
 use crate::{
@@ -155,14 +156,18 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
                 timeout_secs = parse_bounded_u64(
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
-                    15,
-                    300,
+                    1,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
                 )?;
                 index += 2;
             }
             value if value.starts_with("--timeout=") => {
-                timeout_secs =
-                    parse_bounded_u64(flag_value(value, "--timeout="), "--timeout", 1, 3600)?;
+                timeout_secs = parse_bounded_u64(
+                    flag_value(value, "--timeout="),
+                    "--timeout",
+                    1,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                )?;
                 index += 1;
             }
             value if value.starts_with("--timeout-secs=") => {
@@ -170,7 +175,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
                     flag_value(value, "--timeout-secs="),
                     "--timeout-secs",
                     1,
-                    3600,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }

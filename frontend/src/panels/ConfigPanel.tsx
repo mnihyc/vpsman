@@ -15,7 +15,11 @@ import {
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../privilege";
 import { parseSearchExpression, selectorExpressionForClientIds } from "../searchExpression";
-import { clampInteger } from "./jobDispatchModel";
+import {
+  clampCommandTimeoutSecs,
+  clampInteger,
+  MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+} from "./jobDispatchModel";
 import type {
   AgentView,
   AssignDataSourcePresetRequest,
@@ -585,7 +589,7 @@ function BulkConfigApply({
     const frozenPrivilegeMaterial = privilegeMaterial;
     const frozenSelector = selectorExpression.trim();
     const frozenValuesText = valuesText;
-    const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
+    const boundedTimeoutSecs = clampCommandTimeoutSecs(timeoutSecs);
     setReviewStatus("Preparing bulk config review");
     try {
       await runAction(async () => {
@@ -765,7 +769,7 @@ function BulkConfigApply({
         <div className="inlinePrivilege">
           <input
             aria-label="Config apply timeout seconds"
-            max={3600}
+            max={MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}
             min={1}
             onChange={(event) => {
               setTimeoutSecs(Number(event.target.value));
@@ -884,7 +888,7 @@ function SingleVpsConfig({
     const reviewGeneration = captureReviewGeneration();
     const frozenTarget = singleTarget;
     const frozenPrivilegeMaterial = privilegeMaterial;
-    const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
+    const boundedTimeoutSecs = clampCommandTimeoutSecs(timeoutSecs);
     await runAction(async () => {
       if (!frozenTarget || !frozenPrivilegeMaterial) {
         throw new Error("Select one VPS and unlock privilege");
@@ -953,7 +957,7 @@ function SingleVpsConfig({
     const frozenPrivilegeMaterial = privilegeMaterial;
     const frozenToml = redactedToml;
     const frozenBaseHash = baseHash;
-    const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
+    const boundedTimeoutSecs = clampCommandTimeoutSecs(timeoutSecs);
     setReviewStatus("Preparing single config review");
     try {
       await runAction(async () => {
@@ -1051,7 +1055,7 @@ function SingleVpsConfig({
         <div className="inlinePrivilege">
           <input
             aria-label="Single config timeout seconds"
-            max={3600}
+            max={MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}
             min={1}
             onChange={(event) => {
               clearSingleConfigReview();

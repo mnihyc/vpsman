@@ -43,6 +43,7 @@ import {
 } from "../resumableFileTransfer";
 import {
   buildOperation,
+  clampCommandTimeoutSecs,
   clampInteger,
   operationCommandLabel,
   parseBackupPaths,
@@ -364,7 +365,7 @@ export function JobDispatchPanel({
       setSelectorExpression(dispatchPreset.selectorExpression);
     }
     if (dispatchPreset.timeoutSecs !== undefined) {
-      setTimeoutSecs(clampInteger(dispatchPreset.timeoutSecs, 1, 3600));
+      setTimeoutSecs(clampCommandTimeoutSecs(dispatchPreset.timeoutSecs));
     } else if (dispatchPreset.mode === "agent_update_activate" || dispatchPreset.mode === "agent_update_rollback") {
       setTimeoutSecs(60);
     } else if (dispatchPreset.mode.startsWith("agent_update")) {
@@ -608,7 +609,7 @@ export function JobDispatchPanel({
   const dispatchConfirmationTargets =
     activeDispatchConfirmation?.targets ?? preview?.targets ?? expressionTargets;
   const dispatchConfirmationTimeoutSecs =
-    activeDispatchConfirmation?.timeoutSecs ?? clampInteger(timeoutSecs, 1, 3600);
+    activeDispatchConfirmation?.timeoutSecs ?? clampCommandTimeoutSecs(timeoutSecs);
   const dispatchConfirmationForceUnprivileged =
     activeDispatchConfirmation?.forceUnprivileged ??
     (supportsForceUnprivileged ? forceUnprivileged : false);
@@ -770,7 +771,7 @@ export function JobDispatchPanel({
       throw new Error("Privilege unlock is locked");
     }
     const selector = selectorExpression.trim();
-    const timeout = clampInteger(timeoutSecs, 1, 3600);
+    const timeout = clampCommandTimeoutSecs(timeoutSecs);
     const frozenForceUnprivileged = supportsForceUnprivileged ? forceUnprivileged : false;
     const operationLabel = operationCommandLabel(mode, commandText);
     const base = {
@@ -946,7 +947,7 @@ export function JobDispatchPanel({
       return;
     }
     if (typeof defaults.timeout_secs === "number") {
-      setTimeoutSecs(clampInteger(defaults.timeout_secs, 1, 3600));
+      setTimeoutSecs(clampCommandTimeoutSecs(defaults.timeout_secs));
     }
     if (typeof defaults.force_unprivileged === "boolean") {
       setForceUnprivileged(defaults.force_unprivileged);
@@ -1082,7 +1083,7 @@ export function JobDispatchPanel({
         confirmed: operationNeedsConfirmation,
         destructive: operationNeedsConfirmation,
         force_unprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
-        timeout_secs: clampInteger(timeoutSecs, 1, 3600),
+        timeout_secs: clampCommandTimeoutSecs(timeoutSecs),
       },
       confirmed: true,
     };
@@ -1240,7 +1241,7 @@ export function JobDispatchPanel({
 
   async function trackDispatchProgress(job: CreateJobResponse, targets: AgentView[], jobTimeoutSecs = timeoutSecs) {
     const targetCount = createJobTargetCount(job);
-    const boundedJobTimeoutSecs = clampInteger(jobTimeoutSecs, 1, 3600);
+    const boundedJobTimeoutSecs = clampCommandTimeoutSecs(jobTimeoutSecs);
     setLastDispatchProgress(null);
     setDispatchProgress(buildBulkJobProgress({
       jobId: job.job_id,

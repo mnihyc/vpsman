@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use uuid::Uuid;
-use vpsman_common::{render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide, TunnelPlan};
+use vpsman_common::{
+    render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide, TunnelPlan,
+    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+};
 
 use crate::{
     commands_schedules::selector_expression_from_targets, http::http_post_json,
@@ -76,14 +79,18 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
                 timeout_secs = parse_bounded_u64(
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
-                    15,
-                    300,
+                    1,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
                 )?;
                 index += 2;
             }
             value if value.starts_with("--timeout=") => {
-                timeout_secs =
-                    parse_bounded_u64(flag_value(value, "--timeout="), "--timeout", 1, 3600)?;
+                timeout_secs = parse_bounded_u64(
+                    flag_value(value, "--timeout="),
+                    "--timeout",
+                    1,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                )?;
                 index += 1;
             }
             value if value.starts_with("--timeout-secs=") => {
@@ -91,7 +98,7 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
                     flag_value(value, "--timeout-secs="),
                     "--timeout-secs",
                     1,
-                    3600,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }

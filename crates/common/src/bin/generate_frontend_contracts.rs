@@ -15,7 +15,8 @@ use vpsman_common::{
     fleet_alert_notification_delivery_process_status_class_by_status,
     fleet_alert_notification_delivery_process_statuses,
     fleet_alert_notification_delivery_status_class_by_status,
-    fleet_alert_notification_delivery_statuses, job_command_display_group_by_command_type,
+    fleet_alert_notification_delivery_statuses,
+    job_command_confirmation_required_by_operation_type, job_command_display_group_by_command_type,
     job_command_safety_by_operation_type, job_command_type_by_operation_type,
     job_command_type_labels, job_command_variant_names, job_privilege_intent_fields,
     job_status_class_by_status, job_status_classes, job_statuses,
@@ -93,7 +94,7 @@ fn main() -> io::Result<()> {
     write_string_array(
         &mut output,
         "JOB_COMMAND_SAFETY_CLASSES",
-        &["read_only", "exclusive"],
+        &["read", "write", "exec", "exclusive"],
     )?;
     writeln!(
         output,
@@ -109,7 +110,7 @@ fn main() -> io::Result<()> {
     write_bool_map(
         &mut output,
         "JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE",
-        job_command_safety_by_operation_type(),
+        job_command_confirmation_required_by_operation_type(),
         "GeneratedJobOperationType",
     )?;
     write_string_map(
@@ -589,13 +590,12 @@ fn write_string_map(
 fn write_bool_map(
     output: &mut Vec<u8>,
     name: &str,
-    values: &[(&str, &str)],
+    values: &[(&str, bool)],
     key_type: &str,
 ) -> io::Result<()> {
     writeln!(output, "\nexport const {name} = {{")?;
     for (key, value) in values {
-        let required = *value == "exclusive";
-        writeln!(output, "  {key:?}: {required},")?;
+        writeln!(output, "  {key:?}: {value},")?;
     }
     writeln!(output, "}} as const satisfies Record<{key_type}, boolean>;")
 }

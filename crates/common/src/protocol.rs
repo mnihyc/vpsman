@@ -907,8 +907,11 @@ impl Default for AgentCapabilitySnapshot {
 }
 
 fn default_agent_command_timeout_secs() -> u64 {
-    3600
+    DEFAULT_MAX_COMMAND_TIMEOUT_SECS
 }
+
+pub const DEFAULT_MAX_COMMAND_TIMEOUT_SECS: u64 = 3600;
+pub const MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentHello {
@@ -1228,7 +1231,9 @@ pub fn job_command_variant_names() -> &'static [&'static str] {
     ]
 }
 
-pub const JOB_COMMAND_SAFETY_READ_ONLY: &str = "read_only";
+pub const JOB_COMMAND_SAFETY_READ: &str = "read";
+pub const JOB_COMMAND_SAFETY_WRITE: &str = "write";
+pub const JOB_COMMAND_SAFETY_EXEC: &str = "exec";
 pub const JOB_COMMAND_SAFETY_EXCLUSIVE: &str = "exclusive";
 
 pub const JOB_COMMAND_TYPE_LABELS: [&str; 53] = [
@@ -1288,58 +1293,113 @@ pub const JOB_COMMAND_TYPE_LABELS: [&str; 53] = [
 ];
 
 pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 52] = [
-    ("shell", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("shell_script", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("terminal_open", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("terminal_input", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("terminal_poll", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("terminal_resize", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("terminal_close", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("config_read", JOB_COMMAND_SAFETY_READ_ONLY),
+    ("shell", JOB_COMMAND_SAFETY_EXEC),
+    ("shell_script", JOB_COMMAND_SAFETY_EXEC),
+    ("terminal_open", JOB_COMMAND_SAFETY_EXEC),
+    ("terminal_input", JOB_COMMAND_SAFETY_EXEC),
+    ("terminal_poll", JOB_COMMAND_SAFETY_EXEC),
+    ("terminal_resize", JOB_COMMAND_SAFETY_EXEC),
+    ("terminal_close", JOB_COMMAND_SAFETY_EXEC),
+    ("config_read", JOB_COMMAND_SAFETY_READ),
     ("hot_config", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("data_source_config_patch", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update_activate", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update_rollback", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update_check", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_pull", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("file_push", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_push_chunked", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_transfer_start", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_transfer_chunk", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_transfer_commit", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_transfer_abort", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_transfer_download_start", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("file_transfer_download_chunk", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("file_stat", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("file_list_dir", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("file_read_text", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("file_mkdir", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_write_text", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_rename", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_delete", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_chmod", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_chown", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_copy", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("file_download", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("file_archive_tar", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("user_sessions", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("process_list", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("process_start", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("process_stop", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("process_restart", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("process_status", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("process_logs", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("backup", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("restore", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("restore_rollback", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("network_apply", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("network_ospf_cost_update", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("network_rollback", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("network_status", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("network_interfaces", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("network_probe", JOB_COMMAND_SAFETY_READ_ONLY),
-    ("network_speed_test", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("file_pull", JOB_COMMAND_SAFETY_READ),
+    ("file_push", JOB_COMMAND_SAFETY_WRITE),
+    ("file_push_chunked", JOB_COMMAND_SAFETY_WRITE),
+    ("file_transfer_start", JOB_COMMAND_SAFETY_WRITE),
+    ("file_transfer_chunk", JOB_COMMAND_SAFETY_WRITE),
+    ("file_transfer_commit", JOB_COMMAND_SAFETY_WRITE),
+    ("file_transfer_abort", JOB_COMMAND_SAFETY_WRITE),
+    ("file_transfer_download_start", JOB_COMMAND_SAFETY_READ),
+    ("file_transfer_download_chunk", JOB_COMMAND_SAFETY_READ),
+    ("file_stat", JOB_COMMAND_SAFETY_READ),
+    ("file_list_dir", JOB_COMMAND_SAFETY_READ),
+    ("file_read_text", JOB_COMMAND_SAFETY_READ),
+    ("file_mkdir", JOB_COMMAND_SAFETY_WRITE),
+    ("file_write_text", JOB_COMMAND_SAFETY_WRITE),
+    ("file_rename", JOB_COMMAND_SAFETY_WRITE),
+    ("file_delete", JOB_COMMAND_SAFETY_WRITE),
+    ("file_chmod", JOB_COMMAND_SAFETY_WRITE),
+    ("file_chown", JOB_COMMAND_SAFETY_WRITE),
+    ("file_copy", JOB_COMMAND_SAFETY_WRITE),
+    ("file_download", JOB_COMMAND_SAFETY_READ),
+    ("file_archive_tar", JOB_COMMAND_SAFETY_READ),
+    ("user_sessions", JOB_COMMAND_SAFETY_READ),
+    ("process_list", JOB_COMMAND_SAFETY_READ),
+    ("process_start", JOB_COMMAND_SAFETY_EXEC),
+    ("process_stop", JOB_COMMAND_SAFETY_EXEC),
+    ("process_restart", JOB_COMMAND_SAFETY_EXEC),
+    ("process_status", JOB_COMMAND_SAFETY_READ),
+    ("process_logs", JOB_COMMAND_SAFETY_READ),
+    ("backup", JOB_COMMAND_SAFETY_READ),
+    ("restore", JOB_COMMAND_SAFETY_WRITE),
+    ("restore_rollback", JOB_COMMAND_SAFETY_WRITE),
+    ("network_apply", JOB_COMMAND_SAFETY_WRITE),
+    ("network_ospf_cost_update", JOB_COMMAND_SAFETY_WRITE),
+    ("network_rollback", JOB_COMMAND_SAFETY_WRITE),
+    ("network_status", JOB_COMMAND_SAFETY_READ),
+    ("network_interfaces", JOB_COMMAND_SAFETY_READ),
+    ("network_probe", JOB_COMMAND_SAFETY_READ),
+    ("network_speed_test", JOB_COMMAND_SAFETY_EXEC),
+];
+
+pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 52] = [
+    ("shell", true),
+    ("shell_script", true),
+    ("terminal_open", true),
+    ("terminal_input", true),
+    ("terminal_poll", true),
+    ("terminal_resize", true),
+    ("terminal_close", true),
+    ("config_read", false),
+    ("hot_config", true),
+    ("data_source_config_patch", true),
+    ("agent_update", true),
+    ("agent_update_activate", true),
+    ("agent_update_rollback", true),
+    ("agent_update_check", true),
+    ("file_pull", false),
+    ("file_push", true),
+    ("file_push_chunked", true),
+    ("file_transfer_start", true),
+    ("file_transfer_chunk", true),
+    ("file_transfer_commit", true),
+    ("file_transfer_abort", true),
+    ("file_transfer_download_start", false),
+    ("file_transfer_download_chunk", false),
+    ("file_stat", false),
+    ("file_list_dir", false),
+    ("file_read_text", false),
+    ("file_mkdir", true),
+    ("file_write_text", true),
+    ("file_rename", true),
+    ("file_delete", true),
+    ("file_chmod", true),
+    ("file_chown", true),
+    ("file_copy", true),
+    ("file_download", false),
+    ("file_archive_tar", false),
+    ("user_sessions", false),
+    ("process_list", false),
+    ("process_start", true),
+    ("process_stop", true),
+    ("process_restart", true),
+    ("process_status", false),
+    ("process_logs", false),
+    ("backup", true),
+    ("restore", true),
+    ("restore_rollback", true),
+    ("network_apply", true),
+    ("network_ospf_cost_update", true),
+    ("network_rollback", true),
+    ("network_status", false),
+    ("network_interfaces", false),
+    ("network_probe", false),
+    ("network_speed_test", true),
 ];
 
 pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 52] = [
@@ -1467,6 +1527,10 @@ pub fn job_command_safety_by_operation_type() -> &'static [(&'static str, &'stat
     &JOB_COMMAND_SAFETY_BY_OPERATION_TYPE
 }
 
+pub fn job_command_confirmation_required_by_operation_type() -> &'static [(&'static str, bool)] {
+    &JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE
+}
+
 pub fn job_command_type_by_operation_type() -> &'static [(&'static str, &'static str)] {
     &JOB_COMMAND_TYPE_BY_OPERATION_TYPE
 }
@@ -1476,11 +1540,9 @@ pub fn job_command_display_group_by_command_type() -> &'static [(&'static str, &
 }
 
 pub fn job_command_requires_confirmation_by_operation_type(operation_type: &str) -> Option<bool> {
-    JOB_COMMAND_SAFETY_BY_OPERATION_TYPE
+    JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE
         .iter()
-        .find_map(|(candidate, safety)| {
-            (*candidate == operation_type).then_some(*safety == JOB_COMMAND_SAFETY_EXCLUSIVE)
-        })
+        .find_map(|(candidate, required)| (*candidate == operation_type).then_some(*required))
 }
 
 pub fn job_command_type_label_from_operation_type(operation_type: &str) -> Option<&'static str> {
@@ -1594,7 +1656,7 @@ impl<'a> JobPrivilegeIntent<'a> {
             command_type: input.command_type,
             operation_payload_hash: input.operation_payload_hash,
             resolved_targets: sorted_str_refs(input.resolved_targets),
-            timeout_secs: input.timeout_secs.clamp(1, 3600),
+            timeout_secs: input.timeout_secs.max(1),
             force_unprivileged: input.force_unprivileged,
             privileged: input.privileged,
         }
@@ -1726,7 +1788,7 @@ impl<'a> TerminalInputPrivilegeIntent<'a> {
             client_id: input.client_id.trim(),
             session_id: input.session_id.trim(),
             input_payload_hash: input.input_payload_hash.trim(),
-            timeout_secs: input.timeout_secs.clamp(1, 3600),
+            timeout_secs: input.timeout_secs.max(1),
             confirmed: input.confirmed,
         }
     }
@@ -2988,6 +3050,13 @@ pub fn job_command_type_label(command: &JobCommand) -> &'static str {
     }
 }
 
+pub fn job_command_operation_type(command: &JobCommand) -> &'static str {
+    match command {
+        JobCommand::Shell { .. } => "shell",
+        _ => job_command_type_label(command),
+    }
+}
+
 pub fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> String {
     match command {
         JobCommand::Shell { .. }
@@ -3013,7 +3082,9 @@ pub fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> Str
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobCommandSafety {
-    ReadOnly,
+    Read,
+    Write,
+    Exec,
     Exclusive,
 }
 
@@ -3034,21 +3105,21 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         | JobCommand::ProcessLogs { .. }
         | JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkInterfaces
-        | JobCommand::NetworkProbe { .. } => JobCommandSafety::ReadOnly,
+        | JobCommand::NetworkProbe { .. } => JobCommandSafety::Read,
         JobCommand::Shell { .. }
         | JobCommand::ShellScript { .. }
         | JobCommand::TerminalOpen { .. }
         | JobCommand::TerminalInput { .. }
         | JobCommand::TerminalPoll { .. }
         | JobCommand::TerminalResize { .. }
-        | JobCommand::TerminalClose { .. }
-        | JobCommand::HotConfig { .. }
+        | JobCommand::TerminalClose { .. } => JobCommandSafety::Exec,
+        JobCommand::HotConfig { .. }
         | JobCommand::DataSourceConfigPatch { .. }
         | JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
-        | JobCommand::AgentUpdateCheck { .. }
-        | JobCommand::FilePush { .. }
+        | JobCommand::AgentUpdateCheck { .. } => JobCommandSafety::Exclusive,
+        JobCommand::FilePush { .. }
         | JobCommand::FilePushChunked { .. }
         | JobCommand::FileTransferStart { .. }
         | JobCommand::FileTransferChunk { .. }
@@ -3061,21 +3132,22 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         | JobCommand::FileChmod { .. }
         | JobCommand::FileChown { .. }
         | JobCommand::FileCopy { .. }
-        | JobCommand::ProcessStart { .. }
-        | JobCommand::ProcessStop { .. }
-        | JobCommand::ProcessRestart { .. }
-        | JobCommand::Backup { .. }
         | JobCommand::Restore { .. }
         | JobCommand::RestoreRollback { .. }
         | JobCommand::NetworkApply { .. }
         | JobCommand::NetworkOspfCostUpdate { .. }
-        | JobCommand::NetworkRollback { .. }
-        | JobCommand::NetworkSpeedTest { .. } => JobCommandSafety::Exclusive,
+        | JobCommand::NetworkRollback { .. } => JobCommandSafety::Write,
+        JobCommand::ProcessStart { .. }
+        | JobCommand::ProcessStop { .. }
+        | JobCommand::ProcessRestart { .. }
+        | JobCommand::NetworkSpeedTest { .. } => JobCommandSafety::Exec,
+        JobCommand::Backup { .. } => JobCommandSafety::Read,
     }
 }
 
 pub fn job_command_requires_confirmation(command: &JobCommand) -> bool {
-    job_command_safety(command) == JobCommandSafety::Exclusive
+    job_command_requires_confirmation_by_operation_type(job_command_operation_type(command))
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -3217,6 +3289,7 @@ mod tests {
         is_topology_node_status, is_topology_observation_state, is_topology_probe_state,
         is_topology_runtime_state, is_webhook_rule_delivery_history_status,
         is_webhook_rule_delivery_process_status, is_webhook_rule_delivery_status,
+        job_command_confirmation_required_by_operation_type,
         job_command_requires_confirmation_by_operation_type, job_command_safety_by_operation_type,
         job_command_type_by_operation_type, job_command_type_label_from_operation_type,
         job_command_type_labels, job_command_variant_names, job_status_class_by_status,
@@ -3231,9 +3304,9 @@ mod tests {
         webhook_rule_delivery_process_statuses, webhook_rule_delivery_statuses,
         AgentUpdateReleaseStatus, BackupRequestStatus, JobCommand, JobStatus, JobStatusClass,
         JobTargetStatus, JobTargetStatusClass, MigrationLinkStatus, RestorePlanStatus, ServerHello,
-        JOB_COMMAND_SAFETY_EXCLUSIVE, JOB_COMMAND_SAFETY_READ_ONLY, JOB_STATUS_CLASSES,
-        JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_SKIPPED, JOB_TARGET_STATUS_CLASSES,
-        TARGET_STATUS_SKIPPED,
+        JOB_COMMAND_SAFETY_EXCLUSIVE, JOB_COMMAND_SAFETY_EXEC, JOB_COMMAND_SAFETY_READ,
+        JOB_COMMAND_SAFETY_WRITE, JOB_STATUS_CLASSES, JOB_STATUS_PARTIAL_SUCCESS,
+        JOB_STATUS_SKIPPED, JOB_TARGET_STATUS_CLASSES, TARGET_STATUS_SKIPPED,
     };
 
     #[test]
@@ -3383,8 +3456,13 @@ mod tests {
             .iter()
             .map(|(operation_type, _)| *operation_type)
             .collect::<BTreeSet<_>>();
+        let confirmation_keys = job_command_confirmation_required_by_operation_type()
+            .iter()
+            .map(|(operation_type, _)| *operation_type)
+            .collect::<BTreeSet<_>>();
         assert_eq!(operation_types, safety_keys);
         assert_eq!(operation_types, command_type_keys);
+        assert_eq!(operation_types, confirmation_keys);
         assert!(job_command_type_labels().contains(&"shell_pty"));
         assert_eq!(
             job_command_requires_confirmation_by_operation_type("shell"),
@@ -3411,19 +3489,33 @@ mod tests {
                 .iter()
                 .find(|(operation_type, _)| *operation_type == "backup")
                 .map(|(_, safety)| *safety),
-            Some(JOB_COMMAND_SAFETY_EXCLUSIVE)
+            Some(JOB_COMMAND_SAFETY_READ)
         );
         assert_eq!(
             job_command_safety_by_operation_type()
                 .iter()
                 .find(|(operation_type, _)| *operation_type == "network_status")
                 .map(|(_, safety)| *safety),
-            Some(JOB_COMMAND_SAFETY_READ_ONLY)
+            Some(JOB_COMMAND_SAFETY_READ)
         );
         assert_eq!(
             job_command_safety_by_operation_type()
                 .iter()
                 .find(|(operation_type, _)| *operation_type == "network_speed_test")
+                .map(|(_, safety)| *safety),
+            Some(JOB_COMMAND_SAFETY_EXEC)
+        );
+        assert_eq!(
+            job_command_safety_by_operation_type()
+                .iter()
+                .find(|(operation_type, _)| *operation_type == "restore")
+                .map(|(_, safety)| *safety),
+            Some(JOB_COMMAND_SAFETY_WRITE)
+        );
+        assert_eq!(
+            job_command_safety_by_operation_type()
+                .iter()
+                .find(|(operation_type, _)| *operation_type == "agent_update")
                 .map(|(_, safety)| *safety),
             Some(JOB_COMMAND_SAFETY_EXCLUSIVE)
         );
@@ -3715,6 +3807,34 @@ mod tests {
             intent,
             r#"{"version":1,"action":"suite_config.update","target":"suite_config","selector_expression":null,"resolved_targets":["client-a","client-b"],"confirmed":true,"payload_hash":"ab"}"#
         );
+    }
+
+    #[test]
+    fn privilege_intents_preserve_long_timeout_values() {
+        let resolved_targets = vec!["client-b".to_string(), "client-a".to_string()];
+        let job_intent = super::canonical_job_privilege_intent(super::JobPrivilegeIntentInput {
+            selector_expression: "tag:prod",
+            command_type: "shell",
+            operation_payload_hash: "ab",
+            resolved_targets: &resolved_targets,
+            timeout_secs: 7_200,
+            force_unprivileged: false,
+            privileged: true,
+        })
+        .unwrap();
+        assert!(job_intent.contains(r#""timeout_secs":7200"#));
+
+        let terminal_intent = super::canonical_terminal_input_privilege_intent(
+            super::TerminalInputPrivilegeIntentInput {
+                client_id: "client-a",
+                session_id: "session-a",
+                input_payload_hash: "cd",
+                timeout_secs: 7_200,
+                confirmed: true,
+            },
+        )
+        .unwrap();
+        assert!(terminal_intent.contains(r#""timeout_secs":7200"#));
     }
 
     #[test]

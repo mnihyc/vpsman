@@ -6,7 +6,7 @@ use vpsman_common::{
     backend_config_signature_payload, payload_hash, plan_tunnel,
     render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, BandwidthTier,
     JobCommand, TunnelAddressFamily, TunnelAddressPair, TunnelConfigBackend, TunnelEndpointSide,
-    TunnelPlan,
+    TunnelPlan, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -560,14 +560,18 @@ fn parse_vty_tunnel_change(
                 timeout_secs = parse_bounded_u64(
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
-                    15,
-                    300,
+                    1,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
                 )?;
                 index += 2;
             }
             value if value.starts_with("--timeout=") => {
-                timeout_secs =
-                    parse_bounded_u64(flag_value(value, "--timeout="), "--timeout", 1, 3600)?;
+                timeout_secs = parse_bounded_u64(
+                    flag_value(value, "--timeout="),
+                    "--timeout",
+                    1,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                )?;
                 index += 1;
             }
             value if value.starts_with("--timeout-secs=") => {
@@ -575,7 +579,7 @@ fn parse_vty_tunnel_change(
                     flag_value(value, "--timeout-secs="),
                     "--timeout-secs",
                     1,
-                    3600,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }

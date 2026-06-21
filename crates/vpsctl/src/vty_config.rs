@@ -7,6 +7,7 @@ use vpsman_common::{
     validate_agent_config_shape, validate_incremental_config_patch_section, AgentConfig,
     JobCommand, DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH,
     HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE, MAX_AGENT_HOT_CONFIG_BYTES,
+    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -133,8 +134,8 @@ pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigReques
         }
     }
     anyhow::ensure!(
-        (1..=3600).contains(&timeout_secs),
-        "hot-config --timeout must be between 1 and 3600"
+        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&timeout_secs),
+        "hot-config --timeout must be between 1 and {MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}"
     );
     anyhow::ensure!(
         (15..=300).contains(&privilege_ttl_secs),
@@ -284,8 +285,8 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
         }
     }
     anyhow::ensure!(
-        (1..=3600).contains(&timeout_secs),
-        "agent-update --timeout must be between 1 and 3600"
+        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&timeout_secs),
+        "agent-update --timeout must be between 1 and {MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}"
     );
     anyhow::ensure!(
         (15..=300).contains(&privilege_ttl_secs),
@@ -733,8 +734,8 @@ fn validate_config_dispatch_bounds(
     command: &str,
 ) -> Result<()> {
     anyhow::ensure!(
-        (1..=3600).contains(&timeout_secs),
-        "{command} --timeout must be between 1 and 3600"
+        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&timeout_secs),
+        "{command} --timeout must be between 1 and {MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}"
     );
     anyhow::ensure!(
         (15..=300).contains(&privilege_ttl_secs),

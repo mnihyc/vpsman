@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
     validate_file_transfer_download_session, validate_file_transfer_session, FileExistingPolicy,
-    FILE_TRANSFER_CHUNK_BYTES, MAX_FILE_TRANSFER_RATE_LIMIT_KBPS,
+    FILE_TRANSFER_CHUNK_BYTES, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+    MAX_FILE_TRANSFER_RATE_LIMIT_KBPS,
 };
 
 use crate::{
@@ -86,8 +87,12 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
                 index += 1;
             }
             "--timeout" => {
-                timeout_secs =
-                    parse_bounded_u64("--timeout", tokens.get(index + 1).copied(), 1, 3600)?;
+                timeout_secs = parse_bounded_u64(
+                    "--timeout",
+                    tokens.get(index + 1).copied(),
+                    1,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                )?;
                 index += 2;
             }
             value if value.starts_with("--timeout=") => {
@@ -95,7 +100,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
                     "--timeout",
                     Some(value.trim_start_matches("--timeout=")),
                     1,
-                    3600,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }
@@ -329,8 +334,12 @@ pub(crate) fn parse_vty_file_transfer_download(
                 index += 1;
             }
             "--timeout" => {
-                timeout_secs =
-                    parse_bounded_u64("--timeout", tokens.get(index + 1).copied(), 1, 3600)?;
+                timeout_secs = parse_bounded_u64(
+                    "--timeout",
+                    tokens.get(index + 1).copied(),
+                    1,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                )?;
                 index += 2;
             }
             value if value.starts_with("--timeout=") => {
@@ -338,7 +347,7 @@ pub(crate) fn parse_vty_file_transfer_download(
                     "--timeout",
                     Some(value.trim_start_matches("--timeout=")),
                     1,
-                    3600,
+                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }

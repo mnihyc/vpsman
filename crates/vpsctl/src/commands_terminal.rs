@@ -377,7 +377,7 @@ mod tests {
     use super::{terminal_input_data, validate_terminal_input_client_id};
 
     #[test]
-    fn terminal_input_text_is_encoded_and_exclusive() {
+    fn terminal_input_text_is_encoded_and_validated() {
         assert_eq!(
             terminal_input_data(Some("id\n".to_string()), None).unwrap(),
             "aWQK"

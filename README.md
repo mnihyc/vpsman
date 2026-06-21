@@ -124,10 +124,13 @@ independent of the compose layout; set `VPSMAN_SUITE_CONFIG` and
 `VPSMAN_POSTGRES_URL` yourself when you want a specific operator config file.
 
 Long-running job control uses `timeout_secs` as the agent execution budget.
-The API adds dispatch/event grace through `timeout.control_deadline_grace_secs`,
-and the gateway keeps forwarder delivery RAM-first with overflow and
-graceful-shutdown spool settings under `[gateway]` in
-`deploy/config/vpsman.toml`. Controlled shutdown defers pending forwarder
+The fleet-wide accepted maximum is `timeout.max_command_timeout_secs` in
+`deploy/config/vpsman.toml`, defaulting to 3600 seconds and configurable up to
+seven days. Requests above the configured maximum are rejected so the browser,
+CLI, API, worker, and agent agree on the exact budget. The API adds
+dispatch/event grace through `timeout.control_deadline_grace_secs`, and the
+gateway keeps forwarder delivery RAM-first with overflow and graceful-shutdown
+spool settings under `[gateway]`. Controlled shutdown defers pending forwarder
 events to the spool; hard crashes before RAM-resident events are spooled remain
 a residual loss boundary. Spool replay reposts saved command-output event
 bodies through normal API ingest so duplicate, conflict, late-output, and
@@ -149,7 +152,10 @@ over the private Docker network, and the dashboard binds to `127.0.0.1:5173` by
 default through `VPSMAN_FRONTEND_BIND`. Gateway TCP also stays loopback-bound by
 default, and gateway control uses a shared Unix socket under
 `deploy/runtime/data`; expose agent TCP through your chosen public proxy,
-firewall, or tunnel when needed.
+firewall, or tunnel when needed. Gateway-to-API forwarding is intentionally
+plain HTTP and should stay on localhost, a Unix-adjacent private compose
+network, or another trusted private network; TLS termination belongs in the
+operator-facing reverse proxy, not this internal forwarding link.
 Because the API is a private service behind the dashboard proxy, operator
 login throttling and auth history trust `X-Forwarded-For` by default, including
 IPv6 client addresses forwarded by an external TLS provider. Deployments that

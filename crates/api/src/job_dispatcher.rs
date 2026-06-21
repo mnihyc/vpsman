@@ -243,7 +243,7 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
         job_id: claimed.job_id,
         command_version,
         command: claimed.operation.clone(),
-        timeout_secs: claimed.timeout_secs.clamp(1, 3600),
+        timeout_secs: claimed.timeout_secs.max(1),
     };
     state.refresh_gateway_dispatch_timeouts();
     let outcome = match state

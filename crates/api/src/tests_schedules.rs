@@ -420,10 +420,11 @@ async fn scheduled_successful_job_resets_failure_controls_on_finish() {
 }
 
 #[tokio::test]
-async fn scheduled_partial_success_resets_but_skipped_preserves_failure_controls_on_finish() {
-    for (status, expected_failure_count, expected_last_error) in
-        [("partial_success", 0, None), ("skipped", 1, Some("failed"))]
-    {
+async fn scheduled_partial_success_and_skipped_preserve_failure_controls_on_finish() {
+    for (status, expected_failure_count, expected_last_error) in [
+        ("partial_success", 1, Some("failed")),
+        ("skipped", 1, Some("failed")),
+    ] {
         let repo = Repository::Memory(MemoryState::default());
         let operator = schedule_test_operator();
         let schedule = repo
@@ -453,6 +454,34 @@ async fn scheduled_partial_success_resets_but_skipped_preserves_failure_controls
         assert_eq!(recovered.last_error.as_deref(), expected_last_error);
         assert!(recovered.enabled);
     }
+}
+
+#[tokio::test]
+async fn scheduled_partial_success_with_failed_target_counts_as_failure() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    let schedule = repo
+        .create_schedule(shell_schedule_request("degraded-schedule", true), &operator)
+        .await
+        .unwrap();
+    let job_id = record_scheduled_memory_job(&repo, &operator, &schedule, "partial-failed").await;
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let mut targets = memory.job_targets.write().await;
+    let target = targets
+        .iter_mut()
+        .find(|target| target.job_id == job_id)
+        .unwrap();
+    target.status = "failed".to_string();
+    target.completed_at = Some(crate::util::unix_now().to_string());
+    drop(targets);
+
+    repo.finish_job(job_id, "partial_success").await.unwrap();
+    let recovered = repo.schedule_by_id(schedule.id).await.unwrap();
+    assert_eq!(recovered.failure_count, 1);
+    assert_eq!(recovered.last_error.as_deref(), Some("failed"));
+    assert!(recovered.enabled);
 }
 
 #[tokio::test]

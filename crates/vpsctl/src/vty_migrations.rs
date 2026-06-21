@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use uuid::Uuid;
+use vpsman_common::MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS;
 
 use crate::{
     commands_migrations::{migration_link_with_credentials, migration_run_with_credentials},
@@ -56,7 +57,7 @@ pub(crate) fn parse_vty_migration_link(tokens: &[&str]) -> Result<VtyMigrationLi
 pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRunRequest> {
     let restore_plan_id = tokens
         .first()
-        .context("usage: migration-run <restore_plan_uuid> --archive-transfer-session-id <uuid> [--note <text>] [--timeout <1-3600>] [--force-unprivileged] --confirmed")?;
+        .context("usage: migration-run <restore_plan_uuid> --archive-transfer-session-id <uuid> [--note <text>] [--timeout <secs>] [--force-unprivileged] --confirmed")?;
     let mut request = VtyMigrationRunRequest {
         restore_plan_id: Uuid::parse_str(restore_plan_id).context("invalid restore plan UUID")?,
         archive_transfer_session_id: Uuid::nil(),
@@ -127,7 +128,7 @@ pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRun
         }
     }
     anyhow::ensure!(
-        (1..=3600).contains(&request.timeout_secs),
+        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&request.timeout_secs),
         "migration-run timeout out of range"
     );
     anyhow::ensure!(

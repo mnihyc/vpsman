@@ -34,7 +34,11 @@ import type {
   TunnelPlanRecord,
 } from "../../types";
 import { clientDisplayNameFromMap, clientDisplayNameMap, runPanelAction, shortId } from "../../utils";
-import { clampInteger } from "../jobDispatchModel";
+import {
+  clampCommandTimeoutSecs,
+  clampInteger,
+  MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+} from "../jobDispatchModel";
 import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
 
 export function TopologyApplyControls({
@@ -180,7 +184,7 @@ export function TopologyApplyControls({
           : [builtOperation.endpoint.localClientId];
       const targets = resolveAgentsById(agents, targetClientIds);
       const selectorExpression = selectorExpressionForClientIds(targetClientIds);
-      const boundedTimeoutSecs = clampInteger(timeoutSecs, 1, 3600);
+      const boundedTimeoutSecs = clampCommandTimeoutSecs(timeoutSecs);
       const boundedForceUnprivileged = isMutation(mode) ? forceUnprivileged : false;
       const builtPrivilege = await buildPrivilegeForJobOperation({
         clientIds: targetClientIds,
@@ -346,7 +350,7 @@ export function TopologyApplyControls({
             <span>Timeout seconds</span>
             <input
               aria-label="Network apply timeout seconds"
-              max={3600}
+              max={MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}
               min={1}
               onChange={(event) => {
                 clearNetworkReview();

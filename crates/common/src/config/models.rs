@@ -60,8 +60,15 @@ pub struct AgentAuthConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentBackupConfig {
-    pub max_plaintext_bytes: u64,
+    #[serde(
+        default = "default_agent_backup_max_uncompressed_bytes",
+        alias = "max_plaintext_bytes"
+    )]
+    pub max_uncompressed_bytes: u64,
+    #[serde(default = "default_agent_backup_max_archive_bytes")]
+    pub max_archive_bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -330,9 +337,18 @@ pub enum AgentRuntimeUnprivilegedMutationPolicy {
 impl Default for AgentBackupConfig {
     fn default() -> Self {
         Self {
-            max_plaintext_bytes: 1024 * 1024,
+            max_uncompressed_bytes: default_agent_backup_max_uncompressed_bytes(),
+            max_archive_bytes: default_agent_backup_max_archive_bytes(),
         }
     }
+}
+
+pub fn default_agent_backup_max_uncompressed_bytes() -> u64 {
+    1024 * 1024
+}
+
+pub fn default_agent_backup_max_archive_bytes() -> u64 {
+    2 * 1024 * 1024
 }
 
 impl Default for AgentTelemetryConfig {

@@ -2,9 +2,8 @@ use super::*;
 use crate::model_terminal::TerminalSessionView;
 use base64::Engine as _;
 use vpsman_common::{
-    job_command_type_label, plan_tunnel, AgentHello, BandwidthTier, CommandOutput,
-    GatewayAgentHelloIngest, GatewayTerminalOutputIngest, JobCommand, OspfCostPolicy,
-    TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+    job_command_type_label, AgentHello, CommandOutput, GatewayAgentHelloIngest,
+    GatewayTerminalOutputIngest, JobCommand,
 };
 use vpsman_server_core::{TARGET_STATUS_AGENT_LOST, TARGET_STATUS_SKIPPED};
 
@@ -1179,8 +1178,12 @@ async fn memory_final_output_insert_terminalizes_target_atomically() {
 async fn memory_dispatch_claims_one_exclusive_target_per_client_per_batch() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
-    let request = test_job_request(&["client-a"]);
-    let command = request.job_command().unwrap();
+    let command = JobCommand::AgentUpdateCheck {
+        version_url: None,
+        activate: false,
+        restart_agent: false,
+    };
+    let request = operation_job_request(command.clone(), &["client-a"]);
     let command_hash = payload_hash(&encode_json(&command).unwrap());
 
     let first_job_id = repo
@@ -2408,70 +2411,34 @@ fn operation_job_request(operation: JobCommand, clients: &[&str]) -> CreateJobRe
 fn exclusive_dispatch_operation_cases() -> Vec<(&'static str, JobCommand)> {
     vec![
         (
-            "backup",
-            JobCommand::Backup {
-                paths: vec!["/etc/hostname".to_string()],
-                include_config: true,
-                follow_symlinks: false,
+            "agent_update",
+            JobCommand::UpdateAgent {
+                artifact_url: "https://updates.example/agent".to_string(),
+                sha256_hex: "a".repeat(64),
             },
         ),
         (
-            "shell",
-            JobCommand::Shell {
-                argv: vec!["/bin/true".to_string()],
-                pty: false,
+            "agent_update_activate",
+            JobCommand::AgentUpdateActivate {
+                staged_sha256_hex: "b".repeat(64),
+                restart_agent: false,
             },
         ),
         (
-            "network",
-            JobCommand::NetworkRollback {
-                plan: Box::new(test_dispatch_tunnel_plan()),
-                side: TunnelEndpointSide::Left,
+            "agent_update_check",
+            JobCommand::AgentUpdateCheck {
+                version_url: None,
+                activate: false,
+                restart_agent: false,
             },
         ),
         (
-            "network_speed_test",
-            JobCommand::NetworkSpeedTest {
-                plan: Box::new(test_dispatch_tunnel_plan()),
-                server_side: TunnelEndpointSide::Left,
-                duration_secs: 3,
-                max_bytes: 16 * 1024 * 1024,
-                rate_limit_kbps: 100_000,
-                port: 5201,
-                connect_timeout_ms: 5000,
+            "agent_update_rollback",
+            JobCommand::AgentUpdateRollback {
+                rollback_sha256_hex: None,
             },
         ),
     ]
-}
-
-fn test_dispatch_tunnel_plan() -> vpsman_common::TunnelPlan {
-    plan_tunnel(&TunnelPlanInput {
-        name: "client-a-client-b".to_string(),
-        interface_name: "tunab".to_string(),
-        kind: TunnelKind::Gre,
-        runtime_control: Default::default(),
-        runtime_topology: Default::default(),
-        left_client_id: "client-a".to_string(),
-        right_client_id: "client-b".to_string(),
-        left_underlay: "198.51.100.10".to_string(),
-        right_underlay: "203.0.113.20".to_string(),
-        address_pool_cidr: "10.255.0.0/30".to_string(),
-        reserved_addresses: Vec::new(),
-        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
-            left: "10.255.0.0".to_string(),
-            right: "10.255.0.1".to_string(),
-            prefix_len: 31,
-        }),
-        ipv6_address_pool_cidr: None,
-        ipv6_tunnel: None,
-        latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
-        latency_ms: 18.0,
-        packet_loss_ratio: 0.0,
-        preference: 1.0,
-        ospf_policy: OspfCostPolicy::default(),
-    })
-    .unwrap()
 }
 
 async fn record_memory_dispatch_job(

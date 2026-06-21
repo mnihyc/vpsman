@@ -4,7 +4,9 @@ use anyhow::{ensure, Result};
 use axum::http::HeaderMap;
 use serde_json::{json, Map, Value};
 use tokio::sync::broadcast;
-use vpsman_common::SuiteConfig;
+use vpsman_common::{
+    SuiteConfig, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+};
 use vpsman_server_core::{JOB_STATUS_QUEUED, JOB_STATUS_RUNNING};
 
 use crate::{
@@ -55,6 +57,7 @@ pub(crate) struct DispatcherRuntimeConfig {
     pub(crate) event_post_secs: u64,
     pub(crate) internal_http_read_secs: u64,
     pub(crate) control_deadline_grace_secs: u64,
+    pub(crate) max_command_timeout_secs: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +88,7 @@ impl Default for DispatcherRuntimeConfig {
             event_post_secs: 15,
             internal_http_read_secs: 15,
             control_deadline_grace_secs: 30,
+            max_command_timeout_secs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
         }
     }
 }
@@ -143,6 +147,11 @@ impl AppState {
                     config.control_deadline_grace_secs = value;
                 }
             }
+            if env_absent("VPSMAN_MAX_COMMAND_TIMEOUT_SECS") {
+                if let Some(value) = suite.timeout.max_command_timeout_secs {
+                    config.max_command_timeout_secs = value;
+                }
+            }
         }
         config.batch_limit = config.batch_limit.clamp(1, 500);
         config.in_flight = config.in_flight.clamp(1, 512);
@@ -150,6 +159,9 @@ impl AppState {
         config.event_post_secs = config.event_post_secs.clamp(1, 3600);
         config.internal_http_read_secs = config.internal_http_read_secs.clamp(1, 3600);
         config.control_deadline_grace_secs = config.control_deadline_grace_secs.clamp(0, 3600);
+        config.max_command_timeout_secs = config
+            .max_command_timeout_secs
+            .clamp(1, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS);
         config
     }
 
@@ -209,6 +221,10 @@ impl AppState {
             }
         }
         value.clamp(MIN_ARTIFACT_MAX_BYTES, MAX_ARTIFACT_MAX_BYTES)
+    }
+
+    pub(crate) fn max_command_timeout_secs(&self) -> u64 {
+        self.dispatcher_runtime_config().max_command_timeout_secs
     }
 
     pub(crate) fn require_registered_agent_updates(&self) -> bool {
@@ -295,7 +311,7 @@ impl AppState {
     pub(crate) fn schedule_apply_now_timeout_secs(&self) -> u64 {
         if let Ok(value) = std::env::var("VPSMAN_WORKER_SCHEDULE_COMMAND_TIMEOUT_SECS") {
             if let Ok(parsed) = value.parse::<u64>() {
-                return parsed.clamp(1, 3600);
+                return parsed.clamp(1, self.max_command_timeout_secs());
             }
         }
         let configured = self.current_suite_config().and_then(|suite| {
@@ -304,7 +320,9 @@ impl AppState {
                 .schedule_command_timeout_secs
                 .or(suite.timeout.worker_schedule_command_secs)
         });
-        configured.unwrap_or(30).clamp(1, 3600)
+        configured
+            .unwrap_or(30)
+            .clamp(1, self.max_command_timeout_secs())
     }
 
     pub(crate) fn fleet_alert_policy(&self) -> FleetAlertPolicy {

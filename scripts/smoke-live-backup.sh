@@ -102,12 +102,14 @@ smoke_create_direct_agent_config \
   "primary=$gateway_addr=10"
 
 if grep -q '^\[backup\]' "$agent_config"; then
-  sed -i "/^\[backup\]/a max_plaintext_bytes = 1048576" "$agent_config"
+  sed -i "/^\[backup\]/a max_archive_bytes = 2097152\\
+max_uncompressed_bytes = 1048576" "$agent_config"
 else
   cat >>"$agent_config" <<EOF
 
 [backup]
-max_plaintext_bytes = 1048576
+max_uncompressed_bytes = 1048576
+max_archive_bytes = 2097152
 EOF
 fi
 

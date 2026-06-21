@@ -1,4 +1,5 @@
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
+import { MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS } from "../commandTimeout";
 import type { AgentView } from "../types";
 
 export function JobTargetSelector({
@@ -48,7 +49,7 @@ export function DispatchOptions({
         <span>Timeout</span>
         <input
           aria-label="Timeout seconds"
-          max={3600}
+          max={MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}
           min={1}
           onChange={(event) => setTimeoutSecs(Number(event.target.value))}
           type="number"

@@ -118,7 +118,12 @@ pub(crate) async fn submit_terminal_session_input(
     if !request.confirmed {
         return Err(ApiError::conflict("terminal_input_confirmation_required"));
     }
-    let timeout_secs = request.timeout_secs.unwrap_or(30).clamp(1, 3600);
+    let timeout_secs = request.timeout_secs.unwrap_or(30).max(1);
+    if timeout_secs > state.max_command_timeout_secs() {
+        return Err(ApiError::bad_request(
+            "command_timeout_exceeds_configured_max",
+        ));
+    }
     let data = terminal_input_request_data(&request)?;
     let data_base64 = BASE64_STANDARD.encode(&data);
     let input_payload_hash = payload_hash(&data);

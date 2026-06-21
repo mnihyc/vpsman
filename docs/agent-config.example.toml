@@ -21,7 +21,8 @@ gateway_connect_timeout_secs = 10
 [backup]
 # Optional. The one-line installer does not write this section; omitted values
 # use safe defaults until backup workflows are configured.
-max_plaintext_bytes = 1048576
+max_uncompressed_bytes = 1048576
+max_archive_bytes = 2097152
 
 [update]
 # The autonomous updater is configured with production defaults but is disabled

@@ -632,6 +632,51 @@ fn job_timeout_must_fit_selected_agent_caps() {
 }
 
 #[test]
+fn job_timeout_accepts_configured_max_above_default() {
+    let agents = vec![test_agent(
+        "long-cap",
+        AgentCapabilitySnapshot {
+            command_timeout_secs: 7_200,
+            ..AgentCapabilitySnapshot::default()
+        },
+    )];
+
+    assert_eq!(
+        effective_job_timeout_secs(
+            7_200,
+            &["long-cap".to_string()],
+            &agents,
+            7_200,
+            &JobPrivilegeSource::RequestAssertion,
+        )
+        .unwrap(),
+        7_200
+    );
+}
+
+#[test]
+fn job_timeout_rejects_above_configured_max() {
+    let agents = vec![test_agent(
+        "long-cap",
+        AgentCapabilitySnapshot {
+            command_timeout_secs: 7_200,
+            ..AgentCapabilitySnapshot::default()
+        },
+    )];
+
+    let error = effective_job_timeout_secs(
+        7_201,
+        &["long-cap".to_string()],
+        &agents,
+        7_200,
+        &JobPrivilegeSource::RequestAssertion,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code, "command_timeout_exceeds_configured_max");
+}
+
+#[test]
 fn saved_schedule_timeout_clamps_to_selected_agent_caps() {
     let agents = vec![
         test_agent(
