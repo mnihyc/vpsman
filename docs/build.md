@@ -51,7 +51,7 @@ default tool discovery and require target-named tools on `PATH`:
 Local development can satisfy those names with profile-managed wrappers in
 `~/bin` or a real musl-cross distribution. The GitHub Actions CI, Release
 Check, and Release Build workflows create temporary wrappers around
-runner-provided `clang` and `llvm-ar` before static agent and CLI builds.
+runner-provided `clang` and `ar` before static agent and CLI builds.
 
 Generate development Noise keypairs with:
 

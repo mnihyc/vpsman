@@ -64,19 +64,19 @@ jobs:
 
           cat > "$RUNNER_TEMP/musl-tools/x86_64-linux-musl-ar" <<'SH'
           #!/usr/bin/env sh
-          exec llvm-ar "$@"
+          exec ar "$@"
           SH
 
           cat > "$RUNNER_TEMP/musl-tools/aarch64-linux-musl-ar" <<'SH'
           #!/usr/bin/env sh
-          exec llvm-ar "$@"
+          exec ar "$@"
           SH
 
           chmod +x "$RUNNER_TEMP"/musl-tools/*
           echo "$RUNNER_TEMP/musl-tools" >> "$GITHUB_PATH"
 
           command -v clang
-          command -v llvm-ar
+          command -v ar
           PATH="$RUNNER_TEMP/musl-tools:$PATH" command -v x86_64-linux-musl-gcc
           PATH="$RUNNER_TEMP/musl-tools:$PATH" command -v x86_64-linux-musl-ar
           PATH="$RUNNER_TEMP/musl-tools:$PATH" command -v aarch64-linux-musl-gcc
