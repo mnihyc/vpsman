@@ -273,20 +273,7 @@ fn restart_monitor_restarts_failed_process_until_retry_budget() {
     }
     assert!(restarted, "restart monitor did not run the process twice");
 
-    let outputs = execute_blocking(
-        uuid::Uuid::new_v4(),
-        &JobCommand::ProcessStatus {
-            name: Some("flap".to_string()),
-        },
-        &root,
-    )
-    .unwrap();
-    let stdout = outputs
-        .iter()
-        .find(|output| output.stream == OutputStream::Stdout)
-        .unwrap();
-    let status: serde_json::Value = serde_json::from_slice(&stdout.data).unwrap();
-    let process = &status["processes"][0];
+    let process = wait_for_process_status(&root, "flap", "running");
     assert_eq!(process["status"], "running");
     assert_eq!(process["restart_attempts"], 1);
     assert_eq!(process["last_exit_code"], 7);
@@ -568,6 +555,37 @@ fn enforces_cpu_shares_with_configured_cgroup_v2_root() {
 fn status_from_outputs(outputs: &[CommandOutput]) -> serde_json::Value {
     let status = outputs.iter().find(|output| output.done).unwrap();
     serde_json::from_slice(&status.data).unwrap()
+}
+
+fn wait_for_process_status(
+    root: &std::path::Path,
+    name: &str,
+    expected: &str,
+) -> serde_json::Value {
+    let mut last_process = serde_json::Value::Null;
+    for _ in 0..50 {
+        let outputs = execute_blocking(
+            uuid::Uuid::new_v4(),
+            &JobCommand::ProcessStatus {
+                name: Some(name.to_string()),
+            },
+            root,
+        )
+        .unwrap();
+        let stdout = outputs
+            .iter()
+            .find(|output| output.stream == OutputStream::Stdout)
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&stdout.data).unwrap();
+        if let Some(process) = status["processes"].get(0) {
+            last_process = process.clone();
+            if process["status"] == expected {
+                return last_process;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!("process {name} did not reach status {expected}: {last_process}");
 }
 
 fn wait_for_pid_file(path: &std::path::Path) -> u32 {

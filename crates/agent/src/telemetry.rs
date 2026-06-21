@@ -893,6 +893,7 @@ async fn run_json_stdin_command(
         let body = serde_json::to_vec(&payload)?;
         stdin.write_all(&body).await?;
         stdin.write_all(b"\n").await?;
+        stdin.shutdown().await?;
     }
     let stdout = child
         .stdout
