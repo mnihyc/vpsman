@@ -81,7 +81,9 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
   );
 
   const loadHistoryExport = useCallback(
-    async (domains = "audit_logs,job_outputs,backup_artifacts,network_observations,topology_history") => {
+    async (
+      domains = "audit_logs,system_metric_rollups,telemetry_rollups,telemetry_network_rates,job_outputs,backup_artifacts,network_observations,topology_history,client_status_history,gateway_sessions",
+    ) => {
       setAuditError(null);
       try {
         setHistoryExport(

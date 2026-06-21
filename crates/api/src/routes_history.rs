@@ -358,6 +358,22 @@ pub(crate) async fn export_history(
                     ),
                 );
             }
+            HistoryDomain::TelemetryNetworkRates => {
+                data.insert(
+                    domain.as_str().to_string(),
+                    json!(
+                        state
+                            .repo
+                            .list_telemetry_network_rates(
+                                limit,
+                                query.client_id.as_deref(),
+                                None,
+                                None,
+                            )
+                            .await?
+                    ),
+                );
+            }
             HistoryDomain::SystemMetricRollups => {
                 data.insert(
                     domain.as_str().to_string(),
@@ -399,6 +415,28 @@ pub(crate) async fn export_history(
                         "graph": state.repo.topology_graph(limit).await?,
                         "trends": state.repo.list_network_observation_trends(limit).await?,
                     }),
+                );
+            }
+            HistoryDomain::ClientStatusHistory => {
+                data.insert(
+                    domain.as_str().to_string(),
+                    Value::Array(
+                        state
+                            .repo
+                            .export_client_status_history(limit, query.client_id.as_deref())
+                            .await?,
+                    ),
+                );
+            }
+            HistoryDomain::GatewaySessions => {
+                data.insert(
+                    domain.as_str().to_string(),
+                    Value::Array(
+                        state
+                            .repo
+                            .export_gateway_sessions(limit, query.client_id.as_deref())
+                            .await?,
+                    ),
                 );
             }
         }
@@ -460,7 +498,11 @@ fn ensure_history_retention_domain_authority(
 fn history_retention_authority_scope(domain: HistoryDomain) -> &'static str {
     match domain {
         HistoryDomain::AuditLogs => SCOPE_AUDIT_READ,
-        HistoryDomain::SystemMetricRollups | HistoryDomain::TelemetryRollups => "inventory:write",
+        HistoryDomain::SystemMetricRollups
+        | HistoryDomain::TelemetryRollups
+        | HistoryDomain::TelemetryNetworkRates
+        | HistoryDomain::ClientStatusHistory
+        | HistoryDomain::GatewaySessions => "inventory:write",
         HistoryDomain::JobOutputs => "jobs:write",
         HistoryDomain::BackupArtifacts => "backups:write",
         HistoryDomain::NetworkObservations | HistoryDomain::TopologyHistory => "network:write",
@@ -473,6 +515,10 @@ fn history_export_scope(domain: HistoryDomain) -> &'static str {
         HistoryDomain::BackupArtifacts => SCOPE_BACKUPS_READ,
         HistoryDomain::AuditLogs => SCOPE_AUDIT_READ,
         HistoryDomain::NetworkObservations | HistoryDomain::TopologyHistory => SCOPE_NETWORK_READ,
-        HistoryDomain::SystemMetricRollups | HistoryDomain::TelemetryRollups => SCOPE_FLEET_READ,
+        HistoryDomain::SystemMetricRollups
+        | HistoryDomain::TelemetryRollups
+        | HistoryDomain::TelemetryNetworkRates
+        | HistoryDomain::ClientStatusHistory
+        | HistoryDomain::GatewaySessions => SCOPE_FLEET_READ,
     }
 }

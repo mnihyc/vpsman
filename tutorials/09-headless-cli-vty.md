@@ -178,7 +178,8 @@ Headless notification delivery has two paths. Use
 and keep `vpsman-worker` running for automatic queued delivery and retention
 pruning. Worker notification flags mirror environment variables, so scripts can
 set delivery limit, retention days, prune limit, and webhook timeout without
-editing code.
+editing code. Webhook-rule retention uses the configured day count directly
+within the 1-3650 day range; the shipped default is 90 days.
 
 This mirrors the panel workflow and keeps browser and headless operations
 consistent.

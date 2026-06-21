@@ -48,7 +48,8 @@ History retention writes require `history:write` plus authority for the selected
 domain. Audit retention requires `audit:read`; job-output retention requires
 `jobs:write`; backup-artifact retention requires `backups:write`; network
 observation and topology retention require `network:write`; telemetry and
-system rollup retention require `inventory:write`.
+system rollup, per-interface telemetry, client lifecycle, and gateway session
+retention require `inventory:write`.
 
 Server artifact cleanup requires explicit cleanup domains. `job_output` and
 `file_transfer` cleanup require `jobs:write`; `backup_artifact` cleanup requires

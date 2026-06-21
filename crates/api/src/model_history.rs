@@ -5,21 +5,27 @@ pub(crate) enum HistoryDomain {
     AuditLogs,
     SystemMetricRollups,
     TelemetryRollups,
+    TelemetryNetworkRates,
     JobOutputs,
     BackupArtifacts,
     NetworkObservations,
     TopologyHistory,
+    ClientStatusHistory,
+    GatewaySessions,
 }
 
 impl HistoryDomain {
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::AuditLogs,
         Self::SystemMetricRollups,
         Self::TelemetryRollups,
+        Self::TelemetryNetworkRates,
         Self::JobOutputs,
         Self::BackupArtifacts,
         Self::NetworkObservations,
         Self::TopologyHistory,
+        Self::ClientStatusHistory,
+        Self::GatewaySessions,
     ];
 
     pub(crate) fn as_str(self) -> &'static str {
@@ -27,10 +33,13 @@ impl HistoryDomain {
             Self::AuditLogs => "audit_logs",
             Self::SystemMetricRollups => "system_metric_rollups",
             Self::TelemetryRollups => "telemetry_rollups",
+            Self::TelemetryNetworkRates => "telemetry_network_rates",
             Self::JobOutputs => "job_outputs",
             Self::BackupArtifacts => "backup_artifacts",
             Self::NetworkObservations => "network_observations",
             Self::TopologyHistory => "topology_history",
+            Self::ClientStatusHistory => "client_status_history",
+            Self::GatewaySessions => "gateway_sessions",
         }
     }
 
@@ -41,10 +50,13 @@ impl HistoryDomain {
                 Some(Self::SystemMetricRollups)
             }
             "telemetry_rollups" | "telemetry" => Some(Self::TelemetryRollups),
+            "telemetry_network_rates" => Some(Self::TelemetryNetworkRates),
             "job_outputs" | "jobs" => Some(Self::JobOutputs),
             "backup_artifacts" | "backups" => Some(Self::BackupArtifacts),
             "network_observations" | "network" => Some(Self::NetworkObservations),
             "topology_history" | "topology" => Some(Self::TopologyHistory),
+            "client_status_history" => Some(Self::ClientStatusHistory),
+            "gateway_sessions" => Some(Self::GatewaySessions),
             _ => None,
         }
     }
@@ -54,7 +66,9 @@ impl HistoryDomain {
             Self::JobOutputs => 30,
             Self::SystemMetricRollups => 3650,
             Self::TelemetryRollups => 3650,
+            Self::TelemetryNetworkRates => 3650,
             Self::NetworkObservations | Self::TopologyHistory => 180,
+            Self::ClientStatusHistory | Self::GatewaySessions => 365,
             Self::AuditLogs => 365,
             Self::BackupArtifacts => 3650,
         }
@@ -63,7 +77,12 @@ impl HistoryDomain {
     pub(crate) fn default_prune_limit(self) -> i32 {
         match self {
             Self::JobOutputs | Self::NetworkObservations => 5_000,
-            Self::SystemMetricRollups | Self::TelemetryRollups | Self::TopologyHistory => 2_000,
+            Self::SystemMetricRollups
+            | Self::TelemetryRollups
+            | Self::TelemetryNetworkRates
+            | Self::TopologyHistory
+            | Self::ClientStatusHistory
+            | Self::GatewaySessions => 2_000,
             Self::AuditLogs | Self::BackupArtifacts => 1_000,
         }
     }

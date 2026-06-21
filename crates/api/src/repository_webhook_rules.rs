@@ -1342,6 +1342,26 @@ pub(crate) async fn ensure_webhook_event_partition(
     Ok(())
 }
 
+pub(crate) async fn ensure_webhook_event_partition_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    timestamp: DateTime<Utc>,
+) -> Result<()> {
+    let date = timestamp.date_naive();
+    let next = date
+        .succ_opt()
+        .context("failed to calculate webhook event partition date")?;
+    let table_name = format!("webhook_events_{}", date.format("%Y%m%d"));
+    let sql = format!(
+        r#"
+        CREATE TABLE IF NOT EXISTS {table_name}
+        PARTITION OF webhook_events
+        FOR VALUES FROM ('{date}') TO ('{next}')
+        "#
+    );
+    sqlx::query(&sql).execute(&mut **tx).await?;
+    Ok(())
+}
+
 fn webhook_event_from_row(row: sqlx::postgres::PgRow) -> Result<WebhookEventRow> {
     let payload: SqlJson<serde_json::Value> = row.try_get("payload")?;
     Ok(WebhookEventRow {

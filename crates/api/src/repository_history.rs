@@ -256,6 +256,21 @@ impl Repository {
                             object_keys: Vec::new(),
                         })
                     }
+                    HistoryDomain::TelemetryNetworkRates => {
+                        let matched_rows = prune_memory_vec(
+                            &memory.telemetry_network_rates,
+                            cutoff_unix,
+                            limit,
+                            dry_run,
+                            |row| &row.bucket_start,
+                        )
+                        .await?;
+                        Ok(HistoryRetentionPruneOutcome {
+                            matched_rows,
+                            pruned_rows: if dry_run { 0 } else { matched_rows },
+                            object_keys: Vec::new(),
+                        })
+                    }
                     HistoryDomain::SystemMetricRollups => {
                         let matched_rows = prune_memory_vec(
                             &memory.system_metric_rollups,
@@ -346,6 +361,49 @@ impl Repository {
                             .filter(|(_, row)| {
                                 (row.plan_name.is_some() || row.interface_name.is_some())
                                     && timestamp_before(&row.observed_at, cutoff_unix)
+                            })
+                            .map(|(index, _)| index)
+                            .take(limit)
+                            .collect::<Vec<_>>();
+                        let matched_rows = matched_indices.len() as i64;
+                        if !dry_run {
+                            matched_indices.sort_unstable_by_key(|index| Reverse(*index));
+                            for index in matched_indices {
+                                rows.remove(index);
+                            }
+                        }
+                        Ok(HistoryRetentionPruneOutcome {
+                            matched_rows,
+                            pruned_rows: if dry_run { 0 } else { matched_rows },
+                            object_keys: Vec::new(),
+                        })
+                    }
+                    HistoryDomain::ClientStatusHistory => {
+                        let matched_rows = prune_memory_vec(
+                            &memory.client_status_history,
+                            cutoff_unix,
+                            limit,
+                            dry_run,
+                            |row| &row.created_at,
+                        )
+                        .await?;
+                        Ok(HistoryRetentionPruneOutcome {
+                            matched_rows,
+                            pruned_rows: if dry_run { 0 } else { matched_rows },
+                            object_keys: Vec::new(),
+                        })
+                    }
+                    HistoryDomain::GatewaySessions => {
+                        let mut rows = memory.gateway_sessions.write().await;
+                        let mut matched_indices = rows
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, row)| row.status != "active")
+                            .filter(|(_, row)| {
+                                timestamp_before(
+                                    row.ended_at.as_deref().unwrap_or(&row.last_seen_at),
+                                    cutoff_unix,
+                                )
                             })
                             .map(|(index, _)| index)
                             .take(limit)
@@ -663,6 +721,145 @@ impl Repository {
                             "done": row.try_get::<bool, _>("done")?,
                             "received_at": row.try_get::<Option<String>, _>("received_at")?,
                             "created_at": row.try_get::<String, _>("created_at")?,
+                        }))
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn export_client_status_history(
+        &self,
+        limit: i64,
+        client_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>> {
+        match self {
+            Self::Memory(memory) => {
+                let mut rows = memory
+                    .client_status_history
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|row| client_id.is_none_or(|expected| row.client_id == expected))
+                    .map(|row| {
+                        json!({
+                            "id": row.id,
+                            "client_id": &row.client_id,
+                            "from_status": &row.from_status,
+                            "to_status": &row.to_status,
+                            "reason": &row.reason,
+                            "metadata": &row.metadata,
+                            "created_at": &row.created_at,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                rows.truncate(limit.clamp(1, 200) as usize);
+                Ok(rows)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        client_id,
+                        from_status,
+                        to_status,
+                        reason,
+                        metadata,
+                        created_at::text AS created_at
+                    FROM client_status_history
+                    WHERE ($1::TEXT IS NULL OR client_id = $1)
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(client_id)
+                .bind(limit.clamp(1, 200))
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        let metadata: serde_json::Value = row.try_get("metadata")?;
+                        Ok(json!({
+                            "id": row.try_get::<Uuid, _>("id")?,
+                            "client_id": row.try_get::<String, _>("client_id")?,
+                            "from_status": row.try_get::<Option<String>, _>("from_status")?,
+                            "to_status": row.try_get::<String, _>("to_status")?,
+                            "reason": row.try_get::<String, _>("reason")?,
+                            "metadata": metadata,
+                            "created_at": row.try_get::<String, _>("created_at")?,
+                        }))
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    pub(crate) async fn export_gateway_sessions(
+        &self,
+        limit: i64,
+        client_id: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>> {
+        match self {
+            Self::Memory(memory) => {
+                let mut rows = memory
+                    .gateway_sessions
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|row| client_id.is_none_or(|expected| row.client_id == expected))
+                    .map(|row| {
+                        json!({
+                            "id": row.id,
+                            "gateway_id": &row.gateway_id,
+                            "client_id": &row.client_id,
+                            "status": &row.status,
+                            "noise_public_key_hex": &row.noise_public_key_hex,
+                            "started_at": &row.started_at,
+                            "last_seen_at": &row.last_seen_at,
+                            "ended_at": &row.ended_at,
+                            "end_reason": &row.end_reason,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                rows.truncate(limit.clamp(1, 200) as usize);
+                Ok(rows)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        gateway_id,
+                        client_id,
+                        noise_public_key_hex,
+                        status,
+                        started_at::text AS started_at,
+                        last_seen_at::text AS last_seen_at,
+                        ended_at::text AS ended_at,
+                        end_reason
+                    FROM gateway_sessions
+                    WHERE ($1::TEXT IS NULL OR client_id = $1)
+                    ORDER BY last_seen_at DESC, id DESC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(client_id)
+                .bind(limit.clamp(1, 200))
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        Ok(json!({
+                            "id": row.try_get::<Uuid, _>("id")?,
+                            "gateway_id": row.try_get::<String, _>("gateway_id")?,
+                            "client_id": row.try_get::<String, _>("client_id")?,
+                            "noise_public_key_hex": row.try_get::<Option<String>, _>("noise_public_key_hex")?,
+                            "status": row.try_get::<String, _>("status")?,
+                            "started_at": row.try_get::<String, _>("started_at")?,
+                            "last_seen_at": row.try_get::<String, _>("last_seen_at")?,
+                            "ended_at": row.try_get::<Option<String>, _>("ended_at")?,
+                            "end_reason": row.try_get::<Option<String>, _>("end_reason")?,
                         }))
                     })
                     .collect()
@@ -1005,6 +1202,12 @@ async fn prune_postgres_history_domain(
         (HistoryDomain::TelemetryRollups, false) => {
             prune_telemetry_rollups(pool, cutoff_unix, limit, false).await
         }
+        (HistoryDomain::TelemetryNetworkRates, true) => {
+            prune_telemetry_network_rates(pool, cutoff_unix, limit, true).await
+        }
+        (HistoryDomain::TelemetryNetworkRates, false) => {
+            prune_telemetry_network_rates(pool, cutoff_unix, limit, false).await
+        }
         (HistoryDomain::SystemMetricRollups, true) => {
             prune_system_metric_rollups(pool, cutoff_unix, limit, true).await
         }
@@ -1070,6 +1273,36 @@ async fn prune_postgres_history_domain(
                 limit,
             )
             .await
+        }
+        (HistoryDomain::ClientStatusHistory, true) => {
+            select_id_count(
+                pool,
+                "client_status_history",
+                "created_at",
+                "id",
+                "TRUE",
+                cutoff_unix,
+                limit,
+            )
+            .await
+        }
+        (HistoryDomain::ClientStatusHistory, false) => {
+            delete_by_id(
+                pool,
+                "client_status_history",
+                "created_at",
+                "id",
+                "TRUE",
+                cutoff_unix,
+                limit,
+            )
+            .await
+        }
+        (HistoryDomain::GatewaySessions, true) => {
+            prune_gateway_sessions(pool, cutoff_unix, limit, true).await
+        }
+        (HistoryDomain::GatewaySessions, false) => {
+            prune_gateway_sessions(pool, cutoff_unix, limit, false).await
         }
     }
 }
@@ -1214,6 +1447,94 @@ async fn prune_system_metric_rollups(
           AND rollup.bucket_secs = doomed.bucket_secs
           AND rollup.bucket_start = doomed.bucket_start
         RETURNING rollup.metric
+        "#
+    };
+    let rows = sqlx::query(query)
+        .bind(cutoff_unix as i64)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(HistoryRetentionPruneOutcome {
+        matched_rows: rows.len() as i64,
+        pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
+        object_keys: Vec::new(),
+    })
+}
+
+async fn prune_telemetry_network_rates(
+    pool: &sqlx::PgPool,
+    cutoff_unix: u64,
+    limit: i32,
+    dry_run: bool,
+) -> Result<HistoryRetentionPruneOutcome> {
+    let query = if dry_run {
+        r#"
+        SELECT client_id, interface, bucket_secs, bucket_start
+        FROM telemetry_network_rates
+        WHERE bucket_start < to_timestamp($1)
+        ORDER BY bucket_start ASC, client_id ASC, interface ASC
+        LIMIT $2
+        "#
+    } else {
+        r#"
+        WITH doomed AS (
+            SELECT client_id, interface, bucket_secs, bucket_start
+            FROM telemetry_network_rates
+            WHERE bucket_start < to_timestamp($1)
+            ORDER BY bucket_start ASC, client_id ASC, interface ASC
+            LIMIT $2
+        )
+        DELETE FROM telemetry_network_rates rate
+        USING doomed
+        WHERE rate.client_id = doomed.client_id
+          AND rate.interface = doomed.interface
+          AND rate.bucket_secs = doomed.bucket_secs
+          AND rate.bucket_start = doomed.bucket_start
+        RETURNING rate.client_id
+        "#
+    };
+    let rows = sqlx::query(query)
+        .bind(cutoff_unix as i64)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(HistoryRetentionPruneOutcome {
+        matched_rows: rows.len() as i64,
+        pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
+        object_keys: Vec::new(),
+    })
+}
+
+async fn prune_gateway_sessions(
+    pool: &sqlx::PgPool,
+    cutoff_unix: u64,
+    limit: i32,
+    dry_run: bool,
+) -> Result<HistoryRetentionPruneOutcome> {
+    let query = if dry_run {
+        r#"
+        SELECT id
+        FROM gateway_sessions
+        WHERE status <> 'active'
+          AND COALESCE(ended_at, last_seen_at) < to_timestamp($1)
+        ORDER BY COALESCE(ended_at, last_seen_at) ASC, id ASC
+        LIMIT $2
+        "#
+    } else {
+        r#"
+        WITH doomed AS (
+            SELECT id
+            FROM gateway_sessions
+            WHERE status <> 'active'
+              AND COALESCE(ended_at, last_seen_at) < to_timestamp($1)
+            ORDER BY COALESCE(ended_at, last_seen_at) ASC, id ASC
+            LIMIT $2
+        )
+        DELETE FROM gateway_sessions session
+        USING doomed
+        WHERE session.id = doomed.id
+          AND session.status <> 'active'
+        RETURNING session.id
         "#
     };
     let rows = sqlx::query(query)

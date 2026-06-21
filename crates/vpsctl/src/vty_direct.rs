@@ -972,11 +972,11 @@ fn percent_encode_query_value(value: &str) -> String {
 }
 
 fn history_retention_upsert_usage() -> String {
-    "usage: history-retention-upsert --domain <domain> [--retention-days <1-3650>] [--prune-limit <1-100000>] [--enabled true|false] [--metadata-only true|false] [--export-enabled true|false] [--notes <text>|--clear-notes] --confirmed".to_string()
+    "usage: history-retention-upsert --domain <audit_logs|system_metric_rollups|telemetry_rollups|telemetry_network_rates|job_outputs|backup_artifacts|network_observations|topology_history|client_status_history|gateway_sessions> [--retention-days <1-3650>] [--prune-limit <1-100000>] [--enabled true|false] [--metadata-only true|false] [--export-enabled true|false] [--notes <text>|--clear-notes] --confirmed".to_string()
 }
 
 fn history_retention_prune_usage() -> String {
-    "usage: history-retention-prune [--domain <domain>] [--dry-run] [--metadata-only true|false] [--preview-hash <sha256>] [--confirmed]".to_string()
+    "usage: history-retention-prune [--domain <audit_logs|system_metric_rollups|telemetry_rollups|telemetry_network_rates|job_outputs|backup_artifacts|network_observations|topology_history|client_status_history|gateway_sessions>] [--dry-run] [--metadata-only true|false] [--preview-hash <sha256>] [--confirmed]".to_string()
 }
 
 fn server_jobs_usage() -> String {

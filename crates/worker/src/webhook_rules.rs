@@ -44,20 +44,25 @@ impl WebhookRuleWorkerConfig {
         retention_days: i64,
         retention_prune_limit: i64,
         webhook_timeout_secs: u64,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            (1..=3_650).contains(&retention_days),
+            "webhook_rule_retention_days_out_of_range"
+        );
+        Ok(Self {
             delivery_limit: delivery_limit.clamp(1, 200),
             materialize_limit: materialize_limit.clamp(1, 1000),
-            retention_days: retention_days.clamp(1, 7),
+            retention_days,
             retention_prune_limit: retention_prune_limit.clamp(1, 10_000),
             webhook_timeout_secs: webhook_timeout_secs.clamp(1, 60),
-        }
+        })
     }
 }
 
 impl Default for WebhookRuleWorkerConfig {
     fn default() -> Self {
-        Self::new(25, 100, 7, 1_000, DEFAULT_WEBHOOK_TIMEOUT_SECS)
+        Self::new(25, 100, 90, 1_000, DEFAULT_WEBHOOK_TIMEOUT_SECS)
+            .expect("default webhook retention config is valid")
     }
 }
 
@@ -166,7 +171,9 @@ pub(crate) async fn process_webhook_rules(
     let materialized = materialize_interval_events(pool, config).await?;
     let event_deliveries = process_webhook_events(pool, config).await?;
     let (processed, delivered, failed) = process_queued_deliveries(pool, config).await?;
-    let pruned = drop_old_event_partitions(pool, config).await?;
+    let pruned = drop_old_event_partitions(pool, config).await?
+        + prune_default_partition_rows(pool, config).await?
+        + prune_deliveries(pool, config).await?;
     Ok(WebhookRuleWorkerRun {
         materialized: materialized + event_deliveries,
         processed,
@@ -332,6 +339,8 @@ pub(crate) async fn insert_webhook_event(
     subject_client_ids: &[String],
     payload: Value,
 ) -> Result<bool> {
+    let occurred_at = Utc::now();
+    create_event_partition(pool, occurred_at.date_naive()).await?;
     let predicates = normalize_event_predicates(kind, event_predicates);
     let inserted = sqlx::query(
         r#"
@@ -342,9 +351,10 @@ pub(crate) async fn insert_webhook_event(
             event_id,
             event_predicates,
             subject_client_ids,
-            payload
+            payload,
+            occurred_at
         )
-        SELECT $1, NULL, $2, $3, $4, $5, $6
+        SELECT $1, NULL, $2, $3, $4, $5, $6, $7::timestamptz
         WHERE NOT EXISTS (
             SELECT 1 FROM webhook_events WHERE kind = $2 AND event_id = $3
         )
@@ -356,6 +366,7 @@ pub(crate) async fn insert_webhook_event(
     .bind(&predicates)
     .bind(subject_client_ids)
     .bind(SqlJson(payload))
+    .bind(occurred_at.to_rfc3339())
     .execute(pool)
     .await?;
     if inserted.rows_affected() > 0 {
@@ -376,6 +387,8 @@ pub(crate) async fn insert_webhook_event_in_tx(
     subject_client_ids: &[String],
     payload: Value,
 ) -> Result<bool> {
+    let occurred_at = Utc::now();
+    create_event_partition_in_tx(tx, occurred_at.date_naive()).await?;
     let predicate_refs = event_predicates
         .iter()
         .map(String::as_str)
@@ -389,9 +402,10 @@ pub(crate) async fn insert_webhook_event_in_tx(
             event_id,
             event_predicates,
             subject_client_ids,
-            payload
+            payload,
+            occurred_at
         )
-        SELECT $1, $2, $3, $4, $5, $6
+        SELECT $1, $2, $3, $4, $5, $6, $7::timestamptz
         WHERE NOT EXISTS (
             SELECT 1 FROM webhook_events WHERE kind = $2 AND event_id = $3
         )
@@ -403,6 +417,7 @@ pub(crate) async fn insert_webhook_event_in_tx(
     .bind(&predicates)
     .bind(subject_client_ids)
     .bind(SqlJson(payload))
+    .bind(occurred_at.to_rfc3339())
     .execute(&mut **tx)
     .await?;
     if inserted.rows_affected() > 0 {
@@ -957,6 +972,25 @@ async fn create_event_partition(pool: &PgPool, date: chrono::NaiveDate) -> Resul
     Ok(())
 }
 
+async fn create_event_partition_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    date: chrono::NaiveDate,
+) -> Result<()> {
+    let next = date
+        .succ_opt()
+        .context("failed to calculate webhook event partition date")?;
+    let table_name = format!("webhook_events_{}", date.format("%Y%m%d"));
+    let sql = format!(
+        r#"
+        CREATE TABLE IF NOT EXISTS {table_name}
+        PARTITION OF webhook_events
+        FOR VALUES FROM ('{date}') TO ('{next}')
+        "#
+    );
+    sqlx::query(&sql).execute(&mut **tx).await?;
+    Ok(())
+}
+
 async fn drop_old_event_partitions(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
@@ -989,6 +1023,65 @@ async fn drop_old_event_partitions(
         dropped += 1;
     }
     Ok(dropped)
+}
+
+async fn prune_default_partition_rows(
+    pool: &PgPool,
+    config: WebhookRuleWorkerConfig,
+) -> Result<usize> {
+    let rows = sqlx::query(
+        r#"
+        WITH candidates AS (
+            SELECT occurred_at, id
+            FROM webhook_events
+            WHERE tableoid = 'webhook_events_default'::regclass
+              AND processed_at IS NOT NULL
+              AND occurred_at <= now() - ($1::bigint * interval '1 day')
+            ORDER BY occurred_at ASC, id ASC
+            LIMIT $2
+        )
+        DELETE FROM webhook_events events
+        USING candidates
+        WHERE events.occurred_at = candidates.occurred_at
+          AND events.id = candidates.id
+        RETURNING events.id
+        "#,
+    )
+    .bind(config.retention_days)
+    .bind(config.retention_prune_limit)
+    .fetch_all(pool)
+    .await?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    insert_default_partition_prune_audit(pool, config, rows.len()).await?;
+    Ok(rows.len())
+}
+
+async fn insert_default_partition_prune_audit(
+    pool: &PgPool,
+    config: WebhookRuleWorkerConfig,
+    pruned_count: usize,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (
+            id, actor_id, action, target, command_hash, metadata
+        )
+        VALUES ($1, NULL, $2, $3, NULL, $4)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind("webhook.default_partition_pruned")
+    .bind("webhook_events_default")
+    .bind(json!({
+        "worker": "webhook_rule_worker",
+        "retention_days": config.retention_days,
+        "pruned_count": pruned_count,
+    }))
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -1035,7 +1128,8 @@ async fn prune_deliveries(pool: &PgPool, config: WebhookRuleWorkerConfig) -> Res
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    insert_prune_audit(pool, config, &pruned).await?;
+    let resolved_alerts = resolve_pruned_delivery_alerts(pool, &pruned).await?;
+    insert_prune_audit(pool, config, &pruned, resolved_alerts).await?;
     Ok(pruned.len())
 }
 
@@ -1124,6 +1218,32 @@ async fn insert_permanent_failure_alert(
     Ok(())
 }
 
+async fn resolve_pruned_delivery_alerts(pool: &PgPool, pruned: &[PrunedDelivery]) -> Result<usize> {
+    let alert_ids = pruned
+        .iter()
+        .filter(|delivery| delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED)
+        .map(|delivery| format!("webhook_delivery:{}", delivery.id))
+        .collect::<Vec<_>>();
+    if alert_ids.is_empty() {
+        return Ok(0);
+    }
+    let updated = sqlx::query(
+        r#"
+        UPDATE fleet_alert_states
+        SET
+            state = 'acknowledged',
+            reason = 'webhook delivery evidence pruned by retention',
+            updated_at = now()
+        WHERE alert_id = ANY($1)
+          AND state = 'open'
+        "#,
+    )
+    .bind(&alert_ids)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() as usize)
+}
+
 fn retry_backoff_secs(attempt_count: i32) -> Option<i64> {
     let index = attempt_count.saturating_sub(1) as usize;
     RETRY_BACKOFF_SECS.get(index).copied()
@@ -1134,6 +1254,7 @@ async fn insert_prune_audit(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
     pruned: &[PrunedDelivery],
+    resolved_alerts: usize,
 ) -> Result<()> {
     sqlx::query(
         r#"
@@ -1150,6 +1271,7 @@ async fn insert_prune_audit(
         "worker": "webhook_rule_worker",
         "retention_days": config.retention_days,
         "pruned_count": pruned.len(),
+        "resolved_alert_count": resolved_alerts,
         "deliveries": pruned.iter().take(MAX_AUDIT_DELIVERY_ROWS).map(|delivery| json!({
             "id": delivery.id,
             "rule_id": delivery.rule_id,
@@ -1227,9 +1349,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn webhook_rule_worker_config_clamps_bounds() {
+    fn webhook_rule_worker_config_clamps_operational_bounds_and_validates_retention() {
         assert_eq!(
-            WebhookRuleWorkerConfig::new(0, 0, 0, 0, 0),
+            WebhookRuleWorkerConfig::new(0, 0, 1, 0, 0).unwrap(),
             WebhookRuleWorkerConfig {
                 delivery_limit: 1,
                 materialize_limit: 1,
@@ -1239,15 +1361,17 @@ mod tests {
             }
         );
         assert_eq!(
-            WebhookRuleWorkerConfig::new(10_000, 10_000, 10_000, 20_000, 120),
+            WebhookRuleWorkerConfig::new(10_000, 10_000, 3_650, 20_000, 120).unwrap(),
             WebhookRuleWorkerConfig {
                 delivery_limit: 200,
                 materialize_limit: 1000,
-                retention_days: 7,
+                retention_days: 3_650,
                 retention_prune_limit: 10_000,
                 webhook_timeout_secs: 60,
             }
         );
+        assert!(WebhookRuleWorkerConfig::new(25, 100, 0, 1_000, 5).is_err());
+        assert!(WebhookRuleWorkerConfig::new(25, 100, 3_651, 1_000, 5).is_err());
     }
 
     #[test]

@@ -5,7 +5,10 @@ use uuid::Uuid;
 
 use crate::{
     gateway_client::GatewayDispatchClient,
-    model::{AuditLogView, AuthContext, JobOutputView, ListQuery, OperatorView},
+    model::{
+        AuditLogView, AuthContext, ClientStatusHistoryView, GatewaySessionView, JobOutputView,
+        ListQuery, OperatorView, ServerJobView, TelemetryNetworkRateView,
+    },
     model_history::{
         HistoryDomain, HistoryRetentionPrunePlan, HistoryRetentionPruneRequest,
         UpsertHistoryRetentionPolicyRequest,
@@ -15,6 +18,9 @@ use crate::{
     routes_history::prune_history_retention,
     state::AppState,
     unix_now,
+};
+use vpsman_common::{
+    SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 
 #[tokio::test]
@@ -270,6 +276,88 @@ async fn history_retention_rejects_unconfirmed_policy_update() {
     assert!(error.contains("history_retention_update_requires_confirmation"));
 }
 
+#[tokio::test]
+async fn history_retention_prunes_network_rates_lifecycle_and_ended_gateway_sessions() {
+    let repo = Repository::Memory(MemoryState::default());
+    let old = unix_now().saturating_sub(400 * 86_400).to_string();
+    let recent = unix_now().to_string();
+    if let Repository::Memory(memory) = &repo {
+        memory.telemetry_network_rates.write().await.extend([
+            network_rate("edge-a", "eth0", &old),
+            network_rate("edge-b", "eth0", &recent),
+        ]);
+        memory.client_status_history.write().await.extend([
+            client_status_history("edge-a", &old),
+            client_status_history("edge-b", &recent),
+        ]);
+        memory.gateway_sessions.write().await.extend([
+            gateway_session("edge-a", "ended", &old, Some(old.clone())),
+            gateway_session("edge-b", "active", &old, None),
+            gateway_session("edge-c", "ended", &recent, Some(recent.clone())),
+        ]);
+    }
+    let cutoff = unix_now().saturating_sub(365 * 86_400);
+    for domain in [
+        HistoryDomain::TelemetryNetworkRates,
+        HistoryDomain::ClientStatusHistory,
+        HistoryDomain::GatewaySessions,
+    ] {
+        let outcome = repo
+            .prune_history_domain(
+                &HistoryRetentionPrunePlan {
+                    domain,
+                    prune_limit: 10,
+                    enabled: true,
+                },
+                cutoff,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.matched_rows, 1, "{domain:?}");
+        assert_eq!(outcome.pruned_rows, 1, "{domain:?}");
+    }
+    if let Repository::Memory(memory) = &repo {
+        assert_eq!(memory.telemetry_network_rates.read().await.len(), 1);
+        assert_eq!(memory.client_status_history.read().await.len(), 1);
+        let sessions = memory.gateway_sessions.read().await;
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().any(|session| session.status == "active"));
+    }
+}
+
+#[tokio::test]
+async fn artifact_cleanup_running_timeout_marks_stale_jobs_failed_without_reclaim() {
+    let repo = Repository::Memory(MemoryState::default());
+    let old = unix_now().saturating_sub(7 * 60 * 60).to_string();
+    let recent = unix_now().to_string();
+    let old_job_id = Uuid::new_v4();
+    if let Repository::Memory(memory) = &repo {
+        memory.server_jobs.write().await.extend([
+            server_job(old_job_id, SERVER_JOB_STATUS_RUNNING, Some(old)),
+            server_job(Uuid::new_v4(), SERVER_JOB_STATUS_RUNNING, Some(recent)),
+        ]);
+    }
+    let expired = repo
+        .expire_stale_running_artifact_cleanup_jobs()
+        .await
+        .unwrap();
+    assert_eq!(expired, 1);
+    let jobs = repo.list_server_jobs(10).await.unwrap();
+    let stale = jobs.iter().find(|job| job.id == old_job_id).unwrap();
+    assert_eq!(stale.status, SERVER_JOB_STATUS_FAILED);
+    assert_eq!(
+        stale.error.as_deref(),
+        Some("artifact_cleanup_running_timeout")
+    );
+    assert_eq!(
+        jobs.iter()
+            .filter(|job| job.status == SERVER_JOB_STATUS_RUNNING)
+            .count(),
+        1
+    );
+}
+
 fn audit_with_created_at(target: &str, created_at: String) -> AuditLogView {
     AuditLogView {
         id: Uuid::new_v4(),
@@ -279,6 +367,75 @@ fn audit_with_created_at(target: &str, created_at: String) -> AuditLogView {
         command_hash: None,
         metadata: json!({}),
         created_at,
+    }
+}
+
+fn network_rate(client_id: &str, interface: &str, bucket_start: &str) -> TelemetryNetworkRateView {
+    TelemetryNetworkRateView {
+        client_id: client_id.to_string(),
+        interface: interface.to_string(),
+        bucket_start: bucket_start.to_string(),
+        bucket_secs: 60,
+        sample_count: 1,
+        rx_bytes_avg: 1,
+        tx_bytes_avg: 1,
+        rx_bytes_delta: 1,
+        tx_bytes_delta: 1,
+        rx_bps_avg: 1.0,
+        tx_bps_avg: 1.0,
+        updated_at: bucket_start.to_string(),
+    }
+}
+
+fn client_status_history(client_id: &str, created_at: &str) -> ClientStatusHistoryView {
+    ClientStatusHistoryView {
+        id: Uuid::new_v4(),
+        client_id: client_id.to_string(),
+        from_status: Some("online".to_string()),
+        to_status: "offline".to_string(),
+        reason: "test".to_string(),
+        metadata: json!({}),
+        created_at: created_at.to_string(),
+    }
+}
+
+fn gateway_session(
+    client_id: &str,
+    status: &str,
+    last_seen_at: &str,
+    ended_at: Option<String>,
+) -> GatewaySessionView {
+    GatewaySessionView {
+        id: Uuid::new_v4(),
+        gateway_id: "gateway-a".to_string(),
+        client_id: client_id.to_string(),
+        status: status.to_string(),
+        noise_public_key_hex: None,
+        started_at: last_seen_at.to_string(),
+        last_seen_at: last_seen_at.to_string(),
+        ended_at,
+        end_reason: None,
+    }
+}
+
+fn server_job(id: Uuid, status: &str, started_at: Option<String>) -> ServerJobView {
+    ServerJobView {
+        id,
+        job_type: SERVER_JOB_TYPE_ARTIFACT_CLEANUP.to_string(),
+        status: status.to_string(),
+        expression: Some("artifact.domain = \"job_output\"".to_string()),
+        preview_hash: Some("a".repeat(64)),
+        matched_count: 1,
+        matched_bytes: 1,
+        deleted_count: 0,
+        deleted_bytes: 0,
+        error: None,
+        created_by: None,
+        metadata: json!({}),
+        created_at: unix_now().to_string(),
+        started_at,
+        completed_at: None,
+        canceled_at: None,
     }
 }
 

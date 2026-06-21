@@ -21,8 +21,8 @@ use vpsman_common::{
 };
 use vpsman_common::{
     payload_hash, read_secret_file_ref, AgentCapabilitySnapshot, JobCommand, SuiteConfig,
-    SERVER_JOB_STATUS_COMPLETED, SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_QUEUED,
-    SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
+    ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS, SERVER_JOB_STATUS_COMPLETED, SERVER_JOB_STATUS_FAILED,
+    SERVER_JOB_STATUS_QUEUED, SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 use vpsman_object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use vpsman_server_core::{
@@ -230,7 +230,7 @@ impl WorkerRuntimeConfig {
                 args.webhook_rule_retention_days,
                 args.webhook_rule_retention_prune_limit,
                 args.webhook_rule_timeout_secs,
-            ),
+            )?,
             backup_policy_prune_config: BackupPolicyRetentionPruneConfig::new(
                 args.backup_policy_prune_enabled,
                 args.backup_policy_prune_limit,
@@ -1103,14 +1103,18 @@ async fn process_artifact_cleanup_jobs(
     pool: &PgPool,
     object_stores: ArtifactObjectStores<'_>,
 ) -> Result<ArtifactCleanupRun> {
+    let expired = expire_stale_artifact_cleanup_jobs(pool).await?;
     let Some(job) = claim_artifact_cleanup_job(pool).await? else {
-        return Ok(ArtifactCleanupRun::default());
+        return Ok(ArtifactCleanupRun {
+            jobs: expired,
+            ..ArtifactCleanupRun::default()
+        });
     };
     for required_scope in artifact_cleanup_job_required_scopes(&job.metadata)? {
         if !actor_authorized(pool, job.created_by, "operator", &[required_scope]).await? {
             mark_artifact_cleanup_job_failed(pool, job.id, "actor_authority_revoked").await?;
             return Ok(ArtifactCleanupRun {
-                jobs: 1,
+                jobs: expired + 1,
                 ..ArtifactCleanupRun::default()
             });
         }
@@ -1144,7 +1148,10 @@ async fn process_artifact_cleanup_jobs(
             .bind(run.skipped_rows)
             .execute(pool)
             .await?;
-            Ok(ArtifactCleanupRun { jobs: 1, ..run })
+            Ok(ArtifactCleanupRun {
+                jobs: expired + 1,
+                ..run
+            })
         }
         Err(error) => {
             sqlx::query(
@@ -1165,6 +1172,32 @@ async fn process_artifact_cleanup_jobs(
             Err(error)
         }
     }
+}
+
+async fn expire_stale_artifact_cleanup_jobs(pool: &PgPool) -> Result<i64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE server_jobs
+        SET
+            status = $3,
+            error = 'artifact_cleanup_running_timeout',
+            completed_at = now(),
+            metadata = metadata || jsonb_build_object(
+                'running_timeout_secs', $4::bigint
+            )
+        WHERE job_type = $1
+          AND status = $2
+          AND started_at IS NOT NULL
+          AND started_at <= now() - ($4::bigint * interval '1 second')
+        "#,
+    )
+    .bind(SERVER_JOB_TYPE_ARTIFACT_CLEANUP)
+    .bind(SERVER_JOB_STATUS_RUNNING)
+    .bind(SERVER_JOB_STATUS_FAILED)
+    .bind(ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() as i64)
 }
 
 async fn mark_artifact_cleanup_job_failed(pool: &PgPool, job_id: Uuid, error: &str) -> Result<()> {

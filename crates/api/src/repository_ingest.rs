@@ -1665,6 +1665,7 @@ pub(crate) async fn insert_client_status_webhook_event_in_tx(
         }
     });
     let occurred_at = Utc::now();
+    crate::repository_webhook_rules::ensure_webhook_event_partition_in_tx(tx, occurred_at).await?;
     sqlx::query(
         r#"
         INSERT INTO webhook_events (

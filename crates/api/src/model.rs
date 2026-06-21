@@ -100,6 +100,17 @@ pub(crate) struct GatewaySessionView {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub(crate) struct ClientStatusHistoryView {
+    pub(crate) id: Uuid,
+    pub(crate) client_id: String,
+    pub(crate) from_status: Option<String>,
+    pub(crate) to_status: String,
+    pub(crate) reason: String,
+    pub(crate) metadata: serde_json::Value,
+    pub(crate) created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct TelemetryRollupView {
     pub(crate) client_id: String,
     pub(crate) bucket_start: String,

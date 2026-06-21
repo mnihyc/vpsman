@@ -166,15 +166,15 @@ of the same root cause.
 | AUD-150 | High | Fixed | Gateway/API/Telemetry/Lifecycle | Displaced gateway sessions can keep forwarding telemetry after replacement |
 | AUD-151 | High | Fixed | API/Frontend/CLI/Auth/Privilege | Operator management mutations lack request-bound privilege verification |
 | AUD-152 | High | Fixed | Frontend/Backups/Migrations | Migration restore runs can use stale hidden restore options |
-| AUD-153 | Medium/High | Confirmed | API/Telemetry/Retention | Per-interface network-rate telemetry has no retention path |
+| AUD-153 | Medium/High | Fixed | API/Telemetry/Retention | Per-interface network-rate telemetry has no retention path |
 | AUD-154 | High | Fixed | API/Frontend/CLI/History Retention | History retention prune reselects live rows instead of deleting the reviewed dry-run set |
 | AUD-155 | High | Fixed | Worker/Artifact Cleanup/Observability | Failed artifact cleanup jobs can hide already-deleted artifacts |
 | AUD-156 | High | Fixed | Agent/Process Supervisor/Command Semantics | Process status and log reads can restart supervised processes |
-| AUD-157 | Medium/High | Confirmed | API/Gateway/Client Lifecycle/Retention | Client and gateway lifecycle histories have no retention path |
-| AUD-158 | Medium/High | Confirmed | API/Worker/Webhooks/Retention | Webhook events in the default partition bypass event retention |
-| AUD-159 | Medium/High | Confirmed | Worker/Webhooks/Retention/Alerts | Webhook permanent-failure deliveries bypass delivery retention and create unbounded alerts |
-| AUD-160 | Medium/High | Confirmed | Worker/Webhooks/Retention/Config | Webhook-rule retention silently clamps the shipped 90-day setting to 7 days |
-| AUD-161 | High | Confirmed | Worker/Server Jobs/Artifact Cleanup | Artifact cleanup server jobs can remain running forever after worker loss |
+| AUD-157 | Medium/High | Fixed | API/Gateway/Client Lifecycle/Retention | Client and gateway lifecycle histories have no retention path |
+| AUD-158 | Medium/High | Fixed | API/Worker/Webhooks/Retention | Webhook events in the default partition bypass event retention |
+| AUD-159 | Medium/High | Fixed | Worker/Webhooks/Retention/Alerts | Webhook permanent-failure deliveries bypass delivery retention and create unbounded alerts |
+| AUD-160 | Medium/High | Fixed | Worker/Webhooks/Retention/Config | Webhook-rule retention silently clamps the shipped 90-day setting to 7 days |
+| AUD-161 | High | Fixed | Worker/Server Jobs/Artifact Cleanup | Artifact cleanup server jobs can remain running forever after worker loss |
 | AUD-162 | High | Fixed | Agent/Updates/Safety | Update-check activation can downgrade agents from an older release manifest |
 | AUD-163 | High | Fixed | Agent/Custom Runtime Commands/Reliability | Custom JSON command timeouts can be bypassed after stdout closes |
 | AUD-164 | High | Fixed | Agent/Process Supervisor/Timeouts | Process supervisor stop and restart can mutate host state after command timeout |
@@ -5814,7 +5814,7 @@ of the same root cause.
 ### AUD-153: Per-Interface Network-Rate Telemetry Has No Retention Path
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Telemetry/Retention
 - Context: Agents send network interface counters as part of normal telemetry.
   The API stores per-client, per-interface, per-bucket network-rate rows and
@@ -5849,6 +5849,10 @@ of the same root cause.
   `telemetry_network_rates` retention domain or make the existing telemetry
   rollup retention domain prune both `telemetry_rollups` and
   `telemetry_network_rates` with clear operator-facing counts.
+- Fix: Added first-class `telemetry_network_rates` history-retention policy,
+  prune, export, CLI/VTY, frontend, audit, and schema-domain support. Prune
+  counts and deletes per-interface network-rate rows by `bucket_start` under
+  the operator-reviewed retention policy.
 
 ### AUD-154: History Retention Prune Reselects Live Rows Instead Of Deleting The Reviewed Dry-Run Set
 
@@ -5987,7 +5991,7 @@ of the same root cause.
 ### AUD-157: Client And Gateway Lifecycle Histories Have No Retention Path
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Gateway/Client Lifecycle/Retention
 - Context: Normal 20+ VPS operation records agent status transitions and
   gateway session starts/ends whenever agents reconnect, go offline, are
@@ -6020,11 +6024,15 @@ of the same root cause.
   explicit retention domains for client lifecycle history and ended gateway
   sessions, or another bounded purge policy with visible counts and audit
   evidence. Active gateway sessions must not be pruned.
+- Fix: Added first-class `client_status_history` and `gateway_sessions`
+  retention domains. Client status rows prune by `created_at`; gateway session
+  retention prunes only non-active ended sessions by `COALESCE(ended_at,
+  last_seen_at)`, so active gateway sessions are never deleted by retention.
 
 ### AUD-158: Webhook Events In The Default Partition Bypass Event Retention
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: API/Worker/Webhooks/Retention
 - Context: Webhook events are created from normal agent status changes,
   schedule events, alert reads, job lifecycle changes, and manual dry runs. The
@@ -6064,11 +6072,15 @@ of the same root cause.
   inserts that can emit webhook events, or add a safe default-partition drain
   that moves rows into date partitions or prunes old processed default rows with
   visible audit evidence.
+- Fix: Webhook event insert paths now create the matching date partition before
+  insert, including existing-transaction status/lifecycle insert paths. The
+  worker also prunes old processed rows that remain in `webhook_events_default`
+  as a bounded safety drain with audit evidence.
 
 ### AUD-159: Webhook Permanent-Failure Deliveries Bypass Delivery Retention And Create Unbounded Alerts
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Worker/Webhooks/Retention/Alerts
 - Context: Webhook-rule delivery is an integration path for fleet events. A
   misconfigured, retired, or temporarily broken receiver can make many event
@@ -6101,11 +6113,16 @@ of the same root cause.
   pruned by the same webhook retention policy after sufficient visibility. The
   chosen behavior should also clean up or resolve the associated
   `webhook_delivery:<id>` fleet-alert states consistently.
+- Fix: Webhook-rule delivery retention now includes `permanently_failed` and
+  `canceled_disabled` terminal rows. Permanent failure remains visible until
+  the configured webhook retention age, then pruning resolves matching open
+  `webhook_delivery:<id>` fleet-alert states with a retention-pruned reason and
+  records audit metadata.
 
 ### AUD-160: Webhook-Rule Retention Silently Clamps The Shipped 90-Day Setting To 7 Days
 
 - Severity: Medium/High
-- Status: Confirmed
+- Status: Fixed
 - Area: Worker/Webhooks/Retention/Config
 - Context: Operators configure webhook-rule retention through the suite config
   and shipped deployment template. Those retention settings govern webhook event
@@ -6136,11 +6153,15 @@ of the same root cause.
   A clean fix should align the shipped default, suite-config validation, UI/help
   text, and worker clamp, preferably by rejecting out-of-range retention rather
   than silently changing it.
+- Fix: Removed the hidden 7-day maximum. Webhook-rule retention now validates
+  `webhook_rule_retention_days` as `1..=3650`, so the shipped 90-day config is
+  honored exactly and out-of-range values fail startup/config load instead of
+  silently changing operator intent.
 
 ### AUD-161: Artifact Cleanup Server Jobs Can Remain Running Forever After Worker Loss
 
 - Severity: High
-- Status: Confirmed
+- Status: Fixed
 - Area: Worker/Server Jobs/Artifact Cleanup
 - Context: Artifact cleanup is a destructive server-side maintenance workflow
   that can delete retained job-output, file-transfer, and backup artifact
@@ -6166,6 +6187,12 @@ of the same root cause.
   path, which filters only `status = 'queued'`. Server-job cancellation updates
   only `status = 'queued'` rows at
   `crates/api/src/repository_server_jobs.rs:266-313`.
+- Fix: Artifact-cleanup server jobs now have a 6-hour running timeout. API
+  server-job management/list paths and worker ticks mark stale running cleanup
+  jobs `failed` with `artifact_cleanup_running_timeout` and preserve already
+  recorded partial progress. The product model is fail-only: timed-out
+  destructive cleanup is not reclaimed or resumed by another worker; operators
+  create a fresh reviewed cleanup job if they want to continue.
 - Notes: This is distinct from AUD-155, which covers misleading counts when a
   cleanup job returns an error after partial deletion. This issue covers worker
   loss before the success/error finalization path runs at all. A clean fix

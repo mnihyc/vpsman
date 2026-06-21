@@ -1910,6 +1910,7 @@ pub const SERVER_JOB_STATUS_RUNNING: &str = "running";
 pub const SERVER_JOB_STATUS_COMPLETED: &str = "completed";
 pub const SERVER_JOB_STATUS_FAILED: &str = "failed";
 pub const SERVER_JOB_STATUS_CANCELED: &str = "canceled";
+pub const ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS: i64 = 6 * 60 * 60;
 pub const SERVER_JOB_TYPES: &[&str] = &[SERVER_JOB_TYPE_ARTIFACT_CLEANUP];
 pub const SERVER_JOB_STATUSES: &[&str] = &[
     SERVER_JOB_STATUS_QUEUED,

@@ -132,8 +132,11 @@ For daily 20+ VPS operation, this is the preferred browser pattern:
 
 ## History Retention And Export
 
-History retention policies are managed by domain. Use dry-run before pruning,
-especially for object-backed domains such as job outputs and backup artifacts:
+History retention policies are managed by domain. This includes audit logs,
+system and telemetry rollups, per-interface network rates, job outputs, backup
+artifacts, network/topology history, client lifecycle history, and ended gateway
+sessions. Use dry-run before pruning, especially for object-backed domains such
+as job outputs and backup artifacts:
 
 ```sh
 cargo run -p vpsctl -- history-retention
@@ -149,6 +152,11 @@ cargo run -p vpsctl -- history-retention-prune \
   --domain audit_logs \
   --dry-run
 ```
+
+Webhook-rule event and delivery retention honors
+`webhook_rule_retention_days` from the worker config exactly; the shipped
+default is 90 days. Permanent webhook delivery failures remain visible until
+that retention age and then prune with their linked delivery alert evidence.
 
 For object-backed domains, keep `--metadata-only false` only when the API has
 object storage configured and the retained blobs should be deleted together

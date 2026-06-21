@@ -46,6 +46,7 @@ pub(crate) struct MemoryState {
     pub(crate) agents: Arc<RwLock<Vec<AgentView>>>,
     pub(crate) hidden_clients: Arc<RwLock<HashSet<String>>>,
     pub(crate) gateway_sessions: Arc<RwLock<Vec<GatewaySessionView>>>,
+    pub(crate) client_status_history: Arc<RwLock<Vec<ClientStatusHistoryView>>>,
     pub(crate) tags: Arc<RwLock<Vec<String>>>,
     pub(crate) fleet_alert_policies:
         Arc<RwLock<Vec<crate::model_alert_policies::FleetAlertPolicyOverrideView>>>,

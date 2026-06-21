@@ -4,7 +4,8 @@ use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::{
     expression_matches, parse_expression, payload_hash, Expression, ExpressionContext,
-    SERVER_JOB_STATUS_CANCELED, SERVER_JOB_STATUS_QUEUED, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
+    ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS, SERVER_JOB_STATUS_CANCELED, SERVER_JOB_STATUS_FAILED,
+    SERVER_JOB_STATUS_QUEUED, SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 
 use crate::{
@@ -243,6 +244,7 @@ impl Repository {
 
     pub(crate) async fn list_server_jobs(&self, limit: i64) -> Result<Vec<ServerJobView>> {
         let limit = limit.clamp(1, 200);
+        self.expire_stale_running_artifact_cleanup_jobs().await?;
         match self {
             Self::Memory(memory) => Ok(memory
                 .server_jobs
@@ -290,6 +292,7 @@ impl Repository {
     }
 
     pub(crate) async fn cancel_server_job(&self, job_id: Uuid) -> Result<Option<ServerJobView>> {
+        self.expire_stale_running_artifact_cleanup_jobs().await?;
         match self {
             Self::Memory(memory) => {
                 let mut jobs = memory.server_jobs.write().await;
@@ -337,6 +340,37 @@ impl Repository {
                 .await?;
                 row.map(server_job_from_row).transpose().map_err(Into::into)
             }
+        }
+    }
+
+    pub(crate) async fn expire_stale_running_artifact_cleanup_jobs(&self) -> Result<i64> {
+        let cutoff_unix = unix_now().saturating_sub(ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS as u64);
+        match self {
+            Self::Memory(memory) => {
+                let mut expired = 0_i64;
+                let now = unix_now().to_string();
+                let mut jobs = memory.server_jobs.write().await;
+                for job in jobs.iter_mut().filter(|job| {
+                    job.job_type == SERVER_JOB_TYPE_ARTIFACT_CLEANUP
+                        && job.status == SERVER_JOB_STATUS_RUNNING
+                }) {
+                    let Some(started_at) = job.started_at.as_deref() else {
+                        continue;
+                    };
+                    let Ok(started_unix) = started_at.parse::<u64>() else {
+                        continue;
+                    };
+                    if started_unix >= cutoff_unix {
+                        continue;
+                    }
+                    job.status = SERVER_JOB_STATUS_FAILED.to_string();
+                    job.error = Some("artifact_cleanup_running_timeout".to_string());
+                    job.completed_at = Some(now.clone());
+                    expired += 1;
+                }
+                Ok(expired)
+            }
+            Self::Postgres(pool) => expire_stale_artifact_cleanup_jobs_in_pool(pool).await,
         }
     }
 
@@ -640,4 +674,30 @@ fn server_job_from_row(
         completed_at: row.try_get("completed_at")?,
         canceled_at: row.try_get("canceled_at")?,
     })
+}
+
+async fn expire_stale_artifact_cleanup_jobs_in_pool(pool: &sqlx::PgPool) -> Result<i64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE server_jobs
+        SET
+            status = $3,
+            error = 'artifact_cleanup_running_timeout',
+            completed_at = now(),
+            metadata = metadata || jsonb_build_object(
+                'running_timeout_secs', $4::bigint
+            )
+        WHERE job_type = $1
+          AND status = $2
+          AND started_at IS NOT NULL
+          AND started_at <= now() - ($4::bigint * interval '1 second')
+        "#,
+    )
+    .bind(SERVER_JOB_TYPE_ARTIFACT_CLEANUP)
+    .bind(SERVER_JOB_STATUS_RUNNING)
+    .bind(SERVER_JOB_STATUS_FAILED)
+    .bind(ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() as i64)
 }

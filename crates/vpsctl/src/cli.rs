@@ -733,7 +733,10 @@ pub(crate) enum Command {
     },
     HistoryRetention,
     HistoryRetentionUpsert {
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Retention domain: audit_logs, system_metric_rollups, telemetry_rollups, telemetry_network_rates, job_outputs, backup_artifacts, network_observations, topology_history, client_status_history, gateway_sessions"
+        )]
         domain: String,
         #[arg(long)]
         retention_days: Option<i32>,
@@ -753,7 +756,10 @@ pub(crate) enum Command {
         confirmed: bool,
     },
     HistoryRetentionPrune {
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Retention domain: audit_logs, system_metric_rollups, telemetry_rollups, telemetry_network_rates, job_outputs, backup_artifacts, network_observations, topology_history, client_status_history, gateway_sessions"
+        )]
         domain: Option<String>,
         #[arg(long, default_value_t = false)]
         dry_run: bool,
@@ -765,7 +771,7 @@ pub(crate) enum Command {
         confirmed: bool,
     },
     HistoryExport {
-        #[arg(long)]
+        #[arg(long, help = "Comma-separated retention domains to export")]
         domains: Option<String>,
         #[arg(long, default_value_t = 50)]
         limit: u16,

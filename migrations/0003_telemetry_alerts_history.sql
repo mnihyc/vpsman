@@ -381,10 +381,13 @@ CREATE TABLE history_retention_policies (
         'audit_logs',
         'system_metric_rollups',
         'telemetry_rollups',
+        'telemetry_network_rates',
         'job_outputs',
         'backup_artifacts',
         'network_observations',
-        'topology_history'
+        'topology_history',
+        'client_status_history',
+        'gateway_sessions'
     )),
     CHECK (retention_days BETWEEN 1 AND 3650),
     CHECK (prune_limit BETWEEN 1 AND 100000),
