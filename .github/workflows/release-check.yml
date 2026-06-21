@@ -47,6 +47,41 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
           rustup target add aarch64-unknown-linux-musl
 
+      - name: Prepare musl C tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/musl-tools"
+
+          cat > "$RUNNER_TEMP/musl-tools/x86_64-linux-musl-gcc" <<'SH'
+          #!/usr/bin/env sh
+          exec clang --target=x86_64-unknown-linux-musl "$@"
+          SH
+
+          cat > "$RUNNER_TEMP/musl-tools/aarch64-linux-musl-gcc" <<'SH'
+          #!/usr/bin/env sh
+          exec clang --target=aarch64-unknown-linux-musl "$@"
+          SH
+
+          cat > "$RUNNER_TEMP/musl-tools/x86_64-linux-musl-ar" <<'SH'
+          #!/usr/bin/env sh
+          exec llvm-ar "$@"
+          SH
+
+          cat > "$RUNNER_TEMP/musl-tools/aarch64-linux-musl-ar" <<'SH'
+          #!/usr/bin/env sh
+          exec llvm-ar "$@"
+          SH
+
+          chmod +x "$RUNNER_TEMP"/musl-tools/*
+          echo "$RUNNER_TEMP/musl-tools" >> "$GITHUB_PATH"
+
+          command -v clang
+          command -v llvm-ar
+          PATH="$RUNNER_TEMP/musl-tools:$PATH" command -v x86_64-linux-musl-gcc
+          PATH="$RUNNER_TEMP/musl-tools:$PATH" command -v x86_64-linux-musl-ar
+          PATH="$RUNNER_TEMP/musl-tools:$PATH" command -v aarch64-linux-musl-gcc
+          PATH="$RUNNER_TEMP/musl-tools:$PATH" command -v aarch64-linux-musl-ar
+
       - name: Rust format
         run: cargo fmt --all -- --check
 

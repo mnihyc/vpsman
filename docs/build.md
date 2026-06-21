@@ -12,8 +12,12 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build -p vpsman-agent --target x86_64-unknown-linux-musl
 cargo build -p vpsman-agent --target aarch64-unknown-linux-musl
+cargo build -p vpsctl --target x86_64-unknown-linux-musl
+cargo build -p vpsctl --target aarch64-unknown-linux-musl
 cargo build -p vpsman-agent --release --target x86_64-unknown-linux-musl
 cargo build -p vpsman-agent --release --target aarch64-unknown-linux-musl
+cargo build -p vpsctl --release --target x86_64-unknown-linux-musl
+cargo build -p vpsctl --release --target aarch64-unknown-linux-musl
 ```
 
 Build numbers are component-scoped and self-increment from `1` during local
@@ -35,8 +39,19 @@ all components.
 GitHub Actions reads the current positive counter values without incrementing
 them. Only local builds advance the counters.
 
-`.cargo/config.toml` uses `rust-lld` for musl targets so static agent builds do
-not require system cross linkers.
+`.cargo/config.toml` uses `rust-lld` for musl targets, so final linking does
+not require system cross linkers. Native C build scripts still use Cargo's
+default tool discovery and require target-named tools on `PATH`:
+
+- `x86_64-linux-musl-gcc`
+- `x86_64-linux-musl-ar`
+- `aarch64-linux-musl-gcc`
+- `aarch64-linux-musl-ar`
+
+Local development can satisfy those names with profile-managed wrappers in
+`~/bin` or a real musl-cross distribution. The GitHub Actions CI, Release
+Check, and Release Build workflows create temporary wrappers around
+runner-provided `clang` and `llvm-ar` before static agent and CLI builds.
 
 Generate development Noise keypairs with:
 
