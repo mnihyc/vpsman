@@ -74,11 +74,14 @@ Place release files into this checkout-local layout:
 
 - server ZIP contents: `deploy/runtime/server/current/`
 - extracted frontend `dist/`: `deploy/runtime/frontend/current/dist/`
+- host CLI: `deploy/runtime/cli/current/vpsctl`
 - suite config: `deploy/config/vpsman.toml`
 - secret files referenced by suite config: generated under
   `deploy/config/secrets/`
 
-Then run:
+For a first Docker Compose start from GitHub Releases, let the deploy updater
+download the release, verify checksums, generate missing compose secrets, and
+start the stack:
 
 ```sh
 cd deploy
@@ -86,22 +89,25 @@ cp .env.example .env
 # edit .env before real deployment; use a URL-safe random hex
 # POSTGRES_PASSWORD because compose derives the API/worker Postgres URL from it
 export VPSMAN_SUPER_PASSWORD='<local_super_password>'
-vpsctl compose-secrets --secrets-dir config/secrets
-docker compose up -d
+./update.sh first-start latest
 ```
 
-Run `cargo run -p vpsctl -- compose-secrets --secrets-dir deploy/config/secrets`
-from a source checkout if the release `vpsctl` binary is not installed yet. The
-command writes the three mounted compose secret files, a gateway public-key file
-for agent installs, and `operator-privilege.env` containing the generated
+For manual asset placement or custom bootstrap, run
+`cargo run -p vpsctl -- compose-secrets --secrets-dir deploy/config/secrets`
+from a source checkout if a release `vpsctl` binary is not installed yet. The
+command writes the three mounted compose secret files, a gateway public-key
+file for agent installs, and `operator-privilege.env` containing the generated
 `VPSMAN_SUPER_SALT_HEX`. Keep the super password in your operator password
 manager; the API never receives it.
 
 Persistent runtime data stays in checkout-local paths:
 
 - PostgreSQL: `deploy/runtime/postgres/data`
-- local object storage: `deploy/runtime/data/objects/backups` and
-  `deploy/runtime/data/objects/updates`
+- local object storage: `deploy/runtime/data/objects/backups` for retained
+  backup artifacts, large job outputs, file-transfer handoffs, and uploaded
+  source artifacts
+
+See `deploy/README.md` for the full compose directory layout.
 
 In Docker, keep the `.env` object-store paths under `/var/lib/vpsman`
 unchanged; compose maps them to `deploy/runtime/data`.
@@ -159,7 +165,7 @@ cd deploy
 ./update.sh v0.1.0
 ```
 
-Rollback swaps back to the previous server/frontend release directories:
+Rollback swaps back to the previous server/frontend/CLI release directories:
 
 ```sh
 cd deploy
@@ -167,9 +173,9 @@ cd deploy
 ```
 
 The update script downloads release assets, verifies `SHA256SUMS`, updates
-`deploy/runtime/server/current` and `deploy/runtime/frontend/current`, and
-recreates containers. It does not delete PostgreSQL or local object-storage
-data.
+`deploy/runtime/server/current`, `deploy/runtime/frontend/current`, and
+`deploy/runtime/cli/current/vpsctl`, then recreates containers. It does not
+delete PostgreSQL or local object-storage data.
 
 ## Direct Gateway Agent Install
 

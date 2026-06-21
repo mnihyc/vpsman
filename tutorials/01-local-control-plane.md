@@ -9,11 +9,28 @@ Use the provided compose template when you want persistent PostgreSQL, local
 object storage, Nginx-served Vite static assets, and all backend processes
 running together from released assets.
 
-First place release assets into the checkout-local runtime layout:
+The simplest release first start is:
+
+```sh
+cd deploy
+cp .env.example .env
+# Edit POSTGRES_PASSWORD before real deployment. Use URL-safe random hex,
+# because compose derives the API/worker Postgres URL from this value.
+export VPSMAN_SUPER_PASSWORD='<local_super_password>'
+./update.sh first-start latest
+```
+
+`update.sh first-start` downloads GitHub release assets, verifies
+`SHA256SUMS`, installs server, frontend, and host CLI payloads under
+`deploy/runtime`, generates missing compose secrets from
+`VPSMAN_SUPER_PASSWORD`, and starts compose.
+
+If you place release assets manually, use the checkout-local runtime layout:
 
 - server binaries: `deploy/runtime/server/current/bin/`
 - migration SQL files: `deploy/runtime/server/current/migrations/`
 - extracted Vite frontend `dist/`: `deploy/runtime/frontend/current/dist/`
+- host CLI: `deploy/runtime/cli/current/vpsctl`
 - suite config: `deploy/config/vpsman.toml`
 - secret files referenced by suite config: generated under
   `deploy/config/secrets/`
@@ -54,11 +71,10 @@ that same authoritative TOML from the dashboard; runtime data stays under
 `deploy/runtime`, and secrets stay in read-only mounts. Local disk object
 storage is the default compose shape. Configure the S3/MinIO variables
 only when the deployment should use the implemented S3-compatible adapter for
-backup or update artifacts. To upgrade, replace the files under
-`deploy/runtime/server/current` and
-`deploy/runtime/frontend/current`, then restart the compose stack; no Rust or
-frontend rebuild is required. Runtime state stays in checkout-local paths, not
-Docker-managed named volumes.
+backup or update artifacts. To upgrade from GitHub Releases, run
+`./update.sh latest` from `deploy/`; it refreshes the server, frontend, and
+host CLI release payloads and recreates the compose services. Runtime state
+stays in checkout-local paths, not Docker-managed named volumes.
 
 ## Start Processes Manually
 
