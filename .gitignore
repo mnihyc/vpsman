@@ -28,6 +28,7 @@
 
 # Local agent/private release planning artifacts.
 /TO_AGENTS.md
+/AUDIT.md
 /PROGRESS.md
 /tmp/
 *.patch

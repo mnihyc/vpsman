@@ -1,10 +1,11 @@
 # vpsman Tutorials
 
 These tutorials are operator-facing guides for using the system. They assume
-the architecture and security model from `../DESIGN.md`: agents connect to the
-gateway over plain TCP with Noise protection, browsers and CLI keep the super
-password local, and privileged operations send request-bound assertions that
-the private gateway verifies.
+the architecture and security model documented in `../README.md` and
+`../docs/operator-access-scopes.md`: agents connect to the gateway over plain
+TCP with Noise protection, browsers and CLI keep the super password local, and
+privileged operations send request-bound assertions that the private gateway
+verifies.
 
 Use these in order for a new deployment:
 
