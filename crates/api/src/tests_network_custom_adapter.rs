@@ -16,10 +16,10 @@ async fn promote_observed_tunnel_plan_to_external_adapter_preserves_plan_id() {
     let state = test_state(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
 
-    let Json(promoted) = crate::routes_network::promote_tunnel_plan_to_adapter(
+    let Json(promoted) = crate::routes_network::promote_tunnel_plan_to_custom_adapter(
         State(state),
         headers,
-        Json(PromoteTunnelPlanToAdapterRequest {
+        Json(PromoteTunnelPlanToCustomAdapterRequest {
             plan_id: observed.id,
             runtime_control: RuntimeTunnelControl {
                 manager: RuntimeTunnelManager::ExternalManagedAdapter,
@@ -67,30 +67,27 @@ async fn promote_observed_tunnel_plan_to_external_adapter_preserves_plan_id() {
         promoted.plan.runtime_topology.desired_interfaces,
         vec!["wg42".to_string()]
     );
-    assert!(promoted
-        .plan
-        .ifupdown_snippet
-        .contains("external managed adapter"));
+    assert!(promoted.plan.ifupdown_snippet.contains("custom adapter"));
     let audits = repo.list_audit_logs(10).await.unwrap();
     let audit = audits
         .iter()
-        .find(|audit| audit.action == "network.tunnel_plan_promoted_to_adapter")
-        .expect("adapter promotion audit");
-    assert_eq!(audit.metadata["adapter_cleanup_configured"], true);
+        .find(|audit| audit.action == "network.tunnel_plan_promoted_to_custom_adapter")
+        .expect("custom adapter audit");
+    assert_eq!(audit.metadata["custom_adapter_cleanup_configured"], true);
 }
 
 #[tokio::test]
-async fn promote_tunnel_plan_to_adapter_requires_confirmation_and_status_command() {
+async fn promote_tunnel_plan_to_custom_adapter_requires_confirmation_and_status_command() {
     let repo = Repository::Memory(MemoryState::default());
     let observed =
         create_observed_plan(&repo, "observed-openvpn", "ovpn42", TunnelKind::Openvpn).await;
     let state = test_state(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
 
-    let error = crate::routes_network::promote_tunnel_plan_to_adapter(
+    let error = crate::routes_network::promote_tunnel_plan_to_custom_adapter(
         State(state),
         headers,
-        Json(PromoteTunnelPlanToAdapterRequest {
+        Json(PromoteTunnelPlanToCustomAdapterRequest {
             plan_id: observed.id,
             runtime_control: startup_only_adapter_control(),
             runtime_topology: None,
@@ -100,14 +97,14 @@ async fn promote_tunnel_plan_to_adapter_requires_confirmation_and_status_command
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code, "adapter_promotion_requires_confirmation");
+    assert_eq!(error.code, "custom_adapter_requires_confirmation");
 
     let state = test_state(repo);
     let headers = crate::test_auth_headers(&state).await;
-    let error = crate::routes_network::promote_tunnel_plan_to_adapter(
+    let error = crate::routes_network::promote_tunnel_plan_to_custom_adapter(
         State(state),
         headers,
-        Json(PromoteTunnelPlanToAdapterRequest {
+        Json(PromoteTunnelPlanToCustomAdapterRequest {
             plan_id: observed.id,
             runtime_control: startup_only_adapter_control(),
             runtime_topology: None,
@@ -117,7 +114,7 @@ async fn promote_tunnel_plan_to_adapter_requires_confirmation_and_status_command
     )
     .await
     .unwrap_err();
-    assert_eq!(error.code, "adapter_promotion_status_command_required");
+    assert_eq!(error.code, "custom_adapter_status_command_required");
 }
 
 async fn create_observed_plan(

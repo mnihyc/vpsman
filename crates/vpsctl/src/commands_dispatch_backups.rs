@@ -341,12 +341,16 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_network::tunnel_plan(api_url, token, *request)?;
             Ok(None)
         }
-        Command::TunnelPromoteTelemetry(request) => {
-            commands_network::tunnel_promote_telemetry(api_url, token, request)?;
+        Command::TunnelPlanExport(request) => {
+            commands_network::tunnel_plan_export(api_url, token, request)?;
             Ok(None)
         }
-        Command::TunnelPromoteAdapter(request) => {
-            commands_network::tunnel_promote_adapter(api_url, token, request)?;
+        Command::TunnelPromoteExternalObserve(request) => {
+            commands_network::tunnel_promote_external_observe(api_url, token, request)?;
+            Ok(None)
+        }
+        Command::TunnelPromoteCustomAdapter(request) => {
+            commands_network::tunnel_promote_custom_adapter(api_url, token, request)?;
             Ok(None)
         }
         Command::TunnelApply(request) => {

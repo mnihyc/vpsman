@@ -5,8 +5,8 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 use vpsman_common::{
-    validate_incremental_config_patch_section, JobCommand,
-    DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH, MAX_AGENT_HOT_CONFIG_BYTES,
+    validate_incremental_config_patch_section, JobCommand, MAX_AGENT_HOT_CONFIG_BYTES,
+    SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH,
 };
 
 use crate::commands_schedules::selector_expression_from_targets;
@@ -18,7 +18,7 @@ use crate::privilege::{
 use crate::util::percent_encode_query_value;
 
 #[derive(Debug, Deserialize)]
-struct DataSourceHotConfigResponse {
+struct SourceConfigPatchResponse {
     toml: String,
 }
 
@@ -554,12 +554,12 @@ pub(crate) fn bulk_resolve(
     Ok(())
 }
 
-pub(crate) fn data_source_presets(
+pub(crate) fn source_templates(
     api_url: &str,
     token: Option<&str>,
     domain: Option<String>,
 ) -> Result<()> {
-    let mut path = "/api/v1/data-source-presets".to_string();
+    let mut path = "/api/v1/source-templates".to_string();
     if let Some(domain) = domain {
         anyhow::ensure!(
             !domain.is_empty() && domain.len() <= 128,
@@ -572,18 +572,18 @@ pub(crate) fn data_source_presets(
     Ok(())
 }
 
-pub(crate) fn data_source_status(
+pub(crate) fn source_status(
     api_url: &str,
     token: Option<&str>,
     client_id: Option<String>,
     domain: Option<String>,
 ) -> Result<()> {
-    let path = data_source_status_path(client_id.as_deref(), domain.as_deref())?;
+    let path = source_status_path(client_id.as_deref(), domain.as_deref())?;
     println!("{}", http_get(api_url, &path, token)?);
     Ok(())
 }
 
-pub(crate) struct DataSourcePresetCreateOptions {
+pub(crate) struct SourceTemplateCreateOptions {
     pub(crate) domain: String,
     pub(crate) name: String,
     pub(crate) scope: String,
@@ -593,17 +593,17 @@ pub(crate) struct DataSourcePresetCreateOptions {
     pub(crate) definition_file: Option<PathBuf>,
 }
 
-pub(crate) fn data_source_preset_create(
+pub(crate) fn source_template_create(
     api_url: &str,
     token: Option<&str>,
-    options: DataSourcePresetCreateOptions,
+    options: SourceTemplateCreateOptions,
 ) -> Result<()> {
-    let definition = preset_definition(options.definition_json, options.definition_file)?;
+    let definition = template_definition(options.definition_json, options.definition_file)?;
     println!(
         "{}",
         http_post_json(
             api_url,
-            "/api/v1/data-source-presets",
+            "/api/v1/source-templates",
             token,
             &serde_json::json!({
                 "domain": options.domain,
@@ -618,22 +618,22 @@ pub(crate) fn data_source_preset_create(
     Ok(())
 }
 
-pub(crate) fn data_source_preset_clone(
+pub(crate) fn source_template_clone(
     api_url: &str,
     token: Option<&str>,
-    source_preset_id: String,
+    source_template_id: String,
     name: String,
     scope: String,
     owner_client_id: Option<String>,
     description: Option<String>,
 ) -> Result<()> {
-    let source_preset_id =
-        Uuid::parse_str(&source_preset_id).context("invalid --source-preset-id UUID")?;
+    let source_template_id =
+        Uuid::parse_str(&source_template_id).context("invalid --template-id UUID")?;
     println!(
         "{}",
         http_post_json(
             api_url,
-            &format!("/api/v1/data-source-presets/{source_preset_id}/clone"),
+            &format!("/api/v1/source-templates/{source_template_id}/clone"),
             token,
             &serde_json::json!({
                 "name": name,
@@ -646,23 +646,23 @@ pub(crate) fn data_source_preset_clone(
     Ok(())
 }
 
-pub(crate) fn data_source_preset_diff(
+pub(crate) fn source_template_diff(
     api_url: &str,
     token: Option<&str>,
-    preset_id: String,
+    template_id: String,
     description: Option<String>,
     clear_description: bool,
     definition_json: Option<String>,
     definition_file: Option<PathBuf>,
 ) -> Result<()> {
-    let preset_id = Uuid::parse_str(&preset_id).context("invalid --preset-id UUID")?;
-    let definition = preset_definition(definition_json, definition_file)?;
+    let template_id = Uuid::parse_str(&template_id).context("invalid --template-id UUID")?;
+    let definition = template_definition(definition_json, definition_file)?;
     let keep_description = description.is_none() && !clear_description;
     println!(
         "{}",
         http_post_json(
             api_url,
-            &format!("/api/v1/data-source-presets/{preset_id}/diff"),
+            &format!("/api/v1/source-templates/{template_id}/diff"),
             token,
             &serde_json::json!({
                 "description": description,
@@ -674,20 +674,20 @@ pub(crate) fn data_source_preset_diff(
     Ok(())
 }
 
-pub(crate) fn data_source_preset_test(
+pub(crate) fn source_template_test(
     api_url: &str,
     token: Option<&str>,
-    preset_id: String,
+    template_id: String,
     definition_json: Option<String>,
     definition_file: Option<PathBuf>,
 ) -> Result<()> {
-    let preset_id = Uuid::parse_str(&preset_id).context("invalid --preset-id UUID")?;
-    let definition = preset_definition(definition_json, definition_file)?;
+    let template_id = Uuid::parse_str(&template_id).context("invalid --template-id UUID")?;
+    let definition = template_definition(definition_json, definition_file)?;
     println!(
         "{}",
         http_post_json(
             api_url,
-            &format!("/api/v1/data-source-presets/{preset_id}/test"),
+            &format!("/api/v1/source-templates/{template_id}/test"),
             token,
             &serde_json::json!({
                 "definition": definition,
@@ -697,8 +697,8 @@ pub(crate) fn data_source_preset_test(
     Ok(())
 }
 
-pub(crate) struct DataSourcePresetUpdateOptions {
-    pub(crate) preset_id: String,
+pub(crate) struct SourceTemplateUpdateOptions {
+    pub(crate) template_id: String,
     pub(crate) description: Option<String>,
     pub(crate) clear_description: bool,
     pub(crate) definition_json: Option<String>,
@@ -706,19 +706,20 @@ pub(crate) struct DataSourcePresetUpdateOptions {
     pub(crate) confirmed: bool,
 }
 
-pub(crate) fn data_source_preset_update(
+pub(crate) fn source_template_update(
     api_url: &str,
     token: Option<&str>,
-    options: DataSourcePresetUpdateOptions,
+    options: SourceTemplateUpdateOptions,
 ) -> Result<()> {
-    let preset_id = Uuid::parse_str(&options.preset_id).context("invalid --preset-id UUID")?;
-    let definition = preset_definition(options.definition_json, options.definition_file)?;
+    let template_id =
+        Uuid::parse_str(&options.template_id).context("invalid --template-id UUID")?;
+    let definition = template_definition(options.definition_json, options.definition_file)?;
     let keep_description = options.description.is_none() && !options.clear_description;
     println!(
         "{}",
         http_post_json(
             api_url,
-            &format!("/api/v1/data-source-presets/{preset_id}/update"),
+            &format!("/api/v1/source-templates/{template_id}/update"),
             token,
             &serde_json::json!({
                 "description": options.description,
@@ -731,7 +732,7 @@ pub(crate) fn data_source_preset_update(
     Ok(())
 }
 
-pub(crate) fn data_source_assignments(
+pub(crate) fn source_template_assignments(
     api_url: &str,
     token: Option<&str>,
     client_id: Option<String>,
@@ -756,15 +757,15 @@ pub(crate) fn data_source_assignments(
         query.push(format!("domain={}", percent_encode_query_value(&domain)));
     }
     let path = if query.is_empty() {
-        "/api/v1/data-source-assignments".to_string()
+        "/api/v1/source-template-assignments".to_string()
     } else {
-        format!("/api/v1/data-source-assignments?{}", query.join("&"))
+        format!("/api/v1/source-template-assignments?{}", query.join("&"))
     };
     println!("{}", http_get(api_url, &path, token)?);
     Ok(())
 }
 
-pub(crate) fn data_source_hot_config(
+pub(crate) fn source_config_patch(
     api_url: &str,
     token: Option<&str>,
     client_id: String,
@@ -774,17 +775,17 @@ pub(crate) fn data_source_hot_config(
         !client_id.is_empty() && client_id.len() <= 128,
         "--client-id must be between 1 and 128 bytes"
     );
-    let path = data_source_hot_config_path(&client_id);
+    let path = source_config_patch_path(&client_id);
     let body = http_get(api_url, &path, token)?;
     match format.as_str() {
         "json" => println!("{body}"),
         "toml" => {
             let value: serde_json::Value =
-                serde_json::from_str(&body).context("invalid data-source config response")?;
+                serde_json::from_str(&body).context("invalid source template config response")?;
             let toml = value
                 .get("toml")
                 .and_then(serde_json::Value::as_str)
-                .context("data-source config response missing toml")?;
+                .context("source template config response missing toml")?;
             print!("{toml}");
         }
         _ => anyhow::bail!("--format must be toml or json"),
@@ -792,7 +793,7 @@ pub(crate) fn data_source_hot_config(
     Ok(())
 }
 
-pub(crate) fn data_source_hot_config_apply(
+pub(crate) fn source_config_patch_apply(
     api_url: &str,
     token: Option<&str>,
     client_id: String,
@@ -805,18 +806,18 @@ pub(crate) fn data_source_hot_config_apply(
 ) -> Result<()> {
     anyhow::ensure!(
         confirmed,
-        "data-source-hot-config-apply requires --confirmed because it applies an incremental config patch"
+        "source-config-patch-apply requires --confirmed because it applies an incremental config patch"
     );
     anyhow::ensure!(
         !client_id.is_empty() && client_id.len() <= 128,
         "--client-id must be between 1 and 128 bytes"
     );
-    let body = http_get(api_url, &data_source_hot_config_path(&client_id), token)?;
-    let rendered: DataSourceHotConfigResponse =
-        serde_json::from_str(&body).context("invalid data-source config response")?;
-    validate_data_source_config_patch(&rendered.toml)?;
-    let operation = JobCommand::DataSourceConfigPatch {
-        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
+    let body = http_get(api_url, &source_config_patch_path(&client_id), token)?;
+    let rendered: SourceConfigPatchResponse =
+        serde_json::from_str(&body).context("invalid source template config response")?;
+    validate_source_config_patch(&rendered.toml)?;
+    let operation = JobCommand::SourceConfigPatch {
+        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
         toml: rendered.toml,
     };
     println!(
@@ -825,7 +826,7 @@ pub(crate) fn data_source_hot_config_apply(
             api_url,
             token,
             operation: &operation,
-            command_label: "data_source_config_patch",
+            command_label: "source_config_patch",
             clients: &[client_id],
             tags: &[],
             password_env: &password_env,
@@ -839,22 +840,22 @@ pub(crate) fn data_source_hot_config_apply(
     Ok(())
 }
 
-pub(crate) struct DataSourcePresetAssignOptions {
+pub(crate) struct SourceTemplateAssignOptions {
     pub(crate) domain: String,
-    pub(crate) preset_id: String,
+    pub(crate) template_id: String,
     pub(crate) clients: Vec<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) confirmed: bool,
 }
 
-fn data_source_hot_config_path(client_id: &str) -> String {
+fn source_config_patch_path(client_id: &str) -> String {
     format!(
-        "/api/v1/data-source-hot-config?client_id={}",
+        "/api/v1/source-config-patch?client_id={}",
         percent_encode_query_value(client_id)
     )
 }
 
-fn data_source_status_path(client_id: Option<&str>, domain: Option<&str>) -> Result<String> {
+fn source_status_path(client_id: Option<&str>, domain: Option<&str>) -> Result<String> {
     let mut query = Vec::new();
     if let Some(client_id) = client_id {
         anyhow::ensure!(
@@ -874,9 +875,9 @@ fn data_source_status_path(client_id: Option<&str>, domain: Option<&str>) -> Res
         query.push(format!("domain={}", percent_encode_query_value(domain)));
     }
     if query.is_empty() {
-        Ok("/api/v1/data-source-status".to_string())
+        Ok("/api/v1/source-status".to_string())
     } else {
-        Ok(format!("/api/v1/data-source-status?{}", query.join("&")))
+        Ok(format!("/api/v1/source-status?{}", query.join("&")))
     }
 }
 
@@ -1323,24 +1324,24 @@ fn validate_optional_positive(value: Option<f64>, flag: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_data_source_config_patch(toml_document: &str) -> Result<()> {
+fn validate_source_config_patch(toml_document: &str) -> Result<()> {
     anyhow::ensure!(
         !toml_document.is_empty(),
-        "rendered data-source config patch is empty"
+        "rendered source template config patch is empty"
     );
     anyhow::ensure!(
         toml_document.len() <= MAX_AGENT_HOT_CONFIG_BYTES,
-        "rendered data-source config patch exceeds {} bytes",
+        "rendered source template config patch exceeds {} bytes",
         MAX_AGENT_HOT_CONFIG_BYTES
     );
     let value: toml::Value = toml::from_str(toml_document)
-        .context("rendered data-source config patch is invalid TOML")?;
+        .context("rendered source template config patch is invalid TOML")?;
     let table = value
         .as_table()
-        .context("rendered data-source config patch must be a TOML table")?;
+        .context("rendered source template config patch must be a TOML table")?;
     anyhow::ensure!(
         !table.is_empty(),
-        "rendered data-source config patch has no sections"
+        "rendered source template config patch has no sections"
     );
     for section in table.keys() {
         validate_incremental_config_patch_section(section)
@@ -1349,23 +1350,24 @@ fn validate_data_source_config_patch(toml_document: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn data_source_preset_assign(
+pub(crate) fn source_template_assign(
     api_url: &str,
     token: Option<&str>,
-    options: DataSourcePresetAssignOptions,
+    options: SourceTemplateAssignOptions,
 ) -> Result<()> {
-    let preset_id = Uuid::parse_str(&options.preset_id).context("invalid --preset-id UUID")?;
+    let template_id =
+        Uuid::parse_str(&options.template_id).context("invalid --template-id UUID")?;
     let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
     let target_client_ids = resolve_target_ids(api_url, token, &options.clients, &options.tags)?;
     println!(
         "{}",
         http_post_json(
             api_url,
-            "/api/v1/data-source-assignments",
+            "/api/v1/source-template-assignments",
             token,
             &serde_json::json!({
                 "domain": options.domain,
-                "preset_id": preset_id,
+                "template_id": template_id,
                 "selector_expression": selector_expression,
                 "target_client_ids": target_client_ids,
                 "confirmed": options.confirmed,
@@ -1375,7 +1377,7 @@ pub(crate) fn data_source_preset_assign(
     Ok(())
 }
 
-fn preset_definition(
+fn template_definition(
     definition_json: Option<String>,
     definition_file: Option<PathBuf>,
 ) -> Result<serde_json::Value> {

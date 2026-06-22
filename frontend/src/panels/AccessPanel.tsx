@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Ban,
   Copy,
@@ -145,6 +145,8 @@ export function AccessPanel({
   wsState,
 }: AccessPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const identityFormRef = useRef<HTMLFormElement | null>(null);
+  const revokeFormRef = useRef<HTMLFormElement | null>(null);
   const [activeSubpage, setActiveSubpage] = useState<AccessSubpage>(
     accessSubpageFromRoute(routeSubpage),
   );
@@ -457,6 +459,7 @@ export function AccessPanel({
     setPrivateKeyHex(null);
     setCreatedIdentity(null);
     setIdentityError(null);
+    scrollIntoViewSoon(identityFormRef.current);
   }
 
   function prepareIdentityRotation(client: KeyLifecycleClientView) {
@@ -470,6 +473,7 @@ export function AccessPanel({
     setCreatedIdentity(null);
     setIdentityError(null);
     setActiveSubpage("VPS keys");
+    scrollIntoViewSoon(identityFormRef.current);
   }
 
   function prepareClientKeyRevoke(clientId: string, reason = "") {
@@ -478,6 +482,7 @@ export function AccessPanel({
     setRevokeReason(reason);
     setRevokeError(null);
     setActiveSubpage("VPS keys");
+    scrollIntoViewSoon(revokeFormRef.current);
   }
 
   async function setupTotp() {
@@ -1053,6 +1058,7 @@ export function AccessPanel({
                 )}
                 rows={clientKeyRevocations}
                 searchPlaceholder="Search VPS, key hash, reason, or operator"
+                selectable={false}
                 singleExpandedRow
                 storageKey="vpsman.access.revocations"
                 title="Client key revocations"
@@ -1086,6 +1092,7 @@ export function AccessPanel({
                 )}
                 rows={gatewaySessions}
                 searchPlaceholder="Search VPS, gateway, status, key, or reason"
+                selectable={false}
                 singleExpandedRow
                 storageKey="vpsman.access.gatewaySessions"
                 title="Gateway sessions"
@@ -1142,6 +1149,7 @@ export function AccessPanel({
           className="sideForm"
           hidden={activeSubpage !== "VPS keys"}
           onSubmit={requestIdentityImport}
+          ref={identityFormRef}
         >
           <label>
             <span>Client ID</span>
@@ -1286,6 +1294,7 @@ export function AccessPanel({
           className="sideForm"
           hidden={activeSubpage !== "VPS keys"}
           onSubmit={requestClientKeyRevoke}
+          ref={revokeFormRef}
         >
           <label>
             <span>VPS ID</span>
@@ -1678,6 +1687,15 @@ function parseListInput(value: string): string[] {
 
 function isFixedHex32(value: string): boolean {
   return /^[0-9a-fA-F]{64}$/.test(value.trim());
+}
+
+function scrollIntoViewSoon(element: HTMLElement | null) {
+  if (!element) {
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    element.scrollIntoView({ block: "start", behavior: "smooth" });
+  });
 }
 
 function InstallCommand({

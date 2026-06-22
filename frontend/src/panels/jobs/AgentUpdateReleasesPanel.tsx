@@ -62,6 +62,7 @@ export function AgentUpdateReleasesPanel({
   const [releaseSnapshot, setReleaseSnapshot] =
     useState<CreateAgentUpdateReleaseRequest | null>(null);
   const latestRelease = releases[0] ?? null;
+  const latestArtifactSha256Hex = latestRelease?.artifact_sha256_hex ?? "";
   const policy = registeredUpdatePolicy(suiteConfig, suiteConfigError, suiteConfigLoading);
   const releaseColumns = useMemo<ConsoleDataGridColumn<AgentUpdateReleaseRecord>[]>(
     () => [
@@ -261,14 +262,20 @@ export function AgentUpdateReleasesPanel({
         <div className="releaseQuickActions" aria-label="Agent update dispatch shortcuts">
           <button
             className="secondaryAction compactAction"
+            disabled={!latestArtifactSha256Hex}
             onClick={() =>
               onOpenDispatchPreset({
                 mode: "agent_update_activate",
                 selectorExpression: "",
-                updateActivationSha256Hex: latestRelease?.artifact_sha256_hex ?? "",
+                updateActivationSha256Hex: latestArtifactSha256Hex,
                 updateRestartAgent: true,
                 maxTimeoutSecs: 60,
               })
+            }
+            title={
+              latestArtifactSha256Hex
+                ? "Open dispatch with the latest registered artifact hash."
+                : "Record a release artifact before using this shortcut."
             }
             type="button"
           >
@@ -442,6 +449,7 @@ export function AgentUpdateReleasesPanel({
         )}
         rows={releases}
         searchPlaceholder="Search releases"
+        selectable={false}
         storageKey="vpsman.jobs.agentUpdateReleases"
         title="Release records"
       />
@@ -481,7 +489,7 @@ function registeredUpdatePolicy(
   }
   return {
     label: "Registered-update policy unknown",
-    detail: "Open System config to confirm whether manual update jobs require registered artifact hashes.",
+    detail: "Open Suite config to confirm whether manual update jobs require registered artifact hashes.",
   };
 }
 

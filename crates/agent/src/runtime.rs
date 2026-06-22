@@ -33,9 +33,7 @@ use crate::{
         command_canceled_output, command_timeout_output, run_cancelable, CommandCancelToken,
         CommandCanceled,
     },
-    config_update::{
-        apply_data_source_config_patch, apply_hot_config_update, read_redacted_config,
-    },
+    config_update::{apply_hot_config_update, apply_source_config_patch, read_redacted_config},
     executor::execute_job_command_with_config_cancel_and_output_sink,
     network_apply::{
         execute_network_apply_command, execute_network_ospf_cost_update_command,
@@ -688,6 +686,7 @@ fn agent_capabilities(config: &AgentConfig) -> AgentCapabilitySnapshot {
         },
         effective_uid: Some(effective_uid),
         max_job_timeout_secs: config.auth.max_job_timeout_secs.max(1),
+        network_backend: config.network.backend,
         can_attempt_privileged_ops: true,
         can_manage_runtime_tunnels: root,
         can_apply_process_limits: root,
@@ -1309,29 +1308,24 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
         return Ok(true);
     }
-    if let JobCommand::DataSourceConfigPatch {
+    if let JobCommand::SourceConfigPatch {
         apply_mode: _,
         toml,
     } = &request.command
     {
-        let outputs = match apply_data_source_config_patch(
-            request.job_id,
-            config,
-            config_path,
-            toml,
-        ) {
+        let outputs = match apply_source_config_patch(request.job_id, config, config_path, toml) {
             Ok(mut outputs) => {
                 let reconcile =
-                    reconcile_configured_runtime_tunnels(config, "data_source_config_patch").await;
+                    reconcile_configured_runtime_tunnels(config, "source_config_patch").await;
                 log_configured_runtime_tunnel_reconcile(&reconcile);
                 if let Err(error) = attach_runtime_reconcile_report(&mut outputs, reconcile) {
-                    warn!(%error, "failed to attach runtime tunnel reconcile report to data source config patch output");
+                    warn!(%error, "failed to attach runtime tunnel reconcile report to source template config patch output");
                 }
                 outputs
             }
             Err(error) => command_result_outputs(
                 request.job_id,
-                "data_source_config_patch",
+                "source_config_patch",
                 max_timeout_secs,
                 Err(error),
             ),
@@ -1510,7 +1504,7 @@ async fn execute_authorized_command(
     match &request.command {
         JobCommand::ConfigRead
         | JobCommand::HotConfig { .. }
-        | JobCommand::DataSourceConfigPatch { .. } => {
+        | JobCommand::SourceConfigPatch { .. } => {
             anyhow::bail!("config updates must run on the main agent task")
         }
         JobCommand::Backup {
@@ -1573,23 +1567,12 @@ async fn execute_authorized_command(
             })
             .await
         }
-        JobCommand::NetworkApply {
-            plan,
-            side,
-            config_backend,
-            config_sha256_hex,
-            ifupdown_sha256_hex,
-            bird2_sha256_hex,
-        } => {
+        JobCommand::NetworkApply { plan, side } => {
             execute_network_apply_command(NetworkApplyInput {
                 job_id: request.job_id,
                 config: &config,
                 plan,
                 side: *side,
-                config_backend: *config_backend,
-                config_sha256_hex: config_sha256_hex.as_deref(),
-                ifupdown_sha256_hex,
-                bird2_sha256_hex,
                 max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })

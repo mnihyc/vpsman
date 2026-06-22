@@ -356,7 +356,7 @@ assert_audit_evidence() {
     <<<"$audits_json" >/dev/null
 }
 
-assert_adapter_promotion_evidence() {
+assert_custom_adapter_evidence() {
   local plans_json
   plans_json="$(api_get "/api/v1/tunnel-plans")"
   if ! jq -e \
@@ -371,17 +371,17 @@ assert_adapter_promotion_evidence() {
         and .plan.runtime_control.traffic_limit_apply.argv[0] == $adapter_script
         and .plan.runtime_control.traffic_limit.egress_kbps == 10000
         and .plan.runtime_control.traffic_limit.ingress_kbps == 5000
-        and .plan.runtime_topology.version == "live-adapter-v1"
+        and .plan.runtime_topology.version == null
         and .plan.runtime_topology.desired_interfaces == ["ovpnlive0"]
         and .plan.touched_files == ["/etc/bird/vpsman-ospf.conf"]
     ' <<<"$plans_json" >/dev/null; then
-    echo "unexpected adapter tunnel plan state after promotion" >&2
+    echo "unexpected custom adapter tunnel plan state after promotion" >&2
     printf '%s\n' "$plans_json" >&2
     exit 1
   fi
 }
 
-assert_adapter_apply_evidence() {
+assert_custom_adapter_apply_evidence() {
   assert_job_completed "$adapter_apply_job_id" "network_apply"
   status_output_for_job "$adapter_apply_job_id" "$adapter_apply_status_file"
   jq -e --arg client "$client_id" --arg peer "$peer_client_id" '
@@ -414,7 +414,7 @@ assert_adapter_apply_evidence() {
   ' "$adapter_apply_status_file" >/dev/null
 }
 
-assert_adapter_rollback_evidence() {
+assert_custom_adapter_rollback_evidence() {
   assert_job_completed "$adapter_rollback_job_id" "network_rollback"
   status_output_for_job "$adapter_rollback_job_id" "$adapter_rollback_status_file"
   jq -e --arg client "$client_id" --arg peer "$peer_client_id" '
@@ -466,7 +466,7 @@ assert_adapter_tunnel_plan_after_apply() {
         and .last_apply_job_id == $apply_job_id
         and .last_rollback_job_id == null
     ' <<<"$plans_json" >/dev/null; then
-    echo "unexpected adapter tunnel plan state after apply" >&2
+    echo "unexpected custom adapter tunnel plan state after apply" >&2
     printf '%s\n' "$plans_json" >&2
     exit 1
   fi
@@ -487,7 +487,7 @@ assert_adapter_tunnel_plan_after_rollback() {
         and .last_apply_job_id == $apply_job_id
         and .last_rollback_job_id == $rollback_job_id
     ' <<<"$plans_json" >/dev/null; then
-    echo "unexpected adapter tunnel plan state after rollback" >&2
+    echo "unexpected custom adapter tunnel plan state after rollback" >&2
     printf '%s\n' "$plans_json" >&2
     exit 1
   fi
@@ -622,8 +622,8 @@ target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --left-underlay 192.0.2.10 \
   --right-underlay 192.0.2.20 \
   --address-pool-cidr 10.255.9.0/30 \
-  --left-tunnel-ipv4 10.255.9.0 \
-  --right-tunnel-ipv4 10.255.9.1 \
+  --left-tunnel-ipv4-cidr 10.255.9.0/31 \
+  --right-tunnel-ipv4-cidr 10.255.9.1/31 \
   --bandwidth 100m \
   --latency-ms 5 >"$network_plan_file"
 
@@ -637,8 +637,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --left-underlay 192.0.2.10 \
     --right-underlay 192.0.2.20 \
     --address-pool-cidr 10.255.9.0/30 \
-    --left-tunnel-ipv4 10.255.9.0 \
-    --right-tunnel-ipv4 10.255.9.1 \
+    --left-tunnel-ipv4-cidr 10.255.9.0/31 \
+    --right-tunnel-ipv4-cidr 10.255.9.1/31 \
     --bandwidth 100m \
     --latency-ms 5 \
     --save \
@@ -650,26 +650,17 @@ VPSMAN_API_TOKEN="$access_token" \
       and .status == "planned"
     ' >/dev/null
 
-ifupdown_snippet="$(jq -r '.ifupdown_snippet' "$network_plan_file")"
-bird2_snippet="$(jq -r '.bird2_interface_snippet' "$network_plan_file")"
-ifupdown_sha="$(printf '%s' "$ifupdown_snippet" | sha256sum | awk '{print $1}')"
-bird2_sha="$(printf '%s' "$bird2_snippet" | sha256sum | awk '{print $1}')"
-
 start_agent "managed-files"
 
 reject_body="$(jq -nc \
   --arg client "$client_id" \
   --slurpfile plan "$network_plan_file" \
-  --arg ifupdown_sha "$ifupdown_sha" \
-  --arg bird2_sha "$bird2_sha" \
   '{
     command: "network_apply",
     operation: {
       type: "network_apply",
       plan: $plan[0],
-      side: "left",
-      ifupdown_sha256_hex: $ifupdown_sha,
-      bird2_sha256_hex: $bird2_sha
+      side: "left"
     },
     selector_expression: ("id:" + $client),
     target_client_ids: [$client],
@@ -780,8 +771,8 @@ observed_json="$(VPSMAN_API_TOKEN="$access_token" \
     --left-underlay 192.0.2.10 \
     --right-underlay 192.0.2.20 \
     --address-pool-cidr 10.255.10.0/30 \
-    --left-tunnel-ipv4 10.255.10.0 \
-    --right-tunnel-ipv4 10.255.10.1 \
+    --left-tunnel-ipv4-cidr 10.255.10.0/31 \
+    --right-tunnel-ipv4-cidr 10.255.10.1/31 \
     --bandwidth 100m \
     --latency-ms 5 \
     --save \
@@ -795,7 +786,7 @@ jq -e '
 ' <<<"$observed_json" >/dev/null
 
 promoted_json="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" tunnel-promote-adapter \
+  target/debug/vpsctl --api-url "$api_url" tunnel-promote-custom-adapter \
     --plan-id "$adapter_plan_id" \
     --name live-adapter \
     --runtime-startup-argv "$adapter_script,$adapter_log,start,{interface},{local_address},{remote_address}" \
@@ -806,7 +797,6 @@ promoted_json="$(VPSMAN_API_TOKEN="$access_token" \
     --traffic-egress-kbps 10000 \
     --traffic-ingress-kbps 5000 \
     --traffic-burst-kb 64 \
-    --topology-version live-adapter-v1 \
     --topology-desired-interfaces ovpnlive0 \
     --confirmed)"
 jq -e --arg plan_id "$adapter_plan_id" '
@@ -816,7 +806,7 @@ jq -e --arg plan_id "$adapter_plan_id" '
     and .plan.runtime_control.status.argv[0] != null
 ' <<<"$promoted_json" >/dev/null
 jq '.plan' <<<"$promoted_json" >"$adapter_plan_file"
-assert_adapter_promotion_evidence
+assert_custom_adapter_evidence
 
 adapter_apply_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
@@ -830,7 +820,7 @@ VPSMAN_API_TOKEN="$access_token" \
 adapter_apply_job_id="$(jq -r '.job_id' <<<"$adapter_apply_json")"
 smoke_assert_job_create_queued "$adapter_apply_json" 1
 smoke_wait_api_job_status "$api_url" "$adapter_apply_job_id" completed 45 >/dev/null
-assert_adapter_apply_evidence
+assert_custom_adapter_apply_evidence
 assert_adapter_tunnel_plan_after_apply
 
 adapter_rollback_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -845,7 +835,7 @@ VPSMAN_API_TOKEN="$access_token" \
 adapter_rollback_job_id="$(jq -r '.job_id' <<<"$adapter_rollback_json")"
 smoke_assert_job_create_queued "$adapter_rollback_json" 1
 smoke_wait_api_job_status "$api_url" "$adapter_rollback_job_id" completed 45 >/dev/null
-assert_adapter_rollback_evidence
+assert_custom_adapter_rollback_evidence
 assert_adapter_tunnel_plan_after_rollback
 assert_adapter_log_evidence
 assert_outputs_redacted
@@ -858,9 +848,9 @@ assert_apply_evidence
 assert_ospf_cost_update_persisted
 assert_rollback_evidence
 assert_tunnel_plan_after_rollback
-assert_adapter_promotion_evidence
-assert_adapter_apply_evidence
-assert_adapter_rollback_evidence
+assert_custom_adapter_evidence
+assert_custom_adapter_apply_evidence
+assert_custom_adapter_rollback_evidence
 assert_adapter_tunnel_plan_after_rollback
 assert_adapter_log_evidence
 assert_outputs_redacted
@@ -882,9 +872,9 @@ jq -n \
     api_restart: "verified",
     no_privilege_unlock_rejected: true,
     tunnel_plan_endpoint_state: "verified",
-    external_adapter_runtime: "verified",
-    adapter_promotion: "verified",
-    unprivileged_adapter_policy: "try_external_adapters",
+    custom_adapter_runtime: "verified",
+    custom_adapter: "verified",
+    unprivileged_custom_adapter_policy: "try_external_adapters",
     sandboxed_root: true,
     client_id: $client_id,
     peer_client_id: $peer_client_id,

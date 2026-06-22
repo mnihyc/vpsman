@@ -51,6 +51,10 @@ backup_policy_prune_object_store_dir = "/var/lib/vpsman/objects/backups"
 schedule_job_max_timeout_secs = 3600
 require_registered_agent_updates = false
 
+[network]
+tunnel_ipv4_allocation_pool_cidr = ""
+tunnel_ipv6_allocation_pool_cidr = ""
+
 [database]
 migrations_dir = "/opt/vpsman/migrations"
 

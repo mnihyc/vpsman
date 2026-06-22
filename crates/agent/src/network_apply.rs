@@ -10,11 +10,10 @@ use std::{
 use anyhow::{Context, Result};
 use tokio::time::{self, Duration};
 use vpsman_common::{
-    backend_config_signature_payload, payload_hash, render_backend_config_for_endpoint,
-    render_tunnel_endpoint_config, AgentConfig, CommandOutput, OutputStream, TunnelBackendFile,
-    TunnelConfigBackend, TunnelEndpointConfig, TunnelEndpointSide, TunnelPlan, MANAGED_BIRD2_FILE,
-    MANAGED_IFUPDOWN_FILE, MANAGED_NETPLAN_FILE, MANAGED_SYSTEMD_NETWORKD_NETDEV_FILE,
-    MANAGED_SYSTEMD_NETWORKD_NETWORK_FILE,
+    payload_hash, render_backend_config_for_endpoint, render_tunnel_endpoint_config, AgentConfig,
+    CommandOutput, OutputStream, TunnelBackendFile, TunnelEndpointConfig, TunnelEndpointSide,
+    TunnelPlan, MANAGED_BIRD2_FILE, MANAGED_IFUPDOWN_FILE, MANAGED_NETPLAN_FILE,
+    MANAGED_SYSTEMD_NETWORKD_NETDEV_FILE, MANAGED_SYSTEMD_NETWORKD_NETWORK_FILE,
 };
 
 use crate::command_worker::{run_cancelable, CommandCancelToken};
@@ -35,10 +34,6 @@ pub(crate) struct NetworkApplyInput<'a> {
     pub(crate) config: &'a AgentConfig,
     pub(crate) plan: &'a TunnelPlan,
     pub(crate) side: TunnelEndpointSide,
-    pub(crate) config_backend: TunnelConfigBackend,
-    pub(crate) config_sha256_hex: Option<&'a str>,
-    pub(crate) ifupdown_sha256_hex: &'a str,
-    pub(crate) bird2_sha256_hex: &'a str,
     pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
@@ -114,41 +109,9 @@ async fn apply_network_plan(
             input.config.client_id
         );
     }
-    if input.config_backend != input.config.network.backend {
-        anyhow::bail!(
-            "network apply backend {} does not match agent backend {}",
-            input.config_backend.as_str(),
-            input.config.network.backend.as_str()
-        );
-    }
-    let backend_config =
-        render_backend_config_for_endpoint(input.plan, &endpoint, input.config_backend)
-            .map_err(|error| anyhow::anyhow!("invalid backend tunnel config: {error}"))?;
-    if input.config_backend == TunnelConfigBackend::Ifupdown {
-        verify_expected_hash(
-            endpoint.ifupdown_snippet.as_bytes(),
-            input.ifupdown_sha256_hex,
-            "network apply",
-            "ifupdown",
-        )?;
-    }
-    if input.config_backend != TunnelConfigBackend::Ifupdown && input.config_sha256_hex.is_none() {
-        anyhow::bail!("network apply backend config hash is required");
-    }
-    if let Some(config_sha256_hex) = input.config_sha256_hex {
-        verify_expected_hash(
-            &backend_config_signature_payload(&backend_config),
-            config_sha256_hex,
-            "network apply",
-            "backend_config",
-        )?;
-    }
-    verify_expected_hash(
-        endpoint.bird2_interface_snippet.as_bytes(),
-        input.bird2_sha256_hex,
-        "network apply",
-        "bird2",
-    )?;
+    let config_backend = input.config.network.backend;
+    let backend_config = render_backend_config_for_endpoint(input.plan, &endpoint, config_backend)
+        .map_err(|error| anyhow::anyhow!("invalid backend tunnel config: {error}"))?;
     let runtime_reconcile = if input.config.network.runtime_reconcile_enabled {
         let report = execute_runtime_tunnel_reconcile_report_cancelable(
             NetworkRuntimeReconcileInput {
@@ -264,7 +227,7 @@ async fn apply_network_plan(
         },
         "client_id": input.config.client_id,
         "peer_client_id": endpoint.peer_client_id,
-        "config_backend": input.config_backend.as_str(),
+        "config_backend": config_backend.as_str(),
         "applied_files": files,
         "validation": validation,
         "reload": reload,

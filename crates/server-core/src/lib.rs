@@ -286,7 +286,7 @@ pub fn target_lacks_agent_update_capability(
     let agent_update_operation = matches!(
         command,
         JobCommand::HotConfig { .. }
-            | JobCommand::DataSourceConfigPatch { .. }
+            | JobCommand::SourceConfigPatch { .. }
             | JobCommand::UpdateAgent { .. }
             | JobCommand::AgentUpdateActivate { .. }
             | JobCommand::AgentUpdateRollback { .. }

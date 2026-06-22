@@ -6,51 +6,54 @@ use uuid::Uuid;
 use vpsman_common::payload_hash;
 
 use crate::{
-    data_source_builtin_presets::builtin_presets,
     model::{
-        AssignDataSourcePresetRequest, AssignDataSourcePresetResponse, AuditLogView, AuthContext,
-        CloneDataSourcePresetRequest, CreateDataSourcePresetRequest,
-        DataSourcePresetAssignmentView, DataSourcePresetDiffRequest, DataSourcePresetDiffView,
-        DataSourcePresetTestView, DataSourcePresetView, TestDataSourcePresetRequest,
-        UpdateDataSourcePresetRequest, UpdateDataSourcePresetResponse,
+        AssignSourceTemplateRequest, AssignSourceTemplateResponse, AuditLogView, AuthContext,
+        CloneSourceTemplateRequest, CreateSourceTemplateRequest, SourceTemplateAssignmentView,
+        SourceTemplateDiffRequest, SourceTemplateDiffView, SourceTemplateTestView,
+        SourceTemplateView, TestSourceTemplateRequest, UpdateSourceTemplateRequest,
+        UpdateSourceTemplateResponse,
     },
     repository::Repository,
-    repository_data_source_hot_config::render_data_source_preset_candidate,
+    repository_source_config_patch::render_source_template_candidate,
+    source_template_builtins::builtin_source_templates,
     unix_now,
 };
 
 impl Repository {
-    pub(crate) async fn list_data_source_presets(
+    pub(crate) async fn list_source_templates(
         &self,
         domain: Option<&str>,
-    ) -> Result<Vec<DataSourcePresetView>> {
-        self.ensure_builtin_data_source_presets().await?;
+    ) -> Result<Vec<SourceTemplateView>> {
+        self.ensure_builtin_source_templates().await?;
         match self {
             Self::Memory(memory) => {
-                let assignments = self.effective_data_source_assignments(None, domain).await?;
-                let mut presets = memory
-                    .data_source_presets
+                let assignments = self
+                    .effective_source_template_assignments(None, domain)
+                    .await?;
+                let mut templates = memory
+                    .source_templates
                     .read()
                     .await
                     .iter()
-                    .filter(|preset| domain.is_none_or(|domain| preset.domain == domain))
+                    .filter(|template| domain.is_none_or(|domain| template.domain == domain))
                     .cloned()
-                    .map(|mut preset| {
-                        preset.assigned_client_count = assignments
+                    .map(|mut template| {
+                        template.assigned_client_count = assignments
                             .iter()
-                            .filter(|assignment| assignment.preset_id == preset.id)
-                            .count() as i64;
-                        preset
+                            .filter(|assignment| assignment.template_id == template.id)
+                            .count()
+                            as i64;
+                        template
                     })
                     .collect::<Vec<_>>();
-                presets.sort_by(|left, right| {
+                templates.sort_by(|left, right| {
                     left.domain
                         .cmp(&right.domain)
                         .then_with(|| right.is_default.cmp(&left.is_default))
                         .then_with(|| left.scope.cmp(&right.scope))
                         .then_with(|| left.name.cmp(&right.name))
                 });
-                Ok(presets)
+                Ok(templates)
             }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
@@ -62,17 +65,17 @@ impl Repository {
                           AND status NOT IN ('deleted', 'revoked')
                     ),
                     effective_assignments AS (
-                        SELECT a.client_id, a.domain, a.preset_id
-                        FROM client_data_source_preset_assignments a
+                        SELECT a.client_id, a.domain, a.template_id
+                        FROM client_source_template_assignments a
                         JOIN visible_clients c ON c.id = a.client_id
                         UNION ALL
-                        SELECT c.id AS client_id, p.domain, p.id AS preset_id
+                        SELECT c.id AS client_id, p.domain, p.id AS template_id
                         FROM visible_clients c
-                        CROSS JOIN data_source_presets p
+                        CROSS JOIN source_templates p
                         WHERE p.is_default
                           AND NOT EXISTS (
                               SELECT 1
-                              FROM client_data_source_preset_assignments a
+                              FROM client_source_template_assignments a
                               WHERE a.client_id = c.id
                                 AND a.domain = p.domain
                           )
@@ -90,8 +93,8 @@ impl Repository {
                         p.created_at::text AS created_at,
                         p.updated_at::text AS updated_at,
                         count(e.client_id)::bigint AS assigned_client_count
-                    FROM data_source_presets p
-                    LEFT JOIN effective_assignments e ON e.preset_id = p.id
+                    FROM source_templates p
+                    LEFT JOIN effective_assignments e ON e.template_id = p.id
                     WHERE $1::TEXT IS NULL OR p.domain = $1
                     GROUP BY p.id
                     ORDER BY p.domain, p.is_default DESC, p.scope, p.name
@@ -100,32 +103,32 @@ impl Repository {
                 .bind(domain)
                 .fetch_all(pool)
                 .await?;
-                rows.into_iter().map(data_source_preset_from_row).collect()
+                rows.into_iter().map(source_template_from_row).collect()
             }
         }
     }
 
-    pub(crate) async fn create_data_source_preset(
+    pub(crate) async fn create_source_template(
         &self,
-        request: &CreateDataSourcePresetRequest,
+        request: &CreateSourceTemplateRequest,
         operator: &AuthContext,
-    ) -> Result<DataSourcePresetView> {
-        self.ensure_builtin_data_source_presets().await?;
+    ) -> Result<SourceTemplateView> {
+        self.ensure_builtin_source_templates().await?;
         let now = unix_now().to_string();
         let scope = request.scope.trim();
         let owner = request.owner_client_id.as_deref().map(str::trim);
-        let preset = match self {
+        let template = match self {
             Self::Memory(memory) => {
-                let mut presets = memory.data_source_presets.write().await;
-                if presets.iter().any(|preset| {
-                    preset.domain == request.domain
-                        && preset.name == request.name
-                        && preset.scope == scope
-                        && preset.owner_client_id.as_deref() == owner
+                let mut templates = memory.source_templates.write().await;
+                if templates.iter().any(|template| {
+                    template.domain == request.domain
+                        && template.name == request.name
+                        && template.scope == scope
+                        && template.owner_client_id.as_deref() == owner
                 }) {
-                    anyhow::bail!("data_source_preset_duplicate");
+                    anyhow::bail!("source_template_duplicate");
                 } else {
-                    let preset = DataSourcePresetView {
+                    let template = SourceTemplateView {
                         id: Uuid::new_v4(),
                         domain: request.domain.clone(),
                         name: request.name.clone(),
@@ -139,15 +142,15 @@ impl Repository {
                         created_at: now.clone(),
                         updated_at: now.clone(),
                     };
-                    presets.push(preset.clone());
-                    preset
+                    templates.push(template.clone());
+                    template
                 }
             }
             Self::Postgres(pool) => {
                 let existing_id = if let Some(owner) = owner {
                     sqlx::query(
                         r#"
-                        SELECT id FROM data_source_presets
+                        SELECT id FROM source_templates
                         WHERE domain = $1 AND name = $2 AND owner_client_id = $3
                         "#,
                     )
@@ -160,7 +163,7 @@ impl Repository {
                 } else {
                     sqlx::query(
                         r#"
-                        SELECT id FROM data_source_presets
+                        SELECT id FROM source_templates
                         WHERE domain = $1 AND name = $2 AND scope = $3 AND owner_client_id IS NULL
                         "#,
                     )
@@ -172,10 +175,10 @@ impl Repository {
                     .map(|row| row.get::<Uuid, _>("id"))
                 };
 
-                anyhow::ensure!(existing_id.is_none(), "data_source_preset_duplicate");
+                anyhow::ensure!(existing_id.is_none(), "source_template_duplicate");
                 let row = sqlx::query(
                     r#"
-                    INSERT INTO data_source_presets (
+                    INSERT INTO source_templates (
                         id, domain, name, scope, built_in, is_default, owner_client_id,
                         description, definition
                     )
@@ -196,49 +199,49 @@ impl Repository {
                 .bind(sqlx::types::Json(&request.definition))
                 .fetch_one(pool)
                 .await?;
-                data_source_preset_from_row(row)?
+                source_template_from_row(row)?
             }
         };
-        self.record_data_source_preset_audit(
-            "data_source_preset.saved",
-            &format!("data_source_preset:{}", preset.id),
-            Some(&preset),
+        self.record_source_template_audit(
+            "source_template.saved",
+            &format!("source_template:{}", template.id),
+            Some(&template),
             &[],
             operator,
         )
         .await?;
-        Ok(preset)
+        Ok(template)
     }
 
-    pub(crate) async fn clone_data_source_preset(
+    pub(crate) async fn clone_source_template(
         &self,
-        source_preset_id: Uuid,
-        request: &CloneDataSourcePresetRequest,
+        source_template_id: Uuid,
+        request: &CloneSourceTemplateRequest,
         operator: &AuthContext,
-    ) -> Result<DataSourcePresetView> {
-        self.ensure_builtin_data_source_presets().await?;
+    ) -> Result<SourceTemplateView> {
+        self.ensure_builtin_source_templates().await?;
         let source = self
-            .data_source_preset_by_id(source_preset_id)
+            .source_template_by_id(source_template_id)
             .await?
-            .with_context(|| format!("data_source_preset_not_found:{source_preset_id}"))?;
+            .with_context(|| format!("source_template_not_found:{source_template_id}"))?;
         let now = unix_now().to_string();
         let scope = request.scope.trim();
         let owner = request.owner_client_id.as_deref().map(str::trim);
         let description = request.description.clone().or(source.description.clone());
-        let preset = match self {
+        let template = match self {
             Self::Memory(memory) => {
-                let mut presets = memory.data_source_presets.write().await;
+                let mut templates = memory.source_templates.write().await;
                 anyhow::ensure!(
-                    !presets.iter().any(|preset| data_source_preset_key_matches(
-                        preset,
+                    !templates.iter().any(|template| source_template_key_matches(
+                        template,
                         &source.domain,
                         &request.name,
                         scope,
                         owner
                     )),
-                    "data_source_preset_clone_target_exists"
+                    "source_template_clone_target_exists"
                 );
-                let preset = DataSourcePresetView {
+                let template = SourceTemplateView {
                     id: Uuid::new_v4(),
                     domain: source.domain.clone(),
                     name: request.name.clone(),
@@ -252,14 +255,14 @@ impl Repository {
                     created_at: now.clone(),
                     updated_at: now,
                 };
-                presets.push(preset.clone());
-                preset
+                templates.push(template.clone());
+                template
             }
             Self::Postgres(pool) => {
                 let exists = if let Some(owner) = owner {
                     sqlx::query(
                         r#"
-                        SELECT id FROM data_source_presets
+                        SELECT id FROM source_templates
                         WHERE domain = $1 AND owner_client_id = $2 AND name = $3
                         "#,
                     )
@@ -272,7 +275,7 @@ impl Repository {
                 } else {
                     sqlx::query(
                         r#"
-                        SELECT id FROM data_source_presets
+                        SELECT id FROM source_templates
                         WHERE domain = $1 AND name = $2 AND scope = $3 AND owner_client_id IS NULL
                         "#,
                     )
@@ -283,10 +286,10 @@ impl Repository {
                     .await?
                     .is_some()
                 };
-                anyhow::ensure!(!exists, "data_source_preset_clone_target_exists");
+                anyhow::ensure!(!exists, "source_template_clone_target_exists");
                 let row = sqlx::query(
                     r#"
-                    INSERT INTO data_source_presets (
+                    INSERT INTO source_templates (
                         id, domain, name, scope, built_in, is_default, owner_client_id,
                         description, definition
                     )
@@ -307,54 +310,54 @@ impl Repository {
                 .bind(sqlx::types::Json(&source.definition))
                 .fetch_one(pool)
                 .await?;
-                data_source_preset_from_row(row)?
+                source_template_from_row(row)?
             }
         };
-        self.record_data_source_preset_audit(
-            "data_source_preset.cloned",
-            &format!("data_source_preset:{}", preset.id),
-            Some(&preset),
+        self.record_source_template_audit(
+            "source_template.cloned",
+            &format!("source_template:{}", template.id),
+            Some(&template),
             &[],
             operator,
         )
         .await?;
-        Ok(preset)
+        Ok(template)
     }
 
-    pub(crate) async fn diff_data_source_preset(
+    pub(crate) async fn diff_source_template(
         &self,
-        preset_id: Uuid,
-        request: &DataSourcePresetDiffRequest,
-    ) -> Result<DataSourcePresetDiffView> {
-        let preset = self
-            .data_source_preset_by_id(preset_id)
+        template_id: Uuid,
+        request: &SourceTemplateDiffRequest,
+    ) -> Result<SourceTemplateDiffView> {
+        let template = self
+            .source_template_by_id(template_id)
             .await?
-            .with_context(|| format!("data_source_preset_not_found:{preset_id}"))?;
+            .with_context(|| format!("source_template_not_found:{template_id}"))?;
         let candidate_description = if request.keep_description {
-            preset.description.clone()
+            template.description.clone()
         } else {
             request.description.clone()
         };
-        Ok(data_source_preset_diff(
-            &preset,
+        Ok(source_template_diff(
+            &template,
             candidate_description,
             request.definition.clone(),
         ))
     }
 
-    pub(crate) async fn test_data_source_preset(
+    pub(crate) async fn test_source_template(
         &self,
-        preset_id: Uuid,
-        request: &TestDataSourcePresetRequest,
-    ) -> Result<DataSourcePresetTestView> {
-        let preset = self
-            .data_source_preset_by_id(preset_id)
+        template_id: Uuid,
+        request: &TestSourceTemplateRequest,
+    ) -> Result<SourceTemplateTestView> {
+        let template = self
+            .source_template_by_id(template_id)
             .await?
-            .with_context(|| format!("data_source_preset_not_found:{preset_id}"))?;
-        let mut candidate = preset.clone();
+            .with_context(|| format!("source_template_not_found:{template_id}"))?;
+        let mut candidate = template.clone();
         candidate.definition = request.definition.clone();
         let (valid, renderable, error, sections, toml, unsupported_domains, render_notes) =
-            match render_data_source_preset_candidate(&candidate) {
+            match render_source_template_candidate(&candidate) {
                 Ok(rendered) => {
                     let renderable = rendered.unsupported_domains.is_empty();
                     (
@@ -377,11 +380,11 @@ impl Repository {
                     Vec::new(),
                 ),
             };
-        Ok(DataSourcePresetTestView {
-            preset_id: preset.id,
-            domain: preset.domain,
-            preset_name: preset.name,
-            affected_client_count: preset.assigned_client_count,
+        Ok(SourceTemplateTestView {
+            template_id: template.id,
+            domain: template.domain,
+            template_name: template.name,
+            affected_client_count: template.assigned_client_count,
             valid,
             renderable,
             error,
@@ -393,40 +396,40 @@ impl Repository {
         })
     }
 
-    pub(crate) async fn update_data_source_preset(
+    pub(crate) async fn update_source_template(
         &self,
-        preset_id: Uuid,
-        request: &UpdateDataSourcePresetRequest,
+        template_id: Uuid,
+        request: &UpdateSourceTemplateRequest,
         operator: &AuthContext,
-    ) -> Result<UpdateDataSourcePresetResponse> {
-        self.ensure_builtin_data_source_presets().await?;
-        let preset = self
-            .data_source_preset_by_id(preset_id)
+    ) -> Result<UpdateSourceTemplateResponse> {
+        self.ensure_builtin_source_templates().await?;
+        let template = self
+            .source_template_by_id(template_id)
             .await?
-            .with_context(|| format!("data_source_preset_not_found:{preset_id}"))?;
-        anyhow::ensure!(!preset.built_in, "data_source_preset_builtin_immutable");
+            .with_context(|| format!("source_template_not_found:{template_id}"))?;
+        anyhow::ensure!(!template.built_in, "source_template_builtin_immutable");
         let candidate_description = if request.keep_description {
-            preset.description.clone()
+            template.description.clone()
         } else {
             request.description.clone()
         };
-        let diff = data_source_preset_diff(
-            &preset,
+        let diff = source_template_diff(
+            &template,
             candidate_description.clone(),
             request.definition.clone(),
         );
         let changed = diff.description_changed || diff.definition_changed;
         if !changed {
-            return Ok(UpdateDataSourcePresetResponse {
-                preset,
+            return Ok(UpdateSourceTemplateResponse {
+                template,
                 affected_client_count: diff.affected_client_count,
                 confirmation_required: false,
                 diff,
             });
         }
         if !request.confirmed {
-            return Ok(UpdateDataSourcePresetResponse {
-                preset,
+            return Ok(UpdateSourceTemplateResponse {
+                template,
                 affected_client_count: diff.affected_client_count,
                 confirmation_required: true,
                 diff,
@@ -435,12 +438,12 @@ impl Repository {
 
         let updated = match self {
             Self::Memory(memory) => {
-                let mut presets = memory.data_source_presets.write().await;
-                let existing = presets
+                let mut templates = memory.source_templates.write().await;
+                let existing = templates
                     .iter_mut()
-                    .find(|preset| preset.id == preset_id)
-                    .with_context(|| format!("data_source_preset_not_found:{preset_id}"))?;
-                anyhow::ensure!(!existing.built_in, "data_source_preset_builtin_immutable");
+                    .find(|template| template.id == template_id)
+                    .with_context(|| format!("source_template_not_found:{template_id}"))?;
+                anyhow::ensure!(!existing.built_in, "source_template_builtin_immutable");
                 existing.description = candidate_description.clone();
                 existing.definition = request.definition.clone();
                 existing.updated_at = unix_now().to_string();
@@ -450,7 +453,7 @@ impl Repository {
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-                    UPDATE data_source_presets p
+                    UPDATE source_templates p
                     SET description = $2, definition = $3, updated_at = now()
                     WHERE p.id = $1 AND p.built_in = FALSE
                     RETURNING
@@ -467,50 +470,50 @@ impl Repository {
                         p.updated_at::text AS updated_at,
                         (
                             SELECT count(*)::bigint
-                            FROM client_data_source_preset_assignments a
-                            WHERE a.preset_id = p.id
+                            FROM client_source_template_assignments a
+                            WHERE a.template_id = p.id
                         ) AS assigned_client_count
                     "#,
                 )
-                .bind(preset_id)
+                .bind(template_id)
                 .bind(&candidate_description)
                 .bind(sqlx::types::Json(&request.definition))
                 .fetch_one(pool)
                 .await?;
-                data_source_preset_from_row(row)?
+                source_template_from_row(row)?
             }
         };
-        self.record_data_source_preset_audit(
-            "data_source_preset.updated",
-            &format!("data_source_preset:{}", updated.id),
+        self.record_source_template_audit(
+            "source_template.updated",
+            &format!("source_template:{}", updated.id),
             Some(&updated),
             &[],
             operator,
         )
         .await?;
-        Ok(UpdateDataSourcePresetResponse {
-            preset: updated,
+        Ok(UpdateSourceTemplateResponse {
+            template: updated,
             affected_client_count: diff.affected_client_count,
             confirmation_required: false,
             diff,
         })
     }
 
-    pub(crate) async fn list_data_source_assignments(
+    pub(crate) async fn list_source_template_assignments(
         &self,
         client_id: Option<&str>,
         domain: Option<&str>,
-    ) -> Result<Vec<DataSourcePresetAssignmentView>> {
-        self.ensure_builtin_data_source_presets().await?;
-        self.effective_data_source_assignments(client_id, domain)
+    ) -> Result<Vec<SourceTemplateAssignmentView>> {
+        self.ensure_builtin_source_templates().await?;
+        self.effective_source_template_assignments(client_id, domain)
             .await
     }
 
-    async fn effective_data_source_assignments(
+    async fn effective_source_template_assignments(
         &self,
         client_id: Option<&str>,
         domain: Option<&str>,
-    ) -> Result<Vec<DataSourcePresetAssignmentView>> {
+    ) -> Result<Vec<SourceTemplateAssignmentView>> {
         match self {
             Self::Memory(memory) => {
                 let hidden = memory.hidden_clients.read().await;
@@ -527,9 +530,9 @@ impl Repository {
                     })
                     .map(|agent| agent.id.clone())
                     .collect::<BTreeSet<_>>();
-                let presets = memory.data_source_presets.read().await.clone();
+                let templates = memory.source_templates.read().await.clone();
                 let explicit = memory
-                    .data_source_assignments
+                    .source_template_assignments
                     .read()
                     .await
                     .iter()
@@ -541,23 +544,24 @@ impl Repository {
                     .collect::<Vec<_>>();
                 let mut assignments = explicit.clone();
                 for client_id in &visible_clients {
-                    for preset in presets
+                    for template in templates
                         .iter()
-                        .filter(|preset| preset.is_default)
-                        .filter(|preset| domain.is_none_or(|domain| preset.domain == domain))
+                        .filter(|template| template.is_default)
+                        .filter(|template| domain.is_none_or(|domain| template.domain == domain))
                     {
                         if explicit.iter().any(|assignment| {
-                            assignment.client_id == *client_id && assignment.domain == preset.domain
+                            assignment.client_id == *client_id
+                                && assignment.domain == template.domain
                         }) {
                             continue;
                         }
-                        assignments.push(DataSourcePresetAssignmentView {
+                        assignments.push(SourceTemplateAssignmentView {
                             client_id: client_id.clone(),
-                            domain: preset.domain.clone(),
-                            preset_id: preset.id,
-                            preset_name: preset.name.clone(),
-                            preset_scope: preset.scope.clone(),
-                            assigned_at: preset.created_at.clone(),
+                            domain: template.domain.clone(),
+                            template_id: template.id,
+                            template_name: template.name.clone(),
+                            template_scope: template.scope.clone(),
+                            assigned_at: template.created_at.clone(),
                         });
                     }
                 }
@@ -582,30 +586,30 @@ impl Repository {
                         SELECT
                             a.client_id,
                             a.domain,
-                            a.preset_id,
-                            p.name AS preset_name,
-                            p.scope AS preset_scope,
+                            a.template_id,
+                            p.name AS template_name,
+                            p.scope AS template_scope,
                             a.assigned_at::text AS assigned_at
-                        FROM client_data_source_preset_assignments a
+                        FROM client_source_template_assignments a
                         JOIN visible_clients c ON c.id = a.client_id
-                        JOIN data_source_presets p ON p.id = a.preset_id
+                        JOIN source_templates p ON p.id = a.template_id
                         WHERE $2::TEXT IS NULL OR a.domain = $2
                     ),
                     effective_defaults AS (
                         SELECT
                             c.id AS client_id,
                             p.domain,
-                            p.id AS preset_id,
-                            p.name AS preset_name,
-                            p.scope AS preset_scope,
+                            p.id AS template_id,
+                            p.name AS template_name,
+                            p.scope AS template_scope,
                             p.created_at::text AS assigned_at
                         FROM visible_clients c
-                        CROSS JOIN data_source_presets p
+                        CROSS JOIN source_templates p
                         WHERE p.is_default
                           AND ($2::TEXT IS NULL OR p.domain = $2)
                           AND NOT EXISTS (
                               SELECT 1
-                              FROM client_data_source_preset_assignments a
+                              FROM client_source_template_assignments a
                               WHERE a.client_id = c.id
                                 AND a.domain = p.domain
                           )
@@ -613,18 +617,18 @@ impl Repository {
                     SELECT
                         client_id,
                         domain,
-                        preset_id,
-                        preset_name,
-                        preset_scope,
+                        template_id,
+                        template_name,
+                        template_scope,
                         assigned_at
                     FROM explicit
                     UNION ALL
                     SELECT
                         client_id,
                         domain,
-                        preset_id,
-                        preset_name,
-                        preset_scope,
+                        template_id,
+                        template_name,
+                        template_scope,
                         assigned_at
                     FROM effective_defaults
                     ORDER BY client_id, domain
@@ -635,41 +639,41 @@ impl Repository {
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
-                    .map(data_source_assignment_from_row)
+                    .map(source_template_assignment_from_row)
                     .collect()
             }
         }
     }
 
-    pub(crate) async fn assign_data_source_preset(
+    pub(crate) async fn assign_source_template(
         &self,
-        request: &AssignDataSourcePresetRequest,
+        request: &AssignSourceTemplateRequest,
         operator: &AuthContext,
-    ) -> Result<AssignDataSourcePresetResponse> {
-        self.ensure_builtin_data_source_presets().await?;
-        let preset = self
-            .data_source_preset_by_id(request.preset_id)
+    ) -> Result<AssignSourceTemplateResponse> {
+        self.ensure_builtin_source_templates().await?;
+        let template = self
+            .source_template_by_id(request.template_id)
             .await?
-            .with_context(|| format!("data_source_preset_not_found:{}", request.preset_id))?;
+            .with_context(|| format!("source_template_not_found:{}", request.template_id))?;
         anyhow::ensure!(
-            preset.domain == request.domain,
-            "data_source_preset_domain_mismatch"
+            template.domain == request.domain,
+            "source_template_domain_mismatch"
         );
 
         let targets = self.fixed_target_agents(&request.target_client_ids).await?;
         anyhow::ensure!(
             !targets.is_empty(),
-            "data_source_assignment_targets_required"
+            "source_template_assignment_targets_required"
         );
 
-        if preset.scope == "vps_local" {
+        if template.scope == "vps_local" {
             anyhow::ensure!(
                 targets.len() == 1,
-                "vps_local_preset_requires_single_target"
+                "vps_local_template_requires_single_target"
             );
             anyhow::ensure!(
-                preset.owner_client_id.as_deref() == Some(targets[0].id.as_str()),
-                "vps_local_preset_owner_mismatch"
+                template.owner_client_id.as_deref() == Some(targets[0].id.as_str()),
+                "vps_local_template_owner_mismatch"
             );
         }
 
@@ -679,10 +683,10 @@ impl Repository {
                 .map(|target| target.id.clone())
                 .collect::<Vec<_>>();
             let assignments = self
-                .list_data_source_assignments_for_clients(&client_ids, Some(&request.domain))
+                .list_source_template_assignments_for_clients(&client_ids, Some(&request.domain))
                 .await?;
-            return Ok(AssignDataSourcePresetResponse {
-                preset,
+            return Ok(AssignSourceTemplateResponse {
+                template,
                 target_count: targets.len(),
                 confirmation_required: true,
                 assignments,
@@ -695,23 +699,23 @@ impl Repository {
             .collect::<Vec<_>>();
         match self {
             Self::Memory(memory) => {
-                let mut assignments = memory.data_source_assignments.write().await;
+                let mut assignments = memory.source_template_assignments.write().await;
                 for client_id in &client_ids {
                     let assigned_at = unix_now().to_string();
                     if let Some(existing) = assignments.iter_mut().find(|assignment| {
                         assignment.client_id == *client_id && assignment.domain == request.domain
                     }) {
-                        existing.preset_id = preset.id;
-                        existing.preset_name = preset.name.clone();
-                        existing.preset_scope = preset.scope.clone();
+                        existing.template_id = template.id;
+                        existing.template_name = template.name.clone();
+                        existing.template_scope = template.scope.clone();
                         existing.assigned_at = assigned_at;
                     } else {
-                        assignments.push(DataSourcePresetAssignmentView {
+                        assignments.push(SourceTemplateAssignmentView {
                             client_id: client_id.clone(),
                             domain: request.domain.clone(),
-                            preset_id: preset.id,
-                            preset_name: preset.name.clone(),
-                            preset_scope: preset.scope.clone(),
+                            template_id: template.id,
+                            template_name: template.name.clone(),
+                            template_scope: template.scope.clone(),
                             assigned_at,
                         });
                     }
@@ -722,18 +726,18 @@ impl Repository {
                 for client_id in &client_ids {
                     sqlx::query(
                         r#"
-                        INSERT INTO client_data_source_preset_assignments (
-                            client_id, domain, preset_id, assigned_at
+                        INSERT INTO client_source_template_assignments (
+                            client_id, domain, template_id, assigned_at
                         )
                         VALUES ($1, $2, $3, now())
                         ON CONFLICT (client_id, domain) DO UPDATE SET
-                            preset_id = EXCLUDED.preset_id,
+                            template_id = EXCLUDED.template_id,
                             assigned_at = now()
                         "#,
                     )
                     .bind(client_id)
                     .bind(&request.domain)
-                    .bind(preset.id)
+                    .bind(template.id)
                     .execute(&mut *tx)
                     .await?;
                 }
@@ -742,30 +746,30 @@ impl Repository {
         }
 
         let assignments = self
-            .list_data_source_assignments_for_clients(&client_ids, Some(&request.domain))
+            .list_source_template_assignments_for_clients(&client_ids, Some(&request.domain))
             .await?;
-        self.record_data_source_preset_audit(
-            "data_source_preset.assigned",
-            &format!("data_source_preset:{}", preset.id),
-            Some(&preset),
+        self.record_source_template_audit(
+            "source_template.assigned",
+            &format!("source_template:{}", template.id),
+            Some(&template),
             &client_ids,
             operator,
         )
         .await?;
-        Ok(AssignDataSourcePresetResponse {
-            preset,
+        Ok(AssignSourceTemplateResponse {
+            template,
             target_count: client_ids.len(),
             confirmation_required: false,
             assignments,
         })
     }
 
-    async fn list_data_source_assignments_for_clients(
+    async fn list_source_template_assignments_for_clients(
         &self,
         client_ids: &[String],
         domain: Option<&str>,
-    ) -> Result<Vec<DataSourcePresetAssignmentView>> {
-        let assignments = self.list_data_source_assignments(None, domain).await?;
+    ) -> Result<Vec<SourceTemplateAssignmentView>> {
+        let assignments = self.list_source_template_assignments(None, domain).await?;
         Ok(assignments
             .into_iter()
             .filter(|assignment| {
@@ -776,17 +780,17 @@ impl Repository {
             .collect())
     }
 
-    async fn ensure_builtin_data_source_presets(&self) -> Result<()> {
+    async fn ensure_builtin_source_templates(&self) -> Result<()> {
         match self {
             Self::Memory(memory) => {
-                let mut presets = memory.data_source_presets.write().await;
-                for built_in in builtin_presets() {
+                let mut templates = memory.source_templates.write().await;
+                for built_in in builtin_source_templates() {
                     let id = Uuid::parse_str(built_in.id)?;
-                    if presets.iter().any(|preset| preset.id == id) {
+                    if templates.iter().any(|template| template.id == id) {
                         continue;
                     }
                     let now = unix_now().to_string();
-                    presets.push(DataSourcePresetView {
+                    templates.push(SourceTemplateView {
                         id,
                         domain: built_in.domain.to_string(),
                         name: built_in.name.to_string(),
@@ -803,10 +807,10 @@ impl Repository {
                 }
             }
             Self::Postgres(pool) => {
-                for built_in in builtin_presets() {
+                for built_in in builtin_source_templates() {
                     sqlx::query(
                         r#"
-                        INSERT INTO data_source_presets (
+                        INSERT INTO source_templates (
                             id, domain, name, scope, built_in, is_default,
                             description, definition
                         )
@@ -835,31 +839,28 @@ impl Repository {
         Ok(())
     }
 
-    async fn data_source_preset_by_id(
-        &self,
-        preset_id: Uuid,
-    ) -> Result<Option<DataSourcePresetView>> {
+    async fn source_template_by_id(&self, template_id: Uuid) -> Result<Option<SourceTemplateView>> {
         Ok(self
-            .list_data_source_presets(None)
+            .list_source_templates(None)
             .await?
             .into_iter()
-            .find(|preset| preset.id == preset_id))
+            .find(|template| template.id == template_id))
     }
 
-    async fn record_data_source_preset_audit(
+    async fn record_source_template_audit(
         &self,
         action: &str,
         target: &str,
-        preset: Option<&DataSourcePresetView>,
+        template: Option<&SourceTemplateView>,
         client_ids: &[String],
         operator: &AuthContext,
     ) -> Result<()> {
         let metadata = serde_json::json!({
-            "domain": preset.map(|preset| preset.domain.as_str()),
-            "preset_id": preset.map(|preset| preset.id),
-            "preset_name": preset.map(|preset| preset.name.as_str()),
-            "preset_scope": preset.map(|preset| preset.scope.as_str()),
-            "owner_client_id": preset.and_then(|preset| preset.owner_client_id.as_deref()),
+            "domain": template.map(|template| template.domain.as_str()),
+            "template_id": template.map(|template| template.id),
+            "template_name": template.map(|template| template.name.as_str()),
+            "template_scope": template.map(|template| template.scope.as_str()),
+            "owner_client_id": template.and_then(|template| template.owner_client_id.as_deref()),
             "target_clients": client_ids,
             "target_count": client_ids.len(),
         });
@@ -897,8 +898,8 @@ impl Repository {
     }
 }
 
-fn data_source_preset_from_row(row: sqlx::postgres::PgRow) -> Result<DataSourcePresetView> {
-    Ok(DataSourcePresetView {
+fn source_template_from_row(row: sqlx::postgres::PgRow) -> Result<SourceTemplateView> {
+    Ok(SourceTemplateView {
         id: row.try_get("id")?,
         domain: row.try_get("domain")?,
         name: row.try_get("name")?,
@@ -916,52 +917,52 @@ fn data_source_preset_from_row(row: sqlx::postgres::PgRow) -> Result<DataSourceP
     })
 }
 
-fn data_source_assignment_from_row(
+fn source_template_assignment_from_row(
     row: sqlx::postgres::PgRow,
-) -> Result<DataSourcePresetAssignmentView> {
-    Ok(DataSourcePresetAssignmentView {
+) -> Result<SourceTemplateAssignmentView> {
+    Ok(SourceTemplateAssignmentView {
         client_id: row.try_get("client_id")?,
         domain: row.try_get("domain")?,
-        preset_id: row.try_get("preset_id")?,
-        preset_name: row.try_get("preset_name")?,
-        preset_scope: row.try_get("preset_scope")?,
+        template_id: row.try_get("template_id")?,
+        template_name: row.try_get("template_name")?,
+        template_scope: row.try_get("template_scope")?,
         assigned_at: row.try_get("assigned_at")?,
     })
 }
 
-fn data_source_preset_key_matches(
-    preset: &DataSourcePresetView,
+fn source_template_key_matches(
+    template: &SourceTemplateView,
     domain: &str,
     name: &str,
     scope: &str,
     owner_client_id: Option<&str>,
 ) -> bool {
-    preset.domain == domain
-        && preset.name == name
-        && preset.scope == scope
-        && preset.owner_client_id.as_deref() == owner_client_id
+    template.domain == domain
+        && template.name == name
+        && template.scope == scope
+        && template.owner_client_id.as_deref() == owner_client_id
 }
 
-fn data_source_preset_diff(
-    preset: &DataSourcePresetView,
+fn source_template_diff(
+    template: &SourceTemplateView,
     candidate_description: Option<String>,
     candidate_definition: serde_json::Value,
-) -> DataSourcePresetDiffView {
-    let changed_keys = changed_definition_keys(&preset.definition, &candidate_definition);
-    let definition_changed = preset.definition != candidate_definition;
-    let description_changed = preset.description != candidate_description;
-    DataSourcePresetDiffView {
-        preset_id: preset.id,
-        domain: preset.domain.clone(),
-        preset_name: preset.name.clone(),
-        current_description: preset.description.clone(),
+) -> SourceTemplateDiffView {
+    let changed_keys = changed_definition_keys(&template.definition, &candidate_definition);
+    let definition_changed = template.definition != candidate_definition;
+    let description_changed = template.description != candidate_description;
+    SourceTemplateDiffView {
+        template_id: template.id,
+        domain: template.domain.clone(),
+        template_name: template.name.clone(),
+        current_description: template.description.clone(),
         candidate_description,
-        current_definition: preset.definition.clone(),
+        current_definition: template.definition.clone(),
         candidate_definition,
         description_changed,
         definition_changed,
         changed_keys,
-        affected_client_count: preset.assigned_client_count,
+        affected_client_count: template.assigned_client_count,
     }
 }
 

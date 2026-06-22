@@ -106,6 +106,7 @@ export function ConsoleDataGrid<T>({
   renderSelectionPanel,
   rowActions = [],
   rows,
+  selectable = true,
   singleExpandedRow = false,
   searchPlaceholder = "Search",
   storageKey,
@@ -127,6 +128,7 @@ export function ConsoleDataGrid<T>({
   renderSelectionPanel?: (rows: T[]) => ReactNode;
   rowActions?: ConsoleDataGridAction<T>[];
   rows: T[];
+  selectable?: boolean;
   singleExpandedRow?: boolean;
   searchPlaceholder?: string;
   storageKey: string;
@@ -187,35 +189,39 @@ export function ConsoleDataGrid<T>({
   );
   const tableColumns = useMemo<ColumnDef<T>[]>(
     () => [
-      {
-        id: "__select",
-        size: 42,
-        minSize: 42,
-        maxSize: 42,
-        enableHiding: false,
-        header: ({ table }) => (
-          <input
-            aria-label={`Select all ${title}`}
-            checked={table.getIsAllPageRowsSelected()}
-            onChange={table.getToggleAllPageRowsSelectedHandler()}
-            ref={(input) => {
-              if (input) {
-                input.indeterminate = table.getIsSomePageRowsSelected();
-              }
-            }}
-            type="checkbox"
-          />
-        ),
-        cell: ({ row }) => (
-          <input
-            aria-label={`Select ${title} row ${getRowId(row.original)}`}
-            checked={row.getIsSelected()}
-            onClick={(event) => event.stopPropagation()}
-            onChange={row.getToggleSelectedHandler()}
-            type="checkbox"
-          />
-        ),
-      },
+      ...(selectable
+        ? [
+            {
+              id: "__select",
+              size: 42,
+              minSize: 42,
+              maxSize: 42,
+              enableHiding: false,
+              header: ({ table }) => (
+                <input
+                  aria-label={`Select all ${title}`}
+                  checked={table.getIsAllPageRowsSelected()}
+                  onChange={table.getToggleAllPageRowsSelectedHandler()}
+                  ref={(input) => {
+                    if (input) {
+                      input.indeterminate = table.getIsSomePageRowsSelected();
+                    }
+                  }}
+                  type="checkbox"
+                />
+              ),
+              cell: ({ row }) => (
+                <input
+                  aria-label={`Select ${title} row ${getRowId(row.original)}`}
+                  checked={row.getIsSelected()}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={row.getToggleSelectedHandler()}
+                  type="checkbox"
+                />
+              ),
+            } satisfies ColumnDef<T>,
+          ]
+        : []),
       ...(hasExpandedRows
         ? [
             {
@@ -275,6 +281,7 @@ export function ConsoleDataGrid<T>({
     [
       columns,
       hasExpandedRows,
+      selectable,
       title,
     ],
   );
@@ -303,7 +310,8 @@ export function ConsoleDataGrid<T>({
     columnResizeMode: "onChange",
     columns: tableColumns,
     data: filteredRows,
-    enableMultiRowSelection: true,
+    enableMultiRowSelection: selectable,
+    enableRowSelection: selectable,
     getCoreRowModel: getCoreRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
     getRowId,
@@ -455,7 +463,7 @@ export function ConsoleDataGrid<T>({
           <span>
             {filteredRows.length} of {rows.length} {itemLabel}
           </span>
-          <span>{selectedRows.length} selected</span>
+          {selectable && <span>{selectedRows.length} selected</span>}
         </div>
         <SearchExpressionInput
           ariaLabel={`${title} search`}
@@ -467,7 +475,7 @@ export function ConsoleDataGrid<T>({
         />
         <div className="gridToolbarActions">
           {toolbarActions}
-          {actions.length > 0 && (
+          {selectable && actions.length > 0 && (
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
                 <button
@@ -757,7 +765,7 @@ export function ConsoleDataGrid<T>({
           </div>
         </div>
       )}
-      {renderSelectionPanel && selectedRows.length > 0 && (
+      {selectable && renderSelectionPanel && selectedRows.length > 0 && (
         <div className="gridSelectionPanel">
           {renderSelectionPanel(selectedRows)}
         </div>

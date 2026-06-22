@@ -110,9 +110,9 @@ import type {
   BulkTagMutationRequest,
   CreateJobRequest,
   CreateJobResponse,
-  DataSourceHotConfigResponse,
-  DataSourcePresetAssignmentRecord,
-  DataSourceStatusRecord,
+  SourceConfigPatchResponse,
+  SourceTemplateAssignmentRecord,
+  SourceStatusRecord,
   FleetAlertPolicyRecord,
   FleetAlertPolicyRequest,
   FleetAlertRecord,
@@ -235,13 +235,13 @@ export function FleetWorkspace({
   webhookRules,
   webhookRuleDeliveries,
   lastLiveEvent,
-  dataSourceAssignments,
-  dataSourceStatus,
+  sourceTemplateAssignments,
+  sourceStatus,
   onCreateJob,
   onBulkMutateTags,
   onNavigatePanel,
   onOpenJobDispatchPreset,
-  onRenderDataSourceHotConfig,
+  onRenderSourceConfigPatch,
   onDeleteFleetAlertNotificationChannel,
   onDeleteFleetAlertPolicy,
   onDeleteWebhookRule,
@@ -284,17 +284,17 @@ export function FleetWorkspace({
   webhookRules: WebhookRuleRecord[];
   webhookRuleDeliveries: WebhookRuleDeliveryRecord[];
   lastLiveEvent: string;
-  dataSourceAssignments: DataSourcePresetAssignmentRecord[];
-  dataSourceStatus: DataSourceStatusRecord[];
+  sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
+  sourceStatus: SourceStatusRecord[];
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onBulkMutateTags: (
     request: BulkTagMutationRequest,
   ) => Promise<TagMutationResponse>;
   onNavigatePanel?: (view: ActiveView, subpage: string) => void;
   onOpenJobDispatchPreset: (preset: JobDispatchPresetInput) => void;
-  onRenderDataSourceHotConfig: (
+  onRenderSourceConfigPatch: (
     clientId: string,
-  ) => Promise<DataSourceHotConfigResponse>;
+  ) => Promise<SourceConfigPatchResponse>;
   onDeleteFleetAlertNotificationChannel: (
     channelId: string,
     reviewedName: string,
@@ -858,10 +858,10 @@ export function FleetWorkspace({
             renderExpandedRow={(agent) => (
               <FleetInstanceDetail
                 agent={agent}
-                dataSourceAssignments={dataSourceAssignments.filter(
+                sourceTemplateAssignments={sourceTemplateAssignments.filter(
                   (assignment) => assignment.client_id === agent.id,
                 )}
-                dataSourceStatus={dataSourceStatus.filter(
+                sourceStatus={sourceStatus.filter(
                   (status) => status.client_id === agent.id,
                 )}
                 lastLiveEvent={lastLiveEvent}
@@ -874,7 +874,7 @@ export function FleetWorkspace({
                 onLoadJobTargets={onLoadJobTargets}
                 onOpenJobDetails={onOpenJobDetails}
                 onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-                onRenderDataSourceHotConfig={onRenderDataSourceHotConfig}
+                onRenderSourceConfigPatch={onRenderSourceConfigPatch}
                 onUpdateAgentAlias={onUpdateAgentAlias}
                 privilegeMaterial={privilegeMaterial}
                 showCountryFlags={preferences.show_country_flags}
@@ -1026,8 +1026,8 @@ export function FleetWorkspace({
 
 function FleetInstanceDetail({
   agent,
-  dataSourceAssignments,
-  dataSourceStatus,
+  sourceTemplateAssignments,
+  sourceStatus,
   lastLiveEvent,
   latestNetworkRates,
   latestRollup,
@@ -1038,7 +1038,7 @@ function FleetInstanceDetail({
   onLoadJobTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
-  onRenderDataSourceHotConfig,
+  onRenderSourceConfigPatch,
   onUpdateAgentAlias,
   privilegeMaterial,
   showCountryFlags,
@@ -1051,8 +1051,8 @@ function FleetInstanceDetail({
   wsState,
 }: {
   agent: AgentView;
-  dataSourceAssignments: DataSourcePresetAssignmentRecord[];
-  dataSourceStatus: DataSourceStatusRecord[];
+  sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
+  sourceStatus: SourceStatusRecord[];
   lastLiveEvent: string;
   latestNetworkRates: TelemetryNetworkRateRecord[];
   latestRollup: TelemetryRollupRecord | null;
@@ -1067,9 +1067,9 @@ function FleetInstanceDetail({
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
-  onRenderDataSourceHotConfig: (
+  onRenderSourceConfigPatch: (
     clientId: string,
-  ) => Promise<DataSourceHotConfigResponse>;
+  ) => Promise<SourceConfigPatchResponse>;
   onUpdateAgentAlias: (
     clientId: string,
     displayName: string,
@@ -1109,7 +1109,7 @@ function FleetInstanceDetail({
   const [configPending, setConfigPending] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
   const [configPreview, setConfigPreview] =
-    useState<DataSourceHotConfigResponse | null>(null);
+    useState<SourceConfigPatchResponse | null>(null);
   const country = countryFromTags(agent.tags);
   const provider = providerFromTags(agent.tags);
   const displayOnlyTags = displayTags(
@@ -1255,7 +1255,7 @@ function FleetInstanceDetail({
 
   async function loadRenderedConfig() {
     await runPanelAction(setConfigPending, setConfigError, async () => {
-      setConfigPreview(await onRenderDataSourceHotConfig(agent.id));
+      setConfigPreview(await onRenderSourceConfigPatch(agent.id));
     });
   }
 
@@ -1594,9 +1594,9 @@ function FleetInstanceDetail({
               label="Process limits"
               value={yesNo(agent.capabilities.can_apply_process_limits)}
             />
-            <DataSourceConfigList
-              assignments={dataSourceAssignments}
-              statuses={dataSourceStatus}
+            <SourceTemplateConfigList
+              assignments={sourceTemplateAssignments}
+              statuses={sourceStatus}
             />
             <ConfigPreviewBlock
               error={configError}
@@ -1617,12 +1617,12 @@ function FleetInstanceDetail({
   );
 }
 
-function DataSourceConfigList({
+function SourceTemplateConfigList({
   assignments,
   statuses,
 }: {
-  assignments: DataSourcePresetAssignmentRecord[];
-  statuses: DataSourceStatusRecord[];
+  assignments: SourceTemplateAssignmentRecord[];
+  statuses: SourceStatusRecord[];
 }) {
   const domains = Array.from(
     new Set(assignments.map((assignment) => assignment.domain)),
@@ -1639,7 +1639,7 @@ function DataSourceConfigList({
       <div className="detailLine">
         <FileCog size={18} />
         <div>
-          <span>Assigned preset domains</span>
+          <span>Assigned template domains</span>
           <strong>
             {domains.length === 0
               ? "No explicit assignments"
@@ -1650,20 +1650,20 @@ function DataSourceConfigList({
       {assignments.slice(0, 8).map((assignment) => (
         <div
           className="detailLine compactConfigLine"
-          key={`${assignment.client_id}-${assignment.domain}-${assignment.preset_id}`}
+          key={`${assignment.client_id}-${assignment.domain}-${assignment.template_id}`}
         >
           <Boxes size={18} />
           <div>
             <span>{assignment.domain}</span>
             <strong>
-              {assignment.preset_name} · {assignment.preset_scope}
+              {assignment.template_name} · {assignment.template_scope}
             </strong>
           </div>
         </div>
       ))}
       {assignments.length > 8 && (
         <small className="mutedText">
-          +{assignments.length - 8} more preset assignment
+          +{assignments.length - 8} more template assignment
           {assignments.length - 8 === 1 ? "" : "s"}
         </small>
       )}
@@ -1671,7 +1671,7 @@ function DataSourceConfigList({
         <Activity size={18} />
         <div>
           <span>Runtime config sources</span>
-          <strong>{formatDataSourceStatusSummary(statusRows)}</strong>
+          <strong>{formatSourceStatusSummary(statusRows)}</strong>
         </div>
       </div>
       {statusRows.slice(0, 8).map((row) => (
@@ -1685,9 +1685,9 @@ function DataSourceConfigList({
               {row.domain} / {row.module}
             </span>
             <strong>
-              {row.status} · {row.preset_name} · {row.source_kind}
+              {row.status} · {row.template_name} · {row.source_kind}
             </strong>
-            <small>{row.status_reason || formatDataSourceEvidence(row)}</small>
+            <small>{row.status_reason || formatSourceTemplateEvidence(row)}</small>
           </div>
         </div>
       ))}
@@ -1701,7 +1701,7 @@ function DataSourceConfigList({
   );
 }
 
-function formatDataSourceStatusSummary(rows: DataSourceStatusRecord[]) {
+function formatSourceStatusSummary(rows: SourceStatusRecord[]) {
   if (rows.length === 0) {
     return "No runtime config source status loaded";
   }
@@ -1712,7 +1712,7 @@ function formatDataSourceStatusSummary(rows: DataSourceStatusRecord[]) {
   return `${rows.length} source${rows.length === 1 ? "" : "s"} · ${ok} ok${degraded > 0 ? ` · ${degraded} needs review` : ""}`;
 }
 
-function formatDataSourceEvidence(row: DataSourceStatusRecord) {
+function formatSourceTemplateEvidence(row: SourceStatusRecord) {
   const evidence = row.evidence;
   if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
     return row.status_reason || "No evidence reported";
@@ -1747,7 +1747,7 @@ function ConfigPreviewBlock({
   error: string | null;
   onLoad: () => void;
   pending: boolean;
-  preview: DataSourceHotConfigResponse | null;
+  preview: SourceConfigPatchResponse | null;
   summary: string;
 }) {
   return (
@@ -6679,7 +6679,7 @@ type NetworkInterfaceSnapshotRecord = {
   addresses?: NetworkInterfaceAddressRecord[];
   rx_bytes?: number;
   tx_bytes?: number;
-  metadata_sources?: string[];
+  metasource_templates?: string[];
 };
 
 type NetworkInterfaceAddressRecord = {

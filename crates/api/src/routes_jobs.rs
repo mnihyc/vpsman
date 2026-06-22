@@ -684,7 +684,7 @@ fn confirmation_error_code(command: &JobCommand) -> &'static str {
         JobCommand::Backup { .. } => "backup_confirmation_required",
         JobCommand::NetworkSpeedTest { .. } => "network_speed_test_confirmation_required",
         JobCommand::HotConfig { .. }
-        | JobCommand::DataSourceConfigPatch { .. }
+        | JobCommand::SourceConfigPatch { .. }
         | JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }

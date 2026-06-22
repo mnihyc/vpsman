@@ -14,6 +14,7 @@ import type {
   AllocateTunnelEndpointsRequest,
   AllocateTunnelEndpointsResponse,
   BandwidthTier,
+  OperatorPreferences,
   PromoteTelemetryTunnelRequest,
   TelemetryTunnelRecord,
   TunnelAddressFamily,
@@ -21,7 +22,7 @@ import type {
   TunnelEndpointSide,
   TunnelPlanRecord,
 } from "../../types";
-import type { PromoteTunnelPlanToAdapterRequest } from "../../typesTopology";
+import type { PromoteTunnelPlanToCustomAdapterRequest } from "../../typesTopology";
 import {
   clientDisplayNameFromMap,
   clientDisplayNameMap,
@@ -45,7 +46,6 @@ type AdapterPromotionForm = {
   trafficIngressKbps: string;
   trafficEgressKbps: string;
   trafficBurstKb: string;
-  topologyVersion: string;
   topologyDesiredText: string;
   topologyStaleText: string;
   topologyRoutesText: string;
@@ -55,7 +55,7 @@ type AdapterPromotionForm = {
 type AdapterPromotionSnapshot = {
   detail: string;
   items: Array<{ label: string; value: string }>;
-  request: PromoteTunnelPlanToAdapterRequest;
+  request: PromoteTunnelPlanToCustomAdapterRequest;
 };
 type TelemetryPromotionSnapshot = {
   detail: string;
@@ -67,36 +67,22 @@ export function TopologyPromotionPanel({
   agents,
   onAllocateTunnelEndpoints,
   onPromoteTelemetryTunnel,
-  onPromoteTunnelPlanToAdapter,
+  onPromoteTunnelPlanToCustomAdapter,
   telemetryTunnels,
   tunnelPlans,
 }: {
   agents: AgentView[];
   onAllocateTunnelEndpoints: (request: AllocateTunnelEndpointsRequest) => Promise<AllocateTunnelEndpointsResponse>;
   onPromoteTelemetryTunnel: (request: PromoteTelemetryTunnelRequest) => Promise<void>;
-  onPromoteTunnelPlanToAdapter: (request: PromoteTunnelPlanToAdapterRequest) => Promise<void>;
+  onPromoteTunnelPlanToCustomAdapter: (request: PromoteTunnelPlanToCustomAdapterRequest) => Promise<void>;
   telemetryTunnels: TelemetryTunnelRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [promoteForm, setPromoteForm] = useState<PromoteTelemetryTunnelRequest>({
-    client_id: "",
-    interface: "",
-    peer_client_id: "",
-    local_underlay: "",
-    peer_underlay: "",
-    address_pool_cidr: "10.255.0.0/30",
-    ipv4_tunnel: null,
-    ipv6_address_pool_cidr: "",
-    ipv6_tunnel: null,
-    latency_primary_family: "ipv4",
-    side: "left",
-    bandwidth: "100m",
-    latency_ms: 20,
-    packet_loss_ratio: 0,
-    preference: 1,
-    confirmed: false,
-  });
+  const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
+  const [promoteForm, setPromoteForm] = useState<PromoteTelemetryTunnelRequest>(() =>
+    initialTelemetryPromotionForm(preferences),
+  );
+  const [reservedText, setReservedText] = useState("");
   const [adapterForm, setAdapterForm] = useState<AdapterPromotionForm>({
     planId: "",
     name: "",
@@ -109,7 +95,6 @@ export function TopologyPromotionPanel({
     trafficIngressKbps: "",
     trafficEgressKbps: "",
     trafficBurstKb: "",
-    topologyVersion: "",
     topologyDesiredText: "",
     topologyStaleText: "",
     topologyRoutesText: "",
@@ -194,13 +179,12 @@ export function TopologyPromotionPanel({
       return;
     }
     const runtimeTopology = buildRuntimeTopology({
-      version: adapterForm.topologyVersion,
       desiredText: adapterForm.topologyDesiredText,
       staleText: adapterForm.topologyStaleText,
       routesText: adapterForm.topologyRoutesText,
       staleRoutesText: adapterForm.topologyStaleRoutesText,
     });
-    const request: PromoteTunnelPlanToAdapterRequest = {
+    const request: PromoteTunnelPlanToCustomAdapterRequest = {
       plan_id: selectedObservedPlan.id,
       runtime_control: buildRuntimeControl("external_managed_adapter", {
         startup: adapterForm.startupArgv,
@@ -221,10 +205,10 @@ export function TopologyPromotionPanel({
       confirmed: true,
     };
     setAdapterPromotionSnapshot({
-      detail: "Confirm promoting the observed tunnel plan into an externally managed runtime adapter.",
+      detail: "Confirm promoting the observed tunnel plan into a custom adapter workflow.",
       items: [
         { label: "Plan", value: selectedObservedPlan.name },
-        { label: "Runtime", value: "external_managed_adapter" },
+        { label: "Runtime", value: "Custom adapter" },
         { label: "Status argv", value: adapterForm.statusArgv.trim() },
         { label: "Traffic", value: adapterTrafficLimitEnabled ? "enabled" : "disabled" },
       ],
@@ -234,23 +218,30 @@ export function TopologyPromotionPanel({
 
   async function executeAdapterPromotion(snapshot: AdapterPromotionSnapshot) {
     await runPanelAction(setPending, setActionError, async () => {
-      await onPromoteTunnelPlanToAdapter(snapshot.request);
+      await onPromoteTunnelPlanToCustomAdapter(snapshot.request);
     });
   }
 
   async function allocatePromotionEndpoints() {
     await runPanelAction(setPending, setActionError, async () => {
-      const includeIpv4 = Boolean(promoteForm.address_pool_cidr.trim());
-      const includeIpv6 = Boolean((promoteForm.ipv6_address_pool_cidr ?? "").trim());
-      if (!includeIpv4 && !includeIpv6) {
-        throw new Error("Enter an IPv4 or IPv6 pool before generating endpoints");
-      }
+      const ipv4Pool = promoteForm.address_pool_cidr.trim();
+      const ipv6Pool = (promoteForm.ipv6_address_pool_cidr ?? "").trim();
+      const hasLocalPool = Boolean(ipv4Pool || ipv6Pool);
+      const reservedAddresses = mergeReservedAddresses(
+        splitReserved(reservedText),
+        currentPromotionAddresses(promoteForm),
+      );
       const allocation = await onAllocateTunnelEndpoints({
-        ipv4_pool_cidr: includeIpv4 ? promoteForm.address_pool_cidr.trim() : null,
-        ipv6_pool_cidr: includeIpv6 ? (promoteForm.ipv6_address_pool_cidr ?? "").trim() : null,
-        include_ipv4: includeIpv4,
-        include_ipv6: includeIpv6,
+        ipv4_pool_cidr: ipv4Pool || null,
+        ipv6_pool_cidr: ipv6Pool || null,
+        reserved_addresses: reservedAddresses,
+        include_ipv4: hasLocalPool ? Boolean(ipv4Pool) : undefined,
+        include_ipv6: hasLocalPool ? Boolean(ipv6Pool) : undefined,
       });
+      if (!allocation.ipv4_tunnel && !allocation.ipv6_tunnel) {
+        throw new Error("No tunnel allocation pool is configured; enter endpoint CIDRs or configure an allocator pool");
+      }
+      setReservedText(formatReservedAddresses(reservedAddresses));
       setTelemetryPromotionSnapshot(null);
       setPromoteForm((current) => ({
         ...current,
@@ -285,10 +276,10 @@ export function TopologyPromotionPanel({
           }}
           open={telemetryPromotionSnapshot !== null}
           pending={pending}
-          title="Confirm observed import"
+          title="Confirm external observe"
         />
         <ConfirmationPrompt
-          confirmLabel="Promote adapter"
+          confirmLabel="Save custom adapter"
           detail={adapterPromotionSnapshot?.detail ?? ""}
           items={adapterPromotionSnapshot?.items ?? []}
           onCancel={() => setAdapterPromotionSnapshot(null)}
@@ -302,14 +293,15 @@ export function TopologyPromotionPanel({
           }}
           open={adapterPromotionSnapshot !== null}
           pending={pending}
-          title="Promote tunnel adapter"
+          title="Confirm custom adapter"
         />
         <form className="dispatchForm promotionStageCard promotionImportCard" onSubmit={submitTelemetryPromotion}>
-          <div className="sectionHeader compactHeader promotionStageHeader">
+          <div
+            className="sectionHeader compactHeader promotionStageHeader"
+            title="Convert one telemetry candidate into a saved observed plan."
+          >
             <div>
-              <small>Step 1</small>
-              <h3>Observed import</h3>
-              <span>Convert one telemetry candidate into a saved observed plan.</span>
+              <h3>External observe</h3>
             </div>
             <Save size={18} />
           </div>
@@ -326,12 +318,12 @@ export function TopologyPromotionPanel({
               </select>
             </label>
             <label>
-              <span>Peer VPS</span>
-              <VpsCombobox
-                agents={agents}
-                ariaLabel="Observed import peer VPS"
+                <span>Peer VPS</span>
+                <VpsCombobox
+                  agents={agents}
+                  ariaLabel="External observe peer VPS"
                 excludeIds={promoteForm.client_id ? [promoteForm.client_id] : []}
-                onChange={(value) => setPromotionField("peer_client_id", value)}
+                onChange={(value) => setPromotionPeerClient(value)}
                 placeholder="Search peer VPS"
                 value={promoteForm.peer_client_id}
               />
@@ -371,75 +363,37 @@ export function TopologyPromotionPanel({
           </div>
           <div className="dispatchControls">
             <label>
-              <span>IPv4 allocation pool</span>
+              <span>Self IPv4 CIDR</span>
               <input
-                value={promoteForm.address_pool_cidr}
-                onChange={(event) => setPromotionField("address_pool_cidr", event.target.value)}
-                placeholder="Empty means disabled"
+                value={promotionEndpointCidr(promoteForm.ipv4_tunnel ?? null, promoteForm.side ?? "left", "local")}
+                onChange={(event) => setPromotionAddressCidr("ipv4_tunnel", "local", event.target.value, 31)}
+                placeholder="IPv4 CIDR"
               />
             </label>
             <label>
-              <span>IPv6 allocation pool</span>
+              <span>Peer IPv4 CIDR</span>
               <input
-                value={promoteForm.ipv6_address_pool_cidr ?? ""}
-                onChange={(event) => setPromotionField("ipv6_address_pool_cidr", event.target.value)}
-                placeholder="Empty means disabled"
-              />
-            </label>
-          </div>
-          <div className="dispatchControls">
-            <label>
-              <span>Self IPv4</span>
-              <input
-                value={promotionAddressValue(promoteForm.ipv4_tunnel ?? null, promoteForm.side ?? "left", "local")}
-                onChange={(event) => setPromotionAddressPair("ipv4_tunnel", "local", event.target.value, 31)}
-                placeholder="Empty means disabled"
-              />
-            </label>
-            <label>
-              <span>Peer IPv4</span>
-              <input
-                value={promotionAddressValue(promoteForm.ipv4_tunnel ?? null, promoteForm.side ?? "left", "peer")}
-                onChange={(event) => setPromotionAddressPair("ipv4_tunnel", "peer", event.target.value, 31)}
-                placeholder="Empty means disabled"
-              />
-            </label>
-            <label>
-              <span>IPv4 prefix</span>
-              <input
-                max={32}
-                min={0}
-                onChange={(event) => setPromotionAddressPrefix("ipv4_tunnel", Number(event.target.value), 31)}
-                type="number"
-                value={promoteForm.ipv4_tunnel?.prefix_len ?? 31}
+                value={promotionEndpointCidr(promoteForm.ipv4_tunnel ?? null, promoteForm.side ?? "left", "peer")}
+                onChange={(event) => setPromotionAddressCidr("ipv4_tunnel", "peer", event.target.value, 31)}
+                placeholder="IPv4 CIDR"
               />
             </label>
           </div>
           <div className="dispatchControls">
             <label>
-              <span>Self IPv6</span>
+              <span>Self IPv6 CIDR</span>
               <input
-                value={promotionAddressValue(promoteForm.ipv6_tunnel ?? null, promoteForm.side ?? "left", "local")}
-                onChange={(event) => setPromotionAddressPair("ipv6_tunnel", "local", event.target.value, 127)}
-                placeholder="Empty means disabled"
+                value={promotionEndpointCidr(promoteForm.ipv6_tunnel ?? null, promoteForm.side ?? "left", "local")}
+                onChange={(event) => setPromotionAddressCidr("ipv6_tunnel", "local", event.target.value, 127)}
+                placeholder="IPv6 CIDR"
               />
             </label>
             <label>
-              <span>Peer IPv6</span>
+              <span>Peer IPv6 CIDR</span>
               <input
-                value={promotionAddressValue(promoteForm.ipv6_tunnel ?? null, promoteForm.side ?? "left", "peer")}
-                onChange={(event) => setPromotionAddressPair("ipv6_tunnel", "peer", event.target.value, 127)}
-                placeholder="Empty means disabled"
-              />
-            </label>
-            <label>
-              <span>IPv6 prefix</span>
-              <input
-                max={128}
-                min={0}
-                onChange={(event) => setPromotionAddressPrefix("ipv6_tunnel", Number(event.target.value), 127)}
-                type="number"
-                value={promoteForm.ipv6_tunnel?.prefix_len ?? 127}
+                value={promotionEndpointCidr(promoteForm.ipv6_tunnel ?? null, promoteForm.side ?? "left", "peer")}
+                onChange={(event) => setPromotionAddressCidr("ipv6_tunnel", "peer", event.target.value, 127)}
+                placeholder="IPv6 CIDR"
               />
             </label>
           </div>
@@ -456,9 +410,37 @@ export function TopologyPromotionPanel({
             </label>
             <button className="secondaryAction" disabled={pending} onClick={allocatePromotionEndpoints} type="button">
               <Wand2 size={17} />
-              Generate endpoints
+              Allocate endpoints
             </button>
           </div>
+          <details
+            className="operationNote formSectionNote"
+            title="Uses Preferences pools unless overridden here. Reserved addresses are comma-separated; repeated allocation appends current endpoint IPs before requesting another suggestion."
+          >
+            <summary>Allocation overrides</summary>
+            <div className="dispatchControls">
+              <label>
+                <span>IPv4 pool override</span>
+                <input
+                  value={promoteForm.address_pool_cidr}
+                  onChange={(event) => setPromotionField("address_pool_cidr", event.target.value)}
+                  placeholder="No default"
+                />
+              </label>
+              <label>
+                <span>IPv6 pool override</span>
+                <input
+                  value={promoteForm.ipv6_address_pool_cidr ?? ""}
+                  onChange={(event) => setPromotionField("ipv6_address_pool_cidr", event.target.value)}
+                  placeholder="No default"
+                />
+              </label>
+              <label>
+                <span>Reserved addresses</span>
+                <input value={reservedText} onChange={(event) => setReservedText(event.target.value)} />
+              </label>
+            </div>
+          </details>
           <div className="dispatchControls">
             <label>
               <span>Bandwidth</span>
@@ -502,11 +484,12 @@ export function TopologyPromotionPanel({
         </form>
 
         <form className="dispatchForm promotionStageCard promotionAdapterCard" onSubmit={submitAdapterPromotion}>
-          <div className="sectionHeader compactHeader promotionStageHeader">
+          <div
+            className="sectionHeader compactHeader promotionStageHeader"
+            title="Attach status, startup, shutdown, restart, cleanup, and optional traffic commands to a saved observed plan."
+          >
             <div>
-              <small>Step 2</small>
-              <h3>Adapter contract</h3>
-              <span>Attach status/start/traffic commands to a saved observed plan.</span>
+              <h3>Custom adapter</h3>
             </div>
             <ShieldCheck size={18} />
           </div>
@@ -527,152 +510,158 @@ export function TopologyPromotionPanel({
               <input value={adapterForm.name} onChange={(event) => setAdapterField("name", event.target.value)} />
             </label>
           </div>
-          <div className="promotionGroupLabel">
-            <strong>Runtime commands</strong>
-            <span>Status is required; other commands are optional lifecycle hooks.</span>
-          </div>
-          <div className="dispatchControls">
-            <label className="adapterArgvField">
-              <span>Status argv</span>
-              <input
-                title={adapterArgvTooltip}
-                value={adapterForm.statusArgv}
-                onChange={(event) => setAdapterField("statusArgv", event.target.value)}
-              />
-            </label>
-            <label className="adapterArgvField">
-              <span>Start argv</span>
-              <input
-                title={adapterArgvTooltip}
-                value={adapterForm.startupArgv}
-                onChange={(event) => setAdapterField("startupArgv", event.target.value)}
-              />
-            </label>
-          </div>
-          <div className="dispatchControls">
-            <label className="adapterArgvField">
-              <span>Restart argv</span>
-              <input
-                title={adapterArgvTooltip}
-                value={adapterForm.restartArgv}
-                onChange={(event) => setAdapterField("restartArgv", event.target.value)}
-              />
-            </label>
-            <label className="adapterArgvField">
-              <span>Stop argv</span>
-              <input
-                title={adapterArgvTooltip}
-                value={adapterForm.stopArgv}
-                onChange={(event) => setAdapterField("stopArgv", event.target.value)}
-              />
-            </label>
-          </div>
           <label className="adapterArgvField">
-            <span>Cleanup argv</span>
+            <span>Status argv</span>
             <input
               title={adapterArgvTooltip}
-              value={adapterForm.cleanupArgv}
-              onChange={(event) => setAdapterField("cleanupArgv", event.target.value)}
+              value={adapterForm.statusArgv}
+              onChange={(event) => setAdapterField("statusArgv", event.target.value)}
             />
           </label>
-          <label className="adapterArgvField">
-            <span>Traffic argv</span>
-            <input
-              title={adapterArgvTooltip}
-              value={adapterForm.trafficArgv}
-              onChange={(event) => setAdapterField("trafficArgv", event.target.value)}
-            />
-          </label>
-          <label className="checkLine">
-            <input
-              checked={adapterTrafficLimitEnabled}
-              onChange={(event) => {
-                setAdapterPromotionSnapshot(null);
-                setAdapterTrafficLimitEnabled(event.target.checked);
-              }}
-              type="checkbox"
-            />
-            <span>Enable traffic shaping</span>
-          </label>
-          <div className="dispatchControls">
-            <label>
-              <span>Egress Kbps</span>
+          <details
+            className="promotionDisclosure"
+            title="Optional commands used when the agent starts, restarts, stops, or cleans up the custom adapter."
+          >
+            <summary>Lifecycle hooks</summary>
+            <div className="dispatchControls">
+              <label className="adapterArgvField">
+                <span>Start argv</span>
+                <input
+                  title={adapterArgvTooltip}
+                  value={adapterForm.startupArgv}
+                  onChange={(event) => setAdapterField("startupArgv", event.target.value)}
+                />
+              </label>
+              <label className="adapterArgvField">
+                <span>Restart argv</span>
+                <input
+                  title={adapterArgvTooltip}
+                  value={adapterForm.restartArgv}
+                  onChange={(event) => setAdapterField("restartArgv", event.target.value)}
+                />
+              </label>
+            </div>
+            <div className="dispatchControls">
+              <label className="adapterArgvField">
+                <span>Stop argv</span>
+                <input
+                  title={adapterArgvTooltip}
+                  value={adapterForm.stopArgv}
+                  onChange={(event) => setAdapterField("stopArgv", event.target.value)}
+                />
+              </label>
+              <label className="adapterArgvField">
+                <span>Cleanup argv</span>
+                <input
+                  title={adapterArgvTooltip}
+                  value={adapterForm.cleanupArgv}
+                  onChange={(event) => setAdapterField("cleanupArgv", event.target.value)}
+                />
+              </label>
+            </div>
+          </details>
+          <details
+            className="promotionDisclosure"
+            title="Optional adapter traffic command and speed limits."
+          >
+            <summary>Traffic shaping</summary>
+            <label className="adapterArgvField">
+              <span>Traffic argv</span>
               <input
-                disabled={!adapterTrafficLimitEnabled}
-                min={64}
-                onChange={(event) => setAdapterField("trafficEgressKbps", event.target.value)}
-                placeholder="Empty means disabled"
-                type="number"
-                value={adapterForm.trafficEgressKbps}
+                title={adapterArgvTooltip}
+                value={adapterForm.trafficArgv}
+                onChange={(event) => setAdapterField("trafficArgv", event.target.value)}
               />
             </label>
-            <label>
-              <span>Ingress Kbps</span>
+            <label className="checkLine">
               <input
-                disabled={!adapterTrafficLimitEnabled}
-                min={64}
-                onChange={(event) => setAdapterField("trafficIngressKbps", event.target.value)}
-                placeholder="Empty means disabled"
-                type="number"
-                value={adapterForm.trafficIngressKbps}
+                checked={adapterTrafficLimitEnabled}
+                onChange={(event) => {
+                  setAdapterPromotionSnapshot(null);
+                  setAdapterTrafficLimitEnabled(event.target.checked);
+                }}
+                type="checkbox"
               />
+              <span>Enable shaping</span>
             </label>
-            <label>
-              <span>Burst KB</span>
-              <input
-                disabled={!adapterTrafficLimitEnabled}
-                min={1}
-                onChange={(event) => setAdapterField("trafficBurstKb", event.target.value)}
-                placeholder="Empty means disabled"
-                type="number"
-                value={adapterForm.trafficBurstKb}
-              />
-            </label>
-          </div>
-          <div className="promotionGroupLabel">
-            <strong>Topology evidence</strong>
-            <span>Optional desired/stale interface and route evidence for drift checks.</span>
-          </div>
-          <div className="dispatchControls">
-            <label>
-              <span>Topology version</span>
-              <input value={adapterForm.topologyVersion} onChange={(event) => setAdapterField("topologyVersion", event.target.value)} />
-            </label>
-            <label>
-              <span>Desired interfaces</span>
-              <input
-                value={adapterForm.topologyDesiredText}
-                onChange={(event) => setAdapterField("topologyDesiredText", event.target.value)}
-              />
-            </label>
-          </div>
-          <div className="dispatchControls">
-            <label>
-              <span>Stale interfaces</span>
-              <input
-                value={adapterForm.topologyStaleText}
-                onChange={(event) => setAdapterField("topologyStaleText", event.target.value)}
-              />
-            </label>
-            <label>
-              <span>Routes</span>
-              <textarea
-                value={adapterForm.topologyRoutesText}
-                onChange={(event) => setAdapterField("topologyRoutesText", event.target.value)}
-              />
-            </label>
-          </div>
-          <label>
-            <span>Stale routes</span>
-            <textarea
-              value={adapterForm.topologyStaleRoutesText}
-              onChange={(event) => setAdapterField("topologyStaleRoutesText", event.target.value)}
-            />
-          </label>
+            <div className="dispatchControls">
+              <label>
+                <span>Egress Kbps</span>
+                <input
+                  disabled={!adapterTrafficLimitEnabled}
+                  min={64}
+                  onChange={(event) => setAdapterField("trafficEgressKbps", event.target.value)}
+                  placeholder="disabled"
+                  type="number"
+                  value={adapterForm.trafficEgressKbps}
+                />
+              </label>
+              <label>
+                <span>Ingress Kbps</span>
+                <input
+                  disabled={!adapterTrafficLimitEnabled}
+                  min={64}
+                  onChange={(event) => setAdapterField("trafficIngressKbps", event.target.value)}
+                  placeholder="disabled"
+                  type="number"
+                  value={adapterForm.trafficIngressKbps}
+                />
+              </label>
+              <label>
+                <span>Burst KB</span>
+                <input
+                  disabled={!adapterTrafficLimitEnabled}
+                  min={1}
+                  onChange={(event) => setAdapterField("trafficBurstKb", event.target.value)}
+                  placeholder="disabled"
+                  type="number"
+                  value={adapterForm.trafficBurstKb}
+                />
+              </label>
+            </div>
+          </details>
+          <details
+            className="promotionDisclosure"
+            title="Optional desired/stale interface and route evidence used for drift checks."
+          >
+            <summary>Topology evidence</summary>
+            <div className="dispatchControls">
+              <label>
+                <span>Desired interfaces</span>
+                <input
+                  value={adapterForm.topologyDesiredText}
+                  onChange={(event) => setAdapterField("topologyDesiredText", event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Stale interfaces</span>
+                <input
+                  value={adapterForm.topologyStaleText}
+                  onChange={(event) => setAdapterField("topologyStaleText", event.target.value)}
+                />
+              </label>
+            </div>
+            <div className="dispatchControls">
+              <label>
+                <span>Routes</span>
+                <textarea
+                  value={adapterForm.topologyRoutesText}
+                  onChange={(event) => setAdapterField("topologyRoutesText", event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Stale routes</span>
+                <textarea
+                  value={adapterForm.topologyStaleRoutesText}
+                  onChange={(event) => setAdapterField("topologyStaleRoutesText", event.target.value)}
+                />
+              </label>
+            </div>
+          </details>
           {!adapterPromotionSnapshot && (
             <button className="primaryAction" disabled={pending || !adapterPromotionReady} type="submit">
               <ShieldCheck size={17} />
-              Review promotion
+              Review custom adapter
             </button>
           )}
         </form>
@@ -701,7 +690,21 @@ export function TopologyPromotionPanel({
     });
   }
 
-  function setPromotionAddressPair(
+  function setPromotionPeerClient(clientId: string) {
+    setTelemetryPromotionSnapshot(null);
+    setPromoteForm((current) => ({
+      ...current,
+      peer_client_id: clientId,
+      peer_underlay: autoUnderlayValue(
+        current.peer_underlay,
+        current.peer_client_id,
+        clientId,
+        agents,
+      ),
+    }));
+  }
+
+  function setPromotionAddressCidr(
     key: "ipv4_tunnel" | "ipv6_tunnel",
     role: "local" | "peer",
     value: string,
@@ -710,15 +713,7 @@ export function TopologyPromotionPanel({
     setTelemetryPromotionSnapshot(null);
     setPromoteForm((current) => ({
       ...current,
-      [key]: updatePairForSide(current[key] ?? null, current.side ?? "left", role, value, fallbackPrefix),
-    }));
-  }
-
-  function setPromotionAddressPrefix(key: "ipv4_tunnel" | "ipv6_tunnel", value: number, fallbackPrefix: number) {
-    setTelemetryPromotionSnapshot(null);
-    setPromoteForm((current) => ({
-      ...current,
-      [key]: updatePairPrefix(current[key] ?? null, value, fallbackPrefix),
+      [key]: updatePairCidrForSide(current[key] ?? null, current.side ?? "left", role, value, fallbackPrefix),
     }));
   }
 
@@ -738,8 +733,13 @@ export function TopologyPromotionPanel({
       ...current,
       client_id: candidate.client_id,
       interface: candidate.interface,
+      local_underlay: autoUnderlayValue(
+        current.local_underlay,
+        current.client_id,
+        candidate.client_id,
+        agents,
+      ),
       name: current.name || `${clientLabel(candidate.client_id)}-${candidate.interface}-observed`,
-      topology_version: current.topology_version || `telemetry-import:${candidate.interface}`,
     }));
   }
 
@@ -754,7 +754,6 @@ export function TopologyPromotionPanel({
       ...current,
       planId,
       name: current.name || `${plan.name}-adapter`,
-      topologyVersion: current.topologyVersion || `adapter:${plan.plan.interface_name}`,
       topologyDesiredText: current.topologyDesiredText || plan.plan.interface_name,
     }));
   }
@@ -770,8 +769,68 @@ function bandwidthTierLabel(tier: BandwidthTier): string {
   return "10m (10 Mbps)";
 }
 
+function initialTelemetryPromotionForm(preferences: OperatorPreferences): PromoteTelemetryTunnelRequest {
+  return {
+    client_id: "",
+    interface: "",
+    peer_client_id: "",
+    local_underlay: "",
+    peer_underlay: "",
+    address_pool_cidr: preferences.tunnel_ipv4_allocation_pool_cidr,
+    ipv4_tunnel: null,
+    ipv6_address_pool_cidr: preferences.tunnel_ipv6_allocation_pool_cidr,
+    ipv6_tunnel: null,
+    latency_primary_family: "ipv4",
+    side: "left",
+    bandwidth: "100m",
+    latency_ms: 20,
+    packet_loss_ratio: 0,
+    preference: 1,
+    confirmed: false,
+  };
+}
+
 function hasPromotionAddressSource(form: PromoteTelemetryTunnelRequest): boolean {
   return Boolean(completePairOrNull(form.ipv4_tunnel ?? null) || completePairOrNull(form.ipv6_tunnel ?? null));
+}
+
+function splitReserved(value: string): string[] {
+  return value
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function formatReservedAddresses(addresses: string[]): string {
+  return addresses.join(", ");
+}
+
+function mergeReservedAddresses(existing: string[], additions: string[]): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const address of [...existing, ...additions]) {
+    const trimmed = address.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    merged.push(trimmed);
+  }
+  return merged;
+}
+
+function currentPromotionAddresses(form: PromoteTelemetryTunnelRequest): string[] {
+  return [
+    ...addressPairValues(form.ipv4_tunnel ?? null),
+    ...addressPairValues(form.ipv6_tunnel ?? null),
+  ];
+}
+
+function addressPairValues(pair: TunnelAddressPair | null): string[] {
+  if (!pair) {
+    return [];
+  }
+  return [pair.left, pair.right].filter(Boolean);
 }
 
 function normalizePair(pair: TunnelAddressPair): TunnelAddressPair | null {
@@ -799,7 +858,19 @@ function promotionAddressValue(
   return fieldForSide(side, role) === "left" ? pair.left : pair.right;
 }
 
-function updatePairForSide(
+function promotionEndpointCidr(
+  pair: TunnelAddressPair | null,
+  side: TunnelEndpointSide,
+  role: "local" | "peer",
+): string {
+  const address = promotionAddressValue(pair, side, role);
+  if (!address || !pair) {
+    return "";
+  }
+  return `${address}/${pair.prefix_len}`;
+}
+
+function updatePairCidrForSide(
   pair: TunnelAddressPair | null,
   side: TunnelEndpointSide,
   role: "local" | "peer",
@@ -807,22 +878,29 @@ function updatePairForSide(
   fallbackPrefix: number,
 ): TunnelAddressPair | null {
   const field = fieldForSide(side, role);
+  const parsed = parseEndpointCidr(value, pair?.prefix_len ?? fallbackPrefix);
   const nextPair = {
     left: pair?.left ?? "",
     right: pair?.right ?? "",
-    prefix_len: pair?.prefix_len ?? fallbackPrefix,
-    [field]: value.trim(),
+    prefix_len: parsed.prefix_len,
+    [field]: parsed.address,
   };
   return normalizePair(nextPair);
 }
 
-function updatePairPrefix(pair: TunnelAddressPair | null, value: number, fallbackPrefix: number): TunnelAddressPair | null {
-  const nextPair = {
-    left: pair?.left ?? "",
-    right: pair?.right ?? "",
-    prefix_len: Number.isFinite(value) ? Math.trunc(value) : fallbackPrefix,
-  };
-  return normalizePair(nextPair);
+function parseEndpointCidr(value: string, fallbackPrefix: number): { address: string; prefix_len: number } {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return { address: "", prefix_len: fallbackPrefix };
+  }
+  const slashIndex = trimmed.lastIndexOf("/");
+  if (slashIndex < 0) {
+    return { address: trimmed, prefix_len: fallbackPrefix };
+  }
+  const address = trimmed.slice(0, slashIndex).trim();
+  const rawPrefix = Number(trimmed.slice(slashIndex + 1).trim());
+  const prefix_len = Number.isFinite(rawPrefix) ? Math.trunc(rawPrefix) : fallbackPrefix;
+  return { address, prefix_len };
 }
 
 function remapPairForSide(
@@ -847,4 +925,27 @@ function fieldForSide(side: TunnelEndpointSide, role: "local" | "peer"): "left" 
     return role === "local" ? "left" : "right";
   }
   return role === "local" ? "right" : "left";
+}
+
+function defaultUnderlayForAgent(agents: AgentView[], clientId: string): string {
+  const agent = agents.find((candidate) => candidate.id === clientId);
+  return agent?.last_ip?.trim() || agent?.registration_ip?.trim() || "";
+}
+
+function autoUnderlayValue(
+  currentValue: string,
+  currentClientId: string,
+  nextClientId: string,
+  agents: AgentView[],
+): string {
+  const nextAuto = defaultUnderlayForAgent(agents, nextClientId);
+  if (!nextAuto) {
+    return currentValue;
+  }
+  const currentAuto = defaultUnderlayForAgent(agents, currentClientId);
+  const currentTrimmed = currentValue.trim();
+  if (!currentTrimmed || currentTrimmed === currentAuto) {
+    return nextAuto;
+  }
+  return currentValue;
 }

@@ -9,7 +9,8 @@ use uuid::Uuid;
 use vpsman_common::{
     allocate_tunnel_endpoints as allocate_tunnel_endpoint_pairs, plan_tunnel, BandwidthTier,
     NetworkPlanError, OspfCostPolicy, RuntimeTunnelControl, RuntimeTunnelManager,
-    RuntimeTunnelTopologyIntent, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+    RuntimeTunnelTopologyIntent, TunnelAddressFamily, TunnelEndpointSide, TunnelKind, TunnelPlan,
+    TunnelPlanInput,
 };
 
 use crate::{
@@ -17,8 +18,8 @@ use crate::{
     model::{
         AllocateTunnelEndpointsRequest, AllocateTunnelEndpointsResponse, CreateTunnelPlanRequest,
         HistoryQuery, NetworkOspfRecommendationView, NetworkOspfUpdatePlanView,
-        PromoteTelemetryTunnelRequest, PromoteTunnelPlanToAdapterRequest, TelemetryTunnelView,
-        TunnelPlanView,
+        PromoteTelemetryTunnelRequest, PromoteTunnelPlanToCustomAdapterRequest,
+        TelemetryTunnelView, TunnelPlanView,
     },
     model_topology::TopologyGraphView,
     security::{SCOPE_FLEET_READ, SCOPE_NETWORK_READ},
@@ -84,12 +85,41 @@ pub(crate) async fn allocate_tunnel_endpoints(
             reserved_addresses.push(pair.right);
         }
     }
-    let allocation = allocate_tunnel_endpoint_pairs(
-        request.ipv4_pool_cidr.as_deref(),
-        request.ipv6_pool_cidr.as_deref(),
-        &reserved_addresses,
+    let (configured_ipv4_pool, configured_ipv6_pool) = state.tunnel_allocation_pool_cidrs();
+    let ipv4_pool = normalize_optional_string(request.ipv4_pool_cidr);
+    let ipv6_pool = normalize_optional_string(request.ipv6_pool_cidr);
+    let explicit_request = ipv4_pool.is_some()
+        || ipv6_pool.is_some()
+        || request.include_ipv4.is_some()
+        || request.include_ipv6.is_some();
+    let resolved_ipv4 = resolve_allocation_family(
         request.include_ipv4,
+        ipv4_pool,
+        configured_ipv4_pool,
+        explicit_request,
+        "ipv4_allocation_pool_required",
+    )?;
+    let resolved_ipv6 = resolve_allocation_family(
         request.include_ipv6,
+        ipv6_pool,
+        configured_ipv6_pool,
+        explicit_request,
+        "ipv6_allocation_pool_required",
+    )?;
+    if resolved_ipv4.is_none() && resolved_ipv6.is_none() {
+        return Ok(Json(AllocateTunnelEndpointsResponse {
+            ipv4_tunnel: None,
+            ipv6_tunnel: None,
+            latency_primary_family: TunnelAddressFamily::Ipv4,
+            conflicts: Vec::new(),
+        }));
+    }
+    let allocation = allocate_tunnel_endpoint_pairs(
+        resolved_ipv4.as_deref(),
+        resolved_ipv6.as_deref(),
+        &reserved_addresses,
+        resolved_ipv4.is_some(),
+        resolved_ipv6.is_some(),
     )
     .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
     Ok(Json(AllocateTunnelEndpointsResponse {
@@ -98,6 +128,20 @@ pub(crate) async fn allocate_tunnel_endpoints(
         latency_primary_family: allocation.latency_primary_family,
         conflicts: Vec::new(),
     }))
+}
+
+pub(crate) async fn export_tunnel_plan(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+) -> Result<Json<TunnelPlan>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_NETWORK_READ)
+        .await?;
+    let Some(view) = state.repo.get_tunnel_plan(plan_id).await? else {
+        return Err(ApiError::not_found("tunnel_plan_not_found"));
+    };
+    Ok(Json(view.plan))
 }
 
 pub(crate) async fn enable_tunnel_plan(
@@ -188,15 +232,15 @@ fn require_tunnel_plan_confirmed(confirmed: bool) -> Result<(), ApiError> {
     }
 }
 
-pub(crate) async fn promote_tunnel_plan_to_adapter(
+pub(crate) async fn promote_tunnel_plan_to_custom_adapter(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<PromoteTunnelPlanToAdapterRequest>,
+    Json(request): Json<PromoteTunnelPlanToCustomAdapterRequest>,
 ) -> Result<Json<TunnelPlanView>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
-    validate_adapter_promotion_request(&request)?;
+    validate_custom_adapter_request(&request)?;
     let existing = state
         .repo
         .get_tunnel_plan(request.plan_id)
@@ -210,10 +254,12 @@ pub(crate) async fn promote_tunnel_plan_to_adapter(
         input.name = name.clone();
     }
     input.runtime_control = request.runtime_control.clone();
+    let server_topology_version = existing.input.runtime_topology.version.clone();
     input.runtime_topology = request
         .runtime_topology
         .clone()
         .unwrap_or_else(|| existing.input.runtime_topology.clone());
+    input.runtime_topology.version = server_topology_version;
     if input.runtime_topology.desired_interfaces.is_empty() {
         input.runtime_topology.desired_interfaces = vec![input.interface_name.clone()];
     }
@@ -222,9 +268,39 @@ pub(crate) async fn promote_tunnel_plan_to_adapter(
     Ok(Json(
         state
             .repo
-            .promote_tunnel_plan_to_adapter(&existing, &input, &plan, &operator)
+            .promote_tunnel_plan_to_custom_adapter(&existing, &input, &plan, &operator)
             .await?,
     ))
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_allocation_family(
+    include: Option<bool>,
+    request_pool: Option<String>,
+    configured_pool: Option<String>,
+    explicit_request: bool,
+    missing_code: &'static str,
+) -> Result<Option<String>, ApiError> {
+    if matches!(include, Some(false)) {
+        return Ok(None);
+    }
+    if let Some(pool) = request_pool {
+        return Ok(Some(pool));
+    }
+    if matches!(include, Some(true)) {
+        return configured_pool
+            .map(Some)
+            .ok_or_else(|| ApiError::bad_request(missing_code));
+    }
+    if !explicit_request {
+        return Ok(configured_pool);
+    }
+    Ok(None)
 }
 
 fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
@@ -247,22 +323,22 @@ fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
     }
 }
 
-fn validate_adapter_promotion_request(
-    request: &PromoteTunnelPlanToAdapterRequest,
+fn validate_custom_adapter_request(
+    request: &PromoteTunnelPlanToCustomAdapterRequest,
 ) -> Result<(), ApiError> {
     if !request.confirmed {
         return Err(ApiError::bad_request(
-            "adapter_promotion_requires_confirmation",
+            "custom_adapter_requires_confirmation",
         ));
     }
     if request.runtime_control.manager != RuntimeTunnelManager::ExternalManagedAdapter {
         return Err(ApiError::bad_request(
-            "adapter_promotion_requires_external_managed_adapter",
+            "custom_adapter_requires_external_managed_adapter",
         ));
     }
     if request.runtime_control.status.is_none() {
         return Err(ApiError::bad_request(
-            "adapter_promotion_status_command_required",
+            "custom_adapter_status_command_required",
         ));
     }
     if request
@@ -296,13 +372,6 @@ fn validate_telemetry_promotion_request(
         .is_some_and(|name| name.is_empty() || name.len() > 128)
     {
         return Err(ApiError::bad_request("invalid_tunnel_plan_name"));
-    }
-    if request
-        .topology_version
-        .as_ref()
-        .is_some_and(|version| version.is_empty() || version.len() > 128)
-    {
-        return Err(ApiError::bad_request("invalid_runtime_topology_version"));
     }
     Ok(())
 }
@@ -340,10 +409,7 @@ fn telemetry_promotion_input(
             ..RuntimeTunnelControl::default()
         },
         runtime_topology: RuntimeTunnelTopologyIntent {
-            version: request
-                .topology_version
-                .clone()
-                .or_else(|| Some(format!("telemetry-import:{}", request.interface))),
+            version: Some(format!("telemetry-import:{}", request.interface)),
             desired_interfaces: vec![request.interface.clone()],
             ..RuntimeTunnelTopologyIntent::default()
         },

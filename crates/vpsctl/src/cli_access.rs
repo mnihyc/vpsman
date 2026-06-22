@@ -187,13 +187,13 @@ pub(crate) struct ComposeSecretsCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct DataSourcePresetListCommand {
+pub(crate) struct SourceTemplateListCommand {
     #[arg(long)]
     pub(crate) domain: Option<String>,
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct DataSourceStatusCommand {
+pub(crate) struct SourceStatusCommand {
     #[arg(long)]
     pub(crate) client_id: Option<String>,
     #[arg(long)]
@@ -385,7 +385,7 @@ pub(crate) struct FleetAlertNotificationProcessCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct DataSourcePresetCreateCommand {
+pub(crate) struct SourceTemplateCreateCommand {
     #[arg(long)]
     pub(crate) domain: String,
     #[arg(long)]
@@ -403,9 +403,9 @@ pub(crate) struct DataSourcePresetCreateCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct DataSourcePresetCloneCommand {
+pub(crate) struct SourceTemplateCloneCommand {
     #[arg(long)]
-    pub(crate) source_preset_id: String,
+    pub(crate) source_template_id: String,
     #[arg(long)]
     pub(crate) name: String,
     #[arg(long, default_value = "shared")]
@@ -417,9 +417,9 @@ pub(crate) struct DataSourcePresetCloneCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct DataSourcePresetDiffCommand {
+pub(crate) struct SourceTemplateDiffCommand {
     #[arg(long)]
-    pub(crate) preset_id: String,
+    pub(crate) template_id: String,
     #[arg(long)]
     pub(crate) description: Option<String>,
     #[arg(long, default_value_t = false)]
@@ -431,9 +431,9 @@ pub(crate) struct DataSourcePresetDiffCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct DataSourcePresetTestCommand {
+pub(crate) struct SourceTemplateTestCommand {
     #[arg(long)]
-    pub(crate) preset_id: String,
+    pub(crate) template_id: String,
     #[arg(long)]
     pub(crate) definition_json: Option<String>,
     #[arg(long)]
@@ -441,9 +441,9 @@ pub(crate) struct DataSourcePresetTestCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct DataSourcePresetUpdateCommand {
+pub(crate) struct SourceTemplateUpdateCommand {
     #[arg(long)]
-    pub(crate) preset_id: String,
+    pub(crate) template_id: String,
     #[arg(long)]
     pub(crate) description: Option<String>,
     #[arg(long, default_value_t = false)]
@@ -457,7 +457,7 @@ pub(crate) struct DataSourcePresetUpdateCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct DataSourceAssignmentListCommand {
+pub(crate) struct SourceTemplateAssignmentListCommand {
     #[arg(long)]
     pub(crate) client_id: Option<String>,
     #[arg(long)]
@@ -465,7 +465,7 @@ pub(crate) struct DataSourceAssignmentListCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct DataSourceHotConfigCommand {
+pub(crate) struct SourceConfigPatchCommand {
     #[arg(long)]
     pub(crate) client_id: String,
     #[arg(long, default_value = "toml")]
@@ -473,7 +473,7 @@ pub(crate) struct DataSourceHotConfigCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct DataSourceHotConfigApplyCommand {
+pub(crate) struct SourceConfigPatchApplyCommand {
     #[arg(long)]
     pub(crate) client_id: String,
     #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -491,11 +491,11 @@ pub(crate) struct DataSourceHotConfigApplyCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct DataSourcePresetAssignCommand {
+pub(crate) struct SourceTemplateAssignCommand {
     #[arg(long)]
     pub(crate) domain: String,
     #[arg(long)]
-    pub(crate) preset_id: String,
+    pub(crate) template_id: String,
     #[arg(long, value_delimiter = ',')]
     pub(crate) clients: Vec<String>,
     #[arg(long, value_delimiter = ',')]

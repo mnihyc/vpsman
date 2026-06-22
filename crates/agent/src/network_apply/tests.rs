@@ -1,8 +1,7 @@
 use super::*;
 use vpsman_common::{
-    backend_config_signature_payload, plan_tunnel, render_tunnel_endpoint_backend_config,
-    AgentNetworkConfig, BandwidthTier, OspfCostPolicy, TunnelConfigBackend, TunnelKind,
-    TunnelPlanInput,
+    plan_tunnel, AgentNetworkConfig, BandwidthTier, OspfCostPolicy, TunnelConfigBackend,
+    TunnelKind, TunnelPlanInput,
 };
 
 #[tokio::test]
@@ -30,7 +29,7 @@ async fn applies_managed_network_files_with_backups() {
         .await
         .unwrap();
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),
@@ -47,10 +46,6 @@ async fn applies_managed_network_files_with_backups() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         max_timeout_secs: 5,
         cancel_token: CommandCancelToken::default(),
     })
@@ -90,14 +85,7 @@ async fn applies_netplan_backend_files_with_config_signature_hash() {
         .await
         .unwrap();
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
-    let backend_config = render_tunnel_endpoint_backend_config(
-        &plan,
-        TunnelEndpointSide::Left,
-        TunnelConfigBackend::Netplan,
-    )
-    .unwrap();
-    let config_hash = payload_hash(&backend_config_signature_payload(&backend_config));
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),
@@ -115,10 +103,6 @@ async fn applies_netplan_backend_files_with_config_signature_hash() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Netplan,
-        config_sha256_hex: Some(&config_hash),
-        ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         max_timeout_secs: 5,
         cancel_token: CommandCancelToken::default(),
     })
@@ -150,7 +134,7 @@ async fn runtime_apply_rejects_bird2_when_reconcile_is_degraded_without_override
         .await
         .unwrap();
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),
@@ -170,10 +154,6 @@ async fn runtime_apply_rejects_bird2_when_reconcile_is_degraded_without_override
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         max_timeout_secs: 5,
         cancel_token: CommandCancelToken::default(),
     })
@@ -200,7 +180,7 @@ async fn runtime_apply_records_degraded_routing_gate_when_override_enabled() {
         .await
         .unwrap();
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),
@@ -221,10 +201,6 @@ async fn runtime_apply_records_degraded_routing_gate_when_override_enabled() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         max_timeout_secs: 5,
         cancel_token: CommandCancelToken::default(),
     })
@@ -248,10 +224,9 @@ async fn runtime_apply_records_degraded_routing_gate_when_override_enabled() {
 }
 
 #[tokio::test]
-async fn rejects_disabled_or_hash_mismatched_apply() {
+async fn rejects_disabled_apply() {
     let job_id = uuid::Uuid::new_v4();
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),
@@ -267,33 +242,6 @@ async fn rejects_disabled_or_hash_mismatched_apply() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
-        max_timeout_secs: 5,
-        cancel_token: CommandCancelToken::default(),
-    })
-    .await
-    .is_err());
-
-    let config = AgentConfig {
-        network: AgentNetworkConfig {
-            apply_enabled: true,
-            root_dir: "/tmp".to_string(),
-            ..AgentNetworkConfig::default()
-        },
-        ..config
-    };
-    assert!(execute_network_apply_command(NetworkApplyInput {
-        job_id,
-        config: &config,
-        plan: &plan,
-        side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: &"00".repeat(32),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         max_timeout_secs: 5,
         cancel_token: CommandCancelToken::default(),
     })
@@ -333,7 +281,7 @@ async fn runs_validation_and_reload_hooks_after_apply() {
     )
     .await;
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),
@@ -355,10 +303,6 @@ async fn runs_validation_and_reload_hooks_after_apply() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         max_timeout_secs: 5,
         cancel_token: CommandCancelToken::default(),
     })
@@ -399,7 +343,7 @@ async fn rolls_back_files_when_validation_hook_fails() {
     let bad_hook = root.join("bad-hook");
     write_hook(&bad_hook, "#!/bin/sh\nexit 17\n").await;
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),
@@ -419,10 +363,6 @@ async fn rolls_back_files_when_validation_hook_fails() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         max_timeout_secs: 5,
         cancel_token: CommandCancelToken::default(),
     })
@@ -498,7 +438,7 @@ async fn updates_only_bird2_managed_block_for_ospf_cost_change() {
         .await
         .unwrap();
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let hook_log = root.join("ospf-hook.log");
     let validate_hook = root.join("bird-validate-hook");
     let reload_hook = root.join("bird-reload-hook");
@@ -549,10 +489,6 @@ async fn updates_only_bird2_managed_block_for_ospf_cost_change() {
         config: &apply_config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         max_timeout_secs: 5,
         cancel_token: CommandCancelToken::default(),
     })
@@ -610,7 +546,7 @@ async fn ospf_cost_update_requires_runtime_link_when_runtime_reconcile_enabled()
         .await
         .unwrap();
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let apply_config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),
@@ -626,10 +562,6 @@ async fn ospf_cost_update_requires_runtime_link_when_runtime_reconcile_enabled()
         config: &apply_config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         max_timeout_secs: 5,
         cancel_token: CommandCancelToken::default(),
     })
@@ -713,7 +645,7 @@ async fn removes_managed_blocks_during_operator_rollback() {
         .await
         .unwrap();
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),
@@ -730,10 +662,6 @@ async fn removes_managed_blocks_during_operator_rollback() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         max_timeout_secs: 5,
         cancel_token: CommandCancelToken::default(),
     })
@@ -776,7 +704,7 @@ async fn rollback_reports_runtime_tunnel_remove_when_runtime_reconcile_enabled()
         .await
         .unwrap();
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),
@@ -797,10 +725,6 @@ async fn rollback_reports_runtime_tunnel_remove_when_runtime_reconcile_enabled()
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         max_timeout_secs: 5,
         cancel_token: CommandCancelToken::default(),
     })

@@ -144,6 +144,6 @@ The same ownership rule applies to command and adjacent workflow models:
 
 - Command safety, confirmation requirements, canonical command type labels, and command-template display groups are defined in `vpsman_common` and generated into frontend contracts.
 - Command templates store backend-derived `command_type`; user-facing grouping is `display_group`. API-owned built-in command templates provide immutable default job parameters, while user-defined command templates remain operator editable.
-- Terminal session state/status/event, file-transfer direction/status/event/command type, backup/restore/migration/tunnel/update-release statuses, data-source readiness, and topology evidence statuses are closed generated vocabularies.
+- Terminal session state/status/event, file-transfer direction/status/event/command type, backup/restore/migration/tunnel/update-release statuses, source readiness, and topology evidence statuses are closed generated vocabularies.
 - Generated frontend contracts also include status-class maps for closed workflow domains. Frontend code may use generic `statusClass` only for free-form display values outside these canonical models.
 - API, CLI, agent, worker, database constraints, frontend types, mocks, and tests must update through `vpsman_common` first. Adding a new workflow state without regenerating contracts and updating constraints is a contract drift bug.

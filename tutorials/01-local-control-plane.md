@@ -159,5 +159,5 @@ bash scripts/release-check.sh
 ```
 
 The alert policy variables are fleet-wide startup defaults. Change them for
-your normal operating tolerance, then use data-source presets and future
+your normal operating tolerance, then use source templates and future
 per-scope policies for environment-specific behavior.

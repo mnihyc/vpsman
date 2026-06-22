@@ -1,8 +1,8 @@
 import type { Page } from "@playwright/test";
 import {
-  dataSourceAssignments,
-  dataSourcePresets,
-} from "./dataSourcePresetFixtures";
+  sourceTemplateAssignments,
+  sourceTemplates,
+} from "./sourceTemplateFixtures";
 import {
   fileTransferSourceArtifacts,
   fileTransfers,
@@ -826,6 +826,8 @@ const agents = [
     capabilities: rootCapabilities,
     display_name: "edge-sfo-01",
     id: "agent-sfo-01",
+    last_ip: "198.51.100.10",
+    registration_ip: "198.51.100.9",
     status: "online",
     tags: ["country:US", "provider:alpha", "role:edge"],
   },
@@ -833,6 +835,8 @@ const agents = [
     capabilities: rootCapabilities,
     display_name: "core-fra-02",
     id: "agent-fra-02",
+    last_ip: "203.0.113.20",
+    registration_ip: "203.0.113.19",
     status: "online",
     tags: ["bgp", "bird2", "country:DE"],
   },
@@ -840,6 +844,8 @@ const agents = [
     capabilities: unprivilegedCapabilities,
     display_name: "backup-nyc-03",
     id: "agent-nyc-03",
+    last_ip: null,
+    registration_ip: "192.0.2.30",
     status: "stale",
     tags: ["country:US"],
   },
@@ -888,7 +894,7 @@ const fleetAlerts = [
     category: "source_readiness",
     client_id: "agent-sfo-01",
     detail:
-      "Backup object store: backup object-store preset is selected, but no server object store is configured",
+      "Backup object store: backup object-store template is selected, but no server object store is configured",
     evidence: { domain: "backup_object_store" },
     id: "fleet-alert-source-agent-sfo-01-backup",
     observed_at: "2026-06-02T10:00:00Z",
@@ -901,8 +907,8 @@ const fleetAlerts = [
     state_updated_at: "2026-06-02T10:00:10Z",
     status: "selected_no_store",
     target_id: "agent-sfo-01:backup_object_store",
-    target_kind: "data_source",
-    title: "Selected data source needs attention",
+    target_kind: "source_template",
+    title: "Selected source template needs attention",
   },
 ];
 
@@ -982,7 +988,7 @@ const fleetAlertNotifications = [
 const webhookRules = [
   {
     actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-    body_template:
+    body_generator:
       "{rule.name} {event.kind} count={matched_vps.length} {matched_vps.0.display_name}",
     cooldown_secs: 300,
     created_at: "2026-06-02T10:00:00Z",
@@ -1188,7 +1194,7 @@ const processSupervisorInventory = [
   },
 ];
 
-const dataSourceStatus = [
+const sourceStatus = [
   {
     assigned_at: "2026-06-02T10:00:00Z",
     client_id: "agent-sfo-01",
@@ -1202,13 +1208,13 @@ const dataSourceStatus = [
       traffic_status: "ok",
     },
     module: "Traffic",
-    preset_id: "11111111-1111-4111-8111-111111111111",
-    preset_name: "shared:vnstat-json",
-    preset_scope: "shared",
+    template_id: "11111111-1111-4111-8111-111111111111",
+    template_name: "shared:vnstat-json",
+    template_scope: "shared",
     source_kind: "vnstat",
     status: "ok",
     status_reason:
-      "latest traffic samples are available from the selected preset",
+      "latest traffic samples are available from the source template",
   },
   {
     assigned_at: "2026-06-02T10:00:00Z",
@@ -1223,13 +1229,13 @@ const dataSourceStatus = [
       traffic_status: "ok",
     },
     module: "Traffic",
-    preset_id: "00000000-0000-4000-8000-000000000002",
-    preset_name: "builtin:interface_counters",
-    preset_scope: "built_in",
+    template_id: "00000000-0000-4000-8000-000000000002",
+    template_name: "builtin:interface_counters",
+    template_scope: "built_in",
     source_kind: "interface_counters",
     status: "ok",
     status_reason:
-      "latest interface counters are available from the selected preset",
+      "latest interface counters are available from the source template",
   },
   {
     assigned_at: "2026-06-02T10:00:00Z",
@@ -1245,13 +1251,13 @@ const dataSourceStatus = [
       workflow: "backup_artifacts",
     },
     module: "Backup object store",
-    preset_id: "00000000-0000-4000-8000-000000000009",
-    preset_name: "builtin:local_filesystem",
-    preset_scope: "built_in",
+    template_id: "00000000-0000-4000-8000-000000000009",
+    template_name: "builtin:local_filesystem",
+    template_scope: "built_in",
     source_kind: "local_filesystem",
     status: "selected_no_store",
     status_reason:
-      "backup object-store preset is selected, but no server object store is configured",
+      "backup object-store template is selected, but no server object store is configured",
   },
   {
     assigned_at: "2026-06-02T10:00:00Z",
@@ -1266,9 +1272,9 @@ const dataSourceStatus = [
       workflow: "agent_update_releases",
     },
     module: "Update artifact source",
-    preset_id: "00000000-0000-4000-8000-00000000000a",
-    preset_name: "builtin:external_https_sha256",
-    preset_scope: "built_in",
+    template_id: "00000000-0000-4000-8000-00000000000a",
+    template_name: "builtin:external_https_sha256",
+    template_scope: "built_in",
     source_kind: "external_https",
     status: "ready",
     status_reason:
@@ -1276,11 +1282,11 @@ const dataSourceStatus = [
   },
 ];
 
-const hotConfigRuleTemplates = [
+const hotConfigPatchGenerators = [
   {
     actor_id: null,
     built_in: true,
-    category: "Data sources",
+    category: "Source config",
     created_at: "2026-06-02T10:00:00Z",
     description:
       "Selects the runtime traffic accounting source for selected VPSs.",
@@ -2099,10 +2105,10 @@ export async function installConsoleApiMock(
       backupsFixture,
       dashboardOverviewFixture,
       systemDashboardFixture,
-      dataSourceAssignmentsFixture,
-      dataSourcePresetsFixture,
-      dataSourceStatusFixture,
-      hotConfigRuleTemplatesFixture,
+      sourceTemplateAssignmentsFixture,
+      sourceTemplatesFixture,
+      sourceStatusFixture,
+      hotConfigPatchGeneratorsFixture,
       jobCommandTypeByOperationTypeFixture,
       commandTemplatesFixture,
       clientKeyRevocationsFixture,
@@ -2183,10 +2189,10 @@ export async function installConsoleApiMock(
         artifactCleanupPreviews: [] as unknown[],
         bulkTagMutations: [] as unknown[],
         bulkResolve: [] as unknown[],
-        dataSourceHotConfigs: [] as unknown[],
-        dataSourcePresetAssignments: [] as unknown[],
-        dataSourcePresets: [] as unknown[],
-        hotConfigRuleTemplates: [] as unknown[],
+        sourceConfigPatchs: [] as unknown[],
+        sourceTemplateAssignments: [] as unknown[],
+        sourceTemplates: [] as unknown[],
+        hotConfigPatchGenerators: [] as unknown[],
         agentIdentities: [] as unknown[],
         clientKeyRevocations: [] as unknown[],
         fleetAlertNotificationDispatches: [] as unknown[],
@@ -2510,7 +2516,7 @@ export async function installConsoleApiMock(
         }
         return JSON.stringify(value);
       };
-      const renderRuleTemplateBodyFixture = (
+      const renderPatchGeneratorBodyFixture = (
         rawGeneratorBody: string,
         values: Record<string, unknown>,
         fieldSchema: unknown,
@@ -3616,12 +3622,12 @@ export async function installConsoleApiMock(
               auto_ospf_updated_unix: null,
             },
           ]);
-        if (pathname === "/api/v1/data-source-presets" && method === "GET") {
-          return jsonResponse(dataSourcePresetsFixture);
+        if (pathname === "/api/v1/source-templates" && method === "GET") {
+          return jsonResponse(sourceTemplatesFixture);
         }
-        if (pathname === "/api/v1/data-source-presets" && method === "POST") {
+        if (pathname === "/api/v1/source-templates" && method === "POST") {
           const body = await readJsonBody(input, init);
-          requests.dataSourcePresets.push(body);
+          requests.sourceTemplates.push(body);
           return jsonResponse({
             ...(body as Record<string, unknown>),
             assigned_client_count: 0,
@@ -3633,26 +3639,26 @@ export async function installConsoleApiMock(
           });
         }
         if (
-          pathname === "/api/v1/data-source-assignments" &&
+          pathname === "/api/v1/source-template-assignments" &&
           method === "GET"
         ) {
-          return jsonResponse(dataSourceAssignmentsFixture);
+          return jsonResponse(sourceTemplateAssignmentsFixture);
         }
-        if (pathname === "/api/v1/data-source-status" && method === "GET") {
-          return jsonResponse(dataSourceStatusFixture);
+        if (pathname === "/api/v1/source-status" && method === "GET") {
+          return jsonResponse(sourceStatusFixture);
         }
         if (
-          pathname === "/api/v1/hot-config/rule-templates" &&
+          pathname === "/api/v1/hot-config/patch-generators" &&
           method === "GET"
         ) {
-          return jsonResponse(hotConfigRuleTemplatesFixture);
+          return jsonResponse(hotConfigPatchGeneratorsFixture);
         }
         if (
-          pathname === "/api/v1/hot-config/rule-templates" &&
+          pathname === "/api/v1/hot-config/patch-generators" &&
           method === "POST"
         ) {
           const body = await readJsonBody(input, init);
-          requests.hotConfigRuleTemplates.push(body);
+          requests.hotConfigPatchGenerators.push(body);
           const request = body as {
             category?: string;
             description?: string;
@@ -3673,65 +3679,65 @@ export async function installConsoleApiMock(
             domain: request.domain ?? "custom",
             field_schema: request.field_schema ?? { type: "object" },
             id: request.id ?? "92929292-2222-4222-8222-929292929292",
-            name: request.name ?? "Custom rule",
+            name: request.name ?? "Custom generator",
             raw_generator_body: request.raw_generator_body ?? "",
             updated_at: "2026-06-02T10:05:00Z",
           });
         }
         if (
-          pathname.startsWith("/api/v1/hot-config/rule-templates/") &&
+          pathname.startsWith("/api/v1/hot-config/patch-generators/") &&
           pathname.endsWith("/render") &&
           method === "POST"
         ) {
-          const templateId =
-            pathname.split("/").at(-2) ?? hotConfigRuleTemplatesFixture[0].id;
-          const template =
-            hotConfigRuleTemplatesFixture.find(
-              (record: { id: string }) => record.id === templateId,
-            ) ?? hotConfigRuleTemplatesFixture[0];
+          const generatorId =
+            pathname.split("/").at(-2) ?? hotConfigPatchGeneratorsFixture[0].id;
+          const generator =
+            hotConfigPatchGeneratorsFixture.find(
+              (record: { id: string }) => record.id === generatorId,
+            ) ?? hotConfigPatchGeneratorsFixture[0];
           const body = await readJsonBody(input, init);
           const values =
             asFixtureRecord(asFixtureRecord(body)?.values) ?? {};
-          const toml = renderRuleTemplateBodyFixture(
-            template.raw_generator_body,
+          const toml = renderPatchGeneratorBodyFixture(
+            generator.raw_generator_body,
             values,
-            template.field_schema,
+            generator.field_schema,
           );
           return jsonResponse({
             affected_sections: affectedSectionsForTomlFixture(
               toml,
-              template.domain,
+              generator.domain,
             ),
-            docs_metadata: template.docs_metadata,
+            docs_metadata: generator.docs_metadata,
             generated_at: "2026-06-02T10:06:00Z",
-            name: template.name,
+            name: generator.name,
             patch: {},
-            template_id: template.id,
+            generator_id: generator.id,
             toml,
           });
         }
         if (
-          pathname.startsWith("/api/v1/hot-config/rule-templates/") &&
+          pathname.startsWith("/api/v1/hot-config/patch-generators/") &&
           method === "DELETE"
         ) {
           return new Response(null, { status: 204 });
         }
         if (
-          pathname === "/api/v1/data-source-assignments" &&
+          pathname === "/api/v1/source-template-assignments" &&
           method === "POST"
         ) {
           const body = await readJsonBody(input, init);
-          requests.dataSourcePresetAssignments.push(body);
+          requests.sourceTemplateAssignments.push(body);
           const request = body as {
-            preset_id?: string;
+            template_id?: string;
             selector_expression?: string;
             target_client_ids?: string[];
             confirmed?: boolean;
           };
-          const preset =
-            dataSourcePresetsFixture.find(
-              (record: { id: string }) => record.id === request.preset_id,
-            ) ?? dataSourcePresetsFixture[0];
+          const template =
+            sourceTemplatesFixture.find(
+              (record: { id: string }) => record.id === request.template_id,
+            ) ?? sourceTemplatesFixture[0];
           const targetCount = Array.isArray(request.target_client_ids)
             ? request.target_client_ids.length
             : request.selector_expression
@@ -3743,33 +3749,33 @@ export async function installConsoleApiMock(
                 ).length
               : 0;
           return jsonResponse({
-            assignments: dataSourceAssignmentsFixture,
+            assignments: sourceTemplateAssignmentsFixture,
             confirmation_required: !request.confirmed,
-            preset,
+            template,
             target_count: targetCount,
           });
         }
         if (
-          pathname === "/api/v1/data-source-hot-config" &&
+          pathname === "/api/v1/source-config-patch" &&
           method === "GET"
         ) {
           const clientId =
             new URL(url, window.location.href).searchParams.get("client_id") ??
             "agent-sfo-01";
-          requests.dataSourceHotConfigs.push({ client_id: clientId });
+          requests.sourceConfigPatchs.push({ client_id: clientId });
           return jsonResponse({
-            assignments: dataSourceAssignmentsFixture.filter(
+            assignments: sourceTemplateAssignmentsFixture.filter(
               (assignment) => assignment.client_id === clientId,
             ),
             client_id: clientId,
             generated_at: "2026-06-02T10:07:00Z",
             render_notes: [],
             sections: {
-              data_sources: {
+              source_templates: {
                 client_id: clientId,
               },
             },
-            toml: `[data_sources]\nclient_id = "${clientId}"\n`,
+            toml: `[source_templates]\nclient_id = "${clientId}"\n`,
             unsupported_domains: [],
           });
         }
@@ -4511,7 +4517,7 @@ export async function installConsoleApiMock(
           return jsonResponse(tunnelPlansFixture[0]);
         }
         if (
-          pathname === "/api/v1/tunnel-plans/promote-adapter" &&
+          pathname === "/api/v1/tunnel-plans/promote-custom-adapter" &&
           method === "POST"
         ) {
           const body = await readJsonBody(input, init);
@@ -4764,10 +4770,10 @@ export async function installConsoleApiMock(
       backupsFixture: backupRequests,
       dashboardOverviewFixture: dashboardOverview,
       systemDashboardFixture: systemDashboard,
-      dataSourceAssignmentsFixture: dataSourceAssignments,
-      dataSourcePresetsFixture: dataSourcePresets,
-      dataSourceStatusFixture: dataSourceStatus,
-      hotConfigRuleTemplatesFixture: hotConfigRuleTemplates,
+      sourceTemplateAssignmentsFixture: sourceTemplateAssignments,
+      sourceTemplatesFixture: sourceTemplates,
+      sourceStatusFixture: sourceStatus,
+      hotConfigPatchGeneratorsFixture: hotConfigPatchGenerators,
       jobCommandTypeByOperationTypeFixture: JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
       commandTemplatesFixture: commandTemplates,
       clientKeyRevocationsFixture: clientKeyRevocations,

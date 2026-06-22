@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { Metric } from "./Metric";
 import { SearchExpressionInput } from "./SearchExpressionInput";
-import { navSections, subpageDescription, subpageLabel, viewSubpages } from "../constants";
+import { navSections, subpageDescription, subpageLabel, viewLabel, viewSubpages } from "../constants";
 import type { ActiveView, AgentView, FleetSummary } from "../types";
 import type { SavedFleetView } from "../hooks/useFleetViews";
 import { usePanelDisplaySettings } from "../panelDisplay";
@@ -88,6 +88,7 @@ export function ConsoleShell({
   const hasFleetScope = fleetQuery.trim().length > 0 || activeSavedFleetViewId !== null;
   const activeSavedFleetView = savedFleetViews.find((view) => view.id === activeSavedFleetViewId) ?? null;
   const scopeName = activeSavedFleetView?.name ?? (fleetQuery.trim() ? "Filtered resources" : "All VPS resources");
+  const activeViewLabel = viewLabel(activeView);
   const activeSubpageLabel = subpageLabel(activeView, activeSubpage);
   const activeSubpageDescription = subpageDescription(activeView, activeSubpage);
   const mobilePageValue = `${activeView}::${activeSubpage}`;
@@ -153,6 +154,7 @@ export function ConsoleShell({
               <span className="navSectionTitle">{section.label}</span>
               {section.items.map((item) => {
                 const Icon = item.icon;
+                const label = viewLabel(item.view);
                 const subpages = viewSubpages[item.view] ?? [];
                 const hasSubpages = subpages.length > 1;
                 const expanded = isSubpanelExpanded(item.view, hasSubpages);
@@ -166,7 +168,7 @@ export function ConsoleShell({
                         type="button"
                       >
                         <Icon size={18} />
-                        <span>{item.view}</span>
+                        <span>{label}</span>
                       </button>
                       {hasSubpages && (
                         <button
@@ -174,7 +176,7 @@ export function ConsoleShell({
                           aria-label={expanded ? "Collapse subpages" : "Expand subpages"}
                           className="subnavToggle"
                           onClick={() => toggleSubpanel(item.view, expanded)}
-                          title={`${expanded ? "Collapse" : "Expand"} ${item.view} sections`}
+                          title={`${expanded ? "Collapse" : "Expand"} ${label} sections`}
                           type="button"
                         >
                           {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
@@ -182,7 +184,7 @@ export function ConsoleShell({
                       )}
                     </div>
                     {expanded && (
-                      <div className="subnav" aria-label={`${item.view} sections`}>
+                      <div className="subnav" aria-label={`${label} sections`}>
                         {subpages.map((subpage) => {
                           const active =
                             activeView === item.view &&
@@ -247,7 +249,7 @@ export function ConsoleShell({
                   {section.items.flatMap((item) =>
                     (viewSubpages[item.view] ?? []).map((subpage) => (
                       <option key={`${item.view}:${subpage.id}`} value={`${item.view}::${subpage.id}`}>
-                        {item.view} / {subpage.label}
+                        {viewLabel(item.view)} / {subpage.label}
                       </option>
                     )),
                   )}
@@ -351,7 +353,7 @@ export function ConsoleShell({
         <section className="consoleHeader">
           <div className="titleBlock">
             <span className="breadcrumb">
-              vpsman / {activeView} / {activeSubpageLabel}
+              vpsman / {activeViewLabel} / {activeSubpageLabel}
             </span>
             <h1>{heroTitle}</h1>
             <p>{heroCopy || activeSubpageDescription}</p>

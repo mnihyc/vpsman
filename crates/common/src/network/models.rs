@@ -8,7 +8,7 @@ pub const MANAGED_SYSTEMD_NETWORKD_NETDEV_FILE: &str =
 pub const MANAGED_SYSTEMD_NETWORKD_NETWORK_FILE: &str =
     "/etc/systemd/network/90-vpsman-tunnels.network";
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TunnelConfigBackend {
     #[default]

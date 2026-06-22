@@ -1,13 +1,12 @@
-use std::path::PathBuf;
+use std::{net::IpAddr, path::PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Args, ValueEnum};
+use clap::{ArgAction, Args, ValueEnum};
 use uuid::Uuid;
 use vpsman_common::{
-    backend_config_signature_payload, payload_hash, plan_tunnel,
-    render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, BandwidthTier,
-    JobCommand, OspfCostPolicy, TunnelAddressFamily, TunnelAddressPair, TunnelConfigBackend,
-    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    payload_hash, plan_tunnel, render_tunnel_endpoint_config, BandwidthTier, JobCommand,
+    OspfCostPolicy, TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind,
+    TunnelPlan, TunnelPlanInput, DEFAULT_MAX_JOB_TIMEOUT_SECS,
     NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
     NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
     NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
@@ -50,22 +49,18 @@ pub(crate) struct TunnelPlanCommand {
     #[arg(long, value_delimiter = ',')]
     pub(crate) reserved_addresses: Vec<String>,
     #[arg(long)]
-    pub(crate) left_tunnel_ipv4: Option<String>,
+    pub(crate) left_tunnel_ipv4_cidr: Option<String>,
     #[arg(long)]
-    pub(crate) right_tunnel_ipv4: Option<String>,
-    #[arg(long, default_value_t = 31)]
-    pub(crate) tunnel_ipv4_prefix_len: u8,
+    pub(crate) right_tunnel_ipv4_cidr: Option<String>,
     #[arg(
         long,
         help = "IPv6 allocation context only; use tunnel-allocate to generate endpoint pairs before saving"
     )]
     pub(crate) ipv6_address_pool_cidr: Option<String>,
     #[arg(long)]
-    pub(crate) left_tunnel_ipv6: Option<String>,
+    pub(crate) left_tunnel_ipv6_cidr: Option<String>,
     #[arg(long)]
-    pub(crate) right_tunnel_ipv6: Option<String>,
-    #[arg(long, default_value_t = 127)]
-    pub(crate) tunnel_ipv6_prefix_len: u8,
+    pub(crate) right_tunnel_ipv6_cidr: Option<String>,
     #[arg(long, value_enum, default_value = "ipv4")]
     pub(crate) latency_primary_family: TunnelAddressFamilyArg,
     #[arg(long, value_enum)]
@@ -102,8 +97,6 @@ pub(crate) struct TunnelPlanCommand {
     pub(crate) fou_peer_port: Option<u16>,
     #[arg(long)]
     pub(crate) fou_ipproto: Option<u8>,
-    #[arg(long)]
-    pub(crate) topology_version: Option<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) topology_desired_interfaces: Vec<String>,
     #[arg(long, value_delimiter = ',')]
@@ -119,7 +112,7 @@ pub(crate) struct TunnelPlanCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct TunnelPromoteTelemetryCommand {
+pub(crate) struct TunnelPromoteExternalObserveCommand {
     #[arg(long)]
     pub(crate) client_id: String,
     #[arg(long)]
@@ -133,34 +126,28 @@ pub(crate) struct TunnelPromoteTelemetryCommand {
     #[arg(
         long,
         default_value = "",
-        help = "Allocation context only; observed import still requires explicit tunnel endpoints"
+        help = "Allocation context only; external observe still requires explicit tunnel endpoints"
     )]
     pub(crate) address_pool_cidr: String,
     #[arg(long)]
-    pub(crate) left_tunnel_ipv4: Option<String>,
+    pub(crate) left_tunnel_ipv4_cidr: Option<String>,
     #[arg(long)]
-    pub(crate) right_tunnel_ipv4: Option<String>,
-    #[arg(long, default_value_t = 31)]
-    pub(crate) tunnel_ipv4_prefix_len: u8,
+    pub(crate) right_tunnel_ipv4_cidr: Option<String>,
     #[arg(
         long,
-        help = "IPv6 allocation context only; observed import still requires explicit tunnel endpoints"
+        help = "IPv6 allocation context only; external observe still requires explicit tunnel endpoints"
     )]
     pub(crate) ipv6_address_pool_cidr: Option<String>,
     #[arg(long)]
-    pub(crate) left_tunnel_ipv6: Option<String>,
+    pub(crate) left_tunnel_ipv6_cidr: Option<String>,
     #[arg(long)]
-    pub(crate) right_tunnel_ipv6: Option<String>,
-    #[arg(long, default_value_t = 127)]
-    pub(crate) tunnel_ipv6_prefix_len: u8,
+    pub(crate) right_tunnel_ipv6_cidr: Option<String>,
     #[arg(long, value_enum, default_value = "ipv4")]
     pub(crate) latency_primary_family: TunnelAddressFamilyArg,
     #[arg(long, value_enum, default_value = "left")]
     pub(crate) side: TunnelApplySideArg,
     #[arg(long)]
     pub(crate) name: Option<String>,
-    #[arg(long)]
-    pub(crate) topology_version: Option<String>,
     #[arg(long, value_enum)]
     pub(crate) bandwidth: Option<BandwidthTierArg>,
     #[arg(long)]
@@ -181,14 +168,26 @@ pub(crate) struct TunnelAllocateCommand {
     pub(crate) ipv6_pool_cidr: Option<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) reserved_addresses: Vec<String>,
-    #[arg(long, default_value_t = true)]
-    pub(crate) include_ipv4: bool,
-    #[arg(long, default_value_t = false)]
-    pub(crate) include_ipv6: bool,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", conflicts_with = "no_ipv4")]
+    pub(crate) include_ipv4: Option<bool>,
+    #[arg(long = "no-ipv4", action = ArgAction::SetTrue)]
+    pub(crate) no_ipv4: bool,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", conflicts_with = "no_ipv6")]
+    pub(crate) include_ipv6: Option<bool>,
+    #[arg(long = "no-ipv6", action = ArgAction::SetTrue)]
+    pub(crate) no_ipv6: bool,
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct TunnelPromoteAdapterCommand {
+pub(crate) struct TunnelPlanExportCommand {
+    #[arg(long)]
+    pub(crate) plan_id: String,
+    #[arg(long)]
+    pub(crate) output_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct TunnelPromoteCustomAdapterCommand {
     #[arg(long)]
     pub(crate) plan_id: String,
     #[arg(long, value_delimiter = ',')]
@@ -215,8 +214,6 @@ pub(crate) struct TunnelPromoteAdapterCommand {
     pub(crate) fou_peer_port: Option<u16>,
     #[arg(long)]
     pub(crate) fou_ipproto: Option<u8>,
-    #[arg(long)]
-    pub(crate) topology_version: Option<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) topology_desired_interfaces: Vec<String>,
     #[arg(long, value_delimiter = ',')]
@@ -290,23 +287,6 @@ impl From<TunnelAddressFamilyArg> for TunnelAddressFamily {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-pub(crate) enum TunnelBackendArg {
-    Ifupdown,
-    Netplan,
-    SystemdNetworkd,
-}
-
-impl From<TunnelBackendArg> for TunnelConfigBackend {
-    fn from(value: TunnelBackendArg) -> Self {
-        match value {
-            TunnelBackendArg::Ifupdown => Self::Ifupdown,
-            TunnelBackendArg::Netplan => Self::Netplan,
-            TunnelBackendArg::SystemdNetworkd => Self::SystemdNetworkd,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum BandwidthTierArg {
     #[value(name = "10m")]
     M10,
@@ -332,8 +312,6 @@ pub(crate) struct TunnelApplyCommand {
     pub(crate) plan_file: PathBuf,
     #[arg(long, value_enum)]
     pub(crate) side: TunnelApplySideArg,
-    #[arg(long, value_enum, default_value = "ifupdown")]
-    pub(crate) backend: TunnelBackendArg,
     #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
     pub(crate) password_env: String,
     #[arg(long)]
@@ -466,6 +444,16 @@ pub(crate) fn tunnel_allocate(
     token: Option<&str>,
     request: TunnelAllocateCommand,
 ) -> Result<()> {
+    let include_ipv4 = match (request.include_ipv4, request.no_ipv4) {
+        (_, true) => Some(false),
+        (Some(value), false) => Some(value),
+        (None, false) => None,
+    };
+    let include_ipv6 = match (request.include_ipv6, request.no_ipv6) {
+        (_, true) => Some(false),
+        (Some(value), false) => Some(value),
+        (None, false) => None,
+    };
     println!(
         "{}",
         http_post_json(
@@ -476,11 +464,30 @@ pub(crate) fn tunnel_allocate(
                 "ipv4_pool_cidr": request.ipv4_pool_cidr,
                 "ipv6_pool_cidr": request.ipv6_pool_cidr,
                 "reserved_addresses": request.reserved_addresses,
-                "include_ipv4": request.include_ipv4,
-                "include_ipv6": request.include_ipv6,
+                "include_ipv4": include_ipv4,
+                "include_ipv6": include_ipv6,
             }),
         )?
     );
+    Ok(())
+}
+
+pub(crate) fn tunnel_plan_export(
+    api_url: &str,
+    token: Option<&str>,
+    request: TunnelPlanExportCommand,
+) -> Result<()> {
+    let plan = http_get(
+        api_url,
+        &format!("/api/v1/tunnel-plans/{}/plan", request.plan_id),
+        token,
+    )?;
+    if let Some(path) = request.output_file {
+        std::fs::write(&path, plan)
+            .with_context(|| format!("failed to write tunnel plan {}", path.display()))?;
+    } else {
+        println!("{plan}");
+    }
     Ok(())
 }
 
@@ -493,17 +500,9 @@ pub(crate) fn tunnel_apply(
     let plan = read_tunnel_plan(&request.plan_file)?;
     let side = request.side.into();
     let endpoint = render_tunnel_endpoint_config(&plan, side)?;
-    let config_backend = request.backend.into();
-    let backend_config = render_tunnel_endpoint_backend_config(&plan, side, config_backend)?;
     let operation = JobCommand::NetworkApply {
         plan: Box::new(plan),
         side,
-        config_backend,
-        config_sha256_hex: Some(payload_hash(&backend_config_signature_payload(
-            &backend_config,
-        ))),
-        ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
     let password = load_super_password(&request.password_env)?;
     let salt_hex = load_super_salt_hex(request.super_salt_hex.as_deref())?;
@@ -862,7 +861,7 @@ pub(crate) fn tunnel_plan(
             fou_ipproto: request.fou_ipproto,
         }),
         runtime_topology: build_runtime_topology(RuntimeTopologyArgs {
-            version: request.topology_version.as_deref(),
+            version: None,
             desired_interfaces: &request.topology_desired_interfaces,
             stale_interfaces: &request.topology_stale_interfaces,
             routes: &request.topology_route,
@@ -874,17 +873,17 @@ pub(crate) fn tunnel_plan(
         right_underlay: request.right_underlay,
         address_pool_cidr: request.address_pool_cidr,
         reserved_addresses: request.reserved_addresses,
-        ipv4_tunnel: build_address_pair(
-            request.left_tunnel_ipv4,
-            request.right_tunnel_ipv4,
-            request.tunnel_ipv4_prefix_len,
+        ipv4_tunnel: build_address_pair_from_cidrs(
+            request.left_tunnel_ipv4_cidr,
+            request.right_tunnel_ipv4_cidr,
+            TunnelAddressFamily::Ipv4,
             "IPv4",
         )?,
         ipv6_address_pool_cidr: request.ipv6_address_pool_cidr,
-        ipv6_tunnel: build_address_pair(
-            request.left_tunnel_ipv6,
-            request.right_tunnel_ipv6,
-            request.tunnel_ipv6_prefix_len,
+        ipv6_tunnel: build_address_pair_from_cidrs(
+            request.left_tunnel_ipv6_cidr,
+            request.right_tunnel_ipv6_cidr,
+            TunnelAddressFamily::Ipv6,
             "IPv6",
         )?,
         latency_primary_family: request.latency_primary_family.into(),
@@ -912,21 +911,64 @@ pub(crate) fn tunnel_plan(
     Ok(())
 }
 
-fn build_address_pair(
+fn build_address_pair_from_cidrs(
     left: Option<String>,
     right: Option<String>,
-    prefix_len: u8,
+    family: TunnelAddressFamily,
     label: &str,
 ) -> Result<Option<TunnelAddressPair>> {
     match (left, right) {
-        (Some(left), Some(right)) => Ok(Some(TunnelAddressPair {
-            left,
-            right,
-            prefix_len,
-        })),
+        (Some(left), Some(right)) => {
+            let (left, left_prefix) = parse_endpoint_cidr(&left, family, label)?;
+            let (right, right_prefix) = parse_endpoint_cidr(&right, family, label)?;
+            anyhow::ensure!(
+                left_prefix == right_prefix,
+                "{label} tunnel endpoint CIDRs must use the same prefix length"
+            );
+            Ok(Some(TunnelAddressPair {
+                left,
+                right,
+                prefix_len: left_prefix,
+            }))
+        }
         (None, None) => Ok(None),
-        _ => anyhow::bail!("{label} tunnel endpoints require both left and right addresses"),
+        _ => anyhow::bail!("{label} tunnel endpoints require both left and right CIDRs"),
     }
+}
+
+fn parse_endpoint_cidr(
+    value: &str,
+    family: TunnelAddressFamily,
+    label: &str,
+) -> Result<(String, u8)> {
+    let (address, prefix) = value
+        .split_once('/')
+        .with_context(|| format!("{label} tunnel endpoint must be address/prefix CIDR"))?;
+    let ip: IpAddr = address
+        .parse()
+        .with_context(|| format!("{label} tunnel endpoint address {address} is invalid"))?;
+    match (family, ip) {
+        (TunnelAddressFamily::Ipv4, IpAddr::V4(_)) => {}
+        (TunnelAddressFamily::Ipv6, IpAddr::V6(_)) => {}
+        (TunnelAddressFamily::Ipv4, IpAddr::V6(_)) => {
+            anyhow::bail!("{label} tunnel endpoint must be IPv4")
+        }
+        (TunnelAddressFamily::Ipv6, IpAddr::V4(_)) => {
+            anyhow::bail!("{label} tunnel endpoint must be IPv6")
+        }
+    }
+    let prefix_len = prefix
+        .parse::<u8>()
+        .with_context(|| format!("{label} tunnel endpoint prefix {prefix} is invalid"))?;
+    let max_prefix = match family {
+        TunnelAddressFamily::Ipv4 => 32,
+        TunnelAddressFamily::Ipv6 => 128,
+    };
+    anyhow::ensure!(
+        prefix_len <= max_prefix,
+        "{label} tunnel endpoint prefix must be <= {max_prefix}"
+    );
+    Ok((address.to_string(), prefix_len))
 }
 
 fn ensure_explicit_tunnel_endpoints(
@@ -936,33 +978,37 @@ fn ensure_explicit_tunnel_endpoints(
 ) -> Result<()> {
     anyhow::ensure!(
         ipv4_tunnel.is_some() || ipv6_tunnel.is_some(),
-        "{command} requires explicit IPv4 or IPv6 tunnel endpoints; run tunnel-allocate for non-overlapping suggestions, then pass --left-tunnel-ipv4/--right-tunnel-ipv4 or --left-tunnel-ipv6/--right-tunnel-ipv6"
+        "{command} requires explicit IPv4 or IPv6 tunnel endpoint CIDRs; run tunnel-allocate for non-overlapping suggestions, then pass --left-tunnel-ipv4-cidr/--right-tunnel-ipv4-cidr or --left-tunnel-ipv6-cidr/--right-tunnel-ipv6-cidr"
     );
     Ok(())
 }
 
-pub(crate) fn tunnel_promote_telemetry(
+pub(crate) fn tunnel_promote_external_observe(
     api_url: &str,
     token: Option<&str>,
-    request: TunnelPromoteTelemetryCommand,
+    request: TunnelPromoteExternalObserveCommand,
 ) -> Result<()> {
     anyhow::ensure!(
         request.confirmed,
-        "tunnel-promote-telemetry requires --confirmed"
+        "tunnel-promote-external-observe requires --confirmed"
     );
-    let ipv4_tunnel = build_address_pair(
-        request.left_tunnel_ipv4,
-        request.right_tunnel_ipv4,
-        request.tunnel_ipv4_prefix_len,
+    let ipv4_tunnel = build_address_pair_from_cidrs(
+        request.left_tunnel_ipv4_cidr,
+        request.right_tunnel_ipv4_cidr,
+        TunnelAddressFamily::Ipv4,
         "IPv4",
     )?;
-    let ipv6_tunnel = build_address_pair(
-        request.left_tunnel_ipv6,
-        request.right_tunnel_ipv6,
-        request.tunnel_ipv6_prefix_len,
+    let ipv6_tunnel = build_address_pair_from_cidrs(
+        request.left_tunnel_ipv6_cidr,
+        request.right_tunnel_ipv6_cidr,
+        TunnelAddressFamily::Ipv6,
         "IPv6",
     )?;
-    ensure_explicit_tunnel_endpoints(&ipv4_tunnel, &ipv6_tunnel, "tunnel-promote-telemetry")?;
+    ensure_explicit_tunnel_endpoints(
+        &ipv4_tunnel,
+        &ipv6_tunnel,
+        "tunnel-promote-external-observe",
+    )?;
     println!(
         "{}",
         http_post_json(
@@ -982,7 +1028,6 @@ pub(crate) fn tunnel_promote_telemetry(
                 "latency_primary_family": TunnelAddressFamily::from(request.latency_primary_family),
                 "side": TunnelEndpointSide::from(request.side),
                 "name": request.name,
-                "topology_version": request.topology_version,
                 "bandwidth": request.bandwidth.map(BandwidthTier::from),
                 "latency_ms": request.latency_ms,
                 "packet_loss_ratio": request.packet_loss_ratio,
@@ -994,10 +1039,10 @@ pub(crate) fn tunnel_promote_telemetry(
     Ok(())
 }
 
-pub(crate) fn tunnel_promote_adapter(
+pub(crate) fn tunnel_promote_custom_adapter(
     api_url: &str,
     token: Option<&str>,
-    request: TunnelPromoteAdapterCommand,
+    request: TunnelPromoteCustomAdapterCommand,
 ) -> Result<()> {
     let runtime_control = build_runtime_control(RuntimeControlArgs {
         manager: vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
@@ -1015,7 +1060,7 @@ pub(crate) fn tunnel_promote_adapter(
         fou_ipproto: request.fou_ipproto,
     });
     let runtime_topology = build_runtime_topology(RuntimeTopologyArgs {
-        version: request.topology_version.as_deref(),
+        version: None,
         desired_interfaces: &request.topology_desired_interfaces,
         stale_interfaces: &request.topology_stale_interfaces,
         routes: &request.topology_route,
@@ -1030,7 +1075,7 @@ pub(crate) fn tunnel_promote_adapter(
         "{}",
         http_post_json(
             api_url,
-            "/api/v1/tunnel-plans/promote-adapter",
+            "/api/v1/tunnel-plans/promote-custom-adapter",
             token,
             &serde_json::json!({
                 "plan_id": request.plan_id,

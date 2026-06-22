@@ -7,7 +7,6 @@ mod backup_handoff;
 mod backup_upload_sessions;
 mod build_info;
 mod client_ip;
-mod data_source_builtin_presets;
 mod error;
 mod fleet_alert_notifications;
 mod fleet_alerts;
@@ -25,13 +24,14 @@ mod model_alert_states;
 mod model_backups;
 mod model_command_templates;
 mod model_dashboard;
-mod model_data_sources;
 mod model_file_transfer;
 mod model_history;
 mod model_server_jobs;
+mod model_source_templates;
 mod model_terminal;
 mod model_topology;
 mod model_webhook_rules;
+mod source_template_builtins;
 pub(crate) mod object_store {
     pub(crate) use vpsman_object_store::*;
 }
@@ -47,14 +47,11 @@ mod repository_backup_artifacts;
 mod repository_backup_policies;
 mod repository_backups;
 mod repository_command_templates;
-mod repository_data_source_hot_config;
-mod repository_data_source_presets;
-mod repository_data_source_status;
 mod repository_file_transfer_sources;
 mod repository_file_transfers;
 mod repository_gateway_sessions;
 mod repository_history;
-mod repository_hot_config_rule_templates;
+mod repository_hot_config_patch_generators;
 mod repository_ingest;
 mod repository_inventory;
 mod repository_job_outputs;
@@ -68,6 +65,9 @@ mod repository_operator_totp;
 mod repository_restores;
 mod repository_schedules;
 mod repository_server_jobs;
+mod repository_source_config_patch;
+mod repository_source_status;
+mod repository_source_templates;
 mod repository_suite_config;
 mod repository_system_dashboard;
 mod repository_telemetry_rollups;
@@ -790,8 +790,6 @@ mod tests_config;
 #[cfg(test)]
 mod tests_dashboard;
 #[cfg(test)]
-mod tests_data_sources;
-#[cfg(test)]
 mod tests_files;
 #[cfg(test)]
 mod tests_history;
@@ -802,7 +800,7 @@ mod tests_migrations;
 #[cfg(test)]
 mod tests_network;
 #[cfg(test)]
-mod tests_network_adapter_promotion;
+mod tests_network_custom_adapter;
 #[cfg(test)]
 mod tests_network_observations;
 #[cfg(test)]
@@ -823,6 +821,8 @@ mod tests_process;
 mod tests_restores;
 #[cfg(test)]
 mod tests_schedules;
+#[cfg(test)]
+mod tests_source_templates;
 #[cfg(test)]
 mod tests_terminal;
 #[cfg(test)]

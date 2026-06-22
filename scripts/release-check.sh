@@ -158,7 +158,7 @@ if [[ "${VPSMAN_RELEASE_SKIP_SMOKES:-0}" == "1" ]]; then
   skip_step smoke-backup-chunked-upload "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-minio-backup-artifact "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-hot-config "VPSMAN_RELEASE_SKIP_SMOKES=1"
-  skip_step smoke-live-data-source-config-patch "VPSMAN_RELEASE_SKIP_SMOKES=1"
+  skip_step smoke-live-source template-config-patch "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-agent-update "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-network-apply "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-network-preset-container "VPSMAN_RELEASE_SKIP_SMOKES=1"
@@ -207,8 +207,8 @@ else
   fi
   run_step smoke-live-hot-config \
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-hot-config.sh
-  run_step smoke-live-data-source-config-patch \
-    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-data-source-config-patch.sh
+  run_step smoke-live-source template-config-patch \
+    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-source template-config-patch.sh
   run_step smoke-live-agent-update \
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-agent-update.sh
   run_step smoke-live-network-apply \

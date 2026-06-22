@@ -7,40 +7,38 @@ use axum::{
 };
 
 use crate::{
-    data_source_builtin_presets::DATA_SOURCE_DOMAINS,
     error::ApiError,
     job_request::{fixed_target_selection, normalized_target_client_ids},
     model::{
-        AgentView, AssignDataSourcePresetRequest, AssignTagRequest, BulkResolveRequest,
-        BulkResolveResponse, BulkTagMutationRequest, CloneDataSourcePresetRequest,
-        CreateDataSourcePresetRequest, CreateTagRequest, DataSourceHotConfigQuery,
-        DataSourceHotConfigView, DataSourcePresetAssignmentQuery, DataSourcePresetAssignmentView,
-        DataSourcePresetDiffRequest, DataSourcePresetDiffView, DataSourcePresetQuery,
-        DataSourcePresetTestView, DataSourcePresetView, DataSourceStatusQuery,
-        DataSourceStatusView, DeleteAgentRequest, DeleteAgentResponse,
-        DeleteHotConfigRuleTemplateRequest, DeleteTagRequest, FleetSummary, GatewaySessionView,
-        HistoryQuery, HotConfigRuleTemplateRenderView, HotConfigRuleTemplateView,
-        RenderHotConfigRuleTemplateRequest, TagMutationResponse, TagView,
-        TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
-        TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView,
-        TestDataSourcePresetRequest, UpdateAgentAliasRequest, UpdateDataSourcePresetRequest,
-        UpdateDataSourcePresetResponse, UpdateTagOrderRequest, UpsertHotConfigRuleTemplateRequest,
-        WsEvent,
+        AgentView, AssignSourceTemplateRequest, AssignTagRequest, BulkResolveRequest,
+        BulkResolveResponse, BulkTagMutationRequest, CloneSourceTemplateRequest,
+        CreateSourceTemplateRequest, CreateTagRequest, DeleteAgentRequest, DeleteAgentResponse,
+        DeleteHotConfigPatchGeneratorRequest, DeleteTagRequest, FleetSummary, GatewaySessionView,
+        HistoryQuery, HotConfigPatchGeneratorRenderView, HotConfigPatchGeneratorView,
+        RenderHotConfigPatchGeneratorRequest, SourceConfigPatchQuery, SourceConfigPatchView,
+        SourceStatusQuery, SourceStatusView, SourceTemplateAssignmentQuery,
+        SourceTemplateAssignmentView, SourceTemplateDiffRequest, SourceTemplateDiffView,
+        SourceTemplateQuery, SourceTemplateTestView, SourceTemplateView, TagMutationResponse,
+        TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
+        TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView, TestSourceTemplateRequest,
+        UpdateAgentAliasRequest, UpdateSourceTemplateRequest, UpdateSourceTemplateResponse,
+        UpdateTagOrderRequest, UpsertHotConfigPatchGeneratorRequest, WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     security::{SCOPE_CONFIG_READ, SCOPE_FLEET_READ},
     selector_expression::parse_selector_expression,
+    source_template_builtins::SOURCE_TEMPLATE_DOMAINS,
     state::AppState,
     util::limit_or_default,
 };
 use tracing::warn;
 
-const MAX_PRESET_NAME_BYTES: usize = 128;
-const MAX_PRESET_DESCRIPTION_BYTES: usize = 1024;
-const MAX_PRESET_DEFINITION_BYTES: usize = 16 * 1024;
-const MAX_PRESET_ARGV_ITEMS: usize = 32;
-const MAX_PRESET_ARG_BYTES: usize = 512;
-const MAX_RULE_TEMPLATE_BODY_BYTES: usize = 16 * 1024;
+const MAX_TEMPLATE_NAME_BYTES: usize = 128;
+const MAX_TEMPLATE_DESCRIPTION_BYTES: usize = 1024;
+const MAX_TEMPLATE_DEFINITION_BYTES: usize = 16 * 1024;
+const MAX_TEMPLATE_ARGV_ITEMS: usize = 32;
+const MAX_TEMPLATE_ARG_BYTES: usize = 512;
+const MAX_PATCH_GENERATOR_BODY_BYTES: usize = 16 * 1024;
 const TELEMETRY_NETWORK_RATE_LIMIT_MAX: i64 = 5_000;
 
 pub(crate) async fn fleet_summary(
@@ -229,11 +227,11 @@ pub(crate) async fn update_tag_order(
     ))
 }
 
-pub(crate) async fn list_data_source_presets(
+pub(crate) async fn list_source_templates(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<DataSourcePresetQuery>,
-) -> Result<Json<Vec<DataSourcePresetView>>, ApiError> {
+    Query(query): Query<SourceTemplateQuery>,
+) -> Result<Json<Vec<SourceTemplateView>>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
@@ -241,199 +239,199 @@ pub(crate) async fn list_data_source_presets(
     Ok(Json(
         state
             .repo
-            .list_data_source_presets(query.domain.as_deref())
+            .list_source_templates(query.domain.as_deref())
             .await?,
     ))
 }
 
-pub(crate) async fn list_hot_config_rule_templates(
+pub(crate) async fn list_hot_config_patch_generators(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<HotConfigRuleTemplateView>>, ApiError> {
+) -> Result<Json<Vec<HotConfigPatchGeneratorView>>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
-    Ok(Json(state.repo.list_hot_config_rule_templates().await?))
+    Ok(Json(state.repo.list_hot_config_patch_generators().await?))
 }
 
-pub(crate) async fn upsert_hot_config_rule_template(
+pub(crate) async fn upsert_hot_config_patch_generator(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<UpsertHotConfigRuleTemplateRequest>,
-) -> Result<Json<HotConfigRuleTemplateView>, ApiError> {
+    Json(request): Json<UpsertHotConfigPatchGeneratorRequest>,
+) -> Result<Json<HotConfigPatchGeneratorView>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
-    validate_hot_config_rule_template(&request)?;
+    validate_hot_config_patch_generator(&request)?;
     if !request.confirmed {
         return Err(ApiError::bad_request(
-            "hot_config_rule_template_confirmation_required",
+            "hot_config_patch_generator_confirmation_required",
         ));
     }
     Ok(Json(
         state
             .repo
-            .upsert_hot_config_rule_template(&request, &operator)
+            .upsert_hot_config_patch_generator(&request, &operator)
             .await
-            .map_err(hot_config_rule_template_error)?,
+            .map_err(hot_config_patch_generator_error)?,
     ))
 }
 
-pub(crate) async fn render_hot_config_rule_template(
+pub(crate) async fn render_hot_config_patch_generator(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(template_id): Path<uuid::Uuid>,
-    Json(request): Json<RenderHotConfigRuleTemplateRequest>,
-) -> Result<Json<HotConfigRuleTemplateRenderView>, ApiError> {
+    Path(generator_id): Path<uuid::Uuid>,
+    Json(request): Json<RenderHotConfigPatchGeneratorRequest>,
+) -> Result<Json<HotConfigPatchGeneratorRenderView>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
     Ok(Json(
         state
             .repo
-            .render_hot_config_rule_template(template_id, &request)
+            .render_hot_config_patch_generator(generator_id, &request)
             .await
-            .map_err(hot_config_rule_template_error)?,
+            .map_err(hot_config_patch_generator_error)?,
     ))
 }
 
-pub(crate) async fn delete_hot_config_rule_template(
+pub(crate) async fn delete_hot_config_patch_generator(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(template_id): Path<uuid::Uuid>,
-    Json(request): Json<DeleteHotConfigRuleTemplateRequest>,
+    Path(generator_id): Path<uuid::Uuid>,
+    Json(request): Json<DeleteHotConfigPatchGeneratorRequest>,
 ) -> Result<StatusCode, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
     if !request.confirmed {
         return Err(ApiError::bad_request(
-            "hot_config_rule_template_delete_confirmation_required",
+            "hot_config_patch_generator_delete_confirmation_required",
         ));
     }
     validate_short_required_value(
         &request.reviewed_name,
-        "hot_config_rule_template_delete_review_invalid",
+        "hot_config_patch_generator_delete_review_invalid",
     )?;
     let existing = state
         .repo
-        .list_hot_config_rule_templates()
+        .list_hot_config_patch_generators()
         .await?
         .into_iter()
-        .find(|template| template.id == template_id)
-        .ok_or_else(|| ApiError::not_found("hot_config_rule_template_not_found"))?;
+        .find(|generator| generator.id == generator_id)
+        .ok_or_else(|| ApiError::not_found("hot_config_patch_generator_not_found"))?;
     if existing.name != request.reviewed_name.trim() {
         return Err(ApiError::conflict(
-            "hot_config_rule_template_delete_review_stale",
+            "hot_config_patch_generator_delete_review_stale",
         ));
     }
     state
         .repo
-        .delete_hot_config_rule_template(template_id, &operator)
+        .delete_hot_config_patch_generator(generator_id, &operator)
         .await
-        .map_err(hot_config_rule_template_error)?;
+        .map_err(hot_config_patch_generator_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub(crate) async fn create_data_source_preset(
+pub(crate) async fn create_source_template(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateDataSourcePresetRequest>,
-) -> Result<Json<DataSourcePresetView>, ApiError> {
+    Json(request): Json<CreateSourceTemplateRequest>,
+) -> Result<Json<SourceTemplateView>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
-    validate_create_data_source_preset(&request)?;
+    validate_create_source_template(&request)?;
     Ok(Json(
         state
             .repo
-            .create_data_source_preset(&request, &operator)
+            .create_source_template(&request, &operator)
             .await
-            .map_err(data_source_preset_lifecycle_error)?,
+            .map_err(source_template_lifecycle_error)?,
     ))
 }
 
-pub(crate) async fn clone_data_source_preset(
+pub(crate) async fn clone_source_template(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(preset_id): Path<uuid::Uuid>,
-    Json(request): Json<CloneDataSourcePresetRequest>,
-) -> Result<Json<DataSourcePresetView>, ApiError> {
+    Path(template_id): Path<uuid::Uuid>,
+    Json(request): Json<CloneSourceTemplateRequest>,
+) -> Result<Json<SourceTemplateView>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
-    validate_clone_data_source_preset(&request)?;
+    validate_clone_source_template(&request)?;
     Ok(Json(
         state
             .repo
-            .clone_data_source_preset(preset_id, &request, &operator)
+            .clone_source_template(template_id, &request, &operator)
             .await
-            .map_err(data_source_preset_lifecycle_error)?,
+            .map_err(source_template_lifecycle_error)?,
     ))
 }
 
-pub(crate) async fn diff_data_source_preset(
+pub(crate) async fn diff_source_template(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(preset_id): Path<uuid::Uuid>,
-    Json(request): Json<DataSourcePresetDiffRequest>,
-) -> Result<Json<DataSourcePresetDiffView>, ApiError> {
+    Path(template_id): Path<uuid::Uuid>,
+    Json(request): Json<SourceTemplateDiffRequest>,
+) -> Result<Json<SourceTemplateDiffView>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
-    validate_data_source_preset_candidate(&request.description, &request.definition)?;
+    validate_source_template_candidate(&request.description, &request.definition)?;
     Ok(Json(
         state
             .repo
-            .diff_data_source_preset(preset_id, &request)
+            .diff_source_template(template_id, &request)
             .await
-            .map_err(data_source_preset_lifecycle_error)?,
+            .map_err(source_template_lifecycle_error)?,
     ))
 }
 
-pub(crate) async fn test_data_source_preset(
+pub(crate) async fn test_source_template(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(preset_id): Path<uuid::Uuid>,
-    Json(request): Json<TestDataSourcePresetRequest>,
-) -> Result<Json<DataSourcePresetTestView>, ApiError> {
+    Path(template_id): Path<uuid::Uuid>,
+    Json(request): Json<TestSourceTemplateRequest>,
+) -> Result<Json<SourceTemplateTestView>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
-    validate_preset_definition(&request.definition)?;
+    validate_template_definition(&request.definition)?;
     Ok(Json(
         state
             .repo
-            .test_data_source_preset(preset_id, &request)
+            .test_source_template(template_id, &request)
             .await
-            .map_err(data_source_preset_lifecycle_error)?,
+            .map_err(source_template_lifecycle_error)?,
     ))
 }
 
-pub(crate) async fn update_data_source_preset(
+pub(crate) async fn update_source_template(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(preset_id): Path<uuid::Uuid>,
-    Json(request): Json<UpdateDataSourcePresetRequest>,
-) -> Result<Json<UpdateDataSourcePresetResponse>, ApiError> {
+    Path(template_id): Path<uuid::Uuid>,
+    Json(request): Json<UpdateSourceTemplateRequest>,
+) -> Result<Json<UpdateSourceTemplateResponse>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
-    validate_data_source_preset_candidate(&request.description, &request.definition)?;
+    validate_source_template_candidate(&request.description, &request.definition)?;
     Ok(Json(
         state
             .repo
-            .update_data_source_preset(preset_id, &request, &operator)
+            .update_source_template(template_id, &request, &operator)
             .await
-            .map_err(data_source_preset_lifecycle_error)?,
+            .map_err(source_template_lifecycle_error)?,
     ))
 }
 
-pub(crate) async fn list_data_source_assignments(
+pub(crate) async fn list_source_template_assignments(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<DataSourcePresetAssignmentQuery>,
-) -> Result<Json<Vec<DataSourcePresetAssignmentView>>, ApiError> {
+    Query(query): Query<SourceTemplateAssignmentQuery>,
+) -> Result<Json<Vec<SourceTemplateAssignmentView>>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
@@ -448,16 +446,16 @@ pub(crate) async fn list_data_source_assignments(
     Ok(Json(
         state
             .repo
-            .list_data_source_assignments(query.client_id.as_deref(), query.domain.as_deref())
+            .list_source_template_assignments(query.client_id.as_deref(), query.domain.as_deref())
             .await?,
     ))
 }
 
-pub(crate) async fn list_data_source_status(
+pub(crate) async fn list_source_status(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<DataSourceStatusQuery>,
-) -> Result<Json<Vec<DataSourceStatusView>>, ApiError> {
+    Query(query): Query<SourceStatusQuery>,
+) -> Result<Json<Vec<SourceStatusView>>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
@@ -467,16 +465,16 @@ pub(crate) async fn list_data_source_status(
     }
     Ok(Json(
         state
-            .list_data_source_status(query.client_id.as_deref(), query.domain.as_deref())
+            .list_source_status(query.client_id.as_deref(), query.domain.as_deref())
             .await?,
     ))
 }
 
-pub(crate) async fn render_data_source_hot_config(
+pub(crate) async fn render_source_config_patch(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<DataSourceHotConfigQuery>,
-) -> Result<Json<DataSourceHotConfigView>, ApiError> {
+    Query(query): Query<SourceConfigPatchQuery>,
+) -> Result<Json<SourceConfigPatchView>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
@@ -484,31 +482,31 @@ pub(crate) async fn render_data_source_hot_config(
     Ok(Json(
         state
             .repo
-            .render_data_source_hot_config(&query.client_id)
+            .render_source_config_patch(&query.client_id)
             .await?,
     ))
 }
 
-pub(crate) async fn assign_data_source_preset(
+pub(crate) async fn assign_source_template(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut request): Json<AssignDataSourcePresetRequest>,
-) -> Result<Json<crate::model::AssignDataSourcePresetResponse>, ApiError> {
+    Json(mut request): Json<AssignSourceTemplateRequest>,
+) -> Result<Json<crate::model::AssignSourceTemplateResponse>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
-    validate_assign_data_source_preset(&request)?;
+    validate_assign_source_template(&request)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
     verified_fixed_target_ids(
         &state,
         &request.target_client_ids,
-        "data_source_assignment_targets_not_found",
+        "source_template_assignment_targets_not_found",
     )
     .await?;
     Ok(Json(
         state
             .repo
-            .assign_data_source_preset(&request, &operator)
+            .assign_source_template(&request, &operator)
             .await?,
     ))
 }
@@ -604,17 +602,15 @@ pub(crate) async fn delete_tag(
     Ok(Json(state.repo.delete_tag(&tag, request.confirmed).await?))
 }
 
-fn validate_create_data_source_preset(
-    request: &CreateDataSourcePresetRequest,
-) -> Result<(), ApiError> {
+fn validate_create_source_template(request: &CreateSourceTemplateRequest) -> Result<(), ApiError> {
     validate_domain(&request.domain)?;
-    validate_preset_name(&request.name)?;
-    validate_data_source_preset_scope(&request.scope, request.owner_client_id.as_deref())?;
-    validate_data_source_preset_candidate(&request.description, &request.definition)
+    validate_template_name(&request.name)?;
+    validate_source_template_scope(&request.scope, request.owner_client_id.as_deref())?;
+    validate_source_template_candidate(&request.description, &request.definition)
 }
 
-fn validate_hot_config_rule_template(
-    request: &UpsertHotConfigRuleTemplateRequest,
+fn validate_hot_config_patch_generator(
+    request: &UpsertHotConfigPatchGeneratorRequest,
 ) -> Result<(), ApiError> {
     for value in [
         request.name.as_str(),
@@ -623,30 +619,30 @@ fn validate_hot_config_rule_template(
         request.description.as_str(),
     ] {
         if value.trim().is_empty() || value.len() > 512 {
-            return Err(ApiError::bad_request("hot_config_rule_template_invalid"));
+            return Err(ApiError::bad_request("hot_config_patch_generator_invalid"));
         }
     }
     if request.raw_generator_body.trim().is_empty()
-        || request.raw_generator_body.len() > MAX_RULE_TEMPLATE_BODY_BYTES
+        || request.raw_generator_body.len() > MAX_PATCH_GENERATOR_BODY_BYTES
     {
         return Err(ApiError::bad_request(
-            "hot_config_rule_template_body_invalid",
+            "hot_config_patch_generator_body_invalid",
         ));
     }
     if !request.field_schema.is_object() || !request.docs_metadata.is_object() {
         return Err(ApiError::bad_request(
-            "hot_config_rule_template_metadata_invalid",
+            "hot_config_patch_generator_metadata_invalid",
         ));
     }
     Ok(())
 }
 
-fn hot_config_rule_template_error(error: anyhow::Error) -> ApiError {
+fn hot_config_patch_generator_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("not_found") {
-        ApiError::not_found("hot_config_rule_template_not_found")
-    } else if message.contains("hot_config_rule_template_builtin_immutable") {
-        ApiError::conflict("hot_config_rule_template_builtin_immutable")
+        ApiError::not_found("hot_config_patch_generator_not_found")
+    } else if message.contains("hot_config_patch_generator_builtin_immutable") {
+        ApiError::conflict("hot_config_patch_generator_builtin_immutable")
     } else {
         ApiError::from(error)
     }
@@ -660,39 +656,37 @@ fn validate_short_required_value(value: &str, error: &'static str) -> Result<(),
     Ok(())
 }
 
-fn validate_clone_data_source_preset(
-    request: &CloneDataSourcePresetRequest,
-) -> Result<(), ApiError> {
-    validate_preset_name(&request.name)?;
-    validate_data_source_preset_scope(&request.scope, request.owner_client_id.as_deref())?;
+fn validate_clone_source_template(request: &CloneSourceTemplateRequest) -> Result<(), ApiError> {
+    validate_template_name(&request.name)?;
+    validate_source_template_scope(&request.scope, request.owner_client_id.as_deref())?;
     if request
         .description
         .as_ref()
-        .is_some_and(|description| description.len() > MAX_PRESET_DESCRIPTION_BYTES)
+        .is_some_and(|description| description.len() > MAX_TEMPLATE_DESCRIPTION_BYTES)
     {
         return Err(ApiError::bad_request(
-            "data_source_preset_description_too_large",
+            "source_template_description_too_large",
         ));
     }
     Ok(())
 }
 
-fn validate_data_source_preset_candidate(
+fn validate_source_template_candidate(
     description: &Option<String>,
     definition: &serde_json::Value,
 ) -> Result<(), ApiError> {
     if description
         .as_ref()
-        .is_some_and(|description| description.len() > MAX_PRESET_DESCRIPTION_BYTES)
+        .is_some_and(|description| description.len() > MAX_TEMPLATE_DESCRIPTION_BYTES)
     {
         return Err(ApiError::bad_request(
-            "data_source_preset_description_too_large",
+            "source_template_description_too_large",
         ));
     }
-    validate_preset_definition(definition)
+    validate_template_definition(definition)
 }
 
-fn validate_data_source_preset_scope(
+fn validate_source_template_scope(
     scope: &str,
     owner_client_id: Option<&str>,
 ) -> Result<(), ApiError> {
@@ -700,14 +694,14 @@ fn validate_data_source_preset_scope(
         "shared" => {
             if owner_client_id.is_some() {
                 return Err(ApiError::bad_request(
-                    "shared_preset_must_not_have_owner_client",
+                    "shared_template_must_not_have_owner_client",
                 ));
             }
         }
         "vps_local" => {
             let Some(owner) = owner_client_id else {
                 return Err(ApiError::bad_request(
-                    "vps_local_preset_requires_owner_client",
+                    "vps_local_template_requires_owner_client",
                 ));
             };
             if owner.is_empty() || owner.len() > 128 {
@@ -716,21 +710,19 @@ fn validate_data_source_preset_scope(
         }
         "built_in" => {
             return Err(ApiError::bad_request(
-                "built_in_presets_are_managed_by_server",
+                "built_in_templates_are_managed_by_server",
             ));
         }
-        _ => return Err(ApiError::bad_request("invalid_data_source_preset_scope")),
+        _ => return Err(ApiError::bad_request("invalid_source_template_scope")),
     }
     Ok(())
 }
 
-fn validate_assign_data_source_preset(
-    request: &AssignDataSourcePresetRequest,
-) -> Result<(), ApiError> {
+fn validate_assign_source_template(request: &AssignSourceTemplateRequest) -> Result<(), ApiError> {
     validate_domain(&request.domain)?;
     if request.selector_expression.trim().is_empty() {
         return Err(ApiError::bad_request(
-            "data_source_assignment_targets_required",
+            "source_template_assignment_targets_required",
         ));
     }
     parse_selector_expression(&request.selector_expression)
@@ -770,41 +762,41 @@ fn validate_optional_domain(domain: Option<&str>) -> Result<(), ApiError> {
 }
 
 fn validate_domain(domain: &str) -> Result<(), ApiError> {
-    if DATA_SOURCE_DOMAINS
+    if SOURCE_TEMPLATE_DOMAINS
         .iter()
         .any(|candidate| candidate == &domain)
     {
         Ok(())
     } else {
-        Err(ApiError::bad_request("invalid_data_source_domain"))
+        Err(ApiError::bad_request("invalid_source_template_domain"))
     }
 }
 
-fn validate_preset_name(name: &str) -> Result<(), ApiError> {
-    if name.trim().is_empty() || name.len() > MAX_PRESET_NAME_BYTES {
-        return Err(ApiError::bad_request("invalid_data_source_preset_name"));
+fn validate_template_name(name: &str) -> Result<(), ApiError> {
+    if name.trim().is_empty() || name.len() > MAX_TEMPLATE_NAME_BYTES {
+        return Err(ApiError::bad_request("invalid_source_template_name"));
     }
     if !name
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'-' | b'_' | b'.'))
     {
-        return Err(ApiError::bad_request("invalid_data_source_preset_name"));
+        return Err(ApiError::bad_request("invalid_source_template_name"));
     }
     Ok(())
 }
 
-fn validate_preset_definition(definition: &serde_json::Value) -> Result<(), ApiError> {
+fn validate_template_definition(definition: &serde_json::Value) -> Result<(), ApiError> {
     if !definition.is_object() {
         return Err(ApiError::bad_request(
-            "data_source_preset_definition_must_be_object",
+            "source_template_definition_must_be_object",
         ));
     }
     let size = serde_json::to_vec(definition)
-        .map_err(|_| ApiError::bad_request("invalid_data_source_preset_definition"))?
+        .map_err(|_| ApiError::bad_request("invalid_source_template_definition"))?
         .len();
-    if size > MAX_PRESET_DEFINITION_BYTES {
+    if size > MAX_TEMPLATE_DEFINITION_BYTES {
         return Err(ApiError::bad_request(
-            "data_source_preset_definition_too_large",
+            "source_template_definition_too_large",
         ));
     }
     validate_argv_fields(definition)
@@ -832,39 +824,37 @@ fn validate_argv_fields(value: &serde_json::Value) -> Result<(), ApiError> {
 
 fn validate_argv_array(value: &serde_json::Value) -> Result<(), ApiError> {
     let Some(items) = value.as_array() else {
-        return Err(ApiError::bad_request(
-            "data_source_preset_argv_must_be_array",
-        ));
+        return Err(ApiError::bad_request("source_template_argv_must_be_array"));
     };
-    if items.is_empty() || items.len() > MAX_PRESET_ARGV_ITEMS {
-        return Err(ApiError::bad_request("data_source_preset_argv_invalid"));
+    if items.is_empty() || items.len() > MAX_TEMPLATE_ARGV_ITEMS {
+        return Err(ApiError::bad_request("source_template_argv_invalid"));
     }
     for item in items {
         let Some(arg) = item.as_str() else {
-            return Err(ApiError::bad_request("data_source_preset_argv_invalid"));
+            return Err(ApiError::bad_request("source_template_argv_invalid"));
         };
-        if arg.is_empty() || arg.len() > MAX_PRESET_ARG_BYTES {
-            return Err(ApiError::bad_request("data_source_preset_argv_invalid"));
+        if arg.is_empty() || arg.len() > MAX_TEMPLATE_ARG_BYTES {
+            return Err(ApiError::bad_request("source_template_argv_invalid"));
         }
     }
     let executable = items[0].as_str().unwrap_or_default();
     if !executable.starts_with('/') {
         return Err(ApiError::bad_request(
-            "data_source_preset_argv_executable_must_be_absolute",
+            "source_template_argv_executable_must_be_absolute",
         ));
     }
     Ok(())
 }
 
-fn data_source_preset_lifecycle_error(error: anyhow::Error) -> ApiError {
+fn source_template_lifecycle_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
-    if message.contains("data_source_preset_not_found") {
-        ApiError::not_found("data_source_preset_not_found")
-    } else if message.contains("data_source_preset_builtin_immutable")
-        || message.contains("data_source_preset_clone_target_exists")
-        || message.contains("data_source_preset_duplicate")
+    if message.contains("source_template_not_found") {
+        ApiError::not_found("source_template_not_found")
+    } else if message.contains("source_template_builtin_immutable")
+        || message.contains("source_template_clone_target_exists")
+        || message.contains("source_template_duplicate")
     {
-        ApiError::conflict("data_source_preset_lifecycle_conflict")
+        ApiError::conflict("source_template_lifecycle_conflict")
     } else {
         ApiError::from(error)
     }

@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react";
-import { GitBranch, Power, PowerOff, RefreshCcw, Route, Save, Wand2 } from "lucide-react";
+import { Download, GitBranch, Power, PowerOff, RefreshCcw, Route, Save, Wand2 } from "lucide-react";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridAction,
@@ -41,6 +41,7 @@ import type {
   NetworkObservationTrendRecord,
   NetworkOspfRecommendationRecord,
   NetworkOspfUpdatePlanRecord,
+  OperatorPreferences,
   PromoteTelemetryTunnelRequest,
   RuntimeTunnelManager,
   TelemetryTunnelRecord,
@@ -48,9 +49,10 @@ import type {
   TunnelAddressPair,
   TopologyGraph,
   TunnelKind,
+  TunnelPlan,
   TunnelPlanRecord,
 } from "../types";
-import type { PromoteTunnelPlanToAdapterRequest } from "../typesTopology";
+import type { PromoteTunnelPlanToCustomAdapterRequest } from "../typesTopology";
 import {
   clientDisplayNameFromMap,
   clientDisplayNameMap,
@@ -96,6 +98,7 @@ export function TopologyPanel({
   onCreateJob,
   onAllocateTunnelEndpoints,
   onCreateTunnelPlan,
+  onExportTunnelPlan,
   onLoadNetworkObservations,
   onLoadNetworkTrends,
   onLoadOspfRecommendations,
@@ -106,7 +109,7 @@ export function TopologyPanel({
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
   onPromoteTelemetryTunnel,
-  onPromoteTunnelPlanToAdapter,
+  onPromoteTunnelPlanToCustomAdapter,
   onRefresh,
   onSetTunnelPlanEnabled,
   privilegeMaterial,
@@ -128,6 +131,7 @@ export function TopologyPanel({
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onAllocateTunnelEndpoints: (request: AllocateTunnelEndpointsRequest) => Promise<AllocateTunnelEndpointsResponse>;
   onCreateTunnelPlan: (request: CreateTunnelPlanRequest) => Promise<void>;
+  onExportTunnelPlan: (planId: string) => Promise<TunnelPlan>;
   onLoadNetworkObservations: () => Promise<void>;
   onLoadNetworkTrends: () => Promise<void>;
   onLoadOspfRecommendations: () => Promise<void>;
@@ -138,7 +142,7 @@ export function TopologyPanel({
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onPromoteTelemetryTunnel: (request: PromoteTelemetryTunnelRequest) => Promise<void>;
-  onPromoteTunnelPlanToAdapter: (request: PromoteTunnelPlanToAdapterRequest) => Promise<void>;
+  onPromoteTunnelPlanToCustomAdapter: (request: PromoteTunnelPlanToCustomAdapterRequest) => Promise<void>;
   onRefresh: () => Promise<void>;
   onSetTunnelPlanEnabled: (planIds: string[], enabled: boolean) => Promise<void>;
   privilegeMaterial: PrivilegeMaterial | null;
@@ -146,29 +150,8 @@ export function TopologyPanel({
   telemetryTunnels: TelemetryTunnelRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [form, setForm] = useState<CreateTunnelPlanRequest>({
-    name: "",
-    interface_name: "tun0",
-    kind: "gre",
-    runtime_control: { manager: "agent_iproute2_managed", traffic_limit: {} },
-    runtime_topology: {},
-    left_client_id: "",
-    right_client_id: "",
-    left_underlay: "",
-    right_underlay: "",
-    address_pool_cidr: "10.255.0.0/30",
-    reserved_addresses: [],
-    ipv4_tunnel: null,
-    ipv6_address_pool_cidr: "",
-    ipv6_tunnel: null,
-    latency_primary_family: "ipv4",
-    bandwidth: "100m",
-    latency_ms: 20,
-    packet_loss_ratio: 0,
-    preference: 1,
-    confirmed: false,
-  });
+  const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
+  const [form, setForm] = useState<CreateTunnelPlanRequest>(() => initialTunnelPlanForm(preferences));
   const [reservedText, setReservedText] = useState("");
   const [runtimeStartupArgv, setRuntimeStartupArgv] = useState("");
   const [runtimeStopArgv, setRuntimeStopArgv] = useState("");
@@ -183,7 +166,6 @@ export function TopologyPanel({
   const [fouPort, setFouPort] = useState("5555");
   const [fouPeerPort, setFouPeerPort] = useState("5555");
   const [fouIpproto, setFouIpproto] = useState("4");
-  const [topologyVersion, setTopologyVersion] = useState("");
   const [topologyDesiredText, setTopologyDesiredText] = useState("");
   const [topologyStaleText, setTopologyStaleText] = useState("");
   const [topologyRoutesText, setTopologyRoutesText] = useState("");
@@ -311,6 +293,13 @@ export function TopologyPanel({
       label: "Disable plan",
       onSelect: (rows) => void setTunnelPlanEnabledForRows(rows, false),
     },
+    {
+      disabled: (rows) => pending || rows.length !== 1,
+      icon: <Download size={15} />,
+      label: "Export JSON",
+      onSelect: (rows) => void exportTunnelPlanJson(rows[0]),
+      separatorBefore: true,
+    },
   ];
   const automationColumns = useMemo<ConsoleDataGridColumn<AutomationRow>[]>(
     () => [
@@ -424,7 +413,6 @@ export function TopologyPanel({
         fouPort,
         fouPeerPort,
         fouIpproto,
-        topologyVersion,
         topologyDesiredText,
         topologyStaleText,
         topologyRoutesText,
@@ -446,7 +434,6 @@ export function TopologyPanel({
       fouPort,
       fouPeerPort,
       fouIpproto,
-      topologyVersion,
       topologyDesiredText,
       topologyStaleText,
       topologyRoutesText,
@@ -496,7 +483,6 @@ export function TopologyPanel({
         fouIpproto: form.kind === "fou" ? fouIpproto : "",
       }),
       runtime_topology: buildRuntimeTopology({
-        version: topologyVersion,
         desiredText: topologyDesiredText,
         staleText: topologyStaleText,
         routesText: topologyRoutesText,
@@ -508,24 +494,45 @@ export function TopologyPanel({
 
   async function allocateEndpoints() {
     await runPanelAction(setPending, setActionError, async () => {
-      const includeIpv4 = Boolean(form.address_pool_cidr.trim());
-      const includeIpv6 = Boolean((form.ipv6_address_pool_cidr ?? "").trim());
-      if (!includeIpv4 && !includeIpv6) {
-        throw new Error("Enter an IPv4 or IPv6 pool before generating endpoints");
-      }
+      const ipv4Pool = form.address_pool_cidr.trim();
+      const ipv6Pool = (form.ipv6_address_pool_cidr ?? "").trim();
+      const hasLocalPool = Boolean(ipv4Pool || ipv6Pool);
+      const reservedAddresses = mergeReservedAddresses(
+        splitReserved(reservedText),
+        currentTunnelAddresses(form),
+      );
       const allocation = await onAllocateTunnelEndpoints({
-        ipv4_pool_cidr: includeIpv4 ? form.address_pool_cidr.trim() : null,
-        ipv6_pool_cidr: includeIpv6 ? (form.ipv6_address_pool_cidr ?? "").trim() : null,
-        reserved_addresses: splitReserved(reservedText),
-        include_ipv4: includeIpv4,
-        include_ipv6: includeIpv6,
+        ipv4_pool_cidr: ipv4Pool || null,
+        ipv6_pool_cidr: ipv6Pool || null,
+        reserved_addresses: reservedAddresses,
+        include_ipv4: hasLocalPool ? Boolean(ipv4Pool) : undefined,
+        include_ipv6: hasLocalPool ? Boolean(ipv6Pool) : undefined,
       });
+      if (!allocation.ipv4_tunnel && !allocation.ipv6_tunnel) {
+        throw new Error("No tunnel allocation pool is configured; enter endpoint CIDRs or configure an allocator pool");
+      }
+      setReservedText(formatReservedAddresses(reservedAddresses));
       setForm((current) => ({
         ...current,
         ipv4_tunnel: allocation.ipv4_tunnel,
         ipv6_tunnel: allocation.ipv6_tunnel,
         latency_primary_family: allocation.latency_primary_family,
       }));
+    });
+  }
+
+  async function exportTunnelPlanJson(plan: TunnelPlanRecord | undefined) {
+    if (!plan) {
+      return;
+    }
+    await runPanelAction(setPending, setActionError, async () => {
+      const exported = await onExportTunnelPlan(plan.id);
+      saveBlob(
+        new Blob([`${JSON.stringify(exported, null, 2)}\n`], {
+          type: "application/json",
+        }),
+        `${safeFileName(plan.name || plan.id)}.plan.json`,
+      );
     });
   }
 
@@ -705,7 +712,7 @@ export function TopologyPanel({
                 agents={agents}
                 ariaLabel="Left VPS"
                 excludeIds={form.right_client_id ? [form.right_client_id] : []}
-                onChange={(value) => setField("left_client_id", value)}
+                onChange={(value) => setEndpointClient("left", value)}
                 placeholder="Search left VPS"
                 value={form.left_client_id}
               />
@@ -716,7 +723,7 @@ export function TopologyPanel({
                 agents={agents}
                 ariaLabel="Right VPS"
                 excludeIds={form.left_client_id ? [form.left_client_id] : []}
-                onChange={(value) => setField("right_client_id", value)}
+                onChange={(value) => setEndpointClient("right", value)}
                 placeholder="Search right VPS"
                 value={form.right_client_id}
               />
@@ -734,79 +741,37 @@ export function TopologyPanel({
           </div>
           <div className="dispatchControls">
             <label>
-              <span>IPv4 allocation pool</span>
+              <span>Left IPv4 CIDR</span>
               <input
-                value={form.address_pool_cidr}
-                onChange={(event) => setField("address_pool_cidr", event.target.value)}
-                placeholder="Empty means disabled"
+                value={formatEndpointCidr(form.ipv4_tunnel ?? null, "left")}
+                onChange={(event) => setAddressCidr("ipv4_tunnel", "left", event.target.value, 31)}
+                placeholder="IPv4 CIDR"
               />
             </label>
             <label>
-              <span>IPv6 allocation pool</span>
+              <span>Right IPv4 CIDR</span>
               <input
-                value={form.ipv6_address_pool_cidr ?? ""}
-                onChange={(event) => setField("ipv6_address_pool_cidr", event.target.value)}
-                placeholder="Empty means disabled"
-              />
-            </label>
-            <label>
-              <span>Reserved</span>
-              <input value={reservedText} onChange={(event) => setReservedText(event.target.value)} />
-            </label>
-          </div>
-          <div className="dispatchControls">
-            <label>
-              <span>Left IPv4</span>
-              <input
-                value={form.ipv4_tunnel?.left ?? ""}
-                onChange={(event) => setAddressPair("ipv4_tunnel", "left", event.target.value, 31)}
-                placeholder="Empty means disabled"
-              />
-            </label>
-            <label>
-              <span>Right IPv4</span>
-              <input
-                value={form.ipv4_tunnel?.right ?? ""}
-                onChange={(event) => setAddressPair("ipv4_tunnel", "right", event.target.value, 31)}
-                placeholder="Empty means disabled"
-              />
-            </label>
-            <label>
-              <span>IPv4 prefix</span>
-              <input
-                max={32}
-                min={0}
-                onChange={(event) => setAddressPrefix("ipv4_tunnel", Number(event.target.value), 31)}
-                type="number"
-                value={form.ipv4_tunnel?.prefix_len ?? 31}
+                value={formatEndpointCidr(form.ipv4_tunnel ?? null, "right")}
+                onChange={(event) => setAddressCidr("ipv4_tunnel", "right", event.target.value, 31)}
+                placeholder="IPv4 CIDR"
               />
             </label>
           </div>
           <div className="dispatchControls">
             <label>
-              <span>Left IPv6</span>
+              <span>Left IPv6 CIDR</span>
               <input
-                value={form.ipv6_tunnel?.left ?? ""}
-                onChange={(event) => setAddressPair("ipv6_tunnel", "left", event.target.value, 127)}
-                placeholder="Empty means disabled"
+                value={formatEndpointCidr(form.ipv6_tunnel ?? null, "left")}
+                onChange={(event) => setAddressCidr("ipv6_tunnel", "left", event.target.value, 127)}
+                placeholder="IPv6 CIDR"
               />
             </label>
             <label>
-              <span>Right IPv6</span>
+              <span>Right IPv6 CIDR</span>
               <input
-                value={form.ipv6_tunnel?.right ?? ""}
-                onChange={(event) => setAddressPair("ipv6_tunnel", "right", event.target.value, 127)}
-                placeholder="Empty means disabled"
-              />
-            </label>
-            <label>
-              <span>IPv6 prefix</span>
-              <input
-                max={128}
-                min={0}
-                onChange={(event) => setAddressPrefix("ipv6_tunnel", Number(event.target.value), 127)}
-                type="number"
-                value={form.ipv6_tunnel?.prefix_len ?? 127}
+                value={formatEndpointCidr(form.ipv6_tunnel ?? null, "right")}
+                onChange={(event) => setAddressCidr("ipv6_tunnel", "right", event.target.value, 127)}
+                placeholder="IPv6 CIDR"
               />
             </label>
           </div>
@@ -823,9 +788,37 @@ export function TopologyPanel({
             </label>
             <button className="secondaryAction" disabled={pending} onClick={allocateEndpoints} type="button">
               <Wand2 size={17} />
-              Generate endpoints
+              Allocate endpoints
             </button>
           </div>
+          <details
+            className="operationNote formSectionNote"
+            title="Uses Preferences pools unless overridden here. Reserved addresses are comma-separated; repeated allocation appends current endpoint IPs before requesting another suggestion."
+          >
+            <summary>Allocation overrides</summary>
+            <div className="dispatchControls">
+              <label>
+                <span>IPv4 pool override</span>
+                <input
+                  value={form.address_pool_cidr}
+                  onChange={(event) => setField("address_pool_cidr", event.target.value)}
+                  placeholder="No default"
+                />
+              </label>
+              <label>
+                <span>IPv6 pool override</span>
+                <input
+                  value={form.ipv6_address_pool_cidr ?? ""}
+                  onChange={(event) => setField("ipv6_address_pool_cidr", event.target.value)}
+                  placeholder="No default"
+                />
+              </label>
+              <label>
+                <span>Reserved addresses</span>
+                <input value={reservedText} onChange={(event) => setReservedText(event.target.value)} />
+              </label>
+            </div>
+          </details>
           <div className="dispatchControls">
             <label>
               <span>Latency ms</span>
@@ -849,7 +842,7 @@ export function TopologyPanel({
           </div>
           <div className="operationNote formSectionNote">
             <strong>Runtime ownership and traffic limits</strong>
-            <span>Choose whether the agent owns the tunnel, only observes it, or delegates commands to an adapter.</span>
+            <span>Choose whether the agent owns the tunnel, observes it externally, or delegates lifecycle commands to a custom adapter.</span>
           </div>
           <div className="dispatchControls">
             <label>
@@ -869,10 +862,6 @@ export function TopologyPanel({
                   </option>
                 ))}
               </select>
-            </label>
-            <label>
-              <span>Topology version</span>
-              <input value={topologyVersion} onChange={(event) => setTopologyVersion(event.target.value)} />
             </label>
           </div>
           <label className="checkLine">
@@ -1009,7 +998,7 @@ export function TopologyPanel({
         agents={agents}
         onAllocateTunnelEndpoints={onAllocateTunnelEndpoints}
         onPromoteTelemetryTunnel={onPromoteTelemetryTunnel}
-        onPromoteTunnelPlanToAdapter={onPromoteTunnelPlanToAdapter}
+        onPromoteTunnelPlanToCustomAdapter={onPromoteTunnelPlanToCustomAdapter}
         telemetryTunnels={telemetryTunnels}
         tunnelPlans={tunnelPlans}
       />
@@ -1082,7 +1071,24 @@ export function TopologyPanel({
     setForm((current) => ({ ...current, [key]: value }));
   }
 
-  function setAddressPair(
+  function setEndpointClient(side: "left" | "right", clientId: string) {
+    setForm((current) => {
+      const clientKey = side === "left" ? "left_client_id" : "right_client_id";
+      const underlayKey = side === "left" ? "left_underlay" : "right_underlay";
+      return {
+        ...current,
+        [clientKey]: clientId,
+        [underlayKey]: autoUnderlayValue(
+          current[underlayKey],
+          current[clientKey],
+          clientId,
+          agents,
+        ),
+      };
+    });
+  }
+
+  function setAddressCidr(
     key: "ipv4_tunnel" | "ipv6_tunnel",
     side: "left" | "right",
     value: string,
@@ -1090,15 +1096,12 @@ export function TopologyPanel({
   ) {
     setForm((current) => {
       const currentPair = current[key] ?? { left: "", right: "", prefix_len: fallbackPrefix };
-      const nextPair = { ...currentPair, [side]: value.trim() };
-      return { ...current, [key]: normalizePair(nextPair) };
-    });
-  }
-
-  function setAddressPrefix(key: "ipv4_tunnel" | "ipv6_tunnel", value: number, fallbackPrefix: number) {
-    setForm((current) => {
-      const currentPair = current[key] ?? { left: "", right: "", prefix_len: fallbackPrefix };
-      const nextPair = { ...currentPair, prefix_len: Number.isFinite(value) ? Math.trunc(value) : fallbackPrefix };
+      const parsed = parseEndpointCidr(value, currentPair.prefix_len);
+      const nextPair = {
+        ...currentPair,
+        [side]: parsed.address,
+        prefix_len: parsed.prefix_len,
+      };
       return { ...current, [key]: normalizePair(nextPair) };
     });
   }
@@ -1139,7 +1142,7 @@ export function TopologyPanel({
       for (const target of targets) {
         const toml = buildMonitoringConfigPatchToml(target.clientId, tunnelPlans, enabled);
         const operation = {
-          type: "data_source_config_patch" as const,
+          type: "source_config_patch" as const,
           apply_mode: "incremental_patch" as const,
           toml,
         };
@@ -1147,7 +1150,7 @@ export function TopologyPanel({
         const maxTimeoutSecs = 120;
         const builtPrivilege = await buildPrivilegeForJobOperation({
           clientIds: [target.clientId],
-          commandType: "data_source_config_patch",
+          commandType: "source_config_patch",
           operation,
           privilegeMaterial,
           selectorExpression,
@@ -1155,7 +1158,7 @@ export function TopologyPanel({
         });
         await onCreateJob({
           argv: [],
-          command: "data_source_config_patch",
+          command: "source_config_patch",
           confirmed: true,
           destructive: true,
           force_unprivileged: false,
@@ -1179,6 +1182,124 @@ function splitReserved(value: string): string[] {
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function formatReservedAddresses(addresses: string[]): string {
+  return addresses.join(", ");
+}
+
+function mergeReservedAddresses(existing: string[], additions: string[]): string[] {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const address of [...existing, ...additions]) {
+    const trimmed = address.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+    seen.add(trimmed);
+    merged.push(trimmed);
+  }
+  return merged;
+}
+
+function currentTunnelAddresses(form: CreateTunnelPlanRequest): string[] {
+  return [
+    ...addressPairValues(form.ipv4_tunnel ?? null),
+    ...addressPairValues(form.ipv6_tunnel ?? null),
+  ];
+}
+
+function addressPairValues(pair: TunnelAddressPair | null): string[] {
+  if (!pair) {
+    return [];
+  }
+  return [pair.left, pair.right].filter(Boolean);
+}
+
+function formatEndpointCidr(pair: TunnelAddressPair | null, side: "left" | "right"): string {
+  const address = side === "left" ? pair?.left : pair?.right;
+  if (!pair || !address) {
+    return "";
+  }
+  return `${address}/${pair.prefix_len}`;
+}
+
+function parseEndpointCidr(value: string, fallbackPrefix: number): { address: string; prefix_len: number } {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return { address: "", prefix_len: fallbackPrefix };
+  }
+  const slashIndex = trimmed.lastIndexOf("/");
+  if (slashIndex < 0) {
+    return { address: trimmed, prefix_len: fallbackPrefix };
+  }
+  const address = trimmed.slice(0, slashIndex).trim();
+  const rawPrefix = Number(trimmed.slice(slashIndex + 1).trim());
+  const prefix_len = Number.isFinite(rawPrefix) ? Math.trunc(rawPrefix) : fallbackPrefix;
+  return { address, prefix_len };
+}
+
+function defaultUnderlayForAgent(agents: AgentView[], clientId: string): string {
+  const agent = agents.find((candidate) => candidate.id === clientId);
+  return agent?.last_ip?.trim() || agent?.registration_ip?.trim() || "";
+}
+
+function autoUnderlayValue(
+  currentValue: string,
+  currentClientId: string,
+  nextClientId: string,
+  agents: AgentView[],
+): string {
+  const nextAuto = defaultUnderlayForAgent(agents, nextClientId);
+  if (!nextAuto) {
+    return currentValue;
+  }
+  const currentAuto = defaultUnderlayForAgent(agents, currentClientId);
+  const currentTrimmed = currentValue.trim();
+  if (!currentTrimmed || currentTrimmed === currentAuto) {
+    return nextAuto;
+  }
+  return currentValue;
+}
+
+function initialTunnelPlanForm(preferences: OperatorPreferences): CreateTunnelPlanRequest {
+  return {
+    name: "",
+    interface_name: "tun0",
+    kind: "gre",
+    runtime_control: { manager: "agent_iproute2_managed", traffic_limit: {} },
+    runtime_topology: {},
+    left_client_id: "",
+    right_client_id: "",
+    left_underlay: "",
+    right_underlay: "",
+    address_pool_cidr: preferences.tunnel_ipv4_allocation_pool_cidr,
+    reserved_addresses: [],
+    ipv4_tunnel: null,
+    ipv6_address_pool_cidr: preferences.tunnel_ipv6_allocation_pool_cidr,
+    ipv6_tunnel: null,
+    latency_primary_family: "ipv4",
+    bandwidth: "100m",
+    latency_ms: 20,
+    packet_loss_ratio: 0,
+    preference: 1,
+    confirmed: false,
+  };
+}
+
+function saveBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name || "plan.json";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function safeFileName(value: string): string {
+  return value.trim().replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "tunnel-plan";
 }
 
 function normalizePair(pair: TunnelAddressPair): TunnelAddressPair | null {

@@ -943,25 +943,25 @@ async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
         .await,
     );
     assert_scope_forbidden(
-        routes_inventory::list_data_source_presets(
+        routes_inventory::list_source_templates(
             axum::extract::State(state.clone()),
             viewer_headers.clone(),
-            axum::extract::Query(DataSourcePresetQuery { domain: None }),
+            axum::extract::Query(SourceTemplateQuery { domain: None }),
         )
         .await,
     );
     assert_scope_forbidden(
-        routes_inventory::list_hot_config_rule_templates(
+        routes_inventory::list_hot_config_patch_generators(
             axum::extract::State(state.clone()),
             viewer_headers.clone(),
         )
         .await,
     );
     assert_scope_forbidden(
-        routes_inventory::render_data_source_hot_config(
+        routes_inventory::render_source_config_patch(
             axum::extract::State(state.clone()),
             viewer_headers.clone(),
-            axum::extract::Query(DataSourceHotConfigQuery {
+            axum::extract::Query(SourceConfigPatchQuery {
                 client_id: "client-a".to_string(),
             }),
         )
@@ -1188,10 +1188,10 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
         .await,
     );
     assert_not_scope_forbidden(
-        routes_inventory::list_data_source_presets(
+        routes_inventory::list_source_templates(
             axum::extract::State(state.clone()),
             config_headers.clone(),
-            axum::extract::Query(DataSourcePresetQuery { domain: None }),
+            axum::extract::Query(SourceTemplateQuery { domain: None }),
         )
         .await,
     );

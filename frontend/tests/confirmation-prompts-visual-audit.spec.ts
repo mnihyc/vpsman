@@ -37,7 +37,7 @@ async function captureSystemConfigSavePrompt(
   manifest: Array<Record<string, unknown>>,
 ) {
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "System", "Config");
+  await openConsoleSubpage(page, "System", "Suite config");
   await page.getByLabel("API DB pool").fill("40");
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.getByText(/Validation passed/)).toBeVisible();
@@ -95,11 +95,12 @@ async function captureTopologySavePrompt(
   await composer.getByLabel("Interface", { exact: true }).fill("visgre0");
   await chooseVpsBySearch(composer, "Left VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
   await chooseVpsBySearch(composer, "Right VPS", "fra", /core-fra-02.*agent-fra-02/);
-  await composer.getByLabel("Left underlay", { exact: true }).fill("198.51.100.10");
-  await composer.getByLabel("Right underlay", { exact: true }).fill("203.0.113.20");
-  await composer.getByLabel("IPv4 allocation pool", { exact: true }).fill("10.255.60.0/30");
-  await activate(composer.getByRole("button", { name: "Generate endpoints" }));
-  await expect(composer.getByLabel("Left IPv4", { exact: true })).toHaveValue("10.255.50.0");
+  await expect(composer.getByLabel("Left underlay", { exact: true })).toHaveValue("198.51.100.10");
+  await expect(composer.getByLabel("Right underlay", { exact: true })).toHaveValue("203.0.113.20");
+  await composer.getByText("Allocation overrides").click();
+  await composer.getByLabel("IPv4 pool override", { exact: true }).fill("10.255.60.0/30");
+  await activate(composer.getByRole("button", { name: "Allocate endpoints" }));
+  await expect(composer.getByLabel("Left IPv4 CIDR", { exact: true })).toHaveValue("10.255.50.0/31");
   await activate(composer.getByRole("button", { name: "Save plan" }));
   await expect(page.getByLabel("Confirm tunnel plan save")).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "topology-save-confirm");

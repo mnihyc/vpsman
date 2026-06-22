@@ -34,7 +34,7 @@ function getScopedHeroTitle(view: ActiveView, subpage: string): string {
   if (view === "System") {
     switch (subpage) {
       case "config":
-        return "System config";
+        return "Suite config";
       case "users":
         return "System users";
       case "sessions":
@@ -259,8 +259,8 @@ export function App() {
                 activeSubpage={activeSubpage}
                 agents={visibleAgents}
                 apiError={dashboard.apiError}
-                dataSourceAssignments={dashboard.dataSourceAssignments}
-                dataSourceStatus={dashboard.dataSourceStatus}
+                sourceTemplateAssignments={dashboard.sourceTemplateAssignments}
+                sourceStatus={dashboard.sourceStatus}
                 fleetAlerts={dashboard.fleetAlerts}
                 fleetAlertStates={dashboard.fleetAlertStates}
                 fleetAlertPolicies={dashboard.fleetAlertPolicies}
@@ -280,8 +280,8 @@ export function App() {
                 onOpenJobDispatchPreset={openJobDispatchPreset}
                 onOpenJobDetails={openJobDetails}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
-                onRenderDataSourceHotConfig={
-                  dashboard.renderDataSourceHotConfig
+                onRenderSourceConfigPatch={
+                  dashboard.renderSourceConfigPatch
                 }
                 onSelectAgent={setSelectedAgentId}
                 onUpdateAgentAlias={dashboard.updateAgentAlias}
@@ -326,37 +326,38 @@ export function App() {
               <ConfigPanel
                 activeSubpage={activeSubpage}
                 agents={dashboard.agents}
-                dataSourceAssignments={dashboard.dataSourceAssignments}
-                dataSourcePresets={dashboard.dataSourcePresets}
-                dataSourceStatus={dashboard.dataSourceStatus}
+                sourceTemplateAssignments={dashboard.sourceTemplateAssignments}
+                sourceTemplates={dashboard.sourceTemplates}
+                sourceStatus={dashboard.sourceStatus}
                 error={dashboard.tagsError}
-                hotConfigRuleTemplates={dashboard.hotConfigRuleTemplates}
+                hotConfigPatchGenerators={dashboard.hotConfigPatchGenerators}
                 jobs={dashboard.jobs}
                 loading={dashboard.tagsLoading}
-                onAssignDataSourcePreset={dashboard.assignDataSourcePreset}
-                onCloneDataSourcePreset={dashboard.cloneDataSourcePreset}
+                onAssignSourceTemplate={dashboard.assignSourceTemplate}
+                onCloneSourceTemplate={dashboard.cloneSourceTemplate}
                 onCreateJob={dashboard.createJob}
-                onCreateDataSourcePreset={dashboard.createDataSourcePreset}
-                onDiffDataSourcePreset={dashboard.diffDataSourcePreset}
+                onCreateSourceTemplate={dashboard.createSourceTemplate}
+                onDiffSourceTemplate={dashboard.diffSourceTemplate}
                 onLoadJobOutputs={dashboard.loadJobOutputs}
                 onLoadJobTargets={dashboard.loadJobTargets}
-                onDeleteHotConfigRuleTemplate={
-                  dashboard.deleteHotConfigRuleTemplate
+                onDeleteHotConfigPatchGenerator={
+                  dashboard.deleteHotConfigPatchGenerator
                 }
                 onOpenJobDetails={openJobDetails}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
                 onRefresh={dashboard.loadTagInventory}
-                onRenderDataSourceHotConfig={
-                  dashboard.renderDataSourceHotConfig
+                onRenderSourceConfigPatch={
+                  dashboard.renderSourceConfigPatch
                 }
-                onRenderHotConfigRuleTemplate={
-                  dashboard.renderHotConfigRuleTemplate
+                onRenderHotConfigPatchGenerator={
+                  dashboard.renderHotConfigPatchGenerator
                 }
                 onResolveBulk={dashboard.resolveBulkPreview}
-                onTestDataSourcePreset={dashboard.testDataSourcePreset}
-                onUpdateDataSourcePreset={dashboard.updateDataSourcePreset}
-                onUpsertHotConfigRuleTemplate={
-                  dashboard.upsertHotConfigRuleTemplate
+                onTestSourceTemplate={dashboard.testSourceTemplate}
+                onUpdateSourceTemplate={dashboard.updateSourceTemplate}
+                onSelectSubpage={selectSubpage}
+                onUpsertHotConfigPatchGenerator={
+                  dashboard.upsertHotConfigPatchGenerator
                 }
                 privilegeMaterial={privilegeMaterial}
                 setPrivilegeMaterial={setPrivilegeMaterial}
@@ -478,6 +479,7 @@ export function App() {
                 onAllocateTunnelEndpoints={dashboard.allocateTunnelEndpoints}
                 onCreateJob={dashboard.createJob}
                 onCreateTunnelPlan={dashboard.createTunnelPlan}
+                onExportTunnelPlan={dashboard.exportTunnelPlan}
                 onLoadNetworkObservations={dashboard.loadNetworkObservations}
                 onLoadNetworkTrends={dashboard.loadNetworkTrends}
                 onLoadOspfRecommendations={dashboard.loadOspfRecommendations}
@@ -488,8 +490,8 @@ export function App() {
                 onOpenJobDetails={openJobDetails}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
                 onPromoteTelemetryTunnel={dashboard.promoteTelemetryTunnel}
-                onPromoteTunnelPlanToAdapter={
-                  dashboard.promoteTunnelPlanToAdapter
+                onPromoteTunnelPlanToCustomAdapter={
+                  dashboard.promoteTunnelPlanToCustomAdapter
                 }
                 onRefresh={dashboard.loadTunnelPlans}
                 onSetTunnelPlanEnabled={dashboard.setTunnelPlanEnabled}

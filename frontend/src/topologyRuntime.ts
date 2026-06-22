@@ -30,7 +30,7 @@ export type RuntimeControlFormValues = {
 };
 
 export type RuntimeTopologyFormValues = {
-  version: string;
+  version?: string | null;
   desiredText: string;
   staleText: string;
   routesText: string;
@@ -69,7 +69,7 @@ export function buildRuntimeControl(
 
 export function buildRuntimeTopology(values: RuntimeTopologyFormValues): RuntimeTunnelTopologyIntent {
   return {
-    version: values.version.trim() || undefined,
+    version: values.version?.trim() || undefined,
     desired_interfaces: splitList(values.desiredText),
     stale_interfaces: splitList(values.staleText),
     routes: parseRouteLines(values.routesText),
@@ -103,7 +103,6 @@ export function normalizeTelemetryPromotionRequest(
     ipv6_tunnel: normalizeTunnelAddressPair(request.ipv6_tunnel ?? null),
     latency_primary_family: request.latency_primary_family ?? "ipv4",
     name: request.name?.trim() || undefined,
-    topology_version: request.topology_version?.trim() || undefined,
     bandwidth: request.bandwidth ?? "100m",
     latency_ms: request.latency_ms ?? 20,
     packet_loss_ratio: request.packet_loss_ratio ?? 0,
@@ -134,7 +133,7 @@ export function runtimeManagerLabel(manager: RuntimeTunnelManager | string | nul
     return "External observed";
   }
   if (manager === "external_managed_adapter") {
-    return "External adapter";
+    return "Custom adapter";
   }
   if (manager === "agent_iproute2_managed" || !manager) {
     return "Agent iproute2";

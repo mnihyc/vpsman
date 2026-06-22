@@ -416,15 +416,15 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::DataSourcePresets(command) => {
-            commands_inventory::data_source_presets(api_url, token, command.domain)?;
+        Command::SourceTemplates(command) => {
+            commands_inventory::source_templates(api_url, token, command.domain)?;
             Ok(None)
         }
-        Command::DataSourcePresetCreate(command) => {
-            commands_inventory::data_source_preset_create(
+        Command::SourceTemplateCreate(command) => {
+            commands_inventory::source_template_create(
                 api_url,
                 token,
-                commands_inventory::DataSourcePresetCreateOptions {
+                commands_inventory::SourceTemplateCreateOptions {
                     domain: command.domain,
                     name: command.name,
                     scope: command.scope,
@@ -436,11 +436,11 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::DataSourcePresetClone(command) => {
-            commands_inventory::data_source_preset_clone(
+        Command::SourceTemplateClone(command) => {
+            commands_inventory::source_template_clone(
                 api_url,
                 token,
-                command.source_preset_id,
+                command.source_template_id,
                 command.name,
                 command.scope,
                 command.owner_client_id,
@@ -448,11 +448,11 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::DataSourcePresetDiff(command) => {
-            commands_inventory::data_source_preset_diff(
+        Command::SourceTemplateDiff(command) => {
+            commands_inventory::source_template_diff(
                 api_url,
                 token,
-                command.preset_id,
+                command.template_id,
                 command.description,
                 command.clear_description,
                 command.definition_json,
@@ -460,22 +460,22 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::DataSourcePresetTest(command) => {
-            commands_inventory::data_source_preset_test(
+        Command::SourceTemplateTest(command) => {
+            commands_inventory::source_template_test(
                 api_url,
                 token,
-                command.preset_id,
+                command.template_id,
                 command.definition_json,
                 command.definition_file,
             )?;
             Ok(None)
         }
-        Command::DataSourcePresetUpdate(command) => {
-            commands_inventory::data_source_preset_update(
+        Command::SourceTemplateUpdate(command) => {
+            commands_inventory::source_template_update(
                 api_url,
                 token,
-                commands_inventory::DataSourcePresetUpdateOptions {
-                    preset_id: command.preset_id,
+                commands_inventory::SourceTemplateUpdateOptions {
+                    template_id: command.template_id,
                     description: command.description,
                     clear_description: command.clear_description,
                     definition_json: command.definition_json,
@@ -485,8 +485,12 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::DataSourceStatus(command) => {
-            commands_inventory::data_source_status(
+        Command::SourceStatus(command) => {
+            commands_inventory::source_status(api_url, token, command.client_id, command.domain)?;
+            Ok(None)
+        }
+        Command::SourceTemplateAssignments(command) => {
+            commands_inventory::source_template_assignments(
                 api_url,
                 token,
                 command.client_id,
@@ -494,17 +498,8 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::DataSourceAssignments(command) => {
-            commands_inventory::data_source_assignments(
-                api_url,
-                token,
-                command.client_id,
-                command.domain,
-            )?;
-            Ok(None)
-        }
-        Command::DataSourceHotConfig(command) => {
-            commands_inventory::data_source_hot_config(
+        Command::SourceConfigPatch(command) => {
+            commands_inventory::source_config_patch(
                 api_url,
                 token,
                 command.client_id,
@@ -512,8 +507,8 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::DataSourceHotConfigApply(command) => {
-            commands_inventory::data_source_hot_config_apply(
+        Command::SourceConfigPatchApply(command) => {
+            commands_inventory::source_config_patch_apply(
                 api_url,
                 token,
                 command.client_id,
@@ -526,13 +521,13 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::DataSourcePresetAssign(command) => {
-            commands_inventory::data_source_preset_assign(
+        Command::SourceTemplateAssign(command) => {
+            commands_inventory::source_template_assign(
                 api_url,
                 token,
-                commands_inventory::DataSourcePresetAssignOptions {
+                commands_inventory::SourceTemplateAssignOptions {
                     domain: command.domain,
-                    preset_id: command.preset_id,
+                    template_id: command.template_id,
                     clients: command.clients,
                     tags: command.tags,
                     confirmed: command.confirmed,

@@ -1,4 +1,4 @@
-CREATE TABLE data_source_presets (
+CREATE TABLE source_templates (
     id UUID PRIMARY KEY,
     domain TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -10,39 +10,39 @@ CREATE TABLE data_source_presets (
     definition JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT data_source_presets_scope_check
+    CONSTRAINT source_templates_scope_check
         CHECK (scope IN ('built_in', 'shared', 'vps_local')),
-    CONSTRAINT data_source_presets_definition_object_check
+    CONSTRAINT source_templates_definition_object_check
         CHECK (jsonb_typeof(definition) = 'object'),
-    CONSTRAINT data_source_presets_owner_scope_check
+    CONSTRAINT source_templates_owner_scope_check
         CHECK (
             (scope = 'vps_local' AND owner_client_id IS NOT NULL)
             OR (scope <> 'vps_local' AND owner_client_id IS NULL)
         )
 );
 
-CREATE UNIQUE INDEX data_source_presets_global_name_idx
-    ON data_source_presets (domain, name, scope)
+CREATE UNIQUE INDEX source_templates_global_name_idx
+    ON source_templates (domain, name, scope)
     WHERE owner_client_id IS NULL;
 
-CREATE UNIQUE INDEX data_source_presets_client_name_idx
-    ON data_source_presets (domain, owner_client_id, name)
+CREATE UNIQUE INDEX source_templates_client_name_idx
+    ON source_templates (domain, owner_client_id, name)
     WHERE owner_client_id IS NOT NULL;
 
-CREATE UNIQUE INDEX data_source_presets_default_idx
-    ON data_source_presets (domain)
+CREATE UNIQUE INDEX source_templates_default_idx
+    ON source_templates (domain)
     WHERE is_default;
 
-CREATE TABLE client_data_source_preset_assignments (
+CREATE TABLE client_source_template_assignments (
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     domain TEXT NOT NULL,
-    preset_id UUID NOT NULL REFERENCES data_source_presets(id) ON DELETE RESTRICT,
+    template_id UUID NOT NULL REFERENCES source_templates(id) ON DELETE RESTRICT,
     assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (client_id, domain)
 );
 
-CREATE INDEX client_data_source_preset_assignments_preset_idx
-    ON client_data_source_preset_assignments (preset_id);
+CREATE INDEX client_source_template_assignments_template_idx
+    ON client_source_template_assignments (template_id);
 
 CREATE TABLE file_transfer_sessions (
     session_id UUID NOT NULL,
@@ -95,7 +95,7 @@ CREATE TABLE file_transfer_sessions (
 CREATE INDEX file_transfer_sessions_observed_idx
     ON file_transfer_sessions (observed_at DESC, client_id, session_id);
 
-INSERT INTO data_source_presets (
+INSERT INTO source_templates (
     id, domain, name, scope, built_in, is_default, description, definition
 ) VALUES
     (
@@ -235,7 +235,7 @@ INSERT INTO data_source_presets (
         'built_in',
         TRUE,
         FALSE,
-        'Reserved iperf3 JSON provider adapter preset for fleets that standardize on iperf3',
+        'Reserved iperf3 JSON provider adapter template for fleets that standardize on iperf3',
         '{"provider":"iperf3_json_adapter","server_argv":["/usr/bin/iperf3","--server","--one-off","--json"],"client_argv":["/usr/bin/iperf3","--client","{server_address}","--json"]}'::jsonb
     ),
     (
@@ -295,7 +295,7 @@ INSERT INTO data_source_presets (
         'built_in',
         TRUE,
         FALSE,
-        'Reserved S3/MinIO path-style artifact adapter preset',
+        'Reserved S3/MinIO path-style artifact adapter template',
         '{"provider":"s3_path_style","requires_server_env":["VPSMAN_OBJECT_ENDPOINT","VPSMAN_OBJECT_BUCKET","VPSMAN_OBJECT_ACCESS_KEY","VPSMAN_OBJECT_SECRET_KEY"]}'::jsonb
     ),
     (
@@ -310,7 +310,7 @@ INSERT INTO data_source_presets (
     )
 ON CONFLICT (id) DO NOTHING;
 
-CREATE TABLE hot_config_rule_templates (
+CREATE TABLE hot_config_patch_generators (
     id UUID PRIMARY KEY,
     name TEXT NOT NULL,
     category TEXT NOT NULL,
@@ -323,17 +323,17 @@ CREATE TABLE hot_config_rule_templates (
     actor_id UUID REFERENCES operators(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT hot_config_rule_templates_name_not_empty CHECK (length(trim(name)) > 0),
-    CONSTRAINT hot_config_rule_templates_category_not_empty CHECK (length(trim(category)) > 0),
-    CONSTRAINT hot_config_rule_templates_domain_not_empty CHECK (length(trim(domain)) > 0),
-    CONSTRAINT hot_config_rule_templates_schema_object CHECK (jsonb_typeof(field_schema) = 'object'),
-    CONSTRAINT hot_config_rule_templates_docs_object CHECK (jsonb_typeof(docs_metadata) = 'object')
+    CONSTRAINT hot_config_patch_generators_name_not_empty CHECK (length(trim(name)) > 0),
+    CONSTRAINT hot_config_patch_generators_category_not_empty CHECK (length(trim(category)) > 0),
+    CONSTRAINT hot_config_patch_generators_domain_not_empty CHECK (length(trim(domain)) > 0),
+    CONSTRAINT hot_config_patch_generators_schema_object CHECK (jsonb_typeof(field_schema) = 'object'),
+    CONSTRAINT hot_config_patch_generators_docs_object CHECK (jsonb_typeof(docs_metadata) = 'object')
 );
 
-CREATE INDEX hot_config_rule_templates_category_idx
-    ON hot_config_rule_templates (category, name);
+CREATE INDEX hot_config_patch_generators_category_idx
+    ON hot_config_patch_generators (category, name);
 
-INSERT INTO hot_config_rule_templates (
+INSERT INTO hot_config_patch_generators (
     id, name, category, domain, description, field_schema, raw_generator_body, docs_metadata, built_in
 )
 VALUES

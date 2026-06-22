@@ -18,7 +18,7 @@ use crate::{
         TunnelPlanView, WsEvent,
     },
     model_agent_updates::AgentUpdateReleaseView,
-    model_data_sources::DataSourceStatusView,
+    model_source_templates::SourceStatusView,
     object_store::BackupObjectStore,
     repository::Repository,
     security::{bearer_token, constant_time_eq, operator_has_scope, role_allows},
@@ -225,6 +225,16 @@ impl AppState {
         self.dispatcher_runtime_config().max_job_timeout_secs
     }
 
+    pub(crate) fn tunnel_allocation_pool_cidrs(&self) -> (Option<String>, Option<String>) {
+        let Some(suite) = self.current_suite_config() else {
+            return (None, None);
+        };
+        (
+            normalize_optional_text(suite.network.tunnel_ipv4_allocation_pool_cidr),
+            normalize_optional_text(suite.network.tunnel_ipv6_allocation_pool_cidr),
+        )
+    }
+
     pub(crate) fn require_registered_agent_updates(&self) -> bool {
         if let Some(suite) = self.current_suite_config() {
             if env_absent("VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES") {
@@ -419,12 +429,12 @@ impl UpdateReleasePolicy {
 }
 
 impl AppState {
-    pub(crate) async fn list_data_source_status(
+    pub(crate) async fn list_source_status(
         &self,
         client_id: Option<&str>,
         domain: Option<&str>,
-    ) -> Result<Vec<DataSourceStatusView>> {
-        let mut rows = self.repo.list_data_source_status(client_id, domain).await?;
+    ) -> Result<Vec<SourceStatusView>> {
+        let mut rows = self.repo.list_source_status(client_id, domain).await?;
         if rows.iter().any(|row| {
             matches!(
                 row.domain.as_str(),
@@ -472,8 +482,8 @@ impl AppState {
         }
         for row in &rows {
             ensure!(
-                vpsman_common::is_data_source_readiness_status(&row.status),
-                "data source status contract drift: {}",
+                vpsman_common::is_source_readiness_status(&row.status),
+                "source template status contract drift: {}",
                 row.status
             );
         }
@@ -600,7 +610,7 @@ fn is_safe_release_token(value: &str, max_bytes: usize) -> bool {
 }
 
 fn enrich_backup_status_rows(
-    rows: &mut [DataSourceStatusView],
+    rows: &mut [SourceStatusView],
     store: Option<&BackupObjectStore>,
     artifacts: &[BackupArtifactView],
     backup_requests: &[BackupRequestView],
@@ -674,10 +684,7 @@ fn enrich_backup_status_rows(
     }
 }
 
-fn enrich_update_status_rows(
-    rows: &mut [DataSourceStatusView],
-    releases: &[AgentUpdateReleaseView],
-) {
+fn enrich_update_status_rows(rows: &mut [SourceStatusView], releases: &[AgentUpdateReleaseView]) {
     let release_count = releases.len();
     let external_release_count = releases
         .iter()
@@ -732,7 +739,7 @@ fn enrich_update_status_rows(
     }
 }
 
-fn update_source_accepts_external_url(row: &DataSourceStatusView) -> bool {
+fn update_source_accepts_external_url(row: &SourceStatusView) -> bool {
     matches!(
         row.source_kind.as_str(),
         "external_https" | "github_release"
@@ -740,7 +747,7 @@ fn update_source_accepts_external_url(row: &DataSourceStatusView) -> bool {
 }
 
 fn enrich_runtime_tunnel_status_rows(
-    rows: &mut [DataSourceStatusView],
+    rows: &mut [SourceStatusView],
     plans: &[TunnelPlanView],
     trends: &[NetworkObservationTrendView],
     recommendations: &[NetworkOspfRecommendationView],
@@ -819,7 +826,7 @@ fn enrich_runtime_tunnel_status_rows(
     }
 }
 
-fn enrich_runtime_traffic_status_rows(rows: &mut [DataSourceStatusView], plans: &[TunnelPlanView]) {
+fn enrich_runtime_traffic_status_rows(rows: &mut [SourceStatusView], plans: &[TunnelPlanView]) {
     for row in rows.iter_mut().filter(|row| {
         matches!(
             row.domain.as_str(),
@@ -870,6 +877,12 @@ fn tunnel_plan_touches_client(plan: &TunnelPlanView, client_id: &str) -> bool {
 fn tunnel_plan_has_traffic_limit(plan: &TunnelPlanView) -> bool {
     plan.plan.runtime_control.traffic_limit_apply.is_some()
         || !plan.plan.runtime_control.traffic_limit.is_default()
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn network_trend_touches_client(trend: &NetworkObservationTrendView, client_id: &str) -> bool {

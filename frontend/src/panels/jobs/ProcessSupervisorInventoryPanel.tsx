@@ -128,6 +128,7 @@ export function ProcessSupervisorInventoryPanel({
         )}
         rows={inventory}
         searchPlaceholder="Search processes"
+        selectable={false}
         storageKey="vpsman.jobs.processSupervisorInventory"
         title="Process records"
       />

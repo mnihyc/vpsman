@@ -1078,6 +1078,7 @@ export function JobHistoryPanel({
                 )}
                 rows={targets}
                 searchPlaceholder="Search targets"
+                selectable={false}
                 storageKey="vpsman.jobs.history.targets"
                 title="Target result records"
               />
@@ -1237,6 +1238,7 @@ export function JobHistoryPanel({
                       )}
                       rows={outputComparison.groups}
                       searchPlaceholder="Search grouped outcomes"
+                      selectable={false}
                       storageKey="vpsman.jobs.history.comparisonGroups"
                       title="Grouped outcomes"
                     />
@@ -1269,6 +1271,7 @@ export function JobHistoryPanel({
                       )}
                       rows={displayedComparisonRows}
                       searchPlaceholder="Search target results"
+                      selectable={false}
                       storageKey="vpsman.jobs.history.comparisonTargets"
                     />
                   )}

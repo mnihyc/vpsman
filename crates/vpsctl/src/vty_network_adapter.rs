@@ -10,7 +10,7 @@ use crate::{
 };
 
 #[derive(Debug, PartialEq)]
-pub(crate) struct VtyTunnelPromoteAdapterRequest {
+pub(crate) struct VtyTunnelPromoteCustomAdapterRequest {
     pub(crate) plan_id: String,
     pub(crate) runtime_startup_argv: Vec<String>,
     pub(crate) runtime_stop_argv: Vec<String>,
@@ -24,7 +24,6 @@ pub(crate) struct VtyTunnelPromoteAdapterRequest {
     pub(crate) fou_port: Option<u16>,
     pub(crate) fou_peer_port: Option<u16>,
     pub(crate) fou_ipproto: Option<u8>,
-    pub(crate) topology_version: Option<String>,
     pub(crate) topology_desired_interfaces: Vec<String>,
     pub(crate) topology_stale_interfaces: Vec<String>,
     pub(crate) topology_routes: Vec<String>,
@@ -33,10 +32,10 @@ pub(crate) struct VtyTunnelPromoteAdapterRequest {
     pub(crate) confirmed: bool,
 }
 
-pub(crate) fn submit_vty_tunnel_promote_adapter(
+pub(crate) fn submit_vty_tunnel_promote_custom_adapter(
     api_url: &str,
     token: Option<&str>,
-    request: VtyTunnelPromoteAdapterRequest,
+    request: VtyTunnelPromoteCustomAdapterRequest,
 ) -> Result<String> {
     let runtime_control = build_runtime_control(RuntimeControlArgs {
         manager: RuntimeTunnelManager::ExternalManagedAdapter,
@@ -54,7 +53,7 @@ pub(crate) fn submit_vty_tunnel_promote_adapter(
         fou_ipproto: request.fou_ipproto,
     });
     let runtime_topology = build_runtime_topology(RuntimeTopologyArgs {
-        version: request.topology_version.as_deref(),
+        version: None,
         desired_interfaces: &request.topology_desired_interfaces,
         stale_interfaces: &request.topology_stale_interfaces,
         routes: &request.topology_routes,
@@ -67,7 +66,7 @@ pub(crate) fn submit_vty_tunnel_promote_adapter(
     };
     http_post_json(
         api_url,
-        "/api/v1/tunnel-plans/promote-adapter",
+        "/api/v1/tunnel-plans/promote-custom-adapter",
         token,
         &serde_json::json!({
             "plan_id": request.plan_id,
@@ -79,9 +78,9 @@ pub(crate) fn submit_vty_tunnel_promote_adapter(
     )
 }
 
-pub(crate) fn parse_vty_tunnel_promote_adapter(
+pub(crate) fn parse_vty_tunnel_promote_custom_adapter(
     tokens: &[&str],
-) -> Result<VtyTunnelPromoteAdapterRequest> {
+) -> Result<VtyTunnelPromoteCustomAdapterRequest> {
     let mut plan_id = None::<String>;
     let mut runtime_startup_argv = Vec::new();
     let mut runtime_stop_argv = Vec::new();
@@ -95,7 +94,6 @@ pub(crate) fn parse_vty_tunnel_promote_adapter(
     let mut fou_port = None::<u16>;
     let mut fou_peer_port = None::<u16>;
     let mut fou_ipproto = None::<u8>;
-    let mut topology_version = None::<String>;
     let mut topology_desired_interfaces = Vec::new();
     let mut topology_stale_interfaces = Vec::new();
     let mut topology_routes = Vec::new();
@@ -236,15 +234,6 @@ pub(crate) fn parse_vty_tunnel_promote_adapter(
                 )?);
                 index += 1;
             }
-            "--topology-version" => {
-                topology_version =
-                    Some(next_value(tokens, index, "--topology-version")?.to_string());
-                index += 2;
-            }
-            value if value.starts_with("--topology-version=") => {
-                topology_version = Some(flag_value(value, "--topology-version=").to_string());
-                index += 1;
-            }
             "--topology-desired-interfaces" => {
                 topology_desired_interfaces =
                     split_argv_spec(next_value(tokens, index, "--topology-desired-interfaces")?);
@@ -295,11 +284,11 @@ pub(crate) fn parse_vty_tunnel_promote_adapter(
                 confirmed = true;
                 index += 1;
             }
-            other => anyhow::bail!("unknown tunnel-promote-adapter flag {other}"),
+            other => anyhow::bail!("unknown tunnel-promote-custom-adapter flag {other}"),
         }
     }
-    Ok(VtyTunnelPromoteAdapterRequest {
-        plan_id: plan_id.context("tunnel-promote-adapter requires --plan-id")?,
+    Ok(VtyTunnelPromoteCustomAdapterRequest {
+        plan_id: plan_id.context("tunnel-promote-custom-adapter requires --plan-id")?,
         runtime_startup_argv,
         runtime_stop_argv,
         runtime_cleanup_argv,
@@ -312,7 +301,6 @@ pub(crate) fn parse_vty_tunnel_promote_adapter(
         fou_port,
         fou_peer_port,
         fou_ipproto,
-        topology_version,
         topology_desired_interfaces,
         topology_stale_interfaces,
         topology_routes,
@@ -347,11 +335,11 @@ fn parse_u8(value: &str, flag: &str) -> Result<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_vty_tunnel_promote_adapter;
+    use super::parse_vty_tunnel_promote_custom_adapter;
 
     #[test]
-    fn parses_vty_tunnel_promote_adapter() {
-        let request = parse_vty_tunnel_promote_adapter(&[
+    fn parses_vty_tunnel_promote_custom_adapter() {
+        let request = parse_vty_tunnel_promote_custom_adapter(&[
             "--plan-id=00000000-0000-0000-0000-000000000001",
             "--runtime-startup-argv=/usr/local/libexec/wg-adapter,start,{interface}",
             "--runtime-status-argv",
@@ -365,7 +353,6 @@ mod tests {
             "--fou-peer-port",
             "7755",
             "--fou-ipproto=47",
-            "--topology-version=adapter-v1",
             "--topology-desired-interfaces=wg42",
             "--topology-route",
             "10.42.0.0/24,dev=wg42,metric=42",
@@ -396,7 +383,6 @@ mod tests {
         assert_eq!(request.fou_port, Some(6655));
         assert_eq!(request.fou_peer_port, Some(7755));
         assert_eq!(request.fou_ipproto, Some(47));
-        assert_eq!(request.topology_version.as_deref(), Some("adapter-v1"));
         assert_eq!(
             request.topology_desired_interfaces,
             vec!["wg42".to_string()]

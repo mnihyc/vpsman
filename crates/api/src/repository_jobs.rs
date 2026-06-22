@@ -251,7 +251,7 @@ mod tests {
         assert!(exclusive.contains(&"agent_update_activate"));
         assert!(exclusive.contains(&"agent_update_rollback"));
         assert!(exclusive.contains(&"agent_update_check"));
-        assert!(exclusive.contains(&"data_source_config_patch"));
+        assert!(exclusive.contains(&"source_config_patch"));
         assert!(!exclusive.contains(&"backup"));
         assert!(!exclusive.contains(&"shell"));
         assert!(!exclusive.contains(&"network_apply"));

@@ -144,9 +144,9 @@ session; operators submit only the bytes to write.
 Use presets instead of editing hardcoded commands per VPS:
 
 ```sh
-cargo run -p vpsctl -- data-source-presets --domain telemetry_metrics_source
-cargo run -p vpsctl -- data-source-status --client-id "$EDGE_CLIENT_ID"
-cargo run -p vpsctl -- data-source-hot-config --client-id "$EDGE_CLIENT_ID" --format toml
+cargo run -p vpsctl -- source-templates --domain telemetry_metrics_source
+cargo run -p vpsctl -- source-status --client-id "$EDGE_CLIENT_ID"
+cargo run -p vpsctl -- source-config-patch --client-id "$EDGE_CLIENT_ID" --format toml
 ```
 
 Assign shared presets to tags or explicit clients, and reserve VPS-local presets
@@ -199,5 +199,5 @@ Use this loop while managing 20+ VPSs:
 3. Dispatch through panel, CLI, or VTY with confirmation and local privilege unlock.
 4. Observe `jobs`, `job-targets`, `job-target-status-download`,
    `job-outputs`, and alerts.
-5. Recover with rollback commands, direct identity key rotation, or data-source preset
+5. Recover with rollback commands, direct identity key rotation, or source template
    changes instead of manual per-host edits.

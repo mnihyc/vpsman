@@ -91,6 +91,10 @@ pub(crate) struct OperatorPreferences {
     pub(crate) gateway_server_public_key_hex: Option<String>,
     #[serde(default)]
     pub(crate) gateway_endpoints: String,
+    #[serde(default)]
+    pub(crate) tunnel_ipv4_allocation_pool_cidr: String,
+    #[serde(default)]
+    pub(crate) tunnel_ipv6_allocation_pool_cidr: String,
 }
 
 impl Default for OperatorPreferences {
@@ -108,6 +112,8 @@ impl Default for OperatorPreferences {
             bulk_output_compare_mode: default_bulk_output_compare_mode(),
             gateway_server_public_key_hex: None,
             gateway_endpoints: String::new(),
+            tunnel_ipv4_allocation_pool_cidr: String::new(),
+            tunnel_ipv6_allocation_pool_cidr: String::new(),
         }
     }
 }
@@ -150,6 +156,14 @@ impl OperatorPreferences {
                 .map(|value| value.trim().to_ascii_lowercase())
                 .filter(|value| !value.is_empty()),
             gateway_endpoints: self.gateway_endpoints.trim().to_string(),
+            tunnel_ipv4_allocation_pool_cidr: self
+                .tunnel_ipv4_allocation_pool_cidr
+                .trim()
+                .to_string(),
+            tunnel_ipv6_allocation_pool_cidr: self
+                .tunnel_ipv6_allocation_pool_cidr
+                .trim()
+                .to_string(),
         }
     }
 }

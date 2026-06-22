@@ -69,6 +69,10 @@ The default is 3600 seconds; raise it explicitly for multi-hour maintenance
 jobs so API validation, worker schedules, frontend signing, CLI submission, and
 agent capability checks share the same maximum.
 
+Tunnel endpoint allocation pools are under `[network]`. They are empty by
+default; set IPv4 and/or IPv6 pool CIDRs before using Generate endpoints or
+`tunnel-allocate` without explicit pool arguments.
+
 The gateway `[gateway].api_url` is intentionally plain `http://` for the
 private compose network or another trusted private network. Expose TLS at the
 operator-facing reverse proxy; do not publish the internal API or gateway

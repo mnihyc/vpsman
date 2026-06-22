@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { DatabaseZap, SlidersHorizontal } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { DatabaseZap, Pencil, Plus, SlidersHorizontal, UserPlus } from "lucide-react";
 import {
   clampJobMaxTimeoutSecs,
   DEFAULT_MAX_JOB_TIMEOUT_SECS,
@@ -8,13 +8,14 @@ import {
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
+  type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { VpsCombobox } from "../components/VpsCombobox";
-import { dataSourceReadinessStatusBadgeClass } from "../jobStatusPresentation";
+import { sourceReadinessStatusBadgeClass } from "../jobStatusPresentation";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { buildPrivilegeForJobOperation, type PrivilegeAssertion, type PrivilegeMaterial } from "../privilege";
 import {
@@ -24,25 +25,25 @@ import {
 } from "../searchExpression";
 import type {
   AgentView,
-  AssignDataSourcePresetRequest,
-  AssignDataSourcePresetResponse,
+  AssignSourceTemplateRequest,
+  AssignSourceTemplateResponse,
   BulkResolveResponse,
-  CloneDataSourcePresetRequest,
+  CloneSourceTemplateRequest,
   CreateJobRequest,
   CreateJobResponse,
-  CreateDataSourcePresetRequest,
-  DataSourceHotConfigResponse,
-  DataSourcePresetAssignmentRecord,
-  DataSourcePresetDiffRequest,
-  DataSourcePresetDiffResponse,
-  DataSourcePresetRecord,
-  DataSourcePresetTestRequest,
-  DataSourcePresetTestResponse,
-  DataSourceStatusRecord,
+  CreateSourceTemplateRequest,
+  SourceConfigPatchResponse,
+  SourceTemplateAssignmentRecord,
+  SourceTemplateDiffRequest,
+  SourceTemplateDiffResponse,
+  SourceTemplateRecord,
+  SourceTemplateTestRequest,
+  SourceTemplateTestResponse,
+  SourceStatusRecord,
   JobOperation,
   JsonValue,
-  UpdateDataSourcePresetRequest,
-  UpdateDataSourcePresetResponse,
+  UpdateSourceTemplateRequest,
+  UpdateSourceTemplateResponse,
 } from "../types";
 import {
   formatTime,
@@ -51,7 +52,7 @@ import {
   shortId,
 } from "../utils";
 
-const DATA_SOURCE_DOMAINS = [
+const SOURCE_TEMPLATE_DOMAINS = [
   "telemetry_metrics_source",
   "runtime_traffic_accounting_source",
   "latency_probe_source",
@@ -71,132 +72,135 @@ const DATA_SOURCE_DOMAINS = [
 ];
 
 const DEFAULT_DEFINITION = "{\n  \"source\": \"custom\"\n}";
-const DATA_SOURCE_SELECTOR_STORAGE_KEY = "vpsman.dataSources.assignmentSelectorExpression";
-type DataSourceConfirmationAction = "assignment" | "apply" | "lifecycle-update";
+const SOURCE_TEMPLATE_SELECTOR_STORAGE_KEY = "vpsman.sourceTemplates.assignmentSelectorExpression";
+type SourceTemplateConfirmationAction = "assignment" | "apply" | "lifecycle-update";
 
-type DataSourceAssignmentSnapshot = {
+type SourceTemplateAssignmentSnapshot = {
   domain: string;
-  presetId: string;
-  presetName: string;
+  templateId: string;
+  templateName: string;
   selectorExpression: string;
   targetClientIds: string[];
   targets: AgentView[];
-  assignments: AssignDataSourcePresetResponse["assignments"];
+  assignments: AssignSourceTemplateResponse["assignments"];
 };
 
-type DataSourceApplySnapshot = {
+type SourceTemplateApplySnapshot = {
   clientId: string;
   clientLabel: string;
   jobId: string;
   operation: JobOperation;
   payloadHashHex: string;
   privilegeAssertion: PrivilegeAssertion;
-  rendered: DataSourceHotConfigResponse;
+  rendered: SourceConfigPatchResponse;
   selectorExpression: string;
   maxTimeoutSecs: number;
 };
 
-type DataSourceLifecycleUpdateSnapshot = {
+type SourceTemplateLifecycleUpdateSnapshot = {
   assignedClientCount: number;
   description: string | null;
   definition: JsonValue;
-  presetId: string;
-  presetName: string;
+  templateId: string;
+  templateName: string;
 };
 
-export function DataSourcePresetPanel({
+export function SourceTemplatePanel({
   activeSubpage,
   agents,
   assignments,
-  dataSourceStatus,
-  onAssignPreset,
-  onClonePreset,
+  sourceStatus,
+  onAssignTemplate,
+  onCloneTemplate,
   onCreateJob,
-  onCreatePreset,
-  onDiffPreset,
+  onCreateTemplate,
+  onDiffTemplate,
   onOpenPrivilegeUnlock,
   onRenderHotConfig,
   onResolveBulk,
-  onTestPreset,
-  onUpdatePreset,
+  onTestTemplate,
+  onUpdateTemplate,
   privilegeMaterial,
-  presets,
+  templates,
   setPrivilegeMaterial,
 }: {
-  activeSubpage: "presets" | "status";
+  activeSubpage: "templates";
   agents: AgentView[];
-  assignments: DataSourcePresetAssignmentRecord[];
-  dataSourceStatus: DataSourceStatusRecord[];
-  onAssignPreset: (request: AssignDataSourcePresetRequest) => Promise<AssignDataSourcePresetResponse>;
-  onClonePreset: (presetId: string, request: CloneDataSourcePresetRequest) => Promise<void>;
+  assignments: SourceTemplateAssignmentRecord[];
+  sourceStatus: SourceStatusRecord[];
+  onAssignTemplate: (request: AssignSourceTemplateRequest) => Promise<AssignSourceTemplateResponse>;
+  onCloneTemplate: (templateId: string, request: CloneSourceTemplateRequest) => Promise<void>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onCreatePreset: (request: CreateDataSourcePresetRequest) => Promise<void>;
-  onDiffPreset: (presetId: string, request: DataSourcePresetDiffRequest) => Promise<DataSourcePresetDiffResponse>;
+  onCreateTemplate: (request: CreateSourceTemplateRequest) => Promise<void>;
+  onDiffTemplate: (templateId: string, request: SourceTemplateDiffRequest) => Promise<SourceTemplateDiffResponse>;
   onOpenPrivilegeUnlock: () => void;
-  onRenderHotConfig: (clientId: string) => Promise<DataSourceHotConfigResponse>;
+  onRenderHotConfig: (clientId: string) => Promise<SourceConfigPatchResponse>;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
-  onTestPreset: (presetId: string, request: DataSourcePresetTestRequest) => Promise<DataSourcePresetTestResponse>;
-  onUpdatePreset: (presetId: string, request: UpdateDataSourcePresetRequest) => Promise<UpdateDataSourcePresetResponse>;
+  onTestTemplate: (templateId: string, request: SourceTemplateTestRequest) => Promise<SourceTemplateTestResponse>;
+  onUpdateTemplate: (templateId: string, request: UpdateSourceTemplateRequest) => Promise<UpdateSourceTemplateResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
-  presets: DataSourcePresetRecord[];
+  templates: SourceTemplateRecord[];
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [createDomain, setCreateDomain] = useState(DATA_SOURCE_DOMAINS[1]);
+  const createFormRef = useRef<HTMLFormElement | null>(null);
+  const assignmentFormRef = useRef<HTMLFormElement | null>(null);
+  const lifecycleFormRef = useRef<HTMLFormElement | null>(null);
+  const [createDomain, setCreateDomain] = useState(SOURCE_TEMPLATE_DOMAINS[1]);
   const [createName, setCreateName] = useState("");
   const [createScope, setCreateScope] = useState("shared");
   const [ownerClientId, setOwnerClientId] = useState("");
   const [description, setDescription] = useState("");
   const [definitionText, setDefinitionText] = useState(DEFAULT_DEFINITION);
-  const [assignDomain, setAssignDomain] = useState(DATA_SOURCE_DOMAINS[1]);
-  const [assignPresetId, setAssignPresetId] = useState("");
+  const [assignDomain, setAssignDomain] = useState(SOURCE_TEMPLATE_DOMAINS[1]);
+  const [assignTemplateId, setAssignTemplateId] = useState("");
   const [assignmentSelectorExpression, setAssignmentSelectorExpression] = useState(() =>
-    readLocalString(DATA_SOURCE_SELECTOR_STORAGE_KEY, ""),
+    readLocalString(SOURCE_TEMPLATE_SELECTOR_STORAGE_KEY, ""),
   );
   const [renderClientId, setRenderClientId] = useState("");
-  const [renderedHotConfig, setRenderedHotConfig] = useState<DataSourceHotConfigResponse | null>(null);
+  const [renderedHotConfig, setRenderedHotConfig] = useState<SourceConfigPatchResponse | null>(null);
   const [applyMaxTimeoutSecs, setApplyMaxTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
   const [lastApplyJob, setLastApplyJob] = useState<CreateJobResponse | null>(null);
   const [lastApplyPayloadHash, setLastApplyPayloadHash] = useState<string | null>(null);
-  const [lifecyclePresetId, setLifecyclePresetId] = useState("");
+  const [lifecycleTemplateId, setLifecycleTemplateId] = useState("");
   const [lifecycleDescription, setLifecycleDescription] = useState("");
   const [lifecycleDefinitionText, setLifecycleDefinitionText] = useState(DEFAULT_DEFINITION);
   const [lifecycleCloneName, setLifecycleCloneName] = useState("");
-  const [lastDiff, setLastDiff] = useState<DataSourcePresetDiffResponse | null>(null);
-  const [lastTest, setLastTest] = useState<DataSourcePresetTestResponse | null>(null);
-  const [lastUpdate, setLastUpdate] = useState<UpdateDataSourcePresetResponse | null>(null);
-  const [lastAssignment, setLastAssignment] = useState<AssignDataSourcePresetResponse | null>(null);
+  const [lastDiff, setLastDiff] = useState<SourceTemplateDiffResponse | null>(null);
+  const [lastTest, setLastTest] = useState<SourceTemplateTestResponse | null>(null);
+  const [lastUpdate, setLastUpdate] = useState<UpdateSourceTemplateResponse | null>(null);
+  const [lastAssignment, setLastAssignment] = useState<AssignSourceTemplateResponse | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
-  const [pendingConfirmation, setPendingConfirmation] = useState<DataSourceConfirmationAction | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] = useState<SourceTemplateConfirmationAction | null>(null);
   const [assignmentSnapshot, setAssignmentSnapshot] =
-    useState<DataSourceAssignmentSnapshot | null>(null);
-  const [applySnapshot, setApplySnapshot] = useState<DataSourceApplySnapshot | null>(null);
+    useState<SourceTemplateAssignmentSnapshot | null>(null);
+  const [applySnapshot, setApplySnapshot] = useState<SourceTemplateApplySnapshot | null>(null);
   const [lifecycleUpdateSnapshot, setLifecycleUpdateSnapshot] =
-    useState<DataSourceLifecycleUpdateSnapshot | null>(null);
+    useState<SourceTemplateLifecycleUpdateSnapshot | null>(null);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
 
-  const assignablePresets = useMemo(
-    () => presets.filter((preset) => preset.domain === assignDomain),
-    [assignDomain, presets],
+  const assignableTemplates = useMemo(
+    () => templates.filter((template) => template.domain === assignDomain),
+    [assignDomain, templates],
   );
   const sourceStatusSummary = useMemo(() => {
-    const degraded = dataSourceStatus.filter((row) => ["degraded", "agent_offline", "needs_promotion"].includes(row.status)).length;
-    const ready = dataSourceStatus.filter((row) => ["ok", "selected", "ready", "ready_on_demand"].includes(row.status)).length;
+    const degraded = sourceStatus.filter((row) => ["degraded", "agent_offline", "needs_promotion"].includes(row.status)).length;
+    const ready = sourceStatus.filter((row) => ["ok", "selected", "ready", "ready_on_demand"].includes(row.status)).length;
     return `${ready} ready source checks, ${degraded} need attention`;
-  }, [dataSourceStatus]);
-  const effectivePresetId = assignPresetId || assignablePresets[0]?.id || "";
-  const effectiveLifecyclePresetId = lifecyclePresetId || presets[0]?.id || "";
-  const showPresetManagement = activeSubpage === "presets";
-  const showSourceStatus = activeSubpage === "status";
-  const lifecyclePreset = useMemo(
-    () => presets.find((preset) => preset.id === effectiveLifecyclePresetId) ?? null,
-    [effectiveLifecyclePresetId, presets],
+  }, [sourceStatus]);
+  const effectiveTemplateId = assignTemplateId || assignableTemplates[0]?.id || "";
+  const effectiveLifecycleTemplateId = lifecycleTemplateId || templates[0]?.id || "";
+  const showTemplateManagement = activeSubpage === "templates";
+  const showSourceStatus = activeSubpage === "templates";
+  const lifecycleTemplate = useMemo(
+    () => templates.find((template) => template.id === effectiveLifecycleTemplateId) ?? null,
+    [effectiveLifecycleTemplateId, templates],
   );
   const assignmentSelectorParse = useMemo(
     () => parseSearchExpression(assignmentSelectorExpression),
@@ -211,13 +215,13 @@ export function DataSourcePresetPanel({
   );
   const lifecycleStatus =
     lastUpdate?.confirmation_required
-      ? `${lastUpdate.affected_client_count} VPSs inherit this preset; confirmation required`
+      ? `${lastUpdate.affected_client_count} VPSs inherit this template; confirmation required`
       : lastUpdate
-        ? `${lastUpdate.affected_client_count} VPSs inherited the preset update`
+        ? `${lastUpdate.affected_client_count} VPSs inherited the template update`
         : lastTest
           ? lastTest.valid
-            ? `${lastTest.renderable ? "Renderable" : "Workflow"} preset test passed for ${lastTest.domain}`
-            : `Preset test failed: ${lastTest.error ?? "invalid definition"}`
+            ? `${lastTest.renderable ? "Renderable" : "Workflow"} template test passed for ${lastTest.domain}`
+            : `Template test failed: ${lastTest.error ?? "invalid definition"}`
           : lastDiff
             ? `${lastDiff.changed_keys.length} keys changed; ${lastDiff.affected_client_count} VPSs affected`
             : null;
@@ -225,13 +229,13 @@ export function DataSourcePresetPanel({
     actionError ??
     reviewStatus ??
     lifecycleStatus ??
-    (dataSourceStatus.length > 0 ? sourceStatusSummary : null) ??
+    (sourceStatus.length > 0 ? sourceStatusSummary : null) ??
     (lastAssignment
-      ? `${lastAssignment.target_count} VPS preset assignments evaluated`
+      ? `${lastAssignment.target_count} source template assignments evaluated`
       : lastApplyJob
-        ? `Data-source patch job ${lastApplyJob.job_id} ${lastApplyJob.status}; ${lastApplyJob.target_count} target`
-      : `${presets.length} presets across ${new Set(presets.map((preset) => preset.domain)).size} domains`);
-  const sourceStatusColumns = useMemo<ConsoleDataGridColumn<DataSourceStatusRecord>[]>(
+        ? `Source template patch job ${lastApplyJob.job_id} ${lastApplyJob.status}; ${lastApplyJob.target_count} target`
+      : `${templates.length} source templates across ${new Set(templates.map((template) => template.domain)).size} domains`);
+  const sourceStatusColumns = useMemo<ConsoleDataGridColumn<SourceStatusRecord>[]>(
     () => [
       {
         cell: (row) => (
@@ -260,14 +264,14 @@ export function DataSourcePresetPanel({
       {
         cell: (row) => (
           <span className="historyPrimary">
-            <strong>{row.preset_name}</strong>
-            <small>{row.preset_scope}</small>
+            <strong>{row.template_name}</strong>
+            <small>{row.template_scope}</small>
           </span>
         ),
-        header: "Preset",
-        id: "preset",
-        searchValue: (row) => `${row.preset_name} ${row.preset_scope}`,
-        sortValue: (row) => row.preset_name,
+        header: "Source template",
+        id: "template",
+        searchValue: (row) => `${row.template_name} ${row.template_scope}`,
+        sortValue: (row) => row.template_name,
       },
       {
         cell: (row) => row.source_kind,
@@ -278,7 +282,7 @@ export function DataSourcePresetPanel({
       },
       {
         cell: (row) => (
-          <span className={`status ${dataSourceReadinessStatusBadgeClass(row.status)}`} title={row.status_reason}>
+          <span className={`status ${sourceReadinessStatusBadgeClass(row.status)}`} title={row.status_reason}>
             {row.status}
           </span>
         ),
@@ -297,77 +301,102 @@ export function DataSourcePresetPanel({
     ],
     [vpsNameDisplayMode],
   );
-  const presetColumns = useMemo<ConsoleDataGridColumn<DataSourcePresetRecord>[]>(
+  const templateColumns = useMemo<ConsoleDataGridColumn<SourceTemplateRecord>[]>(
     () => [
       {
-        cell: (preset) => (
+        cell: (template) => (
           <span className="historyPrimary">
-            <strong>{preset.name}</strong>
-            <small>{preset.description ?? (preset.built_in ? "built-in" : "custom")}</small>
+            <strong>{template.name}</strong>
+            <small>{template.description ?? (template.built_in ? "built-in" : "custom")}</small>
           </span>
         ),
-        header: "Preset",
-        id: "preset",
-        searchValue: (preset) => `${preset.name} ${preset.description ?? ""}`,
-        sortValue: (preset) => preset.name,
+        header: "Source template",
+        id: "template",
+        searchValue: (template) => `${template.name} ${template.description ?? ""}`,
+        sortValue: (template) => template.name,
       },
       {
-        cell: (preset) => preset.domain,
+        cell: (template) => template.domain,
         header: "Domain",
         id: "domain",
-        searchValue: (preset) => preset.domain,
-        sortValue: (preset) => preset.domain,
+        searchValue: (template) => template.domain,
+        sortValue: (template) => template.domain,
       },
       {
-        cell: (preset) => (
-          <span className={`status ${preset.is_default ? "info" : preset.built_in ? "neutral" : "ok"}`}>
-            {preset.is_default ? "default" : preset.scope}
+        cell: (template) => (
+          <span className={`status ${template.is_default ? "info" : template.built_in ? "neutral" : "ok"}`}>
+            {template.is_default ? "default" : template.scope}
           </span>
         ),
         header: "Scope",
         id: "scope",
-        searchValue: (preset) => `${preset.scope} ${preset.is_default ? "default" : ""} ${preset.built_in ? "built-in" : "custom"}`,
-        sortValue: (preset) => `${preset.is_default ? "0" : "1"}:${preset.scope}`,
+        searchValue: (template) => `${template.scope} ${template.is_default ? "default" : ""} ${template.built_in ? "built-in" : "custom"}`,
+        sortValue: (template) => `${template.is_default ? "0" : "1"}:${template.scope}`,
       },
       {
-        cell: (preset) => preset.assigned_client_count,
+        cell: (template) => template.assigned_client_count,
         header: "Assigned",
         id: "assigned",
-        searchValue: (preset) => preset.assigned_client_count,
-        sortValue: (preset) => preset.assigned_client_count,
+        searchValue: (template) => template.assigned_client_count,
+        sortValue: (template) => template.assigned_client_count,
       },
       {
-        cell: (preset) => formatTime(preset.updated_at),
+        cell: (template) => formatTime(template.updated_at),
         header: "Updated",
         id: "updated",
-        searchValue: (preset) => formatTime(preset.updated_at),
-        sortValue: (preset) => preset.updated_at,
+        searchValue: (template) => formatTime(template.updated_at),
+        sortValue: (template) => template.updated_at,
+      },
+    ],
+    [],
+  );
+  const templateActions = useMemo<ConsoleDataGridAction<SourceTemplateRecord>[]>(
+    () => [
+      {
+        label: "Assign template",
+        description: (rows) =>
+          rows.length === 1
+            ? `Load ${rows[0].name} into the assignment form.`
+            : "Select exactly one source template to assign.",
+        disabled: (rows) => rows.length !== 1,
+        icon: <UserPlus size={14} />,
+        onSelect: (rows) => prepareTemplateAssignment(rows[0]),
+      },
+      {
+        label: "Edit / test template",
+        description: (rows) =>
+          rows.length === 1
+            ? `Load ${rows[0].name} into the lifecycle form.`
+            : "Select exactly one source template to edit or test.",
+        disabled: (rows) => rows.length !== 1,
+        icon: <Pencil size={14} />,
+        onSelect: (rows) => prepareTemplateLifecycle(rows[0]),
       },
     ],
     [],
   );
 
   useEffect(() => {
-    if (!lifecyclePreset) {
+    if (!lifecycleTemplate) {
       return;
     }
-    setLifecycleDescription(lifecyclePreset.description ?? "");
-    setLifecycleDefinitionText(JSON.stringify(lifecyclePreset.definition, null, 2));
-    setLifecycleCloneName(defaultCloneName(lifecyclePreset.name));
+    setLifecycleDescription(lifecycleTemplate.description ?? "");
+    setLifecycleDefinitionText(JSON.stringify(lifecycleTemplate.definition, null, 2));
+    setLifecycleCloneName(defaultCloneName(lifecycleTemplate.name));
     setLastDiff(null);
     setLastTest(null);
     setLastUpdate(null);
     clearLifecycleUpdateConfirmation();
-  }, [lifecyclePreset?.id]);
+  }, [lifecycleTemplate?.id]);
 
   useEffect(() => {
-    writeLocalString(DATA_SOURCE_SELECTOR_STORAGE_KEY, assignmentSelectorExpression);
+    writeLocalString(SOURCE_TEMPLATE_SELECTOR_STORAGE_KEY, assignmentSelectorExpression);
   }, [assignmentSelectorExpression]);
 
   async function submitCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await runPanelAction(setPending, setActionError, async () => {
-      await onCreatePreset({
+      await onCreateTemplate({
         definition: parseDefinition(definitionText),
         description: description.trim() || null,
         domain: createDomain,
@@ -386,9 +415,9 @@ export function DataSourcePresetPanel({
     clearAssignmentConfirmation();
     const reviewGeneration = captureReviewGeneration();
     const frozenDomain = assignDomain;
-    const frozenPresetId = effectivePresetId;
+    const frozenTemplateId = effectiveTemplateId;
     const frozenSelector = assignmentSelectorExpression.trim();
-    setReviewStatus("Preparing data-source assignment review");
+    setReviewStatus("Preparing template assignment review");
     try {
       await runPanelAction(setPending, setActionError, async () => {
         await waitForReviewRender();
@@ -398,8 +427,8 @@ export function DataSourcePresetPanel({
         if (!frozenSelector) {
           throw new Error("Add at least one target selector");
         }
-        if (!frozenPresetId) {
-          throw new Error("Select a preset");
+        if (!frozenTemplateId) {
+          throw new Error("Select a template");
         }
         const resolved = await onResolveBulk(frozenSelector);
         if (!isReviewGenerationCurrent(reviewGeneration)) {
@@ -407,12 +436,12 @@ export function DataSourcePresetPanel({
         }
         const targetClientIds = resolved.targets.map((target) => target.id);
         if (!targetClientIds.length) {
-          throw new Error("Data-source assignment confirmation resolved no VPSs");
+          throw new Error("Template assignment confirmation resolved no VPSs");
         }
-        const preview = await onAssignPreset({
+        const preview = await onAssignTemplate({
           confirmed: false,
           domain: frozenDomain,
-          preset_id: frozenPresetId,
+          template_id: frozenTemplateId,
           selector_expression: frozenSelector,
           target_client_ids: targetClientIds,
         });
@@ -423,8 +452,8 @@ export function DataSourcePresetPanel({
         setAssignmentSnapshot({
           assignments: preview.assignments,
           domain: frozenDomain,
-          presetId: frozenPresetId,
-          presetName: preview.preset.name,
+          templateId: frozenTemplateId,
+          templateName: preview.template.name,
           selectorExpression: frozenSelector,
           targetClientIds,
           targets: resolved.targets,
@@ -442,12 +471,12 @@ export function DataSourcePresetPanel({
     await runPanelAction(setPending, setActionError, async () => {
       const snapshot = assignmentSnapshot;
       if (!snapshot) {
-        throw new Error("Data-source assignment confirmation snapshot is missing; review the assignment again");
+        throw new Error("Template assignment confirmation snapshot is missing; review the assignment again");
       }
-      const response = await onAssignPreset({
+      const response = await onAssignTemplate({
         confirmed: true,
         domain: snapshot.domain,
-        preset_id: snapshot.presetId,
+        template_id: snapshot.templateId,
         selector_expression: snapshot.selectorExpression,
         target_client_ids: snapshot.targetClientIds,
       });
@@ -461,7 +490,7 @@ export function DataSourcePresetPanel({
     clearApplyConfirmation();
     const reviewGeneration = captureReviewGeneration();
     const frozenClientId = renderClientId;
-    setReviewStatus("Rendering data-source config");
+    setReviewStatus("Rendering source config");
     try {
       await runPanelAction(setPending, setActionError, async () => {
         await waitForReviewRender();
@@ -481,13 +510,13 @@ export function DataSourcePresetPanel({
     }
   }
 
-  async function applyRenderedHotConfig(snapshot: DataSourceApplySnapshot) {
+  async function applyRenderedHotConfig(snapshot: SourceTemplateApplySnapshot) {
     await runPanelAction(setPending, setActionError, async () => {
       const response = await onCreateJob({
         argv: [],
         selector_expression: snapshot.selectorExpression,
         target_client_ids: [snapshot.clientId],
-        command: "data_source_config_patch",
+        command: "source_config_patch",
         confirmed: true,
         destructive: false,
         force_unprivileged: false,
@@ -511,29 +540,29 @@ export function DataSourcePresetPanel({
     const frozenRendered = renderedHotConfig?.client_id === renderClientId ? renderedHotConfig : null;
     const frozenPrivilegeMaterial = privilegeMaterial;
     const maxTimeoutSecs = clampJobMaxTimeoutSecs(applyMaxTimeoutSecs);
-    setReviewStatus("Preparing data-source apply review");
+    setReviewStatus("Preparing template apply review");
     try {
       await runPanelAction(setPending, setActionError, async () => {
         await waitForReviewRender();
         if (!frozenClientId) {
-          throw new Error("Select a VPS before applying a data-source patch");
+          throw new Error("Select a VPS before applying a source template patch");
         }
         if (!frozenPrivilegeMaterial) {
-          throw new Error("Unlock privilege before applying a data-source patch");
+          throw new Error("Unlock privilege before applying a source template patch");
         }
         const rendered = frozenRendered ?? await onRenderHotConfig(frozenClientId);
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
         }
         const operation: JobOperation = {
-          type: "data_source_config_patch",
+          type: "source_config_patch",
           apply_mode: "incremental_patch",
           toml: rendered.toml,
         };
         const selectorExpression = selectorExpressionForClientIds([frozenClientId]);
         const built = await buildPrivilegeForJobOperation({
           clientIds: [frozenClientId],
-          commandType: "data_source_config_patch",
+          commandType: "source_config_patch",
           operation,
           privilegeMaterial: frozenPrivilegeMaterial,
           selectorExpression,
@@ -564,13 +593,13 @@ export function DataSourcePresetPanel({
     }
   }
 
-  async function diffLifecyclePreset() {
-    if (!lifecyclePreset) {
+  async function diffLifecycleTemplate() {
+    if (!lifecycleTemplate) {
       return;
     }
     await runPanelAction(setPending, setActionError, async () => {
       setLastDiff(
-        await onDiffPreset(lifecyclePreset.id, {
+        await onDiffTemplate(lifecycleTemplate.id, {
           definition: parseDefinition(lifecycleDefinitionText),
           description: lifecycleDescription.trim() || null,
         }),
@@ -580,13 +609,13 @@ export function DataSourcePresetPanel({
     });
   }
 
-  async function testLifecyclePreset() {
-    if (!lifecyclePreset) {
+  async function testLifecycleTemplate() {
+    if (!lifecycleTemplate) {
       return;
     }
     await runPanelAction(setPending, setActionError, async () => {
       setLastTest(
-        await onTestPreset(lifecyclePreset.id, {
+        await onTestTemplate(lifecycleTemplate.id, {
           definition: parseDefinition(lifecycleDefinitionText),
         }),
       );
@@ -595,13 +624,13 @@ export function DataSourcePresetPanel({
     });
   }
 
-  async function cloneLifecyclePreset() {
-    if (!lifecyclePreset || !lifecycleCloneName.trim()) {
+  async function cloneLifecycleTemplate() {
+    if (!lifecycleTemplate || !lifecycleCloneName.trim()) {
       return;
     }
     await runPanelAction(setPending, setActionError, async () => {
-      await onClonePreset(lifecyclePreset.id, {
-        description: lifecycleDescription.trim() || lifecyclePreset.description,
+      await onCloneTemplate(lifecycleTemplate.id, {
+        description: lifecycleDescription.trim() || lifecycleTemplate.description,
         name: lifecycleCloneName.trim(),
         owner_client_id: null,
         scope: "shared",
@@ -612,23 +641,23 @@ export function DataSourcePresetPanel({
     });
   }
 
-  function updateLifecyclePreset() {
-    if (!lifecyclePreset || lifecyclePreset.built_in) {
+  function updateLifecycleTemplate() {
+    if (!lifecycleTemplate || lifecycleTemplate.built_in) {
       return;
     }
     setLifecycleUpdateSnapshot({
-      assignedClientCount: lifecyclePreset.assigned_client_count,
+      assignedClientCount: lifecycleTemplate.assigned_client_count,
       description: lifecycleDescription.trim() || null,
       definition: parseDefinition(lifecycleDefinitionText),
-      presetId: lifecyclePreset.id,
-      presetName: lifecyclePreset.name,
+      templateId: lifecycleTemplate.id,
+      templateName: lifecycleTemplate.name,
     });
     setPendingConfirmation("lifecycle-update");
   }
 
-  async function executeLifecyclePresetUpdate(snapshot: DataSourceLifecycleUpdateSnapshot) {
+  async function executeLifecycleTemplateUpdate(snapshot: SourceTemplateLifecycleUpdateSnapshot) {
     await runPanelAction(setPending, setActionError, async () => {
-      const response = await onUpdatePreset(snapshot.presetId, {
+      const response = await onUpdateTemplate(snapshot.templateId, {
         confirmed: true,
         definition: snapshot.definition,
         description: snapshot.description,
@@ -640,7 +669,7 @@ export function DataSourcePresetPanel({
     });
   }
 
-  async function confirmDataSourceAction() {
+  async function confirmSourceTemplateAction() {
     const action = pendingConfirmation;
     if (!action) {
       return;
@@ -648,46 +677,46 @@ export function DataSourcePresetPanel({
     setPendingConfirmation(null);
     if (action === "assignment") {
       if (!assignmentSnapshot) {
-        setActionError("Data-source assignment confirmation snapshot is missing; review the assignment again");
+        setActionError("Template assignment confirmation snapshot is missing; review the assignment again");
         return;
       }
       await executeAssignment();
     } else if (action === "apply") {
       if (!applySnapshot) {
-        setActionError("Data-source apply confirmation snapshot is missing; review the apply again");
+        setActionError("Template apply confirmation snapshot is missing; review the apply again");
         return;
       }
       await applyRenderedHotConfig(applySnapshot);
     } else {
       if (!lifecycleUpdateSnapshot) {
-        setActionError("Data-source update confirmation snapshot is missing; review the update again");
+        setActionError("Source template update confirmation snapshot is missing; review the update again");
         return;
       }
-      await executeLifecyclePresetUpdate(lifecycleUpdateSnapshot);
+      await executeLifecycleTemplateUpdate(lifecycleUpdateSnapshot);
     }
   }
 
-  const dataSourceConfirmationTitle =
+  const sourceTemplateConfirmationTitle =
     pendingConfirmation === "assignment"
-      ? "Assign data-source preset"
+      ? "Confirm source template assignment"
       : pendingConfirmation === "apply"
-        ? "Apply data-source patch"
-        : "Update data-source preset";
-  const dataSourceConfirmationDetail =
+        ? "Apply source template patch"
+        : "Update source template";
+  const sourceTemplateConfirmationDetail =
     pendingConfirmation === "assignment"
-      ? "Confirm the selected preset and resolved VPS assignment set."
+      ? "Confirm the chosen source template and resolved VPS assignment set."
       : pendingConfirmation === "apply"
         ? "Confirm the rendered incremental config patch for the selected VPS."
-        : "Confirm updating this preset for assigned VPSs.";
-  const dataSourceConfirmationItems =
+        : "Confirm updating this source template for assigned VPSs.";
+  const sourceTemplateConfirmationItems =
     pendingConfirmation === "assignment"
       ? [
           { label: "Domain", value: assignmentSnapshot?.domain ?? assignDomain },
           {
-            label: "Preset",
+            label: "Source template",
             value:
-              assignmentSnapshot?.presetName ??
-              (effectivePresetId ? shortId(effectivePresetId) : "none"),
+              assignmentSnapshot?.templateName ??
+              (effectiveTemplateId ? shortId(effectiveTemplateId) : "none"),
           },
           {
             label: "Targets",
@@ -718,7 +747,7 @@ export function DataSourcePresetPanel({
             { label: "Payload", value: applySnapshot?.payloadHashHex ? shortId(applySnapshot.payloadHashHex) : "-" },
           ]
         : [
-            { label: "Preset", value: lifecycleUpdateSnapshot?.presetName ?? "none" },
+            { label: "Source template", value: lifecycleUpdateSnapshot?.templateName ?? "none" },
             { label: "Assigned", value: `${lifecycleUpdateSnapshot?.assignedClientCount ?? 0} VPSs` },
           ];
 
@@ -744,51 +773,205 @@ export function DataSourcePresetPanel({
   function changeAssignDomain(domain: string) {
     clearAssignmentConfirmation();
     setAssignDomain(domain);
-    setAssignPresetId("");
+    setAssignTemplateId("");
     setLastAssignment(null);
   }
 
+  function prepareTemplateAssignment(template: SourceTemplateRecord) {
+    clearAssignmentConfirmation();
+    setAssignDomain(template.domain);
+    setAssignTemplateId(template.id);
+    setLastAssignment(null);
+    scrollIntoViewSoon(assignmentFormRef.current);
+  }
+
+  function prepareNewTemplate() {
+    setCreateDomain(SOURCE_TEMPLATE_DOMAINS[1]);
+    setCreateName("");
+    setCreateScope("shared");
+    setOwnerClientId("");
+    setDescription("");
+    setDefinitionText(DEFAULT_DEFINITION);
+    setActionError(null);
+    scrollIntoViewSoon(createFormRef.current);
+  }
+
+  function prepareTemplateLifecycle(template: SourceTemplateRecord) {
+    clearLifecycleUpdateConfirmation();
+    setLifecycleTemplateId(template.id);
+    setLastDiff(null);
+    setLastTest(null);
+    setLastUpdate(null);
+    scrollIntoViewSoon(lifecycleFormRef.current);
+  }
+
   return (
-    <section className="fleetPanel dataSourcePresetPanel">
+    <section className="fleetPanel sourceTemplatePanel">
       <div className="sectionHeader">
         <div>
-          <h2>{showSourceStatus ? "Data-source status" : "Data-source presets"}</h2>
+          <h2>Templates</h2>
           <span>{status}</span>
         </div>
       </div>
 
-      {showPresetManagement && (
-      <div className="managementGrid presetManagementGrid">
-        <ConfirmationPrompt
-          confirmLabel="Confirm"
-          detail={dataSourceConfirmationDetail}
-          items={dataSourceConfirmationItems}
-          onCancel={() => {
-            if (pendingConfirmation === "assignment") {
-              setAssignmentSnapshot(null);
-            } else if (pendingConfirmation === "apply") {
-              setApplySnapshot(null);
-            } else if (pendingConfirmation === "lifecycle-update") {
-              setLifecycleUpdateSnapshot(null);
-            }
-            setPendingConfirmation(null);
-          }}
-          onConfirm={() => void confirmDataSourceAction()}
-          open={pendingConfirmation !== null}
-          pending={pending}
-          title={dataSourceConfirmationTitle}
-          tone={pendingConfirmation === "apply" ? "danger" : "normal"}
+      {showTemplateManagement && (
+      <ConfirmationPrompt
+        confirmLabel="Confirm"
+        detail={sourceTemplateConfirmationDetail}
+        items={sourceTemplateConfirmationItems}
+        onCancel={() => {
+          if (pendingConfirmation === "assignment") {
+            setAssignmentSnapshot(null);
+          } else if (pendingConfirmation === "apply") {
+            setApplySnapshot(null);
+          } else if (pendingConfirmation === "lifecycle-update") {
+            setLifecycleUpdateSnapshot(null);
+          }
+          setPendingConfirmation(null);
+        }}
+        onConfirm={() => void confirmSourceTemplateAction()}
+        open={pendingConfirmation !== null}
+        pending={pending}
+        title={sourceTemplateConfirmationTitle}
+        tone={pendingConfirmation === "apply" ? "danger" : "normal"}
+      />
+      )}
+
+      {showTemplateManagement && (
+      <ConsoleDataGrid
+        actions={templateActions}
+        columns={templateColumns}
+        defaultPageSize={10}
+        expandOnRowClick
+        getRowId={(template) => template.id}
+        itemLabel="source templates"
+        empty={
+          <div className="emptyState">
+            <DatabaseZap size={22} />
+            <strong>No source templates</strong>
+            <span>{actionError ?? "No source template records match the current search."}</span>
+          </div>
+        }
+        renderExpandedRow={(template) => (
+          <div className="consoleInlineDetailGrid">
+            <span>Template ID</span>
+            <strong>{template.id}</strong>
+            <span>Name</span>
+            <strong>{template.name}</strong>
+            <span>Domain</span>
+            <strong>{template.domain}</strong>
+            <span>Scope</span>
+            <strong>{template.scope}</strong>
+            <span>Default</span>
+            <strong>{template.is_default ? "Yes" : "No"}</strong>
+            <span>Assigned VPSs</span>
+            <strong>{template.assigned_client_count}</strong>
+            <span>Description</span>
+            <strong>{template.description ?? "None"}</strong>
+          </div>
+        )}
+        renderSelectionPanel={(rows) => (
+          <div className="gridSelectionSummary">
+            <span>
+              <strong>{rows.length}</strong>
+              selected
+            </span>
+            <span>
+              <strong>{new Set(rows.map((template) => template.domain)).size}</strong>
+              domains
+            </span>
+            <span>
+              <strong>{rows.filter((template) => template.built_in).length}</strong>
+              built-in
+            </span>
+            <span>
+              <strong>{rows.reduce((total, template) => total + template.assigned_client_count, 0)}</strong>
+              assigned VPSs
+            </span>
+          </div>
+        )}
+        rowActions={templateActions}
+        rows={templates}
+        searchPlaceholder="Search source templates"
+        storageKey="vpsman.sourceTemplates.registry"
+        title="Source template registry"
+        toolbarActions={
+          <button className="secondaryAction compactAction" onClick={prepareNewTemplate} type="button">
+            <Plus size={15} />
+            <span>New</span>
+          </button>
+        }
+      />
+      )}
+
+      {showSourceStatus && (
+      <div className="sourceStatusSection">
+        <div className="sectionHeader compact">
+          <h2>Active source status</h2>
+          <span>{sourceStatusSummary}</span>
+        </div>
+        <ConsoleDataGrid
+          columns={sourceStatusColumns}
+          defaultPageSize={10}
+          expandOnRowClick
+          getRowId={(row) => `${row.client_id}:${row.domain}`}
+          itemLabel="sources"
+          empty={
+            <div className="emptyState">
+              <DatabaseZap size={22} />
+              <strong>Active source status</strong>
+              <span>No active source records match the current search.</span>
+            </div>
+          }
+          renderExpandedRow={(row) => (
+            <div className="consoleInlineDetailGrid">
+              <span>VPS</span>
+              <strong>{formatVpsName(row, vpsNameDisplayMode)}</strong>
+              <span>Client ID</span>
+              <strong>{row.client_id}</strong>
+              <span>Domain</span>
+              <strong>{row.domain}</strong>
+              <span>Template</span>
+              <strong>{row.template_name}</strong>
+              <span>Source</span>
+              <strong>{row.source_kind}</strong>
+              <span>Reason</span>
+              <strong>{row.status_reason}</strong>
+              <span>Evidence</span>
+              <strong>{sourceEvidenceSummary(row)}</strong>
+            </div>
+          )}
+          rows={sourceStatus}
+          searchPlaceholder="Search active sources"
+          selectable={false}
+          storageKey="vpsman.sourceTemplates.activeSources"
+          title="Active sources"
         />
-        <form className="compactForm presetForm" onSubmit={submitCreate}>
-          <strong>Preset definition</strong>
+      </div>
+      )}
+
+      {showTemplateManagement && (
+      <div className="timeline templateAssignmentSummary">
+        <SlidersHorizontal size={18} />
+        <div>
+          <strong>{assignments.length} source template assignment records</strong>
+          <span>{assignmentSummary(assignments, lastAssignment)}</span>
+        </div>
+      </div>
+      )}
+
+      {showTemplateManagement && (
+      <div className="managementGrid templateManagementGrid">
+        <form className="compactForm templateForm" onSubmit={submitCreate} ref={createFormRef}>
+          <strong>Source template definition</strong>
           <span className="formHint">
-            Create one reusable data-source preset. Scope decides whether it is shared or owned by one VPS.
+            Create one reusable source template. Scope decides whether it is shared or owned by one VPS.
           </span>
-          <div className="formRow presetFormRow">
+          <div className="formRow templateFormRow">
             <label>
               <span>Domain</span>
-              <select aria-label="Preset domain" onChange={(event) => setCreateDomain(event.target.value)} value={createDomain}>
-                {DATA_SOURCE_DOMAINS.map((domain) => (
+              <select aria-label="Template domain" onChange={(event) => setCreateDomain(event.target.value)} value={createDomain}>
+                {SOURCE_TEMPLATE_DOMAINS.map((domain) => (
                   <option key={domain} value={domain}>
                     {domain}
                   </option>
@@ -798,7 +981,7 @@ export function DataSourcePresetPanel({
             <label>
               <span>Name</span>
               <input
-                aria-label="Preset name"
+                aria-label="Template name"
                 onChange={(event) => setCreateName(event.target.value)}
                 placeholder="shared:vnstat-json"
                 value={createName}
@@ -806,7 +989,7 @@ export function DataSourcePresetPanel({
             </label>
             <label>
               <span>Scope</span>
-              <select aria-label="Preset scope" onChange={(event) => setCreateScope(event.target.value)} value={createScope}>
+              <select aria-label="Template scope" onChange={(event) => setCreateScope(event.target.value)} value={createScope}>
                 <option value="shared">shared</option>
                 <option value="vps_local">vps_local</option>
               </select>
@@ -827,7 +1010,7 @@ export function DataSourcePresetPanel({
           <label>
             <span>Description</span>
             <input
-              aria-label="Preset description"
+              aria-label="Template description"
               onChange={(event) => setDescription(event.target.value)}
               placeholder="description"
               value={description}
@@ -836,7 +1019,7 @@ export function DataSourcePresetPanel({
           <label>
             <span>Definition JSON</span>
             <textarea
-              aria-label="Preset definition JSON"
+              aria-label="Source template definition JSON"
               onChange={(event) => setDefinitionText(event.target.value)}
               value={definitionText}
             />
@@ -846,20 +1029,20 @@ export function DataSourcePresetPanel({
             disabled={pending || !createName.trim() || (createScope === "vps_local" && !ownerClientId)}
             type="submit"
           >
-            Save preset
+            Save source template
           </button>
         </form>
 
-        <form className="compactForm presetForm" onSubmit={submitAssignment}>
-          <strong>Assign selected preset</strong>
+        <form className="compactForm templateForm" onSubmit={submitAssignment} ref={assignmentFormRef}>
+          <strong>Assign source template</strong>
           <span className="formHint">
-            Apply one domain preset to a selector-resolved VPS set; preview target count before confirmation.
+            Assign one source template to a selector-resolved VPS set; preview target count before confirmation.
           </span>
-          <div className="formRow presetFormRow">
+          <div className="formRow templateFormRow">
             <label>
               <span>Domain</span>
               <select aria-label="Assignment domain" onChange={(event) => changeAssignDomain(event.target.value)} value={assignDomain}>
-                {DATA_SOURCE_DOMAINS.map((domain) => (
+                {SOURCE_TEMPLATE_DOMAINS.map((domain) => (
                   <option key={domain} value={domain}>
                     {domain}
                   </option>
@@ -867,24 +1050,24 @@ export function DataSourcePresetPanel({
               </select>
             </label>
             <label>
-              <span>Preset</span>
+              <span>Template</span>
               <select
-                aria-label="Preset"
+                aria-label="Template assignment template"
                 onChange={(event) => {
                   clearAssignmentConfirmation();
-                  setAssignPresetId(event.target.value);
+                  setAssignTemplateId(event.target.value);
                 }}
-                value={effectivePresetId}
+                value={effectiveTemplateId}
               >
-                {assignablePresets.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.name}
+                {assignableTemplates.map((template) => (
+                  <option key={template.id} value={template.id}>
+                    {template.name}
                   </option>
                 ))}
               </select>
             </label>
           </div>
-          <div className="targetSelector presetTargetSelector">
+          <div className="targetSelector templateTargetSelector">
             <div className="targetSelectorHeader">
               <strong>Targets</strong>
               <span>
@@ -894,7 +1077,7 @@ export function DataSourcePresetPanel({
             </div>
             <SearchExpressionInput
               agents={agents}
-              ariaLabel="Data-source assignment target expression"
+              ariaLabel="Template assignment target expression"
               className="targetExpressionBar"
               onChange={(value) => {
                 clearAssignmentConfirmation();
@@ -921,7 +1104,7 @@ export function DataSourcePresetPanel({
               className="secondaryAction"
               disabled={
                 pending ||
-                !effectivePresetId ||
+                !effectiveTemplateId ||
                 !assignmentSelectorExpression.trim() ||
                 Boolean(assignmentSelectorParse.error)
               }
@@ -932,16 +1115,16 @@ export function DataSourcePresetPanel({
           )}
         </form>
 
-        <form className="compactForm presetForm" onSubmit={previewHotConfig}>
-          <strong>Render selected config</strong>
+        <form className="compactForm templateForm" onSubmit={previewHotConfig}>
+          <strong>Render template patch</strong>
           <span className="formHint">
-            Review the generated incremental config patch for one VPS before applying it.
+            Review the agent config patch generated from one VPS's assigned source templates.
           </span>
           <label>
             <span>Review VPS</span>
             <VpsCombobox
               agents={agents}
-              ariaLabel="Hot-config preview VPS"
+              ariaLabel="Source template patch preview VPS"
               onChange={(value) => {
                 if (value === renderClientId) {
                   return;
@@ -955,22 +1138,22 @@ export function DataSourcePresetPanel({
             />
           </label>
           <button className="secondaryAction" disabled={pending || !renderClientId} type="submit">
-            Render config
+            Render patch
           </button>
           {renderedHotConfig && (
             <div className="configPreview">
               <div className="previewMeta">
-                <span>{renderedHotConfig.assignments.length} selected presets</span>
+                <span>{renderedHotConfig.assignments.length} resolved source templates</span>
                 <span>{renderedHotConfig.unsupported_domains.length} notes</span>
               </div>
-              <textarea aria-label="Rendered data-source config patch TOML" readOnly value={renderedHotConfig.toml} />
+              <textarea aria-label="Rendered source template patch TOML" readOnly value={renderedHotConfig.toml} />
             </div>
           )}
           <div className="inlinePrivilege">
             <label>
-              <span>Apply max timeout seconds</span>
+              <span>Max timeout seconds</span>
               <input
-                aria-label="Data-source apply max timeout seconds"
+                aria-label="Template apply max timeout seconds"
                 min={1}
                 max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
                 onChange={(event) => {
@@ -983,7 +1166,7 @@ export function DataSourcePresetPanel({
             </label>
           </div>
           <PrivilegeVaultBox
-            labelPrefix="Data-source"
+            labelPrefix="Source"
             lastPayloadHash={lastApplyPayloadHash}
             onOpenUnlock={onOpenPrivilegeUnlock}
             onPrivilegeMaterialChange={(material) => {
@@ -991,7 +1174,7 @@ export function DataSourcePresetPanel({
               clearApplyConfirmation();
             }}
             privilegeMaterial={privilegeMaterial}
-            unlockRedirectLabel="Unlock data-source privilege"
+            unlockRedirectLabel="Unlock source privilege"
           />
           {pendingConfirmation !== "apply" && (
             <button
@@ -1006,22 +1189,22 @@ export function DataSourcePresetPanel({
           {lastApplyJob && <span>Job {shortId(lastApplyJob.job_id)} {lastApplyJob.status}</span>}
         </form>
 
-        <form className="compactForm presetForm" onSubmit={(event) => event.preventDefault()}>
-          <strong>Preset lifecycle</strong>
+        <form className="compactForm templateForm" onSubmit={(event) => event.preventDefault()} ref={lifecycleFormRef}>
+          <strong>Source template lifecycle</strong>
           <span className="formHint">
-            Diff, test, clone, or update a saved preset. Updates report affected VPS count before commit.
+            Diff, test, clone, or update a saved source template. Updates report affected VPS count before commit.
           </span>
-          <div className="formRow presetFormRow">
+          <div className="formRow templateFormRow">
             <label>
-              <span>Preset</span>
+              <span>Template</span>
               <select
-                aria-label="Lifecycle preset"
-                onChange={(event) => setLifecyclePresetId(event.target.value)}
-                value={effectiveLifecyclePresetId}
+                aria-label="Lifecycle source template"
+                onChange={(event) => setLifecycleTemplateId(event.target.value)}
+                value={effectiveLifecycleTemplateId}
               >
-                {presets.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.name}
+                {templates.map((template) => (
+                  <option key={template.id} value={template.id}>
+                    {template.name}
                   </option>
                 ))}
               </select>
@@ -1029,7 +1212,7 @@ export function DataSourcePresetPanel({
             <label>
               <span>Clone name</span>
               <input
-                aria-label="Clone preset name"
+                aria-label="Clone source template name"
                 onChange={(event) => setLifecycleCloneName(event.target.value)}
                 placeholder="shared:copy"
                 value={lifecycleCloneName}
@@ -1039,7 +1222,7 @@ export function DataSourcePresetPanel({
           <label>
             <span>Description</span>
             <input
-              aria-label="Lifecycle preset description"
+              aria-label="Lifecycle source template description"
               onChange={(event) => {
                 setLifecycleDescription(event.target.value);
                 clearLifecycleUpdateConfirmation();
@@ -1051,7 +1234,7 @@ export function DataSourcePresetPanel({
           <label>
             <span>Definition JSON</span>
             <textarea
-              aria-label="Lifecycle preset definition JSON"
+              aria-label="Lifecycle source template definition JSON"
               onChange={(event) => {
                 setLifecycleDefinitionText(event.target.value);
                 clearLifecycleUpdateConfirmation();
@@ -1059,17 +1242,17 @@ export function DataSourcePresetPanel({
               value={lifecycleDefinitionText}
             />
           </label>
-          <div className="formRow presetLifecycleActions">
-            <button className="secondaryAction" disabled={pending || !lifecyclePreset} onClick={diffLifecyclePreset} type="button">
+          <div className="formRow templateLifecycleActions">
+            <button className="secondaryAction" disabled={pending || !lifecycleTemplate} onClick={diffLifecycleTemplate} type="button">
               Diff
             </button>
-            <button className="secondaryAction" disabled={pending || !lifecyclePreset} onClick={testLifecyclePreset} type="button">
+            <button className="secondaryAction" disabled={pending || !lifecycleTemplate} onClick={testLifecycleTemplate} type="button">
               Test
             </button>
             <button
               className="secondaryAction"
-              disabled={pending || !lifecyclePreset || !lifecycleCloneName.trim()}
-              onClick={cloneLifecyclePreset}
+              disabled={pending || !lifecycleTemplate || !lifecycleCloneName.trim()}
+              onClick={cloneLifecycleTemplate}
               type="button"
             >
               Clone
@@ -1077,8 +1260,8 @@ export function DataSourcePresetPanel({
             {pendingConfirmation !== "lifecycle-update" && (
               <button
                 className="secondaryAction"
-                disabled={pending || !lifecyclePreset || lifecyclePreset.built_in}
-                onClick={updateLifecyclePreset}
+                disabled={pending || !lifecycleTemplate || lifecycleTemplate.built_in}
+                onClick={updateLifecycleTemplate}
                 type="button"
               >
                 Review update
@@ -1099,7 +1282,7 @@ export function DataSourcePresetPanel({
                     <span>{lastTest.valid ? "valid" : "invalid"}</span>
                     <span>{lastTest.renderable ? "incremental patch renderable" : "workflow-managed"}</span>
                   </div>
-                  {lastTest.toml && <textarea aria-label="Tested preset TOML" readOnly value={lastTest.toml} />}
+                  {lastTest.toml && <textarea aria-label="Tested template TOML" readOnly value={lastTest.toml} />}
                   {lastTest.error && <span>{lastTest.error}</span>}
                 </>
               )}
@@ -1109,99 +1292,6 @@ export function DataSourcePresetPanel({
       </div>
       )}
 
-      {showSourceStatus && (
-      <div className="sourceStatusSection">
-        <div className="sectionHeader compact">
-          <h2>Active source status</h2>
-          <span>{sourceStatusSummary}</span>
-        </div>
-        <ConsoleDataGrid
-          columns={sourceStatusColumns}
-          defaultPageSize={10}
-          expandOnRowClick
-          getRowId={(row) => `${row.client_id}:${row.domain}`}
-          itemLabel="sources"
-          empty={
-            <div className="emptyState">
-              <DatabaseZap size={22} />
-              <strong>Active source status</strong>
-              <span>No selected source records match the current search.</span>
-            </div>
-          }
-          renderExpandedRow={(row) => (
-            <div className="consoleInlineDetailGrid">
-              <span>VPS</span>
-              <strong>{formatVpsName(row, vpsNameDisplayMode)}</strong>
-              <span>Client ID</span>
-              <strong>{row.client_id}</strong>
-              <span>Domain</span>
-              <strong>{row.domain}</strong>
-              <span>Preset</span>
-              <strong>{row.preset_name}</strong>
-              <span>Source</span>
-              <strong>{row.source_kind}</strong>
-              <span>Reason</span>
-              <strong>{row.status_reason}</strong>
-              <span>Evidence</span>
-              <strong>{sourceEvidenceSummary(row)}</strong>
-            </div>
-          )}
-          rows={dataSourceStatus}
-          searchPlaceholder="Search active sources"
-          storageKey="vpsman.dataSources.activeSources"
-          title="Active sources"
-        />
-      </div>
-      )}
-
-      {showPresetManagement && (
-      <ConsoleDataGrid
-        columns={presetColumns}
-        defaultPageSize={10}
-        expandOnRowClick
-        getRowId={(preset) => preset.id}
-        itemLabel="presets"
-        empty={
-          <div className="emptyState">
-            <DatabaseZap size={22} />
-            <strong>No data-source presets</strong>
-            <span>{actionError ?? "No preset records match the current search."}</span>
-          </div>
-        }
-        renderExpandedRow={(preset) => (
-          <div className="consoleInlineDetailGrid">
-            <span>Preset ID</span>
-            <strong>{preset.id}</strong>
-            <span>Name</span>
-            <strong>{preset.name}</strong>
-            <span>Domain</span>
-            <strong>{preset.domain}</strong>
-            <span>Scope</span>
-            <strong>{preset.scope}</strong>
-            <span>Default</span>
-            <strong>{preset.is_default ? "Yes" : "No"}</strong>
-            <span>Assigned VPSs</span>
-            <strong>{preset.assigned_client_count}</strong>
-            <span>Description</span>
-            <strong>{preset.description ?? "None"}</strong>
-          </div>
-        )}
-        rows={presets}
-        searchPlaceholder="Search presets"
-        storageKey="vpsman.dataSources.presetRegistry"
-        title="Preset registry"
-      />
-      )}
-
-      {showPresetManagement && (
-      <div className="timeline presetAssignmentSummary">
-        <SlidersHorizontal size={18} />
-        <div>
-          <strong>{assignments.length} selected preset records</strong>
-          <span>{assignmentSummary(assignments, lastAssignment)}</span>
-        </div>
-      </div>
-      )}
     </section>
   );
 }
@@ -1216,23 +1306,25 @@ function defaultCloneName(name: string): string {
 function parseDefinition(value: string): JsonValue {
   const parsed = JSON.parse(value) as JsonValue;
   if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") {
-    throw new Error("Preset definition must be a JSON object");
+    throw new Error("Source template definition must be a JSON object");
   }
   return parsed;
 }
 
 function assignmentSummary(
-  assignments: DataSourcePresetAssignmentRecord[],
-  lastAssignment: AssignDataSourcePresetResponse | null,
+  assignments: SourceTemplateAssignmentRecord[],
+  lastAssignment: AssignSourceTemplateResponse | null,
 ): string {
   if (lastAssignment?.confirmation_required) {
-    return "Confirmation required before changing multiple VPS preset selections";
+    return "Confirmation required before changing multiple VPS source template selections";
   }
   const domains = new Set(assignments.map((assignment) => assignment.domain));
-  return domains.size === 0 ? "No VPS preset assignments loaded" : `${domains.size} domains with explicit VPS selections`;
+  return domains.size === 0
+    ? "No VPS source template assignments loaded"
+    : `${domains.size} domains with explicit VPS source selections`;
 }
 
-function sourceEvidenceSummary(row: DataSourceStatusRecord): string {
+function sourceEvidenceSummary(row: SourceStatusRecord): string {
   const evidence = row.evidence;
   if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
     return row.status_reason;
@@ -1374,6 +1466,15 @@ function clampInteger(value: number, min: number, max: number): number {
     return min;
   }
   return Math.min(max, Math.max(min, Math.trunc(value)));
+}
+
+function scrollIntoViewSoon(element: HTMLElement | null) {
+  if (!element) {
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    element.scrollIntoView({ block: "start", behavior: "smooth" });
+  });
 }
 
 function readLocalString(key: string, fallback: string): string {

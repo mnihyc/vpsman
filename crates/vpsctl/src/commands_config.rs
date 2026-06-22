@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
     validate_agent_config_shape, validate_incremental_config_patch_section, AgentConfig,
-    JobCommand, DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH,
-    HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE, MAX_AGENT_HOT_CONFIG_BYTES,
+    JobCommand, HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE, MAX_AGENT_HOT_CONFIG_BYTES,
+    SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH,
 };
 
 use crate::commands_schedules::selector_expression_from_targets;
@@ -138,8 +138,8 @@ pub(crate) fn config_patch(
         .with_context(|| format!("failed to read config patch {}", config_file.display()))?;
     validate_incremental_config_patch(&toml_document)
         .with_context(|| format!("invalid config patch {}", config_file.display()))?;
-    let operation = JobCommand::DataSourceConfigPatch {
-        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
+    let operation = JobCommand::SourceConfigPatch {
+        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
         toml: toml_document,
     };
     println!(
@@ -148,7 +148,7 @@ pub(crate) fn config_patch(
             api_url,
             token,
             operation: &operation,
-            command_label: "data_source_config_patch",
+            command_label: "source_config_patch",
             clients: &clients,
             tags: &tags,
             password_env: &password_env,

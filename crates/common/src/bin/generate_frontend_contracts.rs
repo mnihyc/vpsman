@@ -10,7 +10,6 @@ use uuid::Uuid;
 use vpsman_common::{
     agent_update_release_status_class_by_status, agent_update_release_statuses,
     backup_request_status_class_by_status, backup_request_statuses, create_job_request_fields,
-    data_source_readiness_status_class_by_status, data_source_readiness_statuses,
     db_privilege_intent_fields, encode_json, file_transfer_command_types, file_transfer_directions,
     file_transfer_session_events, file_transfer_session_status_class_by_status,
     file_transfer_session_statuses,
@@ -26,9 +25,9 @@ use vpsman_common::{
     job_target_terminal_statuses, job_terminal_statuses, migration_link_status_class_by_status,
     migration_link_statuses, plan_tunnel, restore_plan_status_class_by_status,
     restore_plan_statuses, schedule_privilege_intent_fields, server_job_status_class_by_status,
-    server_job_statuses, server_job_types, terminal_command_types,
-    terminal_input_privilege_intent_fields, terminal_session_events,
-    terminal_session_state_class_by_state, terminal_session_states,
+    server_job_statuses, server_job_types, source_readiness_status_class_by_status,
+    source_readiness_statuses, terminal_command_types, terminal_input_privilege_intent_fields,
+    terminal_session_events, terminal_session_state_class_by_state, terminal_session_states,
     terminal_session_status_class_by_status, terminal_session_statuses, topology_drift_actions,
     topology_drift_policies, topology_edge_health_status_class_by_status,
     topology_edge_health_statuses, topology_neighbor_state_class_by_state,
@@ -44,7 +43,7 @@ use vpsman_common::{
     workflow_status_classes, BandwidthTier, FileActionPolicy, FileExistingPolicy,
     FileOwnershipPolicy, FilePushChunk, JobCommand, OspfCostPolicy, ProcessResourceLimits,
     ProcessRestartPolicy, ProcessRunPolicy, RestoreRollbackFile, TerminalUserPolicy,
-    TunnelAddressPair, TunnelConfigBackend, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
     CURRENT_COMMAND_PROTOCOL_VERSION, MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_COLS,
     MIN_TERMINAL_ROWS,
 };
@@ -445,15 +444,15 @@ fn main() -> io::Result<()> {
     )?;
     write_domain_array(
         &mut output,
-        "DATA_SOURCE_READINESS_STATUSES",
-        "GeneratedDataSourceReadinessStatus",
-        data_source_readiness_statuses(),
+        "SOURCE_READINESS_STATUSES",
+        "GeneratedSourceReadinessStatus",
+        source_readiness_statuses(),
     )?;
     write_status_class_map(
         &mut output,
-        "DATA_SOURCE_READINESS_STATUS_CLASS_BY_STATUS",
-        data_source_readiness_status_class_by_status(),
-        "GeneratedDataSourceReadinessStatus",
+        "SOURCE_READINESS_STATUS_CLASS_BY_STATUS",
+        source_readiness_status_class_by_status(),
+        "GeneratedSourceReadinessStatus",
     )?;
     write_domain_array(
         &mut output,
@@ -737,10 +736,10 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
             },
         ),
         golden_vector(
-            "data_source_config_patch",
-            JobCommand::DataSourceConfigPatch {
+            "source_config_patch",
+            JobCommand::SourceConfigPatch {
                 apply_mode: "incremental_patch".to_string(),
-                toml: "[data_sources]\n".to_string(),
+                toml: "[source_templates]\n".to_string(),
             },
         ),
         golden_vector(
@@ -1128,10 +1127,6 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
             JobCommand::NetworkApply {
                 plan: Box::new(network_plan.clone()),
                 side: TunnelEndpointSide::Left,
-                config_backend: TunnelConfigBackend::Ifupdown,
-                config_sha256_hex: Some("cc".repeat(32)),
-                ifupdown_sha256_hex: "dd".repeat(32),
-                bird2_sha256_hex: "ee".repeat(32),
             },
         ),
         golden_vector(

@@ -16,8 +16,8 @@ use crate::vty_backups::{
     submit_vty_restore_plan, submit_vty_restore_rollback, submit_vty_restore_run,
 };
 use crate::vty_config::{
-    parse_vty_data_source_hot_config_apply, parse_vty_hot_config,
-    submit_vty_data_source_hot_config_apply, submit_vty_hot_config,
+    parse_vty_hot_config, parse_vty_source_config_patch_apply, submit_vty_hot_config,
+    submit_vty_source_config_patch_apply,
 };
 use crate::vty_direct::submit_vty_direct_command;
 use crate::vty_file_transfer::{
@@ -90,10 +90,10 @@ Fleet and integrations:
   fleet-alert-policies | fleet-alert-policy-upsert
   fleet-alert-notification-channels | fleet-alert-notification-channel-upsert
   fleet-alert-notifications | fleet-alert-notification-dispatch | fleet-alert-notification-process
-  data-source-presets | data-source-preset-create | data-source-preset-clone
-  data-source-preset-diff | data-source-preset-test | data-source-preset-update
-  data-source-status | data-source-assignments | data-source-preset-assign
-  data-source-hot-config | data-source-hot-config-apply
+  source-templates | source-template-create | source-template-clone
+  source-template-diff | source-template-test | source-template-update
+  source-status | source-template-assignments | source-template-assign
+  source-config-patch | source-config-patch-apply
 
 Jobs and schedules:
   jobs | job-create | job-shell | job-targets | job-target-status-download
@@ -138,8 +138,8 @@ Backups, restores, and migrations:
   migration-links | migration-link | migration-run
 
 Network and topology:
-  tunnel-plans | tunnel-plan | tunnel-allocate | tunnel-promote-telemetry
-  tunnel-promote-adapter | tunnel-apply | tunnel-ospf-cost-update
+  tunnel-plans | tunnel-plan | tunnel-plan-export | tunnel-allocate
+  tunnel-promote-external-observe | tunnel-promote-custom-adapter | tunnel-apply | tunnel-ospf-cost-update
   tunnel-rollback | tunnel-status | tunnel-probe | tunnel-speed-test
   network-observations | network-trends | network-ospf-recommendations
   network-ospf-update-plans | topology-graph
@@ -229,8 +229,8 @@ const HOT_CONFIG_USAGE: &str = concat!(
     "[--force-unprivileged] --confirmed"
 );
 
-const DATA_SOURCE_HOT_CONFIG_USAGE: &str = concat!(
-    "usage: data-source-hot-config-apply --client-id <id> ",
+const SOURCE_CONFIG_PATCH_USAGE: &str = concat!(
+    "usage: source-config-patch-apply --client-id <id> ",
     "[--max-timeout <secs>] [--privilege-ttl <15-300>] ",
     "[--force-unprivileged] --confirmed"
 );
@@ -592,23 +592,23 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                     )?
                 );
             }
-            command if command.starts_with("data-source-hot-config-apply ") => {
+            command if command.starts_with("source-config-patch-apply ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if !privilege_context.enabled {
                     println!("{PRIVILEGE_UNLOCK_REQUIRED}");
                     continue;
                 }
-                let request = match parse_vty_data_source_hot_config_apply(&parts[1..]) {
+                let request = match parse_vty_source_config_patch_apply(&parts[1..]) {
                     Ok(request) => request,
                     Err(error) => {
                         println!("usage error: {error}");
-                        println!("{DATA_SOURCE_HOT_CONFIG_USAGE}");
+                        println!("{SOURCE_CONFIG_PATCH_USAGE}");
                         continue;
                     }
                 };
                 println!(
                     "{}",
-                    submit_vty_data_source_hot_config_apply(
+                    submit_vty_source_config_patch_apply(
                         api_url,
                         token.as_deref(),
                         &privilege_context.password,

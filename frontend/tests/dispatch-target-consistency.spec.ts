@@ -197,21 +197,21 @@ test("bulk config review uses the current backend-resolved selector instead of a
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "Bulk apply");
-  await unlockPrivilegeFor(page, "Config", "Bulk apply");
+  await openConsoleSubpage(page, "Config", "Bulk patch");
+  await unlockPrivilegeFor(page, "Config", "Bulk patch");
 
   const panel = page.locator(".configApplyGrid");
   await panel
-    .getByRole("searchbox", { name: "Bulk config selector expression" })
+    .getByRole("searchbox", { name: "Bulk patch target expression" })
     .fill("id:agent-sfo-01");
   await activate(panel.getByRole("button", { name: "Review targets" }));
   await expect(panel.getByText("1/3")).toBeVisible();
   await panel
-    .getByRole("searchbox", { name: "Bulk config selector expression" })
+    .getByRole("searchbox", { name: "Bulk patch target expression" })
     .fill("id:agent-fra-02");
   await activate(panel.getByRole("button", { name: "Review apply" }));
-  await expect(page.getByText("Confirm bulk config apply")).toBeVisible();
-  await activate(page.getByRole("button", { name: "Apply config patch" }));
+  await expect(page.getByText("Confirm bulk patch")).toBeVisible();
+  await activate(page.getByRole("button", { name: "Apply agent config patch" }));
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -220,7 +220,7 @@ test("bulk config review uses the current backend-resolved selector instead of a
     return requests.jobs.at(-1);
   });
   expect(request).toMatchObject({
-    command: "data_source_config_patch",
+    command: "source_config_patch",
     selector_expression: "id:agent-fra-02",
     target_client_ids: ["agent-fra-02"],
   });
@@ -480,35 +480,35 @@ test("backup workflow confirmations clear when switching backup subpages", async
   await expect(page.getByLabel("Confirm backup request")).toBeHidden();
 });
 
-test("data-source apply confirmation closes on edit and submits a fresh snapshot", async ({
+test("source template apply confirmation closes on edit and submits a fresh snapshot", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "data-source apply consistency is covered in desktop workflow tests",
+    "source template apply consistency is covered in desktop workflow tests",
   );
   await installConsoleApiMock(page);
   await page.goto("/");
   await openConsoleSubpage(page, "Config", "Templates");
   await unlockPrivilegeFor(page, "Config", "Templates");
 
-  const panel = page.locator(".dataSourcePresetPanel");
+  const panel = page.locator(".sourceTemplatePanel");
   await chooseVpsBySearch(
     panel,
-    "Hot-config preview VPS",
+    "Source template patch preview VPS",
     "sfo",
     /edge-sfo-01.*agent-sfo-01/,
   );
-  await activate(panel.getByRole("button", { name: "Render config" }));
+  await activate(panel.getByRole("button", { name: "Render patch" }));
   await expect(
-    panel.getByLabel("Rendered data-source config patch TOML"),
+    panel.getByLabel("Rendered source template patch TOML"),
   ).toHaveValue(/agent-sfo-01/);
   await activate(panel.getByRole("button", { name: "Review apply" }));
-  await expect(panel.getByText("Apply data-source patch")).toBeVisible();
-  await panel.getByLabel("Data-source apply max timeout seconds").fill("75");
-  await expect(panel.getByText("Apply data-source patch")).toBeHidden();
+  await expect(panel.getByText("Apply source template patch")).toBeVisible();
+  await panel.getByLabel("Template apply max timeout seconds").fill("75");
+  await expect(panel.getByText("Apply source template patch")).toBeHidden();
   await activate(panel.getByRole("button", { name: "Review apply" }));
-  await expect(panel.getByText("Apply data-source patch")).toBeVisible();
+  await expect(panel.getByText("Apply source template patch")).toBeVisible();
   await activate(
     panel.locator(".confirmationPrompt").getByRole("button", {
       name: "Confirm",
@@ -523,13 +523,13 @@ test("data-source apply confirmation closes on edit and submits a fresh snapshot
     return requests.jobs.at(-1);
   });
   expect(request).toMatchObject({
-    command: "data_source_config_patch",
+    command: "source_config_patch",
     selector_expression: "id:agent-sfo-01",
     target_client_ids: ["agent-sfo-01"],
     max_timeout_secs: 75,
     operation: {
       apply_mode: "incremental_patch",
-      type: "data_source_config_patch",
+      type: "source_config_patch",
     },
   });
   expect(
@@ -546,23 +546,23 @@ test("bulk config async review preparation ignores stale selector edits", async 
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "Bulk apply");
-  await unlockPrivilegeFor(page, "Config", "Bulk apply");
+  await openConsoleSubpage(page, "Config", "Bulk patch");
+  await unlockPrivilegeFor(page, "Config", "Bulk patch");
 
   const panel = page.locator(".configApplyGrid");
   const selector = panel.getByRole("searchbox", {
-    name: "Bulk config selector expression",
+    name: "Bulk patch target expression",
   });
   await selector.fill("id:agent-sfo-01");
   await activate(panel.getByRole("button", { name: "Review apply" }));
-  await expect(page.getByText("Preparing bulk config review")).toBeVisible();
+  await expect(page.getByText("Preparing bulk patch review")).toBeVisible();
   await selector.fill("id:agent-fra-02");
-  await expect(page.getByText("Preparing bulk config review")).toBeHidden();
-  await expect(page.getByText("Confirm bulk config apply")).toBeHidden();
+  await expect(page.getByText("Preparing bulk patch review")).toBeHidden();
+  await expect(page.getByText("Confirm bulk patch")).toBeHidden();
 
   await activate(panel.getByRole("button", { name: "Review apply" }));
-  await expect(page.getByText("Confirm bulk config apply")).toBeVisible();
-  await activate(page.getByRole("button", { name: "Apply config patch" }));
+  await expect(page.getByText("Confirm bulk patch")).toBeVisible();
+  await activate(page.getByRole("button", { name: "Apply agent config patch" }));
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -571,41 +571,41 @@ test("bulk config async review preparation ignores stale selector edits", async 
     return requests.jobs.at(-1);
   });
   expect(request).toMatchObject({
-    command: "data_source_config_patch",
+    command: "source_config_patch",
     selector_expression: "id:agent-fra-02",
     target_client_ids: ["agent-fra-02"],
   });
 });
 
-test("data-source assignment async review ignores stale selector edits", async ({
+test("source template assignment async review ignores stale selector edits", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "data-source assignment async review consistency is covered in desktop workflow tests",
+    "source template assignment async review consistency is covered in desktop workflow tests",
   );
   await installConsoleApiMock(page);
   await page.goto("/");
   await openConsoleSubpage(page, "Config", "Templates");
   await unlockPrivilegeFor(page, "Config", "Templates");
 
-  const panel = page.locator(".dataSourcePresetPanel");
+  const panel = page.locator(".sourceTemplatePanel");
   const selector = panel.getByRole("searchbox", {
-    name: "Data-source assignment target expression",
+    name: "Template assignment target expression",
   });
   await selector.fill("id:agent-sfo-01");
   await activate(panel.getByRole("button", { name: "Review assignment" }));
   await expect(
-    page.getByText("Preparing data-source assignment review"),
+    page.getByText("Preparing template assignment review"),
   ).toBeVisible();
   await selector.fill("id:agent-fra-02");
   await expect(
-    page.getByText("Preparing data-source assignment review"),
+    page.getByText("Preparing template assignment review"),
   ).toBeHidden();
-  await expect(panel.getByText("Assign data-source preset")).toBeHidden();
+  await expect(panel.locator(".confirmationPrompt").getByText("Confirm source template assignment")).toBeHidden();
 
   await activate(panel.getByRole("button", { name: "Review assignment" }));
-  await expect(panel.getByText("Assign data-source preset")).toBeVisible();
+  await expect(panel.locator(".confirmationPrompt").getByText("Confirm source template assignment")).toBeVisible();
   await activate(
     panel.locator(".confirmationPrompt").getByRole("button", {
       name: "Confirm",
@@ -616,10 +616,10 @@ test("data-source assignment async review ignores stale selector edits", async (
   const request = await page.evaluate(() => {
     const requests = (
       window as unknown as {
-        __vpsmanTestRequests: { dataSourcePresetAssignments: unknown[] };
+        __vpsmanTestRequests: { sourceTemplateAssignments: unknown[] };
       }
     ).__vpsmanTestRequests;
-    return requests.dataSourcePresetAssignments.at(-1);
+    return requests.sourceTemplateAssignments.at(-1);
   });
   expect(request).toMatchObject({
     confirmed: true,
@@ -628,42 +628,42 @@ test("data-source assignment async review ignores stale selector edits", async (
   });
 });
 
-test("data-source apply async review ignores stale target edits", async ({
+test("source template apply async review ignores stale target edits", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "data-source apply async review consistency is covered in desktop workflow tests",
+    "source template apply async review consistency is covered in desktop workflow tests",
   );
   await installConsoleApiMock(page);
   await page.goto("/");
   await openConsoleSubpage(page, "Config", "Templates");
   await unlockPrivilegeFor(page, "Config", "Templates");
 
-  const panel = page.locator(".dataSourcePresetPanel");
+  const panel = page.locator(".sourceTemplatePanel");
   await chooseVpsBySearch(
     panel,
-    "Hot-config preview VPS",
+    "Source template patch preview VPS",
     "sfo",
     /edge-sfo-01.*agent-sfo-01/,
   );
   await activate(panel.getByRole("button", { name: "Review apply" }));
   await expect(
-    page.getByText("Preparing data-source apply review"),
+    page.getByText("Preparing template apply review"),
   ).toBeVisible();
   await chooseVpsBySearch(
     panel,
-    "Hot-config preview VPS",
+    "Source template patch preview VPS",
     "fra",
     /core-fra-02.*agent-fra-02/,
   );
   await expect(
-    page.getByText("Preparing data-source apply review"),
+    page.getByText("Preparing template apply review"),
   ).toBeHidden();
-  await expect(panel.getByText("Apply data-source patch")).toBeHidden();
+  await expect(panel.getByText("Apply source template patch")).toBeHidden();
 
   await activate(panel.getByRole("button", { name: "Review apply" }));
-  await expect(panel.getByText("Apply data-source patch")).toBeVisible();
+  await expect(panel.getByText("Apply source template patch")).toBeVisible();
   await activate(
     panel.locator(".confirmationPrompt").getByRole("button", {
       name: "Confirm",
@@ -678,7 +678,7 @@ test("data-source apply async review ignores stale target edits", async ({
     return requests.jobs.at(-1);
   });
   expect(request).toMatchObject({
-    command: "data_source_config_patch",
+    command: "source_config_patch",
     selector_expression: "id:agent-fra-02",
     target_client_ids: ["agent-fra-02"],
   });
@@ -841,23 +841,34 @@ test("topology network confirmation closes on edit and submits a fresh snapshot"
   await expect(page.getByText("Confirm apply")).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", {
-      name: "Apply side",
+      name: "Apply plan",
     }),
   );
 
-  const request = await page.evaluate(() => {
+  const requests = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
     ).__vpsmanTestRequests;
-    return requests.jobs.at(-1);
+    return requests.jobs.slice(-2);
   });
-  expect(request).toMatchObject({
+  expect(requests).toHaveLength(2);
+  expect(requests[0]).toMatchObject({
     command: "network_apply",
     selector_expression: "id:agent-sfo-01",
     target_client_ids: ["agent-sfo-01"],
     max_timeout_secs: 120,
     operation: {
       side: "left",
+      type: "network_apply",
+    },
+  });
+  expect(requests[1]).toMatchObject({
+    command: "network_apply",
+    selector_expression: "id:agent-fra-02",
+    target_client_ids: ["agent-fra-02"],
+    max_timeout_secs: 120,
+    operation: {
+      side: "right",
       type: "network_apply",
     },
   });
@@ -884,19 +895,32 @@ test("topology async review preparation ignores stale edits", async ({
   await expect(page.getByText("Confirm apply")).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", {
-      name: "Apply side",
+      name: "Apply plan",
     }),
   );
 
-  const applyRequest = await page.evaluate(() => {
+  const applyRequests = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
     ).__vpsmanTestRequests;
-    return requests.jobs.at(-1);
+    return requests.jobs.slice(-2);
   });
-  expect(applyRequest).toMatchObject({
+  expect(applyRequests).toHaveLength(2);
+  expect(applyRequests[0]).toMatchObject({
     command: "network_apply",
     max_timeout_secs: 135,
+    operation: {
+      side: "left",
+      type: "network_apply",
+    },
+  });
+  expect(applyRequests[1]).toMatchObject({
+    command: "network_apply",
+    max_timeout_secs: 135,
+    operation: {
+      side: "right",
+      type: "network_apply",
+    },
   });
 
   await openConsoleSubpage(page, "Topology", "OSPF");
@@ -989,12 +1013,12 @@ test("OSPF confirmation closes on edit and submits a fresh snapshot", async ({
   });
 });
 
-test("adapter promotion submits a fresh snapshot after reopening review", async ({
+test("custom adapter submits a fresh snapshot after reopening review", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "adapter promotion consistency is covered in desktop workflow tests",
+    "custom adapter consistency is covered in desktop workflow tests",
   );
   await installConsoleApiMock(page);
   await page.goto("/");
@@ -1004,7 +1028,7 @@ test("adapter promotion submits a fresh snapshot after reopening review", async 
     has: page.getByRole("heading", { name: "Tunnel promotion" }),
   });
   const adapterForm = promotionPanel.locator("form", {
-    has: page.getByRole("heading", { name: "Adapter contract" }),
+    has: page.getByRole("heading", { name: "Custom adapter" }),
   });
   for (const argvLabel of [
     "Status argv",
@@ -1026,9 +1050,9 @@ test("adapter promotion submits a fresh snapshot after reopening review", async 
   await statusArgv.fill(
     "/usr/local/libexec/vpsman-openvpn-adapter\nstatus-a\n{interface}",
   );
-  await activate(adapterForm.getByRole("button", { name: "Review promotion" }));
+  await activate(adapterForm.getByRole("button", { name: "Review custom adapter" }));
   const promotionConfirmation = promotionPanel.locator(".confirmationPrompt", {
-    hasText: "Promote tunnel adapter",
+    hasText: "Confirm custom adapter",
   });
   await expect(promotionConfirmation).toBeVisible();
   await expect(promotionConfirmation.locator("dd", { hasText: "status-a" })).toHaveAttribute(
@@ -1042,11 +1066,11 @@ test("adapter promotion submits a fresh snapshot after reopening review", async 
   await statusArgv.fill(
     "/usr/local/libexec/vpsman-openvpn-adapter\nstatus-b\n{interface}",
   );
-  await activate(adapterForm.getByRole("button", { name: "Review promotion" }));
+  await activate(adapterForm.getByRole("button", { name: "Review custom adapter" }));
   await expect(promotionConfirmation).toBeVisible();
   await activate(
     promotionConfirmation.getByRole("button", {
-      name: "Promote adapter",
+      name: "Save custom adapter",
     }),
   );
 
@@ -1082,28 +1106,28 @@ test("single config confirmation closes on edit and submits a fresh snapshot", a
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "Single VPS");
-  await unlockPrivilegeFor(page, "Config", "Single VPS");
+  await openConsoleSubpage(page, "Config", "VPS config");
+  await unlockPrivilegeFor(page, "Config", "VPS config");
 
   const panel = page.locator(".configApplyGrid");
   await chooseVpsBySearch(
     panel,
-    "Single VPS config target",
+    "VPS config target",
     "fra",
     /core-fra-02.*agent-fra-02/,
   );
-  await activate(panel.getByRole("button", { name: "Read config" }));
-  const editor = panel.getByLabel("Single VPS redacted config TOML");
+  await activate(panel.getByRole("button", { name: "Read agent config" }));
+  const editor = panel.getByLabel("VPS redacted agent config TOML");
   await expect(editor).toHaveValue(/client_id = "agent-fra-02"/);
   await activate(panel.getByRole("button", { name: "Review apply" }));
-  await expect(page.getByText("Confirm single-VPS config apply")).toBeVisible();
+  await expect(page.getByText("Confirm full config override")).toBeVisible();
   await editor.fill(`${await editor.inputValue()}\n# reviewed edit\n`);
-  await expect(page.getByText("Confirm single-VPS config apply")).toBeHidden();
+  await expect(page.getByText("Confirm full config override")).toBeHidden();
   await activate(panel.getByRole("button", { name: "Review apply" }));
-  await expect(page.getByText("Confirm single-VPS config apply")).toBeVisible();
+  await expect(page.getByText("Confirm full config override")).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", {
-      name: "Apply config",
+      name: "Apply full config",
     }),
   );
 

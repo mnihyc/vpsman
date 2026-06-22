@@ -6,7 +6,7 @@ use vpsman_common::{
 };
 
 #[tokio::test]
-async fn data_source_presets_assign_defaults_and_shared_custom_presets() {
+async fn source_templates_assign_defaults_and_shared_custom_templates() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         for client_id in ["client-a", "client-b"] {
@@ -29,15 +29,18 @@ async fn data_source_presets_assign_defaults_and_shared_custom_presets() {
     let operator = memory_admin();
 
     let defaults = repo
-        .list_data_source_assignments(Some("client-a"), Some("runtime_traffic_accounting_source"))
+        .list_source_template_assignments(
+            Some("client-a"),
+            Some("runtime_traffic_accounting_source"),
+        )
         .await
         .unwrap();
     assert_eq!(defaults.len(), 1);
-    assert_eq!(defaults[0].preset_name, "builtin:interface_counters");
+    assert_eq!(defaults[0].template_name, "builtin:interface_counters");
 
     let vnstat = repo
-        .create_data_source_preset(
-            &CreateDataSourcePresetRequest {
+        .create_source_template(
+            &CreateSourceTemplateRequest {
                 domain: "runtime_traffic_accounting_source".to_string(),
                 name: "shared:vnstat-json".to_string(),
                 scope: "shared".to_string(),
@@ -58,10 +61,10 @@ async fn data_source_presets_assign_defaults_and_shared_custom_presets() {
         .unwrap();
 
     let preview = repo
-        .assign_data_source_preset(
-            &AssignDataSourcePresetRequest {
+        .assign_source_template(
+            &AssignSourceTemplateRequest {
                 domain: "runtime_traffic_accounting_source".to_string(),
-                preset_id: vnstat.id,
+                template_id: vnstat.id,
                 selector_expression: "id:client-a || id:client-b".to_string(),
                 target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
                 confirmed: false,
@@ -75,13 +78,13 @@ async fn data_source_presets_assign_defaults_and_shared_custom_presets() {
     assert!(preview
         .assignments
         .iter()
-        .all(|assignment| assignment.preset_name == "builtin:interface_counters"));
+        .all(|assignment| assignment.template_name == "builtin:interface_counters"));
 
     let assigned = repo
-        .assign_data_source_preset(
-            &AssignDataSourcePresetRequest {
+        .assign_source_template(
+            &AssignSourceTemplateRequest {
                 domain: "runtime_traffic_accounting_source".to_string(),
-                preset_id: vnstat.id,
+                template_id: vnstat.id,
                 selector_expression: "id:client-a || id:client-b".to_string(),
                 target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
                 confirmed: true,
@@ -95,17 +98,17 @@ async fn data_source_presets_assign_defaults_and_shared_custom_presets() {
     assert!(assigned
         .assignments
         .iter()
-        .all(|assignment| assignment.preset_name == "shared:vnstat-json"));
+        .all(|assignment| assignment.template_name == "shared:vnstat-json"));
     assert!(repo
         .list_audit_logs(10)
         .await
         .unwrap()
         .iter()
-        .any(|audit| audit.action == "data_source_preset.assigned"));
+        .any(|audit| audit.action == "source_template.assigned"));
 }
 
 #[tokio::test]
-async fn curated_builtin_data_source_presets_are_selectable_not_default() {
+async fn curated_builtin_source_templates_are_selectable_not_default() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
@@ -125,32 +128,32 @@ async fn curated_builtin_data_source_presets_are_selectable_not_default() {
     }
     let operator = memory_admin();
 
-    let presets = repo.list_data_source_presets(None).await.unwrap();
-    let domains = crate::data_source_builtin_presets::DATA_SOURCE_DOMAINS;
-    assert!(presets.len() > domains.len());
+    let templates = repo.list_source_templates(None).await.unwrap();
+    let domains = crate::source_template_builtins::SOURCE_TEMPLATE_DOMAINS;
+    assert!(templates.len() > domains.len());
     for domain in domains {
-        let defaults = presets
+        let defaults = templates
             .iter()
-            .filter(|preset| preset.domain == *domain && preset.is_default)
+            .filter(|template| template.domain == *domain && template.is_default)
             .collect::<Vec<_>>();
         assert_eq!(
             defaults.len(),
             1,
-            "expected one default preset for {domain}"
+            "expected one default template for {domain}"
         );
     }
 
     let default_assignments = repo
-        .list_data_source_assignments(Some("edge-a"), None)
+        .list_source_template_assignments(Some("edge-a"), None)
         .await
         .unwrap();
     assert_eq!(default_assignments.len(), domains.len());
     assert!(default_assignments
         .iter()
-        .all(|assignment| assignment.preset_scope == "built_in"));
+        .all(|assignment| assignment.template_scope == "built_in"));
     assert!(!default_assignments
         .iter()
-        .any(|assignment| assignment.preset_name == "builtin:vnstat_json"));
+        .any(|assignment| assignment.template_name == "builtin:vnstat_json"));
 
     let curated_names = [
         "builtin:host_mounted_procfs",
@@ -163,12 +166,12 @@ async fn curated_builtin_data_source_presets_are_selectable_not_default() {
         "builtin:github_release_sha256",
     ];
     for name in curated_names {
-        let preset = presets
+        let template = templates
             .iter()
-            .find(|preset| preset.name == name)
-            .unwrap_or_else(|| panic!("missing curated preset {name}"));
-        assert!(preset.built_in);
-        assert!(!preset.is_default);
+            .find(|template| template.name == name)
+            .unwrap_or_else(|| panic!("missing curated template {name}"));
+        assert!(template.built_in);
+        assert!(!template.is_default);
     }
 
     let assignments = [
@@ -208,15 +211,15 @@ async fn curated_builtin_data_source_presets_are_selectable_not_default() {
             "runtime_reconcile_enabled = true",
         ),
     ];
-    for (domain, preset_name, _) in assignments {
-        let preset = presets
+    for (domain, template_name, _) in assignments {
+        let template = templates
             .iter()
-            .find(|preset| preset.domain == domain && preset.name == preset_name)
+            .find(|template| template.domain == domain && template.name == template_name)
             .unwrap();
-        repo.assign_data_source_preset(
-            &AssignDataSourcePresetRequest {
+        repo.assign_source_template(
+            &AssignSourceTemplateRequest {
                 domain: domain.to_string(),
-                preset_id: preset.id,
+                template_id: template.id,
                 selector_expression: "id:edge-a".to_string(),
                 target_client_ids: vec!["edge-a".to_string()],
                 confirmed: true,
@@ -227,7 +230,7 @@ async fn curated_builtin_data_source_presets_are_selectable_not_default() {
         .unwrap();
     }
 
-    let rendered = repo.render_data_source_hot_config("edge-a").await.unwrap();
+    let rendered = repo.render_source_config_patch("edge-a").await.unwrap();
     for (_, _, expected) in assignments {
         assert!(
             rendered.toml.contains(expected),
@@ -236,19 +239,19 @@ async fn curated_builtin_data_source_presets_are_selectable_not_default() {
         );
     }
 
-    for preset_name in [
+    for template_name in [
         "builtin:s3_path_style_reserved",
         "builtin:github_release_sha256",
     ] {
-        let preset = presets
+        let template = templates
             .iter()
-            .find(|preset| preset.name == preset_name)
+            .find(|template| template.name == template_name)
             .unwrap();
         let tested = repo
-            .test_data_source_preset(
-                preset.id,
-                &TestDataSourcePresetRequest {
-                    definition: preset.definition.clone(),
+            .test_source_template(
+                template.id,
+                &TestSourceTemplateRequest {
+                    definition: template.definition.clone(),
                 },
             )
             .await
@@ -260,7 +263,7 @@ async fn curated_builtin_data_source_presets_are_selectable_not_default() {
 }
 
 #[tokio::test]
-async fn data_source_preset_lifecycle_updates_the_shared_model() {
+async fn source_template_lifecycle_updates_the_shared_model() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         for client_id in ["client-a", "client-b"] {
@@ -281,9 +284,9 @@ async fn data_source_preset_lifecycle_updates_the_shared_model() {
         }
     }
     let operator = memory_admin();
-    let preset = repo
-        .create_data_source_preset(
-            &CreateDataSourcePresetRequest {
+    let template = repo
+        .create_source_template(
+            &CreateSourceTemplateRequest {
                 domain: "runtime_traffic_accounting_source".to_string(),
                 name: "shared:traffic-source".to_string(),
                 scope: "shared".to_string(),
@@ -295,10 +298,10 @@ async fn data_source_preset_lifecycle_updates_the_shared_model() {
         )
         .await
         .unwrap();
-    repo.assign_data_source_preset(
-        &AssignDataSourcePresetRequest {
+    repo.assign_source_template(
+        &AssignSourceTemplateRequest {
             domain: "runtime_traffic_accounting_source".to_string(),
-            preset_id: preset.id,
+            template_id: template.id,
             selector_expression: "id:client-a || id:client-b".to_string(),
             target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
             confirmed: true,
@@ -313,9 +316,9 @@ async fn data_source_preset_lifecycle_updates_the_shared_model() {
         "vnstat_argv": ["/usr/bin/vnstat", "--json"]
     });
     let diff = repo
-        .diff_data_source_preset(
-            preset.id,
-            &DataSourcePresetDiffRequest {
+        .diff_source_template(
+            template.id,
+            &SourceTemplateDiffRequest {
                 description: Some("provider image uses vnstat".to_string()),
                 definition: candidate.clone(),
                 keep_description: false,
@@ -327,9 +330,9 @@ async fn data_source_preset_lifecycle_updates_the_shared_model() {
     assert_eq!(diff.changed_keys, vec!["source", "vnstat_argv"]);
 
     let test = repo
-        .test_data_source_preset(
-            preset.id,
-            &TestDataSourcePresetRequest {
+        .test_source_template(
+            template.id,
+            &TestSourceTemplateRequest {
                 definition: candidate.clone(),
             },
         )
@@ -340,9 +343,9 @@ async fn data_source_preset_lifecycle_updates_the_shared_model() {
     assert!(test.toml.contains("runtime_vnstat_argv"));
 
     let preview = repo
-        .update_data_source_preset(
-            preset.id,
-            &UpdateDataSourcePresetRequest {
+        .update_source_template(
+            template.id,
+            &UpdateSourceTemplateRequest {
                 description: Some("provider image uses vnstat".to_string()),
                 definition: candidate.clone(),
                 confirmed: false,
@@ -355,14 +358,14 @@ async fn data_source_preset_lifecycle_updates_the_shared_model() {
     assert!(preview.confirmation_required);
     assert_eq!(preview.affected_client_count, 2);
     assert_eq!(
-        preview.preset.definition,
+        preview.template.definition,
         serde_json::json!({"source": "interface_counters"})
     );
 
     let updated = repo
-        .update_data_source_preset(
-            preset.id,
-            &UpdateDataSourcePresetRequest {
+        .update_source_template(
+            template.id,
+            &UpdateSourceTemplateRequest {
                 description: Some("provider image uses vnstat".to_string()),
                 definition: candidate.clone(),
                 confirmed: true,
@@ -373,32 +376,32 @@ async fn data_source_preset_lifecycle_updates_the_shared_model() {
         .await
         .unwrap();
     assert!(!updated.confirmation_required);
-    assert_eq!(updated.preset.definition, candidate);
-    assert_eq!(updated.preset.assigned_client_count, 2);
+    assert_eq!(updated.template.definition, candidate);
+    assert_eq!(updated.template.assigned_client_count, 2);
     assert!(repo
         .list_audit_logs(10)
         .await
         .unwrap()
         .iter()
-        .any(|audit| audit.action == "data_source_preset.updated"));
+        .any(|audit| audit.action == "source_template.updated"));
 }
 
 #[tokio::test]
-async fn data_source_preset_clone_keeps_assignment_separate() {
+async fn source_template_clone_keeps_assignment_separate() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = memory_admin();
     let builtins = repo
-        .list_data_source_presets(Some("runtime_tunnel_adapter"))
+        .list_source_templates(Some("runtime_tunnel_adapter"))
         .await
         .unwrap();
     let source = builtins
         .iter()
-        .find(|preset| preset.name == "builtin:agent_iproute2_managed")
+        .find(|template| template.name == "builtin:agent_iproute2_managed")
         .unwrap();
     let clone = repo
-        .clone_data_source_preset(
+        .clone_source_template(
             source.id,
-            &CloneDataSourcePresetRequest {
+            &CloneSourceTemplateRequest {
                 name: "shared:iproute2-managed-runtime".to_string(),
                 scope: "shared".to_string(),
                 owner_client_id: None,
@@ -417,11 +420,11 @@ async fn data_source_preset_clone_keeps_assignment_separate() {
         .await
         .unwrap()
         .iter()
-        .any(|audit| audit.action == "data_source_preset.cloned"));
+        .any(|audit| audit.action == "source_template.cloned"));
 }
 
 #[tokio::test]
-async fn vps_local_data_source_preset_only_assigns_to_owner() {
+async fn vps_local_source_template_only_assigns_to_owner() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         for client_id in ["client-a", "client-b"] {
@@ -442,9 +445,9 @@ async fn vps_local_data_source_preset_only_assigns_to_owner() {
         }
     }
     let operator = memory_admin();
-    let preset = repo
-        .create_data_source_preset(
-            &CreateDataSourcePresetRequest {
+    let template = repo
+        .create_source_template(
+            &CreateSourceTemplateRequest {
                 domain: "process_inventory_source".to_string(),
                 name: "local:mounted-host-proc".to_string(),
                 scope: "vps_local".to_string(),
@@ -461,10 +464,10 @@ async fn vps_local_data_source_preset_only_assigns_to_owner() {
         .unwrap();
 
     let error = repo
-        .assign_data_source_preset(
-            &AssignDataSourcePresetRequest {
+        .assign_source_template(
+            &AssignSourceTemplateRequest {
                 domain: "process_inventory_source".to_string(),
-                preset_id: preset.id,
+                template_id: template.id,
                 selector_expression: "id:client-b".to_string(),
                 target_client_ids: vec!["client-b".to_string()],
                 confirmed: true,
@@ -475,13 +478,13 @@ async fn vps_local_data_source_preset_only_assigns_to_owner() {
         .unwrap_err();
     assert!(error
         .to_string()
-        .contains("vps_local_preset_owner_mismatch"));
+        .contains("vps_local_template_owner_mismatch"));
 
     let assigned = repo
-        .assign_data_source_preset(
-            &AssignDataSourcePresetRequest {
+        .assign_source_template(
+            &AssignSourceTemplateRequest {
                 domain: "process_inventory_source".to_string(),
-                preset_id: preset.id,
+                template_id: template.id,
                 selector_expression: "id:client-a".to_string(),
                 target_client_ids: vec!["client-a".to_string()],
                 confirmed: true,
@@ -492,13 +495,13 @@ async fn vps_local_data_source_preset_only_assigns_to_owner() {
         .unwrap();
     assert_eq!(assigned.assignments[0].client_id, "client-a");
     assert_eq!(
-        assigned.assignments[0].preset_name,
+        assigned.assignments[0].template_name,
         "local:mounted-host-proc"
     );
 }
 
 #[tokio::test]
-async fn data_source_hot_config_renders_selected_presets() {
+async fn source_config_patch_renders_selected_templates() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
@@ -519,8 +522,8 @@ async fn data_source_hot_config_renders_selected_presets() {
     let operator = memory_admin();
 
     let telemetry = repo
-        .create_data_source_preset(
-            &CreateDataSourcePresetRequest {
+        .create_source_template(
+            &CreateSourceTemplateRequest {
                 domain: "telemetry_metrics_source".to_string(),
                 name: "shared:custom-metrics".to_string(),
                 scope: "shared".to_string(),
@@ -541,8 +544,8 @@ async fn data_source_hot_config_renders_selected_presets() {
         .await
         .unwrap();
     let process = repo
-        .create_data_source_preset(
-            &CreateDataSourcePresetRequest {
+        .create_source_template(
+            &CreateSourceTemplateRequest {
                 domain: "process_inventory_source".to_string(),
                 name: "shared:processctl".to_string(),
                 scope: "shared".to_string(),
@@ -562,8 +565,8 @@ async fn data_source_hot_config_renders_selected_presets() {
         .await
         .unwrap();
     let vnstat = repo
-        .create_data_source_preset(
-            &CreateDataSourcePresetRequest {
+        .create_source_template(
+            &CreateSourceTemplateRequest {
                 domain: "runtime_traffic_accounting_source".to_string(),
                 name: "shared:vnstat".to_string(),
                 scope: "shared".to_string(),
@@ -579,8 +582,8 @@ async fn data_source_hot_config_renders_selected_presets() {
         .await
         .unwrap();
     let execution = repo
-        .create_data_source_preset(
-            &CreateDataSourcePresetRequest {
+        .create_source_template(
+            &CreateSourceTemplateRequest {
                 domain: "command_execution_policy".to_string(),
                 name: "shared:clean-batch".to_string(),
                 scope: "shared".to_string(),
@@ -601,16 +604,16 @@ async fn data_source_hot_config_renders_selected_presets() {
         .await
         .unwrap();
 
-    for (domain, preset_id) in [
+    for (domain, template_id) in [
         ("telemetry_metrics_source", telemetry.id),
         ("process_inventory_source", process.id),
         ("runtime_traffic_accounting_source", vnstat.id),
         ("command_execution_policy", execution.id),
     ] {
-        repo.assign_data_source_preset(
-            &AssignDataSourcePresetRequest {
+        repo.assign_source_template(
+            &AssignSourceTemplateRequest {
                 domain: domain.to_string(),
-                preset_id,
+                template_id,
                 selector_expression: "id:edge-a".to_string(),
                 target_client_ids: vec!["edge-a".to_string()],
                 confirmed: true,
@@ -621,7 +624,7 @@ async fn data_source_hot_config_renders_selected_presets() {
         .unwrap();
     }
 
-    let rendered = repo.render_data_source_hot_config("edge-a").await.unwrap();
+    let rendered = repo.render_source_config_patch("edge-a").await.unwrap();
     assert_eq!(rendered.client_id, "edge-a");
     assert!(rendered.toml.contains("[telemetry]"));
     assert!(rendered
@@ -664,7 +667,7 @@ async fn data_source_hot_config_renders_selected_presets() {
 }
 
 #[tokio::test]
-async fn data_source_hot_config_rejects_unsafe_migrated_preset_commands() {
+async fn source_config_patch_rejects_unsafe_migrated_template_commands() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
@@ -682,10 +685,10 @@ async fn data_source_hot_config_rejects_unsafe_migrated_preset_commands() {
         )
         .await;
         memory
-            .data_source_presets
+            .source_templates
             .write()
             .await
-            .push(DataSourcePresetView {
+            .push(SourceTemplateView {
                 id: Uuid::new_v4(),
                 domain: "command_execution_policy".to_string(),
                 name: "shared:bad-shell".to_string(),
@@ -701,32 +704,29 @@ async fn data_source_hot_config_rejects_unsafe_migrated_preset_commands() {
                 created_at: "0".to_string(),
                 updated_at: "0".to_string(),
             });
-        let preset_id = memory.data_source_presets.read().await.last().unwrap().id;
+        let template_id = memory.source_templates.read().await.last().unwrap().id;
         memory
-            .data_source_assignments
+            .source_template_assignments
             .write()
             .await
-            .push(DataSourcePresetAssignmentView {
+            .push(SourceTemplateAssignmentView {
                 client_id: "edge-a".to_string(),
                 domain: "command_execution_policy".to_string(),
-                preset_id,
-                preset_name: "shared:bad-shell".to_string(),
-                preset_scope: "shared".to_string(),
+                template_id,
+                template_name: "shared:bad-shell".to_string(),
+                template_scope: "shared".to_string(),
                 assigned_at: "0".to_string(),
             });
     }
 
-    let error = repo
-        .render_data_source_hot_config("edge-a")
-        .await
-        .unwrap_err();
+    let error = repo.render_source_config_patch("edge-a").await.unwrap_err();
     assert!(error
         .to_string()
         .contains("shell_script_argv_executable_must_be_absolute"));
 }
 
 #[tokio::test]
-async fn data_source_status_links_selected_presets_to_live_source_evidence() {
+async fn source_status_links_selected_templates_to_live_source_evidence() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
@@ -747,6 +747,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
                     can_manage_runtime_tunnels: true,
                     can_apply_process_limits: true,
                     unprivileged_hint: None,
+                    ..AgentCapabilitySnapshot::default()
                 },
             },
         )
@@ -769,6 +770,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,
                     unprivileged_hint: Some("running without root in test".to_string()),
+                    ..AgentCapabilitySnapshot::default()
                 },
             },
         )
@@ -836,8 +838,8 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
     }
     let operator = memory_admin();
     let vnstat = repo
-        .create_data_source_preset(
-            &CreateDataSourcePresetRequest {
+        .create_source_template(
+            &CreateSourceTemplateRequest {
                 domain: "runtime_traffic_accounting_source".to_string(),
                 name: "shared:vnstat".to_string(),
                 scope: "shared".to_string(),
@@ -852,10 +854,10 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
         )
         .await
         .unwrap();
-    repo.assign_data_source_preset(
-        &AssignDataSourcePresetRequest {
+    repo.assign_source_template(
+        &AssignSourceTemplateRequest {
             domain: "runtime_traffic_accounting_source".to_string(),
-            preset_id: vnstat.id,
+            template_id: vnstat.id,
             selector_expression: "id:edge-a".to_string(),
             target_client_ids: vec!["edge-a".to_string()],
             confirmed: true,
@@ -865,18 +867,15 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
     .await
     .unwrap();
 
-    let all = repo
-        .list_data_source_status(Some("edge-a"), None)
-        .await
-        .unwrap();
+    let all = repo.list_source_status(Some("edge-a"), None).await.unwrap();
     assert_eq!(
         all.len(),
-        crate::data_source_builtin_presets::DATA_SOURCE_DOMAINS.len()
+        crate::source_template_builtins::SOURCE_TEMPLATE_DOMAINS.len()
     );
     assert!(all
         .iter()
         .any(|row| row.domain == "telemetry_metrics_source"
-            && row.preset_name == "builtin:linux_procfs"
+            && row.template_name == "builtin:linux_procfs"
             && row.status == "selected"));
     let process = status_row(&all, "process_inventory_source");
     assert_eq!(process.status, "ready_on_demand");
@@ -922,17 +921,17 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
     assert_eq!(heartbeat.evidence["health_gate"], "heartbeat_verified");
 
     let traffic = repo
-        .list_data_source_status(Some("edge-a"), Some("runtime_traffic_accounting_source"))
+        .list_source_status(Some("edge-a"), Some("runtime_traffic_accounting_source"))
         .await
         .unwrap();
     assert_eq!(traffic.len(), 1);
-    assert_eq!(traffic[0].preset_name, "shared:vnstat");
+    assert_eq!(traffic[0].template_name, "shared:vnstat");
     assert_eq!(traffic[0].source_kind, "vnstat");
     assert_eq!(traffic[0].status, "ok");
     assert_eq!(traffic[0].evidence["sample_count"], 1);
 
     let tunnels = repo
-        .list_data_source_status(Some("edge-a"), Some("runtime_tunnel_adapter"))
+        .list_source_status(Some("edge-a"), Some("runtime_tunnel_adapter"))
         .await
         .unwrap();
     assert_eq!(tunnels.len(), 1);
@@ -943,7 +942,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
     );
 
     let unprivileged_process = repo
-        .list_data_source_status(Some("edge-b"), Some("process_inventory_source"))
+        .list_source_status(Some("edge-b"), Some("process_inventory_source"))
         .await
         .unwrap();
     assert_eq!(unprivileged_process.len(), 1);
@@ -960,7 +959,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
         "agent_capability_snapshot"
     );
     let unprivileged_supervisor = repo
-        .list_data_source_status(Some("edge-b"), Some("process_supervisor_policy"))
+        .list_source_status(Some("edge-b"), Some("process_supervisor_policy"))
         .await
         .unwrap();
     assert_eq!(
@@ -970,7 +969,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
 }
 
 #[tokio::test]
-async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
+async fn source_status_enriches_backup_and_update_runtime_readiness() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
@@ -1160,9 +1159,9 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
     .await
     .unwrap();
 
-    let no_store_state = data_source_test_state(repo.clone(), None);
+    let no_store_state = source_template_test_state(repo.clone(), None);
     let no_store_rows = no_store_state
-        .list_data_source_status(Some("edge-a"), None)
+        .list_source_status(Some("edge-a"), None)
         .await
         .unwrap();
     let backup = status_row(&no_store_rows, "backup_object_store");
@@ -1220,7 +1219,7 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
             });
     }
     let metadata_only_rows = no_store_state
-        .list_data_source_status(Some("edge-a"), Some("update_artifact_source"))
+        .list_source_status(Some("edge-a"), Some("update_artifact_source"))
         .await
         .unwrap();
     let update = status_row(&metadata_only_rows, "update_artifact_source");
@@ -1229,12 +1228,12 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
 
     let backup_store_root =
         std::env::temp_dir().join(format!("vpsman-backup-store-{}", Uuid::new_v4()));
-    let ready_state = data_source_test_state(
+    let ready_state = source_template_test_state(
         repo.clone(),
         Some(BackupObjectStore::filesystem(backup_store_root).unwrap()),
     );
     let ready_rows = ready_state
-        .list_data_source_status(Some("edge-a"), None)
+        .list_source_status(Some("edge-a"), None)
         .await
         .unwrap();
     let backup = status_row(&ready_rows, "backup_object_store");
@@ -1247,7 +1246,7 @@ async fn data_source_status_enriches_backup_and_update_runtime_readiness() {
 }
 
 #[tokio::test]
-async fn data_source_assignment_reads_compute_defaults_without_persisting_hidden_clients() {
+async fn source_template_assignment_reads_compute_defaults_without_persisting_hidden_clients() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         for client_id in ["edge-a", "edge-hidden"] {
@@ -1273,35 +1272,38 @@ async fn data_source_assignment_reads_compute_defaults_without_persisting_hidden
             .insert("edge-hidden".to_string());
     }
 
-    let assignments = repo.list_data_source_assignments(None, None).await.unwrap();
+    let assignments = repo
+        .list_source_template_assignments(None, None)
+        .await
+        .unwrap();
     assert!(assignments.iter().any(|assignment| {
         assignment.client_id == "edge-a"
             && assignment.domain == "runtime_traffic_accounting_source"
-            && assignment.preset_name == "builtin:interface_counters"
+            && assignment.template_name == "builtin:interface_counters"
     }));
     assert!(assignments
         .iter()
         .all(|assignment| assignment.client_id != "edge-hidden"));
 
-    let presets = repo.list_data_source_presets(None).await.unwrap();
-    let default_preset = presets
+    let templates = repo.list_source_templates(None).await.unwrap();
+    let default_template = templates
         .iter()
-        .find(|preset| {
-            preset.domain == "runtime_traffic_accounting_source"
-                && preset.name == "builtin:interface_counters"
+        .find(|template| {
+            template.domain == "runtime_traffic_accounting_source"
+                && template.name == "builtin:interface_counters"
         })
         .unwrap();
-    assert_eq!(default_preset.assigned_client_count, 1);
+    assert_eq!(default_template.assigned_client_count, 1);
 
     if let Repository::Memory(memory) = &repo {
         assert!(
-            memory.data_source_assignments.read().await.is_empty(),
+            memory.source_template_assignments.read().await.is_empty(),
             "default assignment reads must not persist durable rows"
         );
     }
 }
 
-fn data_source_test_state(
+fn source_template_test_state(
     repo: Repository,
     backup_object_store: Option<BackupObjectStore>,
 ) -> AppState {
@@ -1321,10 +1323,10 @@ fn data_source_test_state(
     }
 }
 
-fn status_row<'a>(rows: &'a [DataSourceStatusView], domain: &str) -> &'a DataSourceStatusView {
+fn status_row<'a>(rows: &'a [SourceStatusView], domain: &str) -> &'a SourceStatusView {
     rows.iter()
         .find(|row| row.domain == domain)
-        .unwrap_or_else(|| panic!("missing data-source status row for {domain}"))
+        .unwrap_or_else(|| panic!("missing source template status row for {domain}"))
 }
 
 fn memory_admin() -> AuthContext {

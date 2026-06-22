@@ -819,38 +819,26 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     {
       view: "Config",
       subpage: "Overview",
-      marker: "Config overview",
+      marker: "Agent config overview",
       screenshot: "page-config-overview",
     },
     {
       view: "Config",
-      subpage: "Rules",
-      marker: "Config rules",
-      screenshot: "page-config-rules",
-    },
-    {
-      view: "Config",
-      subpage: "Bulk apply",
-      marker: "Bulk config patches",
+      subpage: "Bulk patch",
+      marker: "Bulk patch",
       screenshot: "page-config-bulk-apply",
     },
     {
       view: "Config",
-      subpage: "Single VPS",
-      marker: "Single VPS config",
+      subpage: "VPS config",
+      marker: "VPS config",
       screenshot: "page-config-single-vps",
     },
     {
       view: "Config",
       subpage: "Templates",
-      marker: "Data-source presets",
+      marker: "Templates",
       screenshot: "page-config-templates",
-    },
-    {
-      view: "Config",
-      subpage: "Status",
-      marker: "Active source status",
-      screenshot: "page-config-status",
     },
     {
       view: "Jobs",
@@ -1034,8 +1022,8 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     },
     {
       view: "System",
-      subpage: "Config",
-      marker: "System config",
+      subpage: "Suite config",
+      marker: "Suite config",
       screenshot: "page-system-config",
     },
     {

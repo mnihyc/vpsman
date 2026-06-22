@@ -1,17 +1,17 @@
-use std::path::PathBuf;
+use std::{net::IpAddr, path::PathBuf};
 
 use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
-    backend_config_signature_payload, payload_hash, plan_tunnel,
-    render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, BandwidthTier,
-    JobCommand, TunnelAddressFamily, TunnelAddressPair, TunnelConfigBackend, TunnelEndpointSide,
-    TunnelPlan, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+    plan_tunnel, render_tunnel_endpoint_config, BandwidthTier, JobCommand, TunnelAddressFamily,
+    TunnelAddressPair, TunnelEndpointSide, TunnelPlan, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
 use crate::{
-    commands_schedules::selector_expression_from_targets, http::http_post_json,
-    privilege::build_privilege_for_job_command, vty_jobs::VtyPrivilegeContext,
+    commands_schedules::selector_expression_from_targets,
+    http::{http_get, http_post_json},
+    privilege::build_privilege_for_job_command,
+    vty_jobs::VtyPrivilegeContext,
 };
 
 pub(crate) use crate::vty_tunnel_plan::{parse_vty_tunnel_plan, VtyTunnelPlanRequest};
@@ -20,7 +20,6 @@ pub(crate) use crate::vty_tunnel_plan::{parse_vty_tunnel_plan, VtyTunnelPlanRequ
 pub(crate) struct VtyTunnelApplyRequest {
     pub(crate) plan_file: PathBuf,
     pub(crate) side: TunnelEndpointSide,
-    pub(crate) backend: TunnelConfigBackend,
     pub(crate) max_timeout_secs: u64,
     pub(crate) privilege_ttl_secs: u64,
     pub(crate) confirmed: bool,
@@ -31,7 +30,7 @@ pub(crate) type VtyTunnelRollbackRequest = VtyTunnelApplyRequest;
 pub(crate) type VtyTunnelStatusRequest = VtyTunnelApplyRequest;
 
 #[derive(Debug, PartialEq)]
-pub(crate) struct VtyTunnelPromoteTelemetryRequest {
+pub(crate) struct VtyTunnelPromoteExternalObserveRequest {
     pub(crate) client_id: String,
     pub(crate) interface: String,
     pub(crate) peer_client_id: String,
@@ -44,7 +43,6 @@ pub(crate) struct VtyTunnelPromoteTelemetryRequest {
     pub(crate) latency_primary_family: TunnelAddressFamily,
     pub(crate) side: TunnelEndpointSide,
     pub(crate) name: Option<String>,
-    pub(crate) topology_version: Option<String>,
     pub(crate) bandwidth: Option<BandwidthTier>,
     pub(crate) latency_ms: Option<f64>,
     pub(crate) packet_loss_ratio: Option<f64>,
@@ -57,8 +55,14 @@ pub(crate) struct VtyTunnelAllocateRequest {
     pub(crate) ipv4_pool_cidr: Option<String>,
     pub(crate) ipv6_pool_cidr: Option<String>,
     pub(crate) reserved_addresses: Vec<String>,
-    pub(crate) include_ipv4: bool,
-    pub(crate) include_ipv6: bool,
+    pub(crate) include_ipv4: Option<bool>,
+    pub(crate) include_ipv6: Option<bool>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct VtyTunnelPlanExportRequest {
+    pub(crate) plan_id: Uuid,
+    pub(crate) output_file: Option<PathBuf>,
 }
 
 pub(crate) fn submit_or_render_vty_tunnel_plan(
@@ -98,14 +102,33 @@ pub(crate) fn submit_vty_tunnel_allocate(
     )
 }
 
-pub(crate) fn submit_vty_tunnel_promote_telemetry(
+pub(crate) fn submit_vty_tunnel_plan_export(
     api_url: &str,
     token: Option<&str>,
-    request: VtyTunnelPromoteTelemetryRequest,
+    request: VtyTunnelPlanExportRequest,
+) -> Result<String> {
+    let plan = http_get(
+        api_url,
+        &format!("/api/v1/tunnel-plans/{}/plan", request.plan_id),
+        token,
+    )?;
+    if let Some(path) = request.output_file {
+        std::fs::write(&path, &plan)
+            .with_context(|| format!("failed to write tunnel plan {}", path.display()))?;
+        Ok(format!("wrote {}", path.display()))
+    } else {
+        Ok(plan)
+    }
+}
+
+pub(crate) fn submit_vty_tunnel_promote_external_observe(
+    api_url: &str,
+    token: Option<&str>,
+    request: VtyTunnelPromoteExternalObserveRequest,
 ) -> Result<String> {
     anyhow::ensure!(
         request.confirmed,
-        "tunnel-promote-telemetry requires --confirmed"
+        "tunnel-promote-external-observe requires --confirmed"
     );
     http_post_json(
         api_url,
@@ -124,7 +147,6 @@ pub(crate) fn submit_vty_tunnel_promote_telemetry(
             "latency_primary_family": request.latency_primary_family,
             "side": request.side,
             "name": request.name,
-            "topology_version": request.topology_version,
             "bandwidth": request.bandwidth,
             "latency_ms": request.latency_ms,
             "packet_loss_ratio": request.packet_loss_ratio,
@@ -138,8 +160,8 @@ pub(crate) fn parse_vty_tunnel_allocate(tokens: &[&str]) -> Result<VtyTunnelAllo
     let mut ipv4_pool_cidr = None::<String>;
     let mut ipv6_pool_cidr = None::<String>;
     let mut reserved_addresses = Vec::<String>::new();
-    let mut include_ipv4 = true;
-    let mut include_ipv6 = false;
+    let mut include_ipv4 = None::<bool>;
+    let mut include_ipv6 = None::<bool>;
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index] {
@@ -172,39 +194,50 @@ pub(crate) fn parse_vty_tunnel_allocate(tokens: &[&str]) -> Result<VtyTunnelAllo
                 index += 1;
             }
             "--reserved-address" | "--reserved" => {
-                reserved_addresses.push(next_value(tokens, index, tokens[index])?.to_string());
+                reserved_addresses.extend(split_csv_values(next_value(
+                    tokens,
+                    index,
+                    tokens[index],
+                )?));
                 index += 2;
             }
             value if value.starts_with("--reserved-address=") => {
-                reserved_addresses.push(flag_value(value, "--reserved-address=").to_string());
+                reserved_addresses
+                    .extend(split_csv_values(flag_value(value, "--reserved-address=")));
                 index += 1;
             }
             value if value.starts_with("--reserved=") => {
-                reserved_addresses.push(flag_value(value, "--reserved=").to_string());
+                reserved_addresses.extend(split_csv_values(flag_value(value, "--reserved=")));
                 index += 1;
             }
             "--include-ipv4" => {
-                include_ipv4 = true;
+                include_ipv4 = Some(true);
                 index += 1;
             }
             "--no-ipv4" | "--disable-ipv4" => {
-                include_ipv4 = false;
+                include_ipv4 = Some(false);
                 index += 1;
             }
             value if value.starts_with("--include-ipv4=") => {
-                include_ipv4 = parse_bool(flag_value(value, "--include-ipv4="), "--include-ipv4")?;
+                include_ipv4 = Some(parse_bool(
+                    flag_value(value, "--include-ipv4="),
+                    "--include-ipv4",
+                )?);
                 index += 1;
             }
             "--include-ipv6" => {
-                include_ipv6 = true;
+                include_ipv6 = Some(true);
                 index += 1;
             }
             "--no-ipv6" | "--disable-ipv6" => {
-                include_ipv6 = false;
+                include_ipv6 = Some(false);
                 index += 1;
             }
             value if value.starts_with("--include-ipv6=") => {
-                include_ipv6 = parse_bool(flag_value(value, "--include-ipv6="), "--include-ipv6")?;
+                include_ipv6 = Some(parse_bool(
+                    flag_value(value, "--include-ipv6="),
+                    "--include-ipv6",
+                )?);
                 index += 1;
             }
             other => anyhow::bail!("unknown tunnel-allocate flag {other}"),
@@ -219,26 +252,58 @@ pub(crate) fn parse_vty_tunnel_allocate(tokens: &[&str]) -> Result<VtyTunnelAllo
     })
 }
 
-pub(crate) fn parse_vty_tunnel_promote_telemetry(
+pub(crate) fn parse_vty_tunnel_plan_export(tokens: &[&str]) -> Result<VtyTunnelPlanExportRequest> {
+    let mut plan_id = None::<Uuid>;
+    let mut output_file = None::<PathBuf>;
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--plan-id" => {
+                plan_id = Some(next_value(tokens, index, "--plan-id")?.parse()?);
+                index += 2;
+            }
+            value if value.starts_with("--plan-id=") => {
+                plan_id = Some(flag_value(value, "--plan-id=").parse()?);
+                index += 1;
+            }
+            "--output-file" | "--output" => {
+                output_file = Some(PathBuf::from(next_value(tokens, index, tokens[index])?));
+                index += 2;
+            }
+            value if value.starts_with("--output-file=") => {
+                output_file = Some(PathBuf::from(flag_value(value, "--output-file=")));
+                index += 1;
+            }
+            value if value.starts_with("--output=") => {
+                output_file = Some(PathBuf::from(flag_value(value, "--output=")));
+                index += 1;
+            }
+            other => anyhow::bail!("unknown tunnel-plan-export flag {other}"),
+        }
+    }
+    Ok(VtyTunnelPlanExportRequest {
+        plan_id: required(plan_id, "--plan-id")?,
+        output_file,
+    })
+}
+
+pub(crate) fn parse_vty_tunnel_promote_external_observe(
     tokens: &[&str],
-) -> Result<VtyTunnelPromoteTelemetryRequest> {
+) -> Result<VtyTunnelPromoteExternalObserveRequest> {
     let mut client_id = None::<String>;
     let mut interface = None::<String>;
     let mut peer_client_id = None::<String>;
     let mut local_underlay = None::<String>;
     let mut peer_underlay = None::<String>;
     let mut address_pool_cidr = None::<String>;
-    let mut left_tunnel_ipv4 = None::<String>;
-    let mut right_tunnel_ipv4 = None::<String>;
-    let mut tunnel_ipv4_prefix_len = 31_u8;
+    let mut left_tunnel_ipv4_cidr = None::<String>;
+    let mut right_tunnel_ipv4_cidr = None::<String>;
     let mut ipv6_address_pool_cidr = None::<String>;
-    let mut left_tunnel_ipv6 = None::<String>;
-    let mut right_tunnel_ipv6 = None::<String>;
-    let mut tunnel_ipv6_prefix_len = 127_u8;
+    let mut left_tunnel_ipv6_cidr = None::<String>;
+    let mut right_tunnel_ipv6_cidr = None::<String>;
     let mut latency_primary_family = TunnelAddressFamily::Ipv4;
     let mut side = TunnelEndpointSide::Left;
     let mut name = None::<String>;
-    let mut topology_version = None::<String>;
     let mut bandwidth = None::<BandwidthTier>;
     let mut latency_ms = None::<f64>;
     let mut packet_loss_ratio = None::<f64>;
@@ -300,36 +365,24 @@ pub(crate) fn parse_vty_tunnel_promote_telemetry(
                 address_pool_cidr = Some(flag_value(value, "--address-pool-cidr=").to_string());
                 index += 1;
             }
-            "--left-tunnel-ipv4" => {
-                left_tunnel_ipv4 =
-                    Some(next_value(tokens, index, "--left-tunnel-ipv4")?.to_string());
+            "--left-tunnel-ipv4-cidr" => {
+                left_tunnel_ipv4_cidr =
+                    Some(next_value(tokens, index, "--left-tunnel-ipv4-cidr")?.to_string());
                 index += 2;
             }
-            value if value.starts_with("--left-tunnel-ipv4=") => {
-                left_tunnel_ipv4 = Some(flag_value(value, "--left-tunnel-ipv4=").to_string());
+            value if value.starts_with("--left-tunnel-ipv4-cidr=") => {
+                left_tunnel_ipv4_cidr =
+                    Some(flag_value(value, "--left-tunnel-ipv4-cidr=").to_string());
                 index += 1;
             }
-            "--right-tunnel-ipv4" => {
-                right_tunnel_ipv4 =
-                    Some(next_value(tokens, index, "--right-tunnel-ipv4")?.to_string());
+            "--right-tunnel-ipv4-cidr" => {
+                right_tunnel_ipv4_cidr =
+                    Some(next_value(tokens, index, "--right-tunnel-ipv4-cidr")?.to_string());
                 index += 2;
             }
-            value if value.starts_with("--right-tunnel-ipv4=") => {
-                right_tunnel_ipv4 = Some(flag_value(value, "--right-tunnel-ipv4=").to_string());
-                index += 1;
-            }
-            "--tunnel-ipv4-prefix-len" => {
-                tunnel_ipv4_prefix_len = parse_u8(
-                    next_value(tokens, index, "--tunnel-ipv4-prefix-len")?,
-                    "--tunnel-ipv4-prefix-len",
-                )?;
-                index += 2;
-            }
-            value if value.starts_with("--tunnel-ipv4-prefix-len=") => {
-                tunnel_ipv4_prefix_len = parse_u8(
-                    flag_value(value, "--tunnel-ipv4-prefix-len="),
-                    "--tunnel-ipv4-prefix-len",
-                )?;
+            value if value.starts_with("--right-tunnel-ipv4-cidr=") => {
+                right_tunnel_ipv4_cidr =
+                    Some(flag_value(value, "--right-tunnel-ipv4-cidr=").to_string());
                 index += 1;
             }
             "--ipv6-address-pool-cidr" | "--ipv6-pool-cidr" => {
@@ -346,36 +399,24 @@ pub(crate) fn parse_vty_tunnel_promote_telemetry(
                 ipv6_address_pool_cidr = Some(flag_value(value, "--ipv6-pool-cidr=").to_string());
                 index += 1;
             }
-            "--left-tunnel-ipv6" => {
-                left_tunnel_ipv6 =
-                    Some(next_value(tokens, index, "--left-tunnel-ipv6")?.to_string());
+            "--left-tunnel-ipv6-cidr" => {
+                left_tunnel_ipv6_cidr =
+                    Some(next_value(tokens, index, "--left-tunnel-ipv6-cidr")?.to_string());
                 index += 2;
             }
-            value if value.starts_with("--left-tunnel-ipv6=") => {
-                left_tunnel_ipv6 = Some(flag_value(value, "--left-tunnel-ipv6=").to_string());
+            value if value.starts_with("--left-tunnel-ipv6-cidr=") => {
+                left_tunnel_ipv6_cidr =
+                    Some(flag_value(value, "--left-tunnel-ipv6-cidr=").to_string());
                 index += 1;
             }
-            "--right-tunnel-ipv6" => {
-                right_tunnel_ipv6 =
-                    Some(next_value(tokens, index, "--right-tunnel-ipv6")?.to_string());
+            "--right-tunnel-ipv6-cidr" => {
+                right_tunnel_ipv6_cidr =
+                    Some(next_value(tokens, index, "--right-tunnel-ipv6-cidr")?.to_string());
                 index += 2;
             }
-            value if value.starts_with("--right-tunnel-ipv6=") => {
-                right_tunnel_ipv6 = Some(flag_value(value, "--right-tunnel-ipv6=").to_string());
-                index += 1;
-            }
-            "--tunnel-ipv6-prefix-len" => {
-                tunnel_ipv6_prefix_len = parse_u8(
-                    next_value(tokens, index, "--tunnel-ipv6-prefix-len")?,
-                    "--tunnel-ipv6-prefix-len",
-                )?;
-                index += 2;
-            }
-            value if value.starts_with("--tunnel-ipv6-prefix-len=") => {
-                tunnel_ipv6_prefix_len = parse_u8(
-                    flag_value(value, "--tunnel-ipv6-prefix-len="),
-                    "--tunnel-ipv6-prefix-len",
-                )?;
+            value if value.starts_with("--right-tunnel-ipv6-cidr=") => {
+                right_tunnel_ipv6_cidr =
+                    Some(flag_value(value, "--right-tunnel-ipv6-cidr=").to_string());
                 index += 1;
             }
             "--latency-primary-family" => {
@@ -405,15 +446,6 @@ pub(crate) fn parse_vty_tunnel_promote_telemetry(
             }
             value if value.starts_with("--name=") => {
                 name = Some(flag_value(value, "--name=").to_string());
-                index += 1;
-            }
-            "--topology-version" => {
-                topology_version =
-                    Some(next_value(tokens, index, "--topology-version")?.to_string());
-                index += 2;
-            }
-            value if value.starts_with("--topology-version=") => {
-                topology_version = Some(flag_value(value, "--topology-version=").to_string());
                 index += 1;
             }
             "--bandwidth" => {
@@ -453,31 +485,35 @@ pub(crate) fn parse_vty_tunnel_promote_telemetry(
                 preference = Some(flag_value(value, "--preference=").parse()?);
                 index += 1;
             }
-            other => anyhow::bail!("unknown tunnel-promote-telemetry flag {other}"),
+            other => anyhow::bail!("unknown tunnel-promote-external-observe flag {other}"),
         }
     }
-    let ipv4_tunnel = build_address_pair(
-        left_tunnel_ipv4,
-        right_tunnel_ipv4,
-        tunnel_ipv4_prefix_len,
+    let ipv4_tunnel = build_address_pair_from_cidrs(
+        left_tunnel_ipv4_cidr,
+        right_tunnel_ipv4_cidr,
+        TunnelAddressFamily::Ipv4,
         "IPv4",
     )?;
-    let ipv6_tunnel = build_address_pair(
-        left_tunnel_ipv6,
-        right_tunnel_ipv6,
-        tunnel_ipv6_prefix_len,
+    let ipv6_tunnel = build_address_pair_from_cidrs(
+        left_tunnel_ipv6_cidr,
+        right_tunnel_ipv6_cidr,
+        TunnelAddressFamily::Ipv6,
         "IPv6",
     )?;
-    ensure_explicit_tunnel_endpoints(&ipv4_tunnel, &ipv6_tunnel, "tunnel-promote-telemetry")?;
-    Ok(VtyTunnelPromoteTelemetryRequest {
-        client_id: client_id.context("tunnel-promote-telemetry requires --client-id")?,
-        interface: interface.context("tunnel-promote-telemetry requires --interface")?,
+    ensure_explicit_tunnel_endpoints(
+        &ipv4_tunnel,
+        &ipv6_tunnel,
+        "tunnel-promote-external-observe",
+    )?;
+    Ok(VtyTunnelPromoteExternalObserveRequest {
+        client_id: client_id.context("tunnel-promote-external-observe requires --client-id")?,
+        interface: interface.context("tunnel-promote-external-observe requires --interface")?,
         peer_client_id: peer_client_id
-            .context("tunnel-promote-telemetry requires --peer-client-id")?,
+            .context("tunnel-promote-external-observe requires --peer-client-id")?,
         local_underlay: local_underlay
-            .context("tunnel-promote-telemetry requires --local-underlay")?,
+            .context("tunnel-promote-external-observe requires --local-underlay")?,
         peer_underlay: peer_underlay
-            .context("tunnel-promote-telemetry requires --peer-underlay")?,
+            .context("tunnel-promote-external-observe requires --peer-underlay")?,
         address_pool_cidr: address_pool_cidr.unwrap_or_default(),
         ipv4_tunnel,
         ipv6_address_pool_cidr,
@@ -485,7 +521,6 @@ pub(crate) fn parse_vty_tunnel_promote_telemetry(
         latency_primary_family,
         side,
         name,
-        topology_version,
         bandwidth,
         latency_ms,
         packet_loss_ratio,
@@ -513,7 +548,6 @@ fn parse_vty_tunnel_change(
 ) -> Result<VtyTunnelApplyRequest> {
     let mut plan_file = None::<PathBuf>;
     let mut side = None::<TunnelEndpointSide>;
-    let mut backend = TunnelConfigBackend::Ifupdown;
     let mut max_timeout_secs = 60_u64;
     let mut privilege_ttl_secs = 300_u64;
     let mut confirmed = false;
@@ -546,14 +580,6 @@ fn parse_vty_tunnel_change(
             }
             value if value.starts_with("--side=") => {
                 side = Some(parse_tunnel_apply_side(flag_value(value, "--side="))?);
-                index += 1;
-            }
-            "--backend" => {
-                backend = parse_tunnel_backend(next_value(tokens, index, "--backend")?)?;
-                index += 2;
-            }
-            value if value.starts_with("--backend=") => {
-                backend = parse_tunnel_backend(flag_value(value, "--backend="))?;
                 index += 1;
             }
             "--max-timeout" | "--max-timeout-secs" => {
@@ -620,7 +646,6 @@ fn parse_vty_tunnel_change(
     Ok(VtyTunnelApplyRequest {
         plan_file: required(plan_file, "--plan-file")?,
         side: required(side, "--side")?,
-        backend,
         max_timeout_secs,
         privilege_ttl_secs,
         confirmed,
@@ -639,17 +664,9 @@ pub(crate) fn submit_vty_tunnel_apply(
     let plan: TunnelPlan =
         serde_json::from_str(&plan_text).context("tunnel plan JSON is invalid")?;
     let endpoint = render_tunnel_endpoint_config(&plan, request.side)?;
-    let backend_config =
-        render_tunnel_endpoint_backend_config(&plan, request.side, request.backend)?;
     let operation = JobCommand::NetworkApply {
         plan: Box::new(plan),
         side: request.side,
-        config_backend: request.backend,
-        config_sha256_hex: Some(payload_hash(&backend_config_signature_payload(
-            &backend_config,
-        ))),
-        ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
     submit_vty_network_job(
         api_url,
@@ -784,25 +801,77 @@ fn flag_value<'a>(value: &'a str, prefix: &str) -> &'a str {
     value.trim_start_matches(prefix)
 }
 
+fn split_csv_values(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 fn required<T>(value: Option<T>, flag: &str) -> Result<T> {
     value.with_context(|| format!("missing required {flag}"))
 }
 
-fn build_address_pair(
+fn build_address_pair_from_cidrs(
     left: Option<String>,
     right: Option<String>,
-    prefix_len: u8,
+    family: TunnelAddressFamily,
     label: &str,
 ) -> Result<Option<TunnelAddressPair>> {
     match (left, right) {
-        (Some(left), Some(right)) => Ok(Some(TunnelAddressPair {
-            left,
-            right,
-            prefix_len,
-        })),
+        (Some(left), Some(right)) => {
+            let (left, left_prefix) = parse_endpoint_cidr(&left, family, label)?;
+            let (right, right_prefix) = parse_endpoint_cidr(&right, family, label)?;
+            anyhow::ensure!(
+                left_prefix == right_prefix,
+                "{label} tunnel endpoint CIDRs must use the same prefix length"
+            );
+            Ok(Some(TunnelAddressPair {
+                left,
+                right,
+                prefix_len: left_prefix,
+            }))
+        }
         (None, None) => Ok(None),
-        _ => anyhow::bail!("{label} tunnel endpoints require both left and right addresses"),
+        _ => anyhow::bail!("{label} tunnel endpoints require both left and right CIDRs"),
     }
+}
+
+fn parse_endpoint_cidr(
+    value: &str,
+    family: TunnelAddressFamily,
+    label: &str,
+) -> Result<(String, u8)> {
+    let (address, prefix) = value
+        .split_once('/')
+        .with_context(|| format!("{label} tunnel endpoint must be address/prefix CIDR"))?;
+    let ip: IpAddr = address
+        .parse()
+        .with_context(|| format!("{label} tunnel endpoint address {address} is invalid"))?;
+    match (family, ip) {
+        (TunnelAddressFamily::Ipv4, IpAddr::V4(_)) => {}
+        (TunnelAddressFamily::Ipv6, IpAddr::V6(_)) => {}
+        (TunnelAddressFamily::Ipv4, IpAddr::V6(_)) => {
+            anyhow::bail!("{label} tunnel endpoint must be IPv4")
+        }
+        (TunnelAddressFamily::Ipv6, IpAddr::V4(_)) => {
+            anyhow::bail!("{label} tunnel endpoint must be IPv6")
+        }
+    }
+    let prefix_len = prefix
+        .parse::<u8>()
+        .with_context(|| format!("{label} tunnel endpoint prefix {prefix} is invalid"))?;
+    let max_prefix = match family {
+        TunnelAddressFamily::Ipv4 => 32,
+        TunnelAddressFamily::Ipv6 => 128,
+    };
+    anyhow::ensure!(
+        prefix_len <= max_prefix,
+        "{label} tunnel endpoint prefix must be <= {max_prefix}"
+    );
+    Ok((address.to_string(), prefix_len))
 }
 
 fn ensure_explicit_tunnel_endpoints(
@@ -812,7 +881,7 @@ fn ensure_explicit_tunnel_endpoints(
 ) -> Result<()> {
     anyhow::ensure!(
         ipv4_tunnel.is_some() || ipv6_tunnel.is_some(),
-        "{command} requires explicit IPv4 or IPv6 tunnel endpoints; run tunnel-allocate for non-overlapping suggestions first"
+        "{command} requires explicit IPv4 or IPv6 tunnel endpoint CIDRs; run tunnel-allocate for non-overlapping suggestions first"
     );
     Ok(())
 }
@@ -842,21 +911,6 @@ fn parse_tunnel_address_family(value: &str) -> Result<TunnelAddressFamily> {
     }
 }
 
-fn parse_tunnel_backend(value: &str) -> Result<TunnelConfigBackend> {
-    match value {
-        "ifupdown" => Ok(TunnelConfigBackend::Ifupdown),
-        "netplan" => Ok(TunnelConfigBackend::Netplan),
-        "systemd-networkd" | "systemd_networkd" => Ok(TunnelConfigBackend::SystemdNetworkd),
-        _ => anyhow::bail!("--backend must be one of ifupdown, netplan, systemd-networkd"),
-    }
-}
-
-fn parse_u8(value: &str, flag: &str) -> Result<u8> {
-    value
-        .parse::<u8>()
-        .with_context(|| format!("{flag} must be an integer from 0 to 255"))
-}
-
 fn parse_bool(value: &str, flag: &str) -> Result<bool> {
     match value {
         "true" | "yes" | "1" | "on" => Ok(true),
@@ -878,13 +932,15 @@ fn parse_bounded_u64(value: &str, flag: &str, min: u64, max: u64) -> Result<u64>
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::{
-        parse_vty_tunnel_allocate, parse_vty_tunnel_apply, parse_vty_tunnel_promote_telemetry,
-        parse_vty_tunnel_rollback, parse_vty_tunnel_status,
+        parse_vty_tunnel_allocate, parse_vty_tunnel_apply, parse_vty_tunnel_plan_export,
+        parse_vty_tunnel_promote_external_observe, parse_vty_tunnel_rollback,
+        parse_vty_tunnel_status,
     };
-    use vpsman_common::{
-        BandwidthTier, TunnelAddressFamily, TunnelConfigBackend, TunnelEndpointSide,
-    };
+    use uuid::Uuid;
+    use vpsman_common::{BandwidthTier, TunnelAddressFamily, TunnelEndpointSide};
 
     #[test]
     fn parses_vty_tunnel_apply() {
@@ -892,7 +948,6 @@ mod tests {
             "--plan-file=/tmp/plan.json",
             "--side",
             "right",
-            "--backend=netplan",
             "--max-timeout=120",
             "--privilege-ttl",
             "90",
@@ -906,7 +961,6 @@ mod tests {
             std::path::PathBuf::from("/tmp/plan.json")
         );
         assert_eq!(request.side, TunnelEndpointSide::Right);
-        assert_eq!(request.backend, TunnelConfigBackend::Netplan);
         assert_eq!(request.max_timeout_secs, 120);
         assert_eq!(request.privilege_ttl_secs, 90);
         assert!(request.confirmed);
@@ -914,8 +968,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_vty_tunnel_promote_telemetry() {
-        let request = parse_vty_tunnel_promote_telemetry(&[
+    fn parses_vty_tunnel_promote_external_observe() {
+        let request = parse_vty_tunnel_promote_external_observe(&[
             "--client-id=edge-a",
             "--interface",
             "tun42",
@@ -924,12 +978,11 @@ mod tests {
             "--peer-underlay",
             "198.51.100.11",
             "--address-pool-cidr=10.44.0.0/30",
-            "--left-tunnel-ipv4=10.44.0.0",
-            "--right-tunnel-ipv4=10.44.0.1",
+            "--left-tunnel-ipv4-cidr=10.44.0.0/31",
+            "--right-tunnel-ipv4-cidr=10.44.0.1/31",
             "--side=right",
             "--name",
             "imported-tun42",
-            "--topology-version=observed-v1",
             "--bandwidth",
             "1000m",
             "--latency-ms=21.5",
@@ -949,7 +1002,6 @@ mod tests {
         assert_eq!(request.ipv4_tunnel.as_ref().unwrap().left, "10.44.0.0");
         assert_eq!(request.side, TunnelEndpointSide::Right);
         assert_eq!(request.name.as_deref(), Some("imported-tun42"));
-        assert_eq!(request.topology_version.as_deref(), Some("observed-v1"));
         assert_eq!(request.bandwidth, Some(BandwidthTier::M1000));
         assert_eq!(request.latency_ms, Some(21.5));
         assert_eq!(request.packet_loss_ratio, Some(0.02));
@@ -958,15 +1010,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_vty_tunnel_promote_telemetry_explicit_endpoints() {
-        let request = parse_vty_tunnel_promote_telemetry(&[
+    fn parses_vty_tunnel_promote_external_observe_explicit_endpoints() {
+        let request = parse_vty_tunnel_promote_external_observe(&[
             "--client-id=edge-a",
             "--interface=tun42",
             "--peer-client-id=edge-b",
             "--local-underlay=198.51.100.10",
             "--peer-underlay=198.51.100.11",
-            "--left-tunnel-ipv4=10.44.0.0",
-            "--right-tunnel-ipv4=10.44.0.1",
+            "--left-tunnel-ipv4-cidr=10.44.0.0/31",
+            "--right-tunnel-ipv4-cidr=10.44.0.1/31",
             "--ipv6-pool-cidr=fd7a:115c:a1e0:44::/126",
             "--latency-primary-family=ipv6",
         ])
@@ -987,7 +1039,7 @@ mod tests {
             "--ipv4-pool-cidr=10.255.40.0/24",
             "--ipv6-pool-cidr",
             "fd7a:115c:a1e0:40::/120",
-            "--reserved=10.255.40.0",
+            "--reserved=10.255.40.0,10.255.40.1",
             "--include-ipv6",
             "--include-ipv4=false",
         ])
@@ -998,14 +1050,33 @@ mod tests {
             request.ipv6_pool_cidr.as_deref(),
             Some("fd7a:115c:a1e0:40::/120")
         );
-        assert_eq!(request.reserved_addresses, vec!["10.255.40.0"]);
-        assert!(!request.include_ipv4);
-        assert!(request.include_ipv6);
+        assert_eq!(
+            request.reserved_addresses,
+            vec!["10.255.40.0", "10.255.40.1"]
+        );
+        assert_eq!(request.include_ipv4, Some(false));
+        assert_eq!(request.include_ipv6, Some(true));
     }
 
     #[test]
-    fn rejects_vty_tunnel_promote_telemetry_missing_required_fields_or_bad_bandwidth() {
-        assert!(parse_vty_tunnel_promote_telemetry(&[
+    fn parses_vty_tunnel_plan_export() {
+        let request = parse_vty_tunnel_plan_export(&[
+            "--plan-id=00000000-0000-0000-0000-000000000001",
+            "--output-file",
+            "/tmp/plan.json",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            request.plan_id,
+            Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+        );
+        assert_eq!(request.output_file, Some(PathBuf::from("/tmp/plan.json")));
+    }
+
+    #[test]
+    fn rejects_vty_tunnel_promote_external_observe_missing_required_fields_or_bad_bandwidth() {
+        assert!(parse_vty_tunnel_promote_external_observe(&[
             "--client-id=edge-a",
             "--interface=tun42",
             "--peer-client-id=edge-b",
@@ -1015,16 +1086,16 @@ mod tests {
             "--bandwidth=25m",
         ])
         .is_err());
-        assert!(parse_vty_tunnel_promote_telemetry(&[
+        assert!(parse_vty_tunnel_promote_external_observe(&[
             "--client-id=edge-a",
             "--interface=tun42",
             "--peer-client-id=edge-b",
             "--local-underlay=198.51.100.10",
             "--peer-underlay=198.51.100.11",
-            "--left-tunnel-ipv4=10.44.0.0",
+            "--left-tunnel-ipv4-cidr=10.44.0.0/31",
         ])
         .is_err());
-        assert!(parse_vty_tunnel_promote_telemetry(&[
+        assert!(parse_vty_tunnel_promote_external_observe(&[
             "--client-id=edge-a",
             "--interface=tun42",
             "--peer-client-id=edge-b",
@@ -1033,7 +1104,7 @@ mod tests {
             "--address-pool-cidr=10.44.0.0/30",
         ])
         .is_err());
-        assert!(parse_vty_tunnel_promote_telemetry(&[
+        assert!(parse_vty_tunnel_promote_external_observe(&[
             "--client-id=edge-a",
             "--interface=tun42",
             "--peer-client-id=edge-b",

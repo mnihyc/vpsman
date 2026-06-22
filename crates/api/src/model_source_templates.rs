@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct DataSourcePresetView {
+pub(crate) struct SourceTemplateView {
     pub(crate) id: Uuid,
     pub(crate) domain: String,
     pub(crate) name: String,
@@ -18,22 +18,22 @@ pub(crate) struct DataSourcePresetView {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct DataSourcePresetAssignmentView {
+pub(crate) struct SourceTemplateAssignmentView {
     pub(crate) client_id: String,
     pub(crate) domain: String,
-    pub(crate) preset_id: Uuid,
-    pub(crate) preset_name: String,
-    pub(crate) preset_scope: String,
+    pub(crate) template_id: Uuid,
+    pub(crate) template_name: String,
+    pub(crate) template_scope: String,
     pub(crate) assigned_at: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct DataSourcePresetQuery {
+pub(crate) struct SourceTemplateQuery {
     pub(crate) domain: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct CreateDataSourcePresetRequest {
+pub(crate) struct CreateSourceTemplateRequest {
     pub(crate) domain: String,
     pub(crate) name: String,
     pub(crate) scope: String,
@@ -43,7 +43,7 @@ pub(crate) struct CreateDataSourcePresetRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct CloneDataSourcePresetRequest {
+pub(crate) struct CloneSourceTemplateRequest {
     pub(crate) name: String,
     pub(crate) scope: String,
     pub(crate) owner_client_id: Option<String>,
@@ -51,7 +51,7 @@ pub(crate) struct CloneDataSourcePresetRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct DataSourcePresetDiffRequest {
+pub(crate) struct SourceTemplateDiffRequest {
     pub(crate) description: Option<String>,
     pub(crate) definition: serde_json::Value,
     #[serde(default)]
@@ -59,12 +59,12 @@ pub(crate) struct DataSourcePresetDiffRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct TestDataSourcePresetRequest {
+pub(crate) struct TestSourceTemplateRequest {
     pub(crate) definition: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct UpdateDataSourcePresetRequest {
+pub(crate) struct UpdateSourceTemplateRequest {
     pub(crate) description: Option<String>,
     pub(crate) definition: serde_json::Value,
     #[serde(default)]
@@ -74,10 +74,10 @@ pub(crate) struct UpdateDataSourcePresetRequest {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct DataSourcePresetDiffView {
-    pub(crate) preset_id: Uuid,
+pub(crate) struct SourceTemplateDiffView {
+    pub(crate) template_id: Uuid,
     pub(crate) domain: String,
-    pub(crate) preset_name: String,
+    pub(crate) template_name: String,
     pub(crate) current_description: Option<String>,
     pub(crate) candidate_description: Option<String>,
     pub(crate) current_definition: serde_json::Value,
@@ -89,10 +89,10 @@ pub(crate) struct DataSourcePresetDiffView {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct DataSourcePresetTestView {
-    pub(crate) preset_id: Uuid,
+pub(crate) struct SourceTemplateTestView {
+    pub(crate) template_id: Uuid,
     pub(crate) domain: String,
-    pub(crate) preset_name: String,
+    pub(crate) template_name: String,
     pub(crate) affected_client_count: i64,
     pub(crate) valid: bool,
     pub(crate) renderable: bool,
@@ -105,35 +105,35 @@ pub(crate) struct DataSourcePresetTestView {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct UpdateDataSourcePresetResponse {
-    pub(crate) preset: DataSourcePresetView,
-    pub(crate) diff: DataSourcePresetDiffView,
+pub(crate) struct UpdateSourceTemplateResponse {
+    pub(crate) template: SourceTemplateView,
+    pub(crate) diff: SourceTemplateDiffView,
     pub(crate) affected_client_count: i64,
     pub(crate) confirmation_required: bool,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct DataSourcePresetAssignmentQuery {
+pub(crate) struct SourceTemplateAssignmentQuery {
     pub(crate) client_id: Option<String>,
     pub(crate) domain: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct DataSourceStatusQuery {
+pub(crate) struct SourceStatusQuery {
     pub(crate) client_id: Option<String>,
     pub(crate) domain: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct DataSourceHotConfigQuery {
+pub(crate) struct SourceConfigPatchQuery {
     pub(crate) client_id: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AssignDataSourcePresetRequest {
+pub(crate) struct AssignSourceTemplateRequest {
     pub(crate) domain: String,
-    pub(crate) preset_id: Uuid,
+    pub(crate) template_id: Uuid,
     #[serde(default)]
     pub(crate) selector_expression: String,
     pub(crate) target_client_ids: Vec<String>,
@@ -142,34 +142,34 @@ pub(crate) struct AssignDataSourcePresetRequest {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct AssignDataSourcePresetResponse {
-    pub(crate) preset: DataSourcePresetView,
+pub(crate) struct AssignSourceTemplateResponse {
+    pub(crate) template: SourceTemplateView,
     pub(crate) target_count: usize,
     pub(crate) confirmation_required: bool,
-    pub(crate) assignments: Vec<DataSourcePresetAssignmentView>,
+    pub(crate) assignments: Vec<SourceTemplateAssignmentView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct DataSourceHotConfigView {
+pub(crate) struct SourceConfigPatchView {
     pub(crate) client_id: String,
     pub(crate) sections: serde_json::Value,
     pub(crate) toml: String,
-    pub(crate) assignments: Vec<DataSourcePresetAssignmentView>,
+    pub(crate) assignments: Vec<SourceTemplateAssignmentView>,
     pub(crate) unsupported_domains: Vec<String>,
     pub(crate) render_notes: Vec<String>,
     pub(crate) generated_at: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct DataSourceStatusView {
+pub(crate) struct SourceStatusView {
     pub(crate) client_id: String,
     pub(crate) display_name: String,
     pub(crate) client_status: String,
     pub(crate) domain: String,
     pub(crate) module: String,
-    pub(crate) preset_id: Uuid,
-    pub(crate) preset_name: String,
-    pub(crate) preset_scope: String,
+    pub(crate) template_id: Uuid,
+    pub(crate) template_name: String,
+    pub(crate) template_scope: String,
     pub(crate) source_kind: String,
     pub(crate) status: String,
     pub(crate) status_reason: String,
@@ -178,7 +178,7 @@ pub(crate) struct DataSourceStatusView {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct HotConfigRuleTemplateView {
+pub(crate) struct HotConfigPatchGeneratorView {
     pub(crate) id: Uuid,
     pub(crate) name: String,
     pub(crate) category: String,
@@ -194,7 +194,7 @@ pub(crate) struct HotConfigRuleTemplateView {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub(crate) struct UpsertHotConfigRuleTemplateRequest {
+pub(crate) struct UpsertHotConfigPatchGeneratorRequest {
     pub(crate) id: Option<Uuid>,
     pub(crate) name: String,
     pub(crate) category: String,
@@ -209,21 +209,21 @@ pub(crate) struct UpsertHotConfigRuleTemplateRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DeleteHotConfigRuleTemplateRequest {
+pub(crate) struct DeleteHotConfigPatchGeneratorRequest {
     #[serde(default)]
     pub(crate) confirmed: bool,
     pub(crate) reviewed_name: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub(crate) struct RenderHotConfigRuleTemplateRequest {
+pub(crate) struct RenderHotConfigPatchGeneratorRequest {
     #[serde(default)]
     pub(crate) values: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct HotConfigRuleTemplateRenderView {
-    pub(crate) template_id: Uuid,
+pub(crate) struct HotConfigPatchGeneratorRenderView {
+    pub(crate) generator_id: Uuid,
     pub(crate) name: String,
     pub(crate) toml: String,
     pub(crate) patch: serde_json::Value,

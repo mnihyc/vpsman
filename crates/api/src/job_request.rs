@@ -1,20 +1,18 @@
 use anyhow::Result;
 use uuid::Uuid;
 use vpsman_common::{
-    backend_config_signature_payload,
     job_command_min_supported_protocol_version as common_job_command_min_supported_protocol_version,
     job_command_protocol_version as common_job_command_protocol_version, payload_hash,
-    render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config,
-    validate_agent_config_shape, validate_incremental_config_patch_section,
-    validate_runtime_topology_intent, validate_runtime_tunnel_control, AgentConfig, JobCommand,
-    ProcessResourceLimits, ProcessRunPolicy, RestoreRollbackFile, TunnelConfigBackend,
-    DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH, HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE,
+    render_tunnel_endpoint_config, validate_agent_config_shape,
+    validate_incremental_config_patch_section, validate_runtime_topology_intent,
+    validate_runtime_tunnel_control, AgentConfig, JobCommand, ProcessResourceLimits,
+    ProcessRunPolicy, RestoreRollbackFile, HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE,
     MAX_AGENT_HOT_CONFIG_BYTES, MAX_SHELL_SCRIPT_BYTES, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
     NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
     NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
     NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
     NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
-    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS, SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH,
 };
 
 use crate::{
@@ -243,13 +241,13 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             }
             Ok(())
         }
-        JobCommand::DataSourceConfigPatch { apply_mode, toml } => {
-            if apply_mode != DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH {
+        JobCommand::SourceConfigPatch { apply_mode, toml } => {
+            if apply_mode != SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH {
                 return Err(ApiError::bad_request(
-                    "data_source_config_apply_mode_must_be_incremental_patch",
+                    "source_template_config_apply_mode_must_be_incremental_patch",
                 ));
             }
-            validate_data_source_config_patch_document(toml)
+            validate_source_config_patch_document(toml)
         }
         JobCommand::UpdateAgent {
             artifact_url,
@@ -301,21 +299,7 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
         JobCommand::RestoreRollback { restored_files, .. } => {
             validate_restore_rollback_operation(restored_files)
         }
-        JobCommand::NetworkApply {
-            plan,
-            side,
-            config_backend,
-            config_sha256_hex,
-            ifupdown_sha256_hex,
-            bird2_sha256_hex,
-        } => validate_network_apply_operation(
-            plan,
-            *side,
-            *config_backend,
-            config_sha256_hex.as_deref(),
-            ifupdown_sha256_hex,
-            bird2_sha256_hex,
-        ),
+        JobCommand::NetworkApply { plan, side } => validate_network_apply_operation(plan, *side),
         JobCommand::NetworkOspfCostUpdate {
             plan,
             side,
@@ -535,10 +519,6 @@ fn validate_post_restore_argv(argv: &[String]) -> Result<(), ApiError> {
 fn validate_network_apply_operation(
     plan: &vpsman_common::TunnelPlan,
     side: vpsman_common::TunnelEndpointSide,
-    backend: TunnelConfigBackend,
-    config_sha256_hex: Option<&str>,
-    ifupdown_sha256_hex: &str,
-    bird2_sha256_hex: &str,
 ) -> Result<(), ApiError> {
     if plan.mutates_host {
         return Err(ApiError::bad_request(
@@ -555,32 +535,8 @@ fn validate_network_apply_operation(
             _ => ApiError::bad_request("network_runtime_topology_invalid"),
         },
     )?;
-    let endpoint = render_tunnel_endpoint_config(plan, side)
+    render_tunnel_endpoint_config(plan, side)
         .map_err(|_| ApiError::bad_request("network_apply_plan_invalid"))?;
-    let backend_config = render_tunnel_endpoint_backend_config(plan, side, backend)
-        .map_err(|_| ApiError::bad_request("network_apply_backend_invalid"))?;
-    if backend == TunnelConfigBackend::Ifupdown
-        && payload_hash(endpoint.ifupdown_snippet.as_bytes())
-            != normalize_sha256(ifupdown_sha256_hex)?
-    {
-        return Err(ApiError::bad_request(
-            "network_apply_ifupdown_hash_mismatch",
-        ));
-    }
-    if backend != TunnelConfigBackend::Ifupdown && config_sha256_hex.is_none() {
-        return Err(ApiError::bad_request("network_apply_config_hash_required"));
-    }
-    if let Some(config_sha256_hex) = config_sha256_hex {
-        let expected = payload_hash(&backend_config_signature_payload(&backend_config));
-        if expected != normalize_sha256(config_sha256_hex)? {
-            return Err(ApiError::bad_request("network_apply_config_hash_mismatch"));
-        }
-    }
-    if payload_hash(endpoint.bird2_interface_snippet.as_bytes())
-        != normalize_sha256(bird2_sha256_hex)?
-    {
-        return Err(ApiError::bad_request("network_apply_bird2_hash_mismatch"));
-    }
     Ok(())
 }
 
@@ -837,20 +793,20 @@ fn validate_hot_config_document(toml_document: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_data_source_config_patch_document(toml_document: &str) -> Result<(), ApiError> {
+fn validate_source_config_patch_document(toml_document: &str) -> Result<(), ApiError> {
     if toml_document.is_empty() {
-        return Err(ApiError::bad_request("data_source_config_patch_required"));
+        return Err(ApiError::bad_request("source_config_patch_required"));
     }
     if toml_document.len() > MAX_AGENT_HOT_CONFIG_BYTES {
-        return Err(ApiError::bad_request("data_source_config_patch_too_large"));
+        return Err(ApiError::bad_request("source_config_patch_too_large"));
     }
     let value = toml::from_str::<toml::Value>(toml_document)
-        .map_err(|_| ApiError::bad_request("data_source_config_patch_invalid_toml"))?;
+        .map_err(|_| ApiError::bad_request("source_config_patch_invalid_toml"))?;
     let table = value
         .as_table()
-        .ok_or_else(|| ApiError::bad_request("data_source_config_patch_invalid"))?;
+        .ok_or_else(|| ApiError::bad_request("source_config_patch_invalid"))?;
     if table.is_empty() {
-        return Err(ApiError::bad_request("data_source_config_patch_empty"));
+        return Err(ApiError::bad_request("source_config_patch_empty"));
     }
     for section in table.keys() {
         validate_incremental_config_patch_section(section)

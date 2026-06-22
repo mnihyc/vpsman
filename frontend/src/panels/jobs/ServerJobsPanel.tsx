@@ -442,6 +442,7 @@ export function ServerJobsPanel({
           )}
           rows={jobs}
           searchPlaceholder="Search server jobs"
+          selectable={false}
           storageKey="vpsman.jobs.serverJobs"
           title="Server job records"
         />

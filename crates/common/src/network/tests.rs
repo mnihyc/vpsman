@@ -400,7 +400,7 @@ fn plans_external_managed_adapter_tunnel_with_commands() {
         plan.runtime_control.manager,
         RuntimeTunnelManager::ExternalManagedAdapter
     );
-    assert!(plan.ifupdown_snippet.contains("external managed adapter"));
+    assert!(plan.ifupdown_snippet.contains("custom adapter"));
     assert_eq!(plan.touched_files, vec![MANAGED_BIRD2_FILE.to_string()]);
     assert!(plan
         .validation_steps

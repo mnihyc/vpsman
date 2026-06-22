@@ -3,13 +3,11 @@ import type {
   JobOperation,
   RuntimeTunnelFouOptions,
   RuntimeTunnelManager,
-  TunnelConfigBackend,
   TunnelEndpointSide,
   TunnelKind,
   TunnelPlan,
 } from "./types";
 import { DEFAULT_RUNTIME_FOU_OPTIONS } from "./topologyRuntime";
-import { networkBackendFilePresets } from "./presets/networkBackendPresets";
 
 const encoder = new TextEncoder();
 
@@ -85,20 +83,14 @@ function endpointAddressPair(
 export async function buildNetworkApplyOperation(
   plan: TunnelPlan,
   side: TunnelEndpointSide,
-  backend: TunnelConfigBackend = "ifupdown",
 ): Promise<{ endpoint: TunnelEndpointConfig; operation: JobOperation }> {
   const endpoint = renderTunnelEndpointConfig(plan, side);
-  const backendConfig = renderBackendConfig(plan, endpoint, backend);
   return {
     endpoint,
     operation: {
       type: "network_apply",
       plan,
       side,
-      config_backend: backend,
-      config_sha256_hex: await sha256Text(backendSignaturePayload(backendConfig, backend)),
-      ifupdown_sha256_hex: await sha256Text(endpoint.ifupdownSnippet),
-      bird2_sha256_hex: await sha256Text(endpoint.bird2InterfaceSnippet),
     },
   };
 }
@@ -202,53 +194,6 @@ function sha256Text(value: string): Promise<string> {
   return sha256Hex(encoder.encode(value));
 }
 
-type BackendFile = {
-  managedPath: string;
-  blockKind: string;
-  contents: string;
-};
-
-function renderBackendConfig(plan: TunnelPlan, endpoint: TunnelEndpointConfig, backend: TunnelConfigBackend): BackendFile[] {
-  if ((plan.runtime_control?.manager ?? "agent_iproute2_managed") !== "agent_iproute2_managed") {
-    return [];
-  }
-  if (backend === "ifupdown") {
-    return networkBackendFilePresets(backend).map((preset) => ({
-      ...preset,
-      contents: endpoint.ifupdownSnippet,
-    }));
-  }
-  if (backend === "netplan") {
-    if (plan.kind === "fou" || !isLinuxTunnelKind(plan.kind)) {
-      throw new Error("Netplan backend does not support this tunnel rendering");
-    }
-    return networkBackendFilePresets(backend).map((preset) => ({
-      ...preset,
-      contents: renderNetplanSnippet(plan, endpoint),
-    }));
-  }
-  const [netdevPreset, networkPreset] = networkBackendFilePresets(backend);
-  return [
-    {
-      ...netdevPreset,
-      contents: renderSystemdNetdevSnippet(plan, endpoint),
-    },
-    {
-      ...networkPreset,
-      contents: renderSystemdNetworkSnippet(plan, endpoint),
-    },
-  ];
-}
-
-function backendSignaturePayload(files: BackendFile[], backend: TunnelConfigBackend): string {
-  return files
-    .map(
-      (file) =>
-        `vpsman-network-backend-file-v1\nbackend=${backend}\npath=${file.managedPath}\nkind=${file.blockKind}\ncontents-sha256-context\n${file.contents}\n`,
-    )
-    .join("");
-}
-
 function renderIfupdownSnippet(input: {
   name: string;
   interfaceName: string;
@@ -346,81 +291,10 @@ function renderRuntimeSnippet(
     ].join("\n");
   }
   return [
-    `# vpsman tunnel ${input.name}: external managed adapter runtime tunnel`,
+    `# vpsman tunnel ${input.name}: custom adapter runtime tunnel`,
     `# interface ${input.interfaceName} is created, restarted, shaped, or stopped by adapter commands`,
     "# vpsman will run bounded adapter argv, observe evidence, and manage the Bird2 block",
   ].join("\n");
-}
-
-function renderNetplanSnippet(plan: TunnelPlan, endpoint: TunnelEndpointConfig): string {
-  return [
-    `# vpsman tunnel ${plan.name}: generated endpoint ${endpoint.localClientId}`,
-    "network:",
-    "  version: 2",
-    "  renderer: networkd",
-    "  tunnels:",
-    `    ${plan.interface_name}:`,
-    `      mode: ${plan.kind}`,
-    `      local: ${endpoint.localUnderlay}`,
-    `      remote: ${endpoint.remoteUnderlay}`,
-    "      ttl: 255",
-    "      addresses:",
-    ...endpointAddresses(endpoint).map((address) => `        - ${address.local}/${address.prefixLen}`),
-    "",
-  ].join("\n");
-}
-
-function renderSystemdNetdevSnippet(plan: TunnelPlan, endpoint: TunnelEndpointConfig): string {
-  if (!isLinuxTunnelKind(plan.kind)) {
-    throw new Error("systemd-networkd backend does not support this tunnel rendering");
-  }
-  const lines = [
-    `# vpsman tunnel ${plan.name}: generated endpoint ${endpoint.localClientId}`,
-    "[NetDev]",
-    `Name=${plan.interface_name}`,
-    `Kind=${plan.kind === "fou" ? "fou" : plan.kind}`,
-    "",
-    "[Tunnel]",
-    `Local=${endpoint.localUnderlay}`,
-    `Remote=${endpoint.remoteUnderlay}`,
-    "TTL=255",
-  ];
-  if (plan.kind === "fou") {
-    const fou = runtimeFouOptions(plan.kind, plan.runtime_control?.fou);
-    lines.push(
-      "",
-      "[FooOverUDP]",
-      "Encapsulation=FooOverUDP",
-      `Port=${fou.port}`,
-      `PeerPort=${fou.peer_port}`,
-      `Protocol=${fou.ipproto}`,
-    );
-  }
-  lines.push("");
-  return lines.join("\n");
-}
-
-function renderSystemdNetworkSnippet(plan: TunnelPlan, endpoint: TunnelEndpointConfig): string {
-  return [
-    `# vpsman tunnel ${plan.name}: generated endpoint ${endpoint.localClientId}`,
-    "[Match]",
-    `Name=${plan.interface_name}`,
-    "",
-    "[Network]",
-    ...endpointAddresses(endpoint).flatMap((address) => [
-      `Address=${address.local}/${address.prefixLen}`,
-      `Peer=${address.remote}`,
-    ]),
-    "",
-  ].join("\n");
-}
-
-function endpointAddresses(endpoint: TunnelEndpointConfig): EndpointAddressPair[] {
-  const addresses = [endpoint.ipv4Address, endpoint.ipv6Address].filter(Boolean) as EndpointAddressPair[];
-  if (addresses.length > 0) {
-    return addresses;
-  }
-  return [{ local: endpoint.localAddress, remote: endpoint.remoteAddress, prefixLen: endpoint.prefixLen }];
 }
 
 function renderBird2InterfaceSnippet(

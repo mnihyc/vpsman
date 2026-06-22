@@ -372,28 +372,28 @@ jq -e '
   any(.[]; .id == "cli-agent-b" and .status == "online" and .capabilities.privilege_mode == "unprivileged" and .capabilities.can_apply_process_limits == false)
 ' \
   <<<"$agents_json" >/dev/null
-data_source_status_json="$(vpsctl_auth data-source-status --domain telemetry_metrics_source)"
+source_status_json="$(vpsctl_auth source-status --domain telemetry_metrics_source)"
 jq -e '
   map(select(.client_id == "cli-agent-a" or .client_id == "cli-agent-b")) as $live |
   ($live | length) == 2 and
-  all($live[]; .domain == "telemetry_metrics_source" and .preset_name == "builtin:linux_procfs" and .status == "selected")
+  all($live[]; .domain == "telemetry_metrics_source" and .template_name == "builtin:linux_procfs" and .status == "selected")
 ' \
-  <<<"$data_source_status_json" >/dev/null
-backup_source_status_json="$(vpsctl_auth data-source-status --domain backup_object_store)"
+  <<<"$source_status_json" >/dev/null
+backup_source_status_json="$(vpsctl_auth source-status --domain backup_object_store)"
 jq -e '
   map(select(.client_id == "cli-agent-a" or .client_id == "cli-agent-b")) as $live |
   ($live | length) == 2 and
-  all($live[]; .domain == "backup_object_store" and .preset_name == "builtin:local_filesystem" and .status == "ready") and
+  all($live[]; .domain == "backup_object_store" and .template_name == "builtin:local_filesystem" and .status == "ready") and
   all($live[]; .evidence.server_object_store_configured == true and .evidence.server_object_store_kind == "filesystem" and (.evidence.artifact_count | type == "number"))
 ' <<<"$backup_source_status_json" >/dev/null
-update_source_status_json="$(vpsctl_auth data-source-status --domain update_artifact_source)"
+update_source_status_json="$(vpsctl_auth source-status --domain update_artifact_source)"
 jq -e '
   map(select(.client_id == "cli-agent-a" or .client_id == "cli-agent-b")) as $live |
   ($live | length) == 2 and
-  all($live[]; .domain == "update_artifact_source" and .preset_name == "builtin:external_https_sha256" and .status == "selected_no_artifacts") and
+  all($live[]; .domain == "update_artifact_source" and .template_name == "builtin:external_https_sha256" and .status == "selected_no_artifacts") and
   all($live[]; .evidence.external_release_count == .evidence.release_count)
 ' <<<"$update_source_status_json" >/dev/null
-workflow_source_status_json="$(vpsctl_auth data-source-status)"
+workflow_source_status_json="$(vpsctl_auth source-status)"
 jq -e '
   ([.[].domain] | unique) as $domains |
   ($domains | index("process_inventory_source")) and
@@ -694,11 +694,11 @@ if [[ "$scoped_alert_notification_write_status" != "403" ]]; then
   fail "fleet:read scoped fleet-alert-notification write returned HTTP $scoped_alert_notification_write_status: $scoped_alert_notification_write_body"
 fi
 jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_alert_notification_write_body" >/dev/null
-traffic_presets_json="$(vpsctl_auth data-source-presets --domain runtime_traffic_accounting_source)"
+traffic_templates_json="$(vpsctl_auth source-templates --domain runtime_traffic_accounting_source)"
 jq -e '
   any(.[]; .name == "builtin:interface_counters" and .built_in == true and .is_default == true) and
   any(.[]; .name == "builtin:vnstat_json" and .built_in == true and .is_default == false)
-' <<<"$traffic_presets_json" >/dev/null
+' <<<"$traffic_templates_json" >/dev/null
 
 tag_json="$(vpsctl_auth tag-create --name cli-live-tag)"
 jq -e '.name == "cli-live-tag"' <<<"$tag_json" >/dev/null
@@ -719,8 +719,8 @@ plan_json="$(vpsctl_auth tunnel-plan \
   --left-underlay 203.0.113.201 \
   --right-underlay 203.0.113.202 \
   --address-pool-cidr 10.252.0.0/30 \
-  --left-tunnel-ipv4 10.252.0.0 \
-  --right-tunnel-ipv4 10.252.0.1 \
+  --left-tunnel-ipv4-cidr 10.252.0.0/31 \
+  --right-tunnel-ipv4-cidr 10.252.0.1/31 \
   --bandwidth 100m \
   --latency-ms 25 \
   --save \
@@ -814,11 +814,11 @@ jq -n \
       "fleet_alert_notifications",
       "direct_agent_identity",
       "agents_summary",
-      "data_source_status",
-      "data_source_object_store_readiness",
-      "data_source_workflow_readiness",
-      "data_source_process_limit_readiness",
-      "curated_data_source_presets",
+      "source_status",
+      "source_template_object_store_readiness",
+      "source_template_workflow_readiness",
+      "source_template_process_limit_readiness",
+      "curated_source_templates",
       "tag_bulk",
       "tunnel_plan_save_list",
       "schedule_create_list",

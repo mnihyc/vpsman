@@ -12,6 +12,7 @@ import {
   Languages,
   ListChecks,
   RotateCcw,
+  Route,
   Save,
   ServerCog,
   Tags,
@@ -472,6 +473,41 @@ export function PreferencesPanel({ operator, tags }: PreferencesPanelProps) {
                 placeholder={"primary=gw.example.com:9443=10\nbackup=gw2.example.com:9443=20"}
                 rows={3}
                 value={draft.gateway_endpoints}
+              />
+            </label>
+          </PreferenceGroup>
+
+          <PreferenceGroup
+            description="Used to prefill tunnel endpoint allocation pools. Empty fields keep allocation manual."
+            icon={<Route size={18} />}
+            title="Tunnel allocation"
+          >
+            <label>
+              <span>IPv4 pool CIDR</span>
+              <input
+                aria-label="Tunnel IPv4 allocation pool CIDR"
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    tunnel_ipv4_allocation_pool_cidr: event.target.value,
+                  }))
+                }
+                placeholder="No default; enter IPv4 pool CIDR"
+                value={draft.tunnel_ipv4_allocation_pool_cidr}
+              />
+            </label>
+            <label>
+              <span>IPv6 pool CIDR</span>
+              <input
+                aria-label="Tunnel IPv6 allocation pool CIDR"
+                onChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    tunnel_ipv6_allocation_pool_cidr: event.target.value,
+                  }))
+                }
+                placeholder="No default; enter IPv6 pool CIDR"
+                value={draft.tunnel_ipv6_allocation_pool_cidr}
               />
             </label>
           </PreferenceGroup>

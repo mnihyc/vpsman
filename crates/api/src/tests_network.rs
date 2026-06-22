@@ -4,13 +4,11 @@ use axum::{extract::State, http::StatusCode, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use tokio::sync::broadcast;
 use vpsman_common::{
-    backend_config_signature_payload, payload_hash, plan_tunnel,
-    render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, AgentCapabilitySnapshot,
-    AgentHello, AgentPrivilegeMode, BandwidthTier, JobCommand, OspfCostPolicy,
-    RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelRoute,
-    RuntimeTunnelTopologyIntent, TunnelConfigBackend, TunnelEndpointSide, TunnelKind, TunnelPlan,
-    TunnelPlanInput, CURRENT_COMMAND_PROTOCOL_VERSION, MANAGED_BIRD2_FILE,
-    MIN_COMMAND_PROTOCOL_VERSION,
+    payload_hash, plan_tunnel, render_tunnel_endpoint_config, AgentCapabilitySnapshot, AgentHello,
+    AgentPrivilegeMode, BandwidthTier, JobCommand, OspfCostPolicy, RuntimeTunnelCommand,
+    RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelRoute, RuntimeTunnelTopologyIntent,
+    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput, CURRENT_COMMAND_PROTOCOL_VERSION,
+    MANAGED_BIRD2_FILE, MIN_COMMAND_PROTOCOL_VERSION,
 };
 
 use crate::{
@@ -123,8 +121,8 @@ async fn allocate_tunnel_endpoints_skips_existing_plan_addresses() {
             ipv4_pool_cidr: Some("10.10.0.0/29".to_string()),
             ipv6_pool_cidr: Some("fd00:10::/126".to_string()),
             reserved_addresses: Vec::new(),
-            include_ipv4: true,
-            include_ipv6: true,
+            include_ipv4: Some(true),
+            include_ipv6: Some(true),
         }),
     )
     .await
@@ -138,6 +136,134 @@ async fn allocate_tunnel_endpoints_skips_existing_plan_addresses() {
     assert_eq!(ipv6.left, "fd00:10::");
     assert_eq!(ipv6.right, "fd00:10::1");
     assert_eq!(ipv6.prefix_len, 127);
+}
+
+#[tokio::test]
+async fn allocate_tunnel_endpoints_empty_without_configured_pools() {
+    let state = test_state(Repository::Memory(MemoryState::default()));
+    let headers = crate::test_auth_headers(&state).await;
+    let Json(allocation) = crate::routes_network::allocate_tunnel_endpoints(
+        State(state),
+        headers,
+        Json(AllocateTunnelEndpointsRequest {
+            ipv4_pool_cidr: None,
+            ipv6_pool_cidr: None,
+            reserved_addresses: Vec::new(),
+            include_ipv4: None,
+            include_ipv6: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(allocation.ipv4_tunnel.is_none());
+    assert!(allocation.ipv6_tunnel.is_none());
+}
+
+#[tokio::test]
+async fn allocate_tunnel_endpoints_uses_configured_pools_for_empty_request() {
+    let state = test_state_with_suite_config(
+        Repository::Memory(MemoryState::default()),
+        r#"
+version = 1
+
+[network]
+tunnel_ipv4_allocation_pool_cidr = "10.20.0.0/30"
+tunnel_ipv6_allocation_pool_cidr = "fd80:20::/126"
+"#,
+    );
+    let headers = crate::test_auth_headers(&state).await;
+    let Json(allocation) = crate::routes_network::allocate_tunnel_endpoints(
+        State(state),
+        headers,
+        Json(AllocateTunnelEndpointsRequest {
+            ipv4_pool_cidr: None,
+            ipv6_pool_cidr: None,
+            reserved_addresses: Vec::new(),
+            include_ipv4: None,
+            include_ipv6: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let ipv4 = allocation.ipv4_tunnel.expect("ipv4");
+    let ipv6 = allocation.ipv6_tunnel.expect("ipv6");
+    assert_eq!(ipv4.left, "10.20.0.0");
+    assert_eq!(ipv4.right, "10.20.0.1");
+    assert_eq!(ipv6.left, "fd80:20::");
+    assert_eq!(ipv6.right, "fd80:20::1");
+}
+
+#[tokio::test]
+async fn allocate_tunnel_endpoints_request_pool_does_not_pull_other_configured_family() {
+    let state = test_state_with_suite_config(
+        Repository::Memory(MemoryState::default()),
+        r#"
+version = 1
+
+[network]
+tunnel_ipv6_allocation_pool_cidr = "fd80:21::/126"
+"#,
+    );
+    let headers = crate::test_auth_headers(&state).await;
+    let Json(allocation) = crate::routes_network::allocate_tunnel_endpoints(
+        State(state),
+        headers,
+        Json(AllocateTunnelEndpointsRequest {
+            ipv4_pool_cidr: Some("10.21.0.0/30".to_string()),
+            ipv6_pool_cidr: None,
+            reserved_addresses: Vec::new(),
+            include_ipv4: None,
+            include_ipv6: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(allocation.ipv4_tunnel.is_some());
+    assert!(allocation.ipv6_tunnel.is_none());
+}
+
+#[tokio::test]
+async fn export_tunnel_plan_returns_inner_plan_json() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = AuthContext {
+        operator: OperatorView {
+            id: Uuid::nil(),
+            username: "test-operator".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
+            totp_enabled: false,
+            status: "active".to_string(),
+            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            created_at: crate::unix_now().to_string(),
+            disabled_at: None,
+            deleted_at: None,
+        },
+        session_id: Uuid::nil(),
+    };
+    let input = test_plan_input();
+    let plan = plan_tunnel(&input).unwrap();
+    let view = repo
+        .record_tunnel_plan(&input, &plan, &operator)
+        .await
+        .unwrap();
+
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let Json(exported) = crate::routes_network::export_tunnel_plan(
+        State(state),
+        headers,
+        axum::extract::Path(view.id),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(exported.name, plan.name);
+    assert_eq!(exported.interface_name, plan.interface_name);
+    assert_eq!(exported.ipv4_tunnel, plan.ipv4_tunnel);
 }
 
 #[tokio::test]
@@ -471,17 +597,13 @@ async fn completed_network_jobs_update_tunnel_plan_endpoint_state() {
     repo.record_tunnel_plan(&input, &plan, &operator)
         .await
         .unwrap();
-    let left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let left_job = Uuid::new_v4();
     repo.record_tunnel_plan_execution(
         left_job,
         &JobCommand::NetworkApply {
             plan: Box::new(plan.clone()),
             side: TunnelEndpointSide::Left,
-            config_backend: TunnelConfigBackend::Ifupdown,
-            config_sha256_hex: None,
-            ifupdown_sha256_hex: payload_hash(left.ifupdown_snippet.as_bytes()),
-            bird2_sha256_hex: payload_hash(left.bird2_interface_snippet.as_bytes()),
         },
         "completed",
     )
@@ -493,16 +615,12 @@ async fn completed_network_jobs_update_tunnel_plan_endpoint_state() {
     assert_eq!(plans[0].status, "partially_applied");
     assert_eq!(plans[0].last_apply_job_id, Some(left_job));
 
-    let right = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
+    let _right = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
     repo.record_tunnel_plan_execution(
         Uuid::new_v4(),
         &JobCommand::NetworkApply {
             plan: Box::new(plan.clone()),
             side: TunnelEndpointSide::Right,
-            config_backend: TunnelConfigBackend::Ifupdown,
-            config_sha256_hex: None,
-            ifupdown_sha256_hex: payload_hash(right.ifupdown_snippet.as_bytes()),
-            bird2_sha256_hex: payload_hash(right.bird2_interface_snippet.as_bytes()),
         },
         "completed",
     )
@@ -671,15 +789,11 @@ async fn completed_network_job_refresh_repairs_missing_tunnel_plan_execution_onc
         .await
         .unwrap();
 
-    let left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let job_id = Uuid::new_v4();
     let operation = JobCommand::NetworkApply {
         plan: Box::new(plan.clone()),
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: payload_hash(left.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: payload_hash(left.bird2_interface_snippet.as_bytes()),
     };
     seed_completed_network_job(&memory, job_id, operation).await;
 
@@ -730,7 +844,7 @@ async fn completed_network_job_refresh_does_not_rewrite_newer_tunnel_plan_execut
         .await
         .unwrap();
 
-    let left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let old_job = Uuid::new_v4();
     seed_completed_network_job(
         &memory,
@@ -738,25 +852,17 @@ async fn completed_network_job_refresh_does_not_rewrite_newer_tunnel_plan_execut
         JobCommand::NetworkApply {
             plan: Box::new(plan.clone()),
             side: TunnelEndpointSide::Left,
-            config_backend: TunnelConfigBackend::Ifupdown,
-            config_sha256_hex: None,
-            ifupdown_sha256_hex: payload_hash(left.ifupdown_snippet.as_bytes()),
-            bird2_sha256_hex: payload_hash(left.bird2_interface_snippet.as_bytes()),
         },
     )
     .await;
 
-    let right = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
+    let _right = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
     let newer_job = Uuid::new_v4();
     repo.record_tunnel_plan_execution(
         newer_job,
         &JobCommand::NetworkApply {
             plan: Box::new(plan.clone()),
             side: TunnelEndpointSide::Right,
-            config_backend: TunnelConfigBackend::Ifupdown,
-            config_sha256_hex: None,
-            ifupdown_sha256_hex: payload_hash(right.ifupdown_snippet.as_bytes()),
-            bird2_sha256_hex: payload_hash(right.bird2_interface_snippet.as_bytes()),
         },
         "completed",
     )
@@ -830,41 +936,19 @@ async fn wait_for_job_status(
 }
 
 #[test]
-fn network_apply_validation_rejects_mutating_plan_or_hash_mismatch() {
+fn network_apply_validation_rejects_mutating_plan() {
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let command = JobCommand::NetworkApply {
         plan: Box::new(plan.clone()),
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
     validate_job_command(&command).unwrap();
-
-    let bad_hash = JobCommand::NetworkApply {
-        plan: Box::new(plan.clone()),
-        side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: "0000000000000000000000000000000000000000000000000000000000000000"
-            .to_string(),
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
-    };
-    let error = validate_job_command(&bad_hash).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_apply_ifupdown_hash_mismatch");
 
     let mut mutating_plan = plan;
     mutating_plan.mutates_host = true;
     let mutating = JobCommand::NetworkApply {
         plan: Box::new(mutating_plan),
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
     let error = validate_job_command(&mutating).unwrap_err();
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
@@ -883,14 +967,9 @@ fn network_validation_rejects_invalid_runtime_tunnel_control() {
         }),
         ..RuntimeTunnelControl::default()
     };
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let command = JobCommand::NetworkApply {
         plan: Box::new(plan),
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
 
     let error = validate_job_command(&command).unwrap_err();
@@ -905,14 +984,9 @@ fn network_apply_validation_rejects_invalid_runtime_topology() {
         desired_interfaces: vec!["other0".to_string()],
         ..RuntimeTunnelTopologyIntent::default()
     };
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let command = JobCommand::NetworkApply {
         plan: Box::new(plan),
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
 
     let error = validate_job_command(&command).unwrap_err();
@@ -931,64 +1005,14 @@ fn network_apply_validation_rejects_invalid_runtime_route() {
         }],
         ..RuntimeTunnelTopologyIntent::default()
     };
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let command = JobCommand::NetworkApply {
         plan: Box::new(plan),
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
 
     let error = validate_job_command(&command).unwrap_err();
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "network_runtime_route_invalid");
-}
-
-#[test]
-fn network_apply_validation_requires_backend_specific_config_hash() {
-    let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
-    let backend_config = render_tunnel_endpoint_backend_config(
-        &plan,
-        TunnelEndpointSide::Left,
-        TunnelConfigBackend::Netplan,
-    )
-    .unwrap();
-    let command = JobCommand::NetworkApply {
-        plan: Box::new(plan.clone()),
-        side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Netplan,
-        config_sha256_hex: Some(payload_hash(&backend_config_signature_payload(
-            &backend_config,
-        ))),
-        ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
-    };
-    validate_job_command(&command).unwrap();
-
-    let missing_hash = JobCommand::NetworkApply {
-        plan: Box::new(plan.clone()),
-        side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Netplan,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
-    };
-    let error = validate_job_command(&missing_hash).unwrap_err();
-    assert_eq!(error.code, "network_apply_config_hash_required");
-
-    let bad_hash = JobCommand::NetworkApply {
-        plan: Box::new(plan),
-        side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Netplan,
-        config_sha256_hex: Some("00".repeat(32)),
-        ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
-    };
-    let error = validate_job_command(&bad_hash).unwrap_err();
-    assert_eq!(error.code, "network_apply_config_hash_mismatch");
 }
 
 #[test]
@@ -1168,7 +1192,7 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
     }
 
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let request = CreateJobRequest {
         job_id: Some(Uuid::new_v4()),
         selector_expression: "id:right-b".to_string(),
@@ -1180,10 +1204,6 @@ async fn network_apply_create_job_rejects_wrong_side_target() {
         operation: Some(JobCommand::NetworkApply {
             plan: Box::new(plan),
             side: TunnelEndpointSide::Left,
-            config_backend: TunnelConfigBackend::Ifupdown,
-            config_sha256_hex: None,
-            ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-            bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         }),
         max_timeout_secs: Some(60),
         force_unprivileged: false,
@@ -1226,14 +1246,10 @@ async fn network_apply_degrades_unprivileged_target_after_privilege_verification
     }
 
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let operation = JobCommand::NetworkApply {
         plan: Box::new(plan),
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
     };
     let request = CreateJobRequest {
         job_id: Some(Uuid::new_v4()),
@@ -1648,6 +1664,16 @@ fn test_state(repo: Repository) -> AppState {
         require_registered_agent_updates: false,
         suite_config_path: std::path::PathBuf::from("config/vpsman.toml"),
         dispatcher_config: crate::state::DispatcherRuntimeConfig::default(),
+    }
+}
+
+fn test_state_with_suite_config(repo: Repository, suite_config: &str) -> AppState {
+    let path =
+        std::env::temp_dir().join(format!("vpsman-tests-suite-config-{}.toml", Uuid::new_v4()));
+    std::fs::write(&path, suite_config).expect("write suite config");
+    AppState {
+        suite_config_path: path,
+        ..test_state(repo)
     }
 }
 

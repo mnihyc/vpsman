@@ -49,15 +49,14 @@ use crate::{
         validate_agent_identity, verify_agent_update_artifact,
     },
     routes_inventory::{
-        assign_agent_tag, assign_data_source_preset, bulk_mutate_tags, clone_data_source_preset,
-        create_data_source_preset, create_tag, delete_agent, delete_hot_config_rule_template,
-        delete_tag, diff_data_source_preset, fleet_summary, list_agents,
-        list_data_source_assignments, list_data_source_presets, list_data_source_status,
-        list_gateway_sessions, list_hot_config_rule_templates, list_tags,
-        list_telemetry_network_rates, list_telemetry_rollups, list_telemetry_tunnels,
-        render_data_source_hot_config, render_hot_config_rule_template, resolve_bulk_targets,
-        test_data_source_preset, update_agent_alias, update_data_source_preset, update_tag_order,
-        upsert_hot_config_rule_template,
+        assign_agent_tag, assign_source_template, bulk_mutate_tags, clone_source_template,
+        create_source_template, create_tag, delete_agent, delete_hot_config_patch_generator,
+        delete_tag, diff_source_template, fleet_summary, list_agents, list_gateway_sessions,
+        list_hot_config_patch_generators, list_source_status, list_source_template_assignments,
+        list_source_templates, list_tags, list_telemetry_network_rates, list_telemetry_rollups,
+        list_telemetry_tunnels, render_hot_config_patch_generator, render_source_config_patch,
+        resolve_bulk_targets, test_source_template, update_agent_alias, update_source_template,
+        update_tag_order, upsert_hot_config_patch_generator,
     },
     routes_job_history::{
         compare_job_outputs, download_file_download_bundle, download_file_download_for_client,
@@ -74,8 +73,9 @@ use crate::{
     routes_migrations::{create_migration_link, create_migration_run, list_migration_links},
     routes_network::{
         allocate_tunnel_endpoints, create_tunnel_plan, disable_tunnel_plan, enable_tunnel_plan,
-        get_topology_graph, list_network_ospf_recommendations, list_network_ospf_update_plans,
-        list_tunnel_plans, promote_telemetry_tunnel_plan, promote_tunnel_plan_to_adapter,
+        export_tunnel_plan, get_topology_graph, list_network_ospf_recommendations,
+        list_network_ospf_update_plans, list_tunnel_plans, promote_telemetry_tunnel_plan,
+        promote_tunnel_plan_to_custom_adapter,
     },
     routes_restores::{create_restore_plan, list_restore_plans},
     routes_schedules::{
@@ -263,45 +263,45 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/tags/order", put(update_tag_order))
         .route("/api/v1/tags/{tag}", delete(delete_tag))
         .route(
-            "/api/v1/data-source-presets",
-            get(list_data_source_presets).post(create_data_source_preset),
+            "/api/v1/source-templates",
+            get(list_source_templates).post(create_source_template),
         )
         .route(
-            "/api/v1/data-source-presets/{preset_id}/clone",
-            post(clone_data_source_preset),
+            "/api/v1/source-templates/{template_id}/clone",
+            post(clone_source_template),
         )
         .route(
-            "/api/v1/data-source-presets/{preset_id}/diff",
-            post(diff_data_source_preset),
+            "/api/v1/source-templates/{template_id}/diff",
+            post(diff_source_template),
         )
         .route(
-            "/api/v1/data-source-presets/{preset_id}/test",
-            post(test_data_source_preset),
+            "/api/v1/source-templates/{template_id}/test",
+            post(test_source_template),
         )
         .route(
-            "/api/v1/data-source-presets/{preset_id}/update",
-            post(update_data_source_preset),
+            "/api/v1/source-templates/{template_id}/update",
+            post(update_source_template),
         )
         .route(
-            "/api/v1/data-source-assignments",
-            get(list_data_source_assignments).post(assign_data_source_preset),
+            "/api/v1/source-template-assignments",
+            get(list_source_template_assignments).post(assign_source_template),
         )
-        .route("/api/v1/data-source-status", get(list_data_source_status))
+        .route("/api/v1/source-status", get(list_source_status))
         .route(
-            "/api/v1/data-source-hot-config",
-            get(render_data_source_hot_config),
-        )
-        .route(
-            "/api/v1/hot-config/rule-templates",
-            get(list_hot_config_rule_templates).post(upsert_hot_config_rule_template),
+            "/api/v1/source-config-patch",
+            get(render_source_config_patch),
         )
         .route(
-            "/api/v1/hot-config/rule-templates/{template_id}",
-            delete(delete_hot_config_rule_template),
+            "/api/v1/hot-config/patch-generators",
+            get(list_hot_config_patch_generators).post(upsert_hot_config_patch_generator),
         )
         .route(
-            "/api/v1/hot-config/rule-templates/{template_id}/render",
-            post(render_hot_config_rule_template),
+            "/api/v1/hot-config/patch-generators/{generator_id}",
+            delete(delete_hot_config_patch_generator),
+        )
+        .route(
+            "/api/v1/hot-config/patch-generators/{generator_id}/render",
+            post(render_hot_config_patch_generator),
         )
         .route("/api/v1/agents/{client_id}/tags", post(assign_agent_tag))
         .route("/api/v1/agents/{client_id}/alias", post(update_agent_alias))
@@ -461,6 +461,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(allocate_tunnel_endpoints),
         )
         .route(
+            "/api/v1/tunnel-plans/{plan_id}/plan",
+            get(export_tunnel_plan),
+        )
+        .route(
             "/api/v1/tunnel-plans/{plan_id}/enable",
             post(enable_tunnel_plan),
         )
@@ -473,8 +477,8 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(promote_telemetry_tunnel_plan),
         )
         .route(
-            "/api/v1/tunnel-plans/promote-adapter",
-            post(promote_tunnel_plan_to_adapter),
+            "/api/v1/tunnel-plans/promote-custom-adapter",
+            post(promote_tunnel_plan_to_custom_adapter),
         )
         .route(
             "/api/v1/backups",

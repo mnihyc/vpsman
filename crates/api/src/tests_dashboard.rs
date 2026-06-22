@@ -113,6 +113,7 @@ async fn dashboard_overview_aggregates_memory_state() {
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,
                     unprivileged_hint: Some("agent is running without root".to_string()),
+                    ..AgentCapabilitySnapshot::default()
                 },
             },
         ]);

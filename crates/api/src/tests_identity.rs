@@ -446,6 +446,7 @@ async fn memory_agent_inventory_preserves_unprivileged_capability_snapshot() {
                         "root-only operations require forced best-effort or a root agent"
                             .to_string(),
                     ),
+                    ..AgentCapabilitySnapshot::default()
                 },
             },
         )

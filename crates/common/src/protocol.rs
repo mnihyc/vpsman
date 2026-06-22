@@ -37,7 +37,7 @@ pub const TERMINAL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const FILE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE: &str = "full_override";
-pub const DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH: &str = "incremental_patch";
+pub const SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH: &str = "incremental_patch";
 pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const USER_SESSIONS_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const PROCESS_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -311,7 +311,7 @@ pub const WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 2
     ("failed", WORKFLOW_STATUS_CLASS_WARNING),
 ];
 
-pub const DATA_SOURCE_READINESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 14] = [
+pub const SOURCE_READINESS_STATUS_CLASS_BY_STATUS: [(&str, &str); 14] = [
     ("agent_offline", WORKFLOW_STATUS_CLASS_WARNING),
     ("selected", WORKFLOW_STATUS_CLASS_NEUTRAL),
     ("selected_workflow", WORKFLOW_STATUS_CLASS_NEUTRAL),
@@ -734,8 +734,8 @@ pub fn webhook_rule_delivery_process_status_class_by_status(
     &WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS
 }
 
-pub fn data_source_readiness_status_class_by_status() -> &'static [(&'static str, &'static str)] {
-    &DATA_SOURCE_READINESS_STATUS_CLASS_BY_STATUS
+pub fn source_readiness_status_class_by_status() -> &'static [(&'static str, &'static str)] {
+    &SOURCE_READINESS_STATUS_CLASS_BY_STATUS
 }
 
 pub fn topology_node_status_class_by_status() -> &'static [(&'static str, &'static str)] {
@@ -883,6 +883,8 @@ pub struct AgentCapabilitySnapshot {
     #[serde(default = "default_agent_max_job_timeout_secs")]
     pub max_job_timeout_secs: u64,
     #[serde(default)]
+    pub network_backend: TunnelConfigBackend,
+    #[serde(default)]
     pub can_attempt_privileged_ops: bool,
     #[serde(default)]
     pub can_manage_runtime_tunnels: bool,
@@ -898,6 +900,7 @@ impl Default for AgentCapabilitySnapshot {
             privilege_mode: AgentPrivilegeMode::Unknown,
             effective_uid: None,
             max_job_timeout_secs: default_agent_max_job_timeout_secs(),
+            network_backend: TunnelConfigBackend::default(),
             can_attempt_privileged_ops: false,
             can_manage_runtime_tunnels: false,
             can_apply_process_limits: false,
@@ -1211,7 +1214,7 @@ pub fn job_command_variant_names() -> &'static [&'static str] {
         "terminal_close",
         "config_read",
         "hot_config",
-        "data_source_config_patch",
+        "source_config_patch",
         "agent_update",
         "agent_update_activate",
         "agent_update_rollback",
@@ -1273,7 +1276,7 @@ pub const JOB_COMMAND_TYPE_LABELS: [&str; 53] = [
     "terminal_close",
     "config_read",
     "hot_config",
-    "data_source_config_patch",
+    "source_config_patch",
     "agent_update",
     "agent_update_activate",
     "agent_update_rollback",
@@ -1328,7 +1331,7 @@ pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 52] = [
     ("terminal_close", JOB_COMMAND_SAFETY_EXEC),
     ("config_read", JOB_COMMAND_SAFETY_READ),
     ("hot_config", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("data_source_config_patch", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("source_config_patch", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update_activate", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update_rollback", JOB_COMMAND_SAFETY_EXCLUSIVE),
@@ -1383,7 +1386,7 @@ pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 52
     ("terminal_close", true),
     ("config_read", false),
     ("hot_config", true),
-    ("data_source_config_patch", true),
+    ("source_config_patch", true),
     ("agent_update", true),
     ("agent_update_activate", true),
     ("agent_update_rollback", true),
@@ -1438,7 +1441,7 @@ pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 52] = [
     ("terminal_close", "terminal_close"),
     ("config_read", "config_read"),
     ("hot_config", "hot_config"),
-    ("data_source_config_patch", "data_source_config_patch"),
+    ("source_config_patch", "source_config_patch"),
     ("agent_update", "agent_update"),
     ("agent_update_activate", "agent_update_activate"),
     ("agent_update_rollback", "agent_update_rollback"),
@@ -1500,7 +1503,7 @@ pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 53] = [
     ("terminal_close", "terminal"),
     ("config_read", "config"),
     ("hot_config", "config"),
-    ("data_source_config_patch", "config"),
+    ("source_config_patch", "config"),
     ("agent_update", "agent_update"),
     ("agent_update_activate", "agent_update"),
     ("agent_update_rollback", "agent_update"),
@@ -2062,7 +2065,7 @@ pub const WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES: &[&str] = &[
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
 ];
 
-pub const DATA_SOURCE_READINESS_STATUSES: &[&str] = &[
+pub const SOURCE_READINESS_STATUSES: &[&str] = &[
     "agent_offline",
     "selected",
     "selected_workflow",
@@ -2203,8 +2206,8 @@ pub fn webhook_rule_delivery_process_statuses() -> &'static [&'static str] {
     WEBHOOK_RULE_DELIVERY_PROCESS_STATUSES
 }
 
-pub fn data_source_readiness_statuses() -> &'static [&'static str] {
-    DATA_SOURCE_READINESS_STATUSES
+pub fn source_readiness_statuses() -> &'static [&'static str] {
+    SOURCE_READINESS_STATUSES
 }
 
 pub fn topology_node_statuses() -> &'static [&'static str] {
@@ -2300,8 +2303,8 @@ pub fn file_transfer_session_status(event_type: &str, download_complete: bool) -
     }
 }
 
-pub fn is_data_source_readiness_status(status: &str) -> bool {
-    contains_static(DATA_SOURCE_READINESS_STATUSES, status)
+pub fn is_source_readiness_status(status: &str) -> bool {
+    contains_static(SOURCE_READINESS_STATUSES, status)
 }
 
 pub fn is_topology_node_status(status: &str) -> bool {
@@ -2592,7 +2595,7 @@ pub enum JobCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_config_sha256_hex: Option<String>,
     },
-    DataSourceConfigPatch {
+    SourceConfigPatch {
         apply_mode: String,
         toml: String,
     },
@@ -2863,12 +2866,6 @@ pub enum JobCommand {
     NetworkApply {
         plan: Box<TunnelPlan>,
         side: TunnelEndpointSide,
-        #[serde(default)]
-        config_backend: TunnelConfigBackend,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        config_sha256_hex: Option<String>,
-        ifupdown_sha256_hex: String,
-        bird2_sha256_hex: String,
     },
     NetworkOspfCostUpdate {
         plan: Box<TunnelPlan>,
@@ -2935,7 +2932,7 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::FileArchiveTar { .. } => FILE_COMMAND_PROTOCOL_VERSION,
         JobCommand::ConfigRead
         | JobCommand::HotConfig { .. }
-        | JobCommand::DataSourceConfigPatch { .. } => CONFIG_COMMAND_PROTOCOL_VERSION,
+        | JobCommand::SourceConfigPatch { .. } => CONFIG_COMMAND_PROTOCOL_VERSION,
         JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
@@ -2972,7 +2969,7 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::TerminalClose { .. }
         | JobCommand::ConfigRead
         | JobCommand::HotConfig { .. }
-        | JobCommand::DataSourceConfigPatch { .. }
+        | JobCommand::SourceConfigPatch { .. }
         | JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
@@ -3030,7 +3027,7 @@ pub fn job_command_type_label(command: &JobCommand) -> &'static str {
         JobCommand::TerminalClose { .. } => "terminal_close",
         JobCommand::ConfigRead => "config_read",
         JobCommand::HotConfig { .. } => "hot_config",
-        JobCommand::DataSourceConfigPatch { .. } => "data_source_config_patch",
+        JobCommand::SourceConfigPatch { .. } => "source_config_patch",
         JobCommand::UpdateAgent { .. } => "agent_update",
         JobCommand::AgentUpdateActivate { .. } => "agent_update_activate",
         JobCommand::AgentUpdateRollback { .. } => "agent_update_rollback",
@@ -3140,7 +3137,7 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         | JobCommand::TerminalResize { .. }
         | JobCommand::TerminalClose { .. } => JobCommandSafety::Exec,
         JobCommand::HotConfig { .. }
-        | JobCommand::DataSourceConfigPatch { .. }
+        | JobCommand::SourceConfigPatch { .. }
         | JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
@@ -3710,8 +3707,8 @@ mod tests {
             super::webhook_rule_delivery_process_status_class_by_status(),
         );
         assert_status_class_map_total(
-            super::data_source_readiness_statuses(),
-            super::data_source_readiness_status_class_by_status(),
+            super::source_readiness_statuses(),
+            super::source_readiness_status_class_by_status(),
         );
         assert_status_class_map_total(
             topology_node_statuses(),

@@ -9,10 +9,11 @@ import type {
   NetworkOspfRecommendationRecord,
   NetworkOspfUpdatePlanRecord,
   PromoteTelemetryTunnelRequest,
+  TunnelPlan,
   TopologyGraph,
   TunnelPlanRecord,
 } from "../types";
-import type { PromoteTunnelPlanToAdapterRequest } from "../typesTopology";
+import type { PromoteTunnelPlanToCustomAdapterRequest } from "../typesTopology";
 
 export function useTopologyData(
   apiToken: string,
@@ -136,6 +137,12 @@ export function useTopologyData(
     [apiToken],
   );
 
+  const exportTunnelPlan = useCallback(
+    async (planId: string) =>
+      apiGet<TunnelPlan>(`/api/v1/tunnel-plans/${encodeURIComponent(planId)}/plan`, apiToken),
+    [apiToken],
+  );
+
   const setTunnelPlanEnabled = useCallback(
     async (planIds: string[], enabled: boolean) => {
       await Promise.all(
@@ -160,9 +167,9 @@ export function useTopologyData(
     [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
   );
 
-  const promoteTunnelPlanToAdapter = useCallback(
-    async (request: PromoteTunnelPlanToAdapterRequest) => {
-      await apiPost<TunnelPlanRecord>("/api/v1/tunnel-plans/promote-adapter", apiToken, request);
+  const promoteTunnelPlanToCustomAdapter = useCallback(
+    async (request: PromoteTunnelPlanToCustomAdapterRequest) => {
+      await apiPost<TunnelPlanRecord>("/api/v1/tunnel-plans/promote-custom-adapter", apiToken, request);
       await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged()]);
     },
     [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
@@ -171,6 +178,7 @@ export function useTopologyData(
   return {
     allocateTunnelEndpoints,
     createTunnelPlan,
+    exportTunnelPlan,
     loadNetworkObservations,
     loadNetworkTrends,
     loadOspfRecommendations,
@@ -182,7 +190,7 @@ export function useTopologyData(
     ospfRecommendations,
     ospfUpdatePlans,
     promoteTelemetryTunnel,
-    promoteTunnelPlanToAdapter,
+    promoteTunnelPlanToCustomAdapter,
     setTunnelPlanEnabled,
     topologyError,
     topologyGraph,

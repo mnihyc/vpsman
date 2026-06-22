@@ -6,8 +6,8 @@ use vpsman_common::payload_hash;
 
 use crate::{
     model::{
-        AgentView, BackupRequestView, DataSourceStatusView, FleetAlertQuery, FleetAlertView,
-        JobHistoryView, JobTargetView, TelemetryRollupView, TelemetryTunnelView,
+        AgentView, BackupRequestView, FleetAlertQuery, FleetAlertView, JobHistoryView,
+        JobTargetView, SourceStatusView, TelemetryRollupView, TelemetryTunnelView,
     },
     model_alert_policies::FleetAlertPolicyOverrideView,
     model_alert_states::FleetAlertStateView,
@@ -260,7 +260,7 @@ impl AppState {
         let tunnels = self.repo.list_telemetry_tunnels(200, None, None).await?;
         append_tunnel_alerts(&mut alerts, &tunnels);
 
-        let source_status = self.list_data_source_status(None, None).await?;
+        let source_status = self.list_source_status(None, None).await?;
         append_source_readiness_alerts(&mut alerts, &source_status);
 
         let backup_requests = self.repo.list_backup_requests(200).await?;
@@ -487,7 +487,7 @@ fn append_tunnel_alerts(alerts: &mut Vec<FleetAlertView>, tunnels: &[TelemetryTu
     }
 }
 
-fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[DataSourceStatusView]) {
+fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[SourceStatusView]) {
     for row in rows {
         let severity = match row.status.as_str() {
             "degraded" | "selected_no_store" => "warning",
@@ -499,15 +499,15 @@ fn append_source_readiness_alerts(alerts: &mut Vec<FleetAlertView>, rows: &[Data
             AlertInput {
                 severity,
                 category: "source_readiness",
-                target_kind: "data_source",
+                target_kind: "source_template",
                 target_id: &format!("{}:{}", row.client_id, row.domain),
                 client_id: Some(&row.client_id),
-                title: "Selected data source needs attention",
+                title: "Selected source template needs attention",
                 detail: format!("{}: {}", row.module, row.status_reason),
                 status: &row.status,
                 evidence: json!({
                     "domain": &row.domain,
-                    "preset_name": &row.preset_name,
+                    "template_name": &row.template_name,
                     "source_kind": &row.source_kind,
                     "evidence": &row.evidence,
                 }),

@@ -6,27 +6,27 @@ use vpsman_common::validate_incremental_config_patch_section;
 
 use crate::{
     model::{
-        AuditLogView, AuthContext, HotConfigRuleTemplateRenderView, HotConfigRuleTemplateView,
-        RenderHotConfigRuleTemplateRequest, UpsertHotConfigRuleTemplateRequest,
+        AuditLogView, AuthContext, HotConfigPatchGeneratorRenderView, HotConfigPatchGeneratorView,
+        RenderHotConfigPatchGeneratorRequest, UpsertHotConfigPatchGeneratorRequest,
     },
     repository::Repository,
     unix_now,
 };
 
 impl Repository {
-    pub(crate) async fn list_hot_config_rule_templates(
+    pub(crate) async fn list_hot_config_patch_generators(
         &self,
-    ) -> Result<Vec<HotConfigRuleTemplateView>> {
-        self.ensure_builtin_hot_config_rule_templates().await?;
+    ) -> Result<Vec<HotConfigPatchGeneratorView>> {
+        self.ensure_builtin_hot_config_patch_generators().await?;
         match self {
             Self::Memory(memory) => {
-                let mut templates = memory.hot_config_rule_templates.read().await.clone();
-                templates.sort_by(|left, right| {
+                let mut generators = memory.hot_config_patch_generators.read().await.clone();
+                generators.sort_by(|left, right| {
                     left.category
                         .cmp(&right.category)
                         .then_with(|| left.name.cmp(&right.name))
                 });
-                Ok(templates)
+                Ok(generators)
             }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
@@ -44,25 +44,25 @@ impl Repository {
                         actor_id,
                         created_at::text AS created_at,
                         updated_at::text AS updated_at
-                    FROM hot_config_rule_templates
+                    FROM hot_config_patch_generators
                     ORDER BY category, name, id
                     "#,
                 )
                 .fetch_all(pool)
                 .await?;
-                rows.into_iter().map(rule_template_from_row).collect()
+                rows.into_iter().map(patch_generator_from_row).collect()
             }
         }
     }
 
-    pub(crate) async fn upsert_hot_config_rule_template(
+    pub(crate) async fn upsert_hot_config_patch_generator(
         &self,
-        request: &UpsertHotConfigRuleTemplateRequest,
+        request: &UpsertHotConfigPatchGeneratorRequest,
         operator: &AuthContext,
-    ) -> Result<HotConfigRuleTemplateView> {
+    ) -> Result<HotConfigPatchGeneratorView> {
         let id = request.id.unwrap_or_else(Uuid::new_v4);
         let now = unix_now().to_string();
-        let template = HotConfigRuleTemplateView {
+        let generator = HotConfigPatchGeneratorView {
             id,
             name: request.name.trim().to_string(),
             category: request.category.trim().to_string(),
@@ -76,50 +76,57 @@ impl Repository {
             created_at: now.clone(),
             updated_at: now,
         };
-        validate_rule_template_renderable(&template.raw_generator_body, &template.field_schema)?;
+        validate_patch_generator_renderable(
+            &generator.raw_generator_body,
+            &generator.field_schema,
+        )?;
         match self {
             Self::Memory(memory) => {
-                self.ensure_builtin_hot_config_rule_templates().await?;
-                let mut templates = memory.hot_config_rule_templates.write().await;
+                self.ensure_builtin_hot_config_patch_generators().await?;
+                let mut generators = memory.hot_config_patch_generators.write().await;
                 let saved = if let Some(existing) =
-                    templates.iter_mut().find(|existing| existing.id == id)
+                    generators.iter_mut().find(|existing| existing.id == id)
                 {
                     anyhow::ensure!(
                         !existing.built_in,
-                        "hot_config_rule_template_builtin_immutable"
+                        "hot_config_patch_generator_builtin_immutable"
                     );
                     let created_at = existing.created_at.clone();
-                    *existing = HotConfigRuleTemplateView {
-                        id: template.id,
-                        name: template.name.clone(),
-                        category: template.category.clone(),
-                        domain: template.domain.clone(),
-                        description: template.description.clone(),
-                        field_schema: template.field_schema.clone(),
-                        raw_generator_body: template.raw_generator_body.clone(),
-                        docs_metadata: template.docs_metadata.clone(),
+                    *existing = HotConfigPatchGeneratorView {
+                        id: generator.id,
+                        name: generator.name.clone(),
+                        category: generator.category.clone(),
+                        domain: generator.domain.clone(),
+                        description: generator.description.clone(),
+                        field_schema: generator.field_schema.clone(),
+                        raw_generator_body: generator.raw_generator_body.clone(),
+                        docs_metadata: generator.docs_metadata.clone(),
                         built_in: false,
-                        actor_id: template.actor_id,
+                        actor_id: generator.actor_id,
                         created_at,
-                        updated_at: template.updated_at.clone(),
+                        updated_at: generator.updated_at.clone(),
                     };
                     existing.clone()
                 } else {
-                    templates.push(template.clone());
-                    template.clone()
+                    generators.push(generator.clone());
+                    generator.clone()
                 };
-                memory.audits.write().await.push(hot_config_template_audit(
-                    "hot_config_rule_template.saved",
-                    &saved,
-                    operator,
-                    unix_now().to_string(),
-                ));
+                memory
+                    .audits
+                    .write()
+                    .await
+                    .push(hot_config_patch_generator_audit(
+                        "hot_config_patch_generator.saved",
+                        &saved,
+                        operator,
+                        unix_now().to_string(),
+                    ));
                 Ok(saved)
             }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-                    INSERT INTO hot_config_rule_templates (
+                    INSERT INTO hot_config_patch_generators (
                         id,
                         name,
                         category,
@@ -142,7 +149,7 @@ impl Repository {
                         docs_metadata = EXCLUDED.docs_metadata,
                         actor_id = EXCLUDED.actor_id,
                         updated_at = now()
-                    WHERE hot_config_rule_templates.built_in = FALSE
+                    WHERE hot_config_patch_generators.built_in = FALSE
                     RETURNING
                         id,
                         name,
@@ -159,18 +166,18 @@ impl Repository {
                     "#,
                 )
                 .bind(id)
-                .bind(&template.name)
-                .bind(&template.category)
-                .bind(&template.domain)
-                .bind(&template.description)
-                .bind(SqlJson(&template.field_schema))
-                .bind(&template.raw_generator_body)
-                .bind(SqlJson(&template.docs_metadata))
+                .bind(&generator.name)
+                .bind(&generator.category)
+                .bind(&generator.domain)
+                .bind(&generator.description)
+                .bind(SqlJson(&generator.field_schema))
+                .bind(&generator.raw_generator_body)
+                .bind(SqlJson(&generator.docs_metadata))
                 .bind(operator.operator.id)
                 .fetch_optional(pool)
                 .await?;
-                let row = row.with_context(|| "hot_config_rule_template_builtin_immutable")?;
-                let saved = rule_template_from_row(row)?;
+                let row = row.with_context(|| "hot_config_patch_generator_builtin_immutable")?;
+                let saved = patch_generator_from_row(row)?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -179,10 +186,10 @@ impl Repository {
                 )
                 .bind(Uuid::new_v4())
                 .bind(operator.operator.id)
-                .bind("hot_config_rule_template.saved")
-                .bind(format!("hot_config_rule_template:{}", saved.id))
+                .bind("hot_config_patch_generator.saved")
+                .bind(format!("hot_config_patch_generator:{}", saved.id))
                 .bind(Option::<String>::None)
-                .bind(hot_config_template_audit_metadata(&saved, operator))
+                .bind(hot_config_patch_generator_audit_metadata(&saved, operator))
                 .execute(pool)
                 .await?;
                 Ok(saved)
@@ -190,67 +197,71 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn render_hot_config_rule_template(
+    pub(crate) async fn render_hot_config_patch_generator(
         &self,
-        template_id: Uuid,
-        request: &RenderHotConfigRuleTemplateRequest,
-    ) -> Result<HotConfigRuleTemplateRenderView> {
-        let template = self
-            .list_hot_config_rule_templates()
+        generator_id: Uuid,
+        request: &RenderHotConfigPatchGeneratorRequest,
+    ) -> Result<HotConfigPatchGeneratorRenderView> {
+        let generator = self
+            .list_hot_config_patch_generators()
             .await?
             .into_iter()
-            .find(|candidate| candidate.id == template_id)
-            .with_context(|| format!("hot_config_rule_template_not_found:{template_id}"))?;
-        let rendered = render_template_body(
-            &template.raw_generator_body,
+            .find(|candidate| candidate.id == generator_id)
+            .with_context(|| format!("hot_config_patch_generator_not_found:{generator_id}"))?;
+        let rendered = render_generator_body(
+            &generator.raw_generator_body,
             &request.values,
-            &template.field_schema,
+            &generator.field_schema,
         )?;
         let patch: toml::Value =
             toml::from_str(&rendered).context("failed to parse rendered config patch TOML")?;
         let affected_sections = validate_rendered_patch(&patch)?;
-        Ok(HotConfigRuleTemplateRenderView {
-            template_id: template.id,
-            name: template.name,
+        Ok(HotConfigPatchGeneratorRenderView {
+            generator_id: generator.id,
+            name: generator.name,
             toml: rendered,
             patch: serde_json::to_value(&patch).context("failed to serialize rendered patch")?,
             affected_sections,
-            docs_metadata: template.docs_metadata,
+            docs_metadata: generator.docs_metadata,
             generated_at: unix_now().to_string(),
         })
     }
 
-    pub(crate) async fn delete_hot_config_rule_template(
+    pub(crate) async fn delete_hot_config_patch_generator(
         &self,
-        template_id: Uuid,
+        generator_id: Uuid,
         operator: &AuthContext,
     ) -> Result<()> {
         match self {
             Self::Memory(memory) => {
-                self.ensure_builtin_hot_config_rule_templates().await?;
-                let mut templates = memory.hot_config_rule_templates.write().await;
-                let existing = templates
+                self.ensure_builtin_hot_config_patch_generators().await?;
+                let mut generators = memory.hot_config_patch_generators.write().await;
+                let existing = generators
                     .iter()
-                    .find(|template| template.id == template_id)
+                    .find(|generator| generator.id == generator_id)
                     .cloned()
-                    .with_context(|| "hot_config_rule_template_not_found")?;
+                    .with_context(|| "hot_config_patch_generator_not_found")?;
                 anyhow::ensure!(
                     !existing.built_in,
-                    "hot_config_rule_template_builtin_immutable"
+                    "hot_config_patch_generator_builtin_immutable"
                 );
-                templates.retain(|template| template.id != template_id);
-                memory.audits.write().await.push(hot_config_template_audit(
-                    "hot_config_rule_template.deleted",
-                    &existing,
-                    operator,
-                    unix_now().to_string(),
-                ));
+                generators.retain(|generator| generator.id != generator_id);
+                memory
+                    .audits
+                    .write()
+                    .await
+                    .push(hot_config_patch_generator_audit(
+                        "hot_config_patch_generator.deleted",
+                        &existing,
+                        operator,
+                        unix_now().to_string(),
+                    ));
                 Ok(())
             }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-                    DELETE FROM hot_config_rule_templates
+                    DELETE FROM hot_config_patch_generators
                     WHERE id = $1 AND built_in = FALSE
                     RETURNING
                         id,
@@ -267,13 +278,13 @@ impl Repository {
                         updated_at::text AS updated_at
                     "#,
                 )
-                .bind(template_id)
+                .bind(generator_id)
                 .fetch_optional(pool)
                 .await?;
                 let deleted = row
-                    .map(rule_template_from_row)
+                    .map(patch_generator_from_row)
                     .transpose()?
-                    .with_context(|| "hot_config_rule_template_not_found")?;
+                    .with_context(|| "hot_config_patch_generator_not_found")?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -282,10 +293,12 @@ impl Repository {
                 )
                 .bind(Uuid::new_v4())
                 .bind(operator.operator.id)
-                .bind("hot_config_rule_template.deleted")
-                .bind(format!("hot_config_rule_template:{}", deleted.id))
+                .bind("hot_config_patch_generator.deleted")
+                .bind(format!("hot_config_patch_generator:{}", deleted.id))
                 .bind(Option::<String>::None)
-                .bind(hot_config_template_audit_metadata(&deleted, operator))
+                .bind(hot_config_patch_generator_audit_metadata(
+                    &deleted, operator,
+                ))
                 .execute(pool)
                 .await?;
                 Ok(())
@@ -293,17 +306,20 @@ impl Repository {
         }
     }
 
-    async fn ensure_builtin_hot_config_rule_templates(&self) -> Result<()> {
+    async fn ensure_builtin_hot_config_patch_generators(&self) -> Result<()> {
         match self {
             Self::Memory(memory) => {
-                let mut seeded = memory.hot_config_rule_templates_seeded.write().await;
+                let mut seeded = memory.hot_config_patch_generators_seeded.write().await;
                 if *seeded {
                     return Ok(());
                 }
-                let mut templates = memory.hot_config_rule_templates.write().await;
-                for template in builtin_rule_templates() {
-                    if !templates.iter().any(|existing| existing.id == template.id) {
-                        templates.push(template);
+                let mut generators = memory.hot_config_patch_generators.write().await;
+                for generator in builtin_patch_generators() {
+                    if !generators
+                        .iter()
+                        .any(|existing| existing.id == generator.id)
+                    {
+                        generators.push(generator);
                     }
                 }
                 *seeded = true;
@@ -314,9 +330,9 @@ impl Repository {
     }
 }
 
-fn hot_config_template_audit(
+fn hot_config_patch_generator_audit(
     action: &str,
-    template: &HotConfigRuleTemplateView,
+    generator: &HotConfigPatchGeneratorView,
     operator: &AuthContext,
     created_at: String,
 ) -> AuditLogView {
@@ -324,35 +340,35 @@ fn hot_config_template_audit(
         id: Uuid::new_v4(),
         actor_id: Some(operator.operator.id),
         action: action.to_string(),
-        target: format!("hot_config_rule_template:{}", template.id),
+        target: format!("hot_config_patch_generator:{}", generator.id),
         command_hash: None,
-        metadata: hot_config_template_audit_metadata(template, operator),
+        metadata: hot_config_patch_generator_audit_metadata(generator, operator),
         created_at,
     }
 }
 
-fn hot_config_template_audit_metadata(
-    template: &HotConfigRuleTemplateView,
+fn hot_config_patch_generator_audit_metadata(
+    generator: &HotConfigPatchGeneratorView,
     operator: &AuthContext,
 ) -> serde_json::Value {
     serde_json::json!({
-        "template_id": template.id,
-        "name": template.name,
-        "category": template.category,
-        "domain": template.domain,
-        "description": template.description,
-        "field_schema": template.field_schema,
-        "raw_generator_body": template.raw_generator_body,
-        "docs_metadata": template.docs_metadata,
-        "built_in": template.built_in,
+        "generator_id": generator.id,
+        "name": generator.name,
+        "category": generator.category,
+        "domain": generator.domain,
+        "description": generator.description,
+        "field_schema": generator.field_schema,
+        "raw_generator_body": generator.raw_generator_body,
+        "docs_metadata": generator.docs_metadata,
+        "built_in": generator.built_in,
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,
         "session_id": operator.session_id,
     })
 }
 
-fn rule_template_from_row(row: sqlx::postgres::PgRow) -> Result<HotConfigRuleTemplateView> {
-    Ok(HotConfigRuleTemplateView {
+fn patch_generator_from_row(row: sqlx::postgres::PgRow) -> Result<HotConfigPatchGeneratorView> {
+    Ok(HotConfigPatchGeneratorView {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         category: row.try_get("category")?,
@@ -368,15 +384,15 @@ fn rule_template_from_row(row: sqlx::postgres::PgRow) -> Result<HotConfigRuleTem
     })
 }
 
-fn validate_rule_template_renderable(body: &str, field_schema: &JsonValue) -> Result<()> {
-    let rendered = render_template_body(body, &serde_json::json!({}), field_schema)?;
+fn validate_patch_generator_renderable(body: &str, field_schema: &JsonValue) -> Result<()> {
+    let rendered = render_generator_body(body, &serde_json::json!({}), field_schema)?;
     let patch: toml::Value =
-        toml::from_str(&rendered).context("failed to parse config template TOML")?;
+        toml::from_str(&rendered).context("failed to parse config generator TOML")?;
     validate_rendered_patch(&patch)?;
     Ok(())
 }
 
-fn render_template_body(
+fn render_generator_body(
     body: &str,
     values: &JsonValue,
     field_schema: &JsonValue,
@@ -444,17 +460,17 @@ fn toml_literal(value: &JsonValue) -> Result<String> {
             format!("[{items}]")
         }
         JsonValue::Null => String::new(),
-        JsonValue::Object(_) => anyhow::bail!("template object values are not supported"),
+        JsonValue::Object(_) => anyhow::bail!("generator object values are not supported"),
     })
 }
 
 fn validate_rendered_patch(patch: &toml::Value) -> Result<Vec<String>> {
     let Some(table) = patch.as_table() else {
-        anyhow::bail!("config rule-template patch must be a TOML table");
+        anyhow::bail!("config patch generator output must be a TOML table");
     };
     anyhow::ensure!(
         !table.is_empty(),
-        "config rule-template patch must contain at least one section"
+        "config patch generator output must contain at least one section"
     );
     let mut sections = Vec::new();
     for section in table.keys() {
@@ -466,9 +482,9 @@ fn validate_rendered_patch(patch: &toml::Value) -> Result<Vec<String>> {
     Ok(sections)
 }
 
-fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
+fn builtin_patch_generators() -> Vec<HotConfigPatchGeneratorView> {
     vec![
-        predefined_template(
+        predefined_patch_generator(
             "11111111-1111-4111-8111-111111111111",
             "Telemetry source",
             "telemetry",
@@ -483,7 +499,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             }),
             "[telemetry]\nsource = {{source}}\nproc_root = {{proc_root}}\nsys_class_net_dir = {{sys_class_net_dir}}\n",
         ),
-        predefined_template(
+        predefined_patch_generator(
             "22222222-2222-4222-8222-222222222222",
             "Execution policy",
             "execution",
@@ -497,7 +513,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             }),
             "[execution]\nenvironment_policy = {{environment_policy}}\npty_policy = {{pty_policy}}\n",
         ),
-        predefined_template(
+        predefined_patch_generator(
             "33333333-3333-4333-8333-333333333333",
             "Runtime tunnel adapter",
             "network",
@@ -512,7 +528,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             }),
             "[network]\napply_enabled = {{apply_enabled}}\nruntime_reconcile_enabled = {{runtime_reconcile_enabled}}\nruntime_command_timeout_secs = {{runtime_command_timeout_secs}}\n",
         ),
-        predefined_template(
+        predefined_patch_generator(
             "55555555-5555-4555-8555-555555555555",
             "Autonomous updater enabled",
             "update",
@@ -529,7 +545,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             }),
             "[update]\nunmanaged_enabled = true\nunmanaged_version_url = {{unmanaged_version_url}}\nunmanaged_interval_secs = {{unmanaged_interval_secs}}\nunmanaged_jitter_secs = {{unmanaged_jitter_secs}}\nunmanaged_activate = {{unmanaged_activate}}\nunmanaged_restart_agent = {{unmanaged_restart_agent}}\n",
         ),
-        predefined_template(
+        predefined_patch_generator(
             "66666666-6666-4666-8666-666666666666",
             "Autonomous updater disabled",
             "update",
@@ -546,7 +562,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
             }),
             "[update]\nunmanaged_enabled = false\nunmanaged_version_url = {{unmanaged_version_url}}\nunmanaged_interval_secs = {{unmanaged_interval_secs}}\nunmanaged_jitter_secs = {{unmanaged_jitter_secs}}\nunmanaged_activate = {{unmanaged_activate}}\nunmanaged_restart_agent = {{unmanaged_restart_agent}}\n",
         ),
-        predefined_template(
+        predefined_patch_generator(
             "44444444-4444-4444-8444-444444444444",
             "Routing daemon adapter",
             "network",
@@ -568,7 +584,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
     ]
 }
 
-fn predefined_template(
+fn predefined_patch_generator(
     id: &str,
     name: &str,
     category: &str,
@@ -576,9 +592,9 @@ fn predefined_template(
     description: &str,
     field_schema: JsonValue,
     raw_generator_body: &str,
-) -> HotConfigRuleTemplateView {
-    HotConfigRuleTemplateView {
-        id: Uuid::parse_str(id).expect("predefined rule template UUID must parse"),
+) -> HotConfigPatchGeneratorView {
+    HotConfigPatchGeneratorView {
+        id: Uuid::parse_str(id).expect("predefined patch generator UUID must parse"),
         name: name.to_string(),
         category: category.to_string(),
         domain: domain.to_string(),

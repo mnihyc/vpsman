@@ -36,7 +36,7 @@ pub enum NetworkPlanError {
     UnsupportedBackendTunnelKind,
     #[error("runtime tunnel command must be bounded and use absolute argv")]
     InvalidRuntimeTunnelCommand,
-    #[error("external managed adapter requires at least one lifecycle command")]
+    #[error("custom adapter requires at least one lifecycle command")]
     RuntimeTunnelAdapterCommandRequired,
     #[error("external observed tunnels cannot include mutating commands or traffic limits")]
     RuntimeTunnelObservedCannotMutate,
@@ -866,7 +866,7 @@ fn render_runtime_snippet(input: TunnelSnippetInput<'_>, manager: RuntimeTunnelM
         .join("\n"),
         RuntimeTunnelManager::ExternalManagedAdapter => [
             format!(
-                "# vpsman tunnel {}: external managed adapter runtime tunnel",
+                "# vpsman tunnel {}: custom adapter runtime tunnel",
                 input.name
             ),
             format!(

@@ -20,10 +20,10 @@ enum VtyInventoryCommand {
         tag: String,
         confirmed: bool,
     },
-    DataSourcePresets {
+    SourceTemplates {
         domain: Option<String>,
     },
-    DataSourcePresetCreate {
+    SourceTemplateCreate {
         domain: String,
         name: String,
         scope: String,
@@ -31,31 +31,31 @@ enum VtyInventoryCommand {
         description: Option<String>,
         definition: serde_json::Value,
     },
-    DataSourcePresetClone {
-        source_preset_id: String,
+    SourceTemplateClone {
+        source_template_id: String,
         name: String,
         scope: String,
         owner_client_id: Option<String>,
         description: Option<String>,
     },
-    DataSourcePresetDiff {
-        preset_id: String,
+    SourceTemplateDiff {
+        template_id: String,
         description: Option<String>,
         clear_description: bool,
         definition: serde_json::Value,
     },
-    DataSourcePresetTest {
-        preset_id: String,
+    SourceTemplateTest {
+        template_id: String,
         definition: serde_json::Value,
     },
-    DataSourcePresetUpdate {
-        preset_id: String,
+    SourceTemplateUpdate {
+        template_id: String,
         description: Option<String>,
         clear_description: bool,
         definition: serde_json::Value,
         confirmed: bool,
     },
-    DataSourceStatus {
+    SourceStatus {
         client_id: Option<String>,
         domain: Option<String>,
     },
@@ -151,17 +151,17 @@ enum VtyInventoryCommand {
         dry_run: bool,
         confirmed: bool,
     },
-    DataSourceAssignments {
+    SourceTemplateAssignments {
         client_id: Option<String>,
         domain: Option<String>,
     },
-    DataSourceHotConfig {
+    SourceConfigPatch {
         client_id: String,
         format: String,
     },
-    DataSourcePresetAssign {
+    SourceTemplateAssign {
         domain: String,
-        preset_id: String,
+        template_id: String,
         clients: Vec<String>,
         tags: Vec<String>,
         confirmed: bool,
@@ -249,13 +249,13 @@ pub(crate) fn is_vty_inventory_command(command: &str) -> bool {
         name,
         "tag-create"
             | "agent-tag"
-            | "data-source-presets"
-            | "data-source-preset-create"
-            | "data-source-preset-clone"
-            | "data-source-preset-diff"
-            | "data-source-preset-test"
-            | "data-source-preset-update"
-            | "data-source-status"
+            | "source-templates"
+            | "source-template-create"
+            | "source-template-clone"
+            | "source-template-diff"
+            | "source-template-test"
+            | "source-template-update"
+            | "source-status"
             | "fleet-alerts"
             | "fleet-alert-export"
             | "fleet-alert-states"
@@ -267,9 +267,9 @@ pub(crate) fn is_vty_inventory_command(command: &str) -> bool {
             | "fleet-alert-notifications"
             | "fleet-alert-notification-dispatch"
             | "fleet-alert-notification-process"
-            | "data-source-assignments"
-            | "data-source-hot-config"
-            | "data-source-preset-assign"
+            | "source-template-assignments"
+            | "source-config-patch"
+            | "source-template-assign"
             | "bulk-resolve"
             | "telemetry-rollups"
             | "telemetry-network-rates"
@@ -383,10 +383,10 @@ pub(crate) fn submit_vty_inventory_command(
                 }),
             )
         }
-        VtyInventoryCommand::DataSourcePresets { domain } => {
-            http_get(api_url, &data_source_presets_path(domain.as_deref()), token)
+        VtyInventoryCommand::SourceTemplates { domain } => {
+            http_get(api_url, &source_templates_path(domain.as_deref()), token)
         }
-        VtyInventoryCommand::DataSourcePresetCreate {
+        VtyInventoryCommand::SourceTemplateCreate {
             domain,
             name,
             scope,
@@ -395,7 +395,7 @@ pub(crate) fn submit_vty_inventory_command(
             definition,
         } => http_post_json(
             api_url,
-            "/api/v1/data-source-presets",
+            "/api/v1/source-templates",
             token,
             &serde_json::json!({
                 "domain": domain,
@@ -406,15 +406,15 @@ pub(crate) fn submit_vty_inventory_command(
                 "definition": definition,
             }),
         ),
-        VtyInventoryCommand::DataSourcePresetClone {
-            source_preset_id,
+        VtyInventoryCommand::SourceTemplateClone {
+            source_template_id,
             name,
             scope,
             owner_client_id,
             description,
         } => http_post_json(
             api_url,
-            &format!("/api/v1/data-source-presets/{source_preset_id}/clone"),
+            &format!("/api/v1/source-templates/{source_template_id}/clone"),
             token,
             &serde_json::json!({
                 "name": name,
@@ -423,8 +423,8 @@ pub(crate) fn submit_vty_inventory_command(
                 "description": description,
             }),
         ),
-        VtyInventoryCommand::DataSourcePresetDiff {
-            preset_id,
+        VtyInventoryCommand::SourceTemplateDiff {
+            template_id,
             description,
             clear_description,
             definition,
@@ -432,7 +432,7 @@ pub(crate) fn submit_vty_inventory_command(
             let keep_description = description.is_none() && !clear_description;
             http_post_json(
                 api_url,
-                &format!("/api/v1/data-source-presets/{preset_id}/diff"),
+                &format!("/api/v1/source-templates/{template_id}/diff"),
                 token,
                 &serde_json::json!({
                     "description": description,
@@ -441,19 +441,19 @@ pub(crate) fn submit_vty_inventory_command(
                 }),
             )
         }
-        VtyInventoryCommand::DataSourcePresetTest {
-            preset_id,
+        VtyInventoryCommand::SourceTemplateTest {
+            template_id,
             definition,
         } => http_post_json(
             api_url,
-            &format!("/api/v1/data-source-presets/{preset_id}/test"),
+            &format!("/api/v1/source-templates/{template_id}/test"),
             token,
             &serde_json::json!({
                 "definition": definition,
             }),
         ),
-        VtyInventoryCommand::DataSourcePresetUpdate {
-            preset_id,
+        VtyInventoryCommand::SourceTemplateUpdate {
+            template_id,
             description,
             clear_description,
             definition,
@@ -462,7 +462,7 @@ pub(crate) fn submit_vty_inventory_command(
             let keep_description = description.is_none() && !clear_description;
             http_post_json(
                 api_url,
-                &format!("/api/v1/data-source-presets/{preset_id}/update"),
+                &format!("/api/v1/source-templates/{template_id}/update"),
                 token,
                 &serde_json::json!({
                     "description": description,
@@ -472,9 +472,9 @@ pub(crate) fn submit_vty_inventory_command(
                 }),
             )
         }
-        VtyInventoryCommand::DataSourceStatus { client_id, domain } => http_get(
+        VtyInventoryCommand::SourceStatus { client_id, domain } => http_get(
             api_url,
-            &data_source_status_path(client_id.as_deref(), domain.as_deref()),
+            &source_status_path(client_id.as_deref(), domain.as_deref()),
             token,
         ),
         VtyInventoryCommand::FleetAlerts {
@@ -693,30 +693,30 @@ pub(crate) fn submit_vty_inventory_command(
                 "confirmed": confirmed,
             }),
         ),
-        VtyInventoryCommand::DataSourceAssignments { client_id, domain } => http_get(
+        VtyInventoryCommand::SourceTemplateAssignments { client_id, domain } => http_get(
             api_url,
-            &data_source_assignments_path(client_id.as_deref(), domain.as_deref()),
+            &source_template_assignments_path(client_id.as_deref(), domain.as_deref()),
             token,
         ),
-        VtyInventoryCommand::DataSourceHotConfig { client_id, format } => {
-            let body = http_get(api_url, &data_source_hot_config_path(&client_id), token)?;
+        VtyInventoryCommand::SourceConfigPatch { client_id, format } => {
+            let body = http_get(api_url, &source_config_patch_path(&client_id), token)?;
             match format.as_str() {
                 "json" => Ok(body),
                 "toml" => {
                     let value: serde_json::Value = serde_json::from_str(&body)
-                        .context("invalid data-source config response")?;
+                        .context("invalid source template config response")?;
                     Ok(value
                         .get("toml")
                         .and_then(serde_json::Value::as_str)
-                        .context("data-source config response missing toml")?
+                        .context("source template config response missing toml")?
                         .to_string())
                 }
                 _ => anyhow::bail!("--format must be toml or json"),
             }
         }
-        VtyInventoryCommand::DataSourcePresetAssign {
+        VtyInventoryCommand::SourceTemplateAssign {
             domain,
-            preset_id,
+            template_id,
             clients,
             tags,
             confirmed,
@@ -726,11 +726,11 @@ pub(crate) fn submit_vty_inventory_command(
                 resolve_schedule_target_ids(api_url, token, &selector_expression)?;
             http_post_json(
                 api_url,
-                "/api/v1/data-source-assignments",
+                "/api/v1/source-template-assignments",
                 token,
                 &serde_json::json!({
                     "domain": domain,
-                    "preset_id": preset_id,
+                    "template_id": template_id,
                     "selector_expression": selector_expression,
                     "target_client_ids": target_client_ids,
                     "confirmed": confirmed,
@@ -820,7 +820,7 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
                 confirmed,
             })
         }
-        "data-source-presets" => {
+        "source-templates" => {
             let mut domain = None;
             let mut index = 1;
             while index < parts.len() {
@@ -839,14 +839,14 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
                     value => anyhow::bail!("unexpected argument {value}"),
                 }
             }
-            Ok(VtyInventoryCommand::DataSourcePresets { domain })
+            Ok(VtyInventoryCommand::SourceTemplates { domain })
         }
-        "data-source-preset-create" => parse_data_source_preset_create(&parts),
-        "data-source-preset-clone" => parse_data_source_preset_clone(&parts),
-        "data-source-preset-diff" => parse_data_source_preset_diff(&parts),
-        "data-source-preset-test" => parse_data_source_preset_test(&parts),
-        "data-source-preset-update" => parse_data_source_preset_update(&parts),
-        "data-source-status" => parse_data_source_status(&parts),
+        "source-template-create" => parse_source_template_create(&parts),
+        "source-template-clone" => parse_source_template_clone(&parts),
+        "source-template-diff" => parse_source_template_diff(&parts),
+        "source-template-test" => parse_source_template_test(&parts),
+        "source-template-update" => parse_source_template_update(&parts),
+        "source-status" => parse_source_status(&parts),
         "fleet-alerts" => {
             let args = parse_fleet_alert_args(&parts)?;
             Ok(VtyInventoryCommand::FleetAlerts {
@@ -911,9 +911,9 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
         }
         "fleet-alert-notification-dispatch" => parse_fleet_alert_notification_dispatch(&parts),
         "fleet-alert-notification-process" => parse_fleet_alert_notification_process(&parts),
-        "data-source-assignments" => parse_data_source_assignments(&parts),
-        "data-source-hot-config" => parse_data_source_hot_config(&parts),
-        "data-source-preset-assign" => parse_data_source_preset_assign(&parts),
+        "source-template-assignments" => parse_source_template_assignments(&parts),
+        "source-config-patch" => parse_source_config_patch(&parts),
+        "source-template-assign" => parse_source_template_assign(&parts),
         "bulk-resolve" => Ok(VtyInventoryCommand::BulkResolve {
             tags: parts
                 .iter()
@@ -950,7 +950,7 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
     }
 }
 
-fn parse_data_source_preset_create(parts: &[&str]) -> Result<VtyInventoryCommand> {
+fn parse_source_template_create(parts: &[&str]) -> Result<VtyInventoryCommand> {
     let mut domain = None;
     let mut name = None;
     let mut scope = "shared".to_string();
@@ -1013,9 +1013,9 @@ fn parse_data_source_preset_create(parts: &[&str]) -> Result<VtyInventoryCommand
             value => anyhow::bail!("unexpected argument {value}"),
         }
     }
-    Ok(VtyInventoryCommand::DataSourcePresetCreate {
-        domain: domain.context("data-source-preset-create requires --domain")?,
-        name: name.context("data-source-preset-create requires --name")?,
+    Ok(VtyInventoryCommand::SourceTemplateCreate {
+        domain: domain.context("source-template-create requires --domain")?,
+        name: name.context("source-template-create requires --name")?,
         scope,
         owner_client_id,
         description,
@@ -1023,8 +1023,8 @@ fn parse_data_source_preset_create(parts: &[&str]) -> Result<VtyInventoryCommand
     })
 }
 
-fn parse_data_source_preset_clone(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let mut source_preset_id = None;
+fn parse_source_template_clone(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let mut source_template_id = None;
     let mut name = None;
     let mut scope = "shared".to_string();
     let mut owner_client_id = None;
@@ -1032,8 +1032,8 @@ fn parse_data_source_preset_clone(parts: &[&str]) -> Result<VtyInventoryCommand>
     let mut index = 1;
     while index < parts.len() {
         match parts[index] {
-            "--source-preset-id" => {
-                source_preset_id = Some(next_arg(parts, index, "--source-preset-id")?.to_string());
+            "--template-id" => {
+                source_template_id = Some(next_arg(parts, index, "--template-id")?.to_string());
                 index += 2;
             }
             "--name" => {
@@ -1052,9 +1052,8 @@ fn parse_data_source_preset_clone(parts: &[&str]) -> Result<VtyInventoryCommand>
                 description = Some(next_arg(parts, index, "--description")?.to_string());
                 index += 2;
             }
-            value if value.starts_with("--source-preset-id=") => {
-                source_preset_id =
-                    Some(value.trim_start_matches("--source-preset-id=").to_string());
+            value if value.starts_with("--template-id=") => {
+                source_template_id = Some(value.trim_start_matches("--template-id=").to_string());
                 index += 1;
             }
             value if value.starts_with("--name=") => {
@@ -1076,39 +1075,39 @@ fn parse_data_source_preset_clone(parts: &[&str]) -> Result<VtyInventoryCommand>
             value => anyhow::bail!("unexpected argument {value}"),
         }
     }
-    Ok(VtyInventoryCommand::DataSourcePresetClone {
-        source_preset_id: source_preset_id
-            .context("data-source-preset-clone requires --source-preset-id")?,
-        name: name.context("data-source-preset-clone requires --name")?,
+    Ok(VtyInventoryCommand::SourceTemplateClone {
+        source_template_id: source_template_id
+            .context("source-template-clone requires --template-id")?,
+        name: name.context("source-template-clone requires --name")?,
         scope,
         owner_client_id,
         description,
     })
 }
 
-fn parse_data_source_preset_diff(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let (preset_id, description, clear_description, definition, confirmed) =
-        parse_data_source_preset_candidate_args(parts, "data-source-preset-diff")?;
+fn parse_source_template_diff(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let (template_id, description, clear_description, definition, confirmed) =
+        parse_source_template_candidate_args(parts, "source-template-diff")?;
     anyhow::ensure!(
         !confirmed,
-        "data-source-preset-diff does not accept --confirmed"
+        "source-template-diff does not accept --confirmed"
     );
-    Ok(VtyInventoryCommand::DataSourcePresetDiff {
-        preset_id,
+    Ok(VtyInventoryCommand::SourceTemplateDiff {
+        template_id,
         description,
         clear_description,
         definition,
     })
 }
 
-fn parse_data_source_preset_test(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let mut preset_id = None;
+fn parse_source_template_test(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let mut template_id = None;
     let mut definition = serde_json::json!({});
     let mut index = 1;
     while index < parts.len() {
         match parts[index] {
-            "--preset-id" => {
-                preset_id = Some(next_arg(parts, index, "--preset-id")?.to_string());
+            "--template-id" => {
+                template_id = Some(next_arg(parts, index, "--template-id")?.to_string());
                 index += 2;
             }
             "--definition-json" => {
@@ -1116,8 +1115,8 @@ fn parse_data_source_preset_test(parts: &[&str]) -> Result<VtyInventoryCommand> 
                     .context("invalid --definition-json")?;
                 index += 2;
             }
-            value if value.starts_with("--preset-id=") => {
-                preset_id = Some(value.trim_start_matches("--preset-id=").to_string());
+            value if value.starts_with("--template-id=") => {
+                template_id = Some(value.trim_start_matches("--template-id=").to_string());
                 index += 1;
             }
             value if value.starts_with("--definition-json=") => {
@@ -1128,17 +1127,17 @@ fn parse_data_source_preset_test(parts: &[&str]) -> Result<VtyInventoryCommand> 
             value => anyhow::bail!("unexpected argument {value}"),
         }
     }
-    Ok(VtyInventoryCommand::DataSourcePresetTest {
-        preset_id: preset_id.context("data-source-preset-test requires --preset-id")?,
+    Ok(VtyInventoryCommand::SourceTemplateTest {
+        template_id: template_id.context("source-template-test requires --template-id")?,
         definition,
     })
 }
 
-fn parse_data_source_preset_update(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let (preset_id, description, clear_description, definition, confirmed) =
-        parse_data_source_preset_candidate_args(parts, "data-source-preset-update")?;
-    Ok(VtyInventoryCommand::DataSourcePresetUpdate {
-        preset_id,
+fn parse_source_template_update(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let (template_id, description, clear_description, definition, confirmed) =
+        parse_source_template_candidate_args(parts, "source-template-update")?;
+    Ok(VtyInventoryCommand::SourceTemplateUpdate {
+        template_id,
         description,
         clear_description,
         definition,
@@ -1146,11 +1145,11 @@ fn parse_data_source_preset_update(parts: &[&str]) -> Result<VtyInventoryCommand
     })
 }
 
-fn parse_data_source_preset_candidate_args(
+fn parse_source_template_candidate_args(
     parts: &[&str],
     command_name: &str,
 ) -> Result<(String, Option<String>, bool, serde_json::Value, bool)> {
-    let mut preset_id = None;
+    let mut template_id = None;
     let mut description = None;
     let mut clear_description = false;
     let mut definition = serde_json::json!({});
@@ -1158,8 +1157,8 @@ fn parse_data_source_preset_candidate_args(
     let mut index = 1;
     while index < parts.len() {
         match parts[index] {
-            "--preset-id" => {
-                preset_id = Some(next_arg(parts, index, "--preset-id")?.to_string());
+            "--template-id" => {
+                template_id = Some(next_arg(parts, index, "--template-id")?.to_string());
                 index += 2;
             }
             "--description" => {
@@ -1179,8 +1178,8 @@ fn parse_data_source_preset_candidate_args(
                 confirmed = true;
                 index += 1;
             }
-            value if value.starts_with("--preset-id=") => {
-                preset_id = Some(value.trim_start_matches("--preset-id=").to_string());
+            value if value.starts_with("--template-id=") => {
+                template_id = Some(value.trim_start_matches("--template-id=").to_string());
                 index += 1;
             }
             value if value.starts_with("--description=") => {
@@ -1200,7 +1199,7 @@ fn parse_data_source_preset_candidate_args(
         "use only one of --description or --clear-description"
     );
     Ok((
-        preset_id.with_context(|| format!("{command_name} requires --preset-id"))?,
+        template_id.with_context(|| format!("{command_name} requires --template-id"))?,
         description,
         clear_description,
         definition,
@@ -1208,14 +1207,15 @@ fn parse_data_source_preset_candidate_args(
     ))
 }
 
-fn parse_data_source_assignments(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let (client_id, domain) = parse_data_source_filter_args(parts, "data-source-assignments")?;
-    Ok(VtyInventoryCommand::DataSourceAssignments { client_id, domain })
+fn parse_source_template_assignments(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let (client_id, domain) =
+        parse_source_template_filter_args(parts, "source-template-assignments")?;
+    Ok(VtyInventoryCommand::SourceTemplateAssignments { client_id, domain })
 }
 
-fn parse_data_source_status(parts: &[&str]) -> Result<VtyInventoryCommand> {
-    let (client_id, domain) = parse_data_source_filter_args(parts, "data-source-status")?;
-    Ok(VtyInventoryCommand::DataSourceStatus { client_id, domain })
+fn parse_source_status(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let (client_id, domain) = parse_source_template_filter_args(parts, "source-status")?;
+    Ok(VtyInventoryCommand::SourceStatus { client_id, domain })
 }
 
 fn parse_fleet_alert_args(parts: &[&str]) -> Result<FleetAlertArgs> {
@@ -2118,7 +2118,7 @@ fn validate_alert_severity(value: &str, context: &str) -> Result<()> {
     Ok(())
 }
 
-fn parse_data_source_filter_args(
+fn parse_source_template_filter_args(
     parts: &[&str],
     command_name: &str,
 ) -> Result<(Option<String>, Option<String>)> {
@@ -2161,7 +2161,7 @@ fn parse_data_source_filter_args(
     Ok((client_id, domain))
 }
 
-fn parse_data_source_hot_config(parts: &[&str]) -> Result<VtyInventoryCommand> {
+fn parse_source_config_patch(parts: &[&str]) -> Result<VtyInventoryCommand> {
     let mut client_id = None;
     let mut format = "toml".to_string();
     let mut index = 1;
@@ -2190,15 +2190,15 @@ fn parse_data_source_hot_config(parts: &[&str]) -> Result<VtyInventoryCommand> {
         matches!(format.as_str(), "toml" | "json"),
         "--format must be toml or json"
     );
-    Ok(VtyInventoryCommand::DataSourceHotConfig {
-        client_id: client_id.context("data-source-hot-config requires --client-id")?,
+    Ok(VtyInventoryCommand::SourceConfigPatch {
+        client_id: client_id.context("source-config-patch requires --client-id")?,
         format,
     })
 }
 
-fn parse_data_source_preset_assign(parts: &[&str]) -> Result<VtyInventoryCommand> {
+fn parse_source_template_assign(parts: &[&str]) -> Result<VtyInventoryCommand> {
     let mut domain = None;
-    let mut preset_id = None;
+    let mut template_id = None;
     let mut clients = Vec::new();
     let mut tags = Vec::new();
     let mut confirmed = false;
@@ -2209,8 +2209,8 @@ fn parse_data_source_preset_assign(parts: &[&str]) -> Result<VtyInventoryCommand
                 domain = Some(next_arg(parts, index, "--domain")?.to_string());
                 index += 2;
             }
-            "--preset-id" => {
-                preset_id = Some(next_arg(parts, index, "--preset-id")?.to_string());
+            "--template-id" => {
+                template_id = Some(next_arg(parts, index, "--template-id")?.to_string());
                 index += 2;
             }
             "--client" => {
@@ -2229,8 +2229,8 @@ fn parse_data_source_preset_assign(parts: &[&str]) -> Result<VtyInventoryCommand
                 domain = Some(value.trim_start_matches("--domain=").to_string());
                 index += 1;
             }
-            value if value.starts_with("--preset-id=") => {
-                preset_id = Some(value.trim_start_matches("--preset-id=").to_string());
+            value if value.starts_with("--template-id=") => {
+                template_id = Some(value.trim_start_matches("--template-id=").to_string());
                 index += 1;
             }
             value if value.starts_with("--client=") => {
@@ -2244,9 +2244,9 @@ fn parse_data_source_preset_assign(parts: &[&str]) -> Result<VtyInventoryCommand
             value => anyhow::bail!("unexpected argument {value}"),
         }
     }
-    Ok(VtyInventoryCommand::DataSourcePresetAssign {
-        domain: domain.context("data-source-preset-assign requires --domain")?,
-        preset_id: preset_id.context("data-source-preset-assign requires --preset-id")?,
+    Ok(VtyInventoryCommand::SourceTemplateAssign {
+        domain: domain.context("source-template-assign requires --domain")?,
+        template_id: template_id.context("source-template-assign requires --template-id")?,
         clients,
         tags,
         confirmed,
@@ -2687,25 +2687,29 @@ fn fleet_alert_notifications_path(
     path
 }
 
-fn data_source_presets_path(domain: Option<&str>) -> String {
+fn source_templates_path(domain: Option<&str>) -> String {
     match domain {
         Some(domain) => format!(
-            "/api/v1/data-source-presets?domain={}",
+            "/api/v1/source-templates?domain={}",
             percent_encode_query_value(domain)
         ),
-        None => "/api/v1/data-source-presets".to_string(),
+        None => "/api/v1/source-templates".to_string(),
     }
 }
 
-fn data_source_assignments_path(client_id: Option<&str>, domain: Option<&str>) -> String {
-    data_source_filtered_path("/api/v1/data-source-assignments", client_id, domain)
+fn source_template_assignments_path(client_id: Option<&str>, domain: Option<&str>) -> String {
+    source_template_filtered_path("/api/v1/source-template-assignments", client_id, domain)
 }
 
-fn data_source_status_path(client_id: Option<&str>, domain: Option<&str>) -> String {
-    data_source_filtered_path("/api/v1/data-source-status", client_id, domain)
+fn source_status_path(client_id: Option<&str>, domain: Option<&str>) -> String {
+    source_template_filtered_path("/api/v1/source-status", client_id, domain)
 }
 
-fn data_source_filtered_path(base: &str, client_id: Option<&str>, domain: Option<&str>) -> String {
+fn source_template_filtered_path(
+    base: &str,
+    client_id: Option<&str>,
+    domain: Option<&str>,
+) -> String {
     let mut query = Vec::new();
     if let Some(client_id) = client_id {
         query.push(format!(
@@ -2723,9 +2727,9 @@ fn data_source_filtered_path(base: &str, client_id: Option<&str>, domain: Option
     }
 }
 
-fn data_source_hot_config_path(client_id: &str) -> String {
+fn source_config_patch_path(client_id: &str) -> String {
     format!(
-        "/api/v1/data-source-hot-config?client_id={}",
+        "/api/v1/source-config-patch?client_id={}",
         percent_encode_query_value(client_id)
     )
 }

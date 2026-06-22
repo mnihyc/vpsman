@@ -1356,6 +1356,7 @@ function SystemSessionsPanel({
             renderExpandedRow={(row) => <AuthEventDetailGrid event={row} />}
             rows={authEvents}
             searchPlaceholder="Search username, result, reason, remote IP, or session"
+            selectable={false}
             singleExpandedRow
             storageKey="vpsman.system.authEvents"
             title="Authentication history"
@@ -2103,7 +2104,7 @@ function SystemConfigPanel({
         <section className="fleetPanel systemConfigOverview">
           <div className="sectionHeader">
             <div>
-              <h2>System Config</h2>
+              <h2>Suite config</h2>
               <span>{config?.path ?? "Suite TOML path"} / {config?.exists ? "file exists" : "new file"}</span>
             </div>
             <div className="buttonCluster">

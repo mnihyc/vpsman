@@ -604,8 +604,8 @@ tunnel_plan_json="$(vpsctl_json tunnel-plan \
   --left-underlay 203.0.113.41 \
   --right-underlay 203.0.113.42 \
   --address-pool-cidr 10.254.25.0/30 \
-  --left-tunnel-ipv4 10.254.25.0 \
-  --right-tunnel-ipv4 10.254.25.1 \
+  --left-tunnel-ipv4-cidr 10.254.25.0/31 \
+  --right-tunnel-ipv4-cidr 10.254.25.1/31 \
   --bandwidth 1000m \
   --latency-ms 18 \
   --save \

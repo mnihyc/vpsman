@@ -1,4 +1,4 @@
-pub(crate) struct BuiltInPreset {
+pub(crate) struct BuiltInSourceTemplate {
     pub(crate) id: &'static str,
     pub(crate) domain: &'static str,
     pub(crate) name: &'static str,
@@ -7,7 +7,7 @@ pub(crate) struct BuiltInPreset {
     pub(crate) definition: serde_json::Value,
 }
 
-pub(crate) const DATA_SOURCE_DOMAINS: &[&str] = &[
+pub(crate) const SOURCE_TEMPLATE_DOMAINS: &[&str] = &[
     "telemetry_metrics_source",
     "runtime_traffic_accounting_source",
     "latency_probe_source",
@@ -26,9 +26,9 @@ pub(crate) const DATA_SOURCE_DOMAINS: &[&str] = &[
     "update_rollback_heartbeat_source",
 ];
 
-pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
+pub(crate) fn builtin_source_templates() -> Vec<BuiltInSourceTemplate> {
     vec![
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000001",
             domain: "telemetry_metrics_source",
             name: "builtin:linux_procfs",
@@ -36,7 +36,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
             description: "Default low-cost Linux procfs/sysfs telemetry source",
             definition: serde_json::json!({"source": "linux_procfs"}),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000011",
             domain: "telemetry_metrics_source",
             name: "builtin:host_mounted_procfs",
@@ -50,7 +50,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "os_release_file": "/host/etc/os-release"
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000002",
             domain: "runtime_traffic_accounting_source",
             name: "builtin:interface_counters",
@@ -58,7 +58,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
             description: "Default runtime tunnel traffic accounting from interface counters",
             definition: serde_json::json!({"source": "interface_counters"}),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000021",
             domain: "runtime_traffic_accounting_source",
             name: "builtin:vnstat_json",
@@ -70,15 +70,15 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "vnstat_argv": ["/usr/bin/vnstat"]
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000003",
             domain: "latency_probe_source",
             name: "builtin:linux_ping",
             is_default: true,
-            description: "Default ICMP latency/loss probe using Linux ping preset candidates",
+            description: "Default ICMP latency/loss probe using Linux ping template candidates",
             definition: serde_json::json!({"source": "linux_ping_preset"}),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000031",
             domain: "latency_probe_source",
             name: "builtin:usr_bin_ping",
@@ -90,7 +90,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "probe_ping_argv": ["/usr/bin/ping"]
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000004",
             domain: "speed_test_provider",
             name: "builtin:tcp_throughput",
@@ -98,20 +98,20 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
             description: "Default bounded two-endpoint TCP throughput provider",
             definition: serde_json::json!({"provider": "tcp_throughput"}),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000041",
             domain: "speed_test_provider",
             name: "builtin:iperf3_json_adapter",
             is_default: false,
             description:
-                "Reserved iperf3 JSON provider adapter preset for fleets that standardize on iperf3",
+                "Reserved iperf3 JSON provider adapter template for fleets that standardize on iperf3",
             definition: serde_json::json!({
                 "provider": "iperf3_json_adapter",
                 "server_argv": ["/usr/bin/iperf3", "--server", "--one-off", "--json"],
                 "client_argv": ["/usr/bin/iperf3", "--client", "{server_address}", "--json"]
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000005",
             domain: "process_inventory_source",
             name: "builtin:linux_procfs",
@@ -119,7 +119,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
             description: "Default process inventory from configurable Linux procfs root",
             definition: serde_json::json!({"source": "linux_procfs"}),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000051",
             domain: "process_inventory_source",
             name: "builtin:host_mounted_procfs",
@@ -130,7 +130,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "proc_root": "/host/proc"
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000006",
             domain: "user_session_inventory_source",
             name: "builtin:linux_w_who",
@@ -138,7 +138,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
             description: "Default user/session inventory using Linux w/who candidates",
             definition: serde_json::json!({"source": "linux_w_who_preset"}),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000061",
             domain: "user_session_inventory_source",
             name: "builtin:usr_bin_w",
@@ -153,7 +153,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 }
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000062",
             domain: "user_session_inventory_source",
             name: "builtin:usr_bin_who",
@@ -168,7 +168,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 }
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000007",
             domain: "command_execution_policy",
             name: "builtin:linux_shell_argv",
@@ -181,7 +181,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "process_cleanup": "process_group"
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000071",
             domain: "command_execution_policy",
             name: "builtin:busybox_ash_argv",
@@ -195,7 +195,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "process_cleanup": "process_group"
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000072",
             domain: "command_execution_policy",
             name: "builtin:clean_batch_execution",
@@ -209,7 +209,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "process_cleanup": "process_group"
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000008",
             domain: "runtime_tunnel_adapter",
             name: "builtin:agent_iproute2_managed",
@@ -217,7 +217,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
             description: "Default client-managed iproute2/tc runtime tunnel adapter",
             definition: serde_json::json!({"manager": "agent_iproute2_managed"}),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000081",
             domain: "runtime_tunnel_adapter",
             name: "builtin:agent_iproute2_runtime_reconcile",
@@ -231,7 +231,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "runtime_tc_argv": ["/sbin/tc"]
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000082",
             domain: "process_supervisor_policy",
             name: "builtin:agent_supervisor",
@@ -244,7 +244,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "limit_source": "agent_capability_snapshot"
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000083",
             domain: "traffic_limit_status_source",
             name: "builtin:tunnel_plan_tc_status",
@@ -256,7 +256,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "status_source": "network_status_and_telemetry"
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000084",
             domain: "routing_daemon_adapter",
             name: "builtin:bird2_ospf",
@@ -269,7 +269,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "status_source": "bird2_status"
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000009",
             domain: "backup_object_store",
             name: "builtin:local_filesystem",
@@ -277,12 +277,12 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
             description: "Default local filesystem object-store adapter with reserved S3 extension",
             definition: serde_json::json!({"provider": "local_filesystem"}),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000091",
             domain: "backup_object_store",
             name: "builtin:s3_path_style_reserved",
             is_default: false,
-            description: "Reserved S3/MinIO path-style backup artifact adapter preset",
+            description: "Reserved S3/MinIO path-style backup artifact adapter template",
             definition: serde_json::json!({
                 "provider": "s3_path_style",
                 "requires_server_env": [
@@ -293,7 +293,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 ]
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-000000000092",
             domain: "restore_path_mapping",
             name: "builtin:explicit_restore_paths",
@@ -307,7 +307,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "supports_post_restore_hooks": true
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-00000000000a",
             domain: "update_artifact_source",
             name: "builtin:external_https_sha256",
@@ -319,7 +319,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "requires_sha256": true
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-0000000000a1",
             domain: "update_artifact_source",
             name: "builtin:github_release_sha256",
@@ -332,7 +332,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "manifest": "version_json_download_urls_sha256sums"
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-0000000000a2",
             domain: "update_restart_policy",
             name: "builtin:agent_self_restart",
@@ -345,7 +345,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "fallback": "manual_supervisor"
             }),
         },
-        BuiltInPreset {
+        BuiltInSourceTemplate {
             id: "00000000-0000-4000-8000-0000000000a3",
             domain: "update_rollback_heartbeat_source",
             name: "builtin:update_heartbeat_marker",

@@ -57,36 +57,24 @@ const allViews: ScreenshotEntry[] = [
     heading: "Webhook delivery maintenance",
     id: "05d-fleet-notification-maintenance",
   },
-  { view: "Config", heading: "Config overview", id: "06-config-overview" },
+  { view: "Config", heading: "Agent config overview", id: "06-config-overview" },
   {
     view: "Config",
-    subpage: "Rules",
-    heading: "Config rules",
-    id: "07-config-rules",
+    subpage: "Bulk patch",
+    heading: "Bulk patch",
+    id: "07-config-bulk",
   },
   {
     view: "Config",
-    subpage: "Bulk apply",
-    heading: "Bulk config patches",
-    id: "08-config-bulk",
-  },
-  {
-    view: "Config",
-    subpage: "Single VPS",
-    heading: "Single VPS config",
-    id: "09-config-single",
+    subpage: "VPS config",
+    heading: "VPS config",
+    id: "08-config-single",
   },
   {
     view: "Config",
     subpage: "Templates",
-    heading: "Data-source presets",
-    id: "10-config-templates",
-  },
-  {
-    view: "Config",
-    subpage: "Status",
-    heading: "Active source status",
-    id: "11-config-status",
+    heading: "Templates",
+    id: "09-config-templates",
   },
   { view: "Tags", heading: "Tags", id: "12-tags-registry" },
   {
@@ -254,8 +242,8 @@ const allViews: ScreenshotEntry[] = [
   },
   {
     view: "System",
-    subpage: "Config",
-    heading: "System config",
+    subpage: "Suite config",
+    heading: "Suite config",
     id: "45-system-config",
   },
   {
@@ -279,17 +267,18 @@ async function navigateAndScreenshot(
   projectDir: string,
   projectName: string,
 ) {
+  const visibleView = entry.view === "Config" ? "Agent config" : entry.view;
   const label = entry.subpage
-    ? `${entry.view} / ${entry.subpage}${entry.tab ? ` / ${entry.tab}` : ""}`
-    : entry.view;
+    ? `${visibleView} / ${entry.subpage}${entry.tab ? ` / ${entry.tab}` : ""}`
+    : visibleView;
 
   const nav = page.getByRole("navigation", {
     name: "Primary console navigation",
   });
-  await nav.getByRole("button", { name: entry.view, exact: true }).click();
+  await nav.getByRole("button", { name: visibleView, exact: true }).click();
 
   if (entry.subpage) {
-    const subpageGroup = nav.getByLabel(`${entry.view} sections`);
+    const subpageGroup = nav.getByLabel(`${visibleView} sections`);
     const subpageButton = subpageGroup.getByRole("button", {
       name: entry.subpage,
       exact: true,

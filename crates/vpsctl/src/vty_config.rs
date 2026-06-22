@@ -5,9 +5,9 @@ use serde::Deserialize;
 use uuid::Uuid;
 use vpsman_common::{
     validate_agent_config_shape, validate_incremental_config_patch_section, AgentConfig,
-    JobCommand, DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH, DEFAULT_MAX_JOB_TIMEOUT_SECS,
-    HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE, MAX_AGENT_HOT_CONFIG_BYTES,
-    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+    JobCommand, DEFAULT_MAX_JOB_TIMEOUT_SECS, HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE,
+    MAX_AGENT_HOT_CONFIG_BYTES, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+    SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH,
 };
 
 use crate::{
@@ -29,7 +29,7 @@ pub(crate) struct VtyHotConfigRequest {
 }
 
 #[derive(Debug)]
-pub(crate) struct VtyDataSourceHotConfigApplyRequest {
+pub(crate) struct VtySourceConfigPatchApplyRequest {
     client_id: String,
     max_timeout_secs: u64,
     privilege_ttl_secs: u64,
@@ -155,9 +155,9 @@ pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigReques
     })
 }
 
-pub(crate) fn parse_vty_data_source_hot_config_apply(
+pub(crate) fn parse_vty_source_config_patch_apply(
     tokens: &[&str],
-) -> Result<VtyDataSourceHotConfigApplyRequest> {
+) -> Result<VtySourceConfigPatchApplyRequest> {
     let mut client_id = None;
     let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut privilege_ttl_secs = 300_u64;
@@ -200,25 +200,25 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
                 index += 1;
             }
             value => {
-                anyhow::bail!("unknown data-source-hot-config-apply flag {value}");
+                anyhow::bail!("unknown source-config-patch-apply flag {value}");
             }
         }
     }
     validate_config_dispatch_bounds(
         max_timeout_secs,
         privilege_ttl_secs,
-        "data-source-hot-config-apply",
+        "source-config-patch-apply",
     )?;
-    let client_id = client_id.context("data-source-hot-config-apply requires --client-id <id>")?;
+    let client_id = client_id.context("source-config-patch-apply requires --client-id <id>")?;
     anyhow::ensure!(
         !client_id.is_empty() && client_id.len() <= 128,
         "--client-id must be between 1 and 128 bytes"
     );
     anyhow::ensure!(
         confirmed,
-        "data-source-hot-config-apply requires --confirmed because it applies an incremental config patch"
+        "source-config-patch-apply requires --confirmed because it applies an incremental config patch"
     );
-    Ok(VtyDataSourceHotConfigApplyRequest {
+    Ok(VtySourceConfigPatchApplyRequest {
         client_id,
         max_timeout_secs,
         privilege_ttl_secs,
@@ -592,12 +592,12 @@ pub(crate) fn submit_vty_hot_config(
     )
 }
 
-pub(crate) fn submit_vty_data_source_hot_config_apply(
+pub(crate) fn submit_vty_source_config_patch_apply(
     api_url: &str,
     token: Option<&str>,
     password: &str,
     salt_hex: &str,
-    request: VtyDataSourceHotConfigApplyRequest,
+    request: VtySourceConfigPatchApplyRequest,
 ) -> Result<String> {
     #[derive(Deserialize)]
     struct RenderedPatch {
@@ -607,16 +607,16 @@ pub(crate) fn submit_vty_data_source_hot_config_apply(
     let body = http_get(
         api_url,
         &format!(
-            "/api/v1/data-source-hot-config?client_id={}",
+            "/api/v1/source-config-patch?client_id={}",
             percent_encode_query_value(&request.client_id)
         ),
         token,
     )?;
     let rendered: RenderedPatch =
-        serde_json::from_str(&body).context("failed to parse rendered data-source patch")?;
-    validate_data_source_config_patch(&rendered.toml)?;
-    let operation = JobCommand::DataSourceConfigPatch {
-        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
+        serde_json::from_str(&body).context("failed to parse rendered source template patch")?;
+    validate_source_config_patch(&rendered.toml)?;
+    let operation = JobCommand::SourceConfigPatch {
+        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
         toml: rendered.toml,
     };
     let selection = VtyJobSelection {
@@ -630,7 +630,7 @@ pub(crate) fn submit_vty_data_source_hot_config_apply(
         token,
         password,
         salt_hex,
-        "data_source_config_patch",
+        "source_config_patch",
         operation,
         selection,
         request.max_timeout_secs,
@@ -772,24 +772,24 @@ fn validate_sha256(value: &str, label: &str) -> Result<String> {
     Ok(value)
 }
 
-fn validate_data_source_config_patch(toml_document: &str) -> Result<()> {
+fn validate_source_config_patch(toml_document: &str) -> Result<()> {
     anyhow::ensure!(
         !toml_document.is_empty(),
-        "rendered data-source config patch is empty"
+        "rendered source template config patch is empty"
     );
     anyhow::ensure!(
         toml_document.len() <= MAX_AGENT_HOT_CONFIG_BYTES,
-        "rendered data-source config patch exceeds {} bytes",
+        "rendered source template config patch exceeds {} bytes",
         MAX_AGENT_HOT_CONFIG_BYTES
     );
     let value: toml::Value = toml::from_str(toml_document)
-        .context("rendered data-source config patch is invalid TOML")?;
+        .context("rendered source template config patch is invalid TOML")?;
     let table = value
         .as_table()
-        .context("rendered data-source config patch must be a TOML table")?;
+        .context("rendered source template config patch must be a TOML table")?;
     anyhow::ensure!(
         !table.is_empty(),
-        "rendered data-source config patch has no sections"
+        "rendered source template config patch has no sections"
     );
     for section in table.keys() {
         validate_incremental_config_patch_section(section)
@@ -868,8 +868,7 @@ fn submit_vty_config_operation(
 mod tests {
     use super::{
         parse_vty_agent_update, parse_vty_agent_update_activate, parse_vty_agent_update_check,
-        parse_vty_agent_update_rollback, parse_vty_data_source_hot_config_apply,
-        parse_vty_hot_config,
+        parse_vty_agent_update_rollback, parse_vty_hot_config, parse_vty_source_config_patch_apply,
     };
 
     #[test]
@@ -906,8 +905,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_data_source_hot_config_apply_request() {
-        let request = parse_vty_data_source_hot_config_apply(&[
+    fn parses_source_config_patch_apply_request() {
+        let request = parse_vty_source_config_patch_apply(&[
             "--client-id",
             "edge-a",
             "--max-timeout",
@@ -927,8 +926,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unconfirmed_data_source_hot_config_apply() {
-        assert!(parse_vty_data_source_hot_config_apply(&["--client-id", "edge-a"]).is_err());
+    fn rejects_unconfirmed_source_config_patch_apply() {
+        assert!(parse_vty_source_config_patch_apply(&["--client-id", "edge-a"]).is_err());
     }
 
     #[test]

@@ -14,7 +14,6 @@ import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useRe
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import { buildPrivilegeForJobOperation, type PrivilegeAssertion, type PrivilegeMaterial } from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
-import { networkBackendPresetLabel } from "../../presets/networkBackendPresets";
 import {
   buildNetworkApplyOperation,
   buildNetworkProbeOperation,
@@ -29,7 +28,6 @@ import type {
   CreateJobResponse,
   JobOperation,
   JobTargetRecord,
-  TunnelConfigBackend,
   TunnelEndpointSide,
   TunnelPlanRecord,
 } from "../../types";
@@ -40,6 +38,8 @@ import {
   MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 } from "../jobDispatchModel";
 import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
+
+const ALL_PLANNED_SCOPE = "__all_planned__";
 
 export function TopologyApplyControls({
   agents,
@@ -68,7 +68,6 @@ export function TopologyApplyControls({
   } = useReviewGenerationGuard();
   const [selectedPlanId, setSelectedPlanId] = useState(() => tunnelPlans[0]?.id ?? "");
   const [side, setSide] = useState<TunnelEndpointSide>("left");
-  const [backend, setBackend] = useState<TunnelConfigBackend>("ifupdown");
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(60);
   const [probeCount, setProbeCount] = useState(3);
   const [probeIntervalMs, setProbeIntervalMs] = useState(500);
@@ -87,14 +86,25 @@ export function TopologyApplyControls({
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [reviewPending, setReviewPending] = useState(false);
-  const selectedPlan = tunnelPlans.find((plan) => plan.id === selectedPlanId) ?? tunnelPlans[0] ?? null;
+  const plannedApplyPlans = useMemo(() => buildPlannedApplyPlans(tunnelPlans), [tunnelPlans]);
+  const bulkApplySelected = selectedPlanId === ALL_PLANNED_SCOPE;
+  const selectedPlan = bulkApplySelected
+    ? null
+    : (tunnelPlans.find((plan) => plan.id === selectedPlanId) ?? tunnelPlans[0] ?? null);
   const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
   const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
   const endpoint = useMemo(
     () => (selectedPlan ? renderTunnelEndpointConfig(selectedPlan.plan, side) : null),
     [selectedPlan, side],
   );
-  const mutationTargets = resolveAgentsById(agents, endpoint ? [endpoint.localClientId] : []);
+  const mutationTargets = resolveAgentsById(
+    agents,
+    bulkApplySelected
+      ? uniqueClientIds(plannedApplyPlans.flatMap((candidate) => planClientIds(candidate.plan)))
+      : selectedPlan
+        ? planClientIds(selectedPlan)
+        : [],
+  );
   const visibleJobProgress = jobProgress ?? lastJobProgress;
   const status =
     actionError ??
@@ -144,90 +154,136 @@ export function TopologyApplyControls({
     try {
       await waitForReviewRender();
       await runPanelAction(setPending, setActionError, async () => {
-      if (!selectedPlan || !endpoint) {
-        throw new Error("Select a tunnel plan");
-      }
-      if (!privilegeMaterial) {
-        throw new Error("Privilege unlock is locked");
-      }
-      if (!selectedPlan.enabled && !disabledPlanAllowsAction(mode)) {
-        throw new Error("Tunnel plan is disabled");
-      }
-      const boundedProbeCount = clampInteger(probeCount, 1, 20);
-      const boundedProbeIntervalMs = clampInteger(probeIntervalMs, 200, 10_000);
-      const boundedSpeedDurationSecs = clampInteger(speedDurationSecs, 1, 30);
-      const boundedSpeedMaxBytes = clampInteger(speedMaxBytesMiB, 1, 256) * 1024 * 1024;
-      const boundedSpeedRateLimitKbps = clampInteger(speedRateLimitKbps, 64, 1_000_000);
-      const boundedSpeedPort = clampInteger(speedPort, 1024, 65_535);
-      const boundedSpeedConnectTimeoutMs = clampInteger(speedConnectTimeoutMs, 100, 30_000);
-      const builtOperation =
-        mode === "apply"
-          ? await buildNetworkApplyOperation(selectedPlan.plan, side, backend)
-          : mode === "rollback"
-            ? buildNetworkRollbackOperation(selectedPlan.plan, side)
-            : mode === "status"
-              ? buildNetworkStatusOperation(selectedPlan.plan, side)
-              : mode === "probe"
-                ? buildNetworkProbeOperation(selectedPlan.plan, side, boundedProbeCount, boundedProbeIntervalMs)
-                : buildNetworkSpeedTestOperation(
-                    selectedPlan.plan,
-                    side,
-                    boundedSpeedDurationSecs,
-                    boundedSpeedMaxBytes,
-                    boundedSpeedRateLimitKbps,
-                    boundedSpeedPort,
-                    boundedSpeedConnectTimeoutMs,
-                  );
-      const targetClientIds =
-        mode === "speed_test"
-          ? [builtOperation.endpoint.localClientId, builtOperation.endpoint.peerClientId]
-          : [builtOperation.endpoint.localClientId];
-      const targets = resolveAgentsById(agents, targetClientIds);
-      const selectorExpression = selectorExpressionForClientIds(targetClientIds);
-      const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
-      const boundedForceUnprivileged = isMutation(mode) ? forceUnprivileged : false;
-      const builtPrivilege = await buildPrivilegeForJobOperation({
-        clientIds: targetClientIds,
-        commandType: commandName(mode),
-        forceUnprivileged: boundedForceUnprivileged,
-        operation: builtOperation.operation,
-        privilegeMaterial,
-        selectorExpression,
-        maxTimeoutSecs: boundedMaxTimeoutSecs,
+        if (!privilegeMaterial) {
+          throw new Error("Privilege unlock is locked");
+        }
+        if (bulkApplySelected && mode !== "apply") {
+          throw new Error("All Unplanned is only available for apply");
+        }
+        if (!bulkApplySelected && (!selectedPlan || !endpoint)) {
+          throw new Error("Select a tunnel plan");
+        }
+        if (!bulkApplySelected && selectedPlan && !selectedPlan.enabled && !disabledPlanAllowsAction(mode)) {
+          throw new Error("Tunnel plan is disabled");
+        }
+        const boundedProbeCount = clampInteger(probeCount, 1, 20);
+        const boundedProbeIntervalMs = clampInteger(probeIntervalMs, 200, 10_000);
+        const boundedSpeedDurationSecs = clampInteger(speedDurationSecs, 1, 30);
+        const boundedSpeedMaxBytes = clampInteger(speedMaxBytesMiB, 1, 256) * 1024 * 1024;
+        const boundedSpeedRateLimitKbps = clampInteger(speedRateLimitKbps, 64, 1_000_000);
+        const boundedSpeedPort = clampInteger(speedPort, 1024, 65_535);
+        const boundedSpeedConnectTimeoutMs = clampInteger(speedConnectTimeoutMs, 100, 30_000);
+        const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
+        const boundedForceUnprivileged = isMutation(mode) ? forceUnprivileged : false;
+        const buildSubmission = async (
+          planRecord: TunnelPlanRecord,
+          planSide: TunnelEndpointSide,
+        ): Promise<NetworkJobSubmission> => {
+          const builtOperation =
+            mode === "apply"
+              ? await buildNetworkApplyOperation(planRecord.plan, planSide)
+              : mode === "rollback"
+                ? buildNetworkRollbackOperation(planRecord.plan, planSide)
+                : mode === "status"
+                  ? buildNetworkStatusOperation(planRecord.plan, planSide)
+                  : mode === "probe"
+                    ? buildNetworkProbeOperation(planRecord.plan, planSide, boundedProbeCount, boundedProbeIntervalMs)
+                    : buildNetworkSpeedTestOperation(
+                        planRecord.plan,
+                        planSide,
+                        boundedSpeedDurationSecs,
+                        boundedSpeedMaxBytes,
+                        boundedSpeedRateLimitKbps,
+                        boundedSpeedPort,
+                        boundedSpeedConnectTimeoutMs,
+                      );
+          const targetClientIds =
+            mode === "speed_test"
+              ? [builtOperation.endpoint.localClientId, builtOperation.endpoint.peerClientId]
+              : [builtOperation.endpoint.localClientId];
+          const selectorExpression = selectorExpressionForClientIds(targetClientIds);
+          const builtPrivilege = await buildPrivilegeForJobOperation({
+            clientIds: targetClientIds,
+            commandType: commandName(mode),
+            forceUnprivileged: boundedForceUnprivileged,
+            operation: builtOperation.operation,
+            privilegeMaterial,
+            selectorExpression,
+            maxTimeoutSecs: boundedMaxTimeoutSecs,
+          });
+          return {
+            command: commandName(mode),
+            confirmed: requiresConfirmation(mode),
+            destructive: isMutation(mode),
+            forceUnprivileged: boundedForceUnprivileged,
+            jobId: crypto.randomUUID(),
+            maxTimeoutSecs: boundedMaxTimeoutSecs,
+            operation: builtOperation.operation,
+            payloadHashHex: builtPrivilege.payloadHashHex,
+            planName: planRecord.name,
+            privilegeAssertion: builtPrivilege.privilegeAssertion,
+            selectorExpression,
+            side: planSide,
+            targetClientIds,
+            targets: resolveAgentsById(agents, targetClientIds),
+          };
+        };
+        const submissionCandidates = bulkApplySelected
+          ? plannedApplyPlans.flatMap((candidate) => planEndpointSides(candidate.plan).map((planSide) => ({
+              plan: candidate.plan,
+              side: planSide,
+            })))
+          : selectedPlan && (mode === "apply" || mode === "rollback")
+            ? planEndpointSides(selectedPlan).map((planSide) => ({ plan: selectedPlan, side: planSide }))
+            : selectedPlan
+              ? [{ plan: selectedPlan, side }]
+              : [];
+        const submissions = await Promise.all(
+          submissionCandidates.map((candidate) => buildSubmission(candidate.plan, candidate.side)),
+        );
+        if (!submissions.length) {
+          throw new Error("No unplanned tunnel plans are ready to apply");
+        }
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        const snapshotTargets = resolveAgentsById(
+          agents,
+          uniqueClientIds(submissions.flatMap((submission) => submission.targetClientIds)),
+        );
+        const scopeLabel = bulkApplySelected
+          ? `All unplanned (${plannedApplyPlans.length})`
+          : mode === "apply" || mode === "rollback"
+            ? "Selected plan"
+            : "Selected endpoint";
+        const planLabel = bulkApplySelected
+          ? `${uniquePlanCount(submissions)} plans`
+          : submissions[0]?.planName ?? "unknown";
+        setNetworkSnapshot({
+          action: mode,
+          bulk: bulkApplySelected,
+          detail: bulkApplySelected
+            ? `Apply ${plannedApplyPlans.length} unplanned plans with ${submissions.length} endpoint jobs.`
+            : submissions.length > 1
+              ? `${actionLabel(mode)} ${submissions[0]?.planName ?? "selected plan"} on both endpoints.`
+            : `${actionLabel(mode)} ${submissions[0]?.planName ?? "selected plan"} on ${vpsCountLabel(snapshotTargets.length)}.`,
+          forceUnprivileged: boundedForceUnprivileged,
+          items: [
+            { label: "Operation", value: actionLabel(mode) },
+            { label: "Scope", value: scopeLabel },
+            { label: "Targets", value: formatTargetAvailabilitySummary(snapshotTargets) },
+            { label: "Plans", value: planLabel },
+            { label: "Endpoint", value: submissions.length > 1 ? "Both endpoints" : side },
+            { label: "Max timeout", value: `${boundedMaxTimeoutSecs}s` },
+            { label: "Privilege unlock", value: "Unlocked locally" },
+            ...(isMutation(mode)
+              ? [{ label: "Privilege", value: boundedForceUnprivileged ? "Forced best effort" : "Root required" }]
+              : []),
+          ],
+          submissions,
+          targets: snapshotTargets,
+        });
       });
-      if (!isReviewGenerationCurrent(reviewGeneration)) {
-        return;
-      }
-      setNetworkSnapshot({
-        action: mode,
-        command: commandName(mode),
-        confirmed: requiresConfirmation(mode),
-        destructive: isMutation(mode),
-        detail: `${actionLabel(mode)} ${selectedPlan.name} on ${vpsCountLabel(targets.length)}.`,
-        forceUnprivileged: boundedForceUnprivileged,
-        jobId: crypto.randomUUID(),
-        items: [
-          { label: "Operation", value: actionLabel(mode) },
-          { label: "Selector", value: selectorExpression },
-          { label: "Targets", value: formatTargetAvailabilitySummary(targets) },
-          { label: "Plan", value: selectedPlan.name },
-          { label: "Endpoint", value: side },
-          ...(mode === "apply" ? [{ label: "Backend", value: backendLabel(backend) }] : []),
-          { label: "Max timeout", value: `${boundedMaxTimeoutSecs}s` },
-          { label: "Privilege unlock", value: "Unlocked locally" },
-          ...(isMutation(mode)
-            ? [{ label: "Privilege", value: boundedForceUnprivileged ? "Forced best effort" : "Root required" }]
-            : []),
-        ],
-        operation: builtOperation.operation,
-        payloadHashHex: builtPrivilege.payloadHashHex,
-        privilegeAssertion: builtPrivilege.privilegeAssertion,
-        selectorExpression,
-        targetClientIds,
-        targets,
-        maxTimeoutSecs: boundedMaxTimeoutSecs,
-      });
-    });
     } finally {
       setReviewPending(false);
     }
@@ -243,24 +299,31 @@ export function TopologyApplyControls({
     setNetworkSnapshot(null);
     clearExecutionResults();
     await runPanelAction(setPending, setActionError, async () => {
-      const job = await onCreateJob({
-        argv: [],
-        selector_expression: snapshot.selectorExpression,
-        target_client_ids: snapshot.targetClientIds,
-        command: snapshot.command,
-        confirmed: snapshot.confirmed,
-        destructive: snapshot.destructive,
-        operation: snapshot.operation,
-        force_unprivileged: snapshot.forceUnprivileged,
-        job_id: snapshot.jobId,
-        privileged: true,
-        privilege_assertion: snapshot.privilegeAssertion,
-        max_timeout_secs: snapshot.maxTimeoutSecs,
-      });
-      setLastPayloadHash(snapshot.payloadHashHex);
-      setLastJob(job);
+      const jobs: Array<{ job: CreateJobResponse; submission: NetworkJobSubmission }> = [];
+      for (const submission of snapshot.submissions) {
+        const job = await onCreateJob({
+          argv: [],
+          selector_expression: submission.selectorExpression,
+          target_client_ids: submission.targetClientIds,
+          command: submission.command,
+          confirmed: submission.confirmed,
+          destructive: submission.destructive,
+          operation: submission.operation,
+          force_unprivileged: submission.forceUnprivileged,
+          job_id: submission.jobId,
+          privileged: true,
+          privilege_assertion: submission.privilegeAssertion,
+          max_timeout_secs: submission.maxTimeoutSecs,
+        });
+        jobs.push({ job, submission });
+      }
+      const lastSubmission = snapshot.submissions[snapshot.submissions.length - 1] ?? null;
+      setLastPayloadHash(lastSubmission?.payloadHashHex ?? null);
       setLastAction(snapshot.action);
-      await trackNetworkProgress(job, snapshot.targets, snapshot.maxTimeoutSecs);
+      for (const { job, submission } of jobs) {
+        setLastJob(job);
+        await trackNetworkProgress(job, submission.targets, submission.maxTimeoutSecs);
+      }
     });
   }
 
@@ -296,207 +359,312 @@ export function TopologyApplyControls({
         </div>
         <ShieldCheck size={20} />
       </div>
-      <form className="dispatchForm" onSubmit={submitApply}>
-        <div className="dispatchControls">
-          <label>
-            <span>Apply plan</span>
-            <select
-              aria-label="Network apply plan"
-              onChange={(event) => {
-                clearNetworkReview();
-                setSelectedPlanId(event.target.value);
-              }}
-              value={selectedPlan?.id ?? ""}
+      <form className="dispatchForm topologyApplyForm" onSubmit={submitApply}>
+        <div className="topologyApplyGroups">
+          <section
+            className="topologyApplyGroup"
+            title="Required for apply. Select one saved plan, or All Unplanned to apply every enabled plan with at least one endpoint still in planned status."
+          >
+            <div className="topologyApplyGroupHeader">
+              <strong>Apply target</strong>
+              <small>Required</small>
+            </div>
+            <div className="dispatchControls">
+              <label>
+                <span>Plan</span>
+                <select
+                  aria-label="Network apply plan"
+                  onChange={(event) => {
+                    clearNetworkReview();
+                    setSelectedPlanId(event.target.value);
+                  }}
+                  value={selectedPlanId}
+                >
+                  <option value={ALL_PLANNED_SCOPE}>All Unplanned ({plannedApplyPlans.length})</option>
+                  {tunnelPlans.map((plan) => (
+                    <option key={plan.id} value={plan.id}>
+                      {plan.name}{plan.enabled ? "" : " (disabled)"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label title="Maximum wall-clock job runtime sent to the backend for each reviewed network job.">
+                <span>Max timeout</span>
+                <input
+                  aria-label="Network apply max timeout seconds"
+                  max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
+                  min={1}
+                  onChange={(event) => {
+                    clearNetworkReview();
+                    setMaxTimeoutSecs(Number(event.target.value));
+                  }}
+                  type="number"
+                  value={maxTimeoutSecs}
+                />
+              </label>
+            </div>
+            {bulkApplySelected ? (
+              <div className="operationNote compactTopologyNote">
+                <strong>All Unplanned ({plannedApplyPlans.length})</strong>
+                <span title="Agents apply with their configured network backend.">
+                  {plannedApplyPlans.length} plans / {vpsCountLabel(mutationTargets.length)}
+                </span>
+              </div>
+            ) : endpoint ? (
+              <div className="operationNote compactTopologyNote">
+                <strong>{selectedPlan?.name ?? "Selected plan"}</strong>
+                <span title={agentBackendHint(agents, selectedPlan)}>
+                  {clientLabel(selectedPlan?.left_client_id ?? "")} / {clientLabel(selectedPlan?.right_client_id ?? "")}
+                </span>
+              </div>
+            ) : null}
+            <TargetImpactPreview
+              forceUnprivileged={forceUnprivileged}
+              mode="root_network_mutation"
+              targets={mutationTargets}
+              title="Network mutation impact"
+            />
+            <label
+              className="checkLine"
+              title="Try the apply or rollback as the agent user instead of requiring root privilege. Host changes may fail depending on local permissions."
             >
-              {tunnelPlans.map((plan) => (
-                <option key={plan.id} value={plan.id}>
-                  {plan.name}{plan.enabled ? "" : " (disabled)"}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>Endpoint side</span>
-            <select
-              aria-label="Network apply endpoint side"
-              onChange={(event) => {
-                clearNetworkReview();
-                setSide(event.target.value as TunnelEndpointSide);
-              }}
-              value={side}
-            >
-              <option value="left">Left endpoint</option>
-              <option value="right">Right endpoint</option>
-            </select>
-          </label>
-          <label>
-            <span>Network backend</span>
-            <select
-              aria-label="Network apply backend"
-              onChange={(event) => {
-                clearNetworkReview();
-                setBackend(event.target.value as TunnelConfigBackend);
-              }}
-              value={backend}
-            >
-              <option value="ifupdown">ifupdown</option>
-              <option value="netplan">netplan</option>
-              <option value="systemd_networkd">systemd-networkd</option>
-            </select>
-          </label>
+              <input
+                aria-label="Force unprivileged network best effort"
+                checked={forceUnprivileged}
+                onChange={(event) => {
+                  clearNetworkReview();
+                  setForceUnprivileged(event.target.checked);
+                }}
+                type="checkbox"
+              />
+              <span>Unprivileged</span>
+            </label>
+          </section>
+
+          <section className="topologyApplyGroup" title="Mutating network actions. All Unplanned is apply-only.">
+            <div className="topologyApplyGroupHeader">
+              <strong>Mutations</strong>
+              <small>Mutating</small>
+            </div>
+            <div className="topologyApplyActionRow">
+              <button
+                className="primaryAction"
+                disabled={
+                  pending ||
+                  networkSnapshot !== null ||
+                  !privilegeMaterial ||
+                  (bulkApplySelected
+                    ? plannedApplyPlans.length === 0
+                    : !selectedPlan || !endpoint || !selectedPlan.enabled)
+                }
+                type="submit"
+              >
+                <Play size={17} />
+                Review apply
+              </button>
+              <button
+                className="secondaryAction"
+                disabled={pending || networkSnapshot !== null || bulkApplySelected || !selectedPlan || !endpoint || !privilegeMaterial}
+                onClick={submitRollback}
+                type="button"
+              >
+                <RotateCcw size={17} />
+                Review rollback
+              </button>
+            </div>
+          </section>
+
+          <section className="topologyApplyGroup" title="Read-only checks for one selected endpoint side.">
+            <div className="topologyApplyGroupHeader">
+              <strong>Checks</strong>
+              <small>Single endpoint</small>
+            </div>
+            <div className="dispatchControls">
+              <label title="Single-endpoint checks run from this side of the selected plan.">
+                <span>Endpoint</span>
+                <select
+                  aria-label="Network apply endpoint side"
+                  disabled={bulkApplySelected}
+                  onChange={(event) => {
+                    clearNetworkReview();
+                    setSide(event.target.value as TunnelEndpointSide);
+                  }}
+                  value={side}
+                >
+                  <option value="left">Left endpoint</option>
+                  <option value="right">Right endpoint</option>
+                </select>
+              </label>
+              <label title="Number of probe packets for network_probe.">
+                <span>Probe count</span>
+                <input
+                  aria-label="Network probe count"
+                  max={20}
+                  min={1}
+                  onChange={(event) => {
+                    clearNetworkReview();
+                    setProbeCount(Number(event.target.value));
+                  }}
+                  type="number"
+                  value={probeCount}
+                />
+              </label>
+              <label title="Delay between probe packets.">
+                <span>Interval ms</span>
+                <input
+                  aria-label="Network probe interval milliseconds"
+                  max={10_000}
+                  min={200}
+                  onChange={(event) => {
+                    clearNetworkReview();
+                    setProbeIntervalMs(Number(event.target.value));
+                  }}
+                  type="number"
+                  value={probeIntervalMs}
+                />
+              </label>
+            </div>
+            <div className="topologyApplyActionRow">
+              <button
+                className="secondaryAction"
+                disabled={pending || networkSnapshot !== null || bulkApplySelected || !selectedPlan || !endpoint || !privilegeMaterial}
+                onClick={submitStatus}
+                type="button"
+              >
+                <Search size={17} />
+                Review inspect
+              </button>
+              <button
+                className="secondaryAction"
+                disabled={
+                  pending ||
+                  networkSnapshot !== null ||
+                  bulkApplySelected ||
+                  !selectedPlan ||
+                  !endpoint ||
+                  !privilegeMaterial ||
+                  !selectedPlan.enabled
+                }
+                onClick={submitProbe}
+                type="button"
+              >
+                <Activity size={17} />
+                Review probe
+              </button>
+            </div>
+          </section>
+
+          <section
+            className="topologyApplyGroup"
+            title="Speed tests are single-endpoint jobs and always require byte and rate safety caps."
+          >
+            <div className="topologyApplyGroupHeader">
+              <strong>Speed test</strong>
+              <small>Safety capped</small>
+            </div>
+            <div className="dispatchControls">
+              <label title="Maximum speed-test duration.">
+                <span>Duration</span>
+                <input
+                  aria-label="Network speed test duration seconds"
+                  max={30}
+                  min={1}
+                  onChange={(event) => {
+                    clearNetworkReview();
+                    setSpeedDurationSecs(Number(event.target.value));
+                  }}
+                  type="number"
+                  value={speedDurationSecs}
+                />
+              </label>
+              <label title="Required per-run byte safety cap; uncapped speed tests are not submitted.">
+                <span>Max MiB</span>
+                <input
+                  aria-label="Network speed test max mebibytes"
+                  max={256}
+                  min={1}
+                  onChange={(event) => {
+                    clearNetworkReview();
+                    setSpeedMaxBytesMiB(Number(event.target.value));
+                  }}
+                  type="number"
+                  value={speedMaxBytesMiB}
+                />
+              </label>
+              <label title="Required bandwidth safety cap.">
+                <span>Rate Kbps</span>
+                <input
+                  aria-label="Network speed test rate limit Kbps"
+                  max={1_000_000}
+                  min={64}
+                  onChange={(event) => {
+                    clearNetworkReview();
+                    setSpeedRateLimitKbps(Number(event.target.value));
+                  }}
+                  type="number"
+                  value={speedRateLimitKbps}
+                />
+              </label>
+              <label title="TCP port opened for the temporary speed-test server.">
+                <span>TCP port</span>
+                <input
+                  aria-label="Network speed test TCP port"
+                  max={65_535}
+                  min={1024}
+                  onChange={(event) => {
+                    clearNetworkReview();
+                    setSpeedPort(Number(event.target.value));
+                  }}
+                  type="number"
+                  value={speedPort}
+                />
+              </label>
+              <label title="Client connection timeout for the speed-test peer.">
+                <span>Connect ms</span>
+                <input
+                  aria-label="Network speed test connect timeout milliseconds"
+                  max={30_000}
+                  min={100}
+                  onChange={(event) => {
+                    clearNetworkReview();
+                    setSpeedConnectTimeoutMs(Number(event.target.value));
+                  }}
+                  type="number"
+                  value={speedConnectTimeoutMs}
+                />
+              </label>
+            </div>
+            <div className="topologyApplyActionRow">
+              <button
+                className="secondaryAction"
+                disabled={
+                  pending ||
+                  networkSnapshot !== null ||
+                  bulkApplySelected ||
+                  !selectedPlan ||
+                  !endpoint ||
+                  !privilegeMaterial ||
+                  !selectedPlan.enabled
+                }
+                onClick={submitSpeedTest}
+                type="button"
+              >
+                <Activity size={17} />
+                Review speed test
+              </button>
+            </div>
+          </section>
         </div>
-        <div className="dispatchControls">
-          <label>
-            <span>Max timeout seconds</span>
-            <input
-              aria-label="Network apply max timeout seconds"
-              max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
-              min={1}
-              onChange={(event) => {
-                clearNetworkReview();
-                setMaxTimeoutSecs(Number(event.target.value));
-              }}
-              type="number"
-              value={maxTimeoutSecs}
-            />
-          </label>
-        </div>
-        <div className="dispatchControls">
-          <label>
-            <span>Probe count</span>
-            <input
-              aria-label="Network probe count"
-              max={20}
-              min={1}
-              onChange={(event) => {
-                clearNetworkReview();
-                setProbeCount(Number(event.target.value));
-              }}
-              type="number"
-              value={probeCount}
-            />
-          </label>
-          <label>
-            <span>Probe interval ms</span>
-            <input
-              aria-label="Network probe interval milliseconds"
-              max={10_000}
-              min={200}
-              onChange={(event) => {
-                clearNetworkReview();
-                setProbeIntervalMs(Number(event.target.value));
-              }}
-              type="number"
-              value={probeIntervalMs}
-            />
-          </label>
-        </div>
-        <div className="dispatchControls">
-          <label>
-            <span>Speed duration seconds</span>
-            <input
-              aria-label="Network speed test duration seconds"
-              max={30}
-              min={1}
-              onChange={(event) => {
-                clearNetworkReview();
-                setSpeedDurationSecs(Number(event.target.value));
-              }}
-              type="number"
-              value={speedDurationSecs}
-            />
-          </label>
-          <label>
-            <span>Speed cap MiB</span>
-            <input
-              aria-label="Network speed test max mebibytes"
-              max={256}
-              min={1}
-              onChange={(event) => {
-                clearNetworkReview();
-                setSpeedMaxBytesMiB(Number(event.target.value));
-              }}
-              type="number"
-              value={speedMaxBytesMiB}
-            />
-          </label>
-        </div>
-        <div className="dispatchControls">
-          <label>
-            <span>Rate limit Kbps</span>
-            <input
-              aria-label="Network speed test rate limit Kbps"
-              max={1_000_000}
-              min={64}
-              onChange={(event) => {
-                clearNetworkReview();
-                setSpeedRateLimitKbps(Number(event.target.value));
-              }}
-              type="number"
-              value={speedRateLimitKbps}
-            />
-          </label>
-          <label>
-            <span>TCP port</span>
-            <input
-              aria-label="Network speed test TCP port"
-              max={65_535}
-              min={1024}
-              onChange={(event) => {
-                clearNetworkReview();
-                setSpeedPort(Number(event.target.value));
-              }}
-              type="number"
-              value={speedPort}
-            />
-          </label>
-        </div>
-        <div className="dispatchControls">
-          <label>
-            <span>Connect timeout ms</span>
-            <input
-              aria-label="Network speed test connect timeout milliseconds"
-              max={30_000}
-              min={100}
-              onChange={(event) => {
-                clearNetworkReview();
-                setSpeedConnectTimeoutMs(Number(event.target.value));
-              }}
-              type="number"
-              value={speedConnectTimeoutMs}
-            />
-          </label>
-        </div>
-        {endpoint && (
-          <div className="operationNote">
-            <strong>{clientLabel(endpoint.localClientId)}</strong>
-            <span>
-              {backendLabel(backend)} / {selectedPlan?.plan.bird2_file}
-            </span>
-          </div>
-        )}
-        <TargetImpactPreview
-          forceUnprivileged={forceUnprivileged}
-          mode="root_network_mutation"
-          targets={mutationTargets}
-          title="Network mutation impact"
-        />
-        <label className="checkLine">
-          <input
-            aria-label="Force unprivileged network best effort"
-            checked={forceUnprivileged}
-            onChange={(event) => {
-              clearNetworkReview();
-              setForceUnprivileged(event.target.checked);
-            }}
-            type="checkbox"
-          />
-          <span>Force unprivileged best effort</span>
-        </label>
         <ConfirmationPrompt
-          confirmLabel={networkSnapshot ? actionConfirmLabel(networkSnapshot.action) : "Run"}
+          confirmLabel={
+            networkSnapshot
+              ? networkSnapshot.bulk
+                ? "Apply all"
+                : actionConfirmLabel(networkSnapshot.action)
+              : "Run"
+          }
           detail={networkSnapshot?.detail ?? ""}
-          expiresAtUnix={networkSnapshot?.privilegeAssertion.expires_unix}
+          expiresAtUnix={networkSnapshot ? minSubmissionExpiry(networkSnapshot.submissions) : undefined}
           items={networkSnapshot?.items ?? []}
           onCancel={() => setNetworkSnapshot(null)}
           onConfirm={() => networkSnapshot && void submitNetworkChange(networkSnapshot)}
@@ -513,52 +681,6 @@ export function TopologyApplyControls({
             progress={visibleJobProgress}
           />
         )}
-        <div className="dispatchActions">
-          <button
-            className="primaryAction"
-            disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial || !selectedPlan.enabled}
-            type="submit"
-          >
-            <Play size={17} />
-            Review apply
-          </button>
-          <button
-            className="secondaryAction"
-            disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial}
-            onClick={submitRollback}
-            type="button"
-          >
-            <RotateCcw size={17} />
-            Review rollback
-          </button>
-          <button
-            className="secondaryAction"
-            disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial}
-            onClick={submitStatus}
-            type="button"
-          >
-            <Search size={17} />
-            Review inspect
-          </button>
-          <button
-            className="secondaryAction"
-            disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial || !selectedPlan.enabled}
-            onClick={submitProbe}
-            type="button"
-          >
-            <Activity size={17} />
-            Review probe
-          </button>
-          <button
-            className="secondaryAction"
-            disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial || !selectedPlan.enabled}
-            onClick={submitSpeedTest}
-            type="button"
-          >
-            <Activity size={17} />
-            Review speed test
-          </button>
-        </div>
       </form>
       <PrivilegeVaultBox
         lastPayloadHash={lastPayloadHash}
@@ -575,22 +697,35 @@ export function TopologyApplyControls({
 
 type NetworkAction = "apply" | "rollback" | "status" | "probe" | "speed_test";
 
-type NetworkActionSnapshot = {
-  action: NetworkAction;
+type PlannedApplyPlan = {
+  plan: TunnelPlanRecord;
+};
+
+type NetworkJobSubmission = {
   command: string;
   confirmed: boolean;
   destructive: boolean;
-  detail: string;
   forceUnprivileged: boolean;
   jobId: string;
-  items: Array<{ label: string; value: string }>;
+  maxTimeoutSecs: number;
   operation: JobOperation;
   payloadHashHex: string;
+  planName: string;
   privilegeAssertion: PrivilegeAssertion;
   selectorExpression: string;
+  side: TunnelEndpointSide;
   targetClientIds: string[];
   targets: AgentView[];
-  maxTimeoutSecs: number;
+};
+
+type NetworkActionSnapshot = {
+  action: NetworkAction;
+  bulk: boolean;
+  detail: string;
+  forceUnprivileged: boolean;
+  items: Array<{ label: string; value: string }>;
+  submissions: NetworkJobSubmission[];
+  targets: AgentView[];
 };
 
 function disabledPlanAllowsAction(mode: NetworkAction): boolean {
@@ -631,10 +766,10 @@ function actionLabel(mode: NetworkAction) {
 
 function actionConfirmLabel(mode: NetworkAction): string {
   if (mode === "apply") {
-    return "Apply side";
+    return "Apply plan";
   }
   if (mode === "rollback") {
-    return "Rollback side";
+    return "Rollback plan";
   }
   if (mode === "probe") {
     return "Probe latency";
@@ -653,10 +788,44 @@ function requiresConfirmation(mode: NetworkAction) {
   return isMutation(mode) || mode === "speed_test";
 }
 
-function backendLabel(backend: TunnelConfigBackend) {
-  return networkBackendPresetLabel(backend);
-}
-
 function vpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
+}
+
+function buildPlannedApplyPlans(tunnelPlans: TunnelPlanRecord[]): PlannedApplyPlan[] {
+  return tunnelPlans
+    .filter((plan) => plan.enabled && (plan.left_status === "planned" || plan.right_status === "planned"))
+    .map((plan) => ({ plan }));
+}
+
+function uniqueClientIds(clientIds: string[]): string[] {
+  return Array.from(new Set(clientIds));
+}
+
+function uniquePlanCount(submissions: NetworkJobSubmission[]): number {
+  return new Set(submissions.map((submission) => submission.planName)).size;
+}
+
+function minSubmissionExpiry(submissions: NetworkJobSubmission[]): number | undefined {
+  const expiries = submissions
+    .map((submission) => submission.privilegeAssertion.expires_unix)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  return expiries.length ? Math.min(...expiries) : undefined;
+}
+
+function planClientIds(plan: TunnelPlanRecord): string[] {
+  return [plan.left_client_id, plan.right_client_id];
+}
+
+function planEndpointSides(_plan: TunnelPlanRecord): TunnelEndpointSide[] {
+  return ["left", "right"];
+}
+
+function agentBackendHint(agents: AgentView[], plan: TunnelPlanRecord | null): string {
+  if (!plan) {
+    return "agent defaults";
+  }
+  const backendForClient = (clientId: string) =>
+    agents.find((candidate) => candidate.id === clientId)?.capabilities.network_backend ?? "ifupdown";
+  return `backend L ${backendForClient(plan.left_client_id)} / R ${backendForClient(plan.right_client_id)}`;
 }

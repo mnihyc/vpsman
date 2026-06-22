@@ -305,6 +305,7 @@ function TagRegistry({
         )}
         rows={tags}
         searchPlaceholder="Search tags"
+        selectable={false}
         storageKey="vpsman.tags.registry"
         title="Tag registry"
       />
@@ -641,6 +642,7 @@ function TagAssignments({
         )}
         rows={agents}
         searchPlaceholder="Search VPS assignments"
+        selectable={false}
         storageKey="vpsman.tags.assignments"
         title="VPS tag assignments"
       />

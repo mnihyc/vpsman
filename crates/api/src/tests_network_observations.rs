@@ -6,9 +6,8 @@ use axum::{
 };
 use tokio::sync::broadcast;
 use vpsman_common::{
-    observed_ospf_cost, payload_hash, plan_tunnel, render_tunnel_endpoint_config, BandwidthTier,
-    CommandOutput, JobCommand, OspfCostPolicy, OutputStream, TunnelConfigBackend,
-    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
+    observed_ospf_cost, plan_tunnel, BandwidthTier, CommandOutput, JobCommand, OspfCostPolicy,
+    OutputStream, TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
 use crate::gateway_client::GatewayDispatchClient;
@@ -232,16 +231,11 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
     repo.record_tunnel_plan(&input, &plan, &operator)
         .await
         .unwrap();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     repo.record_tunnel_plan_execution(
         Uuid::new_v4(),
         &JobCommand::NetworkApply {
             plan: Box::new(plan.clone()),
             side: TunnelEndpointSide::Left,
-            config_backend: TunnelConfigBackend::Ifupdown,
-            config_sha256_hex: None,
-            ifupdown_sha256_hex: payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-            bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         },
         "completed",
     )

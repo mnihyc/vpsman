@@ -315,6 +315,16 @@ fn validate_operator_preferences(preferences: &OperatorPreferences) -> Result<()
     {
         return Err(ApiError::bad_request("invalid_gateway_endpoints"));
     }
+    validate_tunnel_allocation_preference(
+        preferences.tunnel_ipv4_allocation_pool_cidr.trim(),
+        TunnelAllocationPreferenceFamily::Ipv4,
+        "invalid_tunnel_ipv4_allocation_pool_cidr",
+    )?;
+    validate_tunnel_allocation_preference(
+        preferences.tunnel_ipv6_allocation_pool_cidr.trim(),
+        TunnelAllocationPreferenceFamily::Ipv6,
+        "invalid_tunnel_ipv6_allocation_pool_cidr",
+    )?;
     Ok(())
 }
 
@@ -360,6 +370,35 @@ fn validate_gateway_endpoint_entry(entry: &str) -> bool {
         return false;
     }
     true
+}
+
+#[derive(Clone, Copy)]
+enum TunnelAllocationPreferenceFamily {
+    Ipv4,
+    Ipv6,
+}
+
+fn validate_tunnel_allocation_preference(
+    value: &str,
+    family: TunnelAllocationPreferenceFamily,
+    error_code: &'static str,
+) -> Result<(), ApiError> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    let Ok(parsed) = value.parse::<ipnet::IpNet>() else {
+        return Err(ApiError::bad_request(error_code));
+    };
+    let valid = match (family, parsed) {
+        (TunnelAllocationPreferenceFamily::Ipv4, ipnet::IpNet::V4(net)) => net.prefix_len() <= 31,
+        (TunnelAllocationPreferenceFamily::Ipv6, ipnet::IpNet::V6(net)) => net.prefix_len() <= 127,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request(error_code))
+    }
 }
 
 pub(crate) async fn list_operators(

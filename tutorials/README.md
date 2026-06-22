@@ -19,7 +19,7 @@ Use these in order for a new deployment:
 5. `04-daily-operations.md`: run commands, inspect job/audit history, manage
    retention/export, use terminal sessions, file transfers, process
    supervision, and schedules.
-6. `05-data-source-presets.md`: choose default, shared, and VPS-local data
+6. `05-source-templates.md`: choose default, shared, and VPS-local data
    source presets without hardcoding provider assumptions.
 7. `06-tunnels-topology-bird2.md`: manage runtime-owned tunnels, imported
    tunnels, topology, probes, speed tests, and Bird2 OSPF costs.

@@ -910,7 +910,7 @@
   min-width: max(100%, 360px);
 }
 
-.dataSourcePresetGrid {
+.sourceTemplateGrid {
   grid-template-columns: minmax(190px, 1fr) minmax(180px, 1fr) minmax(
       110px,
       0.5fr
@@ -923,7 +923,7 @@
   gap: 10px;
 }
 
-.dataSourceStatusGrid {
+.sourceStatusGrid {
   grid-template-columns:
     minmax(150px, 0.9fr)
     minmax(180px, 1fr)
@@ -964,6 +964,85 @@
   font-weight: 700;
   text-transform: uppercase;
   white-space: normal;
+}
+
+.configWorkflowGrid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  padding: 0 18px 18px;
+}
+
+.configWorkflowCard {
+  align-items: stretch;
+  background: #fff;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 136px;
+  padding: 14px;
+  text-align: left;
+}
+
+.configWorkflowCard:hover {
+  border-color: #1a73e8;
+  box-shadow: 0 8px 20px rgba(60, 64, 67, 0.12);
+}
+
+.configWorkflowCard span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.configWorkflowCard strong {
+  color: #202124;
+  font-size: 16px;
+}
+
+.configWorkflowCard small,
+.configWorkflowCard em {
+  color: #5f6368;
+  font-style: normal;
+}
+
+.configWorkflowCard b {
+  color: #0f4ca8;
+  font-size: 13px;
+  margin-top: auto;
+}
+
+.configTermMap {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  padding: 0 18px 18px;
+}
+
+.configTermMap span {
+  align-items: start;
+  background: #f8fafc;
+  border: 1px solid #e6ebf2;
+  border-radius: 8px;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+.configTermMap strong {
+  color: #202124;
+  font-size: 13px;
+}
+
+.configTermMap small {
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .configJobGrid {
@@ -1102,6 +1181,7 @@
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
 }
 
+.configApplyGrid > .consoleDataGrid,
 .configApplyGrid > .executionResultPanel,
 .configApplyGrid > .confirmationPrompt {
   grid-column: 1 / -1;
@@ -1246,7 +1326,32 @@
 }
 
 .inlineTagAdd {
+  align-items: center;
+  gap: 8px;
   grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.inlineTagAdd input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  border: 1px solid #dfe3eb;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #202124;
+  outline: 0;
+  padding: 0 8px;
+}
+
+.inlineTagAdd input:focus {
+  border-color: #1a73e8;
+  box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.12);
+}
+
+.inlineTagAdd .compactAction {
+  justify-content: center;
+  min-width: 34px;
+  padding: 0 8px;
 }
 
 .privilegeGateBox {
@@ -1262,12 +1367,12 @@
   font-size: 13px;
 }
 
-.presetManagementGrid {
+.templateManagementGrid {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 430px), 1fr));
   align-items: start;
 }
 
-.presetForm {
+.templateForm {
   display: grid;
   align-content: start;
   gap: 10px;
@@ -1278,48 +1383,48 @@
   padding: 12px;
 }
 
-.presetForm > strong {
+.templateForm > strong {
   border-bottom: 1px solid #eef1f6;
   color: #202124;
   font-size: 14px;
   padding-bottom: 8px;
 }
 
-.presetForm .formHint {
+.templateForm .formHint {
   color: #5f6368;
   font-size: 12px;
   line-height: 1.35;
 }
 
-.presetForm label {
+.templateForm label {
   display: grid;
   gap: 6px;
   min-width: 0;
 }
 
-.presetForm label span {
+.templateForm label span {
   color: #5f6368;
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
 }
 
-.presetFormRow {
+.templateFormRow {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
 }
 
-.presetLifecycleActions {
+.templateLifecycleActions {
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
 }
 
-.presetForm input,
-.presetForm select,
-.presetForm textarea {
+.templateForm input,
+.templateForm select,
+.templateForm textarea {
   width: 100%;
   min-width: 0;
 }
 
-.presetForm textarea {
+.templateForm textarea {
   min-height: 82px;
 }
 
@@ -1347,7 +1452,7 @@
   gap: 10px;
 }
 
-.presetAssignmentSummary {
+.templateAssignmentSummary {
   border-top: 1px solid #eef1f6;
   padding-top: 18px;
 }

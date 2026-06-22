@@ -49,7 +49,7 @@ export function getHeroTitle(view: ActiveView): string {
     case "Fleet":
       return "Fleet overview";
     case "Config":
-      return "Config";
+      return "Agent config";
     case "Jobs":
       return "Job history";
     case "Schedules":
@@ -72,7 +72,7 @@ export function getHeroCopy(view: ActiveView): string {
     case "Schedules":
       return "Server-side schedule registry and due-run records";
     case "Config":
-      return "Rule-card patches, data-source presets, and guarded full-config edits";
+      return "Agent config patches, source templates, and guarded full overrides";
     case "Audit":
       return "Operator and security events from the control plane";
     case "Tags":
@@ -111,6 +111,8 @@ export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
   show_country_flags: true,
   sidebar_subpanel_default: "active",
   timezone: null,
+  tunnel_ipv4_allocation_pool_cidr: "",
+  tunnel_ipv6_allocation_pool_cidr: "",
   vps_name_display_mode: DEFAULT_VPS_NAME_DISPLAY_MODE,
 };
 

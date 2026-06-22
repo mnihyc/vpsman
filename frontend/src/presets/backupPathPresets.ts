@@ -17,7 +17,7 @@ export const BACKUP_PATH_PRESETS: BackupPathPreset[] = [
   {
     description:
       "Common Linux service, SSH, network, and package configuration.",
-    label: "System config",
+    label: "OS config",
     paths: [
       "/etc/hostname",
       "/etc/hosts",
@@ -47,8 +47,8 @@ export const RESTORE_PATH_PRESETS: BackupPathPreset[] = [
   },
   {
     description:
-      "Restore service and network configuration captured by system config backups.",
-    label: "System config",
+      "Restore service and network configuration captured by OS config backups.",
+    label: "OS config",
     paths: [
       "/etc/hostname",
       "/etc/hosts",

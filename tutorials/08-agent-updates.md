@@ -24,8 +24,9 @@ tag-derived version that appears in `version.json`, so an agent reports
 `current` only when its embedded release version matches the manifest.
 
 Operators can enable or disable autonomous updates from the dashboard under
-Config -> Rules with the predefined updater rule templates. These templates are
-ordinary operator-managed records: they can be edited, cloned, or deleted.
+Agent config -> Bulk patch with the built-in updater patch generators.
+These templates are ordinary operator-managed records once cloned: they can be
+edited, reused for bulk patch review, or deleted if they are operator-managed.
 The CLI can apply the same setting with an incremental config patch:
 
 ```toml

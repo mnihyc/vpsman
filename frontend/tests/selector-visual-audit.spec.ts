@@ -20,8 +20,8 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   await openVpsMenu(page.locator(".dashboardControlBar"), "Dashboard scope value", "sfo", /edge-sfo-01.*agent-sfo-01/);
   await capture(page, outputDir, manifest, "dashboard-client-scope");
 
-  await openConsoleSubpage(page, "Config", "Single VPS");
-  await openVpsMenu(page.locator(".configApplyGrid"), "Single VPS config target", "fra", /core-fra-02.*agent-fra-02/);
+  await openConsoleSubpage(page, "Config", "VPS config");
+  await openVpsMenu(page.locator(".configApplyGrid"), "VPS config target", "fra", /core-fra-02.*agent-fra-02/);
   await capture(page, outputDir, manifest, "config-single-target");
 
   await openConsoleSubpage(page, "Jobs", "Files");

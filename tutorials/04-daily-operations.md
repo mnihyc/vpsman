@@ -26,7 +26,7 @@ cargo run -p vpsctl -- job-create --command /bin/sh --argv '/bin/sh,-lc,tty && i
 ```
 
 Command execution behavior is selected through the `command_execution_policy`
-data-source preset domain. Use it to choose shell argv prefix, default working
+source template domain. Use it to choose shell argv prefix, default working
 directory, inherited/clean/minimal environment handling, explicit env values,
 PTY enabled/disabled policy, and process-group or direct-child cleanup for a
 VPS, pool, or tag. Explicit argv jobs remain the preferred frequent-use path.
@@ -117,7 +117,7 @@ residual loss boundary.
 
 ## Use Record Tables In The Panel
 
-Traditional management tabs such as Jobs, Schedules, Audit, and data-source
+Traditional management tabs such as Jobs, Schedules, Audit, and source template
 presets use the same record-table controls. Check the total and filtered row
 counts before acting, use the field selector when you know whether you are
 searching by VPS, command, status, operator, domain, or preset, and page

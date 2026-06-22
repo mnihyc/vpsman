@@ -539,6 +539,7 @@ export function FileTransferSessionsPanel({
           )}
           rows={sources}
           searchPlaceholder="Search source artifacts"
+          selectable={false}
           storageKey="vpsman.jobs.fileTransferSources"
           title="Source artifacts"
         />
@@ -658,6 +659,7 @@ export function FileTransferSessionsPanel({
         )}
         rows={transfers}
         searchPlaceholder="Search transfers"
+        selectable={false}
         storageKey="vpsman.jobs.fileTransferSessions"
         title="Transfer records"
       />

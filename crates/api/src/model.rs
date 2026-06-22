@@ -10,8 +10,8 @@ pub(crate) use crate::auth_model::*;
 pub(crate) use crate::model_agent_updates::*;
 pub(crate) use crate::model_backups::*;
 pub(crate) use crate::model_dashboard::*;
-pub(crate) use crate::model_data_sources::*;
 pub(crate) use crate::model_server_jobs::*;
+pub(crate) use crate::model_source_templates::*;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct FleetSummary {
@@ -538,10 +538,10 @@ pub(crate) struct AllocateTunnelEndpointsRequest {
     pub(crate) ipv6_pool_cidr: Option<String>,
     #[serde(default)]
     pub(crate) reserved_addresses: Vec<String>,
-    #[serde(default = "default_true")]
-    pub(crate) include_ipv4: bool,
     #[serde(default)]
-    pub(crate) include_ipv6: bool,
+    pub(crate) include_ipv4: Option<bool>,
+    #[serde(default)]
+    pub(crate) include_ipv6: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -570,7 +570,6 @@ pub(crate) struct PromoteTelemetryTunnelRequest {
     pub(crate) latency_primary_family: TunnelAddressFamily,
     pub(crate) side: Option<TunnelEndpointSide>,
     pub(crate) name: Option<String>,
-    pub(crate) topology_version: Option<String>,
     pub(crate) bandwidth: Option<BandwidthTier>,
     pub(crate) latency_ms: Option<f64>,
     pub(crate) packet_loss_ratio: Option<f64>,
@@ -579,12 +578,8 @@ pub(crate) struct PromoteTelemetryTunnelRequest {
     pub(crate) confirmed: bool,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Debug, Deserialize)]
-pub(crate) struct PromoteTunnelPlanToAdapterRequest {
+pub(crate) struct PromoteTunnelPlanToCustomAdapterRequest {
     pub(crate) plan_id: Uuid,
     pub(crate) runtime_control: RuntimeTunnelControl,
     #[serde(default)]

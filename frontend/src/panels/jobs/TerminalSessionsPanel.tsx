@@ -393,6 +393,7 @@ export function TerminalSessionsPanel({
         )}
         rows={sessions}
         searchPlaceholder="Search terminal sessions"
+        selectable={false}
         storageKey="vpsman.jobs.terminalSessions"
         title="Terminal records"
       />

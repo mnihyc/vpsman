@@ -195,7 +195,7 @@ fn supported_config_autocomplete() -> serde_json::Value {
     })
 }
 
-pub(crate) fn apply_data_source_config_patch(
+pub(crate) fn apply_source_config_patch(
     job_id: uuid::Uuid,
     current: &mut AgentConfig,
     config_path: &Path,
@@ -203,19 +203,19 @@ pub(crate) fn apply_data_source_config_patch(
 ) -> Result<Vec<CommandOutput>> {
     anyhow::ensure!(
         toml_document.len() <= MAX_AGENT_HOT_CONFIG_BYTES,
-        "data-source config patch TOML exceeds {} bytes",
+        "source template config patch TOML exceeds {} bytes",
         MAX_AGENT_HOT_CONFIG_BYTES
     );
-    let patch: toml::Value =
-        toml::from_str(toml_document).context("failed to parse data-source config patch TOML")?;
+    let patch: toml::Value = toml::from_str(toml_document)
+        .context("failed to parse source template config patch TOML")?;
     let mut merged = toml::Value::try_from(&*current)
-        .context("failed to serialize current config before data-source patch")?;
-    merge_data_source_patch(&mut merged, patch)?;
+        .context("failed to serialize current config before source template patch")?;
+    merge_source_template_patch(&mut merged, patch)?;
     let updated: AgentConfig = merged
         .try_into()
-        .context("failed to parse merged data-source config")?;
+        .context("failed to parse merged source template config")?;
     validate_hot_config_update(current, &updated)
-        .map_err(|message| anyhow::anyhow!("invalid data-source config patch: {message}"))?;
+        .map_err(|message| anyhow::anyhow!("invalid source template config patch: {message}"))?;
     persist_config_update(current, &updated, config_path)?;
     *current = updated;
 
@@ -223,7 +223,7 @@ pub(crate) fn apply_data_source_config_patch(
         job_id,
         stream: OutputStream::Status,
         data: serde_json::to_vec(&serde_json::json!({
-            "type": "data_source_config_patch",
+            "type": "source_config_patch",
             "status": "applied",
             "config_path": config_path.display().to_string(),
             "rollback_path": rollback_path(config_path).display().to_string(),
@@ -233,16 +233,16 @@ pub(crate) fn apply_data_source_config_patch(
     }])
 }
 
-fn merge_data_source_patch(target: &mut toml::Value, patch: toml::Value) -> Result<()> {
+fn merge_source_template_patch(target: &mut toml::Value, patch: toml::Value) -> Result<()> {
     let target_table = target
         .as_table_mut()
         .context("current config is not a TOML table")?;
     let toml::Value::Table(patch_table) = patch else {
-        anyhow::bail!("data-source config patch must be a TOML table");
+        anyhow::bail!("source template config patch must be a TOML table");
     };
     anyhow::ensure!(
         !patch_table.is_empty(),
-        "data-source config patch must contain at least one section"
+        "source template config patch must contain at least one section"
     );
     for (section, value) in patch_table {
         validate_incremental_config_patch_section(&section)
@@ -333,7 +333,7 @@ mod tests {
         TunnelPlanInput,
     };
 
-    use super::{apply_data_source_config_patch, apply_hot_config_update};
+    use super::{apply_hot_config_update, apply_source_config_patch};
 
     fn temp_config_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("{name}-{}.toml", uuid::Uuid::new_v4()))
@@ -408,12 +408,12 @@ mod tests {
     }
 
     #[test]
-    fn applies_data_source_config_patch_without_replacing_identity() {
+    fn applies_source_config_patch_without_replacing_identity() {
         let mut current = AgentConfig::default();
-        let path = temp_config_path("vpsman-data-source-config-patch");
+        let path = temp_config_path("vpsman-source template-config-patch");
         fs::write(&path, toml::to_string_pretty(&current).unwrap()).unwrap();
 
-        let outputs = apply_data_source_config_patch(
+        let outputs = apply_source_config_patch(
             uuid::Uuid::new_v4(),
             &mut current,
             &path,
@@ -489,7 +489,7 @@ mod tests {
             toml::Value::try_from(&patch_network).unwrap(),
         );
 
-        let outputs = apply_data_source_config_patch(
+        let outputs = apply_source_config_patch(
             uuid::Uuid::new_v4(),
             &mut current,
             &path,
@@ -534,7 +534,7 @@ runtime_status_telemetry_plans = [{{ plan_id = "plan-inline", endpoint_side = "l
 "#
         );
 
-        apply_data_source_config_patch(uuid::Uuid::new_v4(), &mut current, &path, &patch).unwrap();
+        apply_source_config_patch(uuid::Uuid::new_v4(), &mut current, &path, &patch).unwrap();
 
         assert_eq!(current.network.runtime_status_telemetry_plans.len(), 1);
         let telemetry_plan = &current.network.runtime_status_telemetry_plans[0];
@@ -550,11 +550,11 @@ runtime_status_telemetry_plans = [{{ plan_id = "plan-inline", endpoint_side = "l
     }
 
     #[test]
-    fn rejects_data_source_config_patch_outside_allowed_sections() {
+    fn rejects_source_config_patch_outside_allowed_sections() {
         let mut current = AgentConfig::default();
-        let path = temp_config_path("vpsman-data-source-config-patch-reject");
+        let path = temp_config_path("vpsman-source template-config-patch-reject");
 
-        assert!(apply_data_source_config_patch(
+        assert!(apply_source_config_patch(
             uuid::Uuid::new_v4(),
             &mut current,
             &path,

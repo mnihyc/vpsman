@@ -21,7 +21,7 @@ test("frontend operation canonicalization matches Rust-generated golden vectors"
       "terminal_close",
       "config_read",
       "hot_config",
-      "data_source_config_patch",
+      "source_config_patch",
       "agent_update",
       "agent_update_activate",
       "agent_update_rollback",

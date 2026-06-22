@@ -7,7 +7,7 @@ use crate::{
     job_request::validate_job_command,
     model::{
         AuthContext, CreateJobRequest, OperatorPreferences, OperatorView,
-        RenderHotConfigRuleTemplateRequest, UpsertHotConfigRuleTemplateRequest,
+        RenderHotConfigPatchGeneratorRequest, UpsertHotConfigPatchGeneratorRequest,
     },
     repository::{MemoryState, Repository},
     repository_ingest::upsert_memory_agent,
@@ -17,8 +17,8 @@ use crate::{
 use uuid::Uuid;
 use vpsman_common::{
     AgentCapabilitySnapshot, AgentConfig, AgentHello, AgentPrivilegeMode, AgentUpdateConfig,
-    JobCommand, DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH,
-    HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE,
+    JobCommand, HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE,
+    SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH,
 };
 
 async fn wait_for_job_status(
@@ -103,24 +103,24 @@ fn autonomous_updater_defaults_disabled_with_official_manifest_defaults() {
 }
 
 #[tokio::test]
-async fn hot_config_rule_templates_keep_built_ins_immutable_and_custom_rules_editable() {
+async fn hot_config_patch_generators_keep_built_ins_immutable_and_custom_generators_editable() {
     let repo = Repository::Memory(MemoryState::default());
-    let templates = repo.list_hot_config_rule_templates().await.unwrap();
-    let enable = templates
+    let generators = repo.list_hot_config_patch_generators().await.unwrap();
+    let enable = generators
         .iter()
-        .find(|template| template.name == "Autonomous updater enabled")
-        .expect("missing autonomous updater enable template");
-    let disable = templates
+        .find(|generator| generator.name == "Autonomous updater enabled")
+        .expect("missing autonomous updater enable generator");
+    let disable = generators
         .iter()
-        .find(|template| template.name == "Autonomous updater disabled")
-        .expect("missing autonomous updater disable template");
+        .find(|generator| generator.name == "Autonomous updater disabled")
+        .expect("missing autonomous updater disable generator");
     assert!(enable.built_in);
     assert!(disable.built_in);
 
     let rendered = repo
-        .render_hot_config_rule_template(
+        .render_hot_config_patch_generator(
             enable.id,
-            &RenderHotConfigRuleTemplateRequest {
+            &RenderHotConfigPatchGeneratorRequest {
                 values: serde_json::json!({}),
             },
         )
@@ -133,13 +133,13 @@ async fn hot_config_rule_templates_keep_built_ins_immutable_and_custom_rules_edi
 
     let operator = memory_admin();
     let built_in_edit = repo
-        .upsert_hot_config_rule_template(
-            &UpsertHotConfigRuleTemplateRequest {
+        .upsert_hot_config_patch_generator(
+            &UpsertHotConfigPatchGeneratorRequest {
                 id: Some(enable.id),
                 name: "Autonomous updater enabled edited".to_string(),
                 category: "update".to_string(),
                 domain: "agent_update".to_string(),
-                description: "operator-edited predefined updater rule".to_string(),
+                description: "operator-edited predefined updater generator".to_string(),
                 field_schema: enable.field_schema.clone(),
                 raw_generator_body: enable.raw_generator_body.clone(),
                 docs_metadata: enable.docs_metadata.clone(),
@@ -151,16 +151,16 @@ async fn hot_config_rule_templates_keep_built_ins_immutable_and_custom_rules_edi
     assert!(built_in_edit
         .unwrap_err()
         .to_string()
-        .contains("hot_config_rule_template_builtin_immutable"));
+        .contains("hot_config_patch_generator_builtin_immutable"));
 
     let custom = repo
-        .upsert_hot_config_rule_template(
-            &UpsertHotConfigRuleTemplateRequest {
+        .upsert_hot_config_patch_generator(
+            &UpsertHotConfigPatchGeneratorRequest {
                 id: None,
                 name: "Custom updater enabled".to_string(),
                 category: "update".to_string(),
                 domain: "agent_update".to_string(),
-                description: "operator-managed updater rule".to_string(),
+                description: "operator-managed updater generator".to_string(),
                 field_schema: enable.field_schema.clone(),
                 raw_generator_body: enable.raw_generator_body.clone(),
                 docs_metadata: enable.docs_metadata.clone(),
@@ -174,13 +174,13 @@ async fn hot_config_rule_templates_keep_built_ins_immutable_and_custom_rules_edi
     assert!(!custom.built_in);
 
     let edited = repo
-        .upsert_hot_config_rule_template(
-            &UpsertHotConfigRuleTemplateRequest {
+        .upsert_hot_config_patch_generator(
+            &UpsertHotConfigPatchGeneratorRequest {
                 id: Some(custom.id),
                 name: "Custom updater enabled edited".to_string(),
                 category: "update".to_string(),
                 domain: "agent_update".to_string(),
-                description: "operator-edited custom updater rule".to_string(),
+                description: "operator-edited custom updater generator".to_string(),
                 field_schema: custom.field_schema.clone(),
                 raw_generator_body: custom.raw_generator_body.clone(),
                 docs_metadata: custom.docs_metadata.clone(),
@@ -194,31 +194,33 @@ async fn hot_config_rule_templates_keep_built_ins_immutable_and_custom_rules_edi
     assert!(!edited.built_in);
 
     let built_in_delete = repo
-        .delete_hot_config_rule_template(disable.id, &operator)
+        .delete_hot_config_patch_generator(disable.id, &operator)
         .await;
     assert!(built_in_delete
         .unwrap_err()
         .to_string()
-        .contains("hot_config_rule_template_builtin_immutable"));
+        .contains("hot_config_patch_generator_builtin_immutable"));
 
-    repo.delete_hot_config_rule_template(custom.id, &operator)
+    repo.delete_hot_config_patch_generator(custom.id, &operator)
         .await
         .unwrap();
-    let after_delete = repo.list_hot_config_rule_templates().await.unwrap();
-    assert!(!after_delete.iter().any(|template| template.id == custom.id));
+    let after_delete = repo.list_hot_config_patch_generators().await.unwrap();
+    assert!(!after_delete
+        .iter()
+        .any(|generator| generator.id == custom.id));
     assert!(after_delete
         .iter()
-        .any(|template| template.id == disable.id));
+        .any(|generator| generator.id == disable.id));
 }
 
 #[test]
-fn validates_data_source_config_patch_job_document() {
+fn validates_source_config_patch_job_document() {
     for toml in [
         "[telemetry]\nproc_root = \"/tmp/vpsman-proc\"\n",
         "[update]\nunmanaged_enabled = true\n",
     ] {
-        let command = JobCommand::DataSourceConfigPatch {
-            apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
+        let command = JobCommand::SourceConfigPatch {
+            apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
             toml: toml.to_string(),
         };
 
@@ -227,19 +229,19 @@ fn validates_data_source_config_patch_job_document() {
 }
 
 #[test]
-fn rejects_invalid_data_source_config_patch_job_document() {
-    assert!(validate_job_command(&JobCommand::DataSourceConfigPatch {
-        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
+fn rejects_invalid_source_config_patch_job_document() {
+    assert!(validate_job_command(&JobCommand::SourceConfigPatch {
+        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
         toml: String::new(),
     })
     .is_err());
-    assert!(validate_job_command(&JobCommand::DataSourceConfigPatch {
-        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
+    assert!(validate_job_command(&JobCommand::SourceConfigPatch {
+        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
         toml: "client_id = \"other\"".to_string(),
     })
     .is_err());
-    assert!(validate_job_command(&JobCommand::DataSourceConfigPatch {
-        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
+    assert!(validate_job_command(&JobCommand::SourceConfigPatch {
+        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
         toml: "[auth]\nmax_job_timeout_secs = 10".to_string(),
     })
     .is_err());
@@ -249,13 +251,13 @@ fn rejects_invalid_data_source_config_patch_job_document() {
 fn rejects_ambiguous_config_apply_modes() {
     let config = AgentConfig::default();
     assert!(validate_job_command(&JobCommand::HotConfig {
-        apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
+        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
         toml: toml::to_string_pretty(&config).unwrap(),
         preserve_redacted: None,
         base_config_sha256_hex: None,
     })
     .is_err());
-    assert!(validate_job_command(&JobCommand::DataSourceConfigPatch {
+    assert!(validate_job_command(&JobCommand::SourceConfigPatch {
         apply_mode: HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE.to_string(),
         toml: "[update]\nunmanaged_enabled = true\n".to_string(),
     })

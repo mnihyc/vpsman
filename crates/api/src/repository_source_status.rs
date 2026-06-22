@@ -4,37 +4,37 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{
-    data_source_builtin_presets::DATA_SOURCE_DOMAINS,
     model::{
-        AgentView, DataSourcePresetAssignmentView, DataSourcePresetView, DataSourceStatusView,
+        AgentView, SourceStatusView, SourceTemplateAssignmentView, SourceTemplateView,
         TelemetryTunnelView,
     },
     repository::Repository,
+    source_template_builtins::SOURCE_TEMPLATE_DOMAINS,
 };
 
 impl Repository {
-    pub(crate) async fn list_data_source_status(
+    pub(crate) async fn list_source_status(
         &self,
         client_id: Option<&str>,
         domain: Option<&str>,
-    ) -> Result<Vec<DataSourceStatusView>> {
+    ) -> Result<Vec<SourceStatusView>> {
         let agents = self
             .list_agents()
             .await?
             .into_iter()
             .filter(|agent| client_id.is_none_or(|client_id| agent.id == client_id))
             .collect::<Vec<_>>();
-        let presets = self
-            .list_data_source_presets(domain)
+        let templates = self
+            .list_source_templates(domain)
             .await?
             .into_iter()
-            .map(|preset| (preset.id, preset))
+            .map(|template| (template.id, template))
             .collect::<HashMap<_, _>>();
         let assignments = self
-            .list_data_source_assignments(client_id, domain)
+            .list_source_template_assignments(client_id, domain)
             .await?
             .into_iter()
-            .filter(|assignment| presets.contains_key(&assignment.preset_id))
+            .filter(|assignment| templates.contains_key(&assignment.template_id))
             .collect::<Vec<_>>();
         let tunnels = self.list_telemetry_tunnels(200, client_id, None).await?;
         let tunnels_by_client = tunnels.into_iter().fold(
@@ -57,13 +57,13 @@ impl Repository {
             let Some(agent) = agents_by_id.get(assignment.client_id.as_str()) else {
                 continue;
             };
-            let Some(preset) = presets.get(&assignment.preset_id) else {
+            let Some(template) = templates.get(&assignment.template_id) else {
                 continue;
             };
             rows.push(status_for_assignment(
                 agent,
                 &assignment,
-                preset,
+                template,
                 tunnels_by_client
                     .get(&assignment.client_id)
                     .map(Vec::as_slice)
@@ -82,21 +82,21 @@ impl Repository {
 
 fn status_for_assignment(
     agent: &AgentView,
-    assignment: &DataSourcePresetAssignmentView,
-    preset: &DataSourcePresetView,
+    assignment: &SourceTemplateAssignmentView,
+    template: &SourceTemplateView,
     tunnels: &[TelemetryTunnelView],
-) -> DataSourceStatusView {
-    let source_kind = source_kind(preset);
-    let (status, status_reason, evidence) = derive_status(agent, preset, &source_kind, tunnels);
-    DataSourceStatusView {
+) -> SourceStatusView {
+    let source_kind = source_kind(template);
+    let (status, status_reason, evidence) = derive_status(agent, template, &source_kind, tunnels);
+    SourceStatusView {
         client_id: assignment.client_id.clone(),
         display_name: agent.display_name.clone(),
         client_status: agent.status.clone(),
         domain: assignment.domain.clone(),
         module: module_label(&assignment.domain).to_string(),
-        preset_id: assignment.preset_id,
-        preset_name: assignment.preset_name.clone(),
-        preset_scope: assignment.preset_scope.clone(),
+        template_id: assignment.template_id,
+        template_name: assignment.template_name.clone(),
+        template_scope: assignment.template_scope.clone(),
         source_kind,
         status,
         status_reason,
@@ -107,15 +107,15 @@ fn status_for_assignment(
 
 fn derive_status(
     agent: &AgentView,
-    preset: &DataSourcePresetView,
+    template: &SourceTemplateView,
     source_kind: &str,
     tunnels: &[TelemetryTunnelView],
 ) -> (String, String, serde_json::Value) {
-    let domain = preset.domain.as_str();
+    let domain = template.domain.as_str();
     if agent.status != "online" {
         return (
             "agent_offline".to_string(),
-            "selected preset exists, but the agent is not currently online".to_string(),
+            "selected template exists, but the agent is not currently online".to_string(),
             json!({
                 "agent_status": agent.status,
                 "continuous_status": false,
@@ -134,26 +134,26 @@ fn derive_status(
         ),
         "runtime_traffic_accounting_source" => traffic_status(source_kind, tunnels),
         "runtime_tunnel_adapter" => tunnel_adapter_status(tunnels),
-        "latency_probe_source" => latency_probe_status(preset, source_kind),
-        "speed_test_provider" => speed_test_status(preset, source_kind),
-        "process_inventory_source" => process_inventory_status(agent, preset, source_kind),
-        "user_session_inventory_source" => user_session_inventory_status(preset, source_kind),
-        "command_execution_policy" => command_execution_policy_status(preset),
-        "process_supervisor_policy" => process_supervisor_policy_status(agent, preset, source_kind),
+        "latency_probe_source" => latency_probe_status(template, source_kind),
+        "speed_test_provider" => speed_test_status(template, source_kind),
+        "process_inventory_source" => process_inventory_status(agent, template, source_kind),
+        "user_session_inventory_source" => user_session_inventory_status(template, source_kind),
+        "command_execution_policy" => command_execution_policy_status(template),
+        "process_supervisor_policy" => process_supervisor_policy_status(agent, template, source_kind),
         "backup_object_store" | "update_artifact_source" => (
             "selected_workflow".to_string(),
-            "preset is selected; status is produced when the related privilege-gated workflow runs"
+            "template is selected; status is produced when the related privilege-gated workflow runs"
                 .to_string(),
             json!({
                 "agent_status": agent.status,
                 "continuous_status": false,
             }),
         ),
-        "restore_path_mapping" => restore_path_mapping_status(preset, source_kind),
-        "update_restart_policy" => update_restart_policy_status(preset, source_kind),
-        "update_rollback_heartbeat_source" => update_rollback_heartbeat_status(preset, source_kind),
-        "traffic_limit_status_source" => traffic_limit_status_source_status(preset, source_kind),
-        "routing_daemon_adapter" => routing_daemon_adapter_status(preset, source_kind),
+        "restore_path_mapping" => restore_path_mapping_status(template, source_kind),
+        "update_restart_policy" => update_restart_policy_status(template, source_kind),
+        "update_rollback_heartbeat_source" => update_rollback_heartbeat_status(template, source_kind),
+        "traffic_limit_status_source" => traffic_limit_status_source_status(template, source_kind),
+        "routing_daemon_adapter" => routing_daemon_adapter_status(template, source_kind),
         _ => (
             "unknown_domain".to_string(),
             "domain is selected but has no status policy yet".to_string(),
@@ -166,16 +166,16 @@ fn derive_status(
 }
 
 fn latency_probe_status(
-    preset: &DataSourcePresetView,
+    template: &SourceTemplateView,
     source_kind: &str,
 ) -> (String, String, serde_json::Value) {
-    let configured_ping = preset.definition.get("probe_ping_argv").is_some()
-        || preset.definition.get("ping_argv").is_some()
-        || preset.definition.get("argv").is_some();
+    let configured_ping = template.definition.get("probe_ping_argv").is_some()
+        || template.definition.get("ping_argv").is_some()
+        || template.definition.get("argv").is_some();
     (
         "ready_on_demand".to_string(),
         format!(
-            "latency probe preset {source_kind} is selected; tunnel probe jobs produce samples on demand"
+            "latency probe template {source_kind} is selected; tunnel probe jobs produce samples on demand"
         ),
         json!({
             "continuous_status": false,
@@ -190,11 +190,11 @@ fn latency_probe_status(
 }
 
 fn speed_test_status(
-    preset: &DataSourcePresetView,
+    template: &SourceTemplateView,
     source_kind: &str,
 ) -> (String, String, serde_json::Value) {
-    let configured_adapter = preset.definition.get("server_argv").is_some()
-        || preset.definition.get("client_argv").is_some();
+    let configured_adapter = template.definition.get("server_argv").is_some()
+        || template.definition.get("client_argv").is_some();
     (
         "ready_on_demand".to_string(),
         format!(
@@ -215,11 +215,11 @@ fn speed_test_status(
 
 fn process_inventory_status(
     agent: &AgentView,
-    preset: &DataSourcePresetView,
+    template: &SourceTemplateView,
     source_kind: &str,
 ) -> (String, String, serde_json::Value) {
-    let custom_command = preset.definition.get("process_command").is_some()
-        || preset.definition.get("command").is_some();
+    let custom_command = template.definition.get("process_command").is_some()
+        || template.definition.get("command").is_some();
     let process_limits_status = if agent.capabilities.can_apply_process_limits {
         "available"
     } else if agent.capabilities.privilege_mode == vpsman_common::AgentPrivilegeMode::Unprivileged {
@@ -257,11 +257,11 @@ fn process_inventory_status(
 }
 
 fn user_session_inventory_status(
-    preset: &DataSourcePresetView,
+    template: &SourceTemplateView,
     source_kind: &str,
 ) -> (String, String, serde_json::Value) {
-    let configured_command = preset.definition.get("user_sessions_command").is_some()
-        || preset.definition.get("command").is_some();
+    let configured_command = template.definition.get("user_sessions_command").is_some()
+        || template.definition.get("command").is_some();
     (
         "ready_on_demand".to_string(),
         format!(
@@ -280,29 +280,29 @@ fn user_session_inventory_status(
 }
 
 fn command_execution_policy_status(
-    preset: &DataSourcePresetView,
+    template: &SourceTemplateView,
 ) -> (String, String, serde_json::Value) {
-    let shell_argv_len = preset
+    let shell_argv_len = template
         .definition
         .get("shell_script_argv")
         .and_then(serde_json::Value::as_array)
         .map_or(0, Vec::len);
-    let environment_policy = preset
+    let environment_policy = template
         .definition
         .get("environment_policy")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("inherit");
-    let pty_policy = preset
+    let pty_policy = template
         .definition
         .get("pty_policy")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("native_pty");
-    let process_cleanup = preset
+    let process_cleanup = template
         .definition
         .get("process_cleanup")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("process_group");
-    let environment_set_keys = preset
+    let environment_set_keys = template
         .definition
         .get("environment_set")
         .and_then(serde_json::Value::as_object)
@@ -318,7 +318,7 @@ fn command_execution_policy_status(
             "command_types": ["shell_argv", "shell_script", "shell_pty", "terminal_open", "user_sessions"],
             "privilege_gated": true,
             "shell_script_argv_len": shell_argv_len,
-            "working_directory_configured": preset.definition.get("working_directory").is_some(),
+            "working_directory_configured": template.definition.get("working_directory").is_some(),
             "environment_policy": environment_policy,
             "environment_set_keys": environment_set_keys,
             "pty_policy": pty_policy,
@@ -329,7 +329,7 @@ fn command_execution_policy_status(
 
 fn process_supervisor_policy_status(
     agent: &AgentView,
-    preset: &DataSourcePresetView,
+    template: &SourceTemplateView,
     source_kind: &str,
 ) -> (String, String, serde_json::Value) {
     let process_limits_status = if agent.capabilities.can_apply_process_limits {
@@ -350,8 +350,8 @@ fn process_supervisor_policy_status(
             "command_types": ["process_start", "process_status", "process_logs", "process_restart", "process_stop"],
             "privilege_gated": true,
             "source_kind": source_kind,
-            "restart_policy_source": preset.definition.get("restart_policy_source").and_then(serde_json::Value::as_str).unwrap_or("process_run_policy"),
-            "limit_source": preset.definition.get("limit_source").and_then(serde_json::Value::as_str).unwrap_or("agent_capability_snapshot"),
+            "restart_policy_source": template.definition.get("restart_policy_source").and_then(serde_json::Value::as_str).unwrap_or("process_run_policy"),
+            "limit_source": template.definition.get("limit_source").and_then(serde_json::Value::as_str).unwrap_or("agent_capability_snapshot"),
             "privilege_mode": agent.capabilities.privilege_mode,
             "can_apply_process_limits": agent.capabilities.can_apply_process_limits,
             "process_limits_status": process_limits_status,
@@ -361,13 +361,13 @@ fn process_supervisor_policy_status(
 }
 
 fn restore_path_mapping_status(
-    preset: &DataSourcePresetView,
+    template: &SourceTemplateView,
     source_kind: &str,
 ) -> (String, String, serde_json::Value) {
     (
         "ready_on_demand".to_string(),
         format!(
-            "restore path-mapping preset {source_kind} is selected; restore and migration plans provide concrete mappings"
+            "restore path-mapping template {source_kind} is selected; restore and migration plans provide concrete mappings"
         ),
         json!({
             "continuous_status": false,
@@ -375,15 +375,15 @@ fn restore_path_mapping_status(
             "command_types": ["restore_run", "restore_rollback", "migration_run"],
             "privilege_gated": true,
             "source_kind": source_kind,
-            "mapping_mode": preset.definition.get("mapping_mode").and_then(serde_json::Value::as_str).unwrap_or("explicit_paths"),
-            "supports_agent_local_archive": preset.definition.get("supports_agent_local_archive").and_then(serde_json::Value::as_bool).unwrap_or(false),
-            "supports_post_restore_hooks": preset.definition.get("supports_post_restore_hooks").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            "mapping_mode": template.definition.get("mapping_mode").and_then(serde_json::Value::as_str).unwrap_or("explicit_paths"),
+            "supports_agent_local_archive": template.definition.get("supports_agent_local_archive").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            "supports_post_restore_hooks": template.definition.get("supports_post_restore_hooks").and_then(serde_json::Value::as_bool).unwrap_or(false),
         }),
     )
 }
 
 fn update_restart_policy_status(
-    preset: &DataSourcePresetView,
+    template: &SourceTemplateView,
     source_kind: &str,
 ) -> (String, String, serde_json::Value) {
     (
@@ -397,14 +397,14 @@ fn update_restart_policy_status(
             "command_types": ["agent_update_activate", "agent_update_rollback"],
             "privilege_gated": true,
             "source_kind": source_kind,
-            "restart_method": preset.definition.get("restart_method").and_then(serde_json::Value::as_str).unwrap_or("agent_configured"),
-            "fallback": preset.definition.get("fallback").and_then(serde_json::Value::as_str).unwrap_or("manual_supervisor"),
+            "restart_method": template.definition.get("restart_method").and_then(serde_json::Value::as_str).unwrap_or("agent_configured"),
+            "fallback": template.definition.get("fallback").and_then(serde_json::Value::as_str).unwrap_or("manual_supervisor"),
         }),
     )
 }
 
 fn update_rollback_heartbeat_status(
-    preset: &DataSourcePresetView,
+    template: &SourceTemplateView,
     source_kind: &str,
 ) -> (String, String, serde_json::Value) {
     (
@@ -418,14 +418,14 @@ fn update_rollback_heartbeat_status(
             "command_types": ["agent_update", "agent_update_activate", "agent_update_rollback"],
             "privilege_gated": true,
             "source_kind": source_kind,
-            "health_gate": preset.definition.get("health_gate").and_then(serde_json::Value::as_str).unwrap_or("heartbeat_verified"),
-            "heartbeat_source": preset.definition.get("source").and_then(serde_json::Value::as_str).unwrap_or("agent_update_heartbeat"),
+            "health_gate": template.definition.get("health_gate").and_then(serde_json::Value::as_str).unwrap_or("heartbeat_verified"),
+            "heartbeat_source": template.definition.get("source").and_then(serde_json::Value::as_str).unwrap_or("agent_update_heartbeat"),
         }),
     )
 }
 
 fn traffic_limit_status_source_status(
-    preset: &DataSourcePresetView,
+    template: &SourceTemplateView,
     source_kind: &str,
 ) -> (String, String, serde_json::Value) {
     (
@@ -439,13 +439,13 @@ fn traffic_limit_status_source_status(
             "command_types": ["network_apply", "network_status", "tunnel_speed_test"],
             "privilege_gated": true,
             "source_kind": source_kind,
-            "status_source": preset.definition.get("status_source").and_then(serde_json::Value::as_str).unwrap_or("network_status_and_telemetry"),
+            "status_source": template.definition.get("status_source").and_then(serde_json::Value::as_str).unwrap_or("network_status_and_telemetry"),
         }),
     )
 }
 
 fn routing_daemon_adapter_status(
-    preset: &DataSourcePresetView,
+    template: &SourceTemplateView,
     source_kind: &str,
 ) -> (String, String, serde_json::Value) {
     (
@@ -459,8 +459,8 @@ fn routing_daemon_adapter_status(
             "command_types": ["network_status", "network_ospf_cost_update"],
             "privilege_gated": true,
             "source_kind": source_kind,
-            "provider": preset.definition.get("provider").and_then(serde_json::Value::as_str).unwrap_or("bird2"),
-            "status_source": preset.definition.get("status_source").and_then(serde_json::Value::as_str).unwrap_or("bird2_status"),
+            "provider": template.definition.get("provider").and_then(serde_json::Value::as_str).unwrap_or("bird2"),
+            "status_source": template.definition.get("status_source").and_then(serde_json::Value::as_str).unwrap_or("bird2_status"),
         }),
     )
 }
@@ -574,7 +574,7 @@ fn tunnel_adapter_status(tunnels: &[TelemetryTunnelView]) -> (String, String, se
     } else if promotion_required > 0 {
         (
             "needs_promotion".to_string(),
-            "observed tunnel candidates need explicit preset-backed promotion".to_string(),
+            "observed tunnel candidates need explicit template-backed promotion".to_string(),
             json!({
                 "continuous_status": true,
                 "sample_count": samples.len(),
@@ -598,9 +598,9 @@ fn tunnel_adapter_status(tunnels: &[TelemetryTunnelView]) -> (String, String, se
     }
 }
 
-fn source_kind(preset: &DataSourcePresetView) -> String {
+fn source_kind(template: &SourceTemplateView) -> String {
     for key in ["source", "provider", "manager"] {
-        if let Some(value) = preset
+        if let Some(value) = template
             .definition
             .get(key)
             .and_then(serde_json::Value::as_str)
@@ -608,10 +608,10 @@ fn source_kind(preset: &DataSourcePresetView) -> String {
             return value.to_string();
         }
     }
-    if preset.definition.get("shell_script_argv").is_some() {
+    if template.definition.get("shell_script_argv").is_some() {
         return "shell_script_argv".to_string();
     }
-    if let Some(value) = preset
+    if let Some(value) = template
         .definition
         .get("status_source")
         .and_then(serde_json::Value::as_str)
@@ -639,13 +639,13 @@ fn module_label(domain: &str) -> &'static str {
         "update_artifact_source" => "Update artifact source",
         "update_restart_policy" => "Update restart policy",
         "update_rollback_heartbeat_source" => "Update heartbeat source",
-        _ => "Custom data-source domain",
+        _ => "Custom source template domain",
     }
 }
 
 fn domain_order(domain: &str) -> usize {
-    DATA_SOURCE_DOMAINS
+    SOURCE_TEMPLATE_DOMAINS
         .iter()
         .position(|candidate| *candidate == domain)
-        .unwrap_or(DATA_SOURCE_DOMAINS.len())
+        .unwrap_or(SOURCE_TEMPLATE_DOMAINS.len())
 }

@@ -11,6 +11,7 @@ pub struct SuiteConfig {
     pub api: SuiteApiConfig,
     pub gateway: SuiteGatewayConfig,
     pub worker: SuiteWorkerConfig,
+    pub network: SuiteNetworkConfig,
     pub database: SuiteDatabaseConfig,
     pub storage: SuiteStorageConfig,
     pub capacity: SuiteCapacityConfig,
@@ -80,6 +81,13 @@ pub struct SuiteWorkerConfig {
     pub backup_policy_prune_object_store_dir: Option<String>,
     pub schedule_job_max_timeout_secs: Option<u64>,
     pub require_registered_agent_updates: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuiteNetworkConfig {
+    pub tunnel_ipv4_allocation_pool_cidr: Option<String>,
+    pub tunnel_ipv6_allocation_pool_cidr: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -320,6 +328,16 @@ impl SuiteConfig {
             self.api.trusted_proxy_cidrs.as_deref(),
             "api.trusted_proxy_cidrs",
         )?;
+        validate_optional_tunnel_allocation_pool(
+            self.network.tunnel_ipv4_allocation_pool_cidr.as_deref(),
+            TunnelAllocationPoolFamily::Ipv4,
+            "network.tunnel_ipv4_allocation_pool_cidr",
+        )?;
+        validate_optional_tunnel_allocation_pool(
+            self.network.tunnel_ipv6_allocation_pool_cidr.as_deref(),
+            TunnelAllocationPoolFamily::Ipv6,
+            "network.tunnel_ipv6_allocation_pool_cidr",
+        )?;
         Ok(())
     }
 
@@ -381,6 +399,7 @@ impl SuiteConfig {
                 "timeout.worker_schedule_job_max_timeout_secs".to_string(),
                 "timeout.agent_offline_secs".to_string(),
                 "api.alert_*".to_string(),
+                "network.tunnel_*_allocation_pool_cidr".to_string(),
             ],
         }
     }
@@ -519,6 +538,38 @@ fn validate_optional_ip_nets(values: Option<&[String]>, name: &str) -> Result<()
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum TunnelAllocationPoolFamily {
+    Ipv4,
+    Ipv6,
+}
+
+fn validate_optional_tunnel_allocation_pool(
+    value: Option<&str>,
+    family: TunnelAllocationPoolFamily,
+    name: &str,
+) -> Result<(), String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let parsed = value
+        .parse::<ipnet::IpNet>()
+        .map_err(|_| format!("{name}_invalid"))?;
+    match (family, parsed) {
+        (TunnelAllocationPoolFamily::Ipv4, ipnet::IpNet::V4(net)) if net.prefix_len() <= 31 => {
+            Ok(())
+        }
+        (TunnelAllocationPoolFamily::Ipv6, ipnet::IpNet::V6(net)) if net.prefix_len() <= 127 => {
+            Ok(())
+        }
+        (TunnelAllocationPoolFamily::Ipv4, ipnet::IpNet::V4(_))
+        | (TunnelAllocationPoolFamily::Ipv6, ipnet::IpNet::V6(_)) => {
+            Err(format!("{name}_too_small"))
+        }
+        _ => Err(format!("{name}_wrong_family")),
+    }
+}
+
 fn validate_u32_range(value: u32, min: u32, max: u32, name: &str) -> Result<(), String> {
     if !(min..=max).contains(&value) {
         return Err(format!("{name}_out_of_range"));
@@ -628,5 +679,79 @@ trusted_proxy_cidrs = ["localhost"]
         .unwrap_err();
 
         assert_eq!(error, "api.trusted_proxy_cidrs_invalid");
+    }
+
+    #[test]
+    fn suite_config_accepts_empty_or_valid_tunnel_allocation_pools() {
+        let empty = SuiteConfig::parse(
+            r#"
+version = 1
+
+[network]
+tunnel_ipv4_allocation_pool_cidr = ""
+tunnel_ipv6_allocation_pool_cidr = ""
+"#,
+        )
+        .expect("empty pools are disabled");
+        assert_eq!(
+            empty.network.tunnel_ipv4_allocation_pool_cidr.as_deref(),
+            Some("")
+        );
+
+        let configured = SuiteConfig::parse(
+            r#"
+version = 1
+
+[network]
+tunnel_ipv4_allocation_pool_cidr = "10.255.0.0/16"
+tunnel_ipv6_allocation_pool_cidr = "fd80::/80"
+"#,
+        )
+        .expect("valid pools");
+        assert_eq!(
+            configured
+                .network
+                .tunnel_ipv4_allocation_pool_cidr
+                .as_deref(),
+            Some("10.255.0.0/16")
+        );
+        assert_eq!(
+            configured
+                .network
+                .tunnel_ipv6_allocation_pool_cidr
+                .as_deref(),
+            Some("fd80::/80")
+        );
+    }
+
+    #[test]
+    fn suite_config_rejects_invalid_tunnel_allocation_pools() {
+        let wrong_family = SuiteConfig::parse(
+            r#"
+version = 1
+
+[network]
+tunnel_ipv4_allocation_pool_cidr = "fd80::/80"
+"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            wrong_family,
+            "network.tunnel_ipv4_allocation_pool_cidr_wrong_family"
+        );
+
+        let too_small = SuiteConfig::parse(
+            r#"
+version = 1
+
+[network]
+tunnel_ipv6_allocation_pool_cidr = "fd80::/128"
+"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            too_small,
+            "network.tunnel_ipv6_allocation_pool_cidr_too_small"
+        );
     }
 }

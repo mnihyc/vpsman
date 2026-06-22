@@ -1,6 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useState, type FormEvent } from "react";
 import { FileSliders, Play, RefreshCw, Save, ServerCog, Trash2 } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridAction,
+  type ConsoleDataGridColumn,
+} from "../components/ConsoleDataGrid";
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
@@ -23,35 +28,35 @@ import {
 } from "./jobDispatchModel";
 import type {
   AgentView,
-  AssignDataSourcePresetRequest,
-  AssignDataSourcePresetResponse,
+  AssignSourceTemplateRequest,
+  AssignSourceTemplateResponse,
   BulkResolveResponse,
-  CloneDataSourcePresetRequest,
-  CreateDataSourcePresetRequest,
+  CloneSourceTemplateRequest,
+  CreateSourceTemplateRequest,
   CreateJobRequest,
   CreateJobResponse,
-  DataSourceHotConfigResponse,
-  DataSourcePresetAssignmentRecord,
-  DataSourcePresetDiffRequest,
-  DataSourcePresetDiffResponse,
-  DataSourcePresetRecord,
-  DataSourcePresetTestRequest,
-  DataSourcePresetTestResponse,
-  DataSourceStatusRecord,
-  DeleteHotConfigRuleTemplateRequest,
-  HotConfigRuleTemplateRecord,
-  HotConfigRuleTemplateRenderResponse,
+  SourceConfigPatchResponse,
+  SourceTemplateAssignmentRecord,
+  SourceTemplateDiffRequest,
+  SourceTemplateDiffResponse,
+  SourceTemplateRecord,
+  SourceTemplateTestRequest,
+  SourceTemplateTestResponse,
+  SourceStatusRecord,
+  DeleteHotConfigPatchGeneratorRequest,
+  HotConfigPatchGeneratorRecord,
+  HotConfigPatchGeneratorRenderResponse,
   JobOperation,
   JobOutputRecord,
   JobTargetRecord,
   JsonValue,
   PrivilegeAssertion,
-  UpdateDataSourcePresetRequest,
-  UpdateDataSourcePresetResponse,
-  UpsertHotConfigRuleTemplateRequest,
+  UpdateSourceTemplateRequest,
+  UpdateSourceTemplateResponse,
+  UpsertHotConfigPatchGeneratorRequest,
 } from "../types";
 import { formatTime, formatVpsName, runPanelAction, shortId } from "../utils";
-import { DataSourcePresetPanel } from "./DataSourcePresetPanel";
+import { SourceTemplatePanel } from "./SourceTemplatesPanel";
 
 const CONFIG_BULK_SELECTOR_STORAGE_KEY = "vpsman.config.bulk.selectorExpression";
 const CONFIG_SINGLE_SELECTOR_STORAGE_KEY = "vpsman.config.single.selectorExpression";
@@ -62,9 +67,10 @@ type BulkConfigApplySnapshot = {
   selectorExpression: string;
   clientIds: string[];
   targets: AgentView[];
-  rendered: HotConfigRuleTemplateRenderResponse;
   operation: JobOperation;
-  templateName: string;
+  patchName: string;
+  patchSections: string[];
+  patchSource: "generator" | "temporary";
   maxTimeoutSecs: number;
   privilegeAssertion: PrivilegeAssertion;
   payloadHashHex: string;
@@ -86,91 +92,91 @@ type SingleConfigApplySnapshot = {
 export function ConfigPanel({
   activeSubpage,
   agents,
-  dataSourceAssignments,
-  dataSourcePresets,
-  dataSourceStatus,
+  sourceTemplateAssignments,
+  sourceTemplates,
+  sourceStatus,
   error,
-  hotConfigRuleTemplates,
+  hotConfigPatchGenerators,
   jobs,
   loading,
-  onAssignDataSourcePreset,
-  onCloneDataSourcePreset,
+  onAssignSourceTemplate,
+  onCloneSourceTemplate,
   onCreateJob,
-  onCreateDataSourcePreset,
-  onDiffDataSourcePreset,
+  onCreateSourceTemplate,
+  onDiffSourceTemplate,
   onLoadJobOutputs,
   onLoadJobTargets,
-  onDeleteHotConfigRuleTemplate,
+  onDeleteHotConfigPatchGenerator,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
   onRefresh,
-  onRenderDataSourceHotConfig,
-  onRenderHotConfigRuleTemplate,
+  onRenderSourceConfigPatch,
+  onRenderHotConfigPatchGenerator,
   onResolveBulk,
-  onTestDataSourcePreset,
-  onUpdateDataSourcePreset,
-  onUpsertHotConfigRuleTemplate,
+  onSelectSubpage,
+  onTestSourceTemplate,
+  onUpdateSourceTemplate,
+  onUpsertHotConfigPatchGenerator,
   privilegeMaterial,
   setPrivilegeMaterial,
 }: {
   activeSubpage: string;
   agents: AgentView[];
-  dataSourceAssignments: DataSourcePresetAssignmentRecord[];
-  dataSourcePresets: DataSourcePresetRecord[];
-  dataSourceStatus: DataSourceStatusRecord[];
+  sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
+  sourceTemplates: SourceTemplateRecord[];
+  sourceStatus: SourceStatusRecord[];
   error: string | null;
-  hotConfigRuleTemplates: HotConfigRuleTemplateRecord[];
+  hotConfigPatchGenerators: HotConfigPatchGeneratorRecord[];
   jobs: Array<{ id: string; command_type: string; status: string; created_at: string }>;
   loading: boolean;
-  onAssignDataSourcePreset: (request: AssignDataSourcePresetRequest) => Promise<AssignDataSourcePresetResponse>;
-  onCloneDataSourcePreset: (presetId: string, request: CloneDataSourcePresetRequest) => Promise<void>;
+  onAssignSourceTemplate: (request: AssignSourceTemplateRequest) => Promise<AssignSourceTemplateResponse>;
+  onCloneSourceTemplate: (templateId: string, request: CloneSourceTemplateRequest) => Promise<void>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onCreateDataSourcePreset: (request: CreateDataSourcePresetRequest) => Promise<void>;
-  onDiffDataSourcePreset: (presetId: string, request: DataSourcePresetDiffRequest) => Promise<DataSourcePresetDiffResponse>;
+  onCreateSourceTemplate: (request: CreateSourceTemplateRequest) => Promise<void>;
+  onDiffSourceTemplate: (templateId: string, request: SourceTemplateDiffRequest) => Promise<SourceTemplateDiffResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
-  onDeleteHotConfigRuleTemplate: (
-    templateId: string,
-    request: DeleteHotConfigRuleTemplateRequest,
+  onDeleteHotConfigPatchGenerator: (
+    generatorId: string,
+    request: DeleteHotConfigPatchGeneratorRequest,
   ) => Promise<void>;
   onOpenJobDetails: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onRefresh: () => void;
-  onRenderDataSourceHotConfig: (clientId: string) => Promise<DataSourceHotConfigResponse>;
-  onRenderHotConfigRuleTemplate: (templateId: string, request: { values: JsonValue }) => Promise<HotConfigRuleTemplateRenderResponse>;
+  onRenderSourceConfigPatch: (clientId: string) => Promise<SourceConfigPatchResponse>;
+  onRenderHotConfigPatchGenerator: (generatorId: string, request: { values: JsonValue }) => Promise<HotConfigPatchGeneratorRenderResponse>;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
-  onTestDataSourcePreset: (presetId: string, request: DataSourcePresetTestRequest) => Promise<DataSourcePresetTestResponse>;
-  onUpdateDataSourcePreset: (presetId: string, request: UpdateDataSourcePresetRequest) => Promise<UpdateDataSourcePresetResponse>;
-  onUpsertHotConfigRuleTemplate: (request: UpsertHotConfigRuleTemplateRequest) => Promise<HotConfigRuleTemplateRecord>;
+  onSelectSubpage: (subpage: string) => void;
+  onTestSourceTemplate: (templateId: string, request: SourceTemplateTestRequest) => Promise<SourceTemplateTestResponse>;
+  onUpdateSourceTemplate: (templateId: string, request: UpdateSourceTemplateRequest) => Promise<UpdateSourceTemplateResponse>;
+  onUpsertHotConfigPatchGenerator: (request: UpsertHotConfigPatchGeneratorRequest) => Promise<HotConfigPatchGeneratorRecord>;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const subpage = ["overview", "rules", "bulk", "single", "templates", "status"].includes(activeSubpage)
-    ? activeSubpage
-    : "overview";
+  const subpage = normalizeConfigSubpage(activeSubpage);
 
-  if (subpage === "templates" || subpage === "status") {
+  if (subpage === "templates") {
     return (
       <section className="workspace singleColumn">
-        <DataSourcePresetPanel
-          activeSubpage={subpage === "status" ? "status" : "presets"}
+        <SourceTemplatePanel
+          activeSubpage="templates"
           agents={agents}
-          assignments={dataSourceAssignments}
-          dataSourceStatus={dataSourceStatus}
-          onAssignPreset={onAssignDataSourcePreset}
-          onClonePreset={onCloneDataSourcePreset}
+          assignments={sourceTemplateAssignments}
+          sourceStatus={sourceStatus}
+          onAssignTemplate={onAssignSourceTemplate}
+          onCloneTemplate={onCloneSourceTemplate}
           onCreateJob={onCreateJob}
-          onCreatePreset={onCreateDataSourcePreset}
-          onDiffPreset={onDiffDataSourcePreset}
+          onCreateTemplate={onCreateSourceTemplate}
+          onDiffTemplate={onDiffSourceTemplate}
           onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-          onRenderHotConfig={onRenderDataSourceHotConfig}
+          onRenderHotConfig={onRenderSourceConfigPatch}
           onResolveBulk={onResolveBulk}
-          onTestPreset={onTestDataSourcePreset}
-          onUpdatePreset={onUpdateDataSourcePreset}
+          onTestTemplate={onTestSourceTemplate}
+          onUpdateTemplate={onUpdateSourceTemplate}
           privilegeMaterial={privilegeMaterial}
-          presets={dataSourcePresets}
+          templates={sourceTemplates}
           setPrivilegeMaterial={setPrivilegeMaterial}
         />
       </section>
@@ -183,7 +189,7 @@ export function ConfigPanel({
         <div className="sectionHeader">
           <div>
             <h2>{configTitle(subpage)}</h2>
-            <span>{actionError ?? error ?? (loading ? "Refreshing config state" : "Config console")}</span>
+            <span>{actionError ?? error ?? (loading ? "Refreshing agent config state" : "Agent config workflows")}</span>
           </div>
           <button className="secondaryAction" disabled={loading || pending} onClick={onRefresh} type="button">
             <RefreshCw size={15} />
@@ -192,34 +198,27 @@ export function ConfigPanel({
         </div>
         {subpage === "overview" && (
           <ConfigOverview
-            dataSourceAssignments={dataSourceAssignments}
-            dataSourcePresets={dataSourcePresets}
-            dataSourceStatus={dataSourceStatus}
-            hotConfigRuleTemplates={hotConfigRuleTemplates}
+            sourceTemplateAssignments={sourceTemplateAssignments}
+            sourceTemplates={sourceTemplates}
+            sourceStatus={sourceStatus}
+            hotConfigPatchGenerators={hotConfigPatchGenerators}
             jobs={jobs}
-          />
-        )}
-        {subpage === "rules" && (
-          <RuleTemplateWorkspace
-            hotConfigRuleTemplates={hotConfigRuleTemplates}
-            onDeleteHotConfigRuleTemplate={onDeleteHotConfigRuleTemplate}
-            onRenderHotConfigRuleTemplate={onRenderHotConfigRuleTemplate}
-            onUpsertHotConfigRuleTemplate={onUpsertHotConfigRuleTemplate}
-            pending={pending}
-            runAction={(action) => runPanelAction(setPending, setActionError, action)}
+            onSelectSubpage={onSelectSubpage}
           />
         )}
         {subpage === "bulk" && (
           <BulkConfigApply
             agents={agents}
-            hotConfigRuleTemplates={hotConfigRuleTemplates}
+            hotConfigPatchGenerators={hotConfigPatchGenerators}
+            onDeleteHotConfigPatchGenerator={onDeleteHotConfigPatchGenerator}
             onCreateJob={onCreateJob}
             onLoadJobOutputs={onLoadJobOutputs}
             onLoadJobTargets={onLoadJobTargets}
             onOpenJobDetails={onOpenJobDetails}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-            onRenderHotConfigRuleTemplate={onRenderHotConfigRuleTemplate}
+            onRenderHotConfigPatchGenerator={onRenderHotConfigPatchGenerator}
             onResolveBulk={onResolveBulk}
+            onUpsertHotConfigPatchGenerator={onUpsertHotConfigPatchGenerator}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
             runAction={(action) => runPanelAction(setPending, setActionError, action)}
@@ -246,40 +245,126 @@ export function ConfigPanel({
 }
 
 function ConfigOverview({
-  dataSourceAssignments,
-  dataSourcePresets,
-  dataSourceStatus,
-  hotConfigRuleTemplates,
+  sourceTemplateAssignments,
+  sourceTemplates,
+  sourceStatus,
+  hotConfigPatchGenerators,
   jobs,
+  onSelectSubpage,
 }: {
-  dataSourceAssignments: DataSourcePresetAssignmentRecord[];
-  dataSourcePresets: DataSourcePresetRecord[];
-  dataSourceStatus: DataSourceStatusRecord[];
-  hotConfigRuleTemplates: HotConfigRuleTemplateRecord[];
+  sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
+  sourceTemplates: SourceTemplateRecord[];
+  sourceStatus: SourceStatusRecord[];
+  hotConfigPatchGenerators: HotConfigPatchGeneratorRecord[];
   jobs: Array<{ id: string; command_type: string; status: string; created_at: string }>;
+  onSelectSubpage: (subpage: string) => void;
 }) {
   const configJobs = jobs
-    .filter((job) => ["config_read", "hot_config", "data_source_config_patch"].includes(job.command_type))
+    .filter((job) => ["config_read", "hot_config", "source_config_patch"].includes(job.command_type))
     .slice(0, 5);
+  const sourceIssues = sourceStatus.filter((row) => row.status !== "ok").length;
+  const workflowCards = [
+    {
+      action: "Read / edit VPS config",
+      detail: "Base-hash guarded full override",
+      subpage: "single",
+      title: "VPS config",
+      value: "Read one VPS config, edit redacted TOML, then apply a guarded full override.",
+    },
+    {
+      action: "Apply incremental patch",
+      detail: "Selector-resolved VPS targets",
+      subpage: "bulk",
+      title: "Bulk patch",
+      value: "Apply one temporary incremental patch to many reviewed VPSs.",
+    },
+    {
+      action: "Manage patch generators",
+      detail: `${hotConfigPatchGenerators.length} saved generators`,
+      subpage: "bulk",
+      title: "Patch generators",
+      value: "Reusable generators that render temporary incremental patches.",
+    },
+    {
+      action: "Manage source templates",
+      detail: `${sourceTemplates.length} templates / ${sourceTemplateAssignments.length} assignments`,
+      subpage: "templates",
+      title: "Source templates",
+      value: "Persistent source definitions bound to VPSs and manually applied.",
+    },
+    {
+      action: "Inspect source status",
+      detail: `${sourceIssues} needing review`,
+      subpage: "templates",
+      title: "Source status",
+      value: "Current template selection, source kind, readiness, and evidence per VPS.",
+    },
+  ];
+  const termMap = [
+    {
+      term: "Patch",
+      meaning: "A temporary incremental TOML change applied to reviewed VPS targets.",
+    },
+    {
+      term: "Patch generators",
+      meaning: "Reusable generators that render temporary patches; they do not bind to VPSs.",
+    },
+    {
+      term: "Templates",
+      meaning: "Persistent source definitions assigned to VPSs and applied after review.",
+    },
+    {
+      term: "Command templates",
+      meaning: "Saved job payloads managed under Jobs and Schedules.",
+    },
+    {
+      term: "Rules",
+      meaning: "Alert and webhook matching logic under Fleet, not agent config.",
+    },
+    {
+      term: "Suite config",
+      meaning: "Control-plane service config managed under System.",
+    },
+  ];
   return (
     <>
       <div className="metricGrid">
         <div className="metricCard">
-          <strong>{hotConfigRuleTemplates.length}</strong>
-          <span>rule templates</span>
+          <strong>{hotConfigPatchGenerators.length}</strong>
+          <span>patch generators</span>
         </div>
         <div className="metricCard">
-          <strong>{dataSourcePresets.length}</strong>
-          <span>data-source presets</span>
+          <strong>{sourceTemplates.length}</strong>
+          <span>source templates</span>
         </div>
         <div className="metricCard">
-          <strong>{dataSourceAssignments.length}</strong>
-          <span>preset assignments</span>
+          <strong>{sourceTemplateAssignments.length}</strong>
+          <span>template assignments</span>
         </div>
         <div className="metricCard">
-          <strong>{dataSourceStatus.filter((row) => row.status !== "ok").length}</strong>
+          <strong>{sourceIssues}</strong>
           <span>source checks needing review</span>
         </div>
+      </div>
+      <div className="configWorkflowGrid">
+        {workflowCards.map((card) => (
+          <button className="configWorkflowCard" key={card.subpage} onClick={() => onSelectSubpage(card.subpage)} type="button">
+            <span>
+              <strong>{card.title}</strong>
+              <small>{card.detail}</small>
+            </span>
+            <em>{card.value}</em>
+            <b>{card.action}</b>
+          </button>
+        ))}
+      </div>
+      <div className="configTermMap" aria-label="Agent config terminology">
+        {termMap.map((item) => (
+          <span key={item.term} title={item.meaning}>
+            <strong>{item.term}</strong>
+            <small>{item.meaning}</small>
+          </span>
+        ))}
       </div>
       <div className="table hierarchyTable">
         <div className="historyRow heading configJobGrid">
@@ -302,205 +387,51 @@ function ConfigOverview({
   );
 }
 
-function RuleTemplateWorkspace({
-  hotConfigRuleTemplates,
-  onDeleteHotConfigRuleTemplate,
-  onRenderHotConfigRuleTemplate,
-  onUpsertHotConfigRuleTemplate,
-  pending,
-  runAction,
-}: {
-  hotConfigRuleTemplates: HotConfigRuleTemplateRecord[];
-  onDeleteHotConfigRuleTemplate: (
-    templateId: string,
-    request: DeleteHotConfigRuleTemplateRequest,
-  ) => Promise<void>;
-  onRenderHotConfigRuleTemplate: (templateId: string, request: { values: JsonValue }) => Promise<HotConfigRuleTemplateRenderResponse>;
-  onUpsertHotConfigRuleTemplate: (request: UpsertHotConfigRuleTemplateRequest) => Promise<HotConfigRuleTemplateRecord>;
-  pending: boolean;
-  runAction: (action: () => Promise<void>) => Promise<void>;
-}) {
-  const [selectedId, setSelectedId] = useState("");
-  const [valuesText, setValuesText] = useState("");
-  const [rendered, setRendered] = useState<HotConfigRuleTemplateRenderResponse | null>(null);
-  const [deleteTemplate, setDeleteTemplate] = useState<HotConfigRuleTemplateRecord | null>(null);
-  const selected = hotConfigRuleTemplates.find((template) => template.id === (selectedId || hotConfigRuleTemplates[0]?.id));
-  const categories = Array.from(new Set(hotConfigRuleTemplates.map((template) => template.category))).sort();
-
-  useEffect(() => {
-    if (selected) {
-      setValuesText(formatJsonObject(exampleValuesForTemplate(selected)));
-    }
-    setDeleteTemplate(null);
-  }, [selected?.id]);
-
-  async function renderSelected() {
-    if (!selected) {
-      return;
-    }
-    await runAction(async () => {
-      setRendered(await onRenderHotConfigRuleTemplate(selected.id, { values: parseJsonObject(valuesText) }));
-    });
-  }
-
-  async function cloneSelected() {
-    if (!selected) {
-      return;
-    }
-    await runAction(async () => {
-      await onUpsertHotConfigRuleTemplate({
-        category: selected.category,
-        description: selected.description,
-        docs_metadata: selected.docs_metadata,
-        domain: selected.domain,
-        field_schema: selected.field_schema,
-        name: `${selected.name}.copy`,
-        raw_generator_body: selected.raw_generator_body,
-        confirmed: true,
-      });
-    });
-  }
-
-  async function deleteSelected() {
-    if (!deleteTemplate) {
-      return;
-    }
-    const templateId = deleteTemplate.id;
-    const reviewedName = deleteTemplate.name;
-    await runAction(async () => {
-      await onDeleteHotConfigRuleTemplate(templateId, {
-        confirmed: true,
-        reviewed_name: reviewedName,
-      });
-      setSelectedId("");
-      setRendered(null);
-      setDeleteTemplate(null);
-    });
-  }
-
-  return (
-    <div className="configRuleWorkspace">
-      <div className="ruleCardGrid">
-        {categories.map((category) => (
-          <div className="ruleCategory" key={category}>
-            <strong>{category}</strong>
-            {hotConfigRuleTemplates
-              .filter((template) => template.category === category)
-              .map((template) => (
-                <button
-                  className={`ruleCard ${selected?.id === template.id ? "activeAction" : ""}`}
-                  key={template.id}
-                  onClick={() => {
-                    setSelectedId(template.id);
-                    setRendered(null);
-                  }}
-                  type="button"
-                >
-                  <span>
-                    <strong>{template.name}</strong>
-                    <small>{template.description}</small>
-                  </span>
-                  <em>{template.built_in ? "predefined" : "custom"}</em>
-                </button>
-              ))}
-          </div>
-        ))}
-      </div>
-      <div className="compactForm ruleEditor">
-        <strong>{selected?.name ?? "Rule template"}</strong>
-        {selected && (
-          <details>
-            <summary>Template docs</summary>
-            <pre>{JSON.stringify({ schema: selected.field_schema, docs: selected.docs_metadata }, null, 2)}</pre>
-          </details>
-        )}
-        <textarea aria-label="Rule render values JSON" onChange={(event) => setValuesText(event.target.value)} rows={8} value={valuesText} />
-        <div className="formRow">
-          <button className="secondaryAction" disabled={pending || !selected} onClick={renderSelected} type="button">
-            <Play size={15} />
-            Render patch
-          </button>
-          <button className="secondaryAction" disabled={pending || !selected} onClick={cloneSelected} type="button">
-            Clone template
-          </button>
-          <button
-            className="secondaryAction dangerAction"
-            disabled={pending || !selected || selected.built_in}
-            onClick={() => selected && setDeleteTemplate(selected)}
-            type="button"
-            title={
-              selected?.built_in
-                ? "Predefined templates are immutable; clone before editing or deleting"
-                : "Review deletion"
-            }
-          >
-            <Trash2 size={15} />
-            Review deletion
-          </button>
-        </div>
-        <ConfirmationPrompt
-          confirmLabel="Delete template"
-          detail="This removes the reviewed operator-managed rule template. Predefined templates are immutable; clone them before editing."
-          items={[
-            { label: "Template", value: deleteTemplate?.name ?? "" },
-            { label: "Domain", value: deleteTemplate?.domain ?? "" },
-          ]}
-          onCancel={() => setDeleteTemplate(null)}
-          onConfirm={() => void deleteSelected()}
-          open={deleteTemplate !== null}
-          pending={pending}
-          title="Delete rule template"
-          tone="danger"
-        />
-        {rendered && (
-          <div className="configPreview">
-            <div className="previewMeta">
-              <span>{rendered.affected_sections.join(", ")}</span>
-              <span>{formatTime(rendered.generated_at)}</span>
-            </div>
-            <textarea aria-label="Rendered rule patch TOML" readOnly rows={10} value={rendered.toml} />
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function BulkConfigApply({
   agents,
-  hotConfigRuleTemplates,
+  hotConfigPatchGenerators,
+  onDeleteHotConfigPatchGenerator,
   onCreateJob,
   onLoadJobOutputs,
   onLoadJobTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
-  onRenderHotConfigRuleTemplate,
+  onRenderHotConfigPatchGenerator,
   onResolveBulk,
+  onUpsertHotConfigPatchGenerator,
   pending,
   privilegeMaterial,
   runAction,
   setPrivilegeMaterial,
 }: {
   agents: AgentView[];
-  hotConfigRuleTemplates: HotConfigRuleTemplateRecord[];
+  hotConfigPatchGenerators: HotConfigPatchGeneratorRecord[];
+  onDeleteHotConfigPatchGenerator: (
+    generatorId: string,
+    request: DeleteHotConfigPatchGeneratorRequest,
+  ) => Promise<void>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
-  onRenderHotConfigRuleTemplate: (templateId: string, request: { values: JsonValue }) => Promise<HotConfigRuleTemplateRenderResponse>;
+  onRenderHotConfigPatchGenerator: (generatorId: string, request: { values: JsonValue }) => Promise<HotConfigPatchGeneratorRenderResponse>;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
+  onUpsertHotConfigPatchGenerator: (request: UpsertHotConfigPatchGeneratorRequest) => Promise<HotConfigPatchGeneratorRecord>;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
   const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(CONFIG_BULK_SELECTOR_STORAGE_KEY));
-  const [templateId, setTemplateId] = useState("");
+  const [patchMode, setPatchMode] = useState<"generator" | "temporary">("generator");
+  const [generatorId, setGeneratorId] = useState("");
   const [valuesText, setValuesText] = useState("");
+  const [temporaryToml, setTemporaryToml] = useState("");
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
-  const [rendered, setRendered] = useState<HotConfigRuleTemplateRenderResponse | null>(null);
+  const [rendered, setRendered] = useState<HotConfigPatchGeneratorRenderResponse | null>(null);
   const [applySnapshot, setApplySnapshot] = useState<BulkConfigApplySnapshot | null>(null);
+  const [deleteGenerator, setDeleteGenerator] = useState<HotConfigPatchGeneratorRecord | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
@@ -510,19 +441,103 @@ function BulkConfigApply({
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
-  const selectedTemplate = hotConfigRuleTemplates.find((template) => template.id === (templateId || hotConfigRuleTemplates[0]?.id));
+  const selectedGenerator = hotConfigPatchGenerators.find((generator) => generator.id === (generatorId || hotConfigPatchGenerators[0]?.id));
   const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
-  const ready = Boolean(selectedTemplate && selectorExpression.trim() && privilegeMaterial && !selectorParse.error);
+  const ready = Boolean(
+    selectorExpression.trim() &&
+      privilegeMaterial &&
+      !selectorParse.error &&
+      (patchMode === "temporary" ? temporaryToml.trim() : selectedGenerator),
+  );
+  const patchGeneratorColumns = useMemo<ConsoleDataGridColumn<HotConfigPatchGeneratorRecord>[]>(
+    () => [
+      {
+        cell: (generator) => (
+          <span className="historyPrimary">
+            <strong>{generator.name}</strong>
+            <small>{generator.description}</small>
+          </span>
+        ),
+        header: "Generator",
+        id: "name",
+        searchValue: (generator) => `${generator.name} ${generator.description}`,
+        sortValue: (generator) => generator.name,
+      },
+      {
+        cell: (generator) => generator.category,
+        header: "Category",
+        id: "category",
+        searchValue: (generator) => generator.category,
+        sortValue: (generator) => generator.category,
+      },
+      {
+        cell: (generator) => generator.domain,
+        header: "Domain",
+        id: "domain",
+        searchValue: (generator) => generator.domain,
+        sortValue: (generator) => generator.domain,
+      },
+      {
+        cell: (generator) => (
+          <span className={`status ${generator.built_in ? "neutral" : "ok"}`}>
+            {generator.built_in ? "built-in" : "custom"}
+          </span>
+        ),
+        header: "Scope",
+        id: "scope",
+        searchValue: (generator) => (generator.built_in ? "built-in" : "custom"),
+        sortValue: (generator) => (generator.built_in ? "0" : "1"),
+      },
+      {
+        cell: (generator) => formatTime(generator.updated_at),
+        header: "Updated",
+        id: "updated",
+        searchValue: (generator) => formatTime(generator.updated_at),
+        sortValue: (generator) => generator.updated_at,
+      },
+    ],
+    [],
+  );
+  const patchGeneratorActions = useMemo<ConsoleDataGridAction<HotConfigPatchGeneratorRecord>[]>(
+    () => [
+      {
+        icon: <Play size={14} />,
+        label: "Load",
+        onSelect: (rows) => loadPatchGeneratorForApply(rows[0]),
+        disabled: (rows) => rows.length !== 1,
+        description: (rows) => `Load ${rows[0]?.name ?? "one patch generator"} into the apply form.`,
+      },
+      {
+        label: "Clone",
+        onSelect: (rows) => void clonePatchGenerator(rows[0]),
+        disabled: (rows) => rows.length !== 1,
+        description: (rows) => `Clone ${rows[0]?.name ?? "one patch generator"} for editing outside built-ins.`,
+      },
+      {
+        icon: <Trash2 size={14} />,
+        label: "Delete",
+        tone: "danger",
+        separatorBefore: true,
+        onSelect: (rows) => setDeleteGenerator(rows[0]),
+        disabled: (rows) => rows.length !== 1 || rows[0].built_in,
+        description: (rows) =>
+          rows[0]?.built_in
+            ? "Built-in patch generators cannot be deleted."
+            : `Review deletion for ${rows[0]?.name ?? "one patch generator"}.`,
+      },
+    ],
+    [generatorId],
+  );
 
   useEffect(() => writeLocalString(CONFIG_BULK_SELECTOR_STORAGE_KEY, selectorExpression), [selectorExpression]);
 
   useLayoutEffect(() => {
-    if (selectedTemplate) {
-      setValuesText(formatJsonObject(exampleValuesForTemplate(selectedTemplate)));
+    if (selectedGenerator) {
+      setValuesText(formatJsonObject(exampleValuesForGenerator(selectedGenerator)));
       setRendered(null);
       clearBulkConfigReview();
     }
-  }, [selectedTemplate?.id]);
+  }, [selectedGenerator?.id]);
 
   function clearBulkConfigReview() {
     invalidateReviewGeneration();
@@ -531,11 +546,53 @@ function BulkConfigApply({
     setReviewStatus(null);
   }
 
+  function loadPatchGeneratorForApply(generator: HotConfigPatchGeneratorRecord) {
+    setPatchMode("generator");
+    setGeneratorId(generator.id);
+    setValuesText(formatJsonObject(exampleValuesForGenerator(generator)));
+    setRendered(null);
+    clearBulkConfigReview();
+  }
+
+  async function clonePatchGenerator(generator: HotConfigPatchGeneratorRecord) {
+    await runAction(async () => {
+      await onUpsertHotConfigPatchGenerator({
+        category: generator.category,
+        description: generator.description,
+        docs_metadata: generator.docs_metadata,
+        domain: generator.domain,
+        field_schema: generator.field_schema,
+        name: `${generator.name}.copy`,
+        raw_generator_body: generator.raw_generator_body,
+        confirmed: true,
+      });
+    });
+  }
+
+  async function deleteSelectedPatchGenerator() {
+    const generator = deleteGenerator;
+    if (!generator) {
+      return;
+    }
+    await runAction(async () => {
+      await onDeleteHotConfigPatchGenerator(generator.id, {
+        confirmed: true,
+        reviewed_name: generator.name,
+      });
+      if (generatorId === generator.id) {
+        setGeneratorId("");
+        setRendered(null);
+      }
+      setDeleteGenerator(null);
+      clearBulkConfigReview();
+    });
+  }
+
   async function previewTargets() {
     clearBulkConfigReview();
     const reviewGeneration = captureReviewGeneration();
     const frozenSelector = selectorExpression.trim();
-    setReviewStatus("Resolving config targets");
+    setReviewStatus("Resolving patch targets");
     try {
       await runAction(async () => {
         await waitForReviewRender();
@@ -557,19 +614,19 @@ function BulkConfigApply({
   }
 
   async function renderPatch() {
-    if (!selectedTemplate) {
+    if (patchMode !== "generator" || !selectedGenerator) {
       return;
     }
     clearBulkConfigReview();
     const reviewGeneration = captureReviewGeneration();
-    const frozenTemplateId = selectedTemplate.id;
+    const frozenGeneratorId = selectedGenerator.id;
     const frozenValuesText = valuesText;
-    setReviewStatus("Rendering config patch");
+    setReviewStatus("Rendering agent config patch");
     try {
       await runAction(async () => {
         const frozenValues = parseJsonObject(frozenValuesText);
         await waitForReviewRender();
-        const nextRendered = await onRenderHotConfigRuleTemplate(frozenTemplateId, { values: frozenValues });
+        const nextRendered = await onRenderHotConfigPatchGenerator(frozenGeneratorId, { values: frozenValues });
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
         }
@@ -586,18 +643,22 @@ function BulkConfigApply({
   async function reviewApply() {
     clearBulkConfigReview();
     const reviewGeneration = captureReviewGeneration();
-    const frozenTemplate = selectedTemplate;
+    const frozenGenerator = selectedGenerator;
+    const frozenPatchMode = patchMode;
     const frozenPrivilegeMaterial = privilegeMaterial;
     const frozenSelector = selectorExpression.trim();
     const frozenValuesText = valuesText;
+    const frozenTemporaryToml = temporaryToml;
     const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
-    setReviewStatus("Preparing bulk config review");
+    setReviewStatus("Preparing bulk patch review");
     try {
       await runAction(async () => {
-        const frozenValues = parseJsonObject(frozenValuesText);
         await waitForReviewRender();
-        if (!frozenTemplate || !frozenPrivilegeMaterial) {
-          throw new Error("Bulk config apply is incomplete");
+        if (!frozenPrivilegeMaterial) {
+          throw new Error("Bulk patch apply is incomplete");
+        }
+        if (frozenPatchMode === "generator" && !frozenGenerator) {
+          throw new Error("Select a patch generator");
         }
         if (selectorParse.error) {
           throw new Error(selectorParse.error);
@@ -605,26 +666,39 @@ function BulkConfigApply({
         if (!frozenSelector) {
           throw new Error("Add at least one target selector");
         }
+        if (frozenPatchMode === "temporary" && !frozenTemporaryToml.trim()) {
+          throw new Error("Paste a temporary TOML patch");
+        }
         const nextPreview = await onResolveBulk(frozenSelector);
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
         }
         const clientIds = nextPreview.targets.map((target) => target.id);
         if (!clientIds.length) {
-          throw new Error("Bulk config confirmation resolved no VPSs");
+          throw new Error("Bulk patch confirmation resolved no VPSs");
         }
-        const nextRendered = await onRenderHotConfigRuleTemplate(frozenTemplate.id, { values: frozenValues });
-        if (!isReviewGenerationCurrent(reviewGeneration)) {
-          return;
+        let toml = frozenTemporaryToml.trim();
+        let patchName = "Temporary patch";
+        let patchSections = inferTomlSections(toml);
+        if (frozenPatchMode === "generator") {
+          const frozenValues = parseJsonObject(frozenValuesText);
+          const nextRendered = await onRenderHotConfigPatchGenerator(frozenGenerator!.id, { values: frozenValues });
+          if (!isReviewGenerationCurrent(reviewGeneration)) {
+            return;
+          }
+          toml = nextRendered.toml;
+          patchName = frozenGenerator!.name;
+          patchSections = nextRendered.affected_sections;
+          setRendered(nextRendered);
         }
         const operation: JobOperation = {
-          type: "data_source_config_patch",
+          type: "source_config_patch",
           apply_mode: "incremental_patch",
-          toml: nextRendered.toml,
+          toml,
         };
         const built = await buildPrivilegeForJobOperation({
           clientIds,
-          commandType: "data_source_config_patch",
+          commandType: "source_config_patch",
           operation,
           privilegeMaterial: frozenPrivilegeMaterial,
           selectorExpression: frozenSelector,
@@ -634,17 +708,17 @@ function BulkConfigApply({
           return;
         }
         setPreview(nextPreview);
-        setRendered(nextRendered);
         setApplySnapshot({
           clientIds,
           jobId: crypto.randomUUID(),
           operation,
+          patchName,
+          patchSections,
+          patchSource: frozenPatchMode,
           payloadHashHex: built.payloadHashHex,
           privilegeAssertion: built.privilegeAssertion,
-          rendered: nextRendered,
           selectorExpression: frozenSelector,
           targets: nextPreview.targets,
-          templateName: frozenTemplate.name,
           maxTimeoutSecs: boundedMaxTimeoutSecs,
         });
         setConfirmOpen(true);
@@ -661,11 +735,11 @@ function BulkConfigApply({
     await runAction(async () => {
       const snapshot = applySnapshot;
       if (!snapshot) {
-        throw new Error("Bulk config confirmation snapshot is missing; review the apply again");
+        throw new Error("Bulk patch confirmation snapshot is missing; review the apply again");
       }
       const response = await onCreateJob({
         argv: [],
-        command: "data_source_config_patch",
+        command: "source_config_patch",
         confirmed: true,
         destructive: true,
         force_unprivileged: false,
@@ -709,41 +783,79 @@ function BulkConfigApply({
   return (
     <div className="configApplyGrid">
       <div className="compactForm">
-        <strong>Patch source</strong>
-        <select
-          aria-label="Rule template"
-          onChange={(event) => {
-            setTemplateId(event.target.value);
-            clearBulkConfigReview();
-          }}
-          value={selectedTemplate?.id ?? ""}
-        >
-          {hotConfigRuleTemplates.map((template) => (
-            <option key={template.id} value={template.id}>
-              {template.name}
-            </option>
-          ))}
-        </select>
-        <textarea
-          aria-label="Rule values JSON"
-          onChange={(event) => {
-            setValuesText(event.target.value);
-            setRendered(null);
-            clearBulkConfigReview();
-          }}
-          rows={7}
-          value={valuesText}
-        />
-        <button className="secondaryAction" disabled={pending || !selectedTemplate} onClick={renderPatch} type="button">
-          Render patch
-        </button>
-        {rendered && <textarea aria-label="Bulk rendered incremental config patch" readOnly rows={8} value={rendered.toml} />}
+        <strong>Incremental patch</strong>
+        <div className="segmentedControl" aria-label="Patch source">
+          <button
+            className={patchMode === "generator" ? "activeAction" : ""}
+            onClick={() => {
+              setPatchMode("generator");
+              clearBulkConfigReview();
+            }}
+            type="button"
+          >
+            Saved generator
+          </button>
+          <button
+            className={patchMode === "temporary" ? "activeAction" : ""}
+            onClick={() => {
+              setPatchMode("temporary");
+              setRendered(null);
+              clearBulkConfigReview();
+            }}
+            type="button"
+          >
+            Temporary
+          </button>
+        </div>
+        {patchMode === "generator" ? (
+          <>
+            <select
+              aria-label="Patch generator"
+              onChange={(event) => {
+                setGeneratorId(event.target.value);
+                clearBulkConfigReview();
+              }}
+              value={selectedGenerator?.id ?? ""}
+            >
+              {hotConfigPatchGenerators.map((generator) => (
+                <option key={generator.id} value={generator.id}>
+                  {generator.name}
+                </option>
+              ))}
+            </select>
+            <textarea
+              aria-label="Patch generator values JSON"
+              onChange={(event) => {
+                setValuesText(event.target.value);
+                setRendered(null);
+                clearBulkConfigReview();
+              }}
+              rows={7}
+              value={valuesText}
+            />
+            <button className="secondaryAction" disabled={pending || !selectedGenerator} onClick={renderPatch} type="button">
+              Render patch
+            </button>
+            {rendered && <textarea aria-label="Rendered bulk agent patch TOML" readOnly rows={8} value={rendered.toml} />}
+          </>
+        ) : (
+          <textarea
+            aria-label="Temporary bulk agent patch TOML"
+            onChange={(event) => {
+              setTemporaryToml(event.target.value);
+              clearBulkConfigReview();
+            }}
+            placeholder="[telemetry]\n# paste one incremental TOML patch"
+            rows={14}
+            value={temporaryToml}
+          />
+        )}
       </div>
       <div className="compactForm">
         <strong>Targets</strong>
         <SearchExpressionInput
           agents={agents}
-          ariaLabel="Bulk config selector expression"
+          ariaLabel="Bulk patch target expression"
           className="targetExpressionBar"
           onChange={(value) => {
             setSelectorExpression(value);
@@ -768,20 +880,23 @@ function BulkConfigApply({
           {preview && preview.target_count > 24 && <span className="targetChip mutedChip">+{preview.target_count - 24} more</span>}
         </div>
         <div className="inlinePrivilege">
-          <input
-            aria-label="Config apply max timeout seconds"
-            max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
-            min={1}
-            onChange={(event) => {
-              setMaxTimeoutSecs(Number(event.target.value));
-              clearBulkConfigReview();
-            }}
-            type="number"
-            value={maxTimeoutSecs}
-          />
+          <label>
+            <span>Max timeout seconds</span>
+            <input
+              aria-label="Bulk patch max timeout seconds"
+              max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
+              min={1}
+              onChange={(event) => {
+                setMaxTimeoutSecs(Number(event.target.value));
+                clearBulkConfigReview();
+              }}
+              type="number"
+              value={maxTimeoutSecs}
+            />
+          </label>
         </div>
         <PrivilegeVaultBox
-          labelPrefix="Config"
+          labelPrefix="Agent config"
           lastPayloadHash={null}
           onOpenUnlock={onOpenPrivilegeUnlock}
           onPrivilegeMaterialChange={(material) => {
@@ -789,7 +904,7 @@ function BulkConfigApply({
             clearBulkConfigReview();
           }}
           privilegeMaterial={privilegeMaterial}
-          unlockRedirectLabel="Unlock config privilege"
+          unlockRedirectLabel="Unlock agent config privilege"
         />
         {reviewStatus && <span className="formHint">{reviewStatus}</span>}
         <button className="primaryAction" disabled={pending || !ready} onClick={() => void reviewApply()} type="button">
@@ -806,14 +921,15 @@ function BulkConfigApply({
         />
       )}
       <ConfirmationPrompt
-        confirmLabel="Apply config patch"
-        detail={`Apply one generated partial patch to ${applySnapshot?.clientIds.length ?? 0} frozen VPS targets.`}
+        confirmLabel="Apply agent config patch"
+        detail={`Apply one generated incremental patch to ${applySnapshot?.clientIds.length ?? 0} frozen VPS targets.`}
         expiresAtUnix={applySnapshot?.privilegeAssertion.expires_unix}
         items={[
           { label: "Selector", value: applySnapshot?.selectorExpression ?? "-" },
           { label: "Targets", value: `${applySnapshot?.clientIds.length ?? 0}` },
-          { label: "Template", value: applySnapshot?.templateName ?? "-" },
-          { label: "Sections", value: applySnapshot?.rendered.affected_sections.join(", ") ?? "-" },
+          { label: "Source", value: applySnapshot?.patchSource ?? "-" },
+          { label: "Patch", value: applySnapshot?.patchName ?? "-" },
+          { label: "Sections", value: applySnapshot?.patchSections.join(", ") ?? "-" },
           { label: "Payload", value: applySnapshot?.payloadHashHex ? shortId(applySnapshot.payloadHashHex) : "-" },
         ]}
         onCancel={() => {
@@ -823,7 +939,55 @@ function BulkConfigApply({
         onConfirm={() => void applyPatch()}
         open={confirmOpen}
         pending={pending}
-        title="Confirm bulk config apply"
+        title="Confirm bulk patch"
+      />
+      <ConsoleDataGrid
+        actions={patchGeneratorActions}
+        columns={patchGeneratorColumns}
+        defaultPageSize={10}
+        expandOnRowClick
+        getRowId={(generator) => generator.id}
+        itemLabel="patch generators"
+        empty="No patch generators match the current search."
+        renderExpandedRow={(generator) => (
+          <div className="consoleInlineDetailGrid">
+            <span>Generator ID</span>
+            <strong>{generator.id}</strong>
+            <span>Name</span>
+            <strong>{generator.name}</strong>
+            <span>Category</span>
+            <strong>{generator.category}</strong>
+            <span>Domain</span>
+            <strong>{generator.domain}</strong>
+            <span>Scope</span>
+            <strong>{generator.built_in ? "built-in" : "custom"}</strong>
+            <span>Updated</span>
+            <strong>{formatTime(generator.updated_at)}</strong>
+            <span>Schema</span>
+            <pre>{JSON.stringify(generator.field_schema, null, 2)}</pre>
+            <span>Docs</span>
+            <pre>{JSON.stringify(generator.docs_metadata, null, 2)}</pre>
+          </div>
+        )}
+        rowActions={patchGeneratorActions}
+        rows={hotConfigPatchGenerators}
+        searchPlaceholder="Search patch generators"
+        storageKey="vpsman.config.patchGenerators"
+        title="Patch generators"
+      />
+      <ConfirmationPrompt
+        confirmLabel="Delete patch generator"
+        detail="This removes the reviewed operator-managed patch generator. Built-in patch generators are read-only."
+        items={[
+          { label: "Generator", value: deleteGenerator?.name ?? "" },
+          { label: "Domain", value: deleteGenerator?.domain ?? "" },
+        ]}
+        onCancel={() => setDeleteGenerator(null)}
+        onConfirm={() => void deleteSelectedPatchGenerator()}
+        open={deleteGenerator !== null}
+        pending={pending}
+        title="Delete patch generator"
+        tone="danger"
       />
     </div>
   );
@@ -959,12 +1123,12 @@ function SingleVpsConfig({
     const frozenToml = redactedToml;
     const frozenBaseHash = baseHash;
     const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
-    setReviewStatus("Preparing single config review");
+    setReviewStatus("Preparing VPS config review");
     try {
       await runAction(async () => {
         await waitForReviewRender();
         if (!frozenTarget || !frozenPrivilegeMaterial || !frozenToml || !frozenBaseHash) {
-          throw new Error("Read a single VPS config before applying");
+          throw new Error("Read one VPS config before applying");
         }
         const operation: JobOperation = {
           type: "hot_config",
@@ -1044,30 +1208,33 @@ function SingleVpsConfig({
   return (
     <div className="configApplyGrid">
       <div className="compactForm">
-        <strong>Single VPS target</strong>
+        <strong>VPS target</strong>
         <VpsCombobox
           agents={agents}
-          ariaLabel="Single VPS config target"
+          ariaLabel="VPS config target"
           onChange={selectClientId}
-          placeholder="Search config VPS"
+          placeholder="Search VPS config"
           value={clientId}
         />
         <span>{singleTarget ? formatVpsName(singleTarget, vpsNameDisplayMode) : clientId ? "Select a listed VPS" : "no target selected"}</span>
         <div className="inlinePrivilege">
-          <input
-            aria-label="Single config max timeout seconds"
-            max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
-            min={1}
-            onChange={(event) => {
-              clearSingleConfigReview();
-              setMaxTimeoutSecs(Number(event.target.value));
-            }}
-            type="number"
-            value={maxTimeoutSecs}
-          />
+          <label>
+            <span>Max timeout seconds</span>
+            <input
+              aria-label="VPS config max timeout seconds"
+              max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
+              min={1}
+              onChange={(event) => {
+                clearSingleConfigReview();
+                setMaxTimeoutSecs(Number(event.target.value));
+              }}
+              type="number"
+              value={maxTimeoutSecs}
+            />
+          </label>
         </div>
         <PrivilegeVaultBox
-          labelPrefix="Config"
+          labelPrefix="Agent config"
           lastPayloadHash={null}
           onOpenUnlock={onOpenPrivilegeUnlock}
           onPrivilegeMaterialChange={(material) => {
@@ -1075,11 +1242,11 @@ function SingleVpsConfig({
             setPrivilegeMaterial(material);
           }}
           privilegeMaterial={privilegeMaterial}
-          unlockRedirectLabel="Unlock config privilege"
+          unlockRedirectLabel="Unlock agent config privilege"
         />
         <button className="secondaryAction" disabled={pending || !singleTarget || !privilegeMaterial} onClick={readConfig} type="button">
           <ServerCog size={16} />
-          Read config
+          Read agent config
         </button>
         {lastJobId && (
           <button className="secondaryAction" onClick={() => onOpenJobDetails(lastJobId)} type="button">
@@ -1088,10 +1255,10 @@ function SingleVpsConfig({
         )}
       </div>
       <div className="compactForm configTomlEditor">
-        <strong>Redacted TOML</strong>
-        <span>{baseHash ? `base ${shortId(baseHash)}` : "Read a single VPS config before editing"}</span>
+        <strong>Redacted agent TOML</strong>
+        <span>{baseHash ? `base ${shortId(baseHash)}` : "Read one VPS config before editing"}</span>
         <textarea
-          aria-label="Single VPS redacted config TOML"
+          aria-label="VPS redacted agent config TOML"
           onChange={(event) => {
             clearSingleConfigReview();
             setRedactedToml(event.target.value);
@@ -1111,8 +1278,8 @@ function SingleVpsConfig({
         {reviewStatus && <span className="formHint">{reviewStatus}</span>}
       </div>
       <ConfirmationPrompt
-        confirmLabel="Apply config"
-        detail="Apply the redacted-preserve TOML only if the VPS config hash still matches the read base."
+        confirmLabel="Apply full config"
+        detail="Apply the redacted-preserve agent TOML only if the VPS config hash still matches the read base."
         expiresAtUnix={singleApplySnapshot?.privilegeAssertion.expires_unix}
         items={[
           { label: "Target", value: singleApplySnapshot ? formatVpsName(singleApplySnapshot.target, vpsNameDisplayMode) : "-" },
@@ -1124,7 +1291,7 @@ function SingleVpsConfig({
         onConfirm={() => singleApplySnapshot && void applyConfig(singleApplySnapshot)}
         open={singleApplySnapshot !== null}
         pending={pending}
-        title="Confirm single-VPS config apply"
+        title="Confirm full config override"
       />
       {progress && (
         <ExecutionResultPanel
@@ -1140,15 +1307,20 @@ function SingleVpsConfig({
 
 function configTitle(subpage: string): string {
   switch (subpage) {
-    case "rules":
-      return "Config rules";
     case "bulk":
-      return "Bulk config patches";
+      return "Bulk patch";
     case "single":
-      return "Single VPS config";
+      return "VPS config";
     default:
-      return "Config overview";
+      return "Agent config overview";
   }
+}
+
+function normalizeConfigSubpage(value: string): "overview" | "bulk" | "single" | "templates" {
+  if (value === "bulk" || value === "single" || value === "templates") {
+    return value;
+  }
+  return "overview";
 }
 
 function parseJsonObject(value: string): JsonValue {
@@ -1159,8 +1331,21 @@ function parseJsonObject(value: string): JsonValue {
   return parsed;
 }
 
-function exampleValuesForTemplate(template: HotConfigRuleTemplateRecord): Record<string, JsonValue> {
-  const schema = asRecord(template.field_schema) ?? {};
+function inferTomlSections(toml: string): string[] {
+  const sections = Array.from(
+    new Set(
+      toml
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .map((line) => /^\[([^[\]]+)\]$/.exec(line)?.[1]?.trim())
+        .filter((section): section is string => Boolean(section)),
+    ),
+  );
+  return sections.length > 0 ? sections : ["root"];
+}
+
+function exampleValuesForGenerator(generator: HotConfigPatchGeneratorRecord): Record<string, JsonValue> {
+  const schema = asRecord(generator.field_schema) ?? {};
   const fields = asRecord(schema.fields) ?? asRecord(schema.properties) ?? {};
   const values: Record<string, JsonValue> = {};
   for (const [field, specValue] of Object.entries(fields)) {

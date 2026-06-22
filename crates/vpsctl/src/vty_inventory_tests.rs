@@ -7,17 +7,15 @@ use super::{
 #[test]
 fn recognizes_inventory_commands() {
     assert!(is_vty_inventory_command(
-        "data-source-presets --domain telemetry_metrics_source"
+        "source-templates --domain telemetry_metrics_source"
     ));
     assert!(is_vty_inventory_command(
-        "data-source-preset-assign --domain telemetry_metrics_source"
+        "source-template-assign --domain telemetry_metrics_source"
     ));
     assert!(is_vty_inventory_command(
-        "data-source-preset-update --preset-id 11111111-1111-4111-8111-111111111111"
+        "source-template-update --template-id 11111111-1111-4111-8111-111111111111"
     ));
-    assert!(is_vty_inventory_command(
-        "data-source-status --client-id edge-a"
-    ));
+    assert!(is_vty_inventory_command("source-status --client-id edge-a"));
     assert!(is_vty_inventory_command("fleet-alerts --severity warning"));
     assert!(is_vty_inventory_command(
         "fleet-alert-export --include-muted"
@@ -44,7 +42,7 @@ fn recognizes_inventory_commands() {
         "fleet-alert-notification-process --dry-run"
     ));
     assert!(is_vty_inventory_command(
-        "data-source-hot-config --client-id edge-a"
+        "source-config-patch --client-id edge-a"
     ));
     assert!(is_vty_inventory_command("bulk-resolve edge bgp"));
     assert!(is_vty_inventory_command(
@@ -68,18 +66,17 @@ fn parses_inventory_commands() {
         }
     );
     assert_eq!(
-        parse_vty_inventory_command("data-source-presets --domain=telemetry_metrics_source")
-            .unwrap(),
-        VtyInventoryCommand::DataSourcePresets {
+        parse_vty_inventory_command("source-templates --domain=telemetry_metrics_source").unwrap(),
+        VtyInventoryCommand::SourceTemplates {
             domain: Some("telemetry_metrics_source".to_string()),
         }
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "data-source-preset-create --domain=runtime_traffic_accounting_source --name=shared:vnstat --definition-json={\"source\":\"vnstat\"}",
+            "source-template-create --domain=runtime_traffic_accounting_source --name=shared:vnstat --definition-json={\"source\":\"vnstat\"}",
         )
         .unwrap(),
-        VtyInventoryCommand::DataSourcePresetCreate {
+        VtyInventoryCommand::SourceTemplateCreate {
             domain: "runtime_traffic_accounting_source".to_string(),
             name: "shared:vnstat".to_string(),
             scope: "shared".to_string(),
@@ -90,11 +87,11 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "data-source-preset-clone --source-preset-id=11111111-1111-4111-8111-111111111111 --name=shared:copy --description copied",
+            "source-template-clone --template-id=11111111-1111-4111-8111-111111111111 --name=shared:copy --description copied",
         )
         .unwrap(),
-        VtyInventoryCommand::DataSourcePresetClone {
-            source_preset_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        VtyInventoryCommand::SourceTemplateClone {
+            source_template_id: "11111111-1111-4111-8111-111111111111".to_string(),
             name: "shared:copy".to_string(),
             scope: "shared".to_string(),
             owner_client_id: None,
@@ -103,11 +100,11 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "data-source-preset-diff --preset-id=11111111-1111-4111-8111-111111111111 --definition-json={\"source\":\"vnstat\"}",
+            "source-template-diff --template-id=11111111-1111-4111-8111-111111111111 --definition-json={\"source\":\"vnstat\"}",
         )
         .unwrap(),
-        VtyInventoryCommand::DataSourcePresetDiff {
-            preset_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        VtyInventoryCommand::SourceTemplateDiff {
+            template_id: "11111111-1111-4111-8111-111111111111".to_string(),
             description: None,
             clear_description: false,
             definition: serde_json::json!({"source": "vnstat"}),
@@ -115,21 +112,21 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "data-source-preset-test --preset-id=11111111-1111-4111-8111-111111111111 --definition-json={\"source\":\"interface_counters\"}",
+            "source-template-test --template-id=11111111-1111-4111-8111-111111111111 --definition-json={\"source\":\"interface_counters\"}",
         )
         .unwrap(),
-        VtyInventoryCommand::DataSourcePresetTest {
-            preset_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        VtyInventoryCommand::SourceTemplateTest {
+            template_id: "11111111-1111-4111-8111-111111111111".to_string(),
             definition: serde_json::json!({"source": "interface_counters"}),
         }
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "data-source-preset-update --preset-id 11111111-1111-4111-8111-111111111111 --clear-description --definition-json={\"source\":\"vnstat\"} --confirmed",
+            "source-template-update --template-id 11111111-1111-4111-8111-111111111111 --clear-description --definition-json={\"source\":\"vnstat\"} --confirmed",
         )
         .unwrap(),
-        VtyInventoryCommand::DataSourcePresetUpdate {
-            preset_id: "11111111-1111-4111-8111-111111111111".to_string(),
+        VtyInventoryCommand::SourceTemplateUpdate {
+            template_id: "11111111-1111-4111-8111-111111111111".to_string(),
             description: None,
             clear_description: true,
             definition: serde_json::json!({"source": "vnstat"}),
@@ -138,31 +135,31 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "data-source-preset-assign --domain runtime_traffic_accounting_source --preset-id 11111111-1111-4111-8111-111111111111 --client edge-a --tag bgp --confirmed",
+            "source-template-assign --domain runtime_traffic_accounting_source --template-id 11111111-1111-4111-8111-111111111111 --client edge-a --tag bgp --confirmed",
         )
         .unwrap(),
-        VtyInventoryCommand::DataSourcePresetAssign {
+        VtyInventoryCommand::SourceTemplateAssign {
             domain: "runtime_traffic_accounting_source".to_string(),
-            preset_id: "11111111-1111-4111-8111-111111111111".to_string(),
+            template_id: "11111111-1111-4111-8111-111111111111".to_string(),
             clients: vec!["edge-a".to_string()],
             tags: vec!["bgp".to_string()],
             confirmed: true,
         }
     );
     assert_eq!(
-        parse_vty_inventory_command("data-source-hot-config --client-id=edge/a --format=json")
+        parse_vty_inventory_command("source-config-patch --client-id=edge/a --format=json")
             .unwrap(),
-        VtyInventoryCommand::DataSourceHotConfig {
+        VtyInventoryCommand::SourceConfigPatch {
             client_id: "edge/a".to_string(),
             format: "json".to_string(),
         }
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "data-source-status --client-id=edge/a --domain=runtime_traffic_accounting_source"
+            "source-status --client-id=edge/a --domain=runtime_traffic_accounting_source"
         )
         .unwrap(),
-        VtyInventoryCommand::DataSourceStatus {
+        VtyInventoryCommand::SourceStatus {
             client_id: Some("edge/a".to_string()),
             domain: Some("runtime_traffic_accounting_source".to_string()),
         }
@@ -340,14 +337,14 @@ fn parses_inventory_commands() {
 #[test]
 fn rejects_invalid_inventory_commands() {
     assert!(parse_vty_inventory_command("agent-tag edge-a").is_err());
-    assert!(parse_vty_inventory_command("data-source-preset-create --name x").is_err());
-    assert!(parse_vty_inventory_command("data-source-preset-clone --name x").is_err());
-    assert!(parse_vty_inventory_command("data-source-preset-diff --confirmed").is_err());
+    assert!(parse_vty_inventory_command("source-template-create --name x").is_err());
+    assert!(parse_vty_inventory_command("source-template-clone --name x").is_err());
+    assert!(parse_vty_inventory_command("source-template-diff --confirmed").is_err());
     assert!(parse_vty_inventory_command(
-        "data-source-preset-update --description x --clear-description"
+        "source-template-update --description x --clear-description"
     )
     .is_err());
-    assert!(parse_vty_inventory_command("data-source-preset-assign --domain x").is_err());
+    assert!(parse_vty_inventory_command("source-template-assign --domain x").is_err());
     assert!(parse_vty_inventory_command("unknown").is_err());
     assert!(gateway_sessions_path("gateway-sessions --limit=0").is_err());
     assert!(gateway_sessions_path("gateway-sessions extra").is_err());
@@ -372,22 +369,22 @@ fn rejects_invalid_inventory_commands() {
         "/api/v1/telemetry/tunnels?limit=10&client_id=edge%2Fa&interface=tun%2F0"
     );
     assert_eq!(
-        super::data_source_presets_path(Some("telemetry/source")),
-        "/api/v1/data-source-presets?domain=telemetry%2Fsource"
+        super::source_templates_path(Some("telemetry/source")),
+        "/api/v1/source-templates?domain=telemetry%2Fsource"
     );
     assert_eq!(
-        super::data_source_assignments_path(Some("edge/a"), Some("telemetry/source")),
-        "/api/v1/data-source-assignments?client_id=edge%2Fa&domain=telemetry%2Fsource"
+        super::source_template_assignments_path(Some("edge/a"), Some("telemetry/source")),
+        "/api/v1/source-template-assignments?client_id=edge%2Fa&domain=telemetry%2Fsource"
     );
     assert_eq!(
-        super::data_source_status_path(Some("edge/a"), Some("telemetry/source")),
-        "/api/v1/data-source-status?client_id=edge%2Fa&domain=telemetry%2Fsource"
+        super::source_status_path(Some("edge/a"), Some("telemetry/source")),
+        "/api/v1/source-status?client_id=edge%2Fa&domain=telemetry%2Fsource"
     );
     assert_eq!(
-        super::data_source_hot_config_path("edge/a"),
-        "/api/v1/data-source-hot-config?client_id=edge%2Fa"
+        super::source_config_patch_path("edge/a"),
+        "/api/v1/source-config-patch?client_id=edge%2Fa"
     );
-    assert!(parse_vty_inventory_command("data-source-hot-config --format xml").is_err());
+    assert!(parse_vty_inventory_command("source-config-patch --format xml").is_err());
     assert!(parse_vty_inventory_command("fleet-alerts --severity noisy").is_err());
     assert!(parse_vty_inventory_command("fleet-alerts --limit=0").is_err());
     assert!(parse_vty_inventory_command("fleet-alerts --operator-state noisy").is_err());

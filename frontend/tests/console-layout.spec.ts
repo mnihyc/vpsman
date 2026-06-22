@@ -873,9 +873,9 @@ test("keeps console layout usable on desktop and mobile widths", async ({
   } else {
     await expect(page.locator(".sidebar")).toBeHidden();
     await expect(page.locator(".scopeSelector")).toBeHidden();
-    await page.getByRole("combobox", { name: "Console page" }).selectOption("Config::status");
+    await page.getByRole("combobox", { name: "Console page" }).selectOption("Config::templates");
     await expect(
-      page.getByRole("heading", { name: "Config", exact: true }),
+      page.getByRole("heading", { name: "Agent config", exact: true }),
     ).toBeVisible();
     await expect(page.getByText("Active source status").first()).toBeVisible();
   }
@@ -912,12 +912,12 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   await expect(page.getByText("Dispatcher in-flight")).toBeVisible();
   await expect(page.getByText("API DB pool")).toBeVisible();
 
-  await openConsoleSubpage(page, "System", "Config");
+  await openConsoleSubpage(page, "System", "Suite config");
   await expect(
-    page.getByRole("heading", { name: "System config", exact: true }),
+    page.locator(".consoleHeader").getByRole("heading", { name: "Suite config", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "System Config", exact: true }),
+    page.locator(".systemConfigOverview").getByRole("heading", { name: "Suite config", exact: true }),
   ).toBeVisible();
   await expect(page.getByLabel("Private API bind")).toBeVisible();
   await page.getByLabel("API DB pool").fill("40");
@@ -935,7 +935,7 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   await expect(page.getByLabel(/super salt/i)).toHaveCount(0);
 
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "System", "Config");
+  await openConsoleSubpage(page, "System", "Suite config");
   await page.getByLabel("API DB pool").fill("40");
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.getByText(/Validation passed/)).toBeVisible();
@@ -1112,18 +1112,18 @@ test("packs dashboard top VPS cards by label length", async ({
   expect(shortest / longest).toBeLessThan(0.6);
 });
 
-test("manages data-source preset assignments from the config view", async ({
+test("manages source template assignments from the config view", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "dense preset management is covered in the desktop console layout",
+    "dense template management is covered in the desktop console layout",
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "Status");
+  await openConsoleSubpage(page, "Config", "Templates");
 
-  const panel = page.locator(".dataSourcePresetPanel");
+  const panel = page.locator(".sourceTemplatePanel");
   const activeSourcesSearch = panel.getByRole("searchbox", {
     name: "Active sources search",
   });
@@ -1134,6 +1134,20 @@ test("manages data-source preset assignments from the config view", async ({
   const activeSourceRows = activeSourcesGrid.locator(".gridBody .gridRow");
   await expect(activeSourcesGrid).toBeVisible();
   await expect(activeSourcesSearch).toBeVisible();
+  await expect(activeSourcesGrid.locator(".gridCounts")).not.toContainText(
+    "selected",
+  );
+  await expect(
+    activeSourcesGrid.locator('.gridHeaderGroup input[type="checkbox"]'),
+  ).toHaveCount(0);
+  await activeSourcesSearch.fill("not-a-real-source");
+  await expect(
+    panel.getByText("No active source records match the current search."),
+  ).toBeVisible();
+  await expect(
+    panel.getByText(/No selected source records/),
+  ).toHaveCount(0);
+  await activeSourcesSearch.fill("");
   await expect(panel.getByText(/\d+ of \d+ sources/)).toBeVisible();
   await expect(panel.getByText(/1 \/ \d+/).first()).toBeVisible();
   await expect(
@@ -1158,110 +1172,150 @@ test("manages data-source preset assignments from the config view", async ({
   ).toBeVisible();
   await activeSourcesSearch.fill("");
 
-  await openConsoleSubpage(page, "Config", "Templates");
-  const presetPanel = page.locator(".dataSourcePresetPanel");
-  const presetRegistrySearch = presetPanel.getByRole("searchbox", {
-    name: "Preset registry search",
+  const templatePanel = page.locator(".sourceTemplatePanel");
+  const templateRegistrySearch = templatePanel.getByRole("searchbox", {
+    name: "Source template registry search",
   });
   await expect(
-    presetPanel.getByRole("heading", { name: "Data-source presets" }),
+    templatePanel.getByRole("heading", { name: "Templates" }),
   ).toBeVisible();
-  const presetRegistryGrid = presetPanel.getByLabel("Preset registry data grid");
-  const presetRows = presetRegistryGrid.locator(".gridBody .gridRow");
-  await expect(presetRegistryGrid).toBeVisible();
-  await expect(presetRegistrySearch).toBeVisible();
+  const templateRegistryGrid = templatePanel.getByLabel("Source template registry data grid");
+  const templateRows = templateRegistryGrid.locator(".gridBody .gridRow");
+  await expect(templateRegistryGrid).toBeVisible();
+  await expect(templateRegistrySearch).toBeVisible();
+  await expect(templateRegistryGrid.locator(".gridCounts")).toContainText(
+    "0 selected",
+  );
   await expect(
-    presetRows.filter({ hasText: "builtin:interface_counters" }),
+    templateRegistryGrid.locator('.gridHeaderGroup input[type="checkbox"]'),
+  ).toHaveCount(1);
+  await expect(
+    templateRegistryGrid.getByRole("button", { name: "New" }),
   ).toBeVisible();
   await expect(
-    presetRows.filter({ hasText: "shared:vnstat-json" }),
-  ).toBeVisible();
-  await presetRegistrySearch.fill("runtime_traffic_accounting_source");
+    templateRegistryGrid.getByRole("button", { name: "Action" }),
+  ).toBeDisabled();
+  await expect(templatePanel.getByText("Assign source template")).toBeVisible();
+  await expect(templatePanel.getByText("Render template patch")).toBeVisible();
+  await expect(templatePanel.getByText("Assign selected template")).toHaveCount(0);
+  await expect(templatePanel.getByText("Render selected config")).toHaveCount(0);
+  await expect(templatePanel.getByText(/selected templates/)).toHaveCount(0);
   await expect(
-    presetRows.filter({ hasText: "builtin:interface_counters" }),
+    templatePanel.getByText(/selected template records/),
+  ).toHaveCount(0);
+  await expect(
+    templateRows.filter({ hasText: "builtin:interface_counters" }),
   ).toBeVisible();
-  await presetRegistrySearch.fill("");
-  await presetPanel
+  await expect(
+    templateRows.filter({ hasText: "shared:vnstat-json" }),
+  ).toBeVisible();
+  await templateRegistrySearch.fill("runtime_traffic_accounting_source");
+  await expect(
+    templateRows.filter({ hasText: "builtin:interface_counters" }),
+  ).toBeVisible();
+  await templateRegistrySearch.fill("");
+  await templatePanel
     .getByLabel("Assignment domain")
     .selectOption("runtime_traffic_accounting_source");
-  await presetPanel
-    .getByLabel("Preset", { exact: true })
+  await templatePanel
+    .getByLabel("Template assignment template")
     .selectOption("11111111-1111-4111-8111-111111111111");
-  await presetPanel
+  await templatePanel
     .getByRole("searchbox", {
-      name: "Data-source assignment target expression",
+      name: "Template assignment target expression",
     })
     .fill("(provider:alpha && country:US) || id:agent-fra-02");
-  await expect(presetPanel.getByText("2/3 matching VPSs")).toBeVisible();
-  await activate(presetPanel.getByRole("button", { name: "Review assignment" }));
+  await expect(templatePanel.getByText("2/3 matching VPSs")).toBeVisible();
+  await activate(templatePanel.getByRole("button", { name: "Review assignment" }));
   await expect(
-    presetPanel.getByText("Assign data-source preset"),
+    templatePanel.getByText("Confirm source template assignment"),
   ).toBeVisible();
   await confirmVisiblePrompt(page, "Confirm");
 
   const request = await page.evaluate(() => {
     const requests = (
       window as unknown as {
-        __vpsmanTestRequests: { dataSourcePresetAssignments: unknown[] };
+        __vpsmanTestRequests: { sourceTemplateAssignments: unknown[] };
       }
     ).__vpsmanTestRequests;
-    return requests.dataSourcePresetAssignments.at(-1);
+    return requests.sourceTemplateAssignments.at(-1);
   });
   expect(request).toMatchObject({
     confirmed: true,
     domain: "runtime_traffic_accounting_source",
-    preset_id: "11111111-1111-4111-8111-111111111111",
+    template_id: "11111111-1111-4111-8111-111111111111",
     selector_expression: "(provider:alpha && country:US) || id:agent-fra-02",
     target_client_ids: ["agent-fra-02", "agent-sfo-01"],
   });
 });
 
-test("renders updater rules and submits explicit config apply modes", async ({
+test("prefills registered agent update shortcuts into dispatch", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "updater config rule editing is covered in the desktop console layout",
+    "update registry shortcuts are covered in the desktop console layout",
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "Rules");
+  await openConsoleSubpage(page, "Jobs", "Update registry");
 
-  const rules = page.locator(".configRuleWorkspace");
-  await expect(rules.getByText("Autonomous updater enabled")).toBeVisible();
-  await expect(rules.getByText("Autonomous updater disabled")).toBeVisible();
-  const updaterEnabledRule = rules.getByRole("button", {
-    name: /Autonomous updater enabled/,
-  });
-  await activate(updaterEnabledRule);
-  await expect(updaterEnabledRule.locator("em")).toHaveText("predefined");
-  await expect(rules.getByLabel("Rule render values JSON")).toHaveValue(
-    /github\.com\/mnihyc\/vpsman\/releases\/latest\/download\/version\.json/,
-  );
   await expect(
-    rules.getByRole("button", { name: "Review deletion" }),
-  ).toBeDisabled();
-  await activate(rules.getByRole("button", { name: "Render patch" }));
-  await expect(rules.getByLabel("Rendered rule patch TOML")).toHaveValue(
-    /\[update\][\s\S]*unmanaged_enabled = true[\s\S]*version\.json/,
+    page.getByRole("heading", { name: "Agent update registry" }),
+  ).toBeVisible();
+  const activateShortcut = page.getByRole("button", {
+    name: "Activate staged",
+  });
+  await expect(activateShortcut).toBeEnabled();
+  await activate(activateShortcut);
+
+  await expect(
+    page.getByRole("heading", { name: "Command dispatch" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Activate", exact: true }),
+  ).toHaveClass(/selected/);
+  await expect(page.getByLabel("Agent update staged SHA-256")).toHaveValue(
+    "d".repeat(64),
+  );
+});
+
+test("renders patch generators and submits explicit agent config apply modes", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "agent config patch generator editing is covered in the desktop console layout",
   );
 
-  await unlockPrivilegeFor(page, "Config", "Bulk apply");
+  await page.goto("/");
+  await page.goto("/");
+  await openConsoleSubpage(page, "Config", "Bulk patch");
+  const templateGrid = page.getByLabel("Patch generators data grid");
+  await expect(templateGrid).toBeVisible();
+  await expect(
+    templateGrid.locator(".gridBody .gridRow").filter({ hasText: "Autonomous updater enabled" }),
+  ).toBeVisible();
+  await expect(
+    templateGrid.locator(".gridBody .gridRow").filter({ hasText: "Autonomous updater disabled" }),
+  ).toBeVisible();
+
+  await unlockPrivilegeFor(page, "Config", "Bulk patch");
   const bulk = page.locator(".configApplyGrid");
   await bulk
-    .getByLabel("Rule template")
+    .getByLabel("Patch generator", { exact: true })
     .selectOption({ label: "Autonomous updater disabled" });
-  await expect(bulk.getByLabel("Rule values JSON")).toHaveValue(
+  await expect(bulk.getByLabel("Patch generator values JSON")).toHaveValue(
     /github\.com\/mnihyc\/vpsman\/releases\/latest\/download\/version\.json/,
   );
   await activate(bulk.getByRole("button", { name: "Render patch" }));
   await expect(
-    bulk.getByLabel("Bulk rendered incremental config patch"),
+    bulk.getByLabel("Rendered bulk agent patch TOML"),
   ).toHaveValue(
     /\[update\][\s\S]*unmanaged_enabled = false[\s\S]*version\.json/,
   );
   await bulk
-    .getByRole("searchbox", { name: "Bulk config selector expression" })
+    .getByRole("searchbox", { name: "Bulk patch target expression" })
     .fill("id:agent-sfo-01");
   await expect(page.getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ })).toBeVisible();
   await page.keyboard.press("Enter");
@@ -1270,8 +1324,8 @@ test("renders updater rules and submits explicit config apply modes", async ({
   await page.keyboard.press("Escape");
   await expect(bulk.getByRole("button", { name: "Review apply" })).toBeEnabled();
   await activate(bulk.getByRole("button", { name: "Review apply" }));
-  await expect(page.getByText("Confirm bulk config apply")).toBeVisible();
-  await confirmVisiblePrompt(page, "Apply config patch");
+  await expect(page.getByText("Confirm bulk patch")).toBeVisible();
+  await confirmVisiblePrompt(page, "Apply agent config patch");
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -1280,10 +1334,10 @@ test("renders updater rules and submits explicit config apply modes", async ({
     return requests.jobs.at(-1);
   });
   expect(request).toMatchObject({
-    command: "data_source_config_patch",
+    command: "source_config_patch",
     operation: {
       apply_mode: "incremental_patch",
-      type: "data_source_config_patch",
+      type: "source_config_patch",
     },
     selector_expression: "id:agent-sfo-01",
     target_client_ids: ["agent-sfo-01"],
@@ -1305,12 +1359,12 @@ test("uses an exact VPS combobox for single config jobs", async ({
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "Single VPS");
+  await openConsoleSubpage(page, "Config", "VPS config");
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Config", "Single VPS");
+  await openConsoleSubpage(page, "Config", "VPS config");
 
   const targetPicker = page.getByRole("combobox", {
-    name: "Single VPS config target",
+    name: "VPS config target",
   });
   await expect(targetPicker).toHaveValue("");
   await targetPicker.fill("not-a-real-vps");
@@ -1318,12 +1372,12 @@ test("uses an exact VPS combobox for single config jobs", async ({
   await expect(targetPicker).toHaveValue("");
   await chooseVpsBySearch(
     page.locator(".configApplyGrid"),
-    "Single VPS config target",
+    "VPS config target",
     "fra",
     /core-fra-02.*agent-fra-02/,
   );
   await expect(targetPicker).toHaveValue("core-fra-02 (ra02)");
-  await activate(page.getByRole("button", { name: "Read config" }));
+  await activate(page.getByRole("button", { name: "Read agent config" }));
 
   await expect
     .poll(async () =>
@@ -1347,14 +1401,14 @@ test("uses an exact VPS combobox for single config jobs", async ({
     target_client_ids: ["agent-fra-02"],
   });
 
-  const configEditor = page.getByLabel("Single VPS redacted config TOML");
+  const configEditor = page.getByLabel("VPS redacted agent config TOML");
   await expect(configEditor).toHaveValue(/client_id = "agent-fra-02"/);
   await expect(configEditor).toHaveValue(
     /unmanaged_version_url = "https:\/\/github\.com\/mnihyc\/vpsman\/releases\/latest\/download\/version\.json"/,
   );
   await activate(page.getByRole("button", { name: "Review apply" }));
-  await expect(page.getByText("Confirm single-VPS config apply")).toBeVisible();
-  await confirmVisiblePrompt(page, "Apply config");
+  await expect(page.getByText("Confirm full config override")).toBeVisible();
+  await confirmVisiblePrompt(page, "Apply full config");
 
   const applyRequest = await page.evaluate(() => {
     const requests = (
@@ -1444,6 +1498,13 @@ test("imports direct gateway identities and revokes current keys from the access
   await expect(
     page.getByRole("heading", { name: "Gateway agent identities" }),
   ).toBeVisible();
+  const revocationGrid = page.getByLabel("Client key revocations data grid");
+  await expect(revocationGrid.locator(".gridCounts")).not.toContainText(
+    "selected",
+  );
+  await expect(
+    revocationGrid.locator('.gridHeaderGroup input[type="checkbox"]'),
+  ).toHaveCount(0);
   const inspector = page.locator(".accessInspector");
   await expect(inspector.getByText("Direct identity actions")).toBeVisible();
   await inspector.getByLabel("Agent identity client ID").fill("agent-tokyo-04");
@@ -1838,6 +1899,7 @@ test("promotes saved observed tunnel plans into custom adapters", async ({
   await adapterForm
     .getByLabel("Status argv", { exact: true })
     .fill("/usr/local/libexec/vpsman-openvpn-adapter\nstatus\n{interface}");
+  await adapterForm.getByText("Lifecycle hooks").click();
   await adapterForm
     .getByLabel("Start argv", { exact: true })
     .fill("/usr/local/libexec/vpsman-openvpn-adapter\nstart\n{interface}");
@@ -1847,12 +1909,14 @@ test("promotes saved observed tunnel plans into custom adapters", async ({
   await adapterForm
     .getByLabel("Cleanup argv", { exact: true })
     .fill("/usr/local/libexec/vpsman-openvpn-adapter\ncleanup\n{interface}");
+  await adapterForm.getByText("Traffic shaping").click();
   await adapterForm
     .getByLabel("Traffic argv", { exact: true })
     .fill("/usr/local/libexec/vpsman-openvpn-adapter\nshape\n{interface}");
   await checkControl(adapterForm.getByLabel("Enable traffic shaping"));
   await adapterForm.getByLabel("Egress Kbps", { exact: true }).fill("100000");
   await adapterForm.getByLabel("Burst KB", { exact: true }).fill("4096");
+  await adapterForm.getByText("Topology evidence").click();
   await adapterForm
     .getByLabel("Desired interfaces", { exact: true })
     .fill("ovpn42");
@@ -1940,6 +2004,13 @@ test("shows grouped execution summaries for job output details", async ({
   await expect(page.getByText(/2 groups across 2 targets/)).toBeVisible();
   await expect(page.getByText("Grouped outcomes")).toBeVisible();
   await expect(page.getByText("Target result details")).toBeVisible();
+  const groupedOutcomesGrid = page.getByLabel("Grouped outcomes data grid");
+  await expect(groupedOutcomesGrid.locator(".gridCounts")).not.toContainText(
+    "selected",
+  );
+  await expect(
+    groupedOutcomesGrid.locator('.gridHeaderGroup input[type="checkbox"]'),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Binary", exact: true }),
   ).toHaveClass(/selected/);

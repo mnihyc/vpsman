@@ -11,7 +11,7 @@ role receives the scopes needed for normal daily operation. The default
 ## Read Scopes
 
 - `fleet:read`: fleet metadata, agent inventory, gateway sessions, telemetry,
-  job status, target status, alert state, data-source readiness, topology
+  job status, target status, alert state, source readiness, topology
   summaries, and other non-payload operational status.
 - `jobs:read`: durable job output payloads, output archives, file-download
   payloads, output chunks, output comparison previews, process-supervisor
@@ -27,12 +27,11 @@ role receives the scopes needed for normal daily operation. The default
 - `templates:read`: built-in and user-defined command templates and their operation payloads.
 - `schedules:read`: saved schedule definitions, target snapshots, timing, and
   recurring operation payloads.
-- `config:read`: data-source preset definitions, preset assignments,
-  diff/test output, rendered agent config, config rule templates, rendered
-  incremental config patches, and private agent-update release metadata.
-- `network:read`: full tunnel plans, including saved input and generated
-  runtime plan details, OSPF update plans, raw network observations, and
-  topology history exports.
+- `config:read`: source template definitions, template assignments,
+  diff/test output, rendered agent config, agent config patch generators,
+  rendered incremental config patches, and private agent-update release metadata.
+- `network:read`: full tunnel plans, exportable runtime `plan.json` details,
+  OSPF update plans, raw network observations, and topology history exports.
 - `audit:read`: audit logs and audit history exports.
 
 ## Write Scopes

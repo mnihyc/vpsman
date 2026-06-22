@@ -326,7 +326,7 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn promote_tunnel_plan_to_adapter(
+    pub(crate) async fn promote_tunnel_plan_to_custom_adapter(
         &self,
         existing: &TunnelPlanView,
         input: &TunnelPlanInput,
@@ -423,7 +423,7 @@ impl Repository {
                 )
                 .bind(Uuid::new_v4())
                 .bind(operator.operator.id)
-                .bind("network.tunnel_plan_promoted_to_adapter")
+                .bind("network.tunnel_plan_promoted_to_custom_adapter")
                 .bind(format!("tunnel_plan:{}", persisted.id))
                 .bind(tunnel_plan_adapter_metadata(&persisted, existing, operator))
                 .execute(pool)
@@ -869,7 +869,7 @@ fn tunnel_plan_adapter_audit(
     AuditLogView {
         id: Uuid::new_v4(),
         actor_id: Some(operator.operator.id),
-        action: "network.tunnel_plan_promoted_to_adapter".to_string(),
+        action: "network.tunnel_plan_promoted_to_custom_adapter".to_string(),
         target: format!("tunnel_plan:{}", view.id),
         command_hash: None,
         metadata: tunnel_plan_adapter_metadata(view, previous, operator),
@@ -889,12 +889,12 @@ fn tunnel_plan_adapter_metadata(
         "kind": tunnel_kind_name(view.kind),
         "left_client_id": &view.left_client_id,
         "right_client_id": &view.right_client_id,
-        "adapter_status_configured": view.plan.runtime_control.status.is_some(),
-        "adapter_startup_configured": view.plan.runtime_control.startup.is_some(),
-        "adapter_restart_configured": view.plan.runtime_control.restart.is_some(),
-        "adapter_stop_configured": view.plan.runtime_control.stop.is_some(),
-        "adapter_cleanup_configured": view.plan.runtime_control.cleanup.is_some(),
-        "adapter_traffic_limit_configured": view.plan.runtime_control.traffic_limit_apply.is_some(),
+        "custom_adapter_status_configured": view.plan.runtime_control.status.is_some(),
+        "custom_adapter_startup_configured": view.plan.runtime_control.startup.is_some(),
+        "custom_adapter_restart_configured": view.plan.runtime_control.restart.is_some(),
+        "custom_adapter_stop_configured": view.plan.runtime_control.stop.is_some(),
+        "custom_adapter_cleanup_configured": view.plan.runtime_control.cleanup.is_some(),
+        "custom_adapter_traffic_limit_configured": view.plan.runtime_control.traffic_limit_apply.is_some(),
         "runtime_topology_version": &view.plan.runtime_topology.version,
         "mutates_host": view.plan.mutates_host,
         "operator_username": &operator.operator.username,

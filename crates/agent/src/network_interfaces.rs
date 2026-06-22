@@ -39,7 +39,7 @@ struct NetworkInterfaceSnapshot {
     addresses: Vec<NetworkInterfaceAddress>,
     rx_bytes: u64,
     tx_bytes: u64,
-    metadata_sources: Vec<String>,
+    metasource_templates: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
@@ -167,13 +167,15 @@ fn collect_sysfs_interfaces(
                 .unwrap_or_default(),
             rx_bytes: counter.map(|value| value.rx_bytes).unwrap_or_default(),
             tx_bytes: counter.map(|value| value.tx_bytes).unwrap_or_default(),
-            metadata_sources: vec!["sysfs".to_string()],
+            metasource_templates: vec!["sysfs".to_string()],
         };
         if counter.is_some() {
-            snapshot.metadata_sources.push("proc_net_dev".to_string());
+            snapshot
+                .metasource_templates
+                .push("proc_net_dev".to_string());
         }
         if !snapshot.addresses.is_empty() {
-            snapshot.metadata_sources.push("getifaddrs".to_string());
+            snapshot.metasource_templates.push("getifaddrs".to_string());
         }
         interfaces.push(snapshot);
     }
@@ -188,7 +190,7 @@ fn collect_sysfs_interfaces(
             addresses: iface_addresses.addresses.clone(),
             rx_bytes: counter.map(|value| value.rx_bytes).unwrap_or_default(),
             tx_bytes: counter.map(|value| value.tx_bytes).unwrap_or_default(),
-            metadata_sources: vec!["getifaddrs".to_string()],
+            metasource_templates: vec!["getifaddrs".to_string()],
             ..NetworkInterfaceSnapshot::default()
         });
     }
@@ -212,7 +214,7 @@ fn interfaces_from_addresses(
             addresses: iface_addresses.addresses.clone(),
             rx_bytes: counter.map(|value| value.rx_bytes).unwrap_or_default(),
             tx_bytes: counter.map(|value| value.tx_bytes).unwrap_or_default(),
-            metadata_sources: vec!["getifaddrs".to_string()],
+            metasource_templates: vec!["getifaddrs".to_string()],
             ..NetworkInterfaceSnapshot::default()
         });
     }
@@ -225,8 +227,8 @@ fn sort_and_limit_interfaces(interfaces: &mut Vec<NetworkInterfaceSnapshot>) {
         interface.flags.dedup();
         interface.addresses.sort();
         interface.addresses.dedup();
-        interface.metadata_sources.sort();
-        interface.metadata_sources.dedup();
+        interface.metasource_templates.sort();
+        interface.metasource_templates.dedup();
     }
     interfaces.sort_by(|left, right| left.name.cmp(&right.name));
     interfaces.truncate(MAX_INTERFACE_COUNT);

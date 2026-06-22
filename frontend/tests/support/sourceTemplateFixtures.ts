@@ -1,4 +1,4 @@
-export const dataSourcePresets = [
+export const sourceTemplates = [
   {
     assigned_client_count: 2,
     built_in: true,
@@ -43,21 +43,21 @@ export const dataSourcePresets = [
   },
 ];
 
-export const dataSourceAssignments = [
+export const sourceTemplateAssignments = [
   {
     assigned_at: "2026-06-02T10:00:00Z",
     client_id: "agent-sfo-01",
     domain: "runtime_traffic_accounting_source",
-    preset_id: "11111111-1111-4111-8111-111111111111",
-    preset_name: "shared:vnstat-json",
-    preset_scope: "shared",
+    template_id: "11111111-1111-4111-8111-111111111111",
+    template_name: "shared:vnstat-json",
+    template_scope: "shared",
   },
   {
     assigned_at: "2026-06-02T10:00:00Z",
     client_id: "agent-fra-02",
     domain: "runtime_traffic_accounting_source",
-    preset_id: "00000000-0000-4000-8000-000000000002",
-    preset_name: "builtin:interface_counters",
-    preset_scope: "built_in",
+    template_id: "00000000-0000-4000-8000-000000000002",
+    template_name: "builtin:interface_counters",
+    template_scope: "built_in",
   },
 ];

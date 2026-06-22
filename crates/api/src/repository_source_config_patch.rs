@@ -2,48 +2,48 @@ use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
 
 use crate::{
-    model::{DataSourceHotConfigView, DataSourcePresetView},
+    model::{SourceConfigPatchView, SourceTemplateView},
     repository::Repository,
     unix_now,
 };
 
-const MAX_PRESET_ARGV_ITEMS: usize = 32;
-const MAX_PRESET_ARG_BYTES: usize = 4096;
+const MAX_TEMPLATE_ARGV_ITEMS: usize = 32;
+const MAX_TEMPLATE_ARG_BYTES: usize = 4096;
 
 impl Repository {
-    pub(crate) async fn render_data_source_hot_config(
+    pub(crate) async fn render_source_config_patch(
         &self,
         client_id: &str,
-    ) -> Result<DataSourceHotConfigView> {
+    ) -> Result<SourceConfigPatchView> {
         let agents = self.list_agents().await?;
         anyhow::ensure!(
             agents.iter().any(|agent| agent.id == client_id),
-            "data_source_hot_config_client_not_found:{client_id}"
+            "source_config_patch_client_not_found:{client_id}"
         );
 
         let assignments = self
-            .list_data_source_assignments(Some(client_id), None)
+            .list_source_template_assignments(Some(client_id), None)
             .await?;
-        let presets = self.list_data_source_presets(None).await?;
+        let templates = self.list_source_templates(None).await?;
         let mut renderer = HotConfigRenderer::default();
 
         for assignment in &assignments {
-            let preset = presets
+            let template = templates
                 .iter()
-                .find(|candidate| candidate.id == assignment.preset_id)
+                .find(|candidate| candidate.id == assignment.template_id)
                 .with_context(|| {
                     format!(
-                        "data_source_hot_config_preset_not_found:{}",
-                        assignment.preset_id
+                        "source_config_patch_template_not_found:{}",
+                        assignment.template_id
                     )
                 })?;
-            renderer.apply_preset(&assignment.domain, preset)?;
+            renderer.apply_template(&assignment.domain, template)?;
         }
 
         let sections = Value::Object(renderer.sections);
         let toml = toml::to_string_pretty(&sections)
-            .context("failed to serialize data-source config patch TOML")?;
-        Ok(DataSourceHotConfigView {
+            .context("failed to serialize source template config patch TOML")?;
+        Ok(SourceConfigPatchView {
             client_id: client_id.to_string(),
             sections,
             toml,
@@ -55,22 +55,22 @@ impl Repository {
     }
 }
 
-pub(crate) struct DataSourcePresetRenderCheck {
+pub(crate) struct SourceTemplateRenderCheck {
     pub(crate) sections: Value,
     pub(crate) toml: String,
     pub(crate) unsupported_domains: Vec<String>,
     pub(crate) render_notes: Vec<String>,
 }
 
-pub(crate) fn render_data_source_preset_candidate(
-    preset: &DataSourcePresetView,
-) -> Result<DataSourcePresetRenderCheck> {
+pub(crate) fn render_source_template_candidate(
+    template: &SourceTemplateView,
+) -> Result<SourceTemplateRenderCheck> {
     let mut renderer = HotConfigRenderer::default();
-    renderer.apply_preset(&preset.domain, preset)?;
+    renderer.apply_template(&template.domain, template)?;
     let sections = Value::Object(renderer.sections);
     let toml = toml::to_string_pretty(&sections)
-        .context("failed to serialize data-source preset test TOML")?;
-    Ok(DataSourcePresetRenderCheck {
+        .context("failed to serialize source template test TOML")?;
+    Ok(SourceTemplateRenderCheck {
         sections,
         toml,
         unsupported_domains: renderer.unsupported_domains,
@@ -86,16 +86,16 @@ struct HotConfigRenderer {
 }
 
 impl HotConfigRenderer {
-    fn apply_preset(&mut self, domain: &str, preset: &DataSourcePresetView) -> Result<()> {
+    fn apply_template(&mut self, domain: &str, template: &SourceTemplateView) -> Result<()> {
         match domain {
-            "telemetry_metrics_source" => self.apply_telemetry_source(preset),
-            "process_inventory_source" => self.apply_process_source(preset),
-            "user_session_inventory_source" => self.apply_user_session_source(preset),
-            "command_execution_policy" => self.apply_command_execution_policy(preset),
-            "latency_probe_source" => self.apply_latency_probe_source(preset),
-            "runtime_traffic_accounting_source" => self.apply_runtime_traffic_source(preset),
-            "runtime_tunnel_adapter" => self.apply_runtime_tunnel_adapter(preset),
-            "routing_daemon_adapter" => self.apply_routing_daemon_adapter(preset),
+            "telemetry_metrics_source" => self.apply_telemetry_source(template),
+            "process_inventory_source" => self.apply_process_source(template),
+            "user_session_inventory_source" => self.apply_user_session_source(template),
+            "command_execution_policy" => self.apply_command_execution_policy(template),
+            "latency_probe_source" => self.apply_latency_probe_source(template),
+            "runtime_traffic_accounting_source" => self.apply_runtime_traffic_source(template),
+            "runtime_tunnel_adapter" => self.apply_runtime_tunnel_adapter(template),
+            "routing_daemon_adapter" => self.apply_routing_daemon_adapter(template),
             "speed_test_provider"
             | "process_supervisor_policy"
             | "traffic_limit_status_source"
@@ -106,20 +106,20 @@ impl HotConfigRenderer {
             | "update_rollback_heartbeat_source" => {
                 self.unsupported_domains.push(format!(
                     "{domain}:{} requires a job, object-store, or release workflow rather than agent hot-config",
-                    preset.name
+                    template.name
                 ));
                 Ok(())
             }
             _ => {
                 self.unsupported_domains
-                    .push(format!("{domain}:{} is not renderable", preset.name));
+                    .push(format!("{domain}:{} is not renderable", template.name));
                 Ok(())
             }
         }
     }
 
-    fn apply_telemetry_source(&mut self, preset: &DataSourcePresetView) -> Result<()> {
-        let source = string_field(&preset.definition, "source").unwrap_or("linux_procfs");
+    fn apply_telemetry_source(&mut self, template: &SourceTemplateView) -> Result<()> {
+        let source = string_field(&template.definition, "source").unwrap_or("linux_procfs");
         let section = self.section_mut("telemetry")?;
         match source {
             "linux_procfs" | "custom_command" | "linux_procfs_and_custom_command" => {
@@ -133,20 +133,20 @@ impl HotConfigRenderer {
             ("hostname_file", "hostname_file"),
             ("os_release_file", "os_release_file"),
         ] {
-            if let Some(path) = string_field(&preset.definition, definition_key) {
+            if let Some(path) = string_field(&template.definition, definition_key) {
                 validate_absolute_path(path, definition_key)?;
                 insert_string(section, config_key, path);
             }
         }
         if matches!(source, "custom_command" | "linux_procfs_and_custom_command") {
             let command = command_field(
-                &preset.definition,
+                &template.definition,
                 &["custom_metrics_command", "metrics_command", "command"],
             )?
             .with_context(|| {
                 format!(
                     "telemetry_metrics_source:{} requires custom_metrics_command",
-                    preset.name
+                    template.name
                 )
             })?;
             section.insert("custom_metrics_command".to_string(), command);
@@ -154,13 +154,13 @@ impl HotConfigRenderer {
         Ok(())
     }
 
-    fn apply_process_source(&mut self, preset: &DataSourcePresetView) -> Result<()> {
-        let source = string_field(&preset.definition, "source").unwrap_or("linux_procfs");
+    fn apply_process_source(&mut self, template: &SourceTemplateView) -> Result<()> {
+        let source = string_field(&template.definition, "source").unwrap_or("linux_procfs");
         let section = self.section_mut("execution")?;
         match source {
             "linux_procfs" => {
                 insert_string(section, "process_inventory_source", source);
-                if let Some(proc_root) = string_field(&preset.definition, "proc_root") {
+                if let Some(proc_root) = string_field(&template.definition, "proc_root") {
                     validate_absolute_path(proc_root, "proc_root")?;
                     insert_string(section, "process_proc_root", proc_root);
                 }
@@ -168,13 +168,13 @@ impl HotConfigRenderer {
             "custom_command" => {
                 insert_string(section, "process_inventory_source", source);
                 let command = command_field(
-                    &preset.definition,
+                    &template.definition,
                     &["process_inventory_command", "process_command", "command"],
                 )?
                 .with_context(|| {
                     format!(
                         "process_inventory_source:{} requires process_inventory_command",
-                        preset.name
+                        template.name
                     )
                 })?;
                 section.insert("process_inventory_command".to_string(), command);
@@ -184,14 +184,14 @@ impl HotConfigRenderer {
         Ok(())
     }
 
-    fn apply_user_session_source(&mut self, preset: &DataSourcePresetView) -> Result<()> {
-        let source = string_field(&preset.definition, "source").unwrap_or("linux_w_who_preset");
+    fn apply_user_session_source(&mut self, template: &SourceTemplateView) -> Result<()> {
+        let source = string_field(&template.definition, "source").unwrap_or("linux_w_who_preset");
         let section = self.section_mut("execution")?;
         match source {
             "linux_w_who_preset" => {
                 insert_string(section, "user_sessions_source", source);
                 if let Some(command) =
-                    command_field(&preset.definition, &["user_sessions_command", "command"])?
+                    command_field(&template.definition, &["user_sessions_command", "command"])?
                 {
                     section.insert("user_sessions_command".to_string(), command);
                 }
@@ -199,11 +199,11 @@ impl HotConfigRenderer {
             "custom_command" => {
                 insert_string(section, "user_sessions_source", source);
                 let command =
-                    command_field(&preset.definition, &["user_sessions_command", "command"])?
+                    command_field(&template.definition, &["user_sessions_command", "command"])?
                         .with_context(|| {
                             format!(
                                 "user_session_inventory_source:{} requires user_sessions_command",
-                                preset.name
+                                template.name
                             )
                         })?;
                 section.insert("user_sessions_command".to_string(), command);
@@ -213,16 +213,16 @@ impl HotConfigRenderer {
         Ok(())
     }
 
-    fn apply_command_execution_policy(&mut self, preset: &DataSourcePresetView) -> Result<()> {
+    fn apply_command_execution_policy(&mut self, template: &SourceTemplateView) -> Result<()> {
         let section = self.section_mut("execution")?;
-        if let Some(argv) = argv_field(&preset.definition, &["shell_script_argv"])? {
+        if let Some(argv) = argv_field(&template.definition, &["shell_script_argv"])? {
             section.insert("shell_script_argv".to_string(), Value::Array(argv));
         }
-        if let Some(working_directory) = string_field(&preset.definition, "working_directory") {
+        if let Some(working_directory) = string_field(&template.definition, "working_directory") {
             validate_absolute_path(working_directory, "working_directory")?;
             insert_string(section, "working_directory", working_directory);
         }
-        if let Some(policy) = string_field(&preset.definition, "environment_policy") {
+        if let Some(policy) = string_field(&template.definition, "environment_policy") {
             validate_one_of(
                 policy,
                 &["inherit", "clean", "minimal_path"],
@@ -230,22 +230,22 @@ impl HotConfigRenderer {
             )?;
             insert_string(section, "environment_policy", policy);
         }
-        if let Some(keep) = string_array_field(&preset.definition, "environment_keep", 64)? {
+        if let Some(keep) = string_array_field(&template.definition, "environment_keep", 64)? {
             section.insert(
                 "environment_keep".to_string(),
                 Value::Array(keep.into_iter().map(Value::String).collect()),
             );
         }
         if let Some(environment_set) =
-            object_string_field(&preset.definition, "environment_set", 64)?
+            object_string_field(&template.definition, "environment_set", 64)?
         {
             section.insert("environment_set".to_string(), environment_set);
         }
-        if let Some(policy) = string_field(&preset.definition, "pty_policy") {
+        if let Some(policy) = string_field(&template.definition, "pty_policy") {
             validate_one_of(policy, &["native_pty", "disabled"], "pty_policy")?;
             insert_string(section, "pty_policy", policy);
         }
-        if let Some(policy) = string_field(&preset.definition, "process_cleanup") {
+        if let Some(policy) = string_field(&template.definition, "process_cleanup") {
             validate_one_of(
                 policy,
                 &["process_group", "direct_child"],
@@ -256,54 +256,55 @@ impl HotConfigRenderer {
         if section.is_empty() {
             self.render_notes.push(format!(
                 "command_execution_policy:{} has no supported fields; agent defaults remain selected",
-                preset.name
+                template.name
             ));
         }
         Ok(())
     }
 
-    fn apply_latency_probe_source(&mut self, preset: &DataSourcePresetView) -> Result<()> {
+    fn apply_latency_probe_source(&mut self, template: &SourceTemplateView) -> Result<()> {
         if let Some(argv) = argv_field(
-            &preset.definition,
+            &template.definition,
             &["probe_ping_argv", "ping_argv", "argv"],
         )? {
             let section = self.section_mut("network")?;
             section.insert("probe_ping_argv".to_string(), Value::Array(argv));
         } else {
             self.render_notes.push(format!(
-                "latency_probe_source:{} uses the built-in probe preset",
-                preset.name
+                "latency_probe_source:{} uses the built-in probe template",
+                template.name
             ));
         }
         Ok(())
     }
 
-    fn apply_runtime_traffic_source(&mut self, preset: &DataSourcePresetView) -> Result<()> {
-        let source = string_field(&preset.definition, "source").unwrap_or("interface_counters");
+    fn apply_runtime_traffic_source(&mut self, template: &SourceTemplateView) -> Result<()> {
+        let source = string_field(&template.definition, "source").unwrap_or("interface_counters");
         match source {
             "interface_counters" => {
                 self.render_notes.push(format!(
                     "runtime_traffic_accounting_source:{} uses interface counters and needs no global argv",
-                    preset.name
+                    template.name
                 ));
             }
             "vnstat" => {
-                if let Some(argv) =
-                    argv_field(&preset.definition, &["runtime_vnstat_argv", "vnstat_argv"])?
-                {
+                if let Some(argv) = argv_field(
+                    &template.definition,
+                    &["runtime_vnstat_argv", "vnstat_argv"],
+                )? {
                     let section = self.section_mut("network")?;
                     section.insert("runtime_vnstat_argv".to_string(), Value::Array(argv));
                 } else {
                     self.unsupported_domains.push(format!(
                         "runtime_traffic_accounting_source:{} selected vnstat but has no vnstat_argv; traffic_command belongs to per-tunnel plans",
-                        preset.name
+                        template.name
                     ));
                 }
             }
             "custom_command" => {
                 self.unsupported_domains.push(format!(
                     "runtime_traffic_accounting_source:{} custom traffic commands require per-tunnel runtime telemetry plans",
-                    preset.name
+                    template.name
                 ));
             }
             _ => bail!("unsupported_runtime_traffic_accounting_source:{source}"),
@@ -311,21 +312,23 @@ impl HotConfigRenderer {
         Ok(())
     }
 
-    fn apply_runtime_tunnel_adapter(&mut self, preset: &DataSourcePresetView) -> Result<()> {
+    fn apply_runtime_tunnel_adapter(&mut self, template: &SourceTemplateView) -> Result<()> {
         let manager =
-            string_field(&preset.definition, "manager").unwrap_or("agent_iproute2_managed");
+            string_field(&template.definition, "manager").unwrap_or("agent_iproute2_managed");
         match manager {
             "agent_iproute2_managed" => {
                 let section = self.section_mut("network")?;
-                if bool_field(&preset.definition, "runtime_reconcile_enabled").unwrap_or(false) {
+                if bool_field(&template.definition, "runtime_reconcile_enabled").unwrap_or(false) {
                     section.insert("apply_enabled".to_string(), Value::Bool(true));
                     section.insert("runtime_reconcile_enabled".to_string(), Value::Bool(true));
                 }
-                if let Some(argv) = argv_field(&preset.definition, &["runtime_ip_argv", "ip_argv"])?
+                if let Some(argv) =
+                    argv_field(&template.definition, &["runtime_ip_argv", "ip_argv"])?
                 {
                     section.insert("runtime_ip_argv".to_string(), Value::Array(argv));
                 }
-                if let Some(argv) = argv_field(&preset.definition, &["runtime_tc_argv", "tc_argv"])?
+                if let Some(argv) =
+                    argv_field(&template.definition, &["runtime_tc_argv", "tc_argv"])?
                 {
                     section.insert("runtime_tc_argv".to_string(), Value::Array(argv));
                 }
@@ -333,7 +336,7 @@ impl HotConfigRenderer {
             "external_managed_adapter" | "custom_adapter" => {
                 self.unsupported_domains.push(format!(
                     "runtime_tunnel_adapter:{} adapter commands are rendered from tunnel plans, not agent-level fallback config",
-                    preset.name
+                    template.name
                 ));
             }
             _ => bail!("unsupported_runtime_tunnel_adapter:{manager}"),
@@ -341,31 +344,31 @@ impl HotConfigRenderer {
         Ok(())
     }
 
-    fn apply_routing_daemon_adapter(&mut self, preset: &DataSourcePresetView) -> Result<()> {
+    fn apply_routing_daemon_adapter(&mut self, template: &SourceTemplateView) -> Result<()> {
         let section = self.section_mut("network")?;
-        if let Some(enabled) = bool_field(&preset.definition, "latency_monitoring_enabled") {
+        if let Some(enabled) = bool_field(&template.definition, "latency_monitoring_enabled") {
             section.insert(
                 "latency_monitoring_enabled".to_string(),
                 Value::Bool(enabled),
             );
         }
-        if let Some(value) = u64_field(&preset.definition, "latency_monitoring_interval_secs") {
+        if let Some(value) = u64_field(&template.definition, "latency_monitoring_interval_secs") {
             section.insert("latency_monitoring_interval_secs".to_string(), value.into());
         }
-        if let Some(value) = u64_field(&preset.definition, "latency_down_windows") {
+        if let Some(value) = u64_field(&template.definition, "latency_down_windows") {
             section.insert("latency_down_windows".to_string(), value.into());
         }
-        if let Some(enabled) = bool_field(&preset.definition, "auto_ospf_enabled") {
+        if let Some(enabled) = bool_field(&template.definition, "auto_ospf_enabled") {
             section.insert("auto_ospf_enabled".to_string(), Value::Bool(enabled));
         }
-        if let Some(value) = u64_field(&preset.definition, "auto_ospf_min_cost_delta") {
+        if let Some(value) = u64_field(&template.definition, "auto_ospf_min_cost_delta") {
             section.insert("auto_ospf_min_cost_delta".to_string(), value.into());
         }
-        if let Some(value) = u64_field(&preset.definition, "auto_ospf_healthy_windows") {
+        if let Some(value) = u64_field(&template.definition, "auto_ospf_healthy_windows") {
             section.insert("auto_ospf_healthy_windows".to_string(), value.into());
         }
         if let Some(command) = command_field(
-            &preset.definition,
+            &template.definition,
             &["auto_ospf_updater", "ospf_updater", "command"],
         )? {
             section.insert("auto_ospf_updater".to_string(), command);
@@ -519,7 +522,7 @@ fn parse_argv(value: &Value, field: &str) -> Result<Vec<String>> {
         .as_array()
         .with_context(|| format!("{field}_must_be_array"))?;
     anyhow::ensure!(
-        !items.is_empty() && items.len() <= MAX_PRESET_ARGV_ITEMS,
+        !items.is_empty() && items.len() <= MAX_TEMPLATE_ARGV_ITEMS,
         "{field}_argv_invalid"
     );
     let mut argv = Vec::with_capacity(items.len());
@@ -528,7 +531,9 @@ fn parse_argv(value: &Value, field: &str) -> Result<Vec<String>> {
             .as_str()
             .with_context(|| format!("{field}_argv_must_be_strings"))?;
         anyhow::ensure!(
-            !part.is_empty() && part.len() <= MAX_PRESET_ARG_BYTES && !part.as_bytes().contains(&0),
+            !part.is_empty()
+                && part.len() <= MAX_TEMPLATE_ARG_BYTES
+                && !part.as_bytes().contains(&0),
             "{field}_argv_invalid"
         );
         argv.push(part.to_string());

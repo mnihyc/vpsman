@@ -1,7 +1,7 @@
 import {
   AGENT_UPDATE_RELEASE_STATUS_CLASS_BY_STATUS,
   BACKUP_REQUEST_STATUS_CLASS_BY_STATUS,
-  DATA_SOURCE_READINESS_STATUS_CLASS_BY_STATUS,
+  SOURCE_READINESS_STATUS_CLASS_BY_STATUS,
   FILE_TRANSFER_SESSION_STATUS_CLASS_BY_STATUS,
   FLEET_ALERT_NOTIFICATION_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS,
   FLEET_ALERT_NOTIFICATION_DELIVERY_STATUS_CLASS_BY_STATUS,
@@ -28,7 +28,7 @@ import {
 import type {
   GeneratedAgentUpdateReleaseStatus,
   GeneratedBackupRequestStatus,
-  GeneratedDataSourceReadinessStatus,
+  GeneratedSourceReadinessStatus,
   GeneratedFileTransferSessionStatus,
   GeneratedFleetAlertNotificationDeliveryProcessStatus,
   GeneratedFleetAlertNotificationDeliveryStatus,
@@ -154,8 +154,8 @@ export function webhookRuleDeliveryProcessStatusBadgeClass(status: GeneratedWebh
   return workflowStatusClassBadge(WEBHOOK_RULE_DELIVERY_PROCESS_STATUS_CLASS_BY_STATUS[status]);
 }
 
-export function dataSourceReadinessStatusBadgeClass(status: GeneratedDataSourceReadinessStatus): string {
-  return workflowStatusClassBadge(DATA_SOURCE_READINESS_STATUS_CLASS_BY_STATUS[status]);
+export function sourceReadinessStatusBadgeClass(status: GeneratedSourceReadinessStatus): string {
+  return workflowStatusClassBadge(SOURCE_READINESS_STATUS_CLASS_BY_STATUS[status]);
 }
 
 export function topologyNodeStatusBadgeClass(status: GeneratedTopologyNodeStatus): string {

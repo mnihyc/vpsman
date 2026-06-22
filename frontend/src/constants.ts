@@ -56,6 +56,15 @@ export const navSections: readonly {
   },
 ];
 
+export function viewLabel(view: ActiveView): string {
+  switch (view) {
+    case "Config":
+      return "Agent config";
+    default:
+      return view;
+  }
+}
+
 export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
   Dashboard: [
     {
@@ -76,12 +85,10 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     { id: "bulk", label: "Bulk", description: "Selector-based tag add, remove, and delete" },
   ],
   Config: [
-    { id: "overview", label: "Overview", description: "Config posture, source selections, and recent operations" },
-    { id: "rules", label: "Rules", description: "Rule-card templates and generated patch previews" },
-    { id: "bulk", label: "Bulk apply", description: "Privilege-unlocked incremental patches by selector" },
-    { id: "single", label: "Single VPS", description: "Redacted full-config read and guarded apply" },
-    { id: "templates", label: "Templates", description: "Data-source preset definition, assignment, and lifecycle" },
-    { id: "status", label: "Status", description: "Active data-source selections and health" },
+    { id: "overview", label: "Overview", description: "Agent config workflow map, source selections, and recent operations" },
+    { id: "bulk", label: "Bulk patch", description: "Temporary incremental patches and reusable patch generators" },
+    { id: "single", label: "VPS config", description: "One-VPS config read and guarded full override" },
+    { id: "templates", label: "Templates", description: "Persistent source templates, assignments, apply, and status" },
   ],
   Jobs: [
     { id: "history", label: "History", description: "Command requests, targets, outputs, and history" },
@@ -102,7 +109,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     { id: "graph", label: "Graph", description: "Observed topology graph and tunnel plan summary" },
     { id: "plans", label: "Tunnel plans", description: "Saved tunnel plans and plan authoring" },
     { id: "apply", label: "Apply / rollback", description: "Privilege-unlocked tunnel apply, rollback, status, probes, and speed tests" },
-    { id: "promotion", label: "Promotion", description: "Promote observed tunnels into adapter contracts" },
+    { id: "promotion", label: "Promotion", description: "External observe and custom adapter workflows" },
     { id: "evidence", label: "Evidence", description: "Network trends, observations, and retained plan output" },
     { id: "ospf", label: "OSPF", description: "OSPF update recommendations and cost apply" },
   ],
@@ -141,7 +148,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     },
     {
       id: "config",
-      label: "Config",
+      label: "Suite config",
       description: "Suite TOML validation, redacted diff review, and privileged config save",
     },
     {

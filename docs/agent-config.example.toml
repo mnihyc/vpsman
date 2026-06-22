@@ -68,7 +68,7 @@ process_proc_root = "/proc"
 # sysfs files. Use "custom_command" to replace Linux telemetry entirely, or
 # "linux_procfs_and_custom_command" to overlay a bounded JSON-producing command
 # on top of procfs/sysfs. In the server model these values should be generated
-# from named data-source presets: built-in defaults, shared customizable
+# from named source templates: built-in defaults, shared customizable
 # presets, and VPS-local custom presets selected per VPS.
 source = "linux_procfs"
 proc_root = "/proc"
@@ -86,7 +86,7 @@ apply_enabled = false
 root_dir = "/"
 # Runtime tunnel reconciliation is the strategic tunnel-management path. Keep
 # it disabled unless this agent is intentionally allowed to mutate runtime
-# tunnel state with iproute2/tc or configured external adapters.
+# tunnel state with iproute2/tc or configured custom adapters.
 runtime_reconcile_enabled = false
 runtime_ip_argv = ["/sbin/ip"]
 runtime_tc_argv = ["/sbin/tc"]

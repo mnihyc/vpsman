@@ -433,7 +433,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
         }
         JobCommand::ConfigRead
         | JobCommand::HotConfig { .. }
-        | JobCommand::DataSourceConfigPatch { .. }
+        | JobCommand::SourceConfigPatch { .. }
         | JobCommand::Backup { .. }
         | JobCommand::Restore { .. }
         | JobCommand::RestoreRollback { .. }

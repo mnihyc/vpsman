@@ -61,10 +61,10 @@ pub(crate) struct MemoryState {
         Arc<RwLock<Vec<crate::model_webhook_rules::WebhookRuleDeliveryView>>>,
     pub(crate) history_retention_policies:
         Arc<RwLock<Vec<crate::model_history::HistoryRetentionPolicyView>>>,
-    pub(crate) data_source_presets: Arc<RwLock<Vec<DataSourcePresetView>>>,
-    pub(crate) data_source_assignments: Arc<RwLock<Vec<DataSourcePresetAssignmentView>>>,
-    pub(crate) hot_config_rule_templates: Arc<RwLock<Vec<HotConfigRuleTemplateView>>>,
-    pub(crate) hot_config_rule_templates_seeded: Arc<RwLock<bool>>,
+    pub(crate) source_templates: Arc<RwLock<Vec<SourceTemplateView>>>,
+    pub(crate) source_template_assignments: Arc<RwLock<Vec<SourceTemplateAssignmentView>>>,
+    pub(crate) hot_config_patch_generators: Arc<RwLock<Vec<HotConfigPatchGeneratorView>>>,
+    pub(crate) hot_config_patch_generators_seeded: Arc<RwLock<bool>>,
     pub(crate) operators: Arc<RwLock<Vec<OperatorRecord>>>,
     pub(crate) sessions: Arc<RwLock<Vec<OperatorSessionRecord>>>,
     pub(crate) operator_auth_throttle:

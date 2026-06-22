@@ -2,7 +2,7 @@ import type {
   GeneratedCreateJobRequestField,
   GeneratedAgentUpdateReleaseStatus,
   GeneratedBackupRequestStatus,
-  GeneratedDataSourceReadinessStatus,
+  GeneratedSourceReadinessStatus,
   GeneratedFleetAlertNotificationDeliveryProcessStatus,
   GeneratedFleetAlertNotificationDeliveryStatus,
   GeneratedMigrationLinkStatus,
@@ -33,7 +33,7 @@ export type JobTargetStatus = GeneratedJobTargetStatus;
 export type JobCommandType = GeneratedJobCommandType;
 export type AgentUpdateReleaseStatus = GeneratedAgentUpdateReleaseStatus;
 export type BackupRequestStatus = GeneratedBackupRequestStatus;
-export type DataSourceReadinessStatus = GeneratedDataSourceReadinessStatus;
+export type SourceReadinessStatus = GeneratedSourceReadinessStatus;
 export type FleetAlertNotificationDeliveryProcessStatus =
   GeneratedFleetAlertNotificationDeliveryProcessStatus;
 export type FleetAlertNotificationDeliveryStatus = GeneratedFleetAlertNotificationDeliveryStatus;
@@ -734,6 +734,7 @@ export type AgentCapabilitySnapshot = {
   privilege_mode: "unknown" | "root" | "unprivileged";
   effective_uid?: number | null;
   max_job_timeout_secs: number;
+  network_backend?: TunnelConfigBackend | null;
   can_attempt_privileged_ops: boolean;
   can_manage_runtime_tunnels: boolean;
   can_apply_process_limits: boolean;
@@ -923,6 +924,8 @@ export type OperatorPreferences = {
   bulk_output_compare_mode: JobOutputCompareMode;
   gateway_server_public_key_hex: string | null;
   gateway_endpoints: string;
+  tunnel_ipv4_allocation_pool_cidr: string;
+  tunnel_ipv6_allocation_pool_cidr: string;
 };
 
 export type OperatorSessionRecord = {
@@ -1253,7 +1256,6 @@ export type PromoteTelemetryTunnelRequest = {
   latency_primary_family?: TunnelAddressFamily;
   side?: TunnelEndpointSide;
   name?: string | null;
-  topology_version?: string | null;
   bandwidth?: BandwidthTier | null;
   latency_ms?: number | null;
   packet_loss_ratio?: number | null;
@@ -1569,7 +1571,7 @@ export type JobOperation =
       preserve_redacted?: boolean | null;
       base_config_sha256_hex?: string | null;
     }
-  | { type: "data_source_config_patch"; apply_mode: "incremental_patch"; toml: string }
+  | { type: "source_config_patch"; apply_mode: "incremental_patch"; toml: string }
   | {
       type: "agent_update";
       artifact_url: string;
@@ -1777,10 +1779,6 @@ export type JobOperation =
       type: "network_apply";
       plan: TunnelPlan;
       side: TunnelEndpointSide;
-      config_backend: TunnelConfigBackend;
-      config_sha256_hex: string;
-      ifupdown_sha256_hex: string;
-      bird2_sha256_hex: string;
     }
   | {
       type: "network_ospf_cost_update";
@@ -2276,7 +2274,7 @@ export type ScheduleImpactRecord = {
   summary: string;
 };
 
-export type DataSourcePresetRecord = {
+export type SourceTemplateRecord = {
   id: string;
   domain: string;
   name: string;
@@ -2291,32 +2289,32 @@ export type DataSourcePresetRecord = {
   updated_at: string;
 };
 
-export type DataSourcePresetAssignmentRecord = {
+export type SourceTemplateAssignmentRecord = {
   client_id: string;
   domain: string;
-  preset_id: string;
-  preset_name: string;
-  preset_scope: string;
+  template_id: string;
+  template_name: string;
+  template_scope: string;
   assigned_at: string;
 };
 
-export type DataSourceStatusRecord = {
+export type SourceStatusRecord = {
   client_id: string;
   display_name: string;
   client_status: string;
   domain: string;
   module: string;
-  preset_id: string;
-  preset_name: string;
-  preset_scope: string;
+  template_id: string;
+  template_name: string;
+  template_scope: string;
   source_kind: string;
-  status: DataSourceReadinessStatus;
+  status: SourceReadinessStatus;
   status_reason: string;
   evidence: JsonValue;
   assigned_at: string;
 };
 
-export type CreateDataSourcePresetRequest = {
+export type CreateSourceTemplateRequest = {
   domain: string;
   name: string;
   scope: string;
@@ -2325,23 +2323,23 @@ export type CreateDataSourcePresetRequest = {
   definition: JsonValue;
 };
 
-export type CloneDataSourcePresetRequest = {
+export type CloneSourceTemplateRequest = {
   name: string;
   scope: string;
   owner_client_id: string | null;
   description: string | null;
 };
 
-export type DataSourcePresetDiffRequest = {
+export type SourceTemplateDiffRequest = {
   description: string | null;
   definition: JsonValue;
   keep_description?: boolean;
 };
 
-export type DataSourcePresetDiffResponse = {
-  preset_id: string;
+export type SourceTemplateDiffResponse = {
+  template_id: string;
   domain: string;
-  preset_name: string;
+  template_name: string;
   current_description: string | null;
   candidate_description: string | null;
   current_definition: JsonValue;
@@ -2352,14 +2350,14 @@ export type DataSourcePresetDiffResponse = {
   affected_client_count: number;
 };
 
-export type DataSourcePresetTestRequest = {
+export type SourceTemplateTestRequest = {
   definition: JsonValue;
 };
 
-export type DataSourcePresetTestResponse = {
-  preset_id: string;
+export type SourceTemplateTestResponse = {
+  template_id: string;
   domain: string;
-  preset_name: string;
+  template_name: string;
   affected_client_count: number;
   valid: boolean;
   renderable: boolean;
@@ -2371,46 +2369,46 @@ export type DataSourcePresetTestResponse = {
   generated_at: string;
 };
 
-export type UpdateDataSourcePresetRequest = {
+export type UpdateSourceTemplateRequest = {
   description: string | null;
   definition: JsonValue;
   confirmed: boolean;
   keep_description?: boolean;
 };
 
-export type UpdateDataSourcePresetResponse = {
-  preset: DataSourcePresetRecord;
-  diff: DataSourcePresetDiffResponse;
+export type UpdateSourceTemplateResponse = {
+  template: SourceTemplateRecord;
+  diff: SourceTemplateDiffResponse;
   affected_client_count: number;
   confirmation_required: boolean;
 };
 
-export type AssignDataSourcePresetRequest = {
+export type AssignSourceTemplateRequest = {
   domain: string;
-  preset_id: string;
+  template_id: string;
   selector_expression: string;
   target_client_ids: string[];
   confirmed: boolean;
 };
 
-export type AssignDataSourcePresetResponse = {
-  preset: DataSourcePresetRecord;
+export type AssignSourceTemplateResponse = {
+  template: SourceTemplateRecord;
   target_count: number;
   confirmation_required: boolean;
-  assignments: DataSourcePresetAssignmentRecord[];
+  assignments: SourceTemplateAssignmentRecord[];
 };
 
-export type DataSourceHotConfigResponse = {
+export type SourceConfigPatchResponse = {
   client_id: string;
   sections: JsonValue;
   toml: string;
-  assignments: DataSourcePresetAssignmentRecord[];
+  assignments: SourceTemplateAssignmentRecord[];
   unsupported_domains: string[];
   render_notes: string[];
   generated_at: string;
 };
 
-export type HotConfigRuleTemplateRecord = {
+export type HotConfigPatchGeneratorRecord = {
   id: string;
   name: string;
   category: string;
@@ -2425,7 +2423,7 @@ export type HotConfigRuleTemplateRecord = {
   updated_at: string;
 };
 
-export type UpsertHotConfigRuleTemplateRequest = {
+export type UpsertHotConfigPatchGeneratorRequest = {
   id?: string | null;
   name: string;
   category: string;
@@ -2437,17 +2435,17 @@ export type UpsertHotConfigRuleTemplateRequest = {
   confirmed: boolean;
 };
 
-export type DeleteHotConfigRuleTemplateRequest = {
+export type DeleteHotConfigPatchGeneratorRequest = {
   confirmed: boolean;
   reviewed_name: string;
 };
 
-export type HotConfigRuleTemplateRenderRequest = {
+export type HotConfigPatchGeneratorRenderRequest = {
   values: JsonValue;
 };
 
-export type HotConfigRuleTemplateRenderResponse = {
-  template_id: string;
+export type HotConfigPatchGeneratorRenderResponse = {
+  generator_id: string;
   name: string;
   toml: string;
   patch: JsonValue;

@@ -149,6 +149,10 @@ tuned with
 `VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS`; this remains a best-effort
 gateway forwarder spool, not an end-to-end gateway-agent ACK protocol.
 
+Tunnel endpoint allocation pools live under `[network]` and are empty by
+default. Operators must set IPv4 and/or IPv6 pool CIDRs, or pass pools on the
+allocation request, before endpoint generation can produce suggestions.
+
 The compose template does not publish the API host port. Nginx reaches the API
 over the private Docker network, and the dashboard binds to `127.0.0.1:5173` by
 default through `VPSMAN_FRONTEND_BIND`. Gateway TCP also stays loopback-bound by

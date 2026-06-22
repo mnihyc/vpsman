@@ -6,9 +6,8 @@ use crate::network_apply::{
     NetworkRollbackInput,
 };
 use vpsman_common::{
-    payload_hash, plan_tunnel, render_tunnel_endpoint_config, AgentNetworkConfig, BandwidthTier,
-    OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager,
-    TunnelConfigBackend, TunnelKind, TunnelPlanInput,
+    plan_tunnel, render_tunnel_endpoint_config, AgentNetworkConfig, BandwidthTier, OspfCostPolicy,
+    RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager, TunnelKind, TunnelPlanInput,
 };
 
 #[tokio::test]
@@ -30,7 +29,7 @@ async fn reports_managed_file_status_for_applied_and_absent_blocks() {
         .await
         .unwrap();
     let plan = test_plan();
-    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),
@@ -47,10 +46,6 @@ async fn reports_managed_file_status_for_applied_and_absent_blocks() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        config_backend: TunnelConfigBackend::Ifupdown,
-        config_sha256_hex: None,
-        ifupdown_sha256_hex: &payload_hash(endpoint.ifupdown_snippet.as_bytes()),
-        bird2_sha256_hex: &payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
         max_timeout_secs: 5,
         cancel_token: CommandCancelToken::default(),
     })

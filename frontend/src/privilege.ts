@@ -420,7 +420,7 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["preserve_redacted", optional(operation.preserve_redacted)],
         ["base_config_sha256_hex", optional(operation.base_config_sha256_hex)],
       ]);
-    case "data_source_config_patch":
+    case "source_config_patch":
       return ordered([
         ["type", operation.type],
         ["apply_mode", operation.apply_mode],
@@ -650,10 +650,6 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["type", operation.type],
         ["plan", operation.plan as JsonValue],
         ["side", operation.side],
-        ["config_backend", operation.config_backend ?? "ifupdown"],
-        ["config_sha256_hex", optional(operation.config_sha256_hex)],
-        ["ifupdown_sha256_hex", operation.ifupdown_sha256_hex],
-        ["bird2_sha256_hex", operation.bird2_sha256_hex],
       ]);
     case "network_ospf_cost_update":
       return ordered([

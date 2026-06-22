@@ -25,6 +25,7 @@ Check available commands:
 cargo run -p vpsctl -- --help
 cargo run -p vpsctl -- terminal-replay --help
 cargo run -p vpsctl -- tunnel-plan --help
+cargo run -p vpsctl -- tunnel-plan-export --help
 ```
 
 Use global structured output for scripts. `raw` is the default and preserves
@@ -48,10 +49,19 @@ cargo run -p vpsctl -- --output pretty-json tunnel-plan \
   --left-underlay 203.0.113.10 \
   --right-underlay 203.0.113.20 \
   --address-pool-cidr 10.255.0.0/30 \
-  --left-tunnel-ipv4 10.255.0.0 \
-  --right-tunnel-ipv4 10.255.0.1 \
+  --left-tunnel-ipv4-cidr 10.255.0.0/31 \
+  --right-tunnel-ipv4-cidr 10.255.0.1/31 \
   --bandwidth 100m \
   --latency-ms 20
+```
+
+Save that stdout as `plan.json` for apply/status/rollback, or re-export a
+saved plan later:
+
+```sh
+cargo run -p vpsctl -- tunnel-plan-export \
+  --plan-id <saved_plan_uuid> \
+  --output-file ./plan.json
 ```
 
 ## VTY Privileged Mode
@@ -126,6 +136,7 @@ terminal-replay --client-id edge-01 --session-id <uuid> --output-file ./terminal
 process-list tag:edge --limit 50
 process-start edge-worker --argv /usr/bin/sleep --argv 60 tag:edge
 tunnel-plans
+tunnel-plan-export --plan-id <saved_plan_uuid> --output-file ./plan.json
 topology-graph --limit 50
 backups
 backup-policies

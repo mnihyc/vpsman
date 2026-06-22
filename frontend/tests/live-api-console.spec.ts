@@ -40,10 +40,11 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
   await chooseVpsBySearch(composer, "Right VPS", "live-agent-b", /live-agent-b|edge-live-b/);
   await composer.getByLabel("Left underlay", { exact: true }).fill("203.0.113.10");
   await composer.getByLabel("Right underlay", { exact: true }).fill("203.0.113.20");
-  await composer.getByLabel("IPv4 allocation pool").fill("10.252.0.0/30");
-  await composer.getByRole("button", { name: "Generate endpoints" }).click();
-  await expect(composer.getByLabel("Left IPv4", { exact: true })).toHaveValue("10.252.0.0");
-  await expect(composer.getByLabel("Right IPv4", { exact: true })).toHaveValue("10.252.0.1");
+  await composer.getByText("Allocation overrides").click();
+  await composer.getByLabel("IPv4 pool override").fill("10.252.0.0/30");
+  await composer.getByRole("button", { name: "Allocate endpoints" }).click();
+  await expect(composer.getByLabel("Left IPv4 CIDR", { exact: true })).toHaveValue("10.252.0.0/31");
+  await expect(composer.getByLabel("Right IPv4 CIDR", { exact: true })).toHaveValue("10.252.0.1/31");
   await composer.getByLabel("Latency ms").fill("18");
   await composer.getByLabel("Preference").fill("1.2");
   await composer.getByRole("button", { name: "Save plan" }).click();
