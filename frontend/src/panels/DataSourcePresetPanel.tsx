@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { DatabaseZap, SlidersHorizontal } from "lucide-react";
 import {
-  clampJobTimeoutSecs,
+  clampJobMaxTimeoutSecs,
   DEFAULT_MAX_JOB_TIMEOUT_SECS,
   MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
-} from "../jobTimeout";
+} from "../jobMaxTimeout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { CrudPager } from "../components/CrudPager";
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
@@ -90,7 +90,7 @@ type DataSourceApplySnapshot = {
   privilegeAssertion: PrivilegeAssertion;
   rendered: DataSourceHotConfigResponse;
   selectorExpression: string;
-  timeoutSecs: number;
+  maxTimeoutSecs: number;
 };
 
 type DataSourceLifecycleUpdateSnapshot = {
@@ -152,7 +152,7 @@ export function DataSourcePresetPanel({
   );
   const [renderClientId, setRenderClientId] = useState("");
   const [renderedHotConfig, setRenderedHotConfig] = useState<DataSourceHotConfigResponse | null>(null);
-  const [applyTimeoutSecs, setApplyTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
+  const [applyMaxTimeoutSecs, setApplyMaxTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
   const [lastApplyJob, setLastApplyJob] = useState<CreateJobResponse | null>(null);
   const [lastApplyPayloadHash, setLastApplyPayloadHash] = useState<string | null>(null);
   const [lifecyclePresetId, setLifecyclePresetId] = useState("");
@@ -377,7 +377,7 @@ export function DataSourcePresetPanel({
         operation: snapshot.operation,
         privileged: true,
         privilege_assertion: snapshot.privilegeAssertion,
-        timeout_secs: snapshot.timeoutSecs,
+        max_timeout_secs: snapshot.maxTimeoutSecs,
       });
       setRenderedHotConfig(snapshot.rendered);
       setLastApplyJob(response);
@@ -392,7 +392,7 @@ export function DataSourcePresetPanel({
     const frozenClientId = renderClientId;
     const frozenRendered = renderedHotConfig?.client_id === renderClientId ? renderedHotConfig : null;
     const frozenPrivilegeMaterial = privilegeMaterial;
-    const timeoutSecs = clampJobTimeoutSecs(applyTimeoutSecs);
+    const maxTimeoutSecs = clampJobMaxTimeoutSecs(applyMaxTimeoutSecs);
     setReviewStatus("Preparing data-source apply review");
     try {
       await runPanelAction(setPending, setActionError, async () => {
@@ -419,7 +419,7 @@ export function DataSourcePresetPanel({
           operation,
           privilegeMaterial: frozenPrivilegeMaterial,
           selectorExpression,
-          timeoutSecs,
+          maxTimeoutSecs,
         });
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
@@ -435,7 +435,7 @@ export function DataSourcePresetPanel({
           privilegeAssertion: built.privilegeAssertion,
           rendered,
           selectorExpression,
-          timeoutSecs,
+          maxTimeoutSecs,
         });
         setPendingConfirmation("apply");
       });
@@ -596,7 +596,7 @@ export function DataSourcePresetPanel({
               label: "VPS",
               value: applySnapshot?.clientLabel ?? "none",
             },
-            { label: "Timeout", value: `${applySnapshot?.timeoutSecs ?? 0}s` },
+            { label: "Max timeout", value: `${applySnapshot?.maxTimeoutSecs ?? 0}s` },
             { label: "Payload", value: applySnapshot?.payloadHashHex ? shortId(applySnapshot.payloadHashHex) : "-" },
           ]
         : [
@@ -850,17 +850,17 @@ export function DataSourcePresetPanel({
           )}
           <div className="inlinePrivilege">
             <label>
-              <span>Apply timeout seconds</span>
+              <span>Apply max timeout seconds</span>
               <input
-                aria-label="Data-source apply timeout"
+                aria-label="Data-source apply max timeout seconds"
                 min={1}
                 max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
                 onChange={(event) => {
-                  setApplyTimeoutSecs(Number(event.target.value));
+                  setApplyMaxTimeoutSecs(Number(event.target.value));
                   clearApplyConfirmation();
                 }}
                 type="number"
-                value={applyTimeoutSecs}
+                value={applyMaxTimeoutSecs}
               />
             </label>
           </div>

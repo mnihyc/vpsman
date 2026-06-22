@@ -49,7 +49,7 @@ Target statuses are:
 - `agent_lost` is a target-level terminal unsuccessful status. Parent jobs
   aggregate it through the existing unsuccessful job statuses; there is no
   separate job-level `agent_lost` status.
-- `timeout_secs` is the agent execution budget. The API control deadline adds
+- `max_timeout_secs` is the agent execution budget. The API control deadline adds
   dispatch/ACK, internal HTTP/event-post, and `control_deadline_grace_secs`
   grace time so healthy long-running commands near their own timeout are not
   mislabeled as `control_timeout` because of gateway/API latency. The accepted

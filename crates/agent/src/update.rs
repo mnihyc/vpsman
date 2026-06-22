@@ -5,8 +5,13 @@ use reqwest::{redirect, Url};
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::time;
-use vpsman_common::{CommandOutput, OutputStream};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time,
+};
+use vpsman_common::{
+    AgentUpdateVerificationRequest, AgentUpdateVerificationResult, CommandOutput, OutputStream,
+};
 
 use crate::{
     agent_binary_path::{current_agent_binary_path, rollback_path, staged_path},
@@ -24,7 +29,7 @@ pub(crate) struct AgentUpdateInput<'a> {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) artifact_url: &'a str,
     pub(crate) sha256_hex: &'a str,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
 
@@ -34,15 +39,23 @@ pub(crate) struct AgentUpdateCheckInput<'a> {
     pub(crate) version_url: &'a str,
     pub(crate) activate: bool,
     pub(crate) restart_agent: bool,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
+    pub(crate) verification_tx: Option<AgentUpdateVerificationSender>,
+}
+
+pub(crate) type AgentUpdateVerificationSender = mpsc::Sender<AgentUpdateVerificationWork>;
+
+pub(crate) struct AgentUpdateVerificationWork {
+    pub(crate) request: AgentUpdateVerificationRequest,
+    pub(crate) response: oneshot::Sender<AgentUpdateVerificationResult>,
 }
 
 pub(crate) async fn execute_update_agent(
     input: AgentUpdateInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
     let current_exe = current_agent_binary_path()?;
-    let timeout = Duration::from_secs(input.timeout_secs.max(1));
+    let timeout = Duration::from_secs(input.max_timeout_secs.max(1));
     input.cancel_token.check("agent_update")?;
     let artifact_url = input.artifact_url.to_string();
     let sha256_hex = normalize_sha256(input.sha256_hex)?;
@@ -63,7 +76,7 @@ pub(crate) async fn execute_update_agent(
         Err(_) => {
             input
                 .cancel_token
-                .cancel(format!("timeout after {}s", input.timeout_secs.max(1)));
+                .cancel(format!("timeout after {}s", input.max_timeout_secs.max(1)));
             return Err(anyhow!("agent update staging timed out"));
         }
     };
@@ -74,7 +87,7 @@ pub(crate) async fn execute_update_check(
     input: AgentUpdateCheckInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
     let current_exe = current_agent_binary_path()?;
-    let timeout = Duration::from_secs(input.timeout_secs.max(1));
+    let timeout = Duration::from_secs(input.max_timeout_secs.max(1));
     input.cancel_token.check("agent_update_check")?;
     let job_id = input.job_id;
     let version_url = input.version_url.trim().to_string();
@@ -85,6 +98,7 @@ pub(crate) async fn execute_update_check(
             version_url: &version_url,
             current_exe: &current_exe,
             cancel_token: &input.cancel_token,
+            verification_tx: input.verification_tx.clone(),
         }),
     )
     .await
@@ -93,7 +107,7 @@ pub(crate) async fn execute_update_check(
         Err(_) => {
             input
                 .cancel_token
-                .cancel(format!("timeout after {}s", input.timeout_secs.max(1)));
+                .cancel(format!("timeout after {}s", input.max_timeout_secs.max(1)));
             return Err(anyhow!("agent update check timed out"));
         }
     };
@@ -110,7 +124,7 @@ pub(crate) async fn execute_update_check(
                     job_id: input.job_id,
                     staged_sha256_hex,
                     restart_agent: input.restart_agent,
-                    timeout_secs: input.timeout_secs,
+                    max_timeout_secs: input.max_timeout_secs,
                     cancel_token: input.cancel_token.clone(),
                 })
                 .await?,
@@ -133,6 +147,7 @@ struct CheckStageInput<'a> {
     version_url: &'a str,
     current_exe: &'a Path,
     cancel_token: &'a CommandCancelToken,
+    verification_tx: Option<AgentUpdateVerificationSender>,
 }
 
 struct CheckStageResult {
@@ -335,6 +350,18 @@ async fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStage
     .context("update checksum manifest is not UTF-8")?;
     input.cancel_token.check("agent_update_check")?;
     let expected_sha256_hex = checksum_for_asset(&sums, asset_name)?;
+    verify_agent_update_candidate(
+        &input,
+        AgentUpdateVerificationRequest {
+            job_id: input.job_id,
+            version_url: input.version_url.to_string(),
+            artifact_url: artifact_url.clone(),
+            checksum_url: sums_url.clone(),
+            asset_name: asset_name.to_string(),
+            sha256_hex: expected_sha256_hex.clone(),
+        },
+    )
+    .await?;
     let check_status = serde_json::json!({
         "type": "agent_update_check",
         "status": "staging",
@@ -361,6 +388,36 @@ async fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStage
         outputs,
         staged_sha256_hex: Some(expected_sha256_hex),
     })
+}
+
+async fn verify_agent_update_candidate(
+    input: &CheckStageInput<'_>,
+    request: AgentUpdateVerificationRequest,
+) -> Result<()> {
+    let Some(verification_tx) = input.verification_tx.as_ref() else {
+        return Ok(());
+    };
+    let job_id = request.job_id;
+    let (response_tx, response_rx) = oneshot::channel();
+    verification_tx
+        .send(AgentUpdateVerificationWork {
+            request,
+            response: response_tx,
+        })
+        .await
+        .context("agent update verification request failed")?;
+    input.cancel_token.check("agent_update_check")?;
+    let result = response_rx
+        .await
+        .context("agent update verification response dropped")?;
+    input.cancel_token.check("agent_update_check")?;
+    if result.job_id != job_id {
+        anyhow::bail!("agent update verification response identity mismatch");
+    }
+    if !result.approved {
+        anyhow::bail!("agent update verification rejected: {}", result.message);
+    }
+    Ok(())
 }
 
 fn candidate_version_status(
@@ -866,6 +923,7 @@ mod tests {
             version_url: &format!("file://{}", manifest_path.display()),
             current_exe: &current,
             cancel_token: &crate::command_worker::CommandCancelToken::default(),
+            verification_tx: None,
         })
         .await
         .unwrap();
@@ -925,6 +983,7 @@ mod tests {
             version_url: &format!("file://{}", manifest_path.display()),
             current_exe: &current,
             cancel_token: &crate::command_worker::CommandCancelToken::default(),
+            verification_tx: None,
         })
         .await
         .unwrap();
@@ -966,6 +1025,7 @@ mod tests {
             version_url: &format!("file://{}", manifest_path.display()),
             current_exe: &current,
             cancel_token: &crate::command_worker::CommandCancelToken::default(),
+            verification_tx: None,
         })
         .await
         .unwrap();
@@ -1027,6 +1087,7 @@ mod tests {
             version_url: &format!("file://{}", manifest_path.display()),
             current_exe: &current,
             cancel_token: &crate::command_worker::CommandCancelToken::default(),
+            verification_tx: None,
         })
         .await
         .unwrap();
@@ -1074,6 +1135,7 @@ mod tests {
             version_url: &format!("file://{}", manifest_path.display()),
             current_exe: &current,
             cancel_token: &crate::command_worker::CommandCancelToken::default(),
+            verification_tx: None,
         })
         .await
         {

@@ -27,7 +27,7 @@ import type {
 } from "../../types";
 import { clientDisplayNameFromMap, clientDisplayNameMap, runPanelAction, shortId } from "../../utils";
 import {
-  clampJobTimeoutSecs,
+  clampJobMaxTimeoutSecs,
   clampInteger,
   MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 } from "../jobDispatchModel";
@@ -62,7 +62,7 @@ export function TopologyOspfUpdateControls({
   } = useReviewGenerationGuard();
   const [selectedPlanId, setSelectedPlanId] = useState(() => ospfUpdatePlans[0]?.plan_id ?? "");
   const [side, setSide] = useState<TunnelEndpointSide>("left");
-  const [timeoutSecs, setTimeoutSecs] = useState(60);
+  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(60);
   const [forceUnprivileged, setForceUnprivileged] = useState(false);
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
@@ -135,7 +135,7 @@ export function TopologyOspfUpdateControls({
       const endpointTarget = builtOperation.endpoint.localClientId;
       const selectorExpression = selectorExpressionForClientIds([endpointTarget]);
       const targets = resolveAgentsById(agents, [endpointTarget]);
-      const boundedTimeoutSecs = clampJobTimeoutSecs(timeoutSecs);
+      const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
       const builtPrivilege = await buildPrivilegeForJobOperation({
         clientIds: [endpointTarget],
         commandType: "network_ospf_cost_update",
@@ -143,7 +143,7 @@ export function TopologyOspfUpdateControls({
         operation: builtOperation.operation,
         privilegeMaterial,
         selectorExpression,
-        timeoutSecs: boundedTimeoutSecs,
+        maxTimeoutSecs: boundedMaxTimeoutSecs,
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
@@ -162,7 +162,7 @@ export function TopologyOspfUpdateControls({
             label: "Cost",
             value: `${selectedUpdatePlan.current_ospf_cost} to ${selectedUpdatePlan.recommended_ospf_cost}`,
           },
-          { label: "Timeout", value: `${boundedTimeoutSecs}s` },
+          { label: "Max timeout", value: `${boundedMaxTimeoutSecs}s` },
           { label: "Privilege unlock", value: "Unlocked locally" },
           { label: "Privilege", value: forceUnprivileged ? "Forced best effort" : "Root required" },
         ],
@@ -172,7 +172,7 @@ export function TopologyOspfUpdateControls({
         selectorExpression,
         targetClientId: endpointTarget,
         targets,
-        timeoutSecs: boundedTimeoutSecs,
+        maxTimeoutSecs: boundedMaxTimeoutSecs,
       });
     });
     } finally {
@@ -202,15 +202,15 @@ export function TopologyOspfUpdateControls({
         job_id: snapshot.jobId,
         privileged: true,
         privilege_assertion: snapshot.privilegeAssertion,
-        timeout_secs: snapshot.timeoutSecs,
+        max_timeout_secs: snapshot.maxTimeoutSecs,
       });
       setLastPayloadHash(snapshot.payloadHashHex);
       setLastJob(job);
-      await trackOspfProgress(job, snapshot.targets, snapshot.timeoutSecs);
+      await trackOspfProgress(job, snapshot.targets, snapshot.maxTimeoutSecs);
     });
   }
 
-  async function trackOspfProgress(job: CreateJobResponse, targets: AgentView[], timeoutSecsForSnapshot: number) {
+  async function trackOspfProgress(job: CreateJobResponse, targets: AgentView[], maxTimeoutSecsForSnapshot: number) {
     const targetCount = createJobTargetCount(job);
     setLastJobProgress(null);
     setJobProgress(buildBulkJobProgress({
@@ -218,14 +218,14 @@ export function TopologyOspfUpdateControls({
       targetCount,
       targetRecords: [],
       targets,
-      timeoutSecs: timeoutSecsForSnapshot,
+      maxTimeoutSecs: maxTimeoutSecsForSnapshot,
     }));
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
         onProgress: setJobProgress,
         targetCount,
         targets,
-        timeoutSecs: timeoutSecsForSnapshot,
+        maxTimeoutSecs: maxTimeoutSecsForSnapshot,
       });
       setLastJobProgress(result.progress);
     } finally {
@@ -282,17 +282,17 @@ export function TopologyOspfUpdateControls({
         </div>
         <div className="dispatchControls">
           <label>
-            <span>Timeout seconds</span>
+            <span>Max timeout seconds</span>
             <input
-              aria-label="OSPF update timeout seconds"
+              aria-label="OSPF update max timeout seconds"
               max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
               min={1}
               onChange={(event) => {
                 clearOspfReview();
-                setTimeoutSecs(Number(event.target.value));
+                setMaxTimeoutSecs(Number(event.target.value));
               }}
               type="number"
-              value={timeoutSecs}
+              value={maxTimeoutSecs}
             />
           </label>
         </div>
@@ -381,7 +381,7 @@ type OspfUpdateSnapshot = {
   selectorExpression: string;
   targetClientId: string;
   targets: AgentView[];
-  timeoutSecs: number;
+  maxTimeoutSecs: number;
 };
 
 function vpsCountLabel(count: number): string {

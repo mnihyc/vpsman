@@ -16,7 +16,7 @@ import { usePanelDisplaySettings } from "../panelDisplay";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../privilege";
 import { parseSearchExpression, selectorExpressionForClientIds } from "../searchExpression";
 import {
-  clampJobTimeoutSecs,
+  clampJobMaxTimeoutSecs,
   clampInteger,
   DEFAULT_MAX_JOB_TIMEOUT_SECS,
   MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
@@ -65,7 +65,7 @@ type BulkConfigApplySnapshot = {
   rendered: HotConfigRuleTemplateRenderResponse;
   operation: JobOperation;
   templateName: string;
-  timeoutSecs: number;
+  maxTimeoutSecs: number;
   privilegeAssertion: PrivilegeAssertion;
   payloadHashHex: string;
 };
@@ -79,7 +79,7 @@ type SingleConfigApplySnapshot = {
   privilegeAssertion: PrivilegeAssertion;
   selectorExpression: string;
   target: AgentView;
-  timeoutSecs: number;
+  maxTimeoutSecs: number;
   toml: string;
 };
 
@@ -502,7 +502,7 @@ function BulkConfigApply({
   const [rendered, setRendered] = useState<HotConfigRuleTemplateRenderResponse | null>(null);
   const [applySnapshot, setApplySnapshot] = useState<BulkConfigApplySnapshot | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
+  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
   const {
@@ -590,7 +590,7 @@ function BulkConfigApply({
     const frozenPrivilegeMaterial = privilegeMaterial;
     const frozenSelector = selectorExpression.trim();
     const frozenValuesText = valuesText;
-    const boundedTimeoutSecs = clampJobTimeoutSecs(timeoutSecs);
+    const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
     setReviewStatus("Preparing bulk config review");
     try {
       await runAction(async () => {
@@ -628,7 +628,7 @@ function BulkConfigApply({
           operation,
           privilegeMaterial: frozenPrivilegeMaterial,
           selectorExpression: frozenSelector,
-          timeoutSecs: boundedTimeoutSecs,
+          maxTimeoutSecs: boundedMaxTimeoutSecs,
         });
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
@@ -645,7 +645,7 @@ function BulkConfigApply({
           selectorExpression: frozenSelector,
           targets: nextPreview.targets,
           templateName: frozenTemplate.name,
-          timeoutSecs: boundedTimeoutSecs,
+          maxTimeoutSecs: boundedMaxTimeoutSecs,
         });
         setConfirmOpen(true);
       });
@@ -675,21 +675,21 @@ function BulkConfigApply({
         privilege_assertion: snapshot.privilegeAssertion,
         selector_expression: snapshot.selectorExpression,
         target_client_ids: snapshot.clientIds,
-        timeout_secs: snapshot.timeoutSecs,
+        max_timeout_secs: snapshot.maxTimeoutSecs,
       });
       const initial = buildBulkJobProgress({
         targetCount: createJobTargetCount(response),
         jobId: response.job_id,
         targetRecords: [],
         targets: snapshot.targets,
-        timeoutSecs: snapshot.timeoutSecs,
+        maxTimeoutSecs: snapshot.maxTimeoutSecs,
       });
       setProgress(initial);
       const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: snapshot.targets,
-        timeoutSecs: snapshot.timeoutSecs,
+        maxTimeoutSecs: snapshot.maxTimeoutSecs,
       });
       const outputs = await onLoadJobOutputs(response.job_id).catch(() => []);
       setProgress(
@@ -699,7 +699,7 @@ function BulkConfigApply({
           outputs,
           targetRecords: waited.targets,
           targets: snapshot.targets,
-          timeoutSecs: snapshot.timeoutSecs,
+          maxTimeoutSecs: snapshot.maxTimeoutSecs,
         }),
       );
       setApplySnapshot(null);
@@ -769,15 +769,15 @@ function BulkConfigApply({
         </div>
         <div className="inlinePrivilege">
           <input
-            aria-label="Config apply timeout seconds"
+            aria-label="Config apply max timeout seconds"
             max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
             min={1}
             onChange={(event) => {
-              setTimeoutSecs(Number(event.target.value));
+              setMaxTimeoutSecs(Number(event.target.value));
               clearBulkConfigReview();
             }}
             type="number"
-            value={timeoutSecs}
+            value={maxTimeoutSecs}
           />
         </div>
         <PrivilegeVaultBox
@@ -857,7 +857,7 @@ function SingleVpsConfig({
   const [redactedToml, setRedactedToml] = useState("");
   const [baseHash, setBaseHash] = useState("");
   const [lastJobId, setLastJobId] = useState<string | null>(null);
-  const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
+  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
   const [singleApplySnapshot, setSingleApplySnapshot] = useState<SingleConfigApplySnapshot | null>(null);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
@@ -889,7 +889,7 @@ function SingleVpsConfig({
     const reviewGeneration = captureReviewGeneration();
     const frozenTarget = singleTarget;
     const frozenPrivilegeMaterial = privilegeMaterial;
-    const boundedTimeoutSecs = clampJobTimeoutSecs(timeoutSecs);
+    const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
     await runAction(async () => {
       if (!frozenTarget || !frozenPrivilegeMaterial) {
         throw new Error("Select one VPS and unlock privilege");
@@ -902,7 +902,7 @@ function SingleVpsConfig({
         operation,
         privilegeMaterial: frozenPrivilegeMaterial,
         selectorExpression: selectorExpressionForTarget,
-        timeoutSecs: boundedTimeoutSecs,
+        maxTimeoutSecs: boundedMaxTimeoutSecs,
       });
       const response = await onCreateJob({
         argv: [],
@@ -916,7 +916,7 @@ function SingleVpsConfig({
         privilege_assertion: built.privilegeAssertion,
         selector_expression: selectorExpressionForTarget,
         target_client_ids: [frozenTarget.id],
-        timeout_secs: boundedTimeoutSecs,
+        max_timeout_secs: boundedMaxTimeoutSecs,
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
@@ -926,7 +926,7 @@ function SingleVpsConfig({
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: [frozenTarget],
-        timeoutSecs: boundedTimeoutSecs,
+        maxTimeoutSecs: boundedMaxTimeoutSecs,
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
@@ -939,7 +939,7 @@ function SingleVpsConfig({
           outputs,
           targetRecords: waited.targets,
           targets: [frozenTarget],
-          timeoutSecs: boundedTimeoutSecs,
+          maxTimeoutSecs: boundedMaxTimeoutSecs,
         }),
       );
       const config = extractConfigRead(outputs);
@@ -958,7 +958,7 @@ function SingleVpsConfig({
     const frozenPrivilegeMaterial = privilegeMaterial;
     const frozenToml = redactedToml;
     const frozenBaseHash = baseHash;
-    const boundedTimeoutSecs = clampJobTimeoutSecs(timeoutSecs);
+    const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
     setReviewStatus("Preparing single config review");
     try {
       await runAction(async () => {
@@ -980,7 +980,7 @@ function SingleVpsConfig({
           operation,
           privilegeMaterial: frozenPrivilegeMaterial,
           selectorExpression: selectorExpressionForTarget,
-          timeoutSecs: boundedTimeoutSecs,
+          maxTimeoutSecs: boundedMaxTimeoutSecs,
         });
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
@@ -994,7 +994,7 @@ function SingleVpsConfig({
           privilegeAssertion: built.privilegeAssertion,
           selectorExpression: selectorExpressionForTarget,
           target: frozenTarget,
-          timeoutSecs: boundedTimeoutSecs,
+          maxTimeoutSecs: boundedMaxTimeoutSecs,
           toml: frozenToml,
         });
       });
@@ -1018,14 +1018,14 @@ function SingleVpsConfig({
         privilege_assertion: snapshot.privilegeAssertion,
         selector_expression: snapshot.selectorExpression,
         target_client_ids: [snapshot.clientId],
-        timeout_secs: snapshot.timeoutSecs,
+        max_timeout_secs: snapshot.maxTimeoutSecs,
       });
       setLastJobId(response.job_id);
       const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
         targetCount: createJobTargetCount(response),
         onProgress: setProgress,
         targets: [snapshot.target],
-        timeoutSecs: snapshot.timeoutSecs,
+        maxTimeoutSecs: snapshot.maxTimeoutSecs,
       });
       const outputs = await onLoadJobOutputs(response.job_id).catch(() => []);
       setProgress(
@@ -1035,7 +1035,7 @@ function SingleVpsConfig({
           outputs,
           targetRecords: waited.targets,
           targets: [snapshot.target],
-          timeoutSecs: snapshot.timeoutSecs,
+          maxTimeoutSecs: snapshot.maxTimeoutSecs,
         }),
       );
     });
@@ -1055,15 +1055,15 @@ function SingleVpsConfig({
         <span>{singleTarget ? formatVpsName(singleTarget, vpsNameDisplayMode) : clientId ? "Select a listed VPS" : "no target selected"}</span>
         <div className="inlinePrivilege">
           <input
-            aria-label="Single config timeout seconds"
+            aria-label="Single config max timeout seconds"
             max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
             min={1}
             onChange={(event) => {
               clearSingleConfigReview();
-              setTimeoutSecs(Number(event.target.value));
+              setMaxTimeoutSecs(Number(event.target.value));
             }}
             type="number"
-            value={timeoutSecs}
+            value={maxTimeoutSecs}
           />
         </div>
         <PrivilegeVaultBox

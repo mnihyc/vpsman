@@ -63,7 +63,7 @@ CREATE TABLE jobs (
     operation JSONB,
     source_schedule_id UUID REFERENCES schedules(id),
     request_fingerprint TEXT NOT NULL,
-    timeout_secs BIGINT NOT NULL DEFAULT 30,
+    max_timeout_secs BIGINT NOT NULL DEFAULT 30,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ,
     CONSTRAINT jobs_status_common_check CHECK (status IN (

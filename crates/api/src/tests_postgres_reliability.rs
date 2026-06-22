@@ -178,7 +178,7 @@ async fn insert_job_target(
         r#"
         INSERT INTO jobs (
             id, command_type, status, target_count, payload_hash, operation,
-            request_fingerprint, timeout_secs
+            request_fingerprint, max_timeout_secs
         )
         VALUES ($1, 'shell', 'queued', 1, $2, $3, $4, 30)
         "#,
@@ -233,7 +233,7 @@ async fn insert_update_activation_target(
         r#"
         INSERT INTO jobs (
             id, command_type, status, target_count, payload_hash, operation,
-            request_fingerprint, timeout_secs
+            request_fingerprint, max_timeout_secs
         )
         VALUES ($1, 'agent_update_activate', 'running', 1, $2, $3, $4, 1)
         "#,

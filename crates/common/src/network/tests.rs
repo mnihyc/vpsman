@@ -354,7 +354,7 @@ fn plans_external_managed_adapter_tunnel_with_commands() {
                     "start".to_string(),
                     "{interface}".to_string(),
                 ],
-                timeout_secs: 20,
+                max_timeout_secs: 20,
                 max_output_bytes: 8192,
             }),
             status: Some(RuntimeTunnelCommand {
@@ -363,7 +363,7 @@ fn plans_external_managed_adapter_tunnel_with_commands() {
                     "status".to_string(),
                     "{interface}".to_string(),
                 ],
-                timeout_secs: 10,
+                max_timeout_secs: 10,
                 max_output_bytes: 4096,
             }),
             ..RuntimeTunnelControl::default()
@@ -447,7 +447,7 @@ fn validates_external_managed_runtime_tunnel_controls() {
                 "start".to_string(),
                 "{interface}".to_string(),
             ],
-            timeout_secs: 20,
+            max_timeout_secs: 20,
             max_output_bytes: 8192,
         }),
         restart: Some(RuntimeTunnelCommand {
@@ -456,7 +456,7 @@ fn validates_external_managed_runtime_tunnel_controls() {
                 "restart".to_string(),
                 "{interface}".to_string(),
             ],
-            timeout_secs: 20,
+            max_timeout_secs: 20,
             max_output_bytes: 8192,
         }),
         cleanup: Some(RuntimeTunnelCommand {
@@ -465,7 +465,7 @@ fn validates_external_managed_runtime_tunnel_controls() {
                 "cleanup".to_string(),
                 "{interface}".to_string(),
             ],
-            timeout_secs: 20,
+            max_timeout_secs: 20,
             max_output_bytes: 8192,
         }),
         status: Some(RuntimeTunnelCommand {
@@ -474,7 +474,7 @@ fn validates_external_managed_runtime_tunnel_controls() {
                 "status".to_string(),
                 "{interface}".to_string(),
             ],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             max_output_bytes: 4096,
         }),
         traffic_limit_apply: Some(RuntimeTunnelCommand {
@@ -483,7 +483,7 @@ fn validates_external_managed_runtime_tunnel_controls() {
                 "shape".to_string(),
                 "{interface}".to_string(),
             ],
-            timeout_secs: 10,
+            max_timeout_secs: 10,
             max_output_bytes: 4096,
         }),
         traffic_limit: RuntimeTunnelTrafficLimit {
@@ -504,7 +504,7 @@ fn rejects_unbounded_or_mutating_runtime_tunnel_controls() {
         manager: RuntimeTunnelManager::ExternalObserved,
         restart: Some(RuntimeTunnelCommand {
             argv: vec!["/usr/local/bin/restart-tun".to_string()],
-            timeout_secs: 10,
+            max_timeout_secs: 10,
             max_output_bytes: 4096,
         }),
         ..RuntimeTunnelControl::default()
@@ -522,7 +522,7 @@ fn rejects_unbounded_or_mutating_runtime_tunnel_controls() {
                 "--config".to_string(),
                 "edge.conf".to_string(),
             ],
-            timeout_secs: 10,
+            max_timeout_secs: 10,
             max_output_bytes: 4096,
         }),
         ..RuntimeTunnelControl::default()

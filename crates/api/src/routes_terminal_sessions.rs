@@ -118,12 +118,14 @@ pub(crate) async fn submit_terminal_session_input(
     if !request.confirmed {
         return Err(ApiError::conflict("terminal_input_confirmation_required"));
     }
-    let timeout_secs = request
-        .timeout_secs
+    let max_timeout_secs = request
+        .max_timeout_secs
         .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
         .max(1);
-    if timeout_secs > state.max_job_timeout_secs() {
-        return Err(ApiError::bad_request("job_timeout_exceeds_configured_max"));
+    if max_timeout_secs > state.max_job_timeout_secs() {
+        return Err(ApiError::bad_request(
+            "max_timeout_exceeds_configured_job_max",
+        ));
     }
     let data = terminal_input_request_data(&request)?;
     let data_base64 = BASE64_STANDARD.encode(&data);
@@ -133,7 +135,7 @@ pub(crate) async fn submit_terminal_session_input(
         client_id: &client_id,
         session_id: &session_id_text,
         input_payload_hash: &input_payload_hash,
-        timeout_secs,
+        max_timeout_secs,
         confirmed: request.confirmed,
     })
     .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
@@ -164,7 +166,7 @@ pub(crate) async fn submit_terminal_session_input(
                 .map_err(|_| ApiError::bad_request("terminal_input_seq_out_of_range"))?,
             data_base64,
         }),
-        timeout_secs: Some(timeout_secs),
+        max_timeout_secs: Some(max_timeout_secs),
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -257,7 +259,7 @@ mod tests {
                 job_id,
                 text: Some("uptime\n".to_string()),
                 data_base64: None,
-                timeout_secs: Some(30),
+                max_timeout_secs: Some(30),
                 confirmed: true,
                 privilege_assertion: None,
             }),
@@ -306,7 +308,7 @@ mod tests {
                 job_id: Uuid::new_v4(),
                 text: Some("uptime\n".to_string()),
                 data_base64: None,
-                timeout_secs: Some(30),
+                max_timeout_secs: Some(30),
                 confirmed: true,
                 privilege_assertion: None,
             }),
@@ -326,7 +328,7 @@ mod tests {
                 job_id: Uuid::new_v4(),
                 text: Some("uptime\n".to_string()),
                 data_base64: None,
-                timeout_secs: Some(30),
+                max_timeout_secs: Some(30),
                 confirmed: false,
                 privilege_assertion: None,
             }),

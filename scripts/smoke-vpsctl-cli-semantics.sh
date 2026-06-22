@@ -98,7 +98,7 @@ require_contains "$update_help" "--sha256-hex" "agent-update help"
 config_patch_help="$("$bin" config-patch --help)"
 require_contains "$config_patch_help" "--config-file" "config-patch help"
 
-printf '[auth]\njob_timeout_secs = 10\n' >"$tmp_dir/bad-config-patch.toml"
+printf '[auth]\nmax_job_timeout_secs = 10\n' >"$tmp_dir/bad-config-patch.toml"
 if "$bin" config-patch \
   --config-file "$tmp_dir/bad-config-patch.toml" \
   --clients edge-a \

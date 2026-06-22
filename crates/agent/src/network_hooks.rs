@@ -138,12 +138,12 @@ pub(crate) fn pre_rollback_hook_specs(
 
 pub(crate) async fn run_network_hooks(
     specs: &[NetworkHookSpec],
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<serde_json::Value>> {
     let mut reports = Vec::new();
     for spec in specs {
-        reports.push(run_hook(spec, timeout_secs, cancel_token.clone()).await?);
+        reports.push(run_hook(spec, max_timeout_secs, cancel_token.clone()).await?);
     }
     Ok(reports)
 }
@@ -390,7 +390,7 @@ impl NetworkHookSpec {
 
 async fn run_hook(
     spec: &NetworkHookSpec,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
     if spec.argv.is_empty() {
@@ -402,7 +402,7 @@ async fn run_hook(
     command.stdin(Stdio::null());
     let result = run_child_with_bounded_output_cancelable(
         command,
-        timeout_secs.clamp(1, 120),
+        max_timeout_secs.clamp(1, 120),
         0,
         ChildCleanupPolicy::ProcessGroup,
         cancel_token,

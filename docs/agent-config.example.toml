@@ -14,7 +14,7 @@ client_private_key_hex = "111111111111111111111111111111111111111111111111111111
 server_public_key_hex = "2222222222222222222222222222222222222222222222222222222222222222"
 
 [auth]
-job_timeout_secs = 3600
+max_job_timeout_secs = 3600
 gateway_retry_secs = 60
 gateway_connect_timeout_secs = 10
 
@@ -55,13 +55,13 @@ process_cleanup = "process_group" # process_group | direct_child
 # source to "custom_command" inside a preset and provide a bounded command for
 # nonstandard images or provider-installed inventory sources.
 user_sessions_source = "linux_w_who_preset"
-# user_sessions_command = { argv = ["/usr/local/libexec/vpsman-users", "{client_id}"], timeout_secs = 2, max_output_bytes = 4096 }
+# user_sessions_command = { argv = ["/usr/local/libexec/vpsman-users", "{client_id}"], max_timeout_secs = 2, max_output_bytes = 4096 }
 # Process inventory defaults to Linux procfs but the root is configurable for
 # containers, test agents, or mounted host views. Custom JSON commands return
 # {"processes":[{"pid":1,"ppid":0,"uid":0,"state":"R","name":"init","command":"init","rss_kib":1024}],"truncated":false}.
 process_inventory_source = "linux_procfs"
 process_proc_root = "/proc"
-# process_inventory_command = { argv = ["/usr/local/libexec/vpsman-processes", "{limit}"], timeout_secs = 2, max_output_bytes = 4096 }
+# process_inventory_command = { argv = ["/usr/local/libexec/vpsman-processes", "{limit}"], max_timeout_secs = 2, max_output_bytes = 4096 }
 
 [telemetry]
 # Source selection is explicit. The default Linux source reads cheap procfs and
@@ -77,7 +77,7 @@ hostname_file = "/etc/hostname"
 os_release_file = "/etc/os-release"
 # Example custom source. Output may include hostname, uptime_secs, cpu, memory,
 # disks, networks, and tunnels in the same JSON shape as agent metrics.
-# custom_metrics_command = { argv = ["/usr/local/libexec/vpsman-metrics-source", "{client_id}"], timeout_secs = 2, max_output_bytes = 4096 }
+# custom_metrics_command = { argv = ["/usr/local/libexec/vpsman-metrics-source", "{client_id}"], max_timeout_secs = 2, max_output_bytes = 4096 }
 
 [network]
 # Disabled by default so privileged network apply must be deliberately enabled

@@ -35,7 +35,7 @@ pub(crate) struct FileTransferUploadPlan {
     pub(crate) clients: Vec<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) privilege_ttl_secs: u64,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) session_id: Option<Uuid>,
     pub(crate) resume_token: Option<String>,
@@ -252,7 +252,7 @@ pub(crate) fn execute_file_transfer_upload(
         password,
         salt_hex,
         privilege_ttl_secs: plan.privilege_ttl_secs,
-        timeout_secs: plan.timeout_secs,
+        max_timeout_secs: plan.max_timeout_secs,
         confirmed: plan.confirmed,
     };
     let start = submit_transfer_step(
@@ -314,7 +314,7 @@ pub(crate) fn execute_file_transfer_upload(
                 password,
                 salt_hex,
                 privilege_ttl_secs: plan.privilege_ttl_secs,
-                timeout_secs: plan.timeout_secs,
+                max_timeout_secs: plan.max_timeout_secs,
                 confirmed: plan.confirmed,
             };
             let mut offset = next_offset.expect("same-offset start offset");
@@ -374,7 +374,7 @@ pub(crate) fn execute_file_transfer_upload(
                         password,
                         salt_hex,
                         privilege_ttl_secs: plan.privilege_ttl_secs,
-                        timeout_secs: plan.timeout_secs,
+                        max_timeout_secs: plan.max_timeout_secs,
                         confirmed: plan.confirmed,
                     };
                     let chunk_job = submit_upload_chunk(
@@ -433,7 +433,7 @@ pub(crate) fn execute_file_transfer_upload(
                 password,
                 salt_hex,
                 privilege_ttl_secs: plan.privilege_ttl_secs,
-                timeout_secs: plan.timeout_secs,
+                max_timeout_secs: plan.max_timeout_secs,
                 confirmed: plan.confirmed,
             };
             let commit = submit_transfer_step(
@@ -483,7 +483,7 @@ pub(crate) struct TransferSubmitContext<'a> {
     pub(crate) password: &'a str,
     pub(crate) salt_hex: &'a str,
     pub(crate) privilege_ttl_secs: u64,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
 }
 
@@ -501,7 +501,7 @@ pub(crate) fn submit_transfer_step(
         ctx.password,
         ctx.salt_hex,
         ctx.privilege_ttl_secs,
-        ctx.timeout_secs,
+        ctx.max_timeout_secs,
         false,
         true,
     )?;
@@ -520,7 +520,7 @@ pub(crate) fn submit_transfer_step(
             "destructive": false,
             "confirmed": ctx.confirmed,
             "force_unprivileged": false,
-            "timeout_secs": ctx.timeout_secs,
+            "max_timeout_secs": ctx.max_timeout_secs,
             "privilege_assertion": privilege.privilege_assertion,
         }),
     )?;

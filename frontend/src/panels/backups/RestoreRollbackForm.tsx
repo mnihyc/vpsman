@@ -1,5 +1,5 @@
 import { RotateCcw } from "lucide-react";
-import { MAX_CONFIGURABLE_JOB_TIMEOUT_SECS } from "../../jobTimeout";
+import { MAX_CONFIGURABLE_JOB_TIMEOUT_SECS } from "../../jobMaxTimeout";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import type { AgentView } from "../../types";
 import { TargetImpactPreview } from "../TargetImpactPreview";
@@ -10,13 +10,13 @@ type RestoreRollbackFormProps = {
   forceUnprivileged: boolean;
   onForceUnprivilegedChange: (value: boolean) => void;
   onRestoreJobIdChange: (value: string) => void;
-  onRestoreRollbackTimeoutSecsChange: (value: number) => void;
+  onRestoreRollbackMaxTimeoutSecsChange: (value: number) => void;
   onRunRestoreRollback: () => void;
   onTargetClientIdChange: (value: string) => void;
   pending: boolean;
   privilegeReady: boolean;
   restoreJobId: string;
-  restoreRollbackTimeoutSecs: number;
+  restoreRollbackMaxTimeoutSecs: number;
   targetAgent: AgentView | null;
   targetClientId: string;
 };
@@ -27,13 +27,13 @@ export function RestoreRollbackForm({
   forceUnprivileged,
   onForceUnprivilegedChange,
   onRestoreJobIdChange,
-  onRestoreRollbackTimeoutSecsChange,
+  onRestoreRollbackMaxTimeoutSecsChange,
   onRunRestoreRollback,
   onTargetClientIdChange,
   pending,
   privilegeReady,
   restoreJobId,
-  restoreRollbackTimeoutSecs,
+  restoreRollbackMaxTimeoutSecs,
   targetAgent,
   targetClientId,
 }: RestoreRollbackFormProps) {
@@ -64,14 +64,14 @@ export function RestoreRollbackForm({
           />
         </label>
         <label>
-          <span>Timeout seconds</span>
+          <span>Max timeout seconds</span>
           <input
-            aria-label="Restore rollback timeout seconds"
+            aria-label="Restore rollback max timeout seconds"
             max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
             min={1}
-            onChange={(event) => onRestoreRollbackTimeoutSecsChange(Number(event.target.value))}
+            onChange={(event) => onRestoreRollbackMaxTimeoutSecsChange(Number(event.target.value))}
             type="number"
-            value={restoreRollbackTimeoutSecs}
+            value={restoreRollbackMaxTimeoutSecs}
           />
         </label>
         <TargetImpactPreview

@@ -5,11 +5,16 @@ use chrono::{TimeZone, Utc};
 use serde::Serialize;
 use tracing::warn;
 use vpsman_common::{
-    is_terminal_command_type, CommandOutput, GatewayAgentHelloIngest, GatewayCommandOutputIngest,
+    is_terminal_command_type, AgentUpdateVerificationResult, CommandOutput,
+    GatewayAgentHelloIngest, GatewayAgentUpdateVerificationIngest, GatewayCommandOutputIngest,
     GatewaySessionLifecycleIngest, GatewayTelemetryIngest, GatewayTerminalOutputIngest, JobCommand,
     OutputStream,
 };
-use vpsman_server_core::{target_status_is_active, TARGET_STATUS_COMPLETED, TARGET_STATUS_RUNNING};
+use vpsman_server_core::{
+    target_status_is_active, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
+    TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT,
+    TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING,
+};
 
 use crate::{
     backup_auto_artifacts::try_auto_record_backup_artifact,
@@ -38,6 +43,66 @@ pub(crate) async fn validate_agent_identity(
             "client identity accepted".to_string()
         } else {
             "client identity rejected".to_string()
+        },
+    }))
+}
+
+pub(crate) async fn verify_agent_update_artifact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(event): Json<GatewayAgentUpdateVerificationIngest>,
+) -> Result<Json<AgentUpdateVerificationResult>, ApiError> {
+    state.require_internal_gateway(&headers)?;
+    validate_agent_update_verification_event(&event)?;
+    let job_id = event.request.job_id;
+    let reject = |message: &'static str| {
+        Json(AgentUpdateVerificationResult {
+            job_id,
+            approved: false,
+            message: message.to_string(),
+        })
+    };
+    if !state
+        .repo
+        .active_gateway_session_matches(
+            &event.gateway_id,
+            &event.client_id,
+            event.gateway_session_id,
+            event.process_incarnation_id,
+        )
+        .await?
+    {
+        return Ok(reject("gateway_session_not_active"));
+    }
+    if !state
+        .repo
+        .active_agent_update_check_target_matches(
+            event.request.job_id,
+            &event.client_id,
+            event.process_incarnation_id,
+        )
+        .await?
+    {
+        return Ok(reject("agent_update_check_target_not_active"));
+    }
+    if !state.require_registered_agent_updates() {
+        return Ok(Json(AgentUpdateVerificationResult {
+            job_id,
+            approved: true,
+            message: "registered agent update verification not required".to_string(),
+        }));
+    }
+    let approved = state
+        .repo
+        .agent_update_release_exists_for_artifact(&event.request.sha256_hex)
+        .await?;
+    Ok(Json(AgentUpdateVerificationResult {
+        job_id,
+        approved,
+        message: if approved {
+            "registered agent update artifact accepted".to_string()
+        } else {
+            "registered agent update artifact missing".to_string()
         },
     }))
 }
@@ -241,6 +306,21 @@ pub(crate) async fn ingest_command_output(
             state
                 .publish_job_finished_after_refresh(event.job_id, refreshed)
                 .await?;
+            if let Err(error) = try_record_agent_update_lifecycle_for_job_target(
+                &state,
+                event.job_id,
+                &event.client_id,
+                &outcome,
+            )
+            .await
+            {
+                warn!(
+                    ?error,
+                    job_id = %event.job_id,
+                    client_id = %event.client_id,
+                    "agent update lifecycle audit failed after command output ingest"
+                );
+            }
             if outcome.status == TARGET_STATUS_COMPLETED {
                 if let Err(error) = try_auto_record_backup_artifact_for_job_target(
                     &state,
@@ -363,6 +443,17 @@ async fn finalize_contiguous_final_job_output_if_ready(
         state
             .publish_job_finished_after_refresh(job_id, refreshed)
             .await?;
+        if let Err(error) =
+            try_record_agent_update_lifecycle_for_job_target(state, job_id, client_id, &outcome)
+                .await
+        {
+            warn!(
+                ?error,
+                job_id = %job_id,
+                client_id,
+                "agent update lifecycle audit failed after deferred command output finalization"
+            );
+        }
         if outcome.status == TARGET_STATUS_COMPLETED {
             if let Err(error) =
                 try_auto_record_backup_artifact_for_job_target(state, job_id, client_id).await
@@ -377,6 +468,83 @@ async fn finalize_contiguous_final_job_output_if_ready(
         }
     }
     Ok(())
+}
+
+async fn try_record_agent_update_lifecycle_for_job_target(
+    state: &AppState,
+    job_id: uuid::Uuid,
+    client_id: &str,
+    outcome: &TargetDispatchOutcome,
+) -> Result<(), ApiError> {
+    let Some(context) = state.repo.get_job_completion_context(job_id).await? else {
+        return Ok(());
+    };
+    match context.operation {
+        JobCommand::AgentUpdateActivate {
+            staged_sha256_hex, ..
+        } if outcome.status == TARGET_STATUS_COMPLETED => {
+            state
+                .repo
+                .record_agent_update_activation_completed(client_id, job_id, &staged_sha256_hex)
+                .await?;
+        }
+        JobCommand::AgentUpdateActivate {
+            staged_sha256_hex, ..
+        } if agent_update_lifecycle_failure_status(&outcome.status) => {
+            state
+                .repo
+                .record_agent_update_activation_failed(
+                    client_id,
+                    job_id,
+                    &staged_sha256_hex,
+                    &outcome.status,
+                    outcome.exit_code,
+                    &outcome.message,
+                )
+                .await?;
+        }
+        JobCommand::AgentUpdateRollback {
+            rollback_sha256_hex,
+        } if outcome.status == TARGET_STATUS_COMPLETED => {
+            state
+                .repo
+                .record_agent_update_rollback_completed(
+                    client_id,
+                    job_id,
+                    rollback_sha256_hex.as_deref(),
+                )
+                .await?;
+        }
+        JobCommand::AgentUpdateRollback {
+            rollback_sha256_hex,
+        } if agent_update_lifecycle_failure_status(&outcome.status) => {
+            state
+                .repo
+                .record_agent_update_rollback_failed(
+                    client_id,
+                    job_id,
+                    rollback_sha256_hex.as_deref(),
+                    &outcome.status,
+                    outcome.exit_code,
+                    &outcome.message,
+                )
+                .await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn agent_update_lifecycle_failure_status(status: &str) -> bool {
+    matches!(
+        status,
+        TARGET_STATUS_FAILED
+            | TARGET_STATUS_REJECTED
+            | TARGET_STATUS_AGENT_TIMEOUT
+            | TARGET_STATUS_CONTROL_TIMEOUT
+            | TARGET_STATUS_AGENT_LOST
+            | TARGET_STATUS_CANCELED
+    )
 }
 
 async fn try_auto_record_backup_artifact_for_job_target(
@@ -592,6 +760,41 @@ fn validate_gateway_telemetry_event(event: &GatewayTelemetryIngest) -> Result<()
     }
     validate_gateway_remote_ip(event.remote_ip.as_deref())?;
     Ok(())
+}
+
+fn validate_agent_update_verification_event(
+    event: &GatewayAgentUpdateVerificationIngest,
+) -> Result<(), ApiError> {
+    if event.gateway_id.is_empty()
+        || event.gateway_id.len() > 128
+        || event.gateway_session_id == uuid::Uuid::nil()
+        || event.process_incarnation_id == uuid::Uuid::nil()
+        || event.client_id.is_empty()
+        || event.client_id.len() > 128
+        || event.request.job_id == uuid::Uuid::nil()
+        || !is_bounded_non_empty(&event.request.version_url, 4096)
+        || !is_bounded_non_empty(&event.request.artifact_url, 4096)
+        || !is_bounded_non_empty(&event.request.checksum_url, 4096)
+        || !is_bounded_non_empty(&event.request.asset_name, 256)
+        || event.request.sha256_hex.len() != 64
+        || !event
+            .request
+            .sha256_hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ApiError::bad_request(
+            "invalid_agent_update_verification_event",
+        ));
+    }
+    Ok(())
+}
+
+fn is_bounded_non_empty(value: &str, max_len: usize) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= max_len
+        && !value.bytes().any(|byte| byte.is_ascii_control())
 }
 
 fn validate_gateway_remote_ip(remote_ip: Option<&str>) -> Result<(), ApiError> {

@@ -89,14 +89,14 @@ pub(crate) struct RestoreCommandInput<'a> {
     pub(crate) max_archive_bytes: u64,
     pub(crate) dry_run: bool,
     pub(crate) post_restore_argv: &'a [String],
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
 
 pub(crate) async fn execute_restore_command(
     input: RestoreCommandInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
-    let deadline = time::Instant::now() + Duration::from_secs(input.timeout_secs.max(1));
+    let deadline = time::Instant::now() + Duration::from_secs(input.max_timeout_secs.max(1));
     let cancel_token = input.cancel_token.clone();
     run_cancelable("restore", cancel_token, restore_archive(input, deadline)).await
 }
@@ -118,7 +118,7 @@ async fn restore_archive(
         dry_run,
         post_restore_argv,
         cancel_token,
-        timeout_secs: _,
+        max_timeout_secs: _,
     } = input;
     cancel_token.check("restore")?;
     validate_restore_scope(paths, include_config, destination_root)?;
@@ -509,7 +509,7 @@ fn validate_post_restore_argv(argv: &[String]) -> Result<()> {
 
 async fn run_post_restore_argv(
     argv: &[String],
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
     if argv.is_empty() {
@@ -519,7 +519,7 @@ async fn run_post_restore_argv(
     command.args(&argv[1..]);
     match run_child_with_bounded_output_cancelable(
         command,
-        timeout_secs.max(1),
+        max_timeout_secs.max(1),
         8192,
         ChildCleanupPolicy::ProcessGroup,
         cancel_token,
@@ -917,7 +917,7 @@ mod tests {
             max_archive_bytes: archive_bytes.len() as u64,
             dry_run: false,
             post_restore_argv: &[],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -959,7 +959,7 @@ mod tests {
             max_archive_bytes: 1024,
             dry_run: false,
             post_restore_argv: &[],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -982,7 +982,7 @@ mod tests {
             max_archive_bytes: 1024,
             dry_run: false,
             post_restore_argv: &[],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -1020,7 +1020,7 @@ mod tests {
             max_archive_bytes: archive_bytes.len() as u64 - 1,
             dry_run: false,
             post_restore_argv: &[],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -1067,7 +1067,7 @@ mod tests {
             max_archive_bytes: archive_bytes.len() as u64,
             dry_run: false,
             post_restore_argv: &[],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -1143,7 +1143,7 @@ mod tests {
             max_archive_bytes: archive_bytes.len() as u64,
             dry_run: false,
             post_restore_argv: &[],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -1204,7 +1204,7 @@ mod tests {
             max_archive_bytes: archive_bytes.len() as u64,
             dry_run: false,
             post_restore_argv: &post_restore_argv,
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await

@@ -41,7 +41,7 @@ pub(crate) struct VtyRestoreRunRequest {
     pub(crate) source_backup_request_id: Uuid,
     pub(crate) target_client_id: String,
     pub(crate) archive_transfer_session_id: Uuid,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
 }
@@ -50,7 +50,7 @@ pub(crate) struct VtyRestoreRunRequest {
 pub(crate) struct VtyRestoreRollbackRequest {
     pub(crate) restore_job_id: Uuid,
     pub(crate) target_client_id: String,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
 }
@@ -61,7 +61,7 @@ pub(crate) struct VtyBackupRunRequest {
     pub(crate) include_config: bool,
     pub(crate) follow_symlinks: bool,
     pub(crate) selection: VtyJobSelection,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -149,7 +149,7 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
     let mut paths = Vec::new();
     let mut include_config = false;
     let mut follow_symlinks = false;
-    let mut timeout_secs = 60_u64;
+    let mut max_timeout_secs = 60_u64;
     let mut target_tokens = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
@@ -175,19 +175,19 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
                 paths.push(value.trim_start_matches("--path=").to_string());
                 index += 1;
             }
-            "--timeout" => {
-                timeout_secs = tokens
+            "--max-timeout" => {
+                max_timeout_secs = tokens
                     .get(index + 1)
-                    .context("--timeout requires a value")?
+                    .context("--max-timeout requires a value")?
                     .parse()
-                    .context("invalid --timeout")?;
+                    .context("invalid --max-timeout")?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = value
-                    .trim_start_matches("--timeout=")
+            value if value.starts_with("--max-timeout=") => {
+                max_timeout_secs = value
+                    .trim_start_matches("--max-timeout=")
                     .parse()
-                    .context("invalid --timeout")?;
+                    .context("invalid --max-timeout")?;
                 index += 1;
             }
             "--recipient-public-key-hex" | "--recipient-public-key" => {
@@ -207,7 +207,7 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
     }
     ensure_backup_scope(&paths, include_config, "backup-run")?;
     anyhow::ensure!(
-        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&timeout_secs),
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&max_timeout_secs),
         "backup timeout out of range"
     );
     Ok(VtyBackupRunRequest {
@@ -215,7 +215,7 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
         include_config,
         follow_symlinks,
         selection: VtyJobSelection::parse(&target_tokens)?,
-        timeout_secs,
+        max_timeout_secs,
     })
 }
 
@@ -498,16 +498,16 @@ pub(crate) fn parse_vty_restore_plan(tokens: &[&str]) -> Result<VtyRestorePlanRe
 pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequest> {
     let source_backup_request_id = tokens
         .first()
-        .context("usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--timeout <secs>] [--force-unprivileged] --confirmed")?;
+        .context("usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--max-timeout <secs>] [--force-unprivileged] --confirmed")?;
     let target_client_id = tokens.get(1).context(
-        "usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--timeout <secs>] [--force-unprivileged] --confirmed",
+        "usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--max-timeout <secs>] [--force-unprivileged] --confirmed",
     )?;
     let mut request = VtyRestoreRunRequest {
         source_backup_request_id: Uuid::parse_str(source_backup_request_id)
             .context("invalid source backup request UUID")?,
         target_client_id: (*target_client_id).to_string(),
         archive_transfer_session_id: Uuid::nil(),
-        timeout_secs: 60,
+        max_timeout_secs: 60,
         confirmed: false,
         force_unprivileged: false,
     };
@@ -563,19 +563,19 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
                     "restore scope and destination root flags were removed; select backup and target records"
                 );
             }
-            "--timeout" => {
-                request.timeout_secs = tokens
+            "--max-timeout" => {
+                request.max_timeout_secs = tokens
                     .get(index + 1)
-                    .context("--timeout requires a value")?
+                    .context("--max-timeout requires a value")?
                     .parse()
-                    .context("invalid --timeout")?;
+                    .context("invalid --max-timeout")?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                request.timeout_secs = value
-                    .trim_start_matches("--timeout=")
+            value if value.starts_with("--max-timeout=") => {
+                request.max_timeout_secs = value
+                    .trim_start_matches("--max-timeout=")
                     .parse()
-                    .context("invalid --timeout")?;
+                    .context("invalid --max-timeout")?;
                 index += 1;
             }
             other => anyhow::bail!("unknown restore-run flag {other}"),
@@ -586,7 +586,7 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
         "restore-run requires --archive-transfer-session-id"
     );
     anyhow::ensure!(
-        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&request.timeout_secs),
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&request.max_timeout_secs),
         "restore timeout out of range"
     );
     anyhow::ensure!(request.confirmed, "restore-run requires --confirmed");
@@ -596,14 +596,14 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
 pub(crate) fn parse_vty_restore_rollback(tokens: &[&str]) -> Result<VtyRestoreRollbackRequest> {
     let restore_job_id = tokens
         .first()
-        .context("usage: restore-rollback <restore_job_uuid> <target_client_id> [--timeout <secs>] [--force-unprivileged] --confirmed")?;
+        .context("usage: restore-rollback <restore_job_uuid> <target_client_id> [--max-timeout <secs>] [--force-unprivileged] --confirmed")?;
     let target_client_id = tokens.get(1).context(
-        "usage: restore-rollback <restore_job_uuid> <target_client_id> [--timeout <secs>] [--force-unprivileged] --confirmed",
+        "usage: restore-rollback <restore_job_uuid> <target_client_id> [--max-timeout <secs>] [--force-unprivileged] --confirmed",
     )?;
     let mut request = VtyRestoreRollbackRequest {
         restore_job_id: Uuid::parse_str(restore_job_id).context("invalid restore job UUID")?,
         target_client_id: (*target_client_id).to_string(),
-        timeout_secs: 60,
+        max_timeout_secs: 60,
         confirmed: false,
         force_unprivileged: false,
     };
@@ -618,26 +618,26 @@ pub(crate) fn parse_vty_restore_rollback(tokens: &[&str]) -> Result<VtyRestoreRo
                 request.force_unprivileged = true;
                 index += 1;
             }
-            "--timeout" => {
-                request.timeout_secs = tokens
+            "--max-timeout" => {
+                request.max_timeout_secs = tokens
                     .get(index + 1)
-                    .context("--timeout requires a value")?
+                    .context("--max-timeout requires a value")?
                     .parse()
-                    .context("invalid --timeout")?;
+                    .context("invalid --max-timeout")?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                request.timeout_secs = value
-                    .trim_start_matches("--timeout=")
+            value if value.starts_with("--max-timeout=") => {
+                request.max_timeout_secs = value
+                    .trim_start_matches("--max-timeout=")
                     .parse()
-                    .context("invalid --timeout")?;
+                    .context("invalid --max-timeout")?;
                 index += 1;
             }
             other => anyhow::bail!("unknown restore-rollback flag {other}"),
         }
     }
     anyhow::ensure!(
-        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&request.timeout_secs),
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&request.max_timeout_secs),
         "restore rollback timeout out of range"
     );
     anyhow::ensure!(request.confirmed, "restore-rollback requires --confirmed");
@@ -708,7 +708,7 @@ pub(crate) fn submit_vty_backup_run(
         "backup",
         &operation,
         request.selection,
-        request.timeout_secs,
+        request.max_timeout_secs,
     )
 }
 
@@ -858,7 +858,7 @@ pub(crate) fn submit_vty_restore_run(
             password: &privilege_context.password,
             salt_hex: &privilege_context.salt_hex,
             privilege_ttl_secs: 300,
-            timeout_secs: request.timeout_secs,
+            max_timeout_secs: request.max_timeout_secs,
             confirmed: request.confirmed,
             force_unprivileged: request.force_unprivileged,
         },
@@ -889,7 +889,7 @@ pub(crate) fn submit_vty_restore_rollback(
             destructive: true,
             confirmed: request.confirmed,
         },
-        request.timeout_secs,
+        request.max_timeout_secs,
         request.force_unprivileged,
     )
 }

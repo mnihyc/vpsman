@@ -27,7 +27,7 @@ pub(crate) struct ProcessStartOptions {
     pub(crate) password_env: String,
     pub(crate) super_salt_hex: Option<String>,
     pub(crate) privilege_ttl_secs: u64,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
 }
@@ -40,7 +40,7 @@ pub(crate) fn user_sessions(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
     println!(
@@ -55,7 +55,7 @@ pub(crate) fn user_sessions(
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged: false,
         })?
@@ -72,7 +72,7 @@ pub(crate) fn process_list(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -92,7 +92,7 @@ pub(crate) fn process_list(
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged: false,
         })?
@@ -142,7 +142,7 @@ pub(crate) fn process_start(
         options.password_env,
         options.super_salt_hex,
         options.privilege_ttl_secs,
-        options.timeout_secs,
+        options.max_timeout_secs,
         options.confirmed,
         options.force_unprivileged,
     )
@@ -166,7 +166,7 @@ pub(crate) fn process_stop(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
     let operation = JobCommand::ProcessStop { name };
@@ -180,7 +180,7 @@ pub(crate) fn process_stop(
         password_env,
         super_salt_hex,
         privilege_ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         confirmed,
         false,
     )
@@ -195,7 +195,7 @@ pub(crate) fn process_restart(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
     let operation = JobCommand::ProcessRestart { name };
@@ -209,7 +209,7 @@ pub(crate) fn process_restart(
         password_env,
         super_salt_hex,
         privilege_ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         confirmed,
         false,
     )
@@ -224,7 +224,7 @@ pub(crate) fn process_status(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
     let operation = JobCommand::ProcessStatus { name };
@@ -238,7 +238,7 @@ pub(crate) fn process_status(
         password_env,
         super_salt_hex,
         privilege_ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         confirmed,
         false,
     )
@@ -254,7 +254,7 @@ pub(crate) fn process_logs(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -272,7 +272,7 @@ pub(crate) fn process_logs(
         password_env,
         super_salt_hex,
         privilege_ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         confirmed,
         false,
     )
@@ -307,7 +307,7 @@ fn submit_process_operation(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
 ) -> Result<()> {
@@ -323,7 +323,7 @@ fn submit_process_operation(
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged,
         })?

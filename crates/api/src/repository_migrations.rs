@@ -1,16 +1,19 @@
 use std::cmp::Ordering;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
+use vpsman_server_core::{JOB_STATUS_QUEUED, TARGET_STATUS_QUEUED};
 
 use crate::{
     model::{
-        AuditLogView, AuthContext, CreateMigrationLinkRequest, ListQuery, MigrationLinkStatus,
-        MigrationLinkView, RestorePlanStatus, RestorePlanView,
+        AuditLogView, AuthContext, CreateJobRequest, CreateMigrationLinkRequest, JobHistoryView,
+        JobTargetView, ListQuery, MigrationLinkStatus, MigrationLinkView, RestorePlanStatus,
+        RestorePlanView,
     },
     repository::Repository,
+    repository_jobs::JobCreatedWebhookEvent,
     unix_now,
     util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
 };
@@ -123,33 +126,6 @@ impl Repository {
                 Ok(exists)
             }
         }
-    }
-
-    pub(crate) async fn delete_migration_link_for_restore_plan(
-        &self,
-        restore_plan_id: Uuid,
-    ) -> Result<()> {
-        match self {
-            Self::Memory(memory) => {
-                memory
-                    .migration_links
-                    .write()
-                    .await
-                    .retain(|link| link.restore_plan_id != restore_plan_id);
-            }
-            Self::Postgres(pool) => {
-                sqlx::query(
-                    r#"
-                    DELETE FROM migration_links
-                    WHERE restore_plan_id = $1
-                    "#,
-                )
-                .bind(restore_plan_id)
-                .execute(pool)
-                .await?;
-            }
-        }
-        Ok(())
     }
 
     pub(crate) async fn list_migration_links(&self, limit: i64) -> Result<Vec<MigrationLinkView>> {
@@ -318,20 +294,7 @@ impl Repository {
         operator: &AuthContext,
         status: MigrationLinkStatus,
     ) -> Result<MigrationLinkView> {
-        let view = MigrationLinkView {
-            id: Uuid::new_v4(),
-            actor_id: Some(operator.operator.id),
-            restore_plan_id: request.restore_plan_id,
-            source_backup_request_id: restore_plan.source_backup_request_id,
-            source_client_id: restore_plan.source_client_id.clone(),
-            target_client_id: restore_plan.target_client_id.clone(),
-            paths: restore_plan.paths.clone(),
-            include_config: restore_plan.include_config,
-            destination_root: restore_plan.destination_root.clone(),
-            status: status.as_str().to_string(),
-            note: request.note.clone(),
-            created_at: unix_now().to_string(),
-        };
+        let view = migration_link_view_from_request(request, restore_plan, operator, status);
         match self {
             Self::Memory(memory) => {
                 if memory
@@ -421,6 +384,302 @@ impl Repository {
         }
         Ok(view)
     }
+
+    pub(crate) async fn record_migration_run_restore_job(
+        &self,
+        link_request: &CreateMigrationLinkRequest,
+        restore_plan: &RestorePlanView,
+        operator: &AuthContext,
+        job_id: Uuid,
+        job_request: &CreateJobRequest,
+        command_hash: &str,
+        request_fingerprint: &str,
+        resolved_targets: &[String],
+    ) -> Result<MigrationLinkView> {
+        let link = migration_link_view_from_request(
+            link_request,
+            restore_plan,
+            operator,
+            MigrationLinkStatus::LinkedMetadataOnly,
+        );
+        let command_type = job_request.command_type_label().to_string();
+        let operation = job_request
+            .job_command()
+            .map_err(|error| anyhow::anyhow!(error.code))?;
+        let max_timeout_secs = job_request
+            .max_timeout_secs
+            .unwrap_or(vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS)
+            .max(1);
+        let job_audit_metadata = json!({
+            "selector_expression": job_request.selector_expression,
+            "resolved_targets": resolved_targets,
+            "destructive": job_request.destructive,
+            "confirmed": job_request.confirmed,
+            "privileged": job_request.privileged,
+            "force_unprivileged": job_request.force_unprivileged,
+            "source_schedule_id": null,
+            "operator_id": operator.operator.id,
+            "operator_username": operator.operator.username,
+            "operator_role": operator.operator.role,
+            "session_id": operator.session_id,
+            "migration_link_id": link.id,
+            "restore_plan_id": restore_plan.id,
+        });
+        match self {
+            Self::Memory(memory) => {
+                let created_at = unix_now().to_string();
+                let mut links = memory.migration_links.write().await;
+                let mut jobs = memory.jobs.write().await;
+                if links
+                    .iter()
+                    .any(|existing| existing.restore_plan_id == link.restore_plan_id)
+                {
+                    bail!("migration_link_already_exists");
+                }
+                if jobs.iter().any(|job| job.id == job_id) {
+                    bail!("job_id_reused_with_different_request");
+                }
+                links.push(link.clone());
+                jobs.push(JobHistoryView {
+                    id: job_id,
+                    actor_id: Some(operator.operator.id),
+                    command_type: command_type.clone(),
+                    privileged: job_request.privileged,
+                    status: JOB_STATUS_QUEUED.to_string(),
+                    target_count: resolved_targets.len() as i32,
+                    payload_hash: command_hash.to_string(),
+                    max_timeout_secs,
+                    created_at: created_at.clone(),
+                    completed_at: None,
+                });
+                memory
+                    .job_request_fingerprints
+                    .write()
+                    .await
+                    .insert(job_id, request_fingerprint.to_string());
+                memory
+                    .job_operations
+                    .write()
+                    .await
+                    .insert(job_id, operation.clone());
+                memory
+                    .job_timeouts
+                    .write()
+                    .await
+                    .insert(job_id, max_timeout_secs);
+                memory
+                    .job_targets
+                    .write()
+                    .await
+                    .extend(
+                        resolved_targets
+                            .iter()
+                            .cloned()
+                            .map(|client_id| JobTargetView {
+                                job_id,
+                                client_id,
+                                status: TARGET_STATUS_QUEUED.to_string(),
+                                message: None,
+                                exit_code: None,
+                                started_at: None,
+                                deadline_at: None,
+                                completed_at: None,
+                                process_incarnation_id: None,
+                            }),
+                    );
+                let mut audits = memory.audits.write().await;
+                audits.push(migration_link_audit(
+                    &link,
+                    link_request.confirmed,
+                    operator,
+                    created_at.clone(),
+                ));
+                audits.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: Some(operator.operator.id),
+                    action: "job.dispatch_requested".to_string(),
+                    target: "api:/api/v1/jobs".to_string(),
+                    command_hash: Some(command_hash.to_string()),
+                    metadata: job_audit_metadata,
+                    created_at,
+                });
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let locked_restore_plan_id: Option<Uuid> = sqlx::query_scalar(
+                    r#"
+                    SELECT id
+                    FROM restore_plans
+                    WHERE id = $1
+                      AND status = 'planned_metadata_only'
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(restore_plan.id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                if locked_restore_plan_id.is_none() {
+                    bail!("migration_restore_plan_not_metadata_only");
+                }
+                let job_id_exists: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM jobs
+                        WHERE id = $1
+                    )
+                    "#,
+                )
+                .bind(job_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                if job_id_exists {
+                    bail!("job_id_reused_with_different_request");
+                }
+                let row = sqlx::query(
+                    r#"
+                    INSERT INTO migration_links (
+                        id,
+                        actor_id,
+                        restore_plan_id,
+                        source_backup_request_id,
+                        source_client_id,
+                        target_client_id,
+                        paths,
+                        include_config,
+                        destination_root,
+                        status,
+                        note
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    ON CONFLICT (restore_plan_id) DO NOTHING
+                    RETURNING created_at::text AS created_at
+                    "#,
+                )
+                .bind(link.id)
+                .bind(operator.operator.id)
+                .bind(link.restore_plan_id)
+                .bind(link.source_backup_request_id)
+                .bind(&link.source_client_id)
+                .bind(&link.target_client_id)
+                .bind(&link.paths)
+                .bind(link.include_config)
+                .bind(&link.destination_root)
+                .bind(&link.status)
+                .bind(&link.note)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(row) = row else {
+                    bail!("migration_link_already_exists");
+                };
+                let persisted_link = MigrationLinkView {
+                    created_at: row.try_get("created_at")?,
+                    ..link
+                };
+                sqlx::query(
+                    r#"
+                    INSERT INTO jobs (
+                        id, actor_id, command_type, privileged, status,
+                        target_count, payload_hash, operation, source_schedule_id,
+                        request_fingerprint, max_timeout_secs
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, $10)
+                    "#,
+                )
+                .bind(job_id)
+                .bind(operator.operator.id)
+                .bind(&command_type)
+                .bind(job_request.privileged)
+                .bind(JOB_STATUS_QUEUED)
+                .bind(resolved_targets.len() as i32)
+                .bind(command_hash)
+                .bind(sqlx::types::Json(operation.clone()))
+                .bind(request_fingerprint)
+                .bind(max_timeout_secs as i64)
+                .execute(&mut *tx)
+                .await?;
+                for client_id in resolved_targets {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO job_targets (
+                            job_id, client_id, status, message
+                        )
+                        VALUES ($1, $2, $3, NULL)
+                        "#,
+                    )
+                    .bind(job_id)
+                    .bind(client_id)
+                    .bind(TARGET_STATUS_QUEUED)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.operator.id)
+                .bind("migration.linked_metadata_only")
+                .bind(format!("migration_link:{}", persisted_link.id))
+                .bind(&restore_plan.payload_hash)
+                .bind(migration_link_metadata(
+                    &persisted_link,
+                    restore_plan,
+                    link_request.confirmed,
+                    operator,
+                ))
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    "#,
+                )
+                .bind(Uuid::new_v4())
+                .bind(operator.operator.id)
+                .bind("job.dispatch_requested")
+                .bind("api:/api/v1/jobs")
+                .bind(command_hash)
+                .bind(job_audit_metadata)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                self.record_job_created_webhook_event(JobCreatedWebhookEvent {
+                    job_id,
+                    command_type: &command_type,
+                    status: JOB_STATUS_QUEUED,
+                    privileged: job_request.privileged,
+                    command_hash,
+                    resolved_targets,
+                    actor_id: Some(operator.operator.id),
+                    source_schedule_id: None,
+                    operation: Some(&operation),
+                })
+                .await?;
+                return Ok(persisted_link);
+            }
+        }
+        self.record_job_created_webhook_event(JobCreatedWebhookEvent {
+            job_id,
+            command_type: &command_type,
+            status: JOB_STATUS_QUEUED,
+            privileged: job_request.privileged,
+            command_hash,
+            resolved_targets,
+            actor_id: Some(operator.operator.id),
+            source_schedule_id: None,
+            operation: Some(&operation),
+        })
+        .await?;
+        Ok(link)
+    }
 }
 
 fn restore_plan_from_row(row: sqlx::postgres::PgRow) -> Result<RestorePlanView> {
@@ -478,6 +737,28 @@ fn migration_link_audit(
         command_hash: None,
         metadata: migration_link_metadata_from_view(view, confirmed, operator),
         created_at,
+    }
+}
+
+fn migration_link_view_from_request(
+    request: &CreateMigrationLinkRequest,
+    restore_plan: &RestorePlanView,
+    operator: &AuthContext,
+    status: MigrationLinkStatus,
+) -> MigrationLinkView {
+    MigrationLinkView {
+        id: Uuid::new_v4(),
+        actor_id: Some(operator.operator.id),
+        restore_plan_id: request.restore_plan_id,
+        source_backup_request_id: restore_plan.source_backup_request_id,
+        source_client_id: restore_plan.source_client_id.clone(),
+        target_client_id: restore_plan.target_client_id.clone(),
+        paths: restore_plan.paths.clone(),
+        include_config: restore_plan.include_config,
+        destination_root: restore_plan.destination_root.clone(),
+        status: status.as_str().to_string(),
+        note: request.note.clone(),
+        created_at: unix_now().to_string(),
     }
 }
 

@@ -22,18 +22,20 @@ export VPSMAN_SUPER_PASSWORD='<local_super_password>'
 
 `update.sh first-start` downloads GitHub release assets, verifies
 `SHA256SUMS`, installs server, frontend, and host CLI payloads under
-`deploy/runtime`, generates missing compose secrets from
-`VPSMAN_SUPER_PASSWORD`, and starts compose.
+`runtime/`, generates missing compose secrets from `VPSMAN_SUPER_PASSWORD`,
+and starts compose.
 
-If you place release assets manually, use the checkout-local runtime layout:
+If you place release assets manually, use the deployment-directory runtime
+layout. The repository template names that directory `deploy/`, but the
+directory can be copied or renamed:
 
-- server binaries: `deploy/runtime/server/current/bin/`
-- migration SQL files: `deploy/runtime/server/current/migrations/`
-- extracted Vite frontend `dist/`: `deploy/runtime/frontend/current/dist/`
-- host CLI: `deploy/runtime/cli/current/vpsctl`
-- suite config: `deploy/config/vpsman.toml`
+- server binaries: `runtime/server/current/bin/`
+- migration SQL files: `runtime/server/current/migrations/`
+- extracted Vite frontend `dist/`: `runtime/frontend/current/dist/`
+- host CLI: `runtime/cli/current/vpsctl`
+- suite config: `config/vpsman.toml`
 - secret files referenced by suite config: generated under
-  `deploy/config/secrets/`
+  `config/secrets/`
 
 Then start the stack:
 
@@ -59,22 +61,22 @@ The default compose shape uses:
 - Frontend: `http://127.0.0.1:5173`
 - Gateway TCP: `127.0.0.1:9443`
 - Gateway control API: private between API and gateway containers
-- PostgreSQL: `deploy/runtime/postgres/data`
-- Local object storage: `deploy/runtime/data`
-- Suite config: `deploy/config/vpsman.toml`, mounted through the authoritative
+- PostgreSQL: `runtime/postgres/data`
+- Local object storage: `runtime/data`
+- Suite config: `config/vpsman.toml`, mounted through the authoritative
   `/etc/vpsman` config directory in compose
 
-For production, replace placeholder secrets in `deploy/.env`, review
-`deploy/config/vpsman.toml`, and serve the panel through HTTPS while keeping the
+For production, replace placeholder secrets in `.env`, review
+`config/vpsman.toml`, and serve the panel through HTTPS while keeping the
 operator API private behind the control-plane proxy. The API can atomically save
 that same authoritative TOML from the dashboard; runtime data stays under
-`deploy/runtime`, and secrets stay in read-only mounts. Local disk object
+`runtime/`, and secrets stay in read-only mounts. Local disk object
 storage is the default compose shape. Configure the S3/MinIO variables
 only when the deployment should use the implemented S3-compatible adapter for
 backup or update artifacts. To upgrade from GitHub Releases, run
-`./update.sh latest` from `deploy/`; it refreshes the server, frontend, and
+`./update.sh latest` from the deployment directory; it refreshes the server, frontend, and
 host CLI release payloads and recreates the compose services. Runtime state
-stays in checkout-local paths, not Docker-managed named volumes.
+stays under the deployment directory, not Docker-managed named volumes.
 
 ## Start Processes Manually
 

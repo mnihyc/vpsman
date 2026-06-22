@@ -788,16 +788,16 @@ struct WebhookJobSummary {
     target_statuses: Vec<String>,
 }
 
-struct JobCreatedWebhookEvent<'a> {
-    job_id: Uuid,
-    command_type: &'a str,
-    status: &'a str,
-    privileged: bool,
-    command_hash: &'a str,
-    resolved_targets: &'a [String],
-    actor_id: Option<Uuid>,
-    source_schedule_id: Option<Uuid>,
-    operation: Option<&'a JobCommand>,
+pub(crate) struct JobCreatedWebhookEvent<'a> {
+    pub(crate) job_id: Uuid,
+    pub(crate) command_type: &'a str,
+    pub(crate) status: &'a str,
+    pub(crate) privileged: bool,
+    pub(crate) command_hash: &'a str,
+    pub(crate) resolved_targets: &'a [String],
+    pub(crate) actor_id: Option<Uuid>,
+    pub(crate) source_schedule_id: Option<Uuid>,
+    pub(crate) operation: Option<&'a JobCommand>,
 }
 
 struct ScheduleJobOutcome {
@@ -824,7 +824,7 @@ pub(crate) struct ClaimedJobTarget {
     pub(crate) process_incarnation_id: Uuid,
     pub(crate) operation: JobCommand,
     pub(crate) source_schedule_id: Option<Uuid>,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -882,7 +882,7 @@ impl Repository {
                         status,
                         target_count,
                         payload_hash,
-                        timeout_secs,
+                        max_timeout_secs,
                         created_at::text AS created_at,
                         completed_at::text AS completed_at
                     FROM jobs
@@ -903,7 +903,7 @@ impl Repository {
                     status: row.try_get("status")?,
                     target_count: row.try_get("target_count")?,
                     payload_hash: row.try_get("payload_hash")?,
-                    timeout_secs: row.try_get::<i64, _>("timeout_secs")?.max(1) as u64,
+                    max_timeout_secs: row.try_get::<i64, _>("max_timeout_secs")?.max(1) as u64,
                     created_at: row.try_get("created_at")?,
                     completed_at: row.try_get("completed_at")?,
                 }))
@@ -1000,7 +1000,7 @@ impl Repository {
                         status,
                         target_count,
                         payload_hash,
-                        timeout_secs,
+                        max_timeout_secs,
                         created_at::text AS created_at,
                         completed_at::text AS completed_at
                     FROM jobs
@@ -1021,7 +1021,8 @@ impl Repository {
                             status: row.try_get("status")?,
                             target_count: row.try_get("target_count")?,
                             payload_hash: row.try_get("payload_hash")?,
-                            timeout_secs: row.try_get::<i64, _>("timeout_secs")?.max(1) as u64,
+                            max_timeout_secs: row.try_get::<i64, _>("max_timeout_secs")?.max(1)
+                                as u64,
                             created_at: row.try_get("created_at")?,
                             completed_at: row.try_get("completed_at")?,
                         })
@@ -1080,7 +1081,7 @@ impl Repository {
                         status,
                         target_count,
                         payload_hash,
-                        timeout_secs,
+                        max_timeout_secs,
                         created_at::text AS created_at,
                         completed_at::text AS completed_at
                     FROM jobs
@@ -1112,7 +1113,8 @@ impl Repository {
                             status: row.try_get("status")?,
                             target_count: row.try_get("target_count")?,
                             payload_hash: row.try_get("payload_hash")?,
-                            timeout_secs: row.try_get::<i64, _>("timeout_secs")?.max(1) as u64,
+                            max_timeout_secs: row.try_get::<i64, _>("max_timeout_secs")?.max(1)
+                                as u64,
                             created_at: row.try_get("created_at")?,
                             completed_at: row.try_get("completed_at")?,
                         })
@@ -1384,8 +1386,8 @@ impl Repository {
                     status: status.to_string(),
                     target_count: resolved_targets.len() as i32,
                     payload_hash: command_hash.to_string(),
-                    timeout_secs: request
-                        .timeout_secs
+                    max_timeout_secs: request
+                        .max_timeout_secs
                         .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
                         .max(1),
                     created_at: created_at.clone(),
@@ -1433,7 +1435,7 @@ impl Repository {
                     INSERT INTO jobs (
                         id, actor_id, command_type, privileged, status,
                         target_count, payload_hash, operation, request_fingerprint,
-                        timeout_secs, completed_at
+                        max_timeout_secs, completed_at
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
                     "#,
@@ -1447,7 +1449,11 @@ impl Repository {
                 .bind(command_hash)
                 .bind(operation.clone().map(sqlx::types::Json))
                 .bind(request_fingerprint)
-                .bind(request.timeout_secs.unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS) as i64)
+                .bind(
+                    request
+                        .max_timeout_secs
+                        .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS) as i64,
+                )
                 .execute(&mut *tx)
                 .await?;
                 for client_id in &resolved_targets {
@@ -1636,8 +1642,8 @@ impl Repository {
                     status: JOB_STATUS_QUEUED.to_string(),
                     target_count: resolved_targets.len() as i32,
                     payload_hash: command_hash.to_string(),
-                    timeout_secs: request
-                        .timeout_secs
+                    max_timeout_secs: request
+                        .max_timeout_secs
                         .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
                         .max(1),
                     created_at: created_at.clone(),
@@ -1656,7 +1662,7 @@ impl Repository {
                 memory.job_timeouts.write().await.insert(
                     job_id,
                     request
-                        .timeout_secs
+                        .max_timeout_secs
                         .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
                         .max(1),
                 );
@@ -1789,7 +1795,7 @@ impl Repository {
                     INSERT INTO jobs (
                         id, actor_id, command_type, privileged, status,
                         target_count, payload_hash, operation, source_schedule_id, request_fingerprint,
-                        timeout_secs
+                        max_timeout_secs
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     "#,
@@ -1804,7 +1810,7 @@ impl Repository {
                 .bind(sqlx::types::Json(operation.clone()))
                 .bind(source_schedule_id)
                 .bind(request_fingerprint)
-                .bind(request.timeout_secs.unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS) as i64)
+                .bind(request.max_timeout_secs.unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS) as i64)
                 .execute(&mut *tx)
                 .await?;
                 for client_id in resolved_targets {
@@ -1968,7 +1974,7 @@ impl Repository {
                     {
                         continue;
                     }
-                    let timeout_secs = timeouts
+                    let max_timeout_secs = timeouts
                         .get(&target.job_id)
                         .copied()
                         .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
@@ -1988,7 +1994,7 @@ impl Repository {
                         process_incarnation_id: Uuid::nil(),
                         operation,
                         source_schedule_id: source_schedule_ids.get(&target.job_id).copied(),
-                        timeout_secs,
+                        max_timeout_secs,
                     });
                 }
                 let claimed_job_ids = claimed
@@ -2020,7 +2026,7 @@ impl Repository {
                             job.payload_hash,
                             job.operation,
                             job.source_schedule_id,
-                            job.timeout_secs,
+                            job.max_timeout_secs,
                             clients.process_incarnation_id AS client_process_incarnation_id
                         FROM job_targets target
                         JOIN jobs job ON job.id = target.job_id
@@ -2202,7 +2208,7 @@ impl Repository {
                             deadline_at = COALESCE(
                                 target.deadline_at,
                                 COALESCE(target.started_at, now())
-                                    + make_interval(secs => (due.timeout_secs + $5)::integer)
+                                    + make_interval(secs => (due.max_timeout_secs + $5)::integer)
                             ),
                             last_dispatch_error = NULL
                         FROM due
@@ -2220,7 +2226,7 @@ impl Repository {
                             ) AS process_incarnation_id,
                             due.operation,
                             due.source_schedule_id,
-                            due.timeout_secs
+                            due.max_timeout_secs
                     ),
                     promoted_jobs AS (
                         UPDATE jobs job
@@ -2243,7 +2249,7 @@ impl Repository {
                         updated_targets.process_incarnation_id,
                         updated_targets.operation,
                         updated_targets.source_schedule_id,
-                        updated_targets.timeout_secs,
+                        updated_targets.max_timeout_secs,
                         (SELECT count(*) FROM promoted_jobs) AS promoted_jobs
                     FROM updated_targets
                     "#,
@@ -2258,7 +2264,8 @@ impl Repository {
                 rows.into_iter()
                     .map(|row| {
                         let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
-                        let timeout_secs = row.try_get::<i64, _>("timeout_secs")?.max(1) as u64;
+                        let max_timeout_secs =
+                            row.try_get::<i64, _>("max_timeout_secs")?.max(1) as u64;
                         Ok(ClaimedJobTarget {
                             job_id: row.try_get("job_id")?,
                             client_id: row.try_get("client_id")?,
@@ -2268,7 +2275,7 @@ impl Repository {
                             process_incarnation_id: row.try_get("process_incarnation_id")?,
                             operation: operation.0,
                             source_schedule_id: row.try_get("source_schedule_id")?,
-                            timeout_secs,
+                            max_timeout_secs,
                         })
                     })
                     .collect()
@@ -2848,13 +2855,13 @@ impl Repository {
                     else {
                         continue;
                     };
-                    let timeout_secs = timeouts
+                    let max_timeout_secs = timeouts
                         .get(&target.job_id)
                         .copied()
                         .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
                         .max(1)
                         .saturating_add(control_deadline_extra_secs);
-                    if now.saturating_sub(started_at) < timeout_secs {
+                    if now.saturating_sub(started_at) < max_timeout_secs {
                         continue;
                     }
                     let (status, message, output_value, exit_code) = if matches!(
@@ -2972,7 +2979,7 @@ impl Repository {
                       AND target.deadline_at IS NOT NULL
                       AND target.deadline_at <= now()
                       AND target.started_at IS NOT NULL
-                      AND target.started_at + make_interval(secs => (job.timeout_secs + $2)::integer) <= now()
+                      AND target.started_at + make_interval(secs => (job.max_timeout_secs + $2)::integer) <= now()
                     ORDER BY target.deadline_at ASC, target.job_id, target.client_id
                     LIMIT $1
                     FOR UPDATE SKIP LOCKED
@@ -3058,7 +3065,7 @@ impl Repository {
                           AND target.deadline_at IS NOT NULL
                           AND target.deadline_at <= now()
                           AND target.started_at IS NOT NULL
-                          AND target.started_at + make_interval(secs => (job.timeout_secs + $5)::integer) <= now()
+                          AND target.started_at + make_interval(secs => (job.max_timeout_secs + $5)::integer) <= now()
                           AND (
                             ($6::uuid IS NULL AND target.process_incarnation_id IS NULL)
                             OR target.process_incarnation_id = $6::uuid
@@ -3846,6 +3853,57 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn active_agent_update_check_target_matches(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        process_incarnation_id: Uuid,
+    ) -> Result<bool> {
+        match self {
+            Self::Memory(memory) => {
+                let operations = memory.job_operations.read().await;
+                if !matches!(
+                    operations.get(&job_id),
+                    Some(JobCommand::AgentUpdateCheck { .. })
+                ) {
+                    return Ok(false);
+                }
+                Ok(memory.job_targets.read().await.iter().any(|target| {
+                    target.job_id == job_id
+                        && target.client_id == client_id
+                        && target.completed_at.is_none()
+                        && matches!(
+                            target.status.as_str(),
+                            TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING
+                        )
+                }))
+            }
+            Self::Postgres(pool) => {
+                let matches: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM job_targets target
+                        JOIN jobs job ON job.id = target.job_id
+                        WHERE target.job_id = $1
+                          AND target.client_id = $2
+                          AND target.completed_at IS NULL
+                          AND target.status IN ('dispatching', 'running')
+                          AND target.process_incarnation_id = $3
+                          AND COALESCE(job.operation ->> 'type', '') = 'agent_update_check'
+                    )
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(process_incarnation_id)
+                .fetch_one(pool)
+                .await?;
+                Ok(matches)
+            }
+        }
+    }
+
     async fn record_schedule_job_outcome(&self, job_id: Uuid, status: &str) -> Result<()> {
         let Some(summary) = self.webhook_job_summary(job_id).await? else {
             return Ok(());
@@ -4218,7 +4276,7 @@ impl Repository {
         Ok(())
     }
 
-    async fn record_job_created_webhook_event(
+    pub(crate) async fn record_job_created_webhook_event(
         &self,
         event: JobCreatedWebhookEvent<'_>,
     ) -> Result<()> {

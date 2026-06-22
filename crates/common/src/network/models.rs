@@ -133,7 +133,7 @@ pub struct TunnelObservation {
 pub struct RuntimeTunnelCommand {
     pub argv: Vec<String>,
     #[serde(default = "default_runtime_command_timeout_secs")]
-    pub timeout_secs: u64,
+    pub max_timeout_secs: u64,
     #[serde(default = "default_runtime_command_max_output_bytes")]
     pub max_output_bytes: u32,
 }
@@ -142,7 +142,7 @@ impl Default for RuntimeTunnelCommand {
     fn default() -> Self {
         Self {
             argv: Vec::new(),
-            timeout_secs: default_runtime_command_timeout_secs(),
+            max_timeout_secs: default_runtime_command_timeout_secs(),
             max_output_bytes: default_runtime_command_max_output_bytes(),
         }
     }

@@ -48,7 +48,7 @@ export function buildBulkJobProgress({
   targetCount,
   targetRecords,
   targets,
-  timeoutSecs,
+  maxTimeoutSecs,
 }: {
   jobId: string;
   nowMs?: number;
@@ -56,14 +56,14 @@ export function buildBulkJobProgress({
   targetCount?: number;
   targetRecords: JobTargetRecord[];
   targets: AgentView[];
-  timeoutSecs?: number;
+  maxTimeoutSecs?: number;
 }): BulkJobProgress {
   const targetRecordByClient = new Map(targetRecords.map((target) => [target.client_id, target]));
   const targetByClient = new Map(targets.map((target) => [target.id, target]));
   const outputClientIds = new Set(outputs.filter((output) => output.done).map((output) => output.client_id));
   const total = Math.max(0, targetCount ?? targets.length, targets.length, targetRecords.length);
-  const jobTimeoutMs = Number.isFinite(timeoutSecs ?? NaN)
-    ? Math.ceil(Math.max(1, timeoutSecs ?? 1)) * 1000
+  const jobMaxTimeoutMs = Number.isFinite(maxTimeoutSecs ?? NaN)
+    ? Math.ceil(Math.max(1, maxTimeoutSecs ?? 1)) * 1000
     : null;
   let agent_timeout = 0;
   let agent_lost = 0;
@@ -140,12 +140,12 @@ export function buildBulkJobProgress({
       retrieved += 1;
     }
     if (
-      jobTimeoutMs !== null &&
+      jobMaxTimeoutMs !== null &&
       (targetRecord.status === "dispatching" || targetRecord.status === "running")
     ) {
       const startedAtMs = parseBackendTimestampMs(targetRecord.started_at);
       const deadlineAtMs = parseBackendTimestampMs(targetRecord.deadline_at);
-      if (startedAtMs !== null && deadlineAtMs !== null && nowMs >= startedAtMs + jobTimeoutMs) {
+      if (startedAtMs !== null && deadlineAtMs !== null && nowMs >= startedAtMs + jobMaxTimeoutMs) {
         if (nowMs >= deadlineAtMs) {
           deadline_overdue += 1;
         } else {
@@ -227,7 +227,7 @@ export async function waitForBulkJobTargets(
     onProgress?: (progress: BulkJobProgress) => void;
     targetCount?: number;
     targets: AgentView[];
-    timeoutSecs?: number;
+    maxTimeoutSecs?: number;
   },
 ): Promise<{ progress: BulkJobProgress; targets: JobTargetRecord[] }> {
   let lastTargets: JobTargetRecord[] = [];
@@ -236,7 +236,7 @@ export async function waitForBulkJobTargets(
     targetCount: options.targetCount,
     targetRecords: lastTargets,
     targets: options.targets,
-    timeoutSecs: options.timeoutSecs,
+    maxTimeoutSecs: options.maxTimeoutSecs,
   });
   const intervalMs = options.intervalMs ?? DEFAULT_BULK_PROGRESS_POLL_INTERVAL_MS;
   for (;;) {
@@ -250,7 +250,7 @@ export async function waitForBulkJobTargets(
       targetCount: options.targetCount,
       targetRecords: lastTargets,
       targets: options.targets,
-      timeoutSecs: options.timeoutSecs,
+      maxTimeoutSecs: options.maxTimeoutSecs,
     });
     options.onProgress?.(progress);
     if (progress.total === 0 || progress.terminal >= progress.total) {

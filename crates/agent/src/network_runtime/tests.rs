@@ -28,7 +28,7 @@ async fn iproute2_reconciler_builds_create_addr_up_and_tc_steps() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -70,7 +70,7 @@ async fn iproute2_reconciler_keeps_matching_existing_link_instead_of_changing_id
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -113,7 +113,7 @@ async fn iproute2_reconciler_rejects_conflicting_existing_link() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -146,7 +146,7 @@ async fn iproute2_reconciler_rejects_conflicting_existing_tunnel_address() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -169,7 +169,7 @@ async fn unprivileged_agent_reports_degraded_without_mutating() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(1000),
     })
     .await
@@ -198,7 +198,7 @@ async fn iproute2_reconciler_uses_custom_fou_runtime_options() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -216,7 +216,7 @@ async fn iproute2_reconciler_uses_custom_fou_runtime_options() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -244,7 +244,7 @@ async fn external_adapter_expands_placeholders_and_runs_status() {
                 "{local_address}".to_string(),
                 "{remote_address}".to_string(),
             ],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             max_output_bytes: 4096,
         }),
         status: Some(RuntimeTunnelCommand {
@@ -253,7 +253,7 @@ async fn external_adapter_expands_placeholders_and_runs_status() {
                 "status".to_string(),
                 "{plan}".to_string(),
             ],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             max_output_bytes: 4096,
         }),
         ..RuntimeTunnelControl::default()
@@ -264,7 +264,7 @@ async fn external_adapter_expands_placeholders_and_runs_status() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -327,7 +327,7 @@ async fn external_adapter_can_run_unprivileged_when_policy_allows_it() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(1000),
     })
     .await
@@ -374,7 +374,7 @@ async fn reconciler_removes_explicit_stale_links_and_replaces_routes() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -419,7 +419,7 @@ async fn reconciler_only_deletes_interfaces_explicitly_declared_stale() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -440,7 +440,7 @@ async fn reconciler_only_deletes_interfaces_explicitly_declared_stale() {
         config: &config,
         plan: &promoted,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -475,7 +475,7 @@ async fn iproute2_reconciler_compensates_new_link_after_required_failure() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -525,7 +525,7 @@ async fn external_adapter_reconciler_compensates_with_stop_after_required_failur
                 "start".to_string(),
                 "{interface}".to_string(),
             ],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             max_output_bytes: 4096,
         }),
         stop: Some(RuntimeTunnelCommand {
@@ -534,7 +534,7 @@ async fn external_adapter_reconciler_compensates_with_stop_after_required_failur
                 "stop".to_string(),
                 "{interface}".to_string(),
             ],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             max_output_bytes: 4096,
         }),
         cleanup: Some(RuntimeTunnelCommand {
@@ -543,7 +543,7 @@ async fn external_adapter_reconciler_compensates_with_stop_after_required_failur
                 "cleanup".to_string(),
                 "{interface}".to_string(),
             ],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             max_output_bytes: 4096,
         }),
         status: Some(RuntimeTunnelCommand {
@@ -552,7 +552,7 @@ async fn external_adapter_reconciler_compensates_with_stop_after_required_failur
                 "status".to_string(),
                 "{interface}".to_string(),
             ],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             max_output_bytes: 4096,
         }),
         ..RuntimeTunnelControl::default()
@@ -563,7 +563,7 @@ async fn external_adapter_reconciler_compensates_with_stop_after_required_failur
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -613,7 +613,7 @@ async fn iproute2_remove_deletes_existing_link_and_declared_routes() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -646,7 +646,7 @@ async fn external_adapter_remove_runs_stop_then_status() {
                 "stop".to_string(),
                 "{interface}".to_string(),
             ],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             max_output_bytes: 4096,
         }),
         cleanup: Some(RuntimeTunnelCommand {
@@ -655,7 +655,7 @@ async fn external_adapter_remove_runs_stop_then_status() {
                 "cleanup".to_string(),
                 "{interface}".to_string(),
             ],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             max_output_bytes: 4096,
         }),
         status: Some(RuntimeTunnelCommand {
@@ -664,7 +664,7 @@ async fn external_adapter_remove_runs_stop_then_status() {
                 "status".to_string(),
                 "{plan}".to_string(),
             ],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             max_output_bytes: 4096,
         }),
         ..RuntimeTunnelControl::default()
@@ -675,7 +675,7 @@ async fn external_adapter_remove_runs_stop_then_status() {
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await
@@ -712,7 +712,7 @@ async fn external_adapter_remove_reports_unavailable_without_remove_lifecycle() 
                 "status".to_string(),
                 "{interface}".to_string(),
             ],
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             max_output_bytes: 4096,
         }),
         ..RuntimeTunnelControl::default()
@@ -723,7 +723,7 @@ async fn external_adapter_remove_reports_unavailable_without_remove_lifecycle() 
         config: &config,
         plan: &plan,
         side: TunnelEndpointSide::Left,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         effective_uid_override: Some(0),
     })
     .await

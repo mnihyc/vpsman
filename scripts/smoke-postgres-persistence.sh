@@ -793,7 +793,7 @@ rejected_job_json="$(api_post_expect_status "/api/v1/jobs" "$(jq -n --arg job_id
   "command": "uptime",
   "argv": ["/usr/bin/uptime"],
   "operation": null,
-  "timeout_secs": 5,
+  "max_timeout_secs": 5,
   "privileged": true,
   "confirmed": true
 }')" "403")"
@@ -810,7 +810,7 @@ command_template_request="$(jq -n '{
     pty: false
   },
   defaults: {
-    timeout_secs: 15,
+    max_timeout_secs: 15,
     confirmed: true
   },
   confirmed: true
@@ -858,7 +858,7 @@ rejected_job_payload="$(jq -n --arg job_id "$rejected_retry_job_id" '{
   command: "idempotent-uptime",
   argv: ["/usr/bin/uptime"],
   operation: null,
-  timeout_secs: 5,
+  max_timeout_secs: 5,
   privileged: true,
   confirmed: true
 }')"

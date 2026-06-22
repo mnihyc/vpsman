@@ -19,7 +19,7 @@ const READ_SMALL_LIMIT_BYTES: u64 = 4096;
 pub(crate) struct NetworkInterfacesInput<'a> {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) config: &'a AgentConfig,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -62,7 +62,7 @@ pub(crate) async fn execute_network_interfaces_command(
     input: NetworkInterfacesInput<'_>,
 ) -> Result<Vec<CommandOutput>> {
     time::timeout(
-        Duration::from_secs(input.timeout_secs.max(1)),
+        Duration::from_secs(input.max_timeout_secs.max(1)),
         inspect_network_interfaces(input),
     )
     .await

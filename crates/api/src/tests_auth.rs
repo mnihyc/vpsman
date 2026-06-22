@@ -2085,7 +2085,7 @@ async fn memory_repository_routes_require_bearer_tokens() {
                 command: "uptime".to_string(),
                 argv: Vec::new(),
                 operation: None,
-                timeout_secs: None,
+                max_timeout_secs: None,
                 force_unprivileged: false,
                 privileged: false,
                 privilege_assertion: None,

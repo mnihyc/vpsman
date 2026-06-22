@@ -1,5 +1,5 @@
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
-import { MAX_CONFIGURABLE_JOB_TIMEOUT_SECS } from "../jobTimeout";
+import { MAX_CONFIGURABLE_JOB_TIMEOUT_SECS } from "../jobMaxTimeout";
 import type { AgentView } from "../types";
 
 export function JobTargetSelector({
@@ -37,23 +37,23 @@ export function JobTargetSelector({
 }
 
 export function DispatchOptions({
-  setTimeoutSecs,
-  timeoutSecs,
+  setMaxTimeoutSecs,
+  maxTimeoutSecs,
 }: {
-  setTimeoutSecs: (value: string) => void;
-  timeoutSecs: string;
+  setMaxTimeoutSecs: (value: string) => void;
+  maxTimeoutSecs: string;
 }) {
   return (
     <div className="dispatchControls">
       <label>
-        <span>Timeout</span>
+        <span>Max timeout</span>
         <input
-          aria-label="Timeout seconds"
+          aria-label="Max timeout seconds"
           inputMode="numeric"
           maxLength={String(MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).length}
           onChange={(event) => {
             if (/^\d*$/.test(event.target.value)) {
-              setTimeoutSecs(event.target.value);
+              setMaxTimeoutSecs(event.target.value);
             }
           }}
           onKeyDown={(event) => {
@@ -70,9 +70,9 @@ export function DispatchOptions({
             }
           }}
           pattern="[0-9]*"
-          placeholder="Default agent timeout (1h)"
+          placeholder="Default max job timeout (1h)"
           type="text"
-          value={timeoutSecs}
+          value={maxTimeoutSecs}
         />
       </label>
     </div>

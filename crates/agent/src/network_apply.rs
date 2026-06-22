@@ -39,7 +39,7 @@ pub(crate) struct NetworkApplyInput<'a> {
     pub(crate) config_sha256_hex: Option<&'a str>,
     pub(crate) ifupdown_sha256_hex: &'a str,
     pub(crate) bird2_sha256_hex: &'a str,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
 
@@ -48,7 +48,7 @@ pub(crate) struct NetworkRollbackInput<'a> {
     pub(crate) config: &'a AgentConfig,
     pub(crate) plan: &'a TunnelPlan,
     pub(crate) side: TunnelEndpointSide,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
 
@@ -60,7 +60,7 @@ pub(crate) struct NetworkOspfCostUpdateInput<'a> {
     pub(crate) current_ospf_cost: u16,
     pub(crate) recommended_ospf_cost: u16,
     pub(crate) bird2_sha256_hex: &'a str,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
 
@@ -69,7 +69,7 @@ pub(crate) async fn execute_network_apply_command(
 ) -> Result<Vec<CommandOutput>> {
     let cancel_token = input.cancel_token.clone();
     run_cancelable("network_apply", cancel_token, async move {
-        let deadline = network_operation_deadline(input.timeout_secs);
+        let deadline = network_operation_deadline(input.max_timeout_secs);
         apply_network_plan(input, deadline).await
     })
     .await
@@ -80,7 +80,7 @@ pub(crate) async fn execute_network_rollback_command(
 ) -> Result<Vec<CommandOutput>> {
     let cancel_token = input.cancel_token.clone();
     run_cancelable("network_rollback", cancel_token, async move {
-        let deadline = network_operation_deadline(input.timeout_secs);
+        let deadline = network_operation_deadline(input.max_timeout_secs);
         rollback_network_plan(input, deadline).await
     })
     .await
@@ -91,7 +91,7 @@ pub(crate) async fn execute_network_ospf_cost_update_command(
 ) -> Result<Vec<CommandOutput>> {
     let cancel_token = input.cancel_token.clone();
     run_cancelable("network_ospf_cost_update", cancel_token, async move {
-        let deadline = network_operation_deadline(input.timeout_secs);
+        let deadline = network_operation_deadline(input.max_timeout_secs);
         update_network_ospf_cost(input, deadline).await
     })
     .await
@@ -155,7 +155,7 @@ async fn apply_network_plan(
                 config: input.config,
                 plan: input.plan,
                 side: input.side,
-                timeout_secs: input.timeout_secs,
+                max_timeout_secs: input.max_timeout_secs,
                 #[cfg(test)]
                 effective_uid_override: None,
             },
@@ -535,7 +535,7 @@ async fn rollback_network_plan(
                 config: input.config,
                 plan: input.plan,
                 side: input.side,
-                timeout_secs: input.timeout_secs,
+                max_timeout_secs: input.max_timeout_secs,
                 #[cfg(test)]
                 effective_uid_override: None,
             },
@@ -711,8 +711,8 @@ async fn apply_updates_with_rollback(
     Ok(applied)
 }
 
-fn network_operation_deadline(timeout_secs: u64) -> time::Instant {
-    time::Instant::now() + Duration::from_secs(timeout_secs.max(1))
+fn network_operation_deadline(max_timeout_secs: u64) -> time::Instant {
+    time::Instant::now() + Duration::from_secs(max_timeout_secs.max(1))
 }
 
 fn ensure_network_deadline(deadline: time::Instant, operation: &str) -> Result<()> {

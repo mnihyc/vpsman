@@ -26,11 +26,11 @@ pub(crate) async fn execute_file_pull_with_timeout(
     job_id: uuid::Uuid,
     path: &str,
     follow_symlinks: bool,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
     time::timeout(
-        Duration::from_secs(timeout_secs.max(1)),
+        Duration::from_secs(max_timeout_secs.max(1)),
         execute_file_pull(job_id, path, follow_symlinks, output_tx),
     )
     .await

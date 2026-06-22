@@ -22,7 +22,7 @@ pub(crate) struct AgentUpdateOptions {
     pub(crate) password_env: String,
     pub(crate) super_salt_hex: Option<String>,
     pub(crate) privilege_ttl_secs: u64,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
 }
@@ -36,7 +36,7 @@ pub(crate) struct AgentUpdateCheckOptions {
     pub(crate) password_env: String,
     pub(crate) super_salt_hex: Option<String>,
     pub(crate) privilege_ttl_secs: u64,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
 }
@@ -64,7 +64,7 @@ pub(crate) fn hot_config(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
 ) -> Result<()> {
@@ -109,7 +109,7 @@ pub(crate) fn hot_config(
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged,
         })?
@@ -126,7 +126,7 @@ pub(crate) fn config_patch(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
 ) -> Result<()> {
@@ -154,7 +154,7 @@ pub(crate) fn config_patch(
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged,
         })?
@@ -188,7 +188,7 @@ pub(crate) fn agent_update(
         &password,
         &salt_hex,
         options.privilege_ttl_secs,
-        options.timeout_secs,
+        options.max_timeout_secs,
         options.force_unprivileged,
         true,
     )?;
@@ -209,7 +209,7 @@ pub(crate) fn agent_update(
                 "destructive": false,
                 "confirmed": options.confirmed,
                 "force_unprivileged": options.force_unprivileged,
-                "timeout_secs": options.timeout_secs,
+                "max_timeout_secs": options.max_timeout_secs,
                 "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
@@ -252,7 +252,7 @@ pub(crate) fn agent_update_check(
         &password,
         &salt_hex,
         options.privilege_ttl_secs,
-        options.timeout_secs,
+        options.max_timeout_secs,
         options.force_unprivileged,
         true,
     )?;
@@ -273,7 +273,7 @@ pub(crate) fn agent_update_check(
                 "destructive": false,
                 "confirmed": options.confirmed,
                 "force_unprivileged": options.force_unprivileged,
-                "timeout_secs": options.timeout_secs,
+                "max_timeout_secs": options.max_timeout_secs,
                 "privilege_assertion": privilege.privilege_assertion,
             }),
         )?
@@ -375,7 +375,7 @@ pub(crate) fn agent_update_activate(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     restart_agent: bool,
     confirmed: bool,
     force_unprivileged: bool,
@@ -401,7 +401,7 @@ pub(crate) fn agent_update_activate(
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged,
         })?
@@ -418,7 +418,7 @@ pub(crate) fn agent_update_rollback(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
 ) -> Result<()> {
@@ -445,7 +445,7 @@ pub(crate) fn agent_update_rollback(
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged,
         })?

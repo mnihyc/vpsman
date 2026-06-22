@@ -23,7 +23,7 @@ use crate::{
 pub(crate) struct VtyHotConfigRequest {
     config_file: PathBuf,
     selection: VtyJobSelection,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     privilege_ttl_secs: u64,
     force_unprivileged: bool,
 }
@@ -31,7 +31,7 @@ pub(crate) struct VtyHotConfigRequest {
 #[derive(Debug)]
 pub(crate) struct VtyDataSourceHotConfigApplyRequest {
     client_id: String,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     privilege_ttl_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
@@ -42,7 +42,7 @@ pub(crate) struct VtyAgentUpdateRequest {
     artifact_url: String,
     sha256_hex: String,
     selection: VtyJobSelection,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     privilege_ttl_secs: u64,
     force_unprivileged: bool,
 }
@@ -53,7 +53,7 @@ pub(crate) struct VtyAgentUpdateCheckRequest {
     activate: bool,
     restart_agent: bool,
     selection: VtyJobSelection,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     privilege_ttl_secs: u64,
     force_unprivileged: bool,
 }
@@ -63,7 +63,7 @@ pub(crate) struct VtyAgentUpdateActivateRequest {
     staged_sha256_hex: String,
     restart_agent: bool,
     selection: VtyJobSelection,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     privilege_ttl_secs: u64,
     force_unprivileged: bool,
 }
@@ -72,7 +72,7 @@ pub(crate) struct VtyAgentUpdateActivateRequest {
 pub(crate) struct VtyAgentUpdateRollbackRequest {
     rollback_sha256_hex: Option<String>,
     selection: VtyJobSelection,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     privilege_ttl_secs: u64,
     force_unprivileged: bool,
 }
@@ -89,7 +89,7 @@ struct VtyTarget {
 
 pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigRequest> {
     let mut config_file = None;
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut privilege_ttl_secs = 300_u64;
     let mut force_unprivileged = false;
     let mut target_tokens = Vec::new();
@@ -104,12 +104,12 @@ pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigReques
                 ));
                 index += 2;
             }
-            "--timeout" => {
-                timeout_secs = tokens
+            "--max-timeout" => {
+                max_timeout_secs = tokens
                     .get(index + 1)
-                    .context("--timeout requires a value")?
+                    .context("--max-timeout requires a value")?
                     .parse()
-                    .context("--timeout must be an integer")?;
+                    .context("--max-timeout must be an integer")?;
                 index += 2;
             }
             "--privilege-ttl" => {
@@ -134,8 +134,8 @@ pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigReques
         }
     }
     anyhow::ensure!(
-        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&timeout_secs),
-        "hot-config --timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&max_timeout_secs),
+        "hot-config --max-timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
     );
     anyhow::ensure!(
         (15..=300).contains(&privilege_ttl_secs),
@@ -149,7 +149,7 @@ pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigReques
     Ok(VtyHotConfigRequest {
         config_file: config_file.context("hot-config requires --config-file <path>")?,
         selection,
-        timeout_secs,
+        max_timeout_secs,
         privilege_ttl_secs,
         force_unprivileged,
     })
@@ -159,7 +159,7 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
     tokens: &[&str],
 ) -> Result<VtyDataSourceHotConfigApplyRequest> {
     let mut client_id = None;
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut privilege_ttl_secs = 300_u64;
     let mut confirmed = false;
     let mut force_unprivileged = false;
@@ -175,12 +175,12 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
                 );
                 index += 2;
             }
-            "--timeout" => {
-                timeout_secs = tokens
+            "--max-timeout" => {
+                max_timeout_secs = tokens
                     .get(index + 1)
-                    .context("--timeout requires a value")?
+                    .context("--max-timeout requires a value")?
                     .parse()
-                    .context("--timeout must be an integer")?;
+                    .context("--max-timeout must be an integer")?;
                 index += 2;
             }
             "--privilege-ttl" => {
@@ -205,7 +205,7 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
         }
     }
     validate_config_dispatch_bounds(
-        timeout_secs,
+        max_timeout_secs,
         privilege_ttl_secs,
         "data-source-hot-config-apply",
     )?;
@@ -220,7 +220,7 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
     );
     Ok(VtyDataSourceHotConfigApplyRequest {
         client_id,
-        timeout_secs,
+        max_timeout_secs,
         privilege_ttl_secs,
         confirmed,
         force_unprivileged,
@@ -230,7 +230,7 @@ pub(crate) fn parse_vty_data_source_hot_config_apply(
 pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRequest> {
     let mut artifact_url = None;
     let mut sha256_hex = None;
-    let mut timeout_secs = 300_u64;
+    let mut max_timeout_secs = 300_u64;
     let mut privilege_ttl_secs = 300_u64;
     let mut force_unprivileged = false;
     let mut target_tokens = Vec::new();
@@ -255,12 +255,12 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
                 );
                 index += 2;
             }
-            "--timeout" => {
-                timeout_secs = tokens
+            "--max-timeout" => {
+                max_timeout_secs = tokens
                     .get(index + 1)
-                    .context("--timeout requires a value")?
+                    .context("--max-timeout requires a value")?
                     .parse()
-                    .context("--timeout must be an integer")?;
+                    .context("--max-timeout must be an integer")?;
                 index += 2;
             }
             "--privilege-ttl" => {
@@ -285,8 +285,8 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
         }
     }
     anyhow::ensure!(
-        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&timeout_secs),
-        "agent-update --timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&max_timeout_secs),
+        "agent-update --max-timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
     );
     anyhow::ensure!(
         (15..=300).contains(&privilege_ttl_secs),
@@ -304,7 +304,7 @@ pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRe
         artifact_url,
         sha256_hex: sha256_hex.to_ascii_lowercase(),
         selection,
-        timeout_secs,
+        max_timeout_secs,
         privilege_ttl_secs,
         force_unprivileged,
     })
@@ -314,7 +314,7 @@ pub(crate) fn parse_vty_agent_update_check(tokens: &[&str]) -> Result<VtyAgentUp
     let mut version_url = None;
     let mut activate = true;
     let mut restart_agent = true;
-    let mut timeout_secs = 300_u64;
+    let mut max_timeout_secs = 300_u64;
     let mut privilege_ttl_secs = 300_u64;
     let mut force_unprivileged = false;
     let mut target_tokens = Vec::new();
@@ -347,12 +347,12 @@ pub(crate) fn parse_vty_agent_update_check(tokens: &[&str]) -> Result<VtyAgentUp
                 restart_agent = false;
                 index += 1;
             }
-            "--timeout" => {
-                timeout_secs = tokens
+            "--max-timeout" => {
+                max_timeout_secs = tokens
                     .get(index + 1)
-                    .context("--timeout requires a value")?
+                    .context("--max-timeout requires a value")?
                     .parse()
-                    .context("--timeout must be an integer")?;
+                    .context("--max-timeout must be an integer")?;
                 index += 2;
             }
             "--privilege-ttl" => {
@@ -376,7 +376,7 @@ pub(crate) fn parse_vty_agent_update_check(tokens: &[&str]) -> Result<VtyAgentUp
             }
         }
     }
-    validate_config_dispatch_bounds(timeout_secs, privilege_ttl_secs, "agent-update-check")?;
+    validate_config_dispatch_bounds(max_timeout_secs, privilege_ttl_secs, "agent-update-check")?;
     if let Some(version_url) = version_url.as_deref() {
         validate_update_check_version_url(version_url)?;
     }
@@ -390,7 +390,7 @@ pub(crate) fn parse_vty_agent_update_check(tokens: &[&str]) -> Result<VtyAgentUp
         activate,
         restart_agent,
         selection,
-        timeout_secs,
+        max_timeout_secs,
         privilege_ttl_secs,
         force_unprivileged,
     })
@@ -400,7 +400,7 @@ pub(crate) fn parse_vty_agent_update_activate(
     tokens: &[&str],
 ) -> Result<VtyAgentUpdateActivateRequest> {
     let mut staged_sha256_hex = None;
-    let mut timeout_secs = 60_u64;
+    let mut max_timeout_secs = 60_u64;
     let mut privilege_ttl_secs = 300_u64;
     let mut restart_agent = false;
     let mut force_unprivileged = false;
@@ -417,12 +417,12 @@ pub(crate) fn parse_vty_agent_update_activate(
                 );
                 index += 2;
             }
-            "--timeout" => {
-                timeout_secs = tokens
+            "--max-timeout" => {
+                max_timeout_secs = tokens
                     .get(index + 1)
-                    .context("--timeout requires a value")?
+                    .context("--max-timeout requires a value")?
                     .parse()
-                    .context("--timeout must be an integer")?;
+                    .context("--max-timeout must be an integer")?;
                 index += 2;
             }
             "--privilege-ttl" => {
@@ -450,7 +450,11 @@ pub(crate) fn parse_vty_agent_update_activate(
             }
         }
     }
-    validate_config_dispatch_bounds(timeout_secs, privilege_ttl_secs, "agent-update-activate")?;
+    validate_config_dispatch_bounds(
+        max_timeout_secs,
+        privilege_ttl_secs,
+        "agent-update-activate",
+    )?;
     let staged_sha256_hex =
         staged_sha256_hex.context("agent-update-activate requires --staged-sha256-hex <sha256>")?;
     let staged_sha256_hex = validate_sha256(&staged_sha256_hex, "--staged-sha256-hex")?;
@@ -463,7 +467,7 @@ pub(crate) fn parse_vty_agent_update_activate(
         staged_sha256_hex,
         restart_agent,
         selection,
-        timeout_secs,
+        max_timeout_secs,
         privilege_ttl_secs,
         force_unprivileged,
     })
@@ -473,7 +477,7 @@ pub(crate) fn parse_vty_agent_update_rollback(
     tokens: &[&str],
 ) -> Result<VtyAgentUpdateRollbackRequest> {
     let mut rollback_sha256_hex = None;
-    let mut timeout_secs = 60_u64;
+    let mut max_timeout_secs = 60_u64;
     let mut privilege_ttl_secs = 300_u64;
     let mut force_unprivileged = false;
     let mut target_tokens = Vec::new();
@@ -489,12 +493,12 @@ pub(crate) fn parse_vty_agent_update_rollback(
                 );
                 index += 2;
             }
-            "--timeout" => {
-                timeout_secs = tokens
+            "--max-timeout" => {
+                max_timeout_secs = tokens
                     .get(index + 1)
-                    .context("--timeout requires a value")?
+                    .context("--max-timeout requires a value")?
                     .parse()
-                    .context("--timeout must be an integer")?;
+                    .context("--max-timeout must be an integer")?;
                 index += 2;
             }
             "--privilege-ttl" => {
@@ -518,7 +522,11 @@ pub(crate) fn parse_vty_agent_update_rollback(
             }
         }
     }
-    validate_config_dispatch_bounds(timeout_secs, privilege_ttl_secs, "agent-update-rollback")?;
+    validate_config_dispatch_bounds(
+        max_timeout_secs,
+        privilege_ttl_secs,
+        "agent-update-rollback",
+    )?;
     let rollback_sha256_hex = rollback_sha256_hex
         .as_deref()
         .map(|value| validate_sha256(value, "--rollback-sha256-hex"))
@@ -531,7 +539,7 @@ pub(crate) fn parse_vty_agent_update_rollback(
     Ok(VtyAgentUpdateRollbackRequest {
         rollback_sha256_hex,
         selection,
-        timeout_secs,
+        max_timeout_secs,
         privilege_ttl_secs,
         force_unprivileged,
     })
@@ -578,7 +586,7 @@ pub(crate) fn submit_vty_hot_config(
         "hot_config",
         operation,
         request.selection,
-        request.timeout_secs,
+        request.max_timeout_secs,
         request.privilege_ttl_secs,
         request.force_unprivileged,
     )
@@ -625,7 +633,7 @@ pub(crate) fn submit_vty_data_source_hot_config_apply(
         "data_source_config_patch",
         operation,
         selection,
-        request.timeout_secs,
+        request.max_timeout_secs,
         request.privilege_ttl_secs,
         request.force_unprivileged,
     )
@@ -650,7 +658,7 @@ pub(crate) fn submit_vty_agent_update(
         "agent_update",
         operation,
         request.selection,
-        request.timeout_secs,
+        request.max_timeout_secs,
         request.privilege_ttl_secs,
         request.force_unprivileged,
     )
@@ -675,7 +683,7 @@ pub(crate) fn submit_vty_agent_update_check(
             restart_agent: request.restart_agent,
         },
         request.selection,
-        request.timeout_secs,
+        request.max_timeout_secs,
         request.privilege_ttl_secs,
         request.force_unprivileged,
     )
@@ -699,7 +707,7 @@ pub(crate) fn submit_vty_agent_update_activate(
             restart_agent: request.restart_agent,
         },
         request.selection,
-        request.timeout_secs,
+        request.max_timeout_secs,
         request.privilege_ttl_secs,
         request.force_unprivileged,
     )
@@ -722,20 +730,20 @@ pub(crate) fn submit_vty_agent_update_rollback(
             rollback_sha256_hex: request.rollback_sha256_hex,
         },
         request.selection,
-        request.timeout_secs,
+        request.max_timeout_secs,
         request.privilege_ttl_secs,
         request.force_unprivileged,
     )
 }
 
 fn validate_config_dispatch_bounds(
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     privilege_ttl_secs: u64,
     command: &str,
 ) -> Result<()> {
     anyhow::ensure!(
-        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&timeout_secs),
-        "{command} --timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&max_timeout_secs),
+        "{command} --max-timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
     );
     anyhow::ensure!(
         (15..=300).contains(&privilege_ttl_secs),
@@ -798,7 +806,7 @@ fn submit_vty_config_operation(
     command_label: &str,
     operation: JobCommand,
     selection: VtyJobSelection,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     privilege_ttl_secs: u64,
     force_unprivileged: bool,
 ) -> Result<String> {
@@ -830,7 +838,7 @@ fn submit_vty_config_operation(
         password,
         salt_hex,
         privilege_ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         force_unprivileged,
         true,
     )?;
@@ -850,7 +858,7 @@ fn submit_vty_config_operation(
             "destructive": false,
             "confirmed": selection.confirmed,
             "force_unprivileged": force_unprivileged,
-            "timeout_secs": timeout_secs,
+            "max_timeout_secs": max_timeout_secs,
             "privilege_assertion": privilege.privilege_assertion,
         }),
     )
@@ -871,7 +879,7 @@ mod tests {
             "./agent.toml",
             "id:edge-a",
             "tag:bgp",
-            "--timeout",
+            "--max-timeout",
             "45",
             "--privilege-ttl",
             "120",
@@ -886,7 +894,7 @@ mod tests {
         );
         assert!(request.selection.clients.is_empty());
         assert_eq!(request.selection.tags, vec!["bgp", "id:edge-a"]);
-        assert_eq!(request.timeout_secs, 45);
+        assert_eq!(request.max_timeout_secs, 45);
         assert_eq!(request.privilege_ttl_secs, 120);
         assert!(request.force_unprivileged);
         assert!(request.selection.confirmed);
@@ -902,7 +910,7 @@ mod tests {
         let request = parse_vty_data_source_hot_config_apply(&[
             "--client-id",
             "edge-a",
-            "--timeout",
+            "--max-timeout",
             "45",
             "--privilege-ttl",
             "120",
@@ -912,7 +920,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(request.client_id, "edge-a");
-        assert_eq!(request.timeout_secs, 45);
+        assert_eq!(request.max_timeout_secs, 45);
         assert_eq!(request.privilege_ttl_secs, 120);
         assert!(request.force_unprivileged);
         assert!(request.confirmed);
@@ -932,7 +940,7 @@ mod tests {
             "--sha256-hex",
             &sha256_hex,
             "id:edge-a",
-            "--timeout",
+            "--max-timeout",
             "300",
             "--privilege-ttl",
             "120",
@@ -945,7 +953,7 @@ mod tests {
         assert_eq!(request.sha256_hex, "ab".repeat(32));
         assert!(request.selection.clients.is_empty());
         assert_eq!(request.selection.tags, vec!["id:edge-a"]);
-        assert_eq!(request.timeout_secs, 300);
+        assert_eq!(request.max_timeout_secs, 300);
         assert_eq!(request.privilege_ttl_secs, 120);
         assert!(request.force_unprivileged);
     }
@@ -956,7 +964,7 @@ mod tests {
             "--version-url",
             "https://github.com/mnihyc/vpsman/releases/latest/download/version.json",
             "tag:edge",
-            "--timeout",
+            "--max-timeout",
             "300",
             "--privilege-ttl",
             "120",
@@ -975,7 +983,7 @@ mod tests {
         assert!(request.activate);
         assert!(request.restart_agent);
         assert_eq!(request.selection.tags, vec!["edge"]);
-        assert_eq!(request.timeout_secs, 300);
+        assert_eq!(request.max_timeout_secs, 300);
         assert_eq!(request.privilege_ttl_secs, 120);
         assert!(request.force_unprivileged);
 
@@ -997,7 +1005,7 @@ mod tests {
             "--staged-sha256-hex",
             &"aa".repeat(32),
             "id:edge-a",
-            "--timeout",
+            "--max-timeout",
             "30",
             "--restart-agent",
             "--force-unprivileged",

@@ -124,7 +124,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             password_env,
             super_salt_hex,
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
         } => {
             commands_backups::backup_run(
@@ -138,7 +138,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 password_env,
                 super_salt_hex,
                 privilege_ttl_secs,
-                timeout_secs,
+                max_timeout_secs,
                 confirmed,
             )?;
             Ok(None)
@@ -238,7 +238,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             password_env,
             super_salt_hex,
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged,
         } => {
@@ -252,7 +252,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     password_env,
                     super_salt_hex,
                     privilege_ttl_secs,
-                    timeout_secs,
+                    max_timeout_secs,
                     confirmed,
                     force_unprivileged,
                 },
@@ -265,7 +265,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             password_env,
             super_salt_hex,
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged,
         } => {
@@ -277,7 +277,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 password_env,
                 super_salt_hex,
                 privilege_ttl_secs,
-                timeout_secs,
+                max_timeout_secs,
                 confirmed,
                 force_unprivileged,
             )?;
@@ -310,7 +310,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             password_env,
             super_salt_hex,
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged,
         } => {
@@ -323,7 +323,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 password_env,
                 super_salt_hex,
                 privilege_ttl_secs,
-                timeout_secs,
+                max_timeout_secs,
                 confirmed,
                 force_unprivileged,
             )?;

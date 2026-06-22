@@ -15,13 +15,13 @@ pub(crate) struct VtyFileOperation {
     pub(crate) command_label: &'static str,
     pub(crate) operation: JobCommand,
     pub(crate) selection: VtyJobSelection,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
 }
 
 pub(crate) fn parse_vty_file_pull(tokens: &[&str]) -> Result<VtyFileOperation> {
     let mut path = None;
     let mut follow_symlinks = false;
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut target_tokens = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
@@ -43,12 +43,12 @@ pub(crate) fn parse_vty_file_pull(tokens: &[&str]) -> Result<VtyFileOperation> {
                 follow_symlinks = true;
                 index += 1;
             }
-            "--timeout" => {
-                timeout_secs = parse_timeout(tokens.get(index + 1).copied())?;
+            "--max-timeout" => {
+                max_timeout_secs = parse_timeout(tokens.get(index + 1).copied())?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = parse_timeout(Some(value.trim_start_matches("--timeout=")))?;
+            value if value.starts_with("--max-timeout=") => {
+                max_timeout_secs = parse_timeout(Some(value.trim_start_matches("--max-timeout=")))?;
                 index += 1;
             }
             value => {
@@ -66,7 +66,7 @@ pub(crate) fn parse_vty_file_pull(tokens: &[&str]) -> Result<VtyFileOperation> {
             follow_symlinks,
         },
         selection: VtyJobSelection::parse(&target_tokens)?,
-        timeout_secs,
+        max_timeout_secs,
     })
 }
 
@@ -74,7 +74,7 @@ pub(crate) fn parse_vty_file_push(tokens: &[&str]) -> Result<VtyFileOperation> {
     let mut source = None;
     let mut path = None;
     let mut mode = 0o644_u32;
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut target_tokens = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
@@ -112,12 +112,12 @@ pub(crate) fn parse_vty_file_push(tokens: &[&str]) -> Result<VtyFileOperation> {
                 mode = parse_mode(Some(value.trim_start_matches("--mode=")))?;
                 index += 1;
             }
-            "--timeout" => {
-                timeout_secs = parse_timeout(tokens.get(index + 1).copied())?;
+            "--max-timeout" => {
+                max_timeout_secs = parse_timeout(tokens.get(index + 1).copied())?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = parse_timeout(Some(value.trim_start_matches("--timeout=")))?;
+            value if value.starts_with("--max-timeout=") => {
+                max_timeout_secs = parse_timeout(Some(value.trim_start_matches("--max-timeout=")))?;
                 index += 1;
             }
             value => {
@@ -141,7 +141,7 @@ pub(crate) fn parse_vty_file_push(tokens: &[&str]) -> Result<VtyFileOperation> {
         command_label,
         operation,
         selection,
-        timeout_secs,
+        max_timeout_secs,
     })
 }
 
@@ -205,13 +205,13 @@ fn build_file_push_operation(
 }
 
 fn parse_timeout(value: Option<&str>) -> Result<u64> {
-    let value = value.context("--timeout requires a value")?;
+    let value = value.context("--max-timeout requires a value")?;
     let timeout = value
         .parse::<u64>()
-        .context("--timeout must be an integer")?;
+        .context("--max-timeout must be an integer")?;
     anyhow::ensure!(
         (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&timeout),
-        "--timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
+        "--max-timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
     );
     Ok(timeout)
 }

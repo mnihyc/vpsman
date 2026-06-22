@@ -13,24 +13,24 @@ pub(crate) struct VtyProcessSupervisorRequest {
     pub(crate) command_label: &'static str,
     pub(crate) operation: JobCommand,
     pub(crate) selection: VtyJobSelection,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) force_unprivileged: bool,
 }
 
 pub(crate) fn process_supervisor_usage(command: &str) -> &'static str {
     match command {
         "process-start" => {
-            "usage: process-start <name> --argv <absolute_executable> [--argv arg ...] <target ...> [--cwd <abs>] [--env KEY=VALUE] [--restart-policy never|on-failure|always] [--restart-max-retries <0-100>] [--restart-backoff-secs <0-3600>] [--graceful-stop-secs <1-300>] [--memory-max-bytes <bytes>] [--pids-max <n>] [--open-files-max <n>] [--cpu-shares <2-262144>] [--no-new-privileges] [--timeout <secs>] [--force-unprivileged] [--confirmed]"
+            "usage: process-start <name> --argv <absolute_executable> [--argv arg ...] <target ...> [--cwd <abs>] [--env KEY=VALUE] [--restart-policy never|on-failure|always] [--restart-max-retries <0-100>] [--restart-backoff-secs <0-3600>] [--graceful-stop-secs <1-300>] [--memory-max-bytes <bytes>] [--pids-max <n>] [--open-files-max <n>] [--cpu-shares <2-262144>] [--no-new-privileges] [--max-timeout <secs>] [--force-unprivileged] [--confirmed]"
         }
-        "process-stop" => "usage: process-stop <name> <target ...> [--timeout <secs>] [--confirmed]",
+        "process-stop" => "usage: process-stop <name> <target ...> [--max-timeout <secs>] [--confirmed]",
         "process-restart" => {
-            "usage: process-restart <name> <target ...> [--timeout <secs>] [--confirmed]"
+            "usage: process-restart <name> <target ...> [--max-timeout <secs>] [--confirmed]"
         }
         "process-status" => {
-            "usage: process-status [--name <name>] <target ...> [--timeout <secs>] [--confirmed]"
+            "usage: process-status [--name <name>] <target ...> [--max-timeout <secs>] [--confirmed]"
         }
         "process-logs" => {
-            "usage: process-logs <name> <target ...> [--max-bytes <1-524288>] [--timeout <secs>] [--confirmed]"
+            "usage: process-logs <name> <target ...> [--max-bytes <1-524288>] [--max-timeout <secs>] [--confirmed]"
         }
         _ => "usage: process-start|process-stop|process-restart|process-status|process-logs ...",
     }
@@ -91,7 +91,7 @@ pub(crate) fn parse_vty_process_list(tokens: &[&str]) -> Result<VtyProcessSuperv
         command_label: "process_list",
         operation: JobCommand::ProcessList { limit },
         selection: VtyJobSelection::parse(&target_tokens)?,
-        timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+        max_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
         force_unprivileged: false,
     })
 }
@@ -137,12 +137,12 @@ pub(crate) fn process_supervisor_inventory_path(command: &str) -> Result<String>
 }
 
 pub(crate) fn parse_vty_user_sessions(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> {
-    let (selection, timeout_secs) = parse_selection_and_timeout(tokens, "user-sessions")?;
+    let (selection, max_timeout_secs) = parse_selection_and_timeout(tokens, "user-sessions")?;
     Ok(VtyProcessSupervisorRequest {
         command_label: "user_sessions",
         operation: JobCommand::UserSessions,
         selection,
-        timeout_secs,
+        max_timeout_secs,
         force_unprivileged: false,
     })
 }
@@ -158,7 +158,7 @@ fn parse_process_start(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> {
     let mut policy = ProcessRunPolicy::default();
     let mut limits = ProcessResourceLimits::default();
     let mut target_tokens = Vec::<&str>::new();
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut force_unprivileged = false;
     let mut index = 1;
 
@@ -332,12 +332,12 @@ fn parse_process_start(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> {
                 force_unprivileged = true;
                 index += 1;
             }
-            "--timeout" => {
-                timeout_secs = parse_timeout(next_value(tokens, index, "--timeout")?)?;
+            "--max-timeout" => {
+                max_timeout_secs = parse_timeout(next_value(tokens, index, "--max-timeout")?)?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = parse_timeout(value.trim_start_matches("--timeout="))?;
+            value if value.starts_with("--max-timeout=") => {
+                max_timeout_secs = parse_timeout(value.trim_start_matches("--max-timeout="))?;
                 index += 1;
             }
             "--destructive" => {
@@ -369,7 +369,7 @@ fn parse_process_start(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> {
             limits,
         },
         selection,
-        timeout_secs,
+        max_timeout_secs,
         force_unprivileged,
     })
 }
@@ -383,12 +383,12 @@ fn parse_named_process_command(
         .first()
         .context("process command requires a managed process name")?
         .to_string();
-    let (selection, timeout_secs) = parse_selection_and_timeout(&tokens[1..], command_label)?;
+    let (selection, max_timeout_secs) = parse_selection_and_timeout(&tokens[1..], command_label)?;
     Ok(VtyProcessSupervisorRequest {
         command_label,
         operation: build(name),
         selection,
-        timeout_secs,
+        max_timeout_secs,
         force_unprivileged: false,
     })
 }
@@ -396,7 +396,7 @@ fn parse_named_process_command(
 fn parse_process_status(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> {
     let mut name = None::<String>;
     let mut target_tokens = Vec::<&str>::new();
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index] {
@@ -408,12 +408,12 @@ fn parse_process_status(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> 
                 name = Some(value.trim_start_matches("--name=").to_string());
                 index += 1;
             }
-            "--timeout" => {
-                timeout_secs = parse_timeout(next_value(tokens, index, "--timeout")?)?;
+            "--max-timeout" => {
+                max_timeout_secs = parse_timeout(next_value(tokens, index, "--max-timeout")?)?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = parse_timeout(value.trim_start_matches("--timeout="))?;
+            value if value.starts_with("--max-timeout=") => {
+                max_timeout_secs = parse_timeout(value.trim_start_matches("--max-timeout="))?;
                 index += 1;
             }
             "--destructive" => {
@@ -430,7 +430,7 @@ fn parse_process_status(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> 
         command_label: "process_status",
         operation: JobCommand::ProcessStatus { name },
         selection,
-        timeout_secs,
+        max_timeout_secs,
         force_unprivileged: false,
     })
 }
@@ -442,7 +442,7 @@ fn parse_process_logs(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> {
         .to_string();
     let mut max_bytes = 65_536_u32;
     let mut target_tokens = Vec::<&str>::new();
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut index = 1;
     while index < tokens.len() {
         match tokens[index] {
@@ -454,12 +454,12 @@ fn parse_process_logs(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> {
                 max_bytes = parse_max_bytes(value.trim_start_matches("--max-bytes="))?;
                 index += 1;
             }
-            "--timeout" => {
-                timeout_secs = parse_timeout(next_value(tokens, index, "--timeout")?)?;
+            "--max-timeout" => {
+                max_timeout_secs = parse_timeout(next_value(tokens, index, "--max-timeout")?)?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = parse_timeout(value.trim_start_matches("--timeout="))?;
+            value if value.starts_with("--max-timeout=") => {
+                max_timeout_secs = parse_timeout(value.trim_start_matches("--max-timeout="))?;
                 index += 1;
             }
             "--destructive" => anyhow::bail!("process-logs is not destructive; omit --destructive"),
@@ -474,7 +474,7 @@ fn parse_process_logs(tokens: &[&str]) -> Result<VtyProcessSupervisorRequest> {
         command_label: "process_logs",
         operation: JobCommand::ProcessLogs { name, max_bytes },
         selection,
-        timeout_secs,
+        max_timeout_secs,
         force_unprivileged: false,
     })
 }
@@ -484,16 +484,16 @@ fn parse_selection_and_timeout(
     command_label: &str,
 ) -> Result<(VtyJobSelection, u64)> {
     let mut target_tokens = Vec::<&str>::new();
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut index = 0;
     while index < tokens.len() {
         match tokens[index] {
-            "--timeout" => {
-                timeout_secs = parse_timeout(next_value(tokens, index, "--timeout")?)?;
+            "--max-timeout" => {
+                max_timeout_secs = parse_timeout(next_value(tokens, index, "--max-timeout")?)?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = parse_timeout(value.trim_start_matches("--timeout="))?;
+            value if value.starts_with("--max-timeout=") => {
+                max_timeout_secs = parse_timeout(value.trim_start_matches("--max-timeout="))?;
                 index += 1;
             }
             "--destructive" => {
@@ -505,7 +505,7 @@ fn parse_selection_and_timeout(
             }
         }
     }
-    Ok((VtyJobSelection::parse(&target_tokens)?, timeout_secs))
+    Ok((VtyJobSelection::parse(&target_tokens)?, max_timeout_secs))
 }
 
 fn next_value<'a>(tokens: &'a [&str], index: usize, flag: &str) -> Result<&'a str> {
@@ -527,10 +527,10 @@ fn insert_env(env: &mut BTreeMap<String, String>, value: &str) -> Result<()> {
 fn parse_timeout(value: &str) -> Result<u64> {
     let timeout = value
         .parse::<u64>()
-        .context("--timeout must be an integer")?;
+        .context("--max-timeout must be an integer")?;
     anyhow::ensure!(
         (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&timeout),
-        "--timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
+        "--max-timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
     );
     Ok(timeout)
 }
@@ -602,11 +602,11 @@ mod tests {
     #[test]
     fn parses_vty_user_sessions_targets_and_timeout() {
         let request =
-            parse_vty_user_sessions(&["id:client-a", "tag:bgp", "--confirmed", "--timeout=45"])
+            parse_vty_user_sessions(&["id:client-a", "tag:bgp", "--confirmed", "--max-timeout=45"])
                 .unwrap();
 
         assert_eq!(request.command_label, "user_sessions");
-        assert_eq!(request.timeout_secs, 45);
+        assert_eq!(request.max_timeout_secs, 45);
         assert!(request.selection.clients.is_empty());
         assert_eq!(request.selection.tags, vec!["bgp", "id:client-a"]);
         assert!(request.selection.confirmed);
@@ -632,7 +632,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_vty_user_sessions_flags() {
-        assert!(parse_vty_user_sessions(&["tag:bgp", "--timeout=0"]).is_err());
+        assert!(parse_vty_user_sessions(&["tag:bgp", "--max-timeout=0"]).is_err());
         assert!(parse_vty_user_sessions(&["tag:bgp", "--destructive"]).is_err());
         assert!(parse_vty_user_sessions(&["--confirmed"]).is_err());
     }
@@ -652,13 +652,13 @@ mod tests {
                 "id:client-a",
                 "tag:bgp",
                 "--confirmed",
-                "--timeout=45",
+                "--max-timeout=45",
             ],
         )
         .unwrap();
 
         assert_eq!(request.command_label, "process_start");
-        assert_eq!(request.timeout_secs, 45);
+        assert_eq!(request.max_timeout_secs, 45);
         assert!(request.selection.clients.is_empty());
         assert_eq!(request.selection.tags, vec!["bgp", "id:client-a"]);
         assert!(request.selection.confirmed);

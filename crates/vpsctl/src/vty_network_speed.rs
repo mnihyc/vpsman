@@ -26,7 +26,7 @@ pub(crate) struct VtyTunnelSpeedTestRequest {
     pub(crate) rate_limit_kbps: u32,
     pub(crate) port: u16,
     pub(crate) connect_timeout_ms: u16,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) privilege_ttl_secs: u64,
     pub(crate) confirmed: bool,
 }
@@ -39,7 +39,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
     let mut rate_limit_kbps = 100_000_u32;
     let mut port = 5201_u16;
     let mut connect_timeout_ms = 5_000_u16;
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut privilege_ttl_secs = 300_u64;
     let mut confirmed = false;
 
@@ -152,8 +152,8 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
                 )?;
                 index += 1;
             }
-            "--timeout" | "--timeout-secs" => {
-                timeout_secs = parse_bounded_u64(
+            "--max-timeout" | "--max-timeout-secs" => {
+                max_timeout_secs = parse_bounded_u64(
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
                     1,
@@ -161,19 +161,19 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
                 )?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = parse_bounded_u64(
-                    flag_value(value, "--timeout="),
-                    "--timeout",
+            value if value.starts_with("--max-timeout=") => {
+                max_timeout_secs = parse_bounded_u64(
+                    flag_value(value, "--max-timeout="),
+                    "--max-timeout",
                     1,
                     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }
-            value if value.starts_with("--timeout-secs=") => {
-                timeout_secs = parse_bounded_u64(
-                    flag_value(value, "--timeout-secs="),
-                    "--timeout-secs",
+            value if value.starts_with("--max-timeout-secs=") => {
+                max_timeout_secs = parse_bounded_u64(
+                    flag_value(value, "--max-timeout-secs="),
+                    "--max-timeout-secs",
                     1,
                     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
@@ -226,7 +226,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
         rate_limit_kbps,
         port,
         connect_timeout_ms,
-        timeout_secs,
+        max_timeout_secs,
         privilege_ttl_secs,
         confirmed,
     })
@@ -265,7 +265,7 @@ pub(crate) fn submit_vty_tunnel_speed_test(
         &privilege_context.password,
         &privilege_context.salt_hex,
         request.privilege_ttl_secs,
-        request.timeout_secs,
+        request.max_timeout_secs,
         false,
         true,
     )?;
@@ -283,7 +283,7 @@ pub(crate) fn submit_vty_tunnel_speed_test(
             "privileged": true,
             "destructive": false,
             "confirmed": request.confirmed,
-            "timeout_secs": request.timeout_secs,
+            "max_timeout_secs": request.max_timeout_secs,
             "operation": operation,
             "privilege_assertion": privilege.privilege_assertion,
         }),
@@ -375,7 +375,7 @@ mod tests {
             "--port",
             "55201",
             "--connect-timeout-ms=2500",
-            "--timeout=120",
+            "--max-timeout=120",
             "--privilege-ttl",
             "90",
             "--confirmed",
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(request.rate_limit_kbps, 10_000);
         assert_eq!(request.port, 55_201);
         assert_eq!(request.connect_timeout_ms, 2500);
-        assert_eq!(request.timeout_secs, 120);
+        assert_eq!(request.max_timeout_secs, 120);
         assert_eq!(request.privilege_ttl_secs, 90);
         assert!(request.confirmed);
     }

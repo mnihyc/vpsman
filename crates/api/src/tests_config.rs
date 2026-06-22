@@ -240,7 +240,7 @@ fn rejects_invalid_data_source_config_patch_job_document() {
     .is_err());
     assert!(validate_job_command(&JobCommand::DataSourceConfigPatch {
         apply_mode: DATA_SOURCE_CONFIG_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
-        toml: "[auth]\njob_timeout_secs = 10".to_string(),
+        toml: "[auth]\nmax_job_timeout_secs = 10".to_string(),
     })
     .is_err());
 }
@@ -352,7 +352,7 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
 
 #[test]
 fn apply_now_schedule_timeout_matches_worker_suite_precedence() {
-    with_cleared_suite_env(&["VPSMAN_WORKER_SCHEDULE_JOB_TIMEOUT_SECS"], || {
+    with_cleared_suite_env(&["VPSMAN_WORKER_SCHEDULE_JOB_MAX_TIMEOUT_SECS"], || {
         let path = temp_suite_config_path("schedule-apply-now-timeout");
         let mut state = test_state(Repository::Memory(MemoryState::default()));
         state.suite_config_path = path.clone();
@@ -362,28 +362,28 @@ fn apply_now_schedule_timeout_matches_worker_suite_precedence() {
             r#"version = 1
 
 [worker]
-schedule_job_timeout_secs = 600
+schedule_job_max_timeout_secs = 600
 
 [timeout]
-worker_schedule_job_timeout_secs = 120
+worker_schedule_job_max_timeout_secs = 120
 "#,
         )
         .unwrap();
-        assert_eq!(state.schedule_apply_now_timeout_secs(), 600);
+        assert_eq!(state.schedule_apply_now_max_timeout_secs(), 600);
 
         std::fs::write(
             &path,
             r#"version = 1
 
 [timeout]
-worker_schedule_job_timeout_secs = 120
+worker_schedule_job_max_timeout_secs = 120
 "#,
         )
         .unwrap();
-        assert_eq!(state.schedule_apply_now_timeout_secs(), 120);
+        assert_eq!(state.schedule_apply_now_max_timeout_secs(), 120);
 
-        std::env::set_var("VPSMAN_WORKER_SCHEDULE_JOB_TIMEOUT_SECS", "45");
-        assert_eq!(state.schedule_apply_now_timeout_secs(), 45);
+        std::env::set_var("VPSMAN_WORKER_SCHEDULE_JOB_MAX_TIMEOUT_SECS", "45");
+        assert_eq!(state.schedule_apply_now_max_timeout_secs(), 45);
 
         let _ = std::fs::remove_file(path);
     });
@@ -473,7 +473,7 @@ async fn agent_update_degrades_unprivileged_target_after_privilege_verification(
         command: "agent_update".to_string(),
         argv: Vec::new(),
         operation: Some(operation),
-        timeout_secs: Some(60),
+        max_timeout_secs: Some(60),
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,

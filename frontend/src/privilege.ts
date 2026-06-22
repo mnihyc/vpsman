@@ -1,5 +1,5 @@
 import type { JobOperation } from "./types";
-import { clampJobTimeoutSecs } from "./jobTimeout";
+import { clampJobMaxTimeoutSecs } from "./jobMaxTimeout";
 import { FILE_BROWSER_ARCHIVE_LIMIT_BYTES } from "./fileBrowser";
 import {
   DB_PRIVILEGE_INTENT_FIELDS,
@@ -34,7 +34,7 @@ export type JobPrivilegeIntentInput = {
   commandType: string;
   operationPayloadHash: string;
   resolvedTargets: string[];
-  timeoutSecs: number;
+  maxTimeoutSecs: number;
   forceUnprivileged: boolean;
   privileged: boolean;
 };
@@ -71,7 +71,7 @@ export type TerminalInputPrivilegeIntentInput = {
   clientId: string;
   sessionId: string;
   inputPayloadHash: string;
-  timeoutSecs: number;
+  maxTimeoutSecs: number;
   confirmed: boolean;
 };
 
@@ -144,7 +144,7 @@ export async function buildPrivilegeForJobOperation({
   privileged = true,
   privilegeMaterial,
   selectorExpression,
-  timeoutSecs,
+  maxTimeoutSecs,
   ttlSecs = 300,
 }: {
   clientIds: string[];
@@ -154,7 +154,7 @@ export async function buildPrivilegeForJobOperation({
   privileged?: boolean;
   privilegeMaterial: PrivilegeMaterial;
   selectorExpression: string;
-  timeoutSecs: number;
+  maxTimeoutSecs: number;
   ttlSecs?: number;
 }): Promise<BuiltJobPrivilege> {
   if (clientIds.length === 0) {
@@ -170,7 +170,7 @@ export async function buildPrivilegeForJobOperation({
     privileged,
     privilegeMaterial,
     selectorExpression,
-    timeoutSecs,
+    maxTimeoutSecs,
     ttlSecs,
   });
 }
@@ -183,7 +183,7 @@ export async function buildPrivilegeForJobPayloadHash({
   privileged = true,
   privilegeMaterial,
   selectorExpression,
-  timeoutSecs,
+  maxTimeoutSecs,
   ttlSecs = 300,
 }: {
   clientIds: string[];
@@ -193,7 +193,7 @@ export async function buildPrivilegeForJobPayloadHash({
   privileged?: boolean;
   privilegeMaterial: PrivilegeMaterial;
   selectorExpression: string;
-  timeoutSecs: number;
+  maxTimeoutSecs: number;
   ttlSecs?: number;
 }): Promise<BuiltJobPrivilege> {
   if (clientIds.length === 0) {
@@ -207,7 +207,7 @@ export async function buildPrivilegeForJobPayloadHash({
     privileged,
     resolvedTargets: clientIds,
     selectorExpression,
-    timeoutSecs,
+    maxTimeoutSecs,
   });
   const privilegeAssertion = await buildPrivilegeAssertion({
     intent,
@@ -299,7 +299,7 @@ export function canonicalJobPrivilegeIntent(input: JobPrivilegeIntentInput): str
     ["command_type", input.commandType],
     ["operation_payload_hash", normalizeSha256Hex(input.operationPayloadHash)],
     ["resolved_targets", [...input.resolvedTargets].sort()],
-    ["timeout_secs", clampJobTimeoutSecs(input.timeoutSecs)],
+    ["max_timeout_secs", clampJobMaxTimeoutSecs(input.maxTimeoutSecs)],
     ["force_unprivileged", input.forceUnprivileged],
     ["privileged", input.privileged],
   ];
@@ -352,7 +352,7 @@ export function canonicalTerminalInputPrivilegeIntent(input: TerminalInputPrivil
     ["client_id", input.clientId.trim()],
     ["session_id", input.sessionId.trim()],
     ["input_payload_hash", normalizeSha256Hex(input.inputPayloadHash)],
-    ["timeout_secs", clampJobTimeoutSecs(input.timeoutSecs)],
+    ["max_timeout_secs", clampJobMaxTimeoutSecs(input.maxTimeoutSecs)],
     ["confirmed", input.confirmed],
   ];
   assertGeneratedFieldOrder("terminal input privilege", entries, TERMINAL_INPUT_PRIVILEGE_INTENT_FIELDS);

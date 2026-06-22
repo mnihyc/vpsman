@@ -68,7 +68,7 @@ recreate_services() {
 
 require_env() {
   if [[ ! -f "$script_dir/.env" ]]; then
-    echo "deploy/.env is required; create it from deploy/.env.example and edit it first" >&2
+    echo ".env is required in the deployment directory; create it from .env.example and edit it first" >&2
     exit 1
   fi
 }

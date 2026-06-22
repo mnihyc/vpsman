@@ -37,7 +37,7 @@ pub(crate) fn submit_vty_terminal_command(
             command_label,
             operation,
             selection,
-            timeout_secs,
+            max_timeout_secs,
         } => vty_submit_operation(
             api_url,
             token,
@@ -45,7 +45,7 @@ pub(crate) fn submit_vty_terminal_command(
             command_label,
             &operation,
             selection,
-            timeout_secs,
+            max_timeout_secs,
         ),
         VtyTerminalRequest::Input(input) => {
             submit_vty_terminal_input(api_url, token, privilege_context, input)
@@ -59,7 +59,7 @@ enum VtyTerminalRequest {
         command_label: &'static str,
         operation: JobCommand,
         selection: VtyJobSelection,
-        timeout_secs: u64,
+        max_timeout_secs: u64,
     },
     Input(VtyTerminalInputRoute),
 }
@@ -69,7 +69,7 @@ struct VtyTerminalInputRoute {
     client_id: String,
     session_id: Uuid,
     data_base64: String,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 }
 
@@ -93,7 +93,7 @@ fn parse_terminal_open(args: &[&str]) -> Result<VtyTerminalRequest> {
     let mut replay_from_seq = None;
     let mut idle_timeout_secs = default_terminal_idle_timeout_secs();
     let mut flow_window_bytes = default_terminal_flow_window_bytes();
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut targets = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -134,9 +134,9 @@ fn parse_terminal_open(args: &[&str]) -> Result<VtyTerminalRequest> {
                 index += 1;
                 flow_window_bytes = parse_value(args.get(index), "--flow-window-bytes")?;
             }
-            "--timeout" => {
+            "--max-timeout" => {
                 index += 1;
-                timeout_secs = parse_timeout(args.get(index))?;
+                max_timeout_secs = parse_timeout(args.get(index))?;
             }
             value => targets.push(value),
         }
@@ -159,7 +159,7 @@ fn parse_terminal_open(args: &[&str]) -> Result<VtyTerminalRequest> {
             flow_window_bytes,
         },
         selection,
-        timeout_secs,
+        max_timeout_secs,
     })
 }
 
@@ -167,7 +167,7 @@ fn parse_terminal_input(args: &[&str]) -> Result<VtyTerminalRequest> {
     let mut client_id = None;
     let mut session_id = None;
     let mut data_base64 = None;
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut confirmed = false;
     let mut index = 0;
     while index < args.len() {
@@ -205,9 +205,9 @@ fn parse_terminal_input(args: &[&str]) -> Result<VtyTerminalRequest> {
                         .to_string(),
                 );
             }
-            "--timeout" => {
+            "--max-timeout" => {
                 index += 1;
-                timeout_secs = parse_timeout(args.get(index))?;
+                max_timeout_secs = parse_timeout(args.get(index))?;
             }
             "--confirmed" => confirmed = true,
             "--input-seq" => anyhow::bail!("terminal-input no longer accepts --input-seq"),
@@ -221,7 +221,7 @@ fn parse_terminal_input(args: &[&str]) -> Result<VtyTerminalRequest> {
         client_id,
         session_id: session_id.context("terminal-input requires --session-id")?,
         data_base64: data_base64.context("terminal-input requires --text or --data-base64")?,
-        timeout_secs,
+        max_timeout_secs,
         confirmed,
     }))
 }
@@ -229,7 +229,7 @@ fn parse_terminal_input(args: &[&str]) -> Result<VtyTerminalRequest> {
 fn parse_terminal_poll(args: &[&str]) -> Result<VtyTerminalRequest> {
     let mut session_id = None;
     let mut replay_from_seq = None;
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut targets = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -242,9 +242,9 @@ fn parse_terminal_poll(args: &[&str]) -> Result<VtyTerminalRequest> {
                 index += 1;
                 replay_from_seq = Some(parse_value(args.get(index), "--replay-from-seq")?);
             }
-            "--timeout" => {
+            "--max-timeout" => {
                 index += 1;
-                timeout_secs = parse_timeout(args.get(index))?;
+                max_timeout_secs = parse_timeout(args.get(index))?;
             }
             value => targets.push(value),
         }
@@ -258,7 +258,7 @@ fn parse_terminal_poll(args: &[&str]) -> Result<VtyTerminalRequest> {
             replay_from_seq,
         },
         selection,
-        timeout_secs,
+        max_timeout_secs,
     })
 }
 
@@ -266,7 +266,7 @@ fn parse_terminal_resize(args: &[&str]) -> Result<VtyTerminalRequest> {
     let mut session_id = None;
     let mut cols = None;
     let mut rows = None;
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut targets = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -283,9 +283,9 @@ fn parse_terminal_resize(args: &[&str]) -> Result<VtyTerminalRequest> {
                 index += 1;
                 rows = Some(parse_value(args.get(index), "--rows")?);
             }
-            "--timeout" => {
+            "--max-timeout" => {
                 index += 1;
-                timeout_secs = parse_timeout(args.get(index))?;
+                max_timeout_secs = parse_timeout(args.get(index))?;
             }
             value => targets.push(value),
         }
@@ -300,14 +300,14 @@ fn parse_terminal_resize(args: &[&str]) -> Result<VtyTerminalRequest> {
             rows: rows.context("terminal-resize requires --rows")?,
         },
         selection,
-        timeout_secs,
+        max_timeout_secs,
     })
 }
 
 fn parse_terminal_close(args: &[&str]) -> Result<VtyTerminalRequest> {
     let mut session_id = None;
     let mut reason = None;
-    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut targets = Vec::new();
     let mut index = 0;
     while index < args.len() {
@@ -324,9 +324,9 @@ fn parse_terminal_close(args: &[&str]) -> Result<VtyTerminalRequest> {
                         .to_string(),
                 );
             }
-            "--timeout" => {
+            "--max-timeout" => {
                 index += 1;
-                timeout_secs = parse_timeout(args.get(index))?;
+                max_timeout_secs = parse_timeout(args.get(index))?;
             }
             value => targets.push(value),
         }
@@ -340,7 +340,7 @@ fn parse_terminal_close(args: &[&str]) -> Result<VtyTerminalRequest> {
             reason,
         },
         selection,
-        timeout_secs,
+        max_timeout_secs,
     })
 }
 
@@ -364,7 +364,7 @@ fn submit_vty_terminal_input(
             client_id: &input.client_id,
             session_id: &session_id,
             input_payload_hash: &input_payload_hash,
-            timeout_secs: input.timeout_secs,
+            max_timeout_secs: input.max_timeout_secs,
             confirmed: input.confirmed,
         },
         &privilege_context.password,
@@ -381,7 +381,7 @@ fn submit_vty_terminal_input(
         &serde_json::json!({
             "job_id": Uuid::new_v4(),
             "data_base64": input.data_base64,
-            "timeout_secs": input.timeout_secs,
+            "max_timeout_secs": input.max_timeout_secs,
             "confirmed": input.confirmed,
             "privilege_assertion": privilege_assertion,
         }),
@@ -416,10 +416,10 @@ where
 }
 
 fn parse_timeout(value: Option<&&str>) -> Result<u64> {
-    let timeout = parse_value::<u64>(value, "--timeout")?;
+    let timeout = parse_value::<u64>(value, "--max-timeout")?;
     anyhow::ensure!(
         (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&timeout),
-        "--timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
+        "--max-timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
     );
     Ok(timeout)
 }

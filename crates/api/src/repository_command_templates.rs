@@ -554,7 +554,7 @@ fn builtin_command_template(
     id: &str,
     name: &str,
     command: JobCommand,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
 ) -> CommandTemplateView {
     let command_type = job_command_type_label(&command).to_string();
     let display_group = job_command_display_group(&command_type).map(ToString::to_string);
@@ -573,7 +573,7 @@ fn builtin_command_template(
             "confirmed": requires_confirmation,
             "destructive": requires_confirmation,
             "force_unprivileged": false,
-            "timeout_secs": timeout_secs,
+            "max_timeout_secs": max_timeout_secs,
         }),
         actor_id: None,
         created_at: "builtin".to_string(),
@@ -943,7 +943,7 @@ mod tests {
                 "pty": false
             }),
             defaults: serde_json::json!({
-                "timeout_secs": 30,
+                "max_timeout_secs": 30,
                 "confirmed": false
             }),
             confirmed: true,

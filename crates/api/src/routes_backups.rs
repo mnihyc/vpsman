@@ -392,7 +392,7 @@ pub(crate) async fn create_backup_request(
         command_type: "backup",
         operation_payload_hash: &command_hash,
         resolved_targets: &resolved_targets,
-        timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+        max_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
         force_unprivileged: false,
         privileged: true,
     });

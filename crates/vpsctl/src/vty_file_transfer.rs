@@ -25,7 +25,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
     let mut source_artifact_id = None;
     let mut path = None;
     let mut mode = 0o644_u32;
-    let mut timeout_secs = 60_u64;
+    let mut max_timeout_secs = 60_u64;
     let mut privilege_ttl_secs = 300_u64;
     let mut session_id = None;
     let mut resume_token = None;
@@ -86,19 +86,19 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
                 mode = parse_mode(Some(value.trim_start_matches("--mode=")))?;
                 index += 1;
             }
-            "--timeout" => {
-                timeout_secs = parse_bounded_u64(
-                    "--timeout",
+            "--max-timeout" => {
+                max_timeout_secs = parse_bounded_u64(
+                    "--max-timeout",
                     tokens.get(index + 1).copied(),
                     1,
                     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = parse_bounded_u64(
-                    "--timeout",
-                    Some(value.trim_start_matches("--timeout=")),
+            value if value.starts_with("--max-timeout=") => {
+                max_timeout_secs = parse_bounded_u64(
+                    "--max-timeout",
+                    Some(value.trim_start_matches("--max-timeout=")),
                     1,
                     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
@@ -272,7 +272,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
         clients: selection.clients,
         tags: selection.tags,
         privilege_ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         confirmed: selection.confirmed,
         session_id,
         resume_token,
@@ -290,7 +290,7 @@ pub(crate) fn parse_vty_file_transfer_download(
 ) -> Result<FileTransferDownloadPlan> {
     let mut destination = None;
     let mut path = None;
-    let mut timeout_secs = 60_u64;
+    let mut max_timeout_secs = 60_u64;
     let mut privilege_ttl_secs = 300_u64;
     let mut session_id = None;
     let mut resume_token = None;
@@ -333,19 +333,19 @@ pub(crate) fn parse_vty_file_transfer_download(
                 follow_symlinks = true;
                 index += 1;
             }
-            "--timeout" => {
-                timeout_secs = parse_bounded_u64(
-                    "--timeout",
+            "--max-timeout" => {
+                max_timeout_secs = parse_bounded_u64(
+                    "--max-timeout",
                     tokens.get(index + 1).copied(),
                     1,
                     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = parse_bounded_u64(
-                    "--timeout",
-                    Some(value.trim_start_matches("--timeout=")),
+            value if value.starts_with("--max-timeout=") => {
+                max_timeout_secs = parse_bounded_u64(
+                    "--max-timeout",
+                    Some(value.trim_start_matches("--max-timeout=")),
                     1,
                     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
@@ -502,7 +502,7 @@ pub(crate) fn parse_vty_file_transfer_download(
         clients: selection.clients,
         tags: selection.tags,
         privilege_ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         confirmed: selection.confirmed,
         session_id,
         resume_token,

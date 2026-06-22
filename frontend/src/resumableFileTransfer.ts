@@ -9,7 +9,7 @@ import {
   sha256Hex,
   FILE_TRANSFER_CHUNK_BYTES,
 } from "./fileTransfer";
-import { clampJobTimeoutSecs } from "./jobTimeout";
+import { clampJobMaxTimeoutSecs } from "./jobMaxTimeout";
 import { JOB_TERMINAL_STATUSES } from "./generated/protocolContracts";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "./privilege";
 import { selectorExpressionForClientIds } from "./searchExpression";
@@ -52,8 +52,8 @@ export type ResumableUploadRequest = {
   chunkSizeBytes: number;
   resumeToken?: string;
   sessionId?: string;
-  timeoutSecs: number;
-  timeoutOverrideSecs?: number;
+  maxTimeoutSecs: number;
+  maxTimeoutOverrideSecs?: number;
   onProgress: (progress: ResumableUploadProgress) => void;
 };
 
@@ -83,8 +83,8 @@ export type ResumableDownloadRequest = {
   chunkSizeBytes: number;
   resumeToken?: string;
   sessionId?: string;
-  timeoutSecs: number;
-  timeoutOverrideSecs?: number;
+  maxTimeoutSecs: number;
+  maxTimeoutOverrideSecs?: number;
   onProgress: (progress: ResumableDownloadProgress) => void;
 };
 
@@ -481,18 +481,18 @@ async function submitTransferStep(
   targetClientIds: string[] = request.clientIds,
 ): Promise<CreateJobResponse> {
   const selectorExpression = selectorExpressionForClientIds(targetClientIds);
-  const timeoutSecs = clampJobTimeoutSecs(request.timeoutSecs);
-  const timeoutOverrideSecs =
-    request.timeoutOverrideSecs === undefined
+  const maxTimeoutSecs = clampJobMaxTimeoutSecs(request.maxTimeoutSecs);
+  const maxTimeoutOverrideSecs =
+    request.maxTimeoutOverrideSecs === undefined
       ? undefined
-      : clampJobTimeoutSecs(request.timeoutOverrideSecs);
+      : clampJobMaxTimeoutSecs(request.maxTimeoutOverrideSecs);
   const built = await buildPrivilegeForJobOperation({
     clientIds: targetClientIds,
     commandType: command,
     operation,
     privilegeMaterial: request.privilegeMaterial,
     selectorExpression,
-    timeoutSecs,
+    maxTimeoutSecs,
   });
   return request.createJob({
     argv: [],
@@ -503,7 +503,7 @@ async function submitTransferStep(
     command,
     job_id: crypto.randomUUID(),
     operation,
-    ...(timeoutOverrideSecs !== undefined ? { timeout_secs: timeoutOverrideSecs } : {}),
+    ...(maxTimeoutOverrideSecs !== undefined ? { max_timeout_secs: maxTimeoutOverrideSecs } : {}),
     force_unprivileged: false,
     privileged: true,
     privilege_assertion: built.privilegeAssertion,

@@ -18,7 +18,7 @@ pub(crate) struct VtyTunnelProbeRequest {
     pub(crate) side: TunnelEndpointSide,
     pub(crate) count: u8,
     pub(crate) interval_ms: u16,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) privilege_ttl_secs: u64,
 }
 
@@ -27,7 +27,7 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
     let mut side = None::<TunnelEndpointSide>;
     let mut count = 3_u8;
     let mut interval_ms = 500_u16;
-    let mut timeout_secs = 60_u64;
+    let mut max_timeout_secs = 60_u64;
     let mut privilege_ttl_secs = 300_u64;
 
     let mut index = 0;
@@ -75,8 +75,8 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
                 )?;
                 index += 1;
             }
-            "--timeout" | "--timeout-secs" => {
-                timeout_secs = parse_bounded_u64(
+            "--max-timeout" | "--max-timeout-secs" => {
+                max_timeout_secs = parse_bounded_u64(
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
                     1,
@@ -84,19 +84,19 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
                 )?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = parse_bounded_u64(
-                    flag_value(value, "--timeout="),
-                    "--timeout",
+            value if value.starts_with("--max-timeout=") => {
+                max_timeout_secs = parse_bounded_u64(
+                    flag_value(value, "--max-timeout="),
+                    "--max-timeout",
                     1,
                     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }
-            value if value.starts_with("--timeout-secs=") => {
-                timeout_secs = parse_bounded_u64(
-                    flag_value(value, "--timeout-secs="),
-                    "--timeout-secs",
+            value if value.starts_with("--max-timeout-secs=") => {
+                max_timeout_secs = parse_bounded_u64(
+                    flag_value(value, "--max-timeout-secs="),
+                    "--max-timeout-secs",
                     1,
                     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
@@ -138,7 +138,7 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
         side: required(side, "--side")?,
         count,
         interval_ms,
-        timeout_secs,
+        max_timeout_secs,
         privilege_ttl_secs,
     })
 }
@@ -170,7 +170,7 @@ pub(crate) fn submit_vty_tunnel_probe(
         &privilege_context.password,
         &privilege_context.salt_hex,
         request.privilege_ttl_secs,
-        request.timeout_secs,
+        request.max_timeout_secs,
         false,
         true,
     )?;
@@ -188,7 +188,7 @@ pub(crate) fn submit_vty_tunnel_probe(
             "privileged": true,
             "destructive": false,
             "confirmed": false,
-            "timeout_secs": request.timeout_secs,
+            "max_timeout_secs": request.max_timeout_secs,
             "operation": operation,
             "privilege_assertion": privilege.privilege_assertion,
         }),
@@ -265,7 +265,7 @@ mod tests {
             "--count=5",
             "--interval-ms",
             "750",
-            "--timeout=120",
+            "--max-timeout=120",
             "--privilege-ttl",
             "90",
         ])
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(request.side, TunnelEndpointSide::Right);
         assert_eq!(request.count, 5);
         assert_eq!(request.interval_ms, 750);
-        assert_eq!(request.timeout_secs, 120);
+        assert_eq!(request.max_timeout_secs, 120);
         assert_eq!(request.privilege_ttl_secs, 90);
     }
 

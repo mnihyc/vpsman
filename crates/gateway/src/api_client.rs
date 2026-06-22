@@ -20,16 +20,18 @@ use tokio::{
 use tracing::warn;
 use vpsman_common::{
     create_private_file_new_async, ensure_private_dir_async, open_private_file_read_async,
-    payload_hash, repair_private_file_permissions_async, GatewayAgentHelloIngest,
-    GatewayCommandOutputIngest, GatewayForwardCriticalFailureCounters,
-    GatewayForwardDropReasonCounters, GatewayForwardEventKindCounters,
-    GatewayForwardMetricsSnapshot, GatewayTerminalOutputIngest, OutputStream,
+    payload_hash, repair_private_file_permissions_async, AgentUpdateVerificationResult,
+    GatewayAgentHelloIngest, GatewayAgentUpdateVerificationIngest, GatewayCommandOutputIngest,
+    GatewayForwardCriticalFailureCounters, GatewayForwardDropReasonCounters,
+    GatewayForwardEventKindCounters, GatewayForwardMetricsSnapshot, GatewayTerminalOutputIngest,
+    OutputStream,
 };
 
 type CriticalForwardingFailureHandler = Arc<dyn Fn(String, &'static str) + Send + Sync + 'static>;
 const SPOOL_MAGIC: &[u8] = b"VPSMAN_GATEWAY_SPOOL_V2\n";
 const SPOOL_SCHEMA_VERSION: u16 = 2;
 const COMMAND_OUTPUT_PATH: &str = "/internal/v1/gateway/command-output";
+const AGENT_UPDATE_VERIFICATION_PATH: &str = "/internal/v1/gateway/agent-update-verification";
 const DEFAULT_SPOOL_RAM_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 const DEFAULT_SPOOL_DISK_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const DEFAULT_SPOOL_SHUTDOWN_FLUSH_SECS: u64 = 30;
@@ -222,6 +224,24 @@ impl GatewayControlClient {
         )
         .await?;
         serde_json::from_str(&body).context("failed to parse gateway identity validation response")
+    }
+
+    pub(crate) async fn verify_agent_update_artifact(
+        &self,
+        value: &GatewayAgentUpdateVerificationIngest,
+    ) -> Result<AgentUpdateVerificationResult> {
+        let Some(api_url) = &self.api_url else {
+            anyhow::bail!("gateway API URL is required for agent update verification");
+        };
+        let body = post_json(
+            api_url,
+            AGENT_UPDATE_VERIFICATION_PATH,
+            value,
+            self.internal_token.as_deref(),
+            self.timeouts(),
+        )
+        .await?;
+        serde_json::from_str(&body).context("failed to parse agent update verification response")
     }
 }
 

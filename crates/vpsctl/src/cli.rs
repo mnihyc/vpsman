@@ -148,7 +148,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = true)]
         privileged: bool,
         #[arg(long, default_value_t = false)]
@@ -174,7 +174,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -194,7 +194,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -259,7 +259,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -287,7 +287,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long)]
@@ -325,7 +325,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long)]
@@ -391,7 +391,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -409,7 +409,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long, default_value_t = false)]
@@ -429,7 +429,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long, default_value_t = false)]
@@ -451,7 +451,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 300)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long, default_value_t = false)]
@@ -475,7 +475,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 300)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long, default_value_t = false)]
@@ -495,7 +495,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         restart_agent: bool,
         #[arg(long, default_value_t = false)]
@@ -517,7 +517,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         force_unprivileged: bool,
         #[arg(long, default_value_t = false)]
@@ -543,7 +543,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -585,7 +585,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long, default_value_t = false)]
@@ -605,7 +605,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -623,7 +623,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -641,7 +641,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -661,7 +661,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -907,7 +907,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
@@ -997,7 +997,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long, default_value_t = false)]
@@ -1017,7 +1017,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long, default_value_t = false)]
@@ -1035,7 +1035,7 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
         #[arg(long, default_value_t = 60)]
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long, default_value_t = false)]

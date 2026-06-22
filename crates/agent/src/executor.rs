@@ -47,13 +47,13 @@ const PRESET_USER_SESSIONS_WHO: &str = "/usr/bin/who";
 pub(crate) async fn execute_job_command(
     job_id: uuid::Uuid,
     command: &JobCommand,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
 ) -> Result<Vec<CommandOutput>> {
     execute_job_command_with_config_and_output_sink(
         &AgentConfig::default(),
         job_id,
         command,
-        timeout_secs,
+        max_timeout_secs,
         None,
     )
     .await
@@ -63,14 +63,14 @@ pub(crate) async fn execute_job_command(
 pub(crate) async fn execute_job_command_with_output_sink(
     job_id: uuid::Uuid,
     command: &JobCommand,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
     execute_job_command_with_config_and_output_sink(
         &AgentConfig::default(),
         job_id,
         command,
-        timeout_secs,
+        max_timeout_secs,
         output_tx,
     )
     .await
@@ -81,14 +81,14 @@ pub(crate) async fn execute_job_command_with_config_and_output_sink(
     config: &AgentConfig,
     job_id: uuid::Uuid,
     command: &JobCommand,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
     execute_job_command_with_config_cancel_and_output_sink(
         config,
         job_id,
         command,
-        timeout_secs,
+        max_timeout_secs,
         CommandCancelToken::default(),
         output_tx,
     )
@@ -99,7 +99,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
     config: &AgentConfig,
     job_id: uuid::Uuid,
     command: &JobCommand,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
@@ -111,7 +111,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
                 job_id,
                 argv,
                 *pty,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token,
                 output_tx,
             )
@@ -122,7 +122,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
                 config,
                 job_id,
                 script,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token,
                 output_tx,
             )
@@ -133,14 +133,20 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
         | JobCommand::TerminalPoll { .. }
         | JobCommand::TerminalResize { .. }
         | JobCommand::TerminalClose { .. } => {
-            execute_terminal_command(config, job_id, command, timeout_secs).await
+            execute_terminal_command(config, job_id, command, max_timeout_secs).await
         }
         JobCommand::FilePull {
             path,
             follow_symlinks,
         } => {
-            execute_file_pull_with_timeout(job_id, path, *follow_symlinks, timeout_secs, output_tx)
-                .await
+            execute_file_pull_with_timeout(
+                job_id,
+                path,
+                *follow_symlinks,
+                max_timeout_secs,
+                output_tx,
+            )
+            .await
         }
         JobCommand::FilePush {
             path,
@@ -155,7 +161,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             gid,
             ownership_policy,
         } => time::timeout(
-            Duration::from_secs(timeout_secs.max(1)),
+            Duration::from_secs(max_timeout_secs.max(1)),
             execute_file_push(
                 job_id,
                 path,
@@ -186,7 +192,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             gid,
             ownership_policy,
         } => time::timeout(
-            Duration::from_secs(timeout_secs.max(1)),
+            Duration::from_secs(max_timeout_secs.max(1)),
             execute_file_push_chunked(
                 job_id,
                 path,
@@ -215,7 +221,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             existing_policy,
             resume_token_hash,
         } => time::timeout(
-            Duration::from_secs(timeout_secs.max(1)),
+            Duration::from_secs(max_timeout_secs.max(1)),
             execute_file_transfer_start(
                 job_id,
                 *session_id,
@@ -238,7 +244,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             chunk,
             resume_token_hash,
         } => time::timeout(
-            Duration::from_secs(timeout_secs.max(1)),
+            Duration::from_secs(max_timeout_secs.max(1)),
             execute_file_transfer_chunk(
                 job_id,
                 *session_id,
@@ -254,7 +260,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             session_id,
             resume_token_hash,
         } => time::timeout(
-            Duration::from_secs(timeout_secs.max(1)),
+            Duration::from_secs(max_timeout_secs.max(1)),
             execute_file_transfer_commit(job_id, *session_id, resume_token_hash, cancel_token),
         )
         .await
@@ -263,7 +269,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             session_id,
             resume_token_hash,
         } => time::timeout(
-            Duration::from_secs(timeout_secs.max(1)),
+            Duration::from_secs(max_timeout_secs.max(1)),
             execute_file_transfer_abort(job_id, *session_id, resume_token_hash, cancel_token),
         )
         .await
@@ -276,7 +282,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             follow_symlinks,
             resume_token_hash,
         } => time::timeout(
-            Duration::from_secs(timeout_secs.max(1)),
+            Duration::from_secs(max_timeout_secs.max(1)),
             execute_file_transfer_download_start(
                 job_id,
                 *session_id,
@@ -296,7 +302,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             max_bytes,
             resume_token_hash,
         } => time::timeout(
-            Duration::from_secs(timeout_secs.max(1)),
+            Duration::from_secs(max_timeout_secs.max(1)),
             execute_file_transfer_download_chunk(
                 job_id,
                 *session_id,
@@ -319,17 +325,17 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
         | JobCommand::FileChown { .. }
         | JobCommand::FileCopy { .. }
         | JobCommand::FileArchiveTar { .. } => {
-            execute_file_browser_command(job_id, command, timeout_secs, cancel_token).await
+            execute_file_browser_command(job_id, command, max_timeout_secs, cancel_token).await
         }
         JobCommand::FileDownload {
             path,
             max_bytes,
             follow_symlinks,
         } => {
-            let timeout_secs = timeout_secs.max(1);
+            let max_timeout_secs = max_timeout_secs.max(1);
             let timeout_cancel_token = cancel_token.clone();
             match time::timeout(
-                Duration::from_secs(timeout_secs),
+                Duration::from_secs(max_timeout_secs),
                 execute_file_download(
                     job_id,
                     path,
@@ -343,22 +349,22 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             {
                 Ok(result) => result,
                 Err(_) => {
-                    timeout_cancel_token.cancel(format!("timeout after {timeout_secs}s"));
+                    timeout_cancel_token.cancel(format!("timeout after {max_timeout_secs}s"));
                     Err(anyhow::anyhow!("file download timed out"))
                 }
             }
         }
         JobCommand::UserSessions => {
-            execute_user_sessions(config, job_id, timeout_secs, cancel_token).await
+            execute_user_sessions(config, job_id, max_timeout_secs, cancel_token).await
         }
         JobCommand::ProcessList { limit } => {
-            execute_process_list(config, job_id, *limit, timeout_secs, cancel_token).await
+            execute_process_list(config, job_id, *limit, max_timeout_secs, cancel_token).await
         }
         JobCommand::NetworkInterfaces => {
             execute_network_interfaces_command(NetworkInterfacesInput {
                 job_id,
                 config,
-                timeout_secs,
+                max_timeout_secs,
             })
             .await
         }
@@ -367,7 +373,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
         | JobCommand::ProcessRestart { .. }
         | JobCommand::ProcessStatus { .. }
         | JobCommand::ProcessLogs { .. } => {
-            execute_process_supervisor_command(job_id, command, timeout_secs).await
+            execute_process_supervisor_command(job_id, command, max_timeout_secs).await
         }
         JobCommand::UpdateAgent {
             artifact_url,
@@ -377,7 +383,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
                 job_id,
                 artifact_url,
                 sha256_hex,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token,
             })
             .await
@@ -390,7 +396,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
                 job_id,
                 staged_sha256_hex: staged_sha256_hex.clone(),
                 restart_agent: *restart_agent,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token,
             })
             .await
@@ -401,7 +407,7 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             execute_update_rollback(AgentUpdateRollbackInput {
                 job_id,
                 rollback_sha256_hex: rollback_sha256_hex.clone(),
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token,
             })
             .await
@@ -419,8 +425,9 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
                 version_url,
                 activate: *activate,
                 restart_agent: *restart_agent,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token,
+                verification_tx: None,
             })
             .await
         }
@@ -446,7 +453,7 @@ async fn execute_shell_command(
     job_id: uuid::Uuid,
     argv: &[String],
     pty: bool,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
@@ -463,7 +470,7 @@ async fn execute_shell_command(
         execute_pty_child_with_output(
             job_id,
             child,
-            timeout_secs,
+            max_timeout_secs,
             cleanup_policy,
             cancel_token,
             output_tx,
@@ -473,7 +480,7 @@ async fn execute_shell_command(
         execute_child_with_output(
             job_id,
             child,
-            timeout_secs,
+            max_timeout_secs,
             cleanup_policy,
             "shell_argv",
             None,
@@ -488,7 +495,7 @@ async fn execute_shell_script(
     config: &AgentConfig,
     job_id: uuid::Uuid,
     script: &str,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
@@ -512,7 +519,7 @@ async fn execute_shell_script(
     execute_child_with_output(
         job_id,
         child,
-        timeout_secs,
+        max_timeout_secs,
         child_cleanup_policy(config),
         "shell_script",
         Some(status),
@@ -537,20 +544,20 @@ fn render_shell_script_argv(config: &AgentConfig, script: &str) -> Result<Vec<St
 async fn execute_child_with_output(
     job_id: uuid::Uuid,
     child: tokio::process::Command,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cleanup_policy: ChildCleanupPolicy,
     mode: &'static str,
     success_status: Option<serde_json::Value>,
     cancel_token: CommandCancelToken,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
-    let timeout_secs = timeout_secs.max(1);
+    let max_timeout_secs = max_timeout_secs.max(1);
     let streaming = output_tx.is_some();
     let output = match output_tx {
         Some(sender) => {
             run_child_with_streaming_output_cancelable(
                 child,
-                timeout_secs,
+                max_timeout_secs,
                 MAX_COMMAND_OUTPUT_BYTES,
                 cleanup_policy,
                 ChildOutputSink { job_id, sender },
@@ -561,7 +568,7 @@ async fn execute_child_with_output(
         None => {
             run_child_with_bounded_output_cancelable(
                 child,
-                timeout_secs,
+                max_timeout_secs,
                 MAX_COMMAND_OUTPUT_BYTES,
                 cleanup_policy,
                 cancel_token,
@@ -574,7 +581,7 @@ async fn execute_child_with_output(
         ChildRunResult::TimedOut(cleanup) => {
             let status = serde_json::json!({
                 "type": "command_timeout",
-                "timeout_secs": timeout_secs,
+                "max_timeout_secs": max_timeout_secs,
                 "mode": mode,
                 "cleanup": cleanup,
             });
@@ -636,18 +643,18 @@ async fn execute_child_with_output(
 async fn execute_pty_child_with_output(
     job_id: uuid::Uuid,
     child: tokio::process::Command,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cleanup_policy: ChildCleanupPolicy,
     cancel_token: CommandCancelToken,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
 ) -> Result<Vec<CommandOutput>> {
-    let timeout_secs = timeout_secs.max(1);
+    let max_timeout_secs = max_timeout_secs.max(1);
     let streaming = output_tx.is_some();
     let output = match output_tx {
         Some(sender) => {
             run_pty_with_streaming_output_cancelable(
                 child,
-                timeout_secs,
+                max_timeout_secs,
                 MAX_COMMAND_OUTPUT_BYTES,
                 cleanup_policy,
                 ChildOutputSink { job_id, sender },
@@ -658,7 +665,7 @@ async fn execute_pty_child_with_output(
         None => {
             run_pty_with_bounded_output_cancelable(
                 child,
-                timeout_secs,
+                max_timeout_secs,
                 MAX_COMMAND_OUTPUT_BYTES,
                 cleanup_policy,
                 cancel_token,
@@ -671,7 +678,7 @@ async fn execute_pty_child_with_output(
         ChildRunResult::TimedOut(cleanup) => {
             let status = serde_json::json!({
                 "type": "command_timeout",
-                "timeout_secs": timeout_secs,
+                "max_timeout_secs": max_timeout_secs,
                 "mode": "shell_pty",
                 "cleanup": cleanup,
             });
@@ -809,16 +816,17 @@ fn validate_shell_script(script: &str) -> Result<()> {
 async fn execute_user_sessions(
     config: &AgentConfig,
     job_id: uuid::Uuid,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
-    let (args, command_source, job_timeout_secs) = user_sessions_argv(config, timeout_secs.max(1))?;
+    let (args, command_source, max_job_timeout_secs) =
+        user_sessions_argv(config, max_timeout_secs.max(1))?;
     let mut outputs = execute_shell_command(
         config,
         job_id,
         &args,
         false,
-        job_timeout_secs,
+        max_job_timeout_secs,
         cancel_token,
         None,
     )
@@ -906,7 +914,7 @@ fn child_cleanup_policy(config: &AgentConfig) -> ChildCleanupPolicy {
 
 fn user_sessions_argv(
     config: &AgentConfig,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
 ) -> Result<(Vec<String>, &'static str, u64)> {
     if let Some(command) = &config.execution.user_sessions_command {
         if command.argv.is_empty() {
@@ -924,7 +932,7 @@ fn user_sessions_argv(
             } else {
                 "configured_linux_command"
             },
-            command.timeout_secs.min(timeout_secs).clamp(1, 120),
+            command.max_timeout_secs.min(max_timeout_secs).clamp(1, 120),
         ));
     }
     if config.execution.user_sessions_source
@@ -936,14 +944,14 @@ fn user_sessions_argv(
         return Ok((
             vec![PRESET_USER_SESSIONS_W.to_string(), "-h".to_string()],
             "linux_w_who_preset",
-            timeout_secs,
+            max_timeout_secs,
         ));
     }
     if std::path::Path::new(PRESET_USER_SESSIONS_WHO).exists() {
         return Ok((
             vec![PRESET_USER_SESSIONS_WHO.to_string()],
             "linux_w_who_preset",
-            timeout_secs,
+            max_timeout_secs,
         ));
     }
     anyhow::bail!("neither w nor who is available")

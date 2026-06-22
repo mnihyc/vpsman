@@ -1,14 +1,14 @@
 export const DEFAULT_MAX_JOB_TIMEOUT_SECS = 3600;
 export const MAX_CONFIGURABLE_JOB_TIMEOUT_SECS = 7 * 24 * 60 * 60;
 
-export function clampJobTimeoutSecs(value: number): number {
+export function clampJobMaxTimeoutSecs(value: number): number {
   if (!Number.isFinite(value)) {
     return 1;
   }
   return Math.trunc(Math.min(Math.max(value, 1), MAX_CONFIGURABLE_JOB_TIMEOUT_SECS));
 }
 
-export function parseOptionalJobTimeoutSecs(value: string): number | undefined {
+export function parseOptionalJobMaxTimeoutSecs(value: string): number | undefined {
   const trimmed = value.trim();
   if (!trimmed) {
     return undefined;
@@ -17,15 +17,15 @@ export function parseOptionalJobTimeoutSecs(value: string): number | undefined {
   if (!Number.isFinite(parsed)) {
     return undefined;
   }
-  return clampJobTimeoutSecs(parsed);
+  return clampJobMaxTimeoutSecs(parsed);
 }
 
-export function effectiveJobTimeoutSecs(value: string | number | undefined): number {
+export function effectiveJobMaxTimeoutSecs(value: string | number | undefined): number {
   if (typeof value === "number") {
-    return clampJobTimeoutSecs(value);
+    return clampJobMaxTimeoutSecs(value);
   }
   if (typeof value === "string") {
-    return parseOptionalJobTimeoutSecs(value) ?? DEFAULT_MAX_JOB_TIMEOUT_SECS;
+    return parseOptionalJobMaxTimeoutSecs(value) ?? DEFAULT_MAX_JOB_TIMEOUT_SECS;
   }
   return DEFAULT_MAX_JOB_TIMEOUT_SECS;
 }

@@ -28,7 +28,7 @@ pub(super) async fn run_runtime_command(
     argv: &[String],
     mutates: bool,
     required: bool,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
 ) -> Result<serde_json::Value> {
     run_runtime_command_cancelable(
@@ -36,7 +36,7 @@ pub(super) async fn run_runtime_command(
         argv,
         mutates,
         required,
-        timeout_secs,
+        max_timeout_secs,
         max_output_bytes,
         CommandCancelToken::default(),
     )
@@ -48,7 +48,7 @@ pub(super) async fn run_runtime_command_cancelable(
     argv: &[String],
     mutates: bool,
     required: bool,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
@@ -75,7 +75,7 @@ pub(super) async fn run_runtime_command_cancelable(
         .context("runtime tunnel command stderr pipe missing")?;
     let mut stdout_task = Some(tokio::spawn(read_limited(stdout, max_output_bytes)));
     let mut stderr_task = Some(tokio::spawn(read_limited(stderr, max_output_bytes)));
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs.clamp(1, 120));
+    let deadline = Instant::now() + Duration::from_secs(max_timeout_secs.clamp(1, 120));
     let mut timed_out = false;
     let mut killed_for_output_limit = false;
     let mut stdout_output = None;

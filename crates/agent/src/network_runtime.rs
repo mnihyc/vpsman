@@ -18,7 +18,7 @@ pub(crate) struct NetworkRuntimeReconcileInput<'a> {
     pub(crate) config: &'a AgentConfig,
     pub(crate) plan: &'a TunnelPlan,
     pub(crate) side: TunnelEndpointSide,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     #[cfg(test)]
     pub(crate) effective_uid_override: Option<u32>,
 }
@@ -27,7 +27,7 @@ pub(crate) struct NetworkRuntimeRemoveInput<'a> {
     pub(crate) config: &'a AgentConfig,
     pub(crate) plan: &'a TunnelPlan,
     pub(crate) side: TunnelEndpointSide,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     #[cfg(test)]
     pub(crate) effective_uid_override: Option<u32>,
 }
@@ -51,7 +51,7 @@ pub(crate) async fn execute_runtime_tunnel_reconcile_report_cancelable(
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
     time::timeout(
-        Duration::from_secs(input.timeout_secs.max(1)),
+        Duration::from_secs(input.max_timeout_secs.max(1)),
         reconcile_runtime_tunnel(input, cancel_token),
     )
     .await
@@ -70,7 +70,7 @@ pub(crate) async fn execute_runtime_tunnel_remove_report_cancelable(
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
     time::timeout(
-        Duration::from_secs(input.timeout_secs.max(1)),
+        Duration::from_secs(input.max_timeout_secs.max(1)),
         remove_runtime_tunnel(input, cancel_token),
     )
     .await

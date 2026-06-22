@@ -31,7 +31,7 @@ pub(crate) struct FileTransferDownloadPlan {
     pub(crate) clients: Vec<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) privilege_ttl_secs: u64,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) session_id: Option<Uuid>,
     pub(crate) resume_token: Option<String>,
@@ -159,7 +159,7 @@ pub(crate) fn execute_file_transfer_download(
             password,
             salt_hex,
             privilege_ttl_secs: plan.privilege_ttl_secs,
-            timeout_secs: plan.timeout_secs,
+            max_timeout_secs: plan.max_timeout_secs,
             confirmed: plan.confirmed,
         };
         execute_file_transfer_download_for_target(DownloadTargetInput {

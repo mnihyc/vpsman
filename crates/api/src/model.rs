@@ -225,7 +225,7 @@ pub(crate) struct JobHistoryView {
     pub(crate) status: String,
     pub(crate) target_count: i32,
     pub(crate) payload_hash: String,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) created_at: String,
     pub(crate) completed_at: Option<String>,
 }
@@ -937,7 +937,7 @@ pub(crate) struct CreateJobRequest {
     #[serde(default)]
     pub(crate) operation: Option<JobCommand>,
     #[serde(default)]
-    pub(crate) timeout_secs: Option<u64>,
+    pub(crate) max_timeout_secs: Option<u64>,
     #[serde(default)]
     pub(crate) force_unprivileged: bool,
     pub(crate) privileged: bool,
@@ -966,7 +966,7 @@ pub(crate) struct CreateJobResponse {
     pub(crate) job_id: Uuid,
     pub(crate) target_count: usize,
     pub(crate) status: String,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) max_job_timeout_secs: u64,
     pub(crate) control_deadline_extra_secs: u64,
     pub(crate) target_counts: CreateJobTargetCounts,

@@ -36,7 +36,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
         capabilities: AgentCapabilitySnapshot {
             privilege_mode: AgentPrivilegeMode::Unprivileged,
             effective_uid: Some(1000),
-            job_timeout_secs: 3600,
+            max_job_timeout_secs: 3600,
             can_attempt_privileged_ops: true,
             can_manage_runtime_tunnels: false,
             can_apply_process_limits: false,
@@ -114,7 +114,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
             status: "failed".to_string(),
             target_count: 1,
             payload_hash: "aa".repeat(32),
-            timeout_secs: 30,
+            max_timeout_secs: 30,
             created_at: "100".to_string(),
             completed_at: Some("110".to_string()),
         });

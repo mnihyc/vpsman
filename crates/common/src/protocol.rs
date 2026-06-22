@@ -880,8 +880,8 @@ pub struct AgentCapabilitySnapshot {
     pub privilege_mode: AgentPrivilegeMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_uid: Option<u32>,
-    #[serde(default = "default_agent_job_timeout_secs")]
-    pub job_timeout_secs: u64,
+    #[serde(default = "default_agent_max_job_timeout_secs")]
+    pub max_job_timeout_secs: u64,
     #[serde(default)]
     pub can_attempt_privileged_ops: bool,
     #[serde(default)]
@@ -897,7 +897,7 @@ impl Default for AgentCapabilitySnapshot {
         Self {
             privilege_mode: AgentPrivilegeMode::Unknown,
             effective_uid: None,
-            job_timeout_secs: default_agent_job_timeout_secs(),
+            max_job_timeout_secs: default_agent_max_job_timeout_secs(),
             can_attempt_privileged_ops: false,
             can_manage_runtime_tunnels: false,
             can_apply_process_limits: false,
@@ -906,7 +906,7 @@ impl Default for AgentCapabilitySnapshot {
     }
 }
 
-fn default_agent_job_timeout_secs() -> u64 {
+fn default_agent_max_job_timeout_secs() -> u64 {
     DEFAULT_MAX_JOB_TIMEOUT_SECS
 }
 
@@ -991,6 +991,32 @@ pub struct GatewayTerminalOutputIngest {
     pub spooled_replay: bool,
     pub client_id: String,
     pub output: TerminalStreamOutput,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AgentUpdateVerificationRequest {
+    pub job_id: Uuid,
+    pub version_url: String,
+    pub artifact_url: String,
+    pub checksum_url: String,
+    pub asset_name: String,
+    pub sha256_hex: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AgentUpdateVerificationResult {
+    pub job_id: Uuid,
+    pub approved: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayAgentUpdateVerificationIngest {
+    pub gateway_id: String,
+    pub gateway_session_id: Uuid,
+    pub process_incarnation_id: Uuid,
+    pub client_id: String,
+    pub request: AgentUpdateVerificationRequest,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1156,7 +1182,7 @@ pub struct JobRequest {
     #[serde(default = "default_command_protocol_version")]
     pub command_version: u16,
     pub command: JobCommand,
-    pub timeout_secs: u64,
+    pub max_timeout_secs: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1565,7 +1591,7 @@ pub fn job_privilege_intent_fields() -> &'static [&'static str] {
         "command_type",
         "operation_payload_hash",
         "resolved_targets",
-        "timeout_secs",
+        "max_timeout_secs",
         "force_unprivileged",
         "privileged",
     ]
@@ -1581,7 +1607,7 @@ pub fn create_job_request_fields() -> &'static [&'static str] {
         "command",
         "argv",
         "operation",
-        "timeout_secs",
+        "max_timeout_secs",
         "force_unprivileged",
         "privileged",
         "privilege_assertion",
@@ -1629,7 +1655,7 @@ pub fn terminal_input_privilege_intent_fields() -> &'static [&'static str] {
         "client_id",
         "session_id",
         "input_payload_hash",
-        "timeout_secs",
+        "max_timeout_secs",
         "confirmed",
     ]
 }
@@ -1642,7 +1668,7 @@ pub struct JobPrivilegeIntent<'a> {
     command_type: &'a str,
     operation_payload_hash: &'a str,
     resolved_targets: Vec<&'a str>,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     force_unprivileged: bool,
     privileged: bool,
 }
@@ -1656,7 +1682,7 @@ impl<'a> JobPrivilegeIntent<'a> {
             command_type: input.command_type,
             operation_payload_hash: input.operation_payload_hash,
             resolved_targets: sorted_str_refs(input.resolved_targets),
-            timeout_secs: input.timeout_secs.max(1),
+            max_timeout_secs: input.max_timeout_secs.max(1),
             force_unprivileged: input.force_unprivileged,
             privileged: input.privileged,
         }
@@ -1668,7 +1694,7 @@ pub struct JobPrivilegeIntentInput<'a> {
     pub command_type: &'a str,
     pub operation_payload_hash: &'a str,
     pub resolved_targets: &'a [String],
-    pub timeout_secs: u64,
+    pub max_timeout_secs: u64,
     pub force_unprivileged: bool,
     pub privileged: bool,
 }
@@ -1776,7 +1802,7 @@ pub struct TerminalInputPrivilegeIntent<'a> {
     client_id: &'a str,
     session_id: &'a str,
     input_payload_hash: &'a str,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 }
 
@@ -1788,7 +1814,7 @@ impl<'a> TerminalInputPrivilegeIntent<'a> {
             client_id: input.client_id.trim(),
             session_id: input.session_id.trim(),
             input_payload_hash: input.input_payload_hash.trim(),
-            timeout_secs: input.timeout_secs.max(1),
+            max_timeout_secs: input.max_timeout_secs.max(1),
             confirmed: input.confirmed,
         }
     }
@@ -1798,7 +1824,7 @@ pub struct TerminalInputPrivilegeIntentInput<'a> {
     pub client_id: &'a str,
     pub session_id: &'a str,
     pub input_payload_hash: &'a str,
-    pub timeout_secs: u64,
+    pub max_timeout_secs: u64,
     pub confirmed: bool,
 }
 
@@ -3817,24 +3843,24 @@ mod tests {
             command_type: "shell",
             operation_payload_hash: "ab",
             resolved_targets: &resolved_targets,
-            timeout_secs: 7_200,
+            max_timeout_secs: 7_200,
             force_unprivileged: false,
             privileged: true,
         })
         .unwrap();
-        assert!(job_intent.contains(r#""timeout_secs":7200"#));
+        assert!(job_intent.contains(r#""max_timeout_secs":7200"#));
 
         let terminal_intent = super::canonical_terminal_input_privilege_intent(
             super::TerminalInputPrivilegeIntentInput {
                 client_id: "client-a",
                 session_id: "session-a",
                 input_payload_hash: "cd",
-                timeout_secs: 7_200,
+                max_timeout_secs: 7_200,
                 confirmed: true,
             },
         )
         .unwrap();
-        assert!(terminal_intent.contains(r#""timeout_secs":7200"#));
+        assert!(terminal_intent.contains(r#""max_timeout_secs":7200"#));
     }
 
     #[test]

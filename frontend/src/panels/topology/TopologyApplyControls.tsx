@@ -35,7 +35,7 @@ import type {
 } from "../../types";
 import { clientDisplayNameFromMap, clientDisplayNameMap, runPanelAction, shortId } from "../../utils";
 import {
-  clampJobTimeoutSecs,
+  clampJobMaxTimeoutSecs,
   clampInteger,
   MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 } from "../jobDispatchModel";
@@ -69,7 +69,7 @@ export function TopologyApplyControls({
   const [selectedPlanId, setSelectedPlanId] = useState(() => tunnelPlans[0]?.id ?? "");
   const [side, setSide] = useState<TunnelEndpointSide>("left");
   const [backend, setBackend] = useState<TunnelConfigBackend>("ifupdown");
-  const [timeoutSecs, setTimeoutSecs] = useState(60);
+  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(60);
   const [probeCount, setProbeCount] = useState(3);
   const [probeIntervalMs, setProbeIntervalMs] = useState(500);
   const [speedDurationSecs, setSpeedDurationSecs] = useState(3);
@@ -184,7 +184,7 @@ export function TopologyApplyControls({
           : [builtOperation.endpoint.localClientId];
       const targets = resolveAgentsById(agents, targetClientIds);
       const selectorExpression = selectorExpressionForClientIds(targetClientIds);
-      const boundedTimeoutSecs = clampJobTimeoutSecs(timeoutSecs);
+      const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
       const boundedForceUnprivileged = isMutation(mode) ? forceUnprivileged : false;
       const builtPrivilege = await buildPrivilegeForJobOperation({
         clientIds: targetClientIds,
@@ -193,7 +193,7 @@ export function TopologyApplyControls({
         operation: builtOperation.operation,
         privilegeMaterial,
         selectorExpression,
-        timeoutSecs: boundedTimeoutSecs,
+        maxTimeoutSecs: boundedMaxTimeoutSecs,
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
@@ -213,7 +213,7 @@ export function TopologyApplyControls({
           { label: "Plan", value: selectedPlan.name },
           { label: "Endpoint", value: side },
           ...(mode === "apply" ? [{ label: "Backend", value: backendLabel(backend) }] : []),
-          { label: "Timeout", value: `${boundedTimeoutSecs}s` },
+          { label: "Max timeout", value: `${boundedMaxTimeoutSecs}s` },
           { label: "Privilege unlock", value: "Unlocked locally" },
           ...(isMutation(mode)
             ? [{ label: "Privilege", value: boundedForceUnprivileged ? "Forced best effort" : "Root required" }]
@@ -225,7 +225,7 @@ export function TopologyApplyControls({
         selectorExpression,
         targetClientIds,
         targets,
-        timeoutSecs: boundedTimeoutSecs,
+        maxTimeoutSecs: boundedMaxTimeoutSecs,
       });
     });
     } finally {
@@ -255,16 +255,16 @@ export function TopologyApplyControls({
         job_id: snapshot.jobId,
         privileged: true,
         privilege_assertion: snapshot.privilegeAssertion,
-        timeout_secs: snapshot.timeoutSecs,
+        max_timeout_secs: snapshot.maxTimeoutSecs,
       });
       setLastPayloadHash(snapshot.payloadHashHex);
       setLastJob(job);
       setLastAction(snapshot.action);
-      await trackNetworkProgress(job, snapshot.targets, snapshot.timeoutSecs);
+      await trackNetworkProgress(job, snapshot.targets, snapshot.maxTimeoutSecs);
     });
   }
 
-  async function trackNetworkProgress(job: CreateJobResponse, targets: AgentView[], timeoutSecsForSnapshot: number) {
+  async function trackNetworkProgress(job: CreateJobResponse, targets: AgentView[], maxTimeoutSecsForSnapshot: number) {
     const targetCount = createJobTargetCount(job);
     setLastJobProgress(null);
     setJobProgress(buildBulkJobProgress({
@@ -272,14 +272,14 @@ export function TopologyApplyControls({
       targetCount,
       targetRecords: [],
       targets,
-      timeoutSecs: timeoutSecsForSnapshot,
+      maxTimeoutSecs: maxTimeoutSecsForSnapshot,
     }));
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
         onProgress: setJobProgress,
         targetCount,
         targets,
-        timeoutSecs: timeoutSecsForSnapshot,
+        maxTimeoutSecs: maxTimeoutSecsForSnapshot,
       });
       setLastJobProgress(result.progress);
     } finally {
@@ -347,17 +347,17 @@ export function TopologyApplyControls({
         </div>
         <div className="dispatchControls">
           <label>
-            <span>Timeout seconds</span>
+            <span>Max timeout seconds</span>
             <input
-              aria-label="Network apply timeout seconds"
+              aria-label="Network apply max timeout seconds"
               max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
               min={1}
               onChange={(event) => {
                 clearNetworkReview();
-                setTimeoutSecs(Number(event.target.value));
+                setMaxTimeoutSecs(Number(event.target.value));
               }}
               type="number"
-              value={timeoutSecs}
+              value={maxTimeoutSecs}
             />
           </label>
         </div>
@@ -590,7 +590,7 @@ type NetworkActionSnapshot = {
   selectorExpression: string;
   targetClientIds: string[];
   targets: AgentView[];
-  timeoutSecs: number;
+  maxTimeoutSecs: number;
 };
 
 function disabledPlanAllowsAction(mode: NetworkAction): boolean {

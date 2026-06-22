@@ -505,7 +505,7 @@ test("data-source apply confirmation closes on edit and submits a fresh snapshot
   ).toHaveValue(/agent-sfo-01/);
   await activate(panel.getByRole("button", { name: "Review apply" }));
   await expect(panel.getByText("Apply data-source patch")).toBeVisible();
-  await panel.getByLabel("Data-source apply timeout").fill("75");
+  await panel.getByLabel("Data-source apply max timeout seconds").fill("75");
   await expect(panel.getByText("Apply data-source patch")).toBeHidden();
   await activate(panel.getByRole("button", { name: "Review apply" }));
   await expect(panel.getByText("Apply data-source patch")).toBeVisible();
@@ -526,7 +526,7 @@ test("data-source apply confirmation closes on edit and submits a fresh snapshot
     command: "data_source_config_patch",
     selector_expression: "id:agent-sfo-01",
     target_client_ids: ["agent-sfo-01"],
-    timeout_secs: 75,
+    max_timeout_secs: 75,
     operation: {
       apply_mode: "incremental_patch",
       type: "data_source_config_patch",
@@ -832,10 +832,10 @@ test("topology network confirmation closes on edit and submits a fresh snapshot"
   await openConsoleSubpage(page, "Topology", "Apply / rollback");
   await unlockPrivilegeFor(page, "Topology", "Apply / rollback");
 
-  await page.getByLabel("Network apply timeout seconds").fill("90");
+  await page.getByLabel("Network apply max timeout seconds").fill("90");
   await activate(page.getByRole("button", { name: "Review apply" }));
   await expect(page.getByText("Confirm apply")).toBeVisible();
-  await page.getByLabel("Network apply timeout seconds").fill("120");
+  await page.getByLabel("Network apply max timeout seconds").fill("120");
   await expect(page.getByText("Confirm apply")).toBeHidden();
   await activate(page.getByRole("button", { name: "Review apply" }));
   await expect(page.getByText("Confirm apply")).toBeVisible();
@@ -855,7 +855,7 @@ test("topology network confirmation closes on edit and submits a fresh snapshot"
     command: "network_apply",
     selector_expression: "id:agent-sfo-01",
     target_client_ids: ["agent-sfo-01"],
-    timeout_secs: 120,
+    max_timeout_secs: 120,
     operation: {
       side: "left",
       type: "network_apply",
@@ -877,7 +877,7 @@ test("topology async review preparation ignores stale edits", async ({
 
   await activate(page.getByRole("button", { name: "Review apply" }));
   await expect(page.getByText("Preparing apply review")).toBeVisible();
-  await page.getByLabel("Network apply timeout seconds").fill("135");
+  await page.getByLabel("Network apply max timeout seconds").fill("135");
   await expect(page.getByText("Preparing apply review")).toBeHidden();
   await expect(page.getByText("Confirm apply")).toBeHidden();
   await activate(page.getByRole("button", { name: "Review apply" }));
@@ -896,13 +896,13 @@ test("topology async review preparation ignores stale edits", async ({
   });
   expect(applyRequest).toMatchObject({
     command: "network_apply",
-    timeout_secs: 135,
+    max_timeout_secs: 135,
   });
 
   await openConsoleSubpage(page, "Topology", "OSPF");
   await activate(page.getByRole("button", { name: "Review cost apply" }));
   await expect(page.getByText("Preparing OSPF review")).toBeVisible();
-  await page.getByLabel("OSPF update timeout seconds").fill("105");
+  await page.getByLabel("OSPF update max timeout seconds").fill("105");
   await expect(page.getByText("Preparing OSPF review")).toBeHidden();
   await expect(page.getByText("Confirm OSPF cost update")).toBeHidden();
   await activate(page.getByRole("button", { name: "Review cost apply" }));
@@ -921,7 +921,7 @@ test("topology async review preparation ignores stale edits", async ({
   });
   expect(ospfRequest).toMatchObject({
     command: "network_ospf_cost_update",
-    timeout_secs: 105,
+    max_timeout_secs: 105,
   });
 });
 
@@ -958,10 +958,10 @@ test("OSPF confirmation closes on edit and submits a fresh snapshot", async ({
   await openConsoleSubpage(page, "Topology", "OSPF");
   await unlockPrivilegeFor(page, "Topology", "OSPF");
 
-  await page.getByLabel("OSPF update timeout seconds").fill("45");
+  await page.getByLabel("OSPF update max timeout seconds").fill("45");
   await activate(page.getByRole("button", { name: "Review cost apply" }));
   await expect(page.getByText("Confirm OSPF cost update")).toBeVisible();
-  await page.getByLabel("OSPF update timeout seconds").fill("75");
+  await page.getByLabel("OSPF update max timeout seconds").fill("75");
   await expect(page.getByText("Confirm OSPF cost update")).toBeHidden();
   await activate(page.getByRole("button", { name: "Review cost apply" }));
   await expect(page.getByText("Confirm OSPF cost update")).toBeVisible();
@@ -981,7 +981,7 @@ test("OSPF confirmation closes on edit and submits a fresh snapshot", async ({
     command: "network_ospf_cost_update",
     selector_expression: "id:agent-sfo-01",
     target_client_ids: ["agent-sfo-01"],
-    timeout_secs: 75,
+    max_timeout_secs: 75,
     operation: {
       side: "left",
       type: "network_ospf_cost_update",
@@ -1194,14 +1194,14 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
   );
   await expect(stagedArchive).toHaveAttribute("title", archivePath);
-  await restoreWorkflow.getByLabel("Restore timeout seconds").fill("120");
+  await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("120");
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review restore" }),
   );
   await expect(
     restoreWorkflow.getByLabel("Confirm restore run"),
   ).toBeVisible();
-  await restoreWorkflow.getByLabel("Restore timeout seconds").fill("45");
+  await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("45");
   await expect(
     restoreWorkflow.getByLabel("Confirm restore run"),
   ).toBeHidden();
@@ -1234,7 +1234,7 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     command: "restore",
     selector_expression: "id:agent-fra-02",
     target_client_ids: ["agent-fra-02"],
-    timeout_secs: 45,
+    max_timeout_secs: 45,
     operation: {
       archive_path: archivePath,
       archive_sha256_hex: archiveSha256Hex,
@@ -1295,12 +1295,12 @@ test("backup restore async review preparation ignores stale edits", async ({
   await expect(restoreWorkflow.getByLabel("Staged archive")).toHaveValue(
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
   );
-  await restoreWorkflow.getByLabel("Restore timeout seconds").fill("150");
+  await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("150");
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review restore" }),
   );
   await expect(page.getByText("Preparing restore run review")).toBeVisible();
-  await restoreWorkflow.getByLabel("Restore timeout seconds").fill("55");
+  await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("55");
   await expect(page.getByText("Preparing restore run review")).toBeHidden();
   await expect(
     restoreWorkflow.getByLabel("Confirm restore run"),
@@ -1326,7 +1326,7 @@ test("backup restore async review preparation ignores stale edits", async ({
   });
   expect(request).toMatchObject({
     command: "restore",
-    timeout_secs: 55,
+    max_timeout_secs: 55,
     operation: {
       archive_path: archivePath,
       destination_root: destinationRoot,

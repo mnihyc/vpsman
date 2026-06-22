@@ -152,7 +152,7 @@ reject_body="$(jq -nc \
     target_client_ids: [$client],
     privileged: true,
     confirmed: true,
-    timeout_secs: 30
+    max_timeout_secs: 30
   }')"
 reject_json="$SMOKE_TMPDIR/reject.json"
 reject_status="$(curl -sS -o "$reject_json" -w "%{http_code}" \
@@ -185,7 +185,7 @@ backup_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --include-config \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 30 \
+    --max-timeout-secs 30 \
     --confirmed)"
 job_id="$(jq -r '.job_id' <<<"$backup_json")"
 smoke_assert_job_create_queued "$backup_json" 1
@@ -247,7 +247,7 @@ restore_upload_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --mode 0600 \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 30 \
+    --max-timeout-secs 30 \
     --confirmed)"
 restore_archive_transfer_session_id="$(jq -r 'select(.event == "file_transfer_upload_complete") | .session_id' <<<"$restore_upload_json" | tail -1)"
 if [[ -z "$restore_archive_transfer_session_id" || "$restore_archive_transfer_session_id" == "null" ]]; then
@@ -270,7 +270,7 @@ restore_json="$(VPSMAN_RESTORE_DESTINATION_ROOT_BASE="$restore_root_base" \
     --target-client-id "$client_id" \
     --archive-transfer-session-id "$restore_archive_transfer_session_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 30 \
+    --max-timeout-secs 30 \
     --force-unprivileged \
     --confirmed)"
 restore_job_id="$(jq -r '.job_id' <<<"$restore_json")"
@@ -291,7 +291,7 @@ rollback_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
     --restore-job-id "$restore_job_id" \
     --target-client-id "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 30 \
+    --max-timeout-secs 30 \
     --force-unprivileged \
     --confirmed)"
 rollback_job_id="$(jq -r '.job_id' <<<"$rollback_json")"
@@ -320,7 +320,7 @@ vty_restore_root="$restore_root"
 vty_restore_log="$SMOKE_TMPDIR/vty-restore.log"
 {
   printf 'enable\n'
-  printf 'restore-run %s %s --archive-transfer-session-id %s --timeout 30 --force-unprivileged --confirmed\n' \
+  printf 'restore-run %s %s --archive-transfer-session-id %s --max-timeout 30 --force-unprivileged --confirmed\n' \
     "$backup_request_id" "$client_id" "$restore_archive_transfer_session_id"
   printf 'exit\n'
 } | VPSMAN_SUPER_PASSWORD="$super_password" \
@@ -359,7 +359,7 @@ migration_json="$(VPSMAN_RESTORE_DESTINATION_ROOT_BASE="$restore_root_base" \
     --restore-plan-id "$migration_restore_plan_id" \
     --archive-transfer-session-id "$restore_archive_transfer_session_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 30 \
+    --max-timeout-secs 30 \
     --force-unprivileged \
     --note "live migration run" \
     --confirmed)"

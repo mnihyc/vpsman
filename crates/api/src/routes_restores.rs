@@ -59,7 +59,7 @@ pub(crate) async fn create_restore_plan(
         command_type: "restore",
         operation_payload_hash: &command_hash,
         resolved_targets: &resolved_targets,
-        timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+        max_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
         force_unprivileged: false,
         privileged: true,
     });

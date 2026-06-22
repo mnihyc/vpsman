@@ -1299,9 +1299,9 @@ fn delivery_from_row(row: sqlx::postgres::PgRow) -> Result<DeliveryRow> {
     })
 }
 
-fn webhook_client(timeout_secs: u64) -> Result<reqwest::Client> {
+fn webhook_client(max_timeout_secs: u64) -> Result<reqwest::Client> {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs.clamp(1, 60)))
+        .timeout(Duration::from_secs(max_timeout_secs.clamp(1, 60)))
         .redirect(Policy::none())
         .build()
         .context("failed to build webhook rule client")

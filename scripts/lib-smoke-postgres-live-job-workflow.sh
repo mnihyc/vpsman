@@ -99,7 +99,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --argv "/bin/sh,-c,printf '%s' '$shell_payload' | tee '$shell_marker'" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 shell_job_id="$(jq -r '.job_id' <<<"$shell_json")"
 smoke_assert_job_create_queued "$shell_json" 1
@@ -114,7 +114,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --pty \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 shell_pty_job_id="$(jq -r '.job_id' <<<"$shell_pty_json")"
 smoke_assert_job_create_queued "$shell_pty_json" 1
@@ -127,7 +127,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --script "printf '%s' '$shell_script_payload' | tee '$shell_script_marker'" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 shell_script_job_id="$(jq -r '.job_id' <<<"$shell_script_json")"
 smoke_assert_job_create_queued "$shell_script_json" 1
@@ -142,7 +142,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --script "printf '%s' '$live_stream_start'; sleep 5; printf '%s' '$live_stream_end'" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed >"$live_stream_output" &
 live_stream_pid="$!"
 live_stream_job_id=""
@@ -185,7 +185,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --script "$large_output_script" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 large_output_job_id="$(jq -r '.job_id' <<<"$large_output_json")"
 smoke_assert_job_create_queued "$large_output_json" 1
@@ -199,7 +199,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --argv "/bin/sh,-c,sleep 2" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 1 \
+    --max-timeout-secs 1 \
     --confirmed)"
 timeout_job_id="$(jq -r '.job_id' <<<"$timeout_json")"
 smoke_assert_job_create_queued "$timeout_json" 1
@@ -213,7 +213,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --path "$shell_marker" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 file_pull_job_id="$(jq -r '.job_id' <<<"$file_pull_json")"
 smoke_assert_job_create_queued "$file_pull_json" 1
@@ -230,7 +230,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --flow-window-bytes 32768 \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 terminal_session_id="$(jq -r '.terminal_session_id' <<<"$terminal_open_json")"
 terminal_open_job_id="$(jq -r '.job.job_id' <<<"$terminal_open_json")"
@@ -248,7 +248,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --rows 30 \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 terminal_resize_job_id="$(jq -r '.job_id' <<<"$terminal_resize_json")"
 smoke_assert_job_create_queued "$terminal_resize_json" 1
@@ -261,7 +261,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --session-id "$terminal_session_id" \
     --data-base64 "$terminal_input_base64" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 terminal_input_job_json="$(jq -c '.job' <<<"$terminal_input_json")"
 terminal_input_job_id="$(jq -r '.job_id' <<<"$terminal_input_job_json")"
@@ -281,7 +281,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --flow-window-bytes 32768 \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 terminal_attach_job_id="$(jq -r '.job.job_id' <<<"$terminal_attach_json")"
 jq -e '
@@ -297,7 +297,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --replay-from-seq 1 \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 terminal_poll_job_id="$(jq -r '.job_id' <<<"$terminal_poll_json")"
 smoke_assert_job_create_queued "$terminal_poll_json" 1
@@ -310,7 +310,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --reason live-terminal-smoke \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 terminal_close_job_id="$(jq -r '.job_id' <<<"$terminal_close_json")"
 smoke_assert_job_create_queued "$terminal_close_json" 1
@@ -328,7 +328,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --chunk-size-bytes 16 \
     --poll-interval-ms 100 \
     --max-polls 120 \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed >"$resumable_upload_events"
 resumable_upload_session_id="$(
   jq -r 'select(.event == "file_transfer_upload_ready") | .session_id' \
@@ -346,7 +346,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --chunk-size-bytes 16 \
     --poll-interval-ms 100 \
     --max-polls 120 \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed >"$resumable_download_events"
 resumable_download_session_id="$(
   jq -r 'select(.event == "file_transfer_download_ready") | .session_id' \
@@ -361,7 +361,7 @@ VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" user-sessions \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 user_sessions_job_id="$(jq -r '.job_id' <<<"$user_sessions_json")"
 smoke_assert_job_create_queued "$user_sessions_json" 1
@@ -377,7 +377,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --argv="$supervisor_script" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 process_start_job_id="$(jq -r '.job_id' <<<"$process_start_json")"
 smoke_assert_job_create_queued "$process_start_json" 1
@@ -391,7 +391,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --name "$supervisor_name" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 process_status_job_id="$(jq -r '.job_id' <<<"$process_status_json")"
 smoke_assert_job_create_queued "$process_status_json" 1
@@ -405,7 +405,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --max-bytes 4096 \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 process_logs_job_id="$(jq -r '.job_id' <<<"$process_logs_json")"
 smoke_assert_job_create_queued "$process_logs_json" 1
@@ -418,7 +418,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --name "$supervisor_name" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 process_restart_job_id="$(jq -r '.job_id' <<<"$process_restart_json")"
 smoke_assert_job_create_queued "$process_restart_json" 1
@@ -432,7 +432,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --name "$supervisor_name" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --confirmed)"
 process_stop_job_id="$(jq -r '.job_id' <<<"$process_stop_json")"
 smoke_assert_job_create_queued "$process_stop_json" 1
@@ -466,7 +466,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --plan-file "$network_plan_file" \
     --side left \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10)"
+    --max-timeout-secs 10)"
 network_status_job_id="$(jq -r '.job_id' <<<"$network_status_json")"
 smoke_assert_job_create_queued "$network_status_json" 1
 smoke_wait_api_job_status "$api_url" "$network_status_job_id" completed 45 >/dev/null
@@ -480,7 +480,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --count 2 \
     --interval-ms 200 \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10)"
+    --max-timeout-secs 10)"
 network_probe_job_id="$(jq -r '.job_id' <<<"$network_probe_json")"
 smoke_assert_job_create_queued "$network_probe_json" 1
 smoke_wait_api_job_status "$api_url" "$network_probe_job_id" completed 45 >/dev/null
@@ -497,7 +497,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --port "$speed_port" \
     --connect-timeout-ms 3000 \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10)"
+    --max-timeout-secs 10)"
 network_speed_job_id="$(jq -r '.job_id' <<<"$network_speed_json")"
 smoke_assert_job_create_queued "$network_speed_json" 2
 smoke_wait_api_job_status "$api_url" "$network_speed_job_id" completed 45 >/dev/null

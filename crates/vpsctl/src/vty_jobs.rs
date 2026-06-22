@@ -128,7 +128,7 @@ pub(crate) fn vty_submit_operation(
     command_label: &str,
     operation: &JobCommand,
     selection: VtyJobSelection,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
 ) -> Result<String> {
     vty_submit_operation_with_force(
         api_url,
@@ -137,7 +137,7 @@ pub(crate) fn vty_submit_operation(
         command_label,
         operation,
         selection,
-        timeout_secs,
+        max_timeout_secs,
         false,
     )
 }
@@ -149,7 +149,7 @@ pub(crate) fn vty_submit_operation_with_force(
     command_label: &str,
     operation: &JobCommand,
     selection: VtyJobSelection,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     force_unprivileged: bool,
 ) -> Result<String> {
     let resolved = http_post_json(
@@ -180,7 +180,7 @@ pub(crate) fn vty_submit_operation_with_force(
         &privilege_context.password,
         &privilege_context.salt_hex,
         300,
-        timeout_secs,
+        max_timeout_secs,
         force_unprivileged,
         true,
     )?;
@@ -200,7 +200,7 @@ pub(crate) fn vty_submit_operation_with_force(
             "destructive": selection.destructive,
             "confirmed": selection.confirmed,
             "force_unprivileged": force_unprivileged,
-            "timeout_secs": timeout_secs,
+            "max_timeout_secs": max_timeout_secs,
             "privilege_assertion": privilege.privilege_assertion,
         }),
     )

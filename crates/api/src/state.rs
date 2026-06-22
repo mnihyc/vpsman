@@ -306,8 +306,8 @@ impl AppState {
         TrustedProxyConfig::from_optional_entries(entries.as_deref()).unwrap_or_default()
     }
 
-    pub(crate) fn schedule_apply_now_timeout_secs(&self) -> u64 {
-        if let Ok(value) = std::env::var("VPSMAN_WORKER_SCHEDULE_JOB_TIMEOUT_SECS") {
+    pub(crate) fn schedule_apply_now_max_timeout_secs(&self) -> u64 {
+        if let Ok(value) = std::env::var("VPSMAN_WORKER_SCHEDULE_JOB_MAX_TIMEOUT_SECS") {
             if let Ok(parsed) = value.parse::<u64>() {
                 return parsed.clamp(1, self.max_job_timeout_secs());
             }
@@ -315,8 +315,8 @@ impl AppState {
         let configured = self.current_suite_config().and_then(|suite| {
             suite
                 .worker
-                .schedule_job_timeout_secs
-                .or(suite.timeout.worker_schedule_job_timeout_secs)
+                .schedule_job_max_timeout_secs
+                .or(suite.timeout.worker_schedule_job_max_timeout_secs)
         });
         configured
             .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)

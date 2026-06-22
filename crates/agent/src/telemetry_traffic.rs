@@ -111,7 +111,7 @@ fn vnstat_preset_command(config: &AgentConfig, interface: &str) -> Option<Runtim
     ]);
     Some(RuntimeTunnelCommand {
         argv,
-        timeout_secs: 5,
+        max_timeout_secs: 5,
         max_output_bytes: 16 * 1024,
     })
 }
@@ -147,8 +147,8 @@ async fn traffic_from_command(
             };
         }
     };
-    let timeout_secs = command
-        .timeout_secs
+    let max_timeout_secs = command
+        .max_timeout_secs
         .min(config.network.runtime_command_timeout_secs)
         .clamp(1, 30);
     let max_output_bytes = usize::try_from(
@@ -158,7 +158,7 @@ async fn traffic_from_command(
             .clamp(1024, 64 * 1024),
     )
     .unwrap_or(16 * 1024);
-    match run_traffic_command_json(&argv, timeout_secs, max_output_bytes).await {
+    match run_traffic_command_json(&argv, max_timeout_secs, max_output_bytes).await {
         Ok(payload) => parse_traffic_json_payload(&payload, source),
         Err(error) => TrafficAccumulation {
             rx_bytes: 0,
@@ -172,7 +172,7 @@ async fn traffic_from_command(
 
 async fn run_traffic_command_json(
     argv: &[String],
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
 ) -> Result<serde_json::Value> {
     if argv.is_empty() || !argv[0].starts_with('/') {
@@ -183,7 +183,7 @@ async fn run_traffic_command_json(
     command.stdin(Stdio::null());
     let result = run_child_with_bounded_output(
         command,
-        timeout_secs,
+        max_timeout_secs,
         max_output_bytes,
         ChildCleanupPolicy::ProcessGroup,
     )

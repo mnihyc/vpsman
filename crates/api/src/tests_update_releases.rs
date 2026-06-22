@@ -1,8 +1,14 @@
 use crate::state::UpdateReleasePolicy;
 use crate::*;
-use axum::{extract::State, Json};
+use axum::{
+    extract::State,
+    http::{header::AUTHORIZATION, HeaderMap},
+    Json,
+};
 use vpsman_common::{
-    agent_update_asset_name_for_arch, encode_json, payload_hash, AgentHello, JobCommand,
+    agent_update_asset_name_for_arch, encode_json, payload_hash, AgentHello,
+    AgentUpdateVerificationRequest, CommandOutput, GatewayAgentUpdateVerificationIngest,
+    GatewayCommandOutputIngest, GatewaySessionLifecycleIngest, JobCommand, OutputStream,
 };
 
 #[tokio::test]
@@ -167,7 +173,7 @@ async fn strict_agent_update_release_policy_rejects_unregistered_update_before_g
         command: "agent_update".to_string(),
         argv: Vec::new(),
         operation: Some(operation),
-        timeout_secs: Some(30),
+        max_timeout_secs: Some(30),
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -263,7 +269,8 @@ async fn strict_agent_update_release_policy_allows_registered_manifest_check() {
 }
 
 #[tokio::test]
-async fn strict_agent_update_release_policy_rejects_unregistered_manifest_check() {
+async fn strict_agent_update_release_policy_defers_unregistered_manifest_check_to_agent_verification(
+) {
     let repo = Repository::Memory(MemoryState::default());
     upsert_test_agent(&repo, "client-a", "x86_64").await;
     let version_url = local_update_manifest_url(&[("x86_64", "34".repeat(32))]);
@@ -281,8 +288,8 @@ async fn strict_agent_update_release_policy_rejects_unregistered_manifest_check(
         .await
         .unwrap();
 
-    assert_eq!(status, axum::http::StatusCode::CONFLICT);
-    assert_eq!(response.status, "failed");
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    assert_eq!(response.status, "queued");
     let jobs = repo.list_jobs(10).await.unwrap();
     assert_eq!(jobs[0].payload_hash, command_hash);
 }
@@ -329,7 +336,7 @@ async fn strict_agent_update_release_policy_requires_every_target_arch_hash() {
 }
 
 #[tokio::test]
-async fn strict_agent_update_release_policy_rejects_unregistered_target_arch_hash() {
+async fn strict_agent_update_release_policy_defers_target_arch_hashes_to_agent_verification() {
     let repo = Repository::Memory(MemoryState::default());
     upsert_test_agent(&repo, "client-a", "x86_64").await;
     upsert_test_agent(&repo, "client-b", "aarch64").await;
@@ -359,12 +366,12 @@ async fn strict_agent_update_release_policy_rejects_unregistered_target_arch_has
         .await
         .unwrap();
 
-    assert_eq!(status, axum::http::StatusCode::CONFLICT);
-    assert_eq!(response.status, "failed");
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    assert_eq!(response.status, "queued");
 }
 
 #[tokio::test]
-async fn strict_agent_update_release_policy_rejects_unsupported_target_arch_without_job() {
+async fn strict_agent_update_release_policy_defers_unsupported_arch_to_agent_verification() {
     let repo = Repository::Memory(MemoryState::default());
     upsert_test_agent(&repo, "client-a", "s390x").await;
     let operator = test_operator();
@@ -384,13 +391,133 @@ async fn strict_agent_update_release_policy_rejects_unsupported_target_arch_with
     let state = test_state(repo.clone(), Default::default(), true);
     let headers = crate::test_auth_headers(&state).await;
 
-    let error = routes_jobs::create_job(State(state), headers, Json(request))
+    let (status, Json(response)) = routes_jobs::create_job(State(state), headers, Json(request))
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "agent_update_check_manifest_invalid");
-    assert!(repo.list_jobs(10).await.unwrap().is_empty());
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    assert_eq!(response.status, "queued");
+    assert_eq!(repo.list_jobs(10).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn strict_agent_update_check_verification_rejects_unregistered_hash() {
+    let repo = Repository::Memory(MemoryState::default());
+    let sha256_hex = "78".repeat(32);
+    let (state, headers, event) =
+        active_update_check_verification_fixture(repo, sha256_hex.clone(), true).await;
+
+    let Json(result) =
+        routes_ingest::verify_agent_update_artifact(State(state), headers, Json(event))
+            .await
+            .unwrap();
+
+    assert!(!result.approved);
+    assert_eq!(result.message, "registered agent update artifact missing");
+}
+
+#[tokio::test]
+async fn strict_agent_update_check_verification_accepts_registered_hash() {
+    let repo = Repository::Memory(MemoryState::default());
+    let sha256_hex = "9a".repeat(32);
+    repo.record_agent_update_release(
+        &external_release_request_with_hash("vpsman-agent", "9.9.9", "stable", &sha256_hex),
+        &test_operator(),
+    )
+    .await
+    .unwrap();
+    let (state, headers, event) =
+        active_update_check_verification_fixture(repo, sha256_hex, true).await;
+
+    let Json(result) =
+        routes_ingest::verify_agent_update_artifact(State(state), headers, Json(event))
+            .await
+            .unwrap();
+
+    assert!(result.approved);
+    assert_eq!(result.message, "registered agent update artifact accepted");
+}
+
+#[tokio::test]
+async fn async_agent_update_activation_output_records_lifecycle_audit() {
+    let repo = Repository::Memory(MemoryState::default());
+    let process_incarnation_id = upsert_test_agent(&repo, "client-a", "x86_64").await;
+    let staged_sha256_hex = "ab".repeat(32);
+    let operation = JobCommand::AgentUpdateActivate {
+        staged_sha256_hex: staged_sha256_hex.clone(),
+        restart_agent: false,
+    };
+    let command_hash = payload_hash(&encode_json(&operation).unwrap());
+    let request = update_job_request("agent_update_activate", operation);
+    let job_id = request.job_id.unwrap();
+    let mut state = test_state(repo.clone(), Default::default(), false);
+    let operator_headers = crate::test_auth_headers(&state).await;
+
+    let (status, Json(_)) =
+        routes_jobs::create_job(State(state.clone()), operator_headers, Json(request))
+            .await
+            .unwrap();
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    let claimed = repo.claim_due_job_targets(10, 30, 0).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    let gateway_session_id = Uuid::new_v4();
+    repo.record_gateway_session_started(&GatewaySessionLifecycleIngest {
+        gateway_id: "gateway-a".to_string(),
+        client_id: "client-a".to_string(),
+        session_id: gateway_session_id,
+        noise_public_key_hex: None,
+        remote_ip: None,
+        reason: None,
+    })
+    .await
+    .unwrap();
+    let internal_token = "test-internal-token-32-byte-minimum".to_string();
+    state.internal_token = Some(internal_token.clone());
+    let mut internal_headers = HeaderMap::new();
+    internal_headers.insert(
+        AUTHORIZATION,
+        format!("Bearer {internal_token}").parse().unwrap(),
+    );
+    let final_status = serde_json::json!({
+        "type": "agent_update_activation",
+        "status": "activated_pending_restart",
+        "sha256_hex": staged_sha256_hex.clone(),
+        "restart": "manual_restart_required",
+    });
+
+    let Json(_) = routes_ingest::ingest_command_output(
+        State(state),
+        internal_headers,
+        Json(GatewayCommandOutputIngest {
+            gateway_id: "gateway-a".to_string(),
+            gateway_session_id,
+            process_incarnation_id,
+            spooled_replay: false,
+            client_id: "client-a".to_string(),
+            job_id,
+            payload_hash: command_hash,
+            seq: 0,
+            received_unix: None,
+            output: CommandOutput {
+                job_id,
+                stream: OutputStream::Status,
+                data: serde_json::to_vec(&final_status).unwrap(),
+                exit_code: Some(0),
+                done: true,
+            },
+        }),
+    )
+    .await
+    .unwrap();
+
+    let audits = repo.list_audit_logs(20).await.unwrap();
+    assert!(audits.iter().any(|audit| {
+        audit.action == "agent_update.activation_completed"
+            && audit.target == "client:client-a"
+            && audit.metadata["activation_job_id"] == job_id.to_string()
+            && audit.metadata["artifact_sha256_hex"] == staged_sha256_hex
+    }));
 }
 
 #[tokio::test]
@@ -506,7 +633,7 @@ fn update_job_request_for_targets(
         command: command.to_string(),
         argv: Vec::new(),
         operation: Some(operation),
-        timeout_secs: Some(30),
+        max_timeout_secs: Some(30),
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
@@ -547,13 +674,79 @@ fn local_update_manifest_url(arch_hashes: &[(&str, String)]) -> String {
     format!("file://{}", manifest_path.display())
 }
 
-async fn upsert_test_agent(repo: &Repository, client_id: &str, arch: &str) {
+async fn active_update_check_verification_fixture(
+    repo: Repository,
+    sha256_hex: String,
+    require_registered_agent_updates: bool,
+) -> (AppState, HeaderMap, GatewayAgentUpdateVerificationIngest) {
+    let process_incarnation_id = upsert_test_agent(&repo, "client-a", "x86_64").await;
+    let state = test_state(
+        repo.clone(),
+        Default::default(),
+        require_registered_agent_updates,
+    );
+    let operator_headers = crate::test_auth_headers(&state).await;
+    let operation = JobCommand::AgentUpdateCheck {
+        version_url: Some("https://updates.example/version.json".to_string()),
+        activate: true,
+        restart_agent: true,
+    };
+    let request = update_job_request("agent_update_check", operation);
+    let job_id = request.job_id.unwrap();
+    let (status, Json(_)) =
+        routes_jobs::create_job(State(state.clone()), operator_headers, Json(request))
+            .await
+            .unwrap();
+    assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+    let claimed = repo.claim_due_job_targets(10, 30, 0).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    let gateway_session_id = Uuid::new_v4();
+    repo.record_gateway_session_started(&GatewaySessionLifecycleIngest {
+        gateway_id: "gateway-a".to_string(),
+        client_id: "client-a".to_string(),
+        session_id: gateway_session_id,
+        noise_public_key_hex: None,
+        remote_ip: None,
+        reason: None,
+    })
+    .await
+    .unwrap();
+    let internal_token = "test-internal-token-32-byte-minimum".to_string();
+    let mut state = state;
+    state.internal_token = Some(internal_token.clone());
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {internal_token}").parse().unwrap(),
+    );
+    (
+        state,
+        headers,
+        GatewayAgentUpdateVerificationIngest {
+            gateway_id: "gateway-a".to_string(),
+            gateway_session_id,
+            process_incarnation_id,
+            client_id: "client-a".to_string(),
+            request: AgentUpdateVerificationRequest {
+                job_id,
+                version_url: "https://updates.example/version.json".to_string(),
+                artifact_url: "https://updates.example/vpsman-agent".to_string(),
+                checksum_url: "https://updates.example/SHA256SUMS".to_string(),
+                asset_name: "vpsman-agent-linux-x86_64-musl".to_string(),
+                sha256_hex,
+            },
+        },
+    )
+}
+
+async fn upsert_test_agent(repo: &Repository, client_id: &str, arch: &str) -> Uuid {
+    let process_incarnation_id = uuid::Uuid::new_v4();
     if let Repository::Memory(memory) = repo {
         repository_ingest::upsert_memory_agent(
             &memory.agents,
             &AgentHello {
                 client_id: client_id.to_string(),
-                process_incarnation_id: uuid::Uuid::new_v4(),
+                process_incarnation_id,
                 agent_version: "test".to_string(),
                 os_release: "test".to_string(),
                 arch: arch.to_string(),
@@ -564,4 +757,5 @@ async fn upsert_test_agent(repo: &Repository, client_id: &str, arch: &str) {
         )
         .await;
     }
+    process_incarnation_id
 }

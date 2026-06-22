@@ -21,7 +21,7 @@ pub(crate) struct VtyTunnelApplyRequest {
     pub(crate) plan_file: PathBuf,
     pub(crate) side: TunnelEndpointSide,
     pub(crate) backend: TunnelConfigBackend,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) privilege_ttl_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
@@ -514,7 +514,7 @@ fn parse_vty_tunnel_change(
     let mut plan_file = None::<PathBuf>;
     let mut side = None::<TunnelEndpointSide>;
     let mut backend = TunnelConfigBackend::Ifupdown;
-    let mut timeout_secs = 60_u64;
+    let mut max_timeout_secs = 60_u64;
     let mut privilege_ttl_secs = 300_u64;
     let mut confirmed = false;
     let mut force_unprivileged = false;
@@ -556,8 +556,8 @@ fn parse_vty_tunnel_change(
                 backend = parse_tunnel_backend(flag_value(value, "--backend="))?;
                 index += 1;
             }
-            "--timeout" | "--timeout-secs" => {
-                timeout_secs = parse_bounded_u64(
+            "--max-timeout" | "--max-timeout-secs" => {
+                max_timeout_secs = parse_bounded_u64(
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
                     1,
@@ -565,19 +565,19 @@ fn parse_vty_tunnel_change(
                 )?;
                 index += 2;
             }
-            value if value.starts_with("--timeout=") => {
-                timeout_secs = parse_bounded_u64(
-                    flag_value(value, "--timeout="),
-                    "--timeout",
+            value if value.starts_with("--max-timeout=") => {
+                max_timeout_secs = parse_bounded_u64(
+                    flag_value(value, "--max-timeout="),
+                    "--max-timeout",
                     1,
                     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }
-            value if value.starts_with("--timeout-secs=") => {
-                timeout_secs = parse_bounded_u64(
-                    flag_value(value, "--timeout-secs="),
-                    "--timeout-secs",
+            value if value.starts_with("--max-timeout-secs=") => {
+                max_timeout_secs = parse_bounded_u64(
+                    flag_value(value, "--max-timeout-secs="),
+                    "--max-timeout-secs",
                     1,
                     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
@@ -621,7 +621,7 @@ fn parse_vty_tunnel_change(
         plan_file: required(plan_file, "--plan-file")?,
         side: required(side, "--side")?,
         backend,
-        timeout_secs,
+        max_timeout_secs,
         privilege_ttl_secs,
         confirmed,
         force_unprivileged,
@@ -659,7 +659,7 @@ pub(crate) fn submit_vty_tunnel_apply(
         vec![endpoint.local_client_id],
         operation,
         request.privilege_ttl_secs,
-        request.timeout_secs,
+        request.max_timeout_secs,
         true,
         request.confirmed,
         request.force_unprivileged,
@@ -689,7 +689,7 @@ pub(crate) fn submit_vty_tunnel_status(
         vec![endpoint.local_client_id],
         operation,
         request.privilege_ttl_secs,
-        request.timeout_secs,
+        request.max_timeout_secs,
         false,
         false,
         false,
@@ -719,7 +719,7 @@ pub(crate) fn submit_vty_tunnel_rollback(
         vec![endpoint.local_client_id],
         operation,
         request.privilege_ttl_secs,
-        request.timeout_secs,
+        request.max_timeout_secs,
         true,
         request.confirmed,
         request.force_unprivileged,
@@ -734,7 +734,7 @@ fn submit_vty_network_job(
     target_clients: Vec<String>,
     operation: JobCommand,
     ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     destructive: bool,
     confirmed: bool,
     force_unprivileged: bool,
@@ -748,7 +748,7 @@ fn submit_vty_network_job(
         &privilege_context.password,
         &privilege_context.salt_hex,
         ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         force_unprivileged,
         true,
     )?;
@@ -766,7 +766,7 @@ fn submit_vty_network_job(
             "destructive": destructive,
             "confirmed": confirmed,
             "force_unprivileged": force_unprivileged,
-            "timeout_secs": timeout_secs,
+            "max_timeout_secs": max_timeout_secs,
             "operation": operation,
             "privilege_assertion": privilege.privilege_assertion,
         }),
@@ -893,7 +893,7 @@ mod tests {
             "--side",
             "right",
             "--backend=netplan",
-            "--timeout=120",
+            "--max-timeout=120",
             "--privilege-ttl",
             "90",
             "--force-unprivileged",
@@ -907,7 +907,7 @@ mod tests {
         );
         assert_eq!(request.side, TunnelEndpointSide::Right);
         assert_eq!(request.backend, TunnelConfigBackend::Netplan);
-        assert_eq!(request.timeout_secs, 120);
+        assert_eq!(request.max_timeout_secs, 120);
         assert_eq!(request.privilege_ttl_secs, 90);
         assert!(request.confirmed);
         assert!(request.force_unprivileged);
@@ -1047,7 +1047,7 @@ mod tests {
         assert!(parse_vty_tunnel_apply(&[
             "--plan-file=/tmp/plan.json",
             "--side=left",
-            "--timeout=120",
+            "--max-timeout=120",
         ])
         .is_err());
         assert!(parse_vty_tunnel_apply(&[
@@ -1064,7 +1064,7 @@ mod tests {
         let request = parse_vty_tunnel_rollback(&[
             "--plan-file=/tmp/plan.json",
             "--side=left",
-            "--timeout-secs=180",
+            "--max-timeout-secs=180",
             "--privilege-ttl-secs=120",
             "--force-unprivileged",
             "--confirmed",
@@ -1076,7 +1076,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/plan.json")
         );
         assert_eq!(request.side, TunnelEndpointSide::Left);
-        assert_eq!(request.timeout_secs, 180);
+        assert_eq!(request.max_timeout_secs, 180);
         assert_eq!(request.privilege_ttl_secs, 120);
         assert!(request.confirmed);
         assert!(request.force_unprivileged);
@@ -1087,7 +1087,7 @@ mod tests {
         let request = parse_vty_tunnel_status(&[
             "--plan-file=/tmp/plan.json",
             "--side=right",
-            "--timeout=45",
+            "--max-timeout=45",
             "--privilege-ttl=75",
         ])
         .unwrap();
@@ -1097,7 +1097,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/plan.json")
         );
         assert_eq!(request.side, TunnelEndpointSide::Right);
-        assert_eq!(request.timeout_secs, 45);
+        assert_eq!(request.max_timeout_secs, 45);
         assert_eq!(request.privilege_ttl_secs, 75);
         assert!(!request.confirmed);
         assert!(!request.force_unprivileged);

@@ -147,7 +147,7 @@ async function captureBackupRestoreRunPrompt(
   await expect(restoreWorkflow.getByLabel("Staged archive")).toHaveValue(
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
   );
-  await restoreWorkflow.getByLabel("Restore timeout seconds").fill("120");
+  await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("120");
   await activate(restoreWorkflow.getByRole("button", { name: "Review restore" }));
   await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "backup-restore-run-confirm");

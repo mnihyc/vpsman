@@ -7,7 +7,7 @@ export type JobDispatchPreset = {
   requestId: string;
   mode: DispatchMode;
   selectorExpression?: string;
-  timeoutSecs?: number;
+  maxTimeoutSecs?: number;
   updateActivationSha256Hex?: string;
   updateArtifactUrl?: string;
   updateCheckActivate?: boolean;

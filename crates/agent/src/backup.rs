@@ -103,7 +103,7 @@ pub(crate) struct BackupCommandInput<'a> {
     pub(crate) include_config: bool,
     pub(crate) follow_symlinks: bool,
     pub(crate) output_tx: Option<mpsc::Sender<CommandOutput>>,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
 
@@ -118,12 +118,12 @@ pub(crate) async fn execute_backup_command(
         include_config,
         follow_symlinks,
         output_tx,
-        timeout_secs,
+        max_timeout_secs,
         cancel_token,
     } = input;
     run_cancelable("backup", cancel_token.clone(), async move {
         time::timeout(
-            Duration::from_secs(timeout_secs.max(1)),
+            Duration::from_secs(max_timeout_secs.max(1)),
             create_backup_archive_artifact(
                 job_id,
                 config,
@@ -490,7 +490,7 @@ mod tests {
             include_config: true,
             follow_symlinks: false,
             output_tx: None,
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -551,7 +551,7 @@ mod tests {
             include_config: false,
             follow_symlinks: false,
             output_tx: None,
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -568,7 +568,7 @@ mod tests {
             include_config: false,
             follow_symlinks: true,
             output_tx: None,
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -625,7 +625,7 @@ mod tests {
             include_config: true,
             follow_symlinks: false,
             output_tx: Some(tx),
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -679,7 +679,7 @@ mod tests {
             include_config: false,
             follow_symlinks: false,
             output_tx: None,
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -694,7 +694,7 @@ mod tests {
             include_config: false,
             follow_symlinks: false,
             output_tx: None,
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -729,7 +729,7 @@ mod tests {
             include_config: false,
             follow_symlinks: false,
             output_tx: None,
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await

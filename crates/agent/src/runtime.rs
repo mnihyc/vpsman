@@ -7,7 +7,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use tokio::{net::TcpStream, sync::mpsc, time};
+use tokio::{
+    net::TcpStream,
+    sync::{mpsc, oneshot},
+    time,
+};
 use tracing::{debug, info, warn};
 #[cfg(test)]
 use vpsman_common::CURRENT_COMMAND_PROTOCOL_VERSION;
@@ -15,10 +19,11 @@ use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
     job_command_protocol_version, job_command_safety, job_command_type_label,
     maybe_compress_payload, payload_hash, AgentCapabilitySnapshot, AgentConfig, AgentHello,
-    AgentPrivilegeMode, AgentSessionDisconnect, CommandOutput, CommandResume, Frame, JobAck,
-    JobCancelAck, JobCancelRequest, JobCommand, JobCommandSafety, JobRequest, MessageKind,
-    NoiseFrameStream, OutputStream, SequencedCommandOutput, ServerEndpoint, ServerHello,
-    TelemetryEnvelope, TerminalStreamOutput, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+    AgentPrivilegeMode, AgentSessionDisconnect, AgentUpdateVerificationResult, CommandOutput,
+    CommandResume, Frame, JobAck, JobCancelAck, JobCancelRequest, JobCommand, JobCommandSafety,
+    JobRequest, MessageKind, NoiseFrameStream, OutputStream, SequencedCommandOutput,
+    ServerEndpoint, ServerHello, TelemetryEnvelope, TerminalStreamOutput,
+    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -50,7 +55,10 @@ use crate::{
         execute_terminal_command_with_stream_sink, mark_gateway_connected,
         mark_gateway_disconnected,
     },
-    update::{execute_update_agent, execute_update_check, AgentUpdateCheckInput, AgentUpdateInput},
+    update::{
+        execute_update_agent, execute_update_check, AgentUpdateCheckInput, AgentUpdateInput,
+        AgentUpdateVerificationWork,
+    },
     update_activation::read_activation_heartbeat,
 };
 
@@ -183,6 +191,8 @@ async fn connect_and_stream(
     let mut unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
     let mut unmanaged_update_sleep =
         Box::pin(time::sleep_until(unmanaged_update_schedule.next_due()));
+    let mut pending_update_verifications =
+        HashMap::<uuid::Uuid, oneshot::Sender<AgentUpdateVerificationResult>>::new();
     loop {
         tokio::select! {
             _ = ticker.tick() => {
@@ -232,6 +242,20 @@ async fn connect_and_stream(
                             decode_json(&frame.decoded_payload()?)?;
                         close_all_terminal_sessions_for_lifecycle(&request.reason).await;
                     }
+                    MessageKind::AgentUpdateVerificationResult => {
+                        let result: AgentUpdateVerificationResult =
+                            decode_json(&frame.decoded_payload()?)?;
+                        if let Some(response) =
+                            pending_update_verifications.remove(&result.job_id)
+                        {
+                            let _ = response.send(result);
+                        } else {
+                            warn!(
+                                job_id = %result.job_id,
+                                "received unknown agent update verification result"
+                            );
+                        }
+                    }
                     other => {
                         debug!(?other, "unhandled agent frame");
                     }
@@ -274,6 +298,38 @@ async fn connect_and_stream(
                     seq += 1;
                 }
             }
+            work = command_runtime.update_verification_rx.recv() => {
+                if let Some(work) = work {
+                    let job_id = work.request.job_id;
+                    if pending_update_verifications.contains_key(&job_id) {
+                        let _ = work.response.send(AgentUpdateVerificationResult {
+                            job_id,
+                            approved: false,
+                            message: "agent update verification already pending".to_string(),
+                        });
+                        continue;
+                    }
+                    if let Err(error) = send_json_frame(
+                        &mut stream,
+                        MessageKind::AgentUpdateVerificationRequest,
+                        2,
+                        seq,
+                        &work.request,
+                    )
+                    .await
+                    {
+                        let message = format!("agent update verification send failed: {error}");
+                        let _ = work.response.send(AgentUpdateVerificationResult {
+                            job_id,
+                            approved: false,
+                            message,
+                        });
+                        return Err(error);
+                    }
+                    seq += 1;
+                    pending_update_verifications.insert(job_id, work.response);
+                }
+            }
             _ = &mut unmanaged_update_sleep, if command_runtime.active_commands.is_empty() && unmanaged_update_schedule.enabled(config) => {
                 if unmanaged_update_schedule.due(config) {
                     unmanaged_update_schedule.mark_attempt(config);
@@ -285,7 +341,7 @@ async fn connect_and_stream(
     }
 }
 
-async fn connect_tcp_endpoint(endpoint: &str, timeout_secs: u64) -> Result<TcpStream> {
+async fn connect_tcp_endpoint(endpoint: &str, max_timeout_secs: u64) -> Result<TcpStream> {
     let mut addrs = tokio::net::lookup_host(endpoint)
         .await
         .with_context(|| format!("failed to resolve gateway endpoint {endpoint}"))?
@@ -295,7 +351,7 @@ async fn connect_tcp_endpoint(endpoint: &str, timeout_secs: u64) -> Result<TcpSt
     }
     addrs.sort_by_key(address_family_order);
 
-    let timeout = Duration::from_secs(timeout_secs.clamp(1, 300));
+    let timeout = Duration::from_secs(max_timeout_secs.clamp(1, 300));
     let mut last_error = None;
     for addr in addrs {
         match time::timeout(timeout, TcpStream::connect(addr)).await {
@@ -333,8 +389,9 @@ async fn run_unmanaged_update_check(config: &AgentConfig) {
         version_url,
         activate: config.update.unmanaged_activate,
         restart_agent: config.update.unmanaged_restart_agent,
-        timeout_secs: config.auth.job_timeout_secs.max(300),
+        max_timeout_secs: config.auth.max_job_timeout_secs.max(300),
         cancel_token: CommandCancelToken::default(),
+        verification_tx: None,
     })
     .await
     {
@@ -371,7 +428,7 @@ async fn reconcile_configured_runtime_tunnels(
             config,
             plan,
             side: telemetry_plan.endpoint_side,
-            timeout_secs: config.network.runtime_command_timeout_secs.max(1),
+            max_timeout_secs: config.network.runtime_command_timeout_secs.max(1),
             #[cfg(test)]
             effective_uid_override: None,
         })
@@ -630,7 +687,7 @@ fn agent_capabilities(config: &AgentConfig) -> AgentCapabilitySnapshot {
             AgentPrivilegeMode::Unprivileged
         },
         effective_uid: Some(effective_uid),
-        job_timeout_secs: config.auth.job_timeout_secs.max(1),
+        max_job_timeout_secs: config.auth.max_job_timeout_secs.max(1),
         can_attempt_privileged_ops: true,
         can_manage_runtime_tunnels: root,
         can_apply_process_limits: root,
@@ -659,7 +716,7 @@ struct ActiveCommand {
 struct CommandExecutionResult {
     job_id: uuid::Uuid,
     operation_type: &'static str,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     result: Result<Vec<CommandOutput>>,
 }
 
@@ -682,6 +739,8 @@ struct AgentCommandRuntime {
     command_ledger: Option<CommandLedger>,
     command_event_tx: mpsc::Sender<CommandExecutionEvent>,
     command_event_rx: mpsc::Receiver<CommandExecutionEvent>,
+    update_verification_tx: mpsc::Sender<AgentUpdateVerificationWork>,
+    update_verification_rx: mpsc::Receiver<AgentUpdateVerificationWork>,
     terminal_stream_tx: mpsc::Sender<TerminalStreamOutput>,
     terminal_stream_rx: mpsc::Receiver<TerminalStreamOutput>,
 }
@@ -689,6 +748,8 @@ struct AgentCommandRuntime {
 impl Default for AgentCommandRuntime {
     fn default() -> Self {
         let (command_event_tx, command_event_rx) = mpsc::channel::<CommandExecutionEvent>(32);
+        let (update_verification_tx, update_verification_rx) =
+            mpsc::channel::<AgentUpdateVerificationWork>(8);
         let (terminal_stream_tx, terminal_stream_rx) = mpsc::channel::<TerminalStreamOutput>(64);
         Self {
             active_commands: HashMap::new(),
@@ -696,6 +757,8 @@ impl Default for AgentCommandRuntime {
             command_ledger: None,
             command_event_tx,
             command_event_rx,
+            update_verification_tx,
+            update_verification_rx,
             terminal_stream_tx,
             terminal_stream_rx,
         }
@@ -864,7 +927,7 @@ fn output_stream_name(stream: OutputStream) -> &'static str {
 fn command_result_outputs(
     job_id: uuid::Uuid,
     operation_type: &str,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     result: Result<Vec<CommandOutput>>,
 ) -> Vec<CommandOutput> {
     match result {
@@ -881,7 +944,7 @@ fn command_result_outputs(
             }
             let message = error.to_string();
             if message.contains("timed out") || message.contains("elapsed") {
-                return command_timeout_output(job_id, operation_type, timeout_secs)
+                return command_timeout_output(job_id, operation_type, max_timeout_secs)
                     .map(|output| vec![output])
                     .unwrap_or_else(|_| fallback_failed_output(job_id, &error));
             }
@@ -1190,13 +1253,14 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
     send_json_frame(stream, MessageKind::CommandAck, frame.stream_id, *seq, &ack).await?;
     *seq += 1;
 
-    let timeout_secs = request
-        .timeout_secs
+    let max_timeout_secs = request
+        .max_timeout_secs
         .clamp(1, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS);
 
     if let JobCommand::ConfigRead = &request.command {
         let result = read_redacted_config(request.job_id, config, config_path);
-        let outputs = command_result_outputs(request.job_id, "config_read", timeout_secs, result);
+        let outputs =
+            command_result_outputs(request.job_id, "config_read", max_timeout_secs, result);
         remember_completed_command_outputs(
             command_runtime,
             request.job_id,
@@ -1232,7 +1296,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 outputs
             }
             Err(error) => {
-                command_result_outputs(request.job_id, "hot_config", timeout_secs, Err(error))
+                command_result_outputs(request.job_id, "hot_config", max_timeout_secs, Err(error))
             }
         };
         remember_completed_command_outputs(
@@ -1268,7 +1332,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             Err(error) => command_result_outputs(
                 request.job_id,
                 "data_source_config_patch",
-                timeout_secs,
+                max_timeout_secs,
                 Err(error),
             ),
         };
@@ -1289,6 +1353,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
     let task_config = config.clone();
     let task_config_path = config_path.to_path_buf();
     let event_tx = command_runtime.command_event_tx.clone();
+    let update_verification_tx = command_runtime.update_verification_tx.clone();
     let terminal_stream_tx = command_runtime.terminal_stream_tx.clone();
     let task_cancel_token = cancel_token.clone();
     let task = tokio::spawn(async move {
@@ -1309,8 +1374,9 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             request,
             task_config,
             task_config_path,
-            timeout_secs,
+            max_timeout_secs,
             output_tx,
+            update_verification_tx,
             terminal_stream_tx,
             task_cancel_token,
         )
@@ -1320,7 +1386,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             .send(CommandExecutionEvent::Finished(CommandExecutionResult {
                 job_id,
                 operation_type,
-                timeout_secs,
+                max_timeout_secs,
                 result,
             }))
             .await;
@@ -1432,8 +1498,9 @@ async fn execute_authorized_command(
     request: JobRequest,
     config: AgentConfig,
     config_path: PathBuf,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     streamed_output_tx: mpsc::Sender<CommandOutput>,
+    update_verification_tx: mpsc::Sender<AgentUpdateVerificationWork>,
     terminal_stream_tx: mpsc::Sender<TerminalStreamOutput>,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
@@ -1459,7 +1526,7 @@ async fn execute_authorized_command(
                 include_config: *include_config,
                 follow_symlinks: *follow_symlinks,
                 output_tx: Some(streamed_output_tx),
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })
             .await
@@ -1488,7 +1555,7 @@ async fn execute_authorized_command(
                 max_archive_bytes: config.backup.max_archive_bytes,
                 dry_run: *dry_run,
                 post_restore_argv,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })
             .await
@@ -1501,7 +1568,7 @@ async fn execute_authorized_command(
                 job_id: request.job_id,
                 source_restore_job_id: *source_restore_job_id,
                 restored_files,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })
             .await
@@ -1523,7 +1590,7 @@ async fn execute_authorized_command(
                 config_sha256_hex: config_sha256_hex.as_deref(),
                 ifupdown_sha256_hex,
                 bird2_sha256_hex,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })
             .await
@@ -1534,7 +1601,7 @@ async fn execute_authorized_command(
                 config: &config,
                 plan,
                 side: *side,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })
             .await
@@ -1554,7 +1621,7 @@ async fn execute_authorized_command(
                 current_ospf_cost: *current_ospf_cost,
                 recommended_ospf_cost: *recommended_ospf_cost,
                 bird2_sha256_hex,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })
             .await
@@ -1565,7 +1632,7 @@ async fn execute_authorized_command(
                 config: &config,
                 plan,
                 side: *side,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })
             .await
@@ -1583,7 +1650,7 @@ async fn execute_authorized_command(
                 side: *side,
                 count: *count,
                 interval_ms: *interval_ms,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })
             .await
@@ -1608,7 +1675,7 @@ async fn execute_authorized_command(
                 rate_limit_kbps: *rate_limit_kbps,
                 port: *port,
                 connect_timeout_ms: *connect_timeout_ms,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })
             .await
@@ -1621,7 +1688,7 @@ async fn execute_authorized_command(
                 job_id: request.job_id,
                 artifact_url,
                 sha256_hex,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })
             .await
@@ -1639,8 +1706,9 @@ async fn execute_authorized_command(
                 version_url,
                 activate: *activate,
                 restart_agent: *restart_agent,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token: cancel_token.clone(),
+                verification_tx: Some(update_verification_tx),
             })
             .await
         }
@@ -1656,7 +1724,7 @@ async fn execute_authorized_command(
                     &config,
                     request.job_id,
                     &request.command,
-                    timeout_secs,
+                    max_timeout_secs,
                     Some(terminal_stream_tx),
                 ),
             )
@@ -1667,7 +1735,7 @@ async fn execute_authorized_command(
                 &config,
                 request.job_id,
                 command,
-                timeout_secs,
+                max_timeout_secs,
                 cancel_token,
                 Some(streamed_output_tx),
             )
@@ -1874,7 +1942,7 @@ async fn finish_active_command(
         let final_outputs = command_result_outputs(
             result.job_id,
             result.operation_type,
-            result.timeout_secs,
+            result.max_timeout_secs,
             result.result,
         );
         for output in final_outputs {

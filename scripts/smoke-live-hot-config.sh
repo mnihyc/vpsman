@@ -241,7 +241,7 @@ reject_body="$(jq -nc \
     target_client_ids: [$client],
     privileged: true,
     confirmed: true,
-    timeout_secs: 30
+    max_timeout_secs: 30
   }')"
 reject_json="$SMOKE_TMPDIR/reject.json"
 reject_status="$(curl -sS -o "$reject_json" -w "%{http_code}" \

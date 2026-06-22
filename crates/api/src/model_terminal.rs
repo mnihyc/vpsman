@@ -42,7 +42,7 @@ pub(crate) struct TerminalInputSubmitRequest {
     #[serde(default)]
     pub(crate) data_base64: Option<String>,
     #[serde(default)]
-    pub(crate) timeout_secs: Option<u64>,
+    pub(crate) max_timeout_secs: Option<u64>,
     #[serde(default)]
     pub(crate) confirmed: bool,
     #[serde(default)]

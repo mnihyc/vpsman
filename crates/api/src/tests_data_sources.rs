@@ -47,7 +47,7 @@ async fn data_source_presets_assign_defaults_and_shared_custom_presets() {
                     "source": "vnstat",
                     "traffic_command": {
                         "argv": ["/usr/bin/vnstat", "--json"],
-                        "timeout_secs": 2,
+                        "max_timeout_secs": 2,
                         "max_output_bytes": 4096
                     }
                 }),
@@ -531,7 +531,7 @@ async fn data_source_hot_config_renders_selected_presets() {
                     "proc_root": "/proc",
                     "custom_metrics_command": {
                         "argv": ["/opt/vpsman/metrics"],
-                        "timeout_secs": 3,
+                        "max_timeout_secs": 3,
                         "max_output_bytes": 4096
                     }
                 }),
@@ -552,7 +552,7 @@ async fn data_source_hot_config_renders_selected_presets() {
                     "source": "custom_command",
                     "process_inventory_command": {
                         "argv": ["/opt/vpsman/process-inventory"],
-                        "timeout_secs": 5,
+                        "max_timeout_secs": 5,
                         "max_output_bytes": 8192
                     }
                 }),
@@ -742,7 +742,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Root,
                     effective_uid: Some(0),
-                    job_timeout_secs: 3600,
+                    max_job_timeout_secs: 3600,
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: true,
                     can_apply_process_limits: true,
@@ -764,7 +764,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Unprivileged,
                     effective_uid: Some(1000),
-                    job_timeout_secs: 3600,
+                    max_job_timeout_secs: 3600,
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,

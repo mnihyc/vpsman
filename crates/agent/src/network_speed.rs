@@ -39,7 +39,7 @@ pub(crate) struct NetworkSpeedTestInput<'a> {
     pub(crate) rate_limit_kbps: u32,
     pub(crate) port: u16,
     pub(crate) connect_timeout_ms: u16,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
 
@@ -49,7 +49,7 @@ pub(crate) async fn execute_network_speed_test_command(
     let cancel_token = input.cancel_token.clone();
     run_cancelable("network_speed_test", cancel_token, async move {
         time::timeout(
-            Duration::from_secs(input.timeout_secs.max(1)),
+            Duration::from_secs(input.max_timeout_secs.max(1)),
             run_network_speed_test(input),
         )
         .await
@@ -558,7 +558,7 @@ mod tests {
             rate_limit_kbps: 1024,
             port,
             connect_timeout_ms: 3000,
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         });
         time::sleep(Duration::from_millis(50)).await;
@@ -573,7 +573,7 @@ mod tests {
             rate_limit_kbps: 1024,
             port,
             connect_timeout_ms: 3000,
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         });
         let (server_outputs, client_outputs) = tokio::join!(server, client);
@@ -611,7 +611,7 @@ mod tests {
             rate_limit_kbps: 512,
             port,
             connect_timeout_ms: 200,
-            timeout_secs: 1,
+            max_timeout_secs: 1,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -642,7 +642,7 @@ mod tests {
             rate_limit_kbps: 512,
             port,
             connect_timeout_ms: 200,
-            timeout_secs: 1,
+            max_timeout_secs: 1,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -680,7 +680,7 @@ mod tests {
             rate_limit_kbps: 1024,
             port,
             connect_timeout_ms: 300,
-            timeout_secs: 2,
+            max_timeout_secs: 2,
             cancel_token: CommandCancelToken::default(),
         });
         time::sleep(Duration::from_millis(50)).await;
@@ -695,7 +695,7 @@ mod tests {
             rate_limit_kbps: 1024,
             port,
             connect_timeout_ms: 300,
-            timeout_secs: 2,
+            max_timeout_secs: 2,
             cancel_token: CommandCancelToken::default(),
         });
         let (server_outputs, client_outputs) = tokio::join!(server, client);
@@ -730,7 +730,7 @@ mod tests {
             rate_limit_kbps: 1024,
             port,
             connect_timeout_ms: 300,
-            timeout_secs: 2,
+            max_timeout_secs: 2,
             cancel_token: CommandCancelToken::default(),
         });
         let wrong_peer = async {

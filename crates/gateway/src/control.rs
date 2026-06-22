@@ -648,7 +648,7 @@ mod tests {
                 argv: vec!["/bin/true".to_string()],
                 pty: false,
             },
-            timeout_secs: 30,
+            max_timeout_secs: 30,
         }
     }
 }

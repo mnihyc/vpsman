@@ -22,7 +22,7 @@ pub(crate) struct NetworkProbeInput<'a> {
     pub(crate) side: TunnelEndpointSide,
     pub(crate) count: u8,
     pub(crate) interval_ms: u16,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
 
@@ -32,7 +32,7 @@ pub(crate) async fn execute_network_probe_command(
     let cancel_token = input.cancel_token.clone();
     run_cancelable("network_probe", cancel_token, async move {
         time::timeout(
-            Duration::from_secs(input.timeout_secs.max(1)),
+            Duration::from_secs(input.max_timeout_secs.max(1)),
             probe_network_plan(input),
         )
         .await
@@ -72,7 +72,7 @@ async fn probe_network_plan(input: NetworkProbeInput<'_>) -> Result<Vec<CommandO
     command.args(&ping_argv[1..]);
     let output = match run_child_with_bounded_output_cancelable(
         command,
-        input.timeout_secs,
+        input.max_timeout_secs,
         MAX_PING_OUTPUT_BYTES,
         ChildCleanupPolicy::ProcessGroup,
         input.cancel_token,
@@ -265,7 +265,7 @@ mod tests {
             side: TunnelEndpointSide::Left,
             count: 3,
             interval_ms: 500,
-            timeout_secs: 1,
+            max_timeout_secs: 1,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -303,7 +303,7 @@ mod tests {
                 side: TunnelEndpointSide::Left,
                 count: 3,
                 interval_ms: 500,
-                timeout_secs: 60,
+                max_timeout_secs: 60,
                 cancel_token: task_cancel_token,
             })
             .await

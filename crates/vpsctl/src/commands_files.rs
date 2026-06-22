@@ -19,7 +19,7 @@ pub(crate) fn file_pull(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
     anyhow::ensure!(path.starts_with('/'), "file pull path must be absolute");
@@ -39,7 +39,7 @@ pub(crate) fn file_pull(
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged: false,
         })?
@@ -58,7 +58,7 @@ pub(crate) fn file_push(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -130,7 +130,7 @@ pub(crate) fn file_push(
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged: false,
         })?

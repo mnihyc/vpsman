@@ -460,7 +460,7 @@ export const JOB_PRIVILEGE_INTENT_FIELDS = [
   "command_type",
   "operation_payload_hash",
   "resolved_targets",
-  "timeout_secs",
+  "max_timeout_secs",
   "force_unprivileged",
   "privileged",
 ] as const;
@@ -474,7 +474,7 @@ export const CREATE_JOB_REQUEST_FIELDS = [
   "command",
   "argv",
   "operation",
-  "timeout_secs",
+  "max_timeout_secs",
   "force_unprivileged",
   "privileged",
   "privilege_assertion",
@@ -517,7 +517,7 @@ export const TERMINAL_INPUT_PRIVILEGE_INTENT_FIELDS = [
   "client_id",
   "session_id",
   "input_payload_hash",
-  "timeout_secs",
+  "max_timeout_secs",
   "confirmed",
 ] as const;
 

@@ -563,7 +563,7 @@ fn builtin_rule_templates() -> Vec<HotConfigRuleTemplateView> {
                     "updater_argv": {"type": "array", "default": ["/usr/local/libexec/vpsman-ospf-cost"]}
                 }
             }),
-            "[network]\nlatency_monitoring_enabled = {{latency_monitoring_enabled}}\nlatency_monitoring_interval_secs = {{latency_monitoring_interval_secs}}\nlatency_down_windows = {{latency_down_windows}}\nauto_ospf_enabled = {{auto_ospf_enabled}}\nauto_ospf_min_cost_delta = {{auto_ospf_min_cost_delta}}\nauto_ospf_healthy_windows = {{auto_ospf_healthy_windows}}\nauto_ospf_updater = { argv = {{updater_argv}}, timeout_secs = 10, max_output_bytes = 16384 }\n",
+            "[network]\nlatency_monitoring_enabled = {{latency_monitoring_enabled}}\nlatency_monitoring_interval_secs = {{latency_monitoring_interval_secs}}\nlatency_down_windows = {{latency_down_windows}}\nauto_ospf_enabled = {{auto_ospf_enabled}}\nauto_ospf_min_cost_delta = {{auto_ospf_min_cost_delta}}\nauto_ospf_healthy_windows = {{auto_ospf_healthy_windows}}\nauto_ospf_updater = { argv = {{updater_argv}}, max_timeout_secs = 10, max_output_bytes = 16384 }\n",
         ),
     ]
 }

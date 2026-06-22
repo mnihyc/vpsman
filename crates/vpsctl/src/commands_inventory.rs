@@ -799,7 +799,7 @@ pub(crate) fn data_source_hot_config_apply(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
 ) -> Result<()> {
@@ -831,7 +831,7 @@ pub(crate) fn data_source_hot_config_apply(
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged,
         })?

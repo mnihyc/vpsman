@@ -41,7 +41,7 @@ pub(crate) fn build_privilege_for_job_command(
     password: &str,
     salt_hex: &str,
     ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     force_unprivileged: bool,
     privileged: bool,
 ) -> Result<BuiltJobPrivilege> {
@@ -54,7 +54,7 @@ pub(crate) fn build_privilege_for_job_command(
         password,
         salt_hex,
         ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         force_unprivileged,
         privileged,
     )
@@ -68,7 +68,7 @@ pub(crate) fn build_privilege_for_payload_hash(
     password: &str,
     salt_hex: &str,
     ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     force_unprivileged: bool,
     privileged: bool,
 ) -> Result<BuiltJobPrivilege> {
@@ -82,7 +82,7 @@ pub(crate) fn build_privilege_for_payload_hash(
         command_type,
         operation_payload_hash: &payload_hash_hex,
         resolved_targets: client_ids,
-        timeout_secs,
+        max_timeout_secs,
         force_unprivileged,
         privileged,
     })?;
@@ -174,7 +174,7 @@ pub(crate) struct TerminalInputPrivilegeRequest<'a> {
     pub(crate) client_id: &'a str,
     pub(crate) session_id: &'a str,
     pub(crate) input_payload_hash: &'a str,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
 }
 
@@ -188,7 +188,7 @@ pub(crate) fn build_privilege_for_terminal_input(
         client_id: request.client_id,
         session_id: request.session_id,
         input_payload_hash: request.input_payload_hash,
-        timeout_secs: request.timeout_secs,
+        max_timeout_secs: request.max_timeout_secs,
         confirmed: request.confirmed,
     })?;
     build_privilege_assertion(&intent, password, salt_hex, ttl_secs)
@@ -273,7 +273,7 @@ mod tests {
             command_type: "shell_argv",
             operation_payload_hash: &payload_hash_hex,
             resolved_targets: &clients,
-            timeout_secs: 30,
+            max_timeout_secs: 30,
             force_unprivileged: false,
             privileged: true,
         })

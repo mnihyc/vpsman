@@ -183,7 +183,7 @@ export function AgentUpdateReleasesPanel({
                 selectorExpression: "",
                 updateActivationSha256Hex: latestRelease?.artifact_sha256_hex ?? "",
                 updateRestartAgent: true,
-                timeoutSecs: 60,
+                maxTimeoutSecs: 60,
               })
             }
             type="button"
@@ -197,7 +197,7 @@ export function AgentUpdateReleasesPanel({
                 mode: "agent_update_rollback",
                 selectorExpression: "",
                 updateRollbackSha256Hex: latestRelease?.rollback_artifact_sha256_hex ?? "",
-                timeoutSecs: 60,
+                maxTimeoutSecs: 60,
               })
             }
             type="button"
@@ -211,7 +211,7 @@ export function AgentUpdateReleasesPanel({
           <PackageCheck size={18} />
           <div>
             <strong>External release metadata</strong>
-            <span>Register HTTPS artifact hashes for strict API-side admission control; update jobs are dispatched from the command composer.</span>
+            <span>Register HTTPS artifact hashes for strict update approval; check jobs verify the resolved agent artifact hash before staging.</span>
           </div>
         </div>
 
@@ -304,7 +304,7 @@ export function AgentUpdateReleasesPanel({
       </div>
       <ConfirmationPrompt
         confirmLabel="Record release"
-        detail="Records the reviewed HTTPS artifact hashes for update admission."
+        detail="Records the reviewed HTTPS artifact hashes for update approval."
         items={[
           { label: "Release", value: releaseSnapshot ? `${releaseSnapshot.name} ${releaseSnapshot.version}` : "-" },
           { label: "Channel", value: releaseSnapshot?.channel ?? "-" },

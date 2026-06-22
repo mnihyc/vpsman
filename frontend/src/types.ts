@@ -242,7 +242,7 @@ export type SystemDashboardCapacityRecord = {
   internal_http_read_secs: number | null;
   control_deadline_grace_secs: number | null;
   max_job_timeout_secs: number | null;
-  worker_schedule_job_timeout_secs: number | null;
+  worker_schedule_job_max_timeout_secs: number | null;
   agent_offline_secs: number | null;
 };
 
@@ -733,7 +733,7 @@ export type DeleteAgentResponse = {
 export type AgentCapabilitySnapshot = {
   privilege_mode: "unknown" | "root" | "unprivileged";
   effective_uid?: number | null;
-  job_timeout_secs: number;
+  max_job_timeout_secs: number;
   can_attempt_privileged_ops: boolean;
   can_manage_runtime_tunnels: boolean;
   can_apply_process_limits: boolean;
@@ -976,7 +976,7 @@ export type JobHistoryRecord = {
   status: JobStatus;
   target_count: number;
   payload_hash: string;
-  timeout_secs: number;
+  max_timeout_secs: number;
   created_at: string;
   completed_at: string | null;
 };
@@ -1125,7 +1125,7 @@ export type RuntimeTunnelManager =
 
 export type RuntimeTunnelCommand = {
   argv: string[];
-  timeout_secs?: number;
+  max_timeout_secs?: number;
   max_output_bytes?: number;
 };
 
@@ -1854,7 +1854,7 @@ export type CreateJobRequest = {
   command: string;
   argv: string[];
   operation?: JobOperation;
-  timeout_secs?: number;
+  max_timeout_secs?: number;
   force_unprivileged?: boolean;
   privileged: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
@@ -1867,7 +1867,7 @@ export type CreateJobResponse = {
   job_id: string;
   target_count: number;
   status: JobStatus;
-  timeout_secs: number;
+  max_timeout_secs: number;
   max_job_timeout_secs: number;
   control_deadline_extra_secs: number;
   target_counts: {

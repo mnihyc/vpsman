@@ -81,10 +81,10 @@ struct ProcessRecord {
 pub(crate) async fn execute_process_supervisor_command(
     job_id: uuid::Uuid,
     command: &JobCommand,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
 ) -> Result<Vec<CommandOutput>> {
     let root = supervisor_root();
-    let timeout = Duration::from_secs(timeout_secs.clamp(1, 60));
+    let timeout = Duration::from_secs(max_timeout_secs.clamp(1, 60));
     let deadline = Instant::now() + timeout;
     execute_at_root(job_id, command, &root, deadline).await
 }

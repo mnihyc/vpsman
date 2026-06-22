@@ -60,7 +60,7 @@ export type TerminalInputSubmitRequest = {
   job_id: string;
   text?: string | null;
   data_base64?: string | null;
-  timeout_secs?: number;
+  max_timeout_secs?: number;
   confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };

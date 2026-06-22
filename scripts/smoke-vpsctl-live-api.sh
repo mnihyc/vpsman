@@ -257,7 +257,7 @@ viewer_access_token="$(jq -r '.access_token' <<<"$viewer_login_json")"
 viewer_job_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $viewer_access_token" \
   -H "Content-Type: application/json" \
-  -d '{"command":"/bin/true","argv":[],"selector_expression":"id:cli-agent-a","target_client_ids":["cli-agent-a"],"privileged":true,"destructive":false,"confirmed":true,"timeout_secs":1}' \
+  -d '{"command":"/bin/true","argv":[],"selector_expression":"id:cli-agent-a","target_client_ids":["cli-agent-a"],"privileged":true,"destructive":false,"confirmed":true,"max_timeout_secs":1}' \
   "$api_url/api/v1/jobs")"
 viewer_job_status="${viewer_job_response##*$'\n'}"
 viewer_job_body="${viewer_job_response%$'\n'*}"
@@ -331,7 +331,7 @@ jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_tag_body" >/dev/null
 scoped_job_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $scoped_access_token" \
   -H "Content-Type: application/json" \
-  -d '{"command":"/bin/true","argv":[],"selector_expression":"id:cli-agent-a","target_client_ids":["cli-agent-a"],"privileged":true,"destructive":false,"confirmed":true,"timeout_secs":1}' \
+  -d '{"command":"/bin/true","argv":[],"selector_expression":"id:cli-agent-a","target_client_ids":["cli-agent-a"],"privileged":true,"destructive":false,"confirmed":true,"max_timeout_secs":1}' \
   "$api_url/api/v1/jobs")"
 scoped_job_status="${scoped_job_response##*$'\n'}"
 scoped_job_body="${scoped_job_response%$'\n'*}"
@@ -411,7 +411,7 @@ jq -e '
 network_status_seed_job_json="$(vpsctl_auth job-shell \
   --script "printf '%s\n' vpsctl-live-api-network-readiness-seed" \
   --clients cli-agent-a \
-  --timeout-secs 5 \
+  --max-timeout-secs 5 \
   --privilege-ttl-secs 60 \
   --confirmed)"
 network_status_seed_job_id="$(jq -r '.job_id' <<<"$network_status_seed_job_json")"

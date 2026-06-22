@@ -101,7 +101,7 @@ pub(crate) fn migration_run(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
 ) -> Result<()> {
@@ -119,7 +119,7 @@ pub(crate) fn migration_run(
         &password,
         &salt_hex,
         privilege_ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         confirmed,
         force_unprivileged,
     )?;
@@ -136,7 +136,7 @@ pub(crate) fn migration_run_with_credentials(
     password: &str,
     salt_hex: &str,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
 ) -> Result<String> {
@@ -168,7 +168,7 @@ pub(crate) fn migration_run_with_credentials(
             password,
             salt_hex,
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed: true,
             force_unprivileged,
         },

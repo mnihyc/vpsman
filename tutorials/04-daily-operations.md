@@ -245,7 +245,7 @@ cargo run -p vpsctl -- file-transfer-download \
 ```
 
 CLI/VTY transfers expose `--poll-interval-ms` and `--max-polls` for unusually
-slow links. The browser console uses the job `timeout_secs` plus control-plane
+slow links. The browser console uses the job `max_timeout_secs` plus control-plane
 grace for each transfer-step wait.
 
 Inspect sessions and materialize a completed download through server-side
@@ -366,8 +366,8 @@ recording that fixed ID as skipped and dispatching the remaining available
 targets.
 
 Manual **Apply now** runs use the same schedule job timeout source as the
-worker: `worker.schedule_job_timeout_secs`, then legacy
-`timeout.worker_schedule_job_timeout_secs`, then the 30 second default. The
+worker: `worker.schedule_job_max_timeout_secs`, then legacy
+`timeout.worker_schedule_job_max_timeout_secs`, then the 30 second default. The
 server-issued job timeout is authoritative for scheduled and Apply now jobs.
 
 Submitted and scheduled jobs enter the durable queue first. As soon as the

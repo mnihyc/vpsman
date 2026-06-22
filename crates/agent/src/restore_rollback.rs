@@ -19,7 +19,7 @@ pub(crate) struct RestoreRollbackCommandInput<'a> {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) source_restore_job_id: uuid::Uuid,
     pub(crate) restored_files: &'a [RestoreRollbackFile],
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
 
@@ -30,10 +30,10 @@ pub(crate) async fn execute_restore_rollback_command(
         job_id,
         source_restore_job_id,
         restored_files,
-        timeout_secs,
+        max_timeout_secs,
         cancel_token,
     } = input;
-    let deadline = time::Instant::now() + Duration::from_secs(timeout_secs.max(1));
+    let deadline = time::Instant::now() + Duration::from_secs(max_timeout_secs.max(1));
     run_cancelable(
         "restore_rollback",
         cancel_token.clone(),
@@ -340,7 +340,7 @@ mod tests {
             job_id,
             source_restore_job_id: restore_job_id,
             restored_files: &restored_files,
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -391,7 +391,7 @@ mod tests {
             job_id,
             source_restore_job_id: uuid::Uuid::new_v4(),
             restored_files: &restored_files,
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await
@@ -431,7 +431,7 @@ mod tests {
             job_id,
             source_restore_job_id: uuid::Uuid::new_v4(),
             restored_files: &restored_files,
-            timeout_secs: 5,
+            max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
         })
         .await

@@ -341,7 +341,7 @@ pub(crate) struct TunnelApplyCommand {
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 60)]
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
     #[arg(long, default_value_t = false)]
@@ -365,7 +365,7 @@ pub(crate) struct TunnelOspfCostUpdateCommand {
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 60)]
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
     #[arg(long, default_value_t = false)]
@@ -385,7 +385,7 @@ pub(crate) struct TunnelRollbackCommand {
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 60)]
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
     #[arg(long, default_value_t = false)]
@@ -405,7 +405,7 @@ pub(crate) struct TunnelStatusCommand {
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = 60)]
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
 }
 
 #[derive(Debug, Args)]
@@ -425,7 +425,7 @@ pub(crate) struct TunnelProbeCommand {
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
 }
 
 #[derive(Debug, Args)]
@@ -451,7 +451,7 @@ pub(crate) struct TunnelSpeedTestCommand {
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }
@@ -518,7 +518,7 @@ pub(crate) fn tunnel_apply(
             &password,
             &salt_hex,
             request.privilege_ttl_secs,
-            request.timeout_secs,
+            request.max_timeout_secs,
             true,
             request.confirmed,
             request.force_unprivileged,
@@ -564,7 +564,7 @@ pub(crate) fn tunnel_ospf_cost_update(
             &password,
             &salt_hex,
             request.privilege_ttl_secs,
-            request.timeout_secs,
+            request.max_timeout_secs,
             true,
             request.confirmed,
             request.force_unprivileged,
@@ -599,7 +599,7 @@ pub(crate) fn tunnel_rollback(
             &password,
             &salt_hex,
             request.privilege_ttl_secs,
-            request.timeout_secs,
+            request.max_timeout_secs,
             true,
             request.confirmed,
             request.force_unprivileged,
@@ -633,7 +633,7 @@ pub(crate) fn tunnel_status(
             &password,
             &salt_hex,
             request.privilege_ttl_secs,
-            request.timeout_secs,
+            request.max_timeout_secs,
             false,
             false,
             false,
@@ -677,7 +677,7 @@ pub(crate) fn tunnel_probe(
             &password,
             &salt_hex,
             request.privilege_ttl_secs,
-            request.timeout_secs,
+            request.max_timeout_secs,
             false,
             false,
             false,
@@ -731,7 +731,7 @@ pub(crate) fn tunnel_speed_test(
             &password,
             &salt_hex,
             request.privilege_ttl_secs,
-            request.timeout_secs,
+            request.max_timeout_secs,
             false,
             request.confirmed,
             false,
@@ -749,7 +749,7 @@ fn submit_network_job(
     password: &str,
     salt_hex: &str,
     ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     destructive: bool,
     confirmed: bool,
     force_unprivileged: bool,
@@ -763,7 +763,7 @@ fn submit_network_job(
         password,
         salt_hex,
         ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         force_unprivileged,
         true,
     )?;
@@ -781,7 +781,7 @@ fn submit_network_job(
             "destructive": destructive,
             "confirmed": confirmed,
             "force_unprivileged": force_unprivileged,
-            "timeout_secs": timeout_secs,
+            "max_timeout_secs": max_timeout_secs,
             "operation": operation,
             "privilege_assertion": privilege.privilege_assertion,
         }),

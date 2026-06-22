@@ -494,8 +494,8 @@ fn parse_command(value: &Value, field: &str) -> Result<Value> {
         .get("argv")
         .with_context(|| format!("{field}_argv_required"))?;
     let argv = parse_argv(argv_value, field)?;
-    let timeout_secs = object
-        .get("timeout_secs")
+    let max_timeout_secs = object
+        .get("max_timeout_secs")
         .and_then(Value::as_u64)
         .unwrap_or(10);
     let max_output_bytes = object
@@ -503,13 +503,13 @@ fn parse_command(value: &Value, field: &str) -> Result<Value> {
         .and_then(Value::as_u64)
         .unwrap_or(16 * 1024);
     anyhow::ensure!(
-        (1..=120).contains(&timeout_secs) && (1024..=64 * 1024).contains(&max_output_bytes),
+        (1..=120).contains(&max_timeout_secs) && (1024..=64 * 1024).contains(&max_output_bytes),
         "{field}_budget_invalid"
     );
 
     Ok(serde_json::json!({
         "argv": argv,
-        "timeout_secs": timeout_secs,
+        "max_timeout_secs": max_timeout_secs,
         "max_output_bytes": max_output_bytes as u32,
     }))
 }

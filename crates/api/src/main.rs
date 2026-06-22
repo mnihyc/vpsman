@@ -119,7 +119,7 @@ use vpsman_common::{
     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
-const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "deploy/runtime/data/objects/backups";
+const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "runtime/data/objects/backups";
 
 pub(crate) use error::ApiError;
 pub(crate) use routes_jobs::TargetDispatchOutcome;

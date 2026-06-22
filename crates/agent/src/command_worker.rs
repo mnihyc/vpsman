@@ -151,7 +151,7 @@ pub(crate) fn command_canceled_output(
 pub(crate) fn command_timeout_output(
     job_id: uuid::Uuid,
     operation_type: &str,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
 ) -> Result<CommandOutput> {
     Ok(CommandOutput {
         job_id,
@@ -159,7 +159,7 @@ pub(crate) fn command_timeout_output(
         data: serde_json::to_vec(&json!({
             "type": "command_timeout",
             "operation_type": operation_type,
-            "timeout_secs": timeout_secs.max(1),
+            "max_timeout_secs": max_timeout_secs.max(1),
         }))?,
         exit_code: Some(124),
         done: true,

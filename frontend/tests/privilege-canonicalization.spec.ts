@@ -139,7 +139,7 @@ test("generated privilege assertions carry a request-bound timestamp", async () 
       superSaltHex: "01020304",
     },
     selectorExpression: "id:agent-sfo-01",
-    timeoutSecs: 30,
+    maxTimeoutSecs: 30,
   });
   const afterUnix = Math.floor(Date.now() / 1000);
   const assertion = built.privilegeAssertion;

@@ -43,11 +43,11 @@ import {
 } from "../resumableFileTransfer";
 import {
   buildOperation,
-  clampJobTimeoutSecs,
+  clampJobMaxTimeoutSecs,
   clampInteger,
-  effectiveJobTimeoutSecs,
+  effectiveJobMaxTimeoutSecs,
   operationCommandLabel,
-  parseOptionalJobTimeoutSecs,
+  parseOptionalJobMaxTimeoutSecs,
   parseBackupPaths,
   supervisorReady,
   terminalReady,
@@ -148,8 +148,8 @@ type DispatchConfirmationSnapshot = {
   forceUnprivileged: boolean;
   selectorExpression: string;
   targets: AgentView[];
-  timeoutSecs: number;
-  timeoutOverrideSecs?: number;
+  maxTimeoutSecs: number;
+  maxTimeoutOverrideSecs?: number;
 } & (
   | {
       kind: "job";
@@ -337,7 +337,7 @@ export function JobDispatchPanel({
   const [supervisorEnv, setSupervisorEnv] = useState("");
   const [supervisorLogBytes, setSupervisorLogBytes] = useState(65536);
   const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(JOB_SELECTOR_STORAGE_KEY));
-  const [timeoutSecs, setTimeoutSecs] = useState("");
+  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState("");
   const [forceUnprivileged, setForceUnprivileged] = useState(false);
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
   const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
@@ -367,12 +367,12 @@ export function JobDispatchPanel({
     if (dispatchPreset.selectorExpression !== undefined) {
       setSelectorExpression(dispatchPreset.selectorExpression);
     }
-    if (dispatchPreset.timeoutSecs !== undefined) {
-      setTimeoutSecs(String(clampJobTimeoutSecs(dispatchPreset.timeoutSecs)));
+    if (dispatchPreset.maxTimeoutSecs !== undefined) {
+      setMaxTimeoutSecs(String(clampJobMaxTimeoutSecs(dispatchPreset.maxTimeoutSecs)));
     } else if (dispatchPreset.mode === "agent_update_activate" || dispatchPreset.mode === "agent_update_rollback") {
-      setTimeoutSecs("60");
+      setMaxTimeoutSecs("60");
     } else if (dispatchPreset.mode.startsWith("agent_update")) {
-      setTimeoutSecs("300");
+      setMaxTimeoutSecs("300");
     }
     if (dispatchPreset.mode === "agent_update") {
       setUpdateArtifactUrl(dispatchPreset.updateArtifactUrl ?? "");
@@ -418,6 +418,9 @@ export function JobDispatchPanel({
         ? String(session.output_retained_first_seq ?? session.output_first_seq ?? 0)
         : "",
     );
+    if (terminalComposerAction.action === "input") {
+      setMaxTimeoutSecs("30");
+    }
     setTerminalInputText("");
     setTerminalCloseReason(session.close_reason ?? "operator");
     setSelectorExpression(`id:${session.client_id}`);
@@ -496,7 +499,7 @@ export function JobDispatchPanel({
     terminalSessionId,
     terminalUser,
     terminalUserPolicy,
-    timeoutSecs,
+    maxTimeoutSecs,
     updateActivationSha256Hex,
     updateArtifactUrl,
     updateCheckActivate,
@@ -611,8 +614,8 @@ export function JobDispatchPanel({
     activeDispatchConfirmation?.selectorExpression ?? selectorExpression.trim();
   const dispatchConfirmationTargets =
     activeDispatchConfirmation?.targets ?? preview?.targets ?? expressionTargets;
-  const dispatchConfirmationTimeoutSecs =
-    activeDispatchConfirmation?.timeoutSecs ?? effectiveJobTimeoutSecs(timeoutSecs);
+  const dispatchConfirmationMaxTimeoutSecs =
+    activeDispatchConfirmation?.maxTimeoutSecs ?? effectiveJobMaxTimeoutSecs(maxTimeoutSecs);
   const dispatchConfirmationForceUnprivileged =
     activeDispatchConfirmation?.forceUnprivileged ??
     (supportsForceUnprivileged ? forceUnprivileged : false);
@@ -654,7 +657,7 @@ export function JobDispatchPanel({
       label: "Targets",
       value: formatTargetAvailabilitySummary(dispatchConfirmationTargets),
     },
-    { label: "Timeout", value: `${dispatchConfirmationTimeoutSecs}s` },
+    { label: "Max timeout", value: `${dispatchConfirmationMaxTimeoutSecs}s` },
     {
       label: "Privilege",
       value: privilegeMaterial ? "Unlocked locally" : "Locked",
@@ -774,8 +777,8 @@ export function JobDispatchPanel({
       throw new Error("Privilege unlock is locked");
     }
     const selector = selectorExpression.trim();
-    const timeoutOverride = parseOptionalJobTimeoutSecs(timeoutSecs);
-    const timeout = timeoutOverride ?? effectiveJobTimeoutSecs(timeoutSecs);
+    const maxTimeoutOverride = parseOptionalJobMaxTimeoutSecs(maxTimeoutSecs);
+    const maxTimeout = maxTimeoutOverride ?? effectiveJobMaxTimeoutSecs(maxTimeoutSecs);
     const frozenForceUnprivileged = supportsForceUnprivileged ? forceUnprivileged : false;
     const operationLabel = operationCommandLabel(mode, commandText);
     const base = {
@@ -783,8 +786,8 @@ export function JobDispatchPanel({
       operationLabel,
       selectorExpression: selector,
       targets,
-      timeoutSecs: timeout,
-      timeoutOverrideSecs: timeoutOverride,
+      maxTimeoutSecs: maxTimeout,
+      maxTimeoutOverrideSecs: maxTimeoutOverride,
     };
     if (mode === "file_transfer_upload") {
       const uploadSourceFile =
@@ -843,7 +846,7 @@ export function JobDispatchPanel({
           clientId,
           sessionId,
           inputPayloadHash: payloadHashHex,
-          timeoutSecs: timeout,
+          maxTimeoutSecs: maxTimeout,
           confirmed: true,
         }),
         privilegeMaterial,
@@ -913,7 +916,7 @@ export function JobDispatchPanel({
         commandType,
         operationPayloadHash: payloadHashHex,
         resolvedTargets: clientIds,
-        timeoutSecs: timeout,
+        maxTimeoutSecs: maxTimeout,
         forceUnprivileged: frozenForceUnprivileged,
         privileged: true,
       }),
@@ -951,8 +954,8 @@ export function JobDispatchPanel({
     if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) {
       return;
     }
-    if (typeof defaults.timeout_secs === "number") {
-      setTimeoutSecs(String(clampJobTimeoutSecs(defaults.timeout_secs)));
+    if (typeof defaults.max_timeout_secs === "number") {
+      setMaxTimeoutSecs(String(clampJobMaxTimeoutSecs(defaults.max_timeout_secs)));
     }
     if (typeof defaults.force_unprivileged === "boolean") {
       setForceUnprivileged(defaults.force_unprivileged);
@@ -1078,7 +1081,7 @@ export function JobDispatchPanel({
       filePushMode,
       null,
     );
-    const timeoutOverride = parseOptionalJobTimeoutSecs(timeoutSecs);
+    const maxTimeoutOverride = parseOptionalJobMaxTimeoutSecs(maxTimeoutSecs);
     return {
       name,
       scope_kind: templateScopeKind,
@@ -1089,7 +1092,7 @@ export function JobDispatchPanel({
         confirmed: operationNeedsConfirmation,
         destructive: operationNeedsConfirmation,
         force_unprivileged: supportsForceUnprivileged ? forceUnprivileged : false,
-        ...(timeoutOverride !== undefined ? { timeout_secs: timeoutOverride } : {}),
+        ...(maxTimeoutOverride !== undefined ? { max_timeout_secs: maxTimeoutOverride } : {}),
       },
       confirmed: true,
     };
@@ -1169,8 +1172,8 @@ export function JobDispatchPanel({
           chunkSizeBytes: confirmed.chunkSizeBytes,
           resumeToken: confirmed.resumeToken,
           sessionId: confirmed.sessionId,
-          timeoutSecs: confirmed.timeoutSecs,
-          timeoutOverrideSecs: confirmed.timeoutOverrideSecs,
+          maxTimeoutSecs: confirmed.maxTimeoutSecs,
+          maxTimeoutOverrideSecs: confirmed.maxTimeoutOverrideSecs,
           onProgress: (progress) => {
             setTransferProgress(progress);
             setFileTransferSessionId(progress.sessionId);
@@ -1179,7 +1182,7 @@ export function JobDispatchPanel({
         });
         setLastJob(commitJob);
         setLastPayloadHash(null);
-        await trackDispatchProgress(commitJob, confirmed.targets, confirmed.timeoutSecs);
+        await trackDispatchProgress(commitJob, confirmed.targets, confirmed.maxTimeoutSecs);
         return;
       }
       if (confirmed.kind === "transfer_download") {
@@ -1200,8 +1203,8 @@ export function JobDispatchPanel({
           chunkSizeBytes: confirmed.chunkSizeBytes,
           resumeToken: confirmed.resumeToken,
           sessionId: confirmed.sessionId,
-          timeoutSecs: confirmed.timeoutSecs,
-          timeoutOverrideSecs: confirmed.timeoutOverrideSecs,
+          maxTimeoutSecs: confirmed.maxTimeoutSecs,
+          maxTimeoutOverrideSecs: confirmed.maxTimeoutOverrideSecs,
           onProgress: (progress) => {
             setTransferProgress(progress);
             setFileTransferSessionId(progress.sessionId);
@@ -1210,20 +1213,20 @@ export function JobDispatchPanel({
         });
         setLastJob(startJob);
         setLastPayloadHash(null);
-        await trackDispatchProgress(startJob, confirmed.targets, confirmed.timeoutSecs);
+        await trackDispatchProgress(startJob, confirmed.targets, confirmed.maxTimeoutSecs);
         return;
       }
       if (confirmed.kind === "terminal_input") {
         const response = await onSubmitTerminalInput(confirmed.clientId, confirmed.sessionId, {
           job_id: confirmed.jobId,
           text: confirmed.text,
-          ...(confirmed.timeoutOverrideSecs !== undefined ? { timeout_secs: confirmed.timeoutOverrideSecs } : {}),
+          max_timeout_secs: confirmed.maxTimeoutSecs,
           confirmed: true,
           privilege_assertion: confirmed.privilegeAssertion,
         });
         setLastJob(response.job);
         setLastPayloadHash(confirmed.payloadHashHex);
-        await trackDispatchProgress(response.job, confirmed.targets, confirmed.timeoutSecs);
+        await trackDispatchProgress(response.job, confirmed.targets, confirmed.maxTimeoutSecs);
         return;
       }
       const clientIds = confirmed.targets.map((target) => target.id);
@@ -1236,34 +1239,34 @@ export function JobDispatchPanel({
         command: confirmed.commandType,
         argv: confirmed.argv,
         operation: confirmed.operation,
-        ...(confirmed.timeoutOverrideSecs !== undefined ? { timeout_secs: confirmed.timeoutOverrideSecs } : {}),
+        ...(confirmed.maxTimeoutOverrideSecs !== undefined ? { max_timeout_secs: confirmed.maxTimeoutOverrideSecs } : {}),
         force_unprivileged: confirmed.forceUnprivileged,
         privileged: true,
         privilege_assertion: confirmed.privilegeAssertion,
       });
       setLastJob(nextJob);
       setLastPayloadHash(confirmed.payloadHashHex);
-      await trackDispatchProgress(nextJob, confirmed.targets, confirmed.timeoutSecs);
+      await trackDispatchProgress(nextJob, confirmed.targets, confirmed.maxTimeoutSecs);
     });
   }
 
-  async function trackDispatchProgress(job: CreateJobResponse, targets: AgentView[], jobTimeoutSecs?: number) {
+  async function trackDispatchProgress(job: CreateJobResponse, targets: AgentView[], jobMaxTimeoutSecs?: number) {
     const targetCount = createJobTargetCount(job);
-    const boundedJobTimeoutSecs = clampJobTimeoutSecs(jobTimeoutSecs ?? effectiveJobTimeoutSecs(timeoutSecs));
+    const boundedJobTimeoutSecs = clampJobMaxTimeoutSecs(jobMaxTimeoutSecs ?? effectiveJobMaxTimeoutSecs(maxTimeoutSecs));
     setLastDispatchProgress(null);
     setDispatchProgress(buildBulkJobProgress({
       jobId: job.job_id,
       targetCount,
       targetRecords: [],
       targets,
-      timeoutSecs: boundedJobTimeoutSecs,
+      maxTimeoutSecs: boundedJobTimeoutSecs,
     }));
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
         onProgress: setDispatchProgress,
         targetCount,
         targets,
-        timeoutSecs: boundedJobTimeoutSecs,
+        maxTimeoutSecs: boundedJobTimeoutSecs,
       });
       setLastDispatchProgress(result.progress);
     } finally {
@@ -1578,8 +1581,8 @@ export function JobDispatchPanel({
           </label>
         )}
         <DispatchOptions
-          setTimeoutSecs={setTimeoutSecs}
-          timeoutSecs={timeoutSecs}
+          setMaxTimeoutSecs={setMaxTimeoutSecs}
+          maxTimeoutSecs={maxTimeoutSecs}
         />
 
         <ConfirmationPrompt

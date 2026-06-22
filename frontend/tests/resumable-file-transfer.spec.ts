@@ -28,7 +28,7 @@ test("bulk progress does not mark grace before job timeout", () => {
     nowMs: 1_700_000_020_000,
     targetRecords: [runningTarget("1700000000", "1700000120")],
     targets: [TARGET],
-    timeoutSecs: 60,
+    maxTimeoutSecs: 60,
   });
 
   expect(progress.control_grace).toBe(0);
@@ -43,7 +43,7 @@ test("bulk progress labels backend control grace after job timeout", () => {
     nowMs: 1_700_000_070_000,
     targetRecords: [runningTarget("1700000000", "1700000120")],
     targets: [TARGET],
-    timeoutSecs: 60,
+    maxTimeoutSecs: 60,
   });
 
   expect(progress.control_grace).toBe(1);
@@ -57,7 +57,7 @@ test("bulk progress labels backend deadline overdue active targets", () => {
     nowMs: 1_700_000_121_000,
     targetRecords: [runningTarget("1700000000", "1700000120")],
     targets: [TARGET],
-    timeoutSecs: 60,
+    maxTimeoutSecs: 60,
   });
 
   expect(progress.control_grace).toBe(0);

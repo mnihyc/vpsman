@@ -83,7 +83,7 @@ smoke_write_enrolled_agent_config() {
   local client_private_hex="$5"
   local gateway_public_hex="$6"
   local endpoints_csv="$7"
-  local job_timeout_secs="${8:-30}"
+  local max_job_timeout_secs="${8:-30}"
   local network_root="${9:-}"
   local telemetry_light_secs="${10:-15}"
   local telemetry_full_secs="${11:-60}"
@@ -100,7 +100,7 @@ smoke_write_enrolled_agent_config() {
     printf 'client_private_key_hex = %s\n' "$(smoke_toml_quote "$client_private_hex")"
     printf 'server_public_key_hex = %s\n' "$(smoke_toml_quote "$gateway_public_hex")"
     printf '\n[auth]\n'
-    printf 'job_timeout_secs = %s\n' "$job_timeout_secs"
+    printf 'max_job_timeout_secs = %s\n' "$max_job_timeout_secs"
     printf 'gateway_retry_secs = 1\n'
     printf 'gateway_connect_timeout_secs = 1\n'
     if [[ -n "$network_root" ]]; then
@@ -137,7 +137,7 @@ smoke_create_direct_agent_config() {
   local tags_csv="$6"
   local gateway_public_hex="$7"
   local endpoints_csv="$8"
-  local job_timeout_secs="${9:-30}"
+  local max_job_timeout_secs="${9:-30}"
   local keypair private_hex public_hex
 
   keypair="$(target/debug/vpsctl noise-keygen)"
@@ -172,7 +172,7 @@ smoke_create_direct_agent_config() {
     "$private_hex" \
     "$gateway_public_hex" \
     "$endpoints_csv" \
-    "$job_timeout_secs"
+    "$max_job_timeout_secs"
 }
 
 smoke_build_binaries() {
@@ -251,8 +251,8 @@ smoke_port_is_reserved() {
 
 smoke_wait_http() {
   local url="$1"
-  local timeout_secs="${SMOKE_WAIT_HTTP_SECS:-45}"
-  local deadline=$((SECONDS + timeout_secs))
+  local max_timeout_secs="${SMOKE_WAIT_HTTP_SECS:-45}"
+  local deadline=$((SECONDS + max_timeout_secs))
   until curl -fsS "$url" >/dev/null 2>&1; do
     if (( SECONDS >= deadline )); then
       echo "timed out waiting for $url" >&2
@@ -292,8 +292,8 @@ smoke_start_postgres() {
 smoke_wait_tcp() {
   local host="$1"
   local port="$2"
-  local timeout_secs="${SMOKE_WAIT_TCP_SECS:-45}"
-  local deadline=$((SECONDS + timeout_secs))
+  local max_timeout_secs="${SMOKE_WAIT_TCP_SECS:-45}"
+  local deadline=$((SECONDS + max_timeout_secs))
   until timeout 0.2 bash -c "</dev/tcp/$host/$port" >/dev/null 2>&1; do
     if (( SECONDS >= deadline )); then
       echo "timed out waiting for $host:$port" >&2
@@ -318,9 +318,9 @@ smoke_wait_api_job_status() {
   local api_url="$1"
   local job_id="$2"
   local expected_status="$3"
-  local timeout_secs="${4:-45}"
+  local max_timeout_secs="${4:-45}"
   local token="${5:-${VPSMAN_API_TOKEN:-}}"
-  local deadline=$((SECONDS + timeout_secs))
+  local deadline=$((SECONDS + max_timeout_secs))
   local job_json status
   local -a curl_args=(-fsS)
   if [[ -n "$token" ]]; then

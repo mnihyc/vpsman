@@ -520,7 +520,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 command.password_env,
                 command.super_salt_hex,
                 command.privilege_ttl_secs,
-                command.timeout_secs,
+                command.max_timeout_secs,
                 command.confirmed,
                 command.force_unprivileged,
             )?;

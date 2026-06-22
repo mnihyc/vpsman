@@ -55,7 +55,7 @@ pub(crate) struct RestoreRunOptions {
     pub(crate) password_env: String,
     pub(crate) super_salt_hex: Option<String>,
     pub(crate) privilege_ttl_secs: u64,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
 }
@@ -70,7 +70,7 @@ pub(crate) struct RestoreRunWithCredentials<'a> {
     pub(crate) password: &'a str,
     pub(crate) salt_hex: &'a str,
     pub(crate) privilege_ttl_secs: u64,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
 }
@@ -554,7 +554,7 @@ pub(crate) fn backup_run(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
     validate_backup_scope(&paths, include_config)?;
@@ -576,7 +576,7 @@ pub(crate) fn backup_run(
         &password,
         &salt_hex,
         privilege_ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         false,
         true,
     )?;
@@ -595,7 +595,7 @@ pub(crate) fn backup_run(
                 "privileged": true,
                 "destructive": false,
                 "confirmed": confirmed,
-                "timeout_secs": timeout_secs,
+                "max_timeout_secs": max_timeout_secs,
                 "operation": operation,
                 "privilege_assertion": privilege.privilege_assertion,
             }),
@@ -877,7 +877,7 @@ pub(crate) fn restore_run(
                 password: &password,
                 salt_hex: &salt_hex,
                 privilege_ttl_secs: options.privilege_ttl_secs,
-                timeout_secs: options.timeout_secs,
+                max_timeout_secs: options.max_timeout_secs,
                 confirmed: options.confirmed,
                 force_unprivileged: options.force_unprivileged,
             },
@@ -928,7 +928,7 @@ pub(crate) fn restore_run_request_with_credentials(
         request.password,
         request.salt_hex,
         request.privilege_ttl_secs,
-        request.timeout_secs,
+        request.max_timeout_secs,
         request.force_unprivileged,
         true,
     )?;
@@ -943,7 +943,7 @@ pub(crate) fn restore_run_request_with_credentials(
         "destructive": true,
         "confirmed": request.confirmed,
         "force_unprivileged": request.force_unprivileged,
-        "timeout_secs": request.timeout_secs,
+        "max_timeout_secs": request.max_timeout_secs,
         "operation": operation,
         "privilege_assertion": privilege.privilege_assertion,
     }))
@@ -1023,7 +1023,7 @@ pub(crate) fn restore_rollback(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
     force_unprivileged: bool,
 ) -> Result<()> {
@@ -1043,7 +1043,7 @@ pub(crate) fn restore_rollback(
         &password,
         &salt_hex,
         privilege_ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         force_unprivileged,
         true,
     )?;
@@ -1064,7 +1064,7 @@ pub(crate) fn restore_rollback(
                 "destructive": true,
                 "confirmed": confirmed,
                 "force_unprivileged": force_unprivileged,
-                "timeout_secs": timeout_secs,
+                "max_timeout_secs": max_timeout_secs,
                 "operation": operation,
                 "privilege_assertion": privilege.privilege_assertion,
             }),

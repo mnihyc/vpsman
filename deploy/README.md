@@ -1,7 +1,7 @@
 # Deploy Directory Layout
 
-This directory is the Docker Compose deployment root. Paths below are relative
-to `deploy/`.
+This directory is the Docker Compose deployment root. It can be renamed or
+copied outside a source checkout; paths below are relative to this directory.
 
 ```text
 .
@@ -47,7 +47,7 @@ to `deploy/`.
 Compose mounts `./runtime/data` into API, gateway, and worker containers as
 `/var/lib/vpsman`. The default suite config keeps the filesystem object store
 under `/var/lib/vpsman/objects/backups`, so object data persists on the host at
-`deploy/runtime/data/objects/backups`.
+`runtime/data/objects/backups`.
 
 Compose mounts `./runtime/postgres/data` into PostgreSQL as
 `/var/lib/postgresql/data`. PostgreSQL stores artifact metadata, job history,

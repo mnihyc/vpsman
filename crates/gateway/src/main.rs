@@ -21,7 +21,8 @@ use tokio::{
 use tracing::{debug, info, warn};
 use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, read_secret_file_ref, AgentHello,
-    AgentSessionDisconnect, CommandResume, Frame, GatewayAgentHelloIngest,
+    AgentSessionDisconnect, AgentUpdateVerificationRequest, AgentUpdateVerificationResult,
+    CommandResume, Frame, GatewayAgentHelloIngest, GatewayAgentUpdateVerificationIngest,
     GatewayCommandOutputIngest, GatewaySessionLifecycleIngest, GatewayTelemetryIngest,
     GatewayTerminalOutputIngest, JobAck, JobCancelAck, MessageKind, NoiseFrameStream,
     SequencedCommandOutput, ServerHello, SuiteConfig, TelemetryEnvelope,
@@ -620,6 +621,7 @@ async fn handle_agent(
                         &mut process_incarnation_id,
                         &mut pending_commands,
                         &mut pending_cancels,
+                        &mut outbound_seq,
                         frame,
                     ).await
                 {
@@ -813,6 +815,7 @@ async fn handle_agent_frame(
         uuid::Uuid,
         tokio::sync::oneshot::Sender<vpsman_common::GatewayCommandCancelResult>,
     >,
+    outbound_seq: &mut u64,
     frame: Frame,
 ) -> Result<()> {
     match frame.kind {
@@ -949,6 +952,41 @@ async fn handle_agent_frame(
                 next_output_seq = resume.next_output_seq,
                 "resumed active agent command"
             );
+        }
+        MessageKind::AgentUpdateVerificationRequest => {
+            let request: AgentUpdateVerificationRequest = decode_json(&frame.decoded_payload()?)?;
+            let Some(active_client_id) = client_id.clone() else {
+                return Ok(());
+            };
+            let active_process_incarnation_id = process_incarnation_id
+                .as_ref()
+                .copied()
+                .context("agent_update_verification_before_hello")?;
+            let job_id = request.job_id;
+            let ingest = GatewayAgentUpdateVerificationIngest {
+                gateway_id: context.args.gateway_id.clone(),
+                gateway_session_id: context.session_id,
+                process_incarnation_id: active_process_incarnation_id,
+                client_id: active_client_id,
+                request,
+            };
+            let response = match context.control.verify_agent_update_artifact(&ingest).await {
+                Ok(response) => response,
+                Err(error) => AgentUpdateVerificationResult {
+                    job_id,
+                    approved: false,
+                    message: format!("agent_update_verification_failed:{error}"),
+                },
+            };
+            write_json_frame(
+                stream,
+                MessageKind::AgentUpdateVerificationResult,
+                2,
+                *outbound_seq,
+                &response,
+            )
+            .await?;
+            *outbound_seq += 1;
         }
         MessageKind::CommandOutput => {
             let sequenced: SequencedCommandOutput = decode_json(&frame.decoded_payload()?)?;

@@ -36,7 +36,7 @@ fn parses_vty_backup_run_targets_and_scope() {
         "--path",
         "/etc/hostname",
         "--include-config",
-        "--timeout=90",
+        "--max-timeout=90",
         "id:client-a",
         "tag:edge",
         "--confirmed",
@@ -45,7 +45,7 @@ fn parses_vty_backup_run_targets_and_scope() {
 
     assert_eq!(request.paths, vec!["/etc/hostname"]);
     assert!(request.include_config);
-    assert_eq!(request.timeout_secs, 90);
+    assert_eq!(request.max_timeout_secs, 90);
     assert!(request.selection.clients.is_empty());
     assert_eq!(request.selection.tags, vec!["edge", "id:client-a"]);
     assert!(request.selection.confirmed);
@@ -139,7 +139,7 @@ fn parses_vty_restore_run_for_single_target_execution() {
         "client-b",
         "--archive-transfer-session-id",
         &archive_transfer_session_id.to_string(),
-        "--timeout=120",
+        "--max-timeout=120",
         "--force-unprivileged",
         "--confirmed",
     ])
@@ -151,7 +151,7 @@ fn parses_vty_restore_run_for_single_target_execution() {
         request.archive_transfer_session_id,
         archive_transfer_session_id
     );
-    assert_eq!(request.timeout_secs, 120);
+    assert_eq!(request.max_timeout_secs, 120);
     assert!(request.confirmed);
     assert!(request.force_unprivileged);
 }
@@ -178,7 +178,7 @@ fn parses_vty_restore_rollback_for_single_target_execution() {
     let request = parse_vty_restore_rollback(&[
         &restore_job_id.to_string(),
         "client-b",
-        "--timeout",
+        "--max-timeout",
         "30",
         "--force-unprivileged",
         "--confirmed",
@@ -187,7 +187,7 @@ fn parses_vty_restore_rollback_for_single_target_execution() {
 
     assert_eq!(request.restore_job_id, restore_job_id);
     assert_eq!(request.target_client_id, "client-b");
-    assert_eq!(request.timeout_secs, 30);
+    assert_eq!(request.max_timeout_secs, 30);
     assert!(request.confirmed);
     assert!(request.force_unprivileged);
 }

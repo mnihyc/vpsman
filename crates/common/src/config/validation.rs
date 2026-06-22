@@ -114,8 +114,8 @@ fn validate_noise_config(config: &AgentNoiseConfig) -> Result<(), String> {
 }
 
 fn validate_auth_config(config: &AgentAuthConfig) -> Result<(), String> {
-    if !(1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&config.job_timeout_secs) {
-        return Err("job_timeout_secs_out_of_range".to_string());
+    if !(1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&config.max_job_timeout_secs) {
+        return Err("max_job_timeout_secs_out_of_range".to_string());
     }
     if !(1..=3600).contains(&config.gateway_retry_secs) {
         return Err("gateway_retry_secs_out_of_range".to_string());
@@ -442,7 +442,7 @@ fn validate_runtime_command_budget(
     command: &crate::RuntimeTunnelCommand,
     field: &str,
 ) -> Result<(), String> {
-    if !(1..=120).contains(&command.timeout_secs)
+    if !(1..=120).contains(&command.max_timeout_secs)
         || !(1024..=64 * 1024).contains(&command.max_output_bytes)
     {
         return Err(format!("{field}_invalid"));

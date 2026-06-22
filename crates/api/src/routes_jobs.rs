@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeSet, HashSet},
-    path::Path as StdPath,
-    time::Duration,
-};
+use std::collections::HashSet;
 
 use anyhow::anyhow;
 use axum::{
@@ -13,8 +9,7 @@ use axum::{
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    encode_json, job_command_requires_confirmation, payload_hash,
-    resolve_agent_update_manifest_candidate, update_manifest_checksum_url, CommandOutput,
+    encode_json, job_command_requires_confirmation, payload_hash, CommandOutput,
     GatewayCommandDispatchResult, JobCancelRequest as GatewayJobCancelRequest, JobCommand,
     OutputStream, DEFAULT_MAX_JOB_TIMEOUT_SECS,
 };
@@ -37,9 +32,6 @@ use crate::{
     repository_jobs::PrecompletedJobTarget,
     state::AppState,
 };
-
-const AGENT_UPDATE_POLICY_FETCH_MAX_BYTES: usize = 16 * 1024 * 1024;
-const AGENT_UPDATE_POLICY_FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub(crate) async fn create_job(
     State(state): State<AppState>,
@@ -208,6 +200,9 @@ async fn create_job_inner(
     let job_id = request
         .job_id
         .ok_or_else(|| ApiError::conflict("job_id_required"))?;
+    if job_id == Uuid::nil() {
+        return Err(ApiError::bad_request("job_id_invalid"));
+    }
     if request.destructive && !request.confirmed {
         return Err(ApiError::conflict("destructive_confirmation_required"));
     }
@@ -282,9 +277,9 @@ async fn create_job_inner(
         JobPrivilegeSource::SavedSchedule(schedule_id) => Some(*schedule_id),
         JobPrivilegeSource::TerminalInputRoute => None,
     };
-    let effective_timeout_secs =
-        effective_job_timeout_secs(request.timeout_secs, state.max_job_timeout_secs())?;
-    request.timeout_secs = Some(effective_timeout_secs);
+    let effective_max_timeout_secs =
+        effective_job_max_timeout_secs(request.max_timeout_secs, state.max_job_timeout_secs())?;
+    request.max_timeout_secs = Some(effective_max_timeout_secs);
     let request_fingerprint = request_fingerprint_for_job(
         &request,
         &command_hash,
@@ -332,7 +327,9 @@ async fn create_job_inner(
             command_type: request.command_type_label(),
             operation_payload_hash: &command_hash,
             resolved_targets: &resolved_targets,
-            timeout_secs: request.timeout_secs.unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS),
+            max_timeout_secs: request
+                .max_timeout_secs
+                .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS),
             force_unprivileged: request.force_unprivileged,
             privileged: request.privileged,
         });
@@ -466,7 +463,9 @@ async fn create_job_inner(
             job_id,
             target_count: resolved_targets.len(),
             status,
-            timeout_secs: request.timeout_secs.unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS),
+            max_timeout_secs: request
+                .max_timeout_secs
+                .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS),
             max_job_timeout_secs: state.max_job_timeout_secs(),
             control_deadline_extra_secs,
             target_counts,
@@ -707,7 +706,7 @@ fn confirmation_error_code(command: &JobCommand) -> &'static str {
     }
 }
 
-fn request_fingerprint_for_job(
+pub(crate) fn request_fingerprint_for_job(
     request: &CreateJobRequest,
     command_hash: &str,
     resolved_targets: &[String],
@@ -720,8 +719,8 @@ fn request_fingerprint_for_job(
         "command_type": request.command_type_label(),
         "operation_payload_hash": command_hash,
         "targets": targets,
-        "timeout_secs": request
-            .timeout_secs
+        "max_timeout_secs": request
+            .max_timeout_secs
             .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS),
         "privileged": request.privileged,
         "force_unprivileged": request.force_unprivileged,
@@ -755,7 +754,7 @@ async fn existing_job_response_for_id(
         job_id: existing.id,
         target_count: existing.target_count.max(0) as usize,
         status: existing.status,
-        timeout_secs: existing.timeout_secs,
+        max_timeout_secs: existing.max_timeout_secs,
         max_job_timeout_secs: state.max_job_timeout_secs(),
         control_deadline_extra_secs: state
             .dispatcher_runtime_config()
@@ -764,7 +763,7 @@ async fn existing_job_response_for_id(
     }))
 }
 
-async fn create_job_target_counts(
+pub(crate) async fn create_job_target_counts(
     state: &AppState,
     job_id: Uuid,
 ) -> Result<CreateJobTargetCounts, ApiError> {
@@ -805,8 +804,8 @@ async fn create_job_target_counts(
 async fn agent_update_release_policy_allows(
     state: &AppState,
     job_command: &JobCommand,
-    dispatch_targets: &[String],
-    target_capabilities: &[TargetCapability],
+    _dispatch_targets: &[String],
+    _target_capabilities: &[TargetCapability],
 ) -> Result<bool, ApiError> {
     if !state.require_registered_agent_updates() {
         return Ok(true);
@@ -831,137 +830,9 @@ async fn agent_update_release_policy_allows(
         JobCommand::AgentUpdateRollback {
             rollback_sha256_hex: None,
         } => Ok(false),
-        JobCommand::AgentUpdateCheck { version_url, .. } => {
-            let Some(version_url) = version_url.as_deref() else {
-                return Ok(false);
-            };
-            if dispatch_targets.is_empty() {
-                return Ok(true);
-            }
-            let candidate_hashes = resolve_registered_update_check_candidate_hashes(
-                version_url,
-                dispatch_targets,
-                target_capabilities,
-            )
-            .await?;
-            for sha256_hex in candidate_hashes {
-                if !state
-                    .repo
-                    .agent_update_release_exists_for_artifact(&sha256_hex)
-                    .await
-                    .map_err(ApiError::from)?
-                {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
+        JobCommand::AgentUpdateCheck { .. } => Ok(true),
         _ => Ok(true),
     }
-}
-
-async fn resolve_registered_update_check_candidate_hashes(
-    version_url: &str,
-    dispatch_targets: &[String],
-    target_capabilities: &[TargetCapability],
-) -> Result<BTreeSet<String>, ApiError> {
-    let manifest = fetch_agent_update_policy_bytes(version_url).await?;
-    let checksum_url = update_manifest_checksum_url(&manifest)
-        .map_err(|_| ApiError::bad_request("agent_update_check_manifest_invalid"))?;
-    let checksums = fetch_agent_update_policy_bytes(&checksum_url).await?;
-    let mut hashes = BTreeSet::new();
-    for client_id in dispatch_targets {
-        let arch = target_capabilities
-            .iter()
-            .find(|target| target.client_id == *client_id)
-            .and_then(|target| target.arch.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| ApiError::bad_request("agent_update_check_target_arch_missing"))?;
-        let candidate = resolve_agent_update_manifest_candidate(&manifest, &checksums, arch)
-            .map_err(|_| ApiError::bad_request("agent_update_check_manifest_invalid"))?;
-        hashes.insert(candidate.sha256_hex);
-    }
-    Ok(hashes)
-}
-
-async fn fetch_agent_update_policy_bytes(url: &str) -> Result<Vec<u8>, ApiError> {
-    let url = url.trim();
-    if let Some(path) = url.strip_prefix("file://") {
-        let path = StdPath::new(path);
-        if !path.is_absolute() {
-            return Err(ApiError::bad_request(
-                "agent_update_check_manifest_url_invalid",
-            ));
-        }
-        let metadata = tokio::fs::metadata(path)
-            .await
-            .map_err(|_| ApiError::bad_request("agent_update_check_manifest_url_invalid"))?;
-        if !metadata.is_file() || metadata.len() > AGENT_UPDATE_POLICY_FETCH_MAX_BYTES as u64 {
-            return Err(ApiError::bad_request(
-                "agent_update_check_manifest_too_large",
-            ));
-        }
-        return tokio::fs::read(path)
-            .await
-            .map_err(|_| ApiError::bad_request("agent_update_check_manifest_url_invalid"));
-    }
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|_| ApiError::bad_request("agent_update_check_manifest_url_invalid"))?;
-    match parsed.scheme() {
-        "https" => {}
-        "http" if parsed.host_str().is_some_and(is_localhost_update_host) => {}
-        _ => {
-            return Err(ApiError::bad_request(
-                "agent_update_check_manifest_url_invalid",
-            ));
-        }
-    }
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .connect_timeout(AGENT_UPDATE_POLICY_FETCH_TIMEOUT)
-        .timeout(AGENT_UPDATE_POLICY_FETCH_TIMEOUT)
-        .build()
-        .map_err(|_| ApiError::bad_request("agent_update_check_manifest_fetch_failed"))?;
-    let response = client
-        .get(parsed)
-        .send()
-        .await
-        .map_err(|_| ApiError::bad_request("agent_update_check_manifest_fetch_failed"))?
-        .error_for_status()
-        .map_err(|_| ApiError::bad_request("agent_update_check_manifest_fetch_failed"))?;
-    read_limited_update_policy_response(response).await
-}
-
-async fn read_limited_update_policy_response(
-    mut response: reqwest::Response,
-) -> Result<Vec<u8>, ApiError> {
-    if response
-        .content_length()
-        .is_some_and(|size| size > AGENT_UPDATE_POLICY_FETCH_MAX_BYTES as u64)
-    {
-        return Err(ApiError::bad_request(
-            "agent_update_check_manifest_too_large",
-        ));
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| ApiError::bad_request("agent_update_check_manifest_fetch_failed"))?
-    {
-        if body.len().saturating_add(chunk.len()) > AGENT_UPDATE_POLICY_FETCH_MAX_BYTES {
-            return Err(ApiError::bad_request(
-                "agent_update_check_manifest_too_large",
-            ));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-fn is_localhost_update_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn precompleted_target_outcomes(
@@ -1099,7 +970,7 @@ fn status_value_message(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn target_capabilities_from_agents(agents: &[AgentView]) -> Vec<TargetCapability> {
+pub(crate) fn target_capabilities_from_agents(agents: &[AgentView]) -> Vec<TargetCapability> {
     agents
         .iter()
         .map(|agent| TargetCapability {
@@ -1336,8 +1207,8 @@ async fn reject_job(
             job_id,
             target_count,
             status,
-            timeout_secs: request
-                .timeout_secs
+            max_timeout_secs: request
+                .max_timeout_secs
                 .unwrap_or_else(|| DEFAULT_MAX_JOB_TIMEOUT_SECS.min(state.max_job_timeout_secs())),
             max_job_timeout_secs: state.max_job_timeout_secs(),
             control_deadline_extra_secs: state
@@ -1356,19 +1227,21 @@ fn validate_job_audit_selector(selector_expression: &str) -> Result<(), ApiError
     Ok(())
 }
 
-pub(crate) fn effective_job_timeout_secs(
-    requested_timeout_secs: Option<u64>,
+pub(crate) fn effective_job_max_timeout_secs(
+    requested_max_timeout_secs: Option<u64>,
     max_job_timeout_secs: u64,
 ) -> Result<u64, ApiError> {
     let max_job_timeout_secs = max_job_timeout_secs.max(1);
-    let default_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS.min(max_job_timeout_secs);
-    let timeout_secs = requested_timeout_secs
-        .unwrap_or(default_timeout_secs)
+    let default_max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS.min(max_job_timeout_secs);
+    let max_timeout_secs = requested_max_timeout_secs
+        .unwrap_or(default_max_timeout_secs)
         .max(1);
-    if timeout_secs > max_job_timeout_secs {
-        return Err(ApiError::bad_request("job_timeout_exceeds_configured_max"));
+    if max_timeout_secs > max_job_timeout_secs {
+        return Err(ApiError::bad_request(
+            "max_timeout_exceeds_configured_job_max",
+        ));
     }
-    Ok(timeout_secs)
+    Ok(max_timeout_secs)
 }
 
 fn bounded_cancel_reason(reason: Option<&str>) -> Option<String> {

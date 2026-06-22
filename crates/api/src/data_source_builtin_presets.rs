@@ -148,7 +148,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "source": "linux_w_who_preset",
                 "user_sessions_command": {
                     "argv": ["/usr/bin/w", "-h"],
-                    "timeout_secs": 5,
+                    "max_timeout_secs": 5,
                     "max_output_bytes": 16384
                 }
             }),
@@ -163,7 +163,7 @@ pub(crate) fn builtin_presets() -> Vec<BuiltInPreset> {
                 "source": "linux_w_who_preset",
                 "user_sessions_command": {
                     "argv": ["/usr/bin/who"],
-                    "timeout_secs": 5,
+                    "max_timeout_secs": 5,
                     "max_output_bytes": 16384
                 }
             }),

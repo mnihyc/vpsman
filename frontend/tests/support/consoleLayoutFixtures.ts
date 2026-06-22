@@ -561,7 +561,7 @@ const systemDashboard = {
     event_post_secs: 15,
     internal_http_read_secs: 15,
     worker_db_pool: 8,
-    worker_schedule_job_timeout_secs: 30,
+    worker_schedule_job_max_timeout_secs: 30,
   },
   current: {
     cancellations: {
@@ -687,7 +687,7 @@ reconnect_grace_secs = 60
 tick_secs = 30
 worker_lease_secs = 60
 agent_offline_timeout_secs = 300
-schedule_job_timeout_secs = 30
+schedule_job_max_timeout_secs = 30
 
 [capacity]
 api_db_pool = 32
@@ -749,7 +749,7 @@ const suiteConfigValidation = {
     "timeout.gateway_reconnect_grace_secs",
     "api.job_output_artifact_min_bytes",
     "api.require_registered_agent_updates",
-    "worker.schedule_job_timeout_secs",
+    "worker.schedule_job_max_timeout_secs",
     "worker.tick_secs",
     "worker.worker_lease_secs",
     "worker.agent_offline_timeout_secs",
@@ -757,7 +757,7 @@ const suiteConfigValidation = {
     "worker.webhook_rule_*",
     "worker.backup_policy_prune_*",
     "worker.require_registered_agent_updates",
-    "timeout.worker_schedule_job_timeout_secs",
+    "timeout.worker_schedule_job_max_timeout_secs",
     "timeout.agent_offline_secs",
     "api.alert_*",
   ],
@@ -1642,7 +1642,7 @@ const commandTemplates = [
     built_in: true,
     command_type: "shell_argv",
     created_at: "builtin",
-    defaults: { confirmed: false, destructive: false, force_unprivileged: false, timeout_secs: 30 },
+    defaults: { confirmed: false, destructive: false, force_unprivileged: false, max_timeout_secs: 30 },
     display_group: "shell",
     id: "00000000-0000-4100-8000-000000000001",
     name: "Default shell command",
@@ -1656,7 +1656,7 @@ const commandTemplates = [
     built_in: false,
     command_type: "shell_argv",
     created_at: "2026-05-31T10:04:00Z",
-    defaults: { timeout_secs: 30 },
+    defaults: { max_timeout_secs: 30 },
     display_group: "shell",
     id: "46464646-5656-4789-8abc-defdefdefdef",
     name: "edge-health-check",

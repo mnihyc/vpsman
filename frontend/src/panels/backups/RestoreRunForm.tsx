@@ -1,5 +1,5 @@
 import { Play } from "lucide-react";
-import { MAX_CONFIGURABLE_JOB_TIMEOUT_SECS } from "../../jobTimeout";
+import { MAX_CONFIGURABLE_JOB_TIMEOUT_SECS } from "../../jobMaxTimeout";
 import type { AgentView } from "../../types";
 import { TargetImpactPreview } from "../TargetImpactPreview";
 import {
@@ -17,7 +17,7 @@ type RestoreRunFormProps = {
   onDryRunChange: (value: boolean) => void;
   onForceUnprivilegedChange: (value: boolean) => void;
   onPostRestoreArgvChange: (value: string) => void;
-  onRestoreTimeoutSecsChange: (value: number) => void;
+  onRestoreMaxTimeoutSecsChange: (value: number) => void;
   onRunRestore: () => void;
   pending: boolean;
   privilegeReady: boolean;
@@ -26,7 +26,7 @@ type RestoreRunFormProps = {
   restoreSourceId: string;
   restoreTarget: AgentView | null;
   restoreTargetId: string;
-  restoreTimeoutSecs: number;
+  restoreMaxTimeoutSecs: number;
 };
 
 export function RestoreRunForm({
@@ -39,7 +39,7 @@ export function RestoreRunForm({
   onDryRunChange,
   onForceUnprivilegedChange,
   onPostRestoreArgvChange,
-  onRestoreTimeoutSecsChange,
+  onRestoreMaxTimeoutSecsChange,
   onRunRestore,
   pending,
   privilegeReady,
@@ -48,7 +48,7 @@ export function RestoreRunForm({
   restoreSourceId,
   restoreTarget,
   restoreTargetId,
-  restoreTimeoutSecs,
+  restoreMaxTimeoutSecs,
 }: RestoreRunFormProps) {
   const archiveReady = Boolean(
     archiveTransferOptions.some((option) => option.key === archiveTransferKey),
@@ -77,14 +77,14 @@ export function RestoreRunForm({
           />
         </label>
         <label>
-          <span>Timeout seconds</span>
+          <span>Max timeout seconds</span>
           <input
-            aria-label="Restore timeout seconds"
+            aria-label="Restore max timeout seconds"
             max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
             min={1}
-            onChange={(event) => onRestoreTimeoutSecsChange(Number(event.target.value))}
+            onChange={(event) => onRestoreMaxTimeoutSecsChange(Number(event.target.value))}
             type="number"
-            value={restoreTimeoutSecs}
+            value={restoreMaxTimeoutSecs}
           />
         </label>
         <label className="checkLine">

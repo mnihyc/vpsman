@@ -379,8 +379,8 @@ async fn adapter_health_for_plan(
             };
         }
     };
-    let timeout_secs = command
-        .timeout_secs
+    let max_timeout_secs = command
+        .max_timeout_secs
         .min(config.network.runtime_command_timeout_secs)
         .clamp(1, 30);
     let max_output_bytes = usize::try_from(
@@ -390,7 +390,7 @@ async fn adapter_health_for_plan(
             .clamp(1024, 64 * 1024),
     )
     .unwrap_or(16 * 1024);
-    match run_adapter_status_telemetry(&argv, timeout_secs, max_output_bytes, now).await {
+    match run_adapter_status_telemetry(&argv, max_timeout_secs, max_output_bytes, now).await {
         Ok(health) => health,
         Err(error) => RuntimeTunnelAdapterHealthStat {
             status: "failed".to_string(),
@@ -866,7 +866,7 @@ async fn run_auto_ospf_updater(
     });
     run_json_stdin_command(
         &argv,
-        updater.timeout_secs,
+        updater.max_timeout_secs,
         updater.max_output_bytes as usize,
         payload,
     )
@@ -875,7 +875,7 @@ async fn run_auto_ospf_updater(
 
 async fn run_json_stdin_command(
     argv: &[String],
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     payload: serde_json::Value,
 ) -> Result<()> {
@@ -906,7 +906,7 @@ async fn run_json_stdin_command(
     let stdout_task = tokio::spawn(read_limited(stdout, max_output_bytes));
     let stderr_task = tokio::spawn(read_limited(stderr, max_output_bytes));
     let status = time::timeout(
-        Duration::from_secs(timeout_secs.clamp(1, 120)),
+        Duration::from_secs(max_timeout_secs.clamp(1, 120)),
         child.wait(),
     )
     .await
@@ -928,7 +928,7 @@ fn optional_f64(value: Option<f64>) -> String {
 
 async fn run_adapter_status_telemetry(
     argv: &[String],
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     now: u64,
 ) -> Result<RuntimeTunnelAdapterHealthStat> {
@@ -953,7 +953,7 @@ async fn run_adapter_status_telemetry(
         .ok_or_else(|| anyhow::anyhow!("adapter status stderr pipe missing"))?;
     let mut stdout_task = Some(tokio::spawn(read_limited(stdout, max_output_bytes)));
     let mut stderr_task = Some(tokio::spawn(read_limited(stderr, max_output_bytes)));
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let deadline = Instant::now() + Duration::from_secs(max_timeout_secs);
     let mut timed_out = false;
     let mut output_truncated = false;
     let mut stdout_output = None;
@@ -1694,7 +1694,7 @@ cat > "$payload_file"
                 "{latency_family}".to_string(),
                 "{latency_target}".to_string(),
             ],
-            timeout_secs: 2,
+            max_timeout_secs: 2,
             max_output_bytes: 1024,
         };
         let mut config = AgentConfig {
@@ -1804,7 +1804,7 @@ printf '%s\n' 'RUN' >> "$1"
                     updater.to_string_lossy().to_string(),
                     args_path.to_string_lossy().to_string(),
                 ],
-                timeout_secs: 2,
+                max_timeout_secs: 2,
                 max_output_bytes: 1024,
             }),
             TunnelAddressFamily::Ipv4,
@@ -1868,7 +1868,7 @@ printf '%s\n' 'RUN' >> "$1"
                         "{peer_client_id}".to_string(),
                         run_log.to_string_lossy().to_string(),
                     ],
-                    timeout_secs: 2,
+                    max_timeout_secs: 2,
                     max_output_bytes: 1024,
                 }),
                 ..Default::default()
@@ -1906,7 +1906,7 @@ printf '%s\n' 'RUN' >> "$1"
                     traffic.to_string_lossy().to_string(),
                     "{interface}".to_string(),
                 ],
-                timeout_secs: 2,
+                max_timeout_secs: 2,
                 max_output_bytes: 1024,
             }),
             latency_monitoring_enabled: true,
@@ -1978,7 +1978,7 @@ printf '%s\n' 'RUN' >> "$1"
             traffic_source: AgentRuntimeTrafficSource::CustomCommand,
             traffic_command: Some(RuntimeTunnelCommand {
                 argv: vec![traffic.to_string_lossy().to_string()],
-                timeout_secs: 1,
+                max_timeout_secs: 1,
                 max_output_bytes: 1024,
             }),
             latency_monitoring_enabled: false,
@@ -2021,7 +2021,7 @@ printf '%s\n' 'RUN' >> "$1"
                 source: AgentTelemetrySource::CustomCommand,
                 custom_metrics_command: Some(RuntimeTunnelCommand {
                     argv: vec![source.to_string_lossy().to_string()],
-                    timeout_secs: 2,
+                    max_timeout_secs: 2,
                     max_output_bytes: 4096,
                 }),
                 ..AgentTelemetryConfig::default()
@@ -2061,7 +2061,7 @@ printf '%s\n' 'RUN' >> "$1"
                 source: AgentTelemetrySource::CustomCommand,
                 custom_metrics_command: Some(RuntimeTunnelCommand {
                     argv: vec![source.to_string_lossy().to_string()],
-                    timeout_secs: 1,
+                    max_timeout_secs: 1,
                     max_output_bytes: 4096,
                 }),
                 ..AgentTelemetryConfig::default()

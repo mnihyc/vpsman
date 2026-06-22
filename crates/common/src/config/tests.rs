@@ -163,7 +163,7 @@ fn validates_execution_source_selection() {
             user_sessions_source: AgentUserSessionsSource::CustomCommand,
             user_sessions_command: Some(RuntimeTunnelCommand {
                 argv: vec!["/usr/local/libexec/vpsman-users".to_string()],
-                timeout_secs: 2,
+                max_timeout_secs: 2,
                 max_output_bytes: 4096,
             }),
             process_inventory_source: AgentProcessInventorySource::CustomCommand,
@@ -172,7 +172,7 @@ fn validates_execution_source_selection() {
                     "/usr/local/libexec/vpsman-processes".to_string(),
                     "{limit}".to_string(),
                 ],
-                timeout_secs: 2,
+                max_timeout_secs: 2,
                 max_output_bytes: 4096,
             }),
             ..AgentExecutionConfig::default()
@@ -282,7 +282,7 @@ fn validates_telemetry_source_selection() {
                     "/usr/local/libexec/vpsman-metrics-source".to_string(),
                     "{client_id}".to_string(),
                 ],
-                timeout_secs: 2,
+                max_timeout_secs: 2,
                 max_output_bytes: 4096,
             }),
             ..AgentTelemetryConfig::default()
@@ -622,7 +622,7 @@ fn validates_network_apply_root() {
                         "/usr/local/libexec/vpsman-traffic-source".to_string(),
                         "{interface}".to_string(),
                     ],
-                    timeout_secs: 2,
+                    max_timeout_secs: 2,
                     max_output_bytes: 1024,
                 }),
                 latency_monitoring_enabled: true,
@@ -686,7 +686,7 @@ fn validates_network_apply_root() {
 fn rejects_hot_config_identity_and_secret_changes() {
     let current = AgentConfig {
         auth: super::AgentAuthConfig {
-            job_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+            max_job_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
             ..Default::default()
         },
         noise: AgentNoiseConfig {
@@ -698,7 +698,7 @@ fn rejects_hot_config_identity_and_secret_changes() {
     };
     let mut updated = current.clone();
     updated.display_name = "new display".to_string();
-    updated.auth.job_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS + 60;
+    updated.auth.max_job_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS + 60;
     validate_hot_config_update(&current, &updated).unwrap();
 
     updated.client_id = "other".to_string();

@@ -1144,14 +1144,14 @@ export function TopologyPanel({
           toml,
         };
         const selectorExpression = selectorExpressionForClientIds([target.clientId]);
-        const timeoutSecs = 120;
+        const maxTimeoutSecs = 120;
         const builtPrivilege = await buildPrivilegeForJobOperation({
           clientIds: [target.clientId],
           commandType: "data_source_config_patch",
           operation,
           privilegeMaterial,
           selectorExpression,
-          timeoutSecs,
+          maxTimeoutSecs,
         });
         await onCreateJob({
           argv: [],
@@ -1165,7 +1165,7 @@ export function TopologyPanel({
           privilege_assertion: builtPrivilege.privilegeAssertion,
           selector_expression: selectorExpression,
           target_client_ids: [target.clientId],
-          timeout_secs: timeoutSecs,
+          max_timeout_secs: maxTimeoutSecs,
         });
         submitted += 1;
       }

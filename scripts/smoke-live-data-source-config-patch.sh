@@ -211,7 +211,7 @@ assert_execution_policy_applied() {
       --script 'printf "cwd=%s\n" "$PWD"; printf "env=%s\n" "$VPSMAN_EXEC_POLICY_SMOKE"; printf "path=%s\n" "${PATH-}"' \
       --clients "$client_id" \
       --super-salt-hex "$super_salt_hex" \
-      --timeout-secs 10 \
+      --max-timeout-secs 10 \
       --confirmed)"
   execution_policy_job_id="$(jq -r '.job_id' <<<"$shell_json")"
   if ! smoke_assert_job_create_queued "$shell_json" 1 || ! smoke_wait_api_job_status "$api_url" "$execution_policy_job_id" completed 45 >/dev/null; then
@@ -242,7 +242,7 @@ assert_execution_policy_applied() {
       --script 'exec sleep 3' \
       --clients "$client_id" \
       --super-salt-hex "$super_salt_hex" \
-      --timeout-secs 1 \
+      --max-timeout-secs 1 \
       --confirmed)"
   execution_timeout_job_id="$(jq -r '.job_id' <<<"$timeout_json")"
   if ! smoke_assert_job_create_queued "$timeout_json" 1 || ! smoke_wait_api_job_status "$api_url" "$execution_timeout_job_id" terminal 45 >/dev/null; then
@@ -277,7 +277,7 @@ assert_execution_policy_applied() {
       --argv /bin/sh \
       --clients "$client_id" \
       --super-salt-hex "$super_salt_hex" \
-      --timeout-secs 10 \
+      --max-timeout-secs 10 \
       --confirmed)"
   terminal_reject_job_id="$(jq -r '.job.job_id' <<<"$terminal_json")"
   if ! jq -e '.job.target_count == 1' <<<"$terminal_json" >/dev/null \
@@ -417,7 +417,7 @@ reject_body="$(jq -nc \
     target_client_ids: [$client],
     privileged: true,
     confirmed: true,
-    timeout_secs: 30
+    max_timeout_secs: 30
   }')"
 reject_json="$SMOKE_TMPDIR/reject.json"
 reject_status="$(curl -sS -o "$reject_json" -w "%{http_code}" \

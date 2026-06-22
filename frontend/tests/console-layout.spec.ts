@@ -740,7 +740,7 @@ test("opens manual update check dispatch from fleet selection", async ({
   await expect(
     page.getByLabel("Agent update version manifest URL"),
   ).toHaveValue(DEFAULT_UPDATE_VERSION_URL);
-  await expect(page.getByLabel("Timeout seconds")).toHaveValue("300");
+  await expect(page.getByLabel("Max timeout seconds")).toHaveValue("300");
   await expect(page.getByText("Version manifest")).toBeVisible();
 });
 
@@ -2361,7 +2361,7 @@ test("dispatches executable restores with agent-local archive metadata only", as
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
   );
   await expect(stagedArchive).toHaveAttribute("title", archivePath);
-  await restoreWorkflow.getByLabel("Restore timeout seconds").fill("120");
+  await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("120");
   await activate(restoreWorkflow.getByRole("button", { name: "Review restore" }));
   await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
   await activate(
@@ -2397,7 +2397,7 @@ test("dispatches executable restores with agent-local archive metadata only", as
       type: "restore",
     },
     privileged: true,
-    timeout_secs: 120,
+    max_timeout_secs: 120,
   });
   expectPrivilegeAssertion(request);
 
@@ -2456,7 +2456,7 @@ test("dispatches executable restores with agent-local archive metadata only", as
     restoreWorkflow.getByLabel("Restore rollback target VPS ID"),
   ).toHaveValue("core-fra-02 (ra02)");
   await restoreWorkflow
-    .getByLabel("Restore rollback timeout seconds")
+    .getByLabel("Restore rollback max timeout seconds")
     .fill("45");
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review rollback" }),
@@ -2497,7 +2497,7 @@ test("dispatches executable restores with agent-local archive metadata only", as
       type: "restore_rollback",
     },
     privileged: true,
-    timeout_secs: 45,
+    max_timeout_secs: 45,
   });
 });
 
@@ -2570,7 +2570,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
 
   await page.getByLabel("Network apply plan").selectOption(tunnelPlans[0].id);
   await page.getByLabel("Network apply endpoint side").selectOption("left");
-  await page.getByLabel("Network apply timeout seconds").fill("90");
+  await page.getByLabel("Network apply max timeout seconds").fill("90");
   await activate(page.getByRole("button", { name: "Review apply" }));
   await confirmVisiblePrompt(page, "Apply side");
 
@@ -2599,7 +2599,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
       type: "network_apply",
     },
     privileged: true,
-    timeout_secs: 90,
+    max_timeout_secs: 90,
   });
   const operation = (
     request as {
@@ -2663,7 +2663,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
       type: "network_rollback",
     },
     privileged: true,
-    timeout_secs: 90,
+    max_timeout_secs: 90,
   });
   expectPrivilegeAssertion(rollbackRequest);
 
@@ -2694,7 +2694,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
       type: "network_status",
     },
     privileged: true,
-    timeout_secs: 90,
+    max_timeout_secs: 90,
   });
   expectPrivilegeAssertion(statusRequest);
 
@@ -2729,7 +2729,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
       type: "network_probe",
     },
     privileged: true,
-    timeout_secs: 90,
+    max_timeout_secs: 90,
   });
   expectPrivilegeAssertion(probeRequest);
 
@@ -2772,7 +2772,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
       type: "network_speed_test",
     },
     privileged: true,
-    timeout_secs: 90,
+    max_timeout_secs: 90,
   });
   expectPrivilegeAssertion(speedRequest);
 
@@ -2785,7 +2785,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     .getByLabel("OSPF update plan")
     .selectOption(ospfUpdatePlans[0].plan_id);
   await page.getByLabel("OSPF update endpoint side").selectOption("left");
-  await page.getByLabel("OSPF update timeout seconds").fill("45");
+  await page.getByLabel("OSPF update max timeout seconds").fill("45");
   await activate(page.getByRole("button", { name: "Review cost apply" }));
   await confirmVisiblePrompt(page, "Apply cost");
   await expect(
@@ -2819,7 +2819,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
       type: "network_ospf_cost_update",
     },
     privileged: true,
-    timeout_secs: 45,
+    max_timeout_secs: 45,
   });
   const ospfOperation = (
     ospfRequest as {

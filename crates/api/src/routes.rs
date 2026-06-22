@@ -46,7 +46,7 @@ use crate::{
     routes_ingest::{
         ingest_agent_hello, ingest_command_output, ingest_gateway_session_ended,
         ingest_gateway_session_started, ingest_telemetry, ingest_terminal_output,
-        validate_agent_identity,
+        validate_agent_identity, verify_agent_update_artifact,
     },
     routes_inventory::{
         assign_agent_tag, assign_data_source_preset, bulk_mutate_tags, clone_data_source_preset,
@@ -549,6 +549,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/internal/v1/gateway/terminal-output",
             post(ingest_terminal_output),
+        )
+        .route(
+            "/internal/v1/gateway/agent-update-verification",
+            post(verify_agent_update_artifact),
         )
         .route("/ws", get(ws_handler))
         .with_state(state)

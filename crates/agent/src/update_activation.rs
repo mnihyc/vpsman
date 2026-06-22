@@ -30,7 +30,7 @@ pub(crate) struct AgentUpdateActivateInput {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) staged_sha256_hex: String,
     pub(crate) restart_agent: bool,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
 
@@ -38,7 +38,7 @@ pub(crate) struct AgentUpdateActivateInput {
 pub(crate) struct AgentUpdateRollbackInput {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) rollback_sha256_hex: Option<String>,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
 
@@ -46,12 +46,12 @@ pub(crate) async fn execute_update_activate(
     input: AgentUpdateActivateInput,
 ) -> Result<Vec<CommandOutput>> {
     let current_exe = current_agent_binary_path()?;
-    let timeout_secs = input.timeout_secs.max(1);
+    let max_timeout_secs = input.max_timeout_secs.max(1);
     input.cancel_token.check("agent_update_activate")?;
     let timeout_cancel_token = input.cancel_token.clone();
     let worker_cancel_token = input.cancel_token.clone();
     let output = match time::timeout(
-        Duration::from_secs(timeout_secs),
+        Duration::from_secs(max_timeout_secs),
         task::spawn_blocking(move || {
             worker_cancel_token.check("agent_update_activate")?;
             activate_staged_update(&current_exe, input)
@@ -61,7 +61,7 @@ pub(crate) async fn execute_update_activate(
     {
         Ok(result) => result.context("agent update activation task failed")??,
         Err(_) => {
-            timeout_cancel_token.cancel(format!("timeout after {timeout_secs}s"));
+            timeout_cancel_token.cancel(format!("timeout after {max_timeout_secs}s"));
             return Err(anyhow::anyhow!("agent update activation timed out"));
         }
     };
@@ -72,12 +72,12 @@ pub(crate) async fn execute_update_rollback(
     input: AgentUpdateRollbackInput,
 ) -> Result<Vec<CommandOutput>> {
     let current_exe = current_agent_binary_path()?;
-    let timeout_secs = input.timeout_secs.max(1);
+    let max_timeout_secs = input.max_timeout_secs.max(1);
     input.cancel_token.check("agent_update_rollback")?;
     let timeout_cancel_token = input.cancel_token.clone();
     let worker_cancel_token = input.cancel_token.clone();
     let output = match time::timeout(
-        Duration::from_secs(timeout_secs),
+        Duration::from_secs(max_timeout_secs),
         task::spawn_blocking(move || {
             worker_cancel_token.check("agent_update_rollback")?;
             rollback_update(&current_exe, input)
@@ -87,7 +87,7 @@ pub(crate) async fn execute_update_rollback(
     {
         Ok(result) => result.context("agent update rollback task failed")??,
         Err(_) => {
-            timeout_cancel_token.cancel(format!("timeout after {timeout_secs}s"));
+            timeout_cancel_token.cancel(format!("timeout after {max_timeout_secs}s"));
             return Err(anyhow::anyhow!("agent update rollback timed out"));
         }
     };
@@ -408,7 +408,7 @@ mod tests {
                 job_id: uuid::Uuid::new_v4(),
                 staged_sha256_hex: sha256_hex(b"new-agent"),
                 restart_agent: false,
-                timeout_secs: 5,
+                max_timeout_secs: 5,
                 cancel_token: crate::command_worker::CommandCancelToken::default(),
             },
         )
@@ -448,7 +448,7 @@ mod tests {
             AgentUpdateRollbackInput {
                 job_id: uuid::Uuid::new_v4(),
                 rollback_sha256_hex: Some(sha256_hex(b"old-agent")),
-                timeout_secs: 5,
+                max_timeout_secs: 5,
                 cancel_token: crate::command_worker::CommandCancelToken::default(),
             },
         )
@@ -481,7 +481,7 @@ mod tests {
                 job_id: uuid::Uuid::new_v4(),
                 staged_sha256_hex: "00".repeat(32),
                 restart_agent: false,
-                timeout_secs: 5,
+                max_timeout_secs: 5,
                 cancel_token: crate::command_worker::CommandCancelToken::default(),
             },
         )

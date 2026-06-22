@@ -28,7 +28,7 @@ pub(crate) struct NetworkStatusInput<'a> {
     pub(crate) config: &'a AgentConfig,
     pub(crate) plan: &'a TunnelPlan,
     pub(crate) side: TunnelEndpointSide,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
 }
 
@@ -38,7 +38,7 @@ pub(crate) async fn execute_network_status_command(
     let cancel_token = input.cancel_token.clone();
     run_cancelable("network_status", cancel_token, async move {
         time::timeout(
-            Duration::from_secs(input.timeout_secs.max(1)),
+            Duration::from_secs(input.max_timeout_secs.max(1)),
             inspect_network_plan(input),
         )
         .await
@@ -627,7 +627,7 @@ async fn inspect_runtime_adapter_status(
                 "runtime_adapter_status",
                 &argv,
                 command
-                    .timeout_secs
+                    .max_timeout_secs
                     .min(config.runtime_command_timeout_secs)
                     .max(1),
                 usize::try_from(
@@ -904,7 +904,7 @@ fn render_probe_argv(
 async fn run_status_probe(
     label: &str,
     argv: &[String],
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
@@ -915,7 +915,7 @@ async fn run_status_probe(
     command.args(&argv[1..]);
     let result = run_child_with_bounded_output_cancelable(
         command,
-        timeout_secs.clamp(1, 30),
+        max_timeout_secs.clamp(1, 30),
         max_output_bytes,
         ChildCleanupPolicy::ProcessGroup,
         cancel_token,

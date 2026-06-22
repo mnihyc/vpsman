@@ -63,7 +63,7 @@ test("prepares terminal reconnect actions from retained session inventory", asyn
   expect(request).toMatchObject({
     text: "uptime\n",
     confirmed: true,
-    timeout_secs: 30,
+    max_timeout_secs: 30,
   });
   expect(JSON.stringify(request)).not.toContain("input_seq");
 });

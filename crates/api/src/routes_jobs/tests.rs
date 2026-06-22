@@ -21,7 +21,7 @@ fn gateway_timeout_output_maps_to_timed_out_target_status() {
             stream: OutputStream::Status,
             data: serde_json::to_vec(&serde_json::json!({
                 "type": "command_timeout",
-                "timeout_secs": 1,
+                "max_timeout_secs": 1,
             }))
             .unwrap(),
             exit_code: Some(124),
@@ -604,40 +604,40 @@ fn capability_degraded_outcome_records_operator_hint() {
 }
 
 #[test]
-fn job_timeout_accepts_configured_max_above_default() {
+fn max_timeout_accepts_configured_max_above_default() {
     assert_eq!(
-        effective_job_timeout_secs(Some(7_200), 7_200).unwrap(),
+        effective_job_max_timeout_secs(Some(7_200), 7_200).unwrap(),
         7_200
     );
 }
 
 #[test]
-fn omitted_job_timeout_uses_default_agent_timeout() {
+fn omitted_max_timeout_uses_default_agent_timeout() {
     assert_eq!(
-        effective_job_timeout_secs(None, 7_200).unwrap(),
+        effective_job_max_timeout_secs(None, 7_200).unwrap(),
         DEFAULT_MAX_JOB_TIMEOUT_SECS
     );
 }
 
 #[test]
-fn job_timeout_rejects_above_configured_max() {
-    let error = effective_job_timeout_secs(Some(7_201), 7_200).unwrap_err();
+fn max_timeout_rejects_above_configured_max() {
+    let error = effective_job_max_timeout_secs(Some(7_201), 7_200).unwrap_err();
 
-    assert_eq!(error.code, "job_timeout_exceeds_configured_max");
+    assert_eq!(error.code, "max_timeout_exceeds_configured_job_max");
 }
 
 #[test]
-fn explicit_job_timeout_overrides_agent_advertised_default() {
+fn explicit_max_timeout_overrides_agent_advertised_default() {
     let agents = [test_agent(
         "short-default",
         AgentCapabilitySnapshot {
-            job_timeout_secs: 12,
+            max_job_timeout_secs: 12,
             ..AgentCapabilitySnapshot::default()
         },
     )];
 
-    assert_eq!(effective_job_timeout_secs(Some(90), 600).unwrap(), 90);
-    assert_eq!(agents[0].capabilities.job_timeout_secs, 12);
+    assert_eq!(effective_job_max_timeout_secs(Some(90), 600).unwrap(), 90);
+    assert_eq!(agents[0].capabilities.max_job_timeout_secs, 12);
 }
 
 #[test]

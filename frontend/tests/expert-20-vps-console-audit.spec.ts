@@ -293,7 +293,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   ).toHaveAttribute("title", "pay-prod-ams-edge-01");
   await expect(impact.getByText(/more/)).toBeVisible();
 
-  await composer.getByLabel("Timeout seconds").fill("120");
+  await composer.getByLabel("Max timeout seconds").fill("120");
   await activate(composer.getByRole("button", { name: "Review dispatch" }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   await expect(composer.locator(".dispatchActions")).toHaveCount(0);
@@ -356,7 +356,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     destructive: true,
     privileged: true,
     selector_expression: "provider:acmecloud && tag:payments",
-    timeout_secs: 120,
+    max_timeout_secs: 120,
   });
 
   await openConsoleSubpage(page, "Access", "VPS keys");

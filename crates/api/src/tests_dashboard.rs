@@ -108,7 +108,7 @@ async fn dashboard_overview_aggregates_memory_state() {
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Unprivileged,
                     effective_uid: Some(1000),
-                    job_timeout_secs: 3600,
+                    max_job_timeout_secs: 3600,
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,
@@ -134,7 +134,7 @@ async fn dashboard_overview_aggregates_memory_state() {
             status: "running".to_string(),
             target_count: 1,
             payload_hash: "aa".repeat(32),
-            timeout_secs: 30,
+            max_timeout_secs: 30,
             created_at: now.clone(),
             completed_at: None,
         });

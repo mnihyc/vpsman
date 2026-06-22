@@ -57,7 +57,7 @@ pub(crate) struct PrivilegedOperationRequest<'a> {
     pub(crate) password_env: &'a str,
     pub(crate) super_salt_hex: Option<&'a str>,
     pub(crate) privilege_ttl_secs: u64,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
 }
@@ -82,7 +82,7 @@ pub(crate) fn submit_privileged_operation(
         &password,
         &salt_hex,
         request.privilege_ttl_secs,
-        request.timeout_secs,
+        request.max_timeout_secs,
         request.force_unprivileged,
         true,
     )?;
@@ -101,7 +101,7 @@ pub(crate) fn submit_privileged_operation(
             "destructive": job_command_requires_confirmation(request.operation),
             "confirmed": request.confirmed,
             "force_unprivileged": request.force_unprivileged,
-            "timeout_secs": request.timeout_secs,
+            "max_timeout_secs": request.max_timeout_secs,
             "privilege_assertion": privilege.privilege_assertion,
         }),
     )

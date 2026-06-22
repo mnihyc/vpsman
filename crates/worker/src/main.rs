@@ -1,9 +1,4 @@
-use std::{
-    collections::{BTreeSet, HashSet},
-    path::{Path, PathBuf},
-    str::FromStr,
-    time::Duration,
-};
+use std::{collections::HashSet, path::PathBuf, str::FromStr, time::Duration};
 
 use anyhow::{bail, ensure, Context, Result};
 use chrono::{DateTime, Utc};
@@ -25,8 +20,7 @@ use vpsman_common::{
     VpsMetadata,
 };
 use vpsman_common::{
-    payload_hash, read_secret_file_ref, resolve_agent_update_manifest_candidate,
-    update_manifest_checksum_url, AgentCapabilitySnapshot, JobCommand, SuiteConfig,
+    payload_hash, read_secret_file_ref, AgentCapabilitySnapshot, JobCommand, SuiteConfig,
     ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS, DEFAULT_MAX_JOB_TIMEOUT_SECS,
     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS, SERVER_JOB_STATUS_COMPLETED, SERVER_JOB_STATUS_FAILED,
     SERVER_JOB_STATUS_QUEUED, SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
@@ -38,9 +32,7 @@ use vpsman_server_core::{
     JOB_STATUS_SKIPPED, TARGET_STATUS_QUEUED, TARGET_STATUS_SKIPPED,
 };
 
-const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "deploy/runtime/data/objects/backups";
-const AGENT_UPDATE_POLICY_FETCH_MAX_BYTES: usize = 16 * 1024 * 1024;
-const AGENT_UPDATE_POLICY_FETCH_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "runtime/data/objects/backups";
 mod actor_authority;
 mod alert_notifications;
 mod backup_policy_retention;
@@ -189,10 +181,10 @@ struct Args {
     object_create_bucket: bool,
     #[arg(
         long,
-        env = "VPSMAN_WORKER_SCHEDULE_JOB_TIMEOUT_SECS",
+        env = "VPSMAN_WORKER_SCHEDULE_JOB_MAX_TIMEOUT_SECS",
         default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS
     )]
-    schedule_job_timeout_secs: u64,
+    schedule_job_max_timeout_secs: u64,
     #[arg(
         long,
         env = "VPSMAN_MAX_JOB_TIMEOUT_SECS",
@@ -255,7 +247,7 @@ impl WorkerRuntimeConfig {
                 backup_policy_prune_object_store,
             ),
             schedule_dispatch_config: ScheduleDispatchConfig::new(
-                args.schedule_job_timeout_secs,
+                args.schedule_job_max_timeout_secs,
                 args.max_job_timeout_secs,
                 args.require_registered_agent_updates,
             ),
@@ -426,12 +418,12 @@ impl Args {
                 read_secret_file_ref(config.secrets.object_secret_key_file.as_deref())?;
         }
         apply_u64_default(
-            &mut self.schedule_job_timeout_secs,
-            "VPSMAN_WORKER_SCHEDULE_JOB_TIMEOUT_SECS",
+            &mut self.schedule_job_max_timeout_secs,
+            "VPSMAN_WORKER_SCHEDULE_JOB_MAX_TIMEOUT_SECS",
             config
                 .worker
-                .schedule_job_timeout_secs
-                .or(config.timeout.worker_schedule_job_timeout_secs),
+                .schedule_job_max_timeout_secs
+                .or(config.timeout.worker_schedule_job_max_timeout_secs),
         );
         apply_u64_default(
             &mut self.max_job_timeout_secs,
@@ -883,7 +875,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn detect_offline_agents(pool: &PgPool, timeout_secs: i64) -> Result<u64> {
+async fn detect_offline_agents(pool: &PgPool, offline_timeout_secs: i64) -> Result<u64> {
     let mut tx = pool.begin().await?;
     let rows = sqlx::query(
         r#"
@@ -894,7 +886,7 @@ async fn detect_offline_agents(pool: &PgPool, timeout_secs: i64) -> Result<u64> 
         RETURNING id
         "#,
     )
-    .bind(timeout_secs as f64)
+    .bind(offline_timeout_secs as f64)
     .fetch_all(&mut *tx)
     .await?;
     for row in &rows {
@@ -903,7 +895,7 @@ async fn detect_offline_agents(pool: &PgPool, timeout_secs: i64) -> Result<u64> 
             "from_status": "online",
             "to_status": "offline",
             "reason": "agent_offline_timeout",
-            "offline_timeout_secs": timeout_secs,
+            "offline_timeout_secs": offline_timeout_secs,
         });
         sqlx::query(
             r#"
@@ -964,7 +956,7 @@ async fn detect_offline_agents(pool: &PgPool, timeout_secs: i64) -> Result<u64> 
     Ok(rows.len() as u64)
 }
 
-async fn expire_stale_gateway_sessions(pool: &PgPool, timeout_secs: i64) -> Result<u64> {
+async fn expire_stale_gateway_sessions(pool: &PgPool, offline_timeout_secs: i64) -> Result<u64> {
     let rows = sqlx::query(
         r#"
         UPDATE gateway_sessions session
@@ -985,7 +977,7 @@ async fn expire_stale_gateway_sessions(pool: &PgPool, timeout_secs: i64) -> Resu
         RETURNING session.id
         "#,
     )
-    .bind(timeout_secs as f64)
+    .bind(offline_timeout_secs as f64)
     .fetch_all(pool)
     .await?;
     Ok(rows.len() as u64)
@@ -1853,20 +1845,20 @@ struct DueSchedule {
 
 #[derive(Clone)]
 struct ScheduleDispatchConfig {
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_job_timeout_secs: u64,
     require_registered_agent_updates: bool,
 }
 
 impl ScheduleDispatchConfig {
     fn new(
-        timeout_secs: u64,
+        max_timeout_secs: u64,
         max_job_timeout_secs: u64,
         require_registered_agent_updates: bool,
     ) -> Self {
         let max_job_timeout_secs = max_job_timeout_secs.clamp(1, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS);
         Self {
-            timeout_secs: timeout_secs.clamp(1, max_job_timeout_secs),
+            max_timeout_secs: max_timeout_secs.clamp(1, max_job_timeout_secs),
             max_job_timeout_secs,
             require_registered_agent_updates,
         }
@@ -1925,8 +1917,8 @@ async fn materialize_due_schedule(
         .map_err(|error| anyhow::anyhow!(error.code()))?;
     let target_availability = load_schedule_target_capabilities(tx, &targets).await?;
     let available_targets = available_schedule_targets(&targets, &target_availability);
-    let timeout_secs = effective_schedule_timeout_secs(
-        dispatch_config.timeout_secs,
+    let max_timeout_secs = effective_schedule_max_timeout_secs(
+        dispatch_config.max_timeout_secs,
         dispatch_config.max_job_timeout_secs,
         &available_targets,
         &target_availability.capabilities,
@@ -2021,7 +2013,7 @@ async fn materialize_due_schedule(
         "command_type": &command_type,
         "operation_payload_hash": &command_hash,
         "targets": fingerprint_targets,
-        "timeout_secs": timeout_secs,
+        "max_timeout_secs": max_timeout_secs,
         "privileged": true,
         "force_unprivileged": false,
         "source_schedule_id": schedule.id,
@@ -2031,7 +2023,7 @@ async fn materialize_due_schedule(
         INSERT INTO jobs (
             id, actor_id, command_type, privileged, status, target_count,
             payload_hash, operation, source_schedule_id, request_fingerprint,
-            timeout_secs, completed_at
+            max_timeout_secs, completed_at
         )
         VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10,
             CASE WHEN $11 THEN now() ELSE NULL END)
@@ -2046,7 +2038,7 @@ async fn materialize_due_schedule(
     .bind(SqlJson(&schedule.operation))
     .bind(schedule.id)
     .bind(&request_fingerprint)
-    .bind(timeout_secs as i64)
+    .bind(max_timeout_secs as i64)
     .bind(job_completed_immediately)
     .execute(&mut **tx)
     .await?;
@@ -2423,21 +2415,21 @@ fn network_speed_test_peer_schedule_skip(client_id: String) -> ScheduleTargetSki
     }
 }
 
-fn effective_schedule_timeout_secs(
-    configured_timeout_secs: u64,
+fn effective_schedule_max_timeout_secs(
+    configured_max_timeout_secs: u64,
     max_job_timeout_secs: u64,
     _targets: &[String],
     _capabilities: &[TargetCapability],
 ) -> u64 {
-    configured_timeout_secs.clamp(1, max_job_timeout_secs)
+    configured_max_timeout_secs.clamp(1, max_job_timeout_secs)
 }
 
 async fn scheduled_agent_update_release_policy_allows(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     command: &JobCommand,
     require_registered_agent_updates: bool,
-    dispatch_targets: &[String],
-    target_capabilities: &[TargetCapability],
+    _dispatch_targets: &[String],
+    _target_capabilities: &[TargetCapability],
 ) -> Result<bool> {
     if !require_registered_agent_updates {
         return Ok(true);
@@ -2454,39 +2446,7 @@ async fn scheduled_agent_update_release_policy_allows(
         JobCommand::AgentUpdateRollback {
             rollback_sha256_hex: None,
         } => return Ok(false),
-        JobCommand::AgentUpdateCheck { version_url, .. } => {
-            let Some(version_url) = version_url.as_deref() else {
-                return Ok(false);
-            };
-            if dispatch_targets.is_empty() {
-                return Ok(true);
-            }
-            let artifact_hashes = resolve_registered_update_check_candidate_hashes(
-                version_url,
-                dispatch_targets,
-                target_capabilities,
-            )
-            .await?;
-            for artifact_sha256_hex in artifact_hashes {
-                let exists: bool = sqlx::query_scalar(
-                    r#"
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM agent_update_releases
-                        WHERE status = 'published_external'
-                          AND artifact_sha256_hex = $1
-                    )
-                    "#,
-                )
-                .bind(artifact_sha256_hex)
-                .fetch_one(&mut **tx)
-                .await?;
-                if !exists {
-                    return Ok(false);
-                }
-            }
-            return Ok(true);
-        }
+        JobCommand::AgentUpdateCheck { .. } => return Ok(true),
         _ => return Ok(true),
     };
     let artifact_sha256_hex = sha256_hex.to_ascii_lowercase();
@@ -2505,84 +2465,6 @@ async fn scheduled_agent_update_release_policy_allows(
         .fetch_one(&mut **tx)
         .await?;
     Ok(exists)
-}
-
-async fn resolve_registered_update_check_candidate_hashes(
-    version_url: &str,
-    dispatch_targets: &[String],
-    target_capabilities: &[TargetCapability],
-) -> Result<BTreeSet<String>> {
-    let manifest = fetch_agent_update_policy_bytes(version_url).await?;
-    let checksum_url = update_manifest_checksum_url(&manifest)
-        .map_err(|error| anyhow::anyhow!("agent_update_check_manifest_invalid:{error}"))?;
-    let checksums = fetch_agent_update_policy_bytes(&checksum_url).await?;
-    let mut hashes = BTreeSet::new();
-    for client_id in dispatch_targets {
-        let arch = target_capabilities
-            .iter()
-            .find(|target| target.client_id == *client_id)
-            .and_then(|target| target.arch.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("agent_update_check_target_arch_missing"))?;
-        let candidate = resolve_agent_update_manifest_candidate(&manifest, &checksums, arch)
-            .map_err(|error| anyhow::anyhow!("agent_update_check_manifest_invalid:{error}"))?;
-        hashes.insert(candidate.sha256_hex);
-    }
-    Ok(hashes)
-}
-
-async fn fetch_agent_update_policy_bytes(url: &str) -> Result<Vec<u8>> {
-    let url = url.trim();
-    if let Some(path) = url.strip_prefix("file://") {
-        let path = Path::new(path);
-        ensure!(
-            path.is_absolute(),
-            "agent_update_check_manifest_url_invalid"
-        );
-        let metadata = tokio::fs::metadata(path).await?;
-        ensure!(
-            metadata.is_file() && metadata.len() <= AGENT_UPDATE_POLICY_FETCH_MAX_BYTES as u64,
-            "agent_update_check_manifest_too_large"
-        );
-        return Ok(tokio::fs::read(path).await?);
-    }
-    let parsed = reqwest::Url::parse(url).context("agent_update_check_manifest_url_invalid")?;
-    match parsed.scheme() {
-        "https" => {}
-        "http" if parsed.host_str().is_some_and(is_localhost_update_host) => {}
-        _ => bail!("agent_update_check_manifest_url_invalid"),
-    }
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .connect_timeout(AGENT_UPDATE_POLICY_FETCH_TIMEOUT)
-        .timeout(AGENT_UPDATE_POLICY_FETCH_TIMEOUT)
-        .build()
-        .context("failed to build agent update check manifest HTTP client")?;
-    let response = client.get(parsed).send().await?.error_for_status()?;
-    read_limited_update_policy_response(response).await
-}
-
-async fn read_limited_update_policy_response(mut response: reqwest::Response) -> Result<Vec<u8>> {
-    if response
-        .content_length()
-        .is_some_and(|size| size > AGENT_UPDATE_POLICY_FETCH_MAX_BYTES as u64)
-    {
-        bail!("agent_update_check_manifest_too_large");
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        ensure!(
-            body.len().saturating_add(chunk.len()) <= AGENT_UPDATE_POLICY_FETCH_MAX_BYTES,
-            "agent_update_check_manifest_too_large"
-        );
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-fn is_localhost_update_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 async fn record_schedule_capability_skip_outputs(
@@ -3201,14 +3083,14 @@ mod schedule_tests {
     }
 
     #[test]
-    fn schedule_timeout_uses_configured_value_without_agent_cap_clamp() {
+    fn schedule_max_timeout_uses_configured_value_without_agent_cap_clamp() {
         let targets = vec!["edge-a".to_string(), "edge-b".to_string()];
         let capabilities = vec![
             TargetCapability {
                 client_id: "edge-a".to_string(),
                 arch: Some("x86_64".to_string()),
                 capabilities: AgentCapabilitySnapshot {
-                    job_timeout_secs: 20,
+                    max_job_timeout_secs: 20,
                     ..AgentCapabilitySnapshot::default()
                 },
             },
@@ -3216,14 +3098,14 @@ mod schedule_tests {
                 client_id: "edge-b".to_string(),
                 arch: Some("aarch64".to_string()),
                 capabilities: AgentCapabilitySnapshot {
-                    job_timeout_secs: 120,
+                    max_job_timeout_secs: 120,
                     ..AgentCapabilitySnapshot::default()
                 },
             },
         ];
 
         assert_eq!(
-            effective_schedule_timeout_secs(
+            effective_schedule_max_timeout_secs(
                 90,
                 DEFAULT_MAX_JOB_TIMEOUT_SECS,
                 &targets,
@@ -3232,7 +3114,7 @@ mod schedule_tests {
             90
         );
         assert_eq!(
-            effective_schedule_timeout_secs(
+            effective_schedule_max_timeout_secs(
                 10,
                 DEFAULT_MAX_JOB_TIMEOUT_SECS,
                 &targets,
@@ -3241,11 +3123,11 @@ mod schedule_tests {
             10
         );
         assert_eq!(
-            effective_schedule_timeout_secs(90, DEFAULT_MAX_JOB_TIMEOUT_SECS, &[], &[]),
+            effective_schedule_max_timeout_secs(90, DEFAULT_MAX_JOB_TIMEOUT_SECS, &[], &[]),
             90
         );
         assert_eq!(
-            effective_schedule_timeout_secs(7_200, 7_200, &[], &[]),
+            effective_schedule_max_timeout_secs(7_200, 7_200, &[], &[]),
             7_200
         );
     }
@@ -3654,7 +3536,7 @@ mod schedule_tests {
         )
         .await
         .unwrap());
-        assert!(!scheduled_agent_update_release_policy_allows(
+        assert!(scheduled_agent_update_release_policy_allows(
             &mut tx,
             &JobCommand::AgentUpdateCheck {
                 version_url: None,
@@ -3758,7 +3640,7 @@ mod schedule_tests {
             assert_eq!(runtime.tick_secs, 7);
             assert_eq!(runtime.worker_lease_secs, 17);
             assert_eq!(runtime.agent_offline_timeout_secs, 333);
-            assert_eq!(runtime.schedule_dispatch_config.timeout_secs, 41);
+            assert_eq!(runtime.schedule_dispatch_config.max_timeout_secs, 41);
             assert!(
                 runtime
                     .schedule_dispatch_config
@@ -3811,7 +3693,7 @@ mod schedule_tests {
             assert_eq!(runtime.tick_secs, 19);
             assert_eq!(runtime.worker_lease_secs, 29);
             assert_eq!(runtime.agent_offline_timeout_secs, 444);
-            assert_eq!(runtime.schedule_dispatch_config.timeout_secs, 55);
+            assert_eq!(runtime.schedule_dispatch_config.max_timeout_secs, 55);
             assert!(
                 !runtime
                     .schedule_dispatch_config
@@ -4083,7 +3965,7 @@ mod schedule_tests {
             r#"
             INSERT INTO jobs (
                 id, command_type, privileged, status, target_count, payload_hash,
-                operation, request_fingerprint, timeout_secs
+                operation, request_fingerprint, max_timeout_secs
             )
             VALUES ($1, 'shell', TRUE, 'running', 1, $2, $3, $4, 60)
             "#,
@@ -4199,7 +4081,7 @@ mod schedule_tests {
         "VPSMAN_OBJECT_SECRET_KEY",
         "VPSMAN_OBJECT_REGION",
         "VPSMAN_OBJECT_CREATE_BUCKET",
-        "VPSMAN_WORKER_SCHEDULE_JOB_TIMEOUT_SECS",
+        "VPSMAN_WORKER_SCHEDULE_JOB_MAX_TIMEOUT_SECS",
         "VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES",
     ];
 
@@ -4234,7 +4116,7 @@ mod schedule_tests {
         tick_secs: u64,
         worker_lease_secs: i32,
         agent_offline_timeout_secs: i64,
-        schedule_job_timeout_secs: u64,
+        schedule_job_max_timeout_secs: u64,
         require_registered_agent_updates: bool,
         notification_delivery_limit: i64,
         notification_retention_days: i64,
@@ -4255,7 +4137,7 @@ mod schedule_tests {
 tick_secs = {tick_secs}
 worker_lease_secs = {worker_lease_secs}
 agent_offline_timeout_secs = {agent_offline_timeout_secs}
-schedule_job_timeout_secs = {schedule_job_timeout_secs}
+schedule_job_max_timeout_secs = {schedule_job_max_timeout_secs}
 require_registered_agent_updates = {require_registered_agent_updates}
 notification_delivery_limit = {notification_delivery_limit}
 notification_retention_days = {notification_retention_days}

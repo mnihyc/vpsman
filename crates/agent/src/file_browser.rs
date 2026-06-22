@@ -65,20 +65,20 @@ impl Write for LimitedVecWriter<'_> {
 pub(crate) async fn execute_file_browser_command(
     job_id: uuid::Uuid,
     command: &vpsman_common::JobCommand,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
     let operation_type = job_command_type_label(command);
-    let timeout_secs = timeout_secs.max(1);
+    let max_timeout_secs = max_timeout_secs.max(1);
     match time::timeout(
-        Duration::from_secs(timeout_secs),
+        Duration::from_secs(max_timeout_secs),
         execute_file_browser_command_inner(job_id, command, cancel_token.clone(), operation_type),
     )
     .await
     {
         Ok(result) => result,
         Err(_) => {
-            cancel_token.cancel(format!("timeout after {timeout_secs}s"));
+            cancel_token.cancel(format!("timeout after {max_timeout_secs}s"));
             Err(anyhow!("file browser command timed out"))
         }
     }

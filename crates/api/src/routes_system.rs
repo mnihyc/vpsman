@@ -164,10 +164,10 @@ fn suite_capacity(state: &AppState) -> SystemDashboardCapacityView {
         internal_http_read_secs: Some(dispatcher_config.internal_http_read_secs),
         control_deadline_grace_secs: Some(dispatcher_config.control_deadline_grace_secs),
         max_job_timeout_secs: Some(dispatcher_config.max_job_timeout_secs),
-        worker_schedule_job_timeout_secs: config
+        worker_schedule_job_max_timeout_secs: config
             .timeout
-            .worker_schedule_job_timeout_secs
-            .or(config.worker.schedule_job_timeout_secs),
+            .worker_schedule_job_max_timeout_secs
+            .or(config.worker.schedule_job_max_timeout_secs),
         agent_offline_secs: config
             .timeout
             .agent_offline_secs

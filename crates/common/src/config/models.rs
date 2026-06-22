@@ -53,7 +53,7 @@ pub struct AgentNoiseConfig {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAuthConfig {
-    pub job_timeout_secs: u64,
+    pub max_job_timeout_secs: u64,
     #[serde(default = "default_agent_gateway_retry_secs")]
     pub gateway_retry_secs: u64,
     #[serde(default = "default_agent_gateway_connect_timeout_secs")]
@@ -522,7 +522,7 @@ fn default_execution_process_proc_root() -> String {
 impl Default for AgentAuthConfig {
     fn default() -> Self {
         Self {
-            job_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+            max_job_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
             gateway_retry_secs: default_agent_gateway_retry_secs(),
             gateway_connect_timeout_secs: default_agent_gateway_connect_timeout_secs(),
         }

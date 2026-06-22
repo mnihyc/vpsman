@@ -256,7 +256,7 @@ INSERT INTO data_source_presets (
         TRUE,
         FALSE,
         'Pinned /usr/bin/w session inventory source',
-        '{"source":"linux_w_who_preset","user_sessions_command":{"argv":["/usr/bin/w","-h"],"timeout_secs":5,"max_output_bytes":16384}}'::jsonb
+        '{"source":"linux_w_who_preset","user_sessions_command":{"argv":["/usr/bin/w","-h"],"max_timeout_secs":5,"max_output_bytes":16384}}'::jsonb
     ),
     (
         '00000000-0000-4000-8000-000000000062',
@@ -266,7 +266,7 @@ INSERT INTO data_source_presets (
         TRUE,
         FALSE,
         'Pinned /usr/bin/who session inventory source',
-        '{"source":"linux_w_who_preset","user_sessions_command":{"argv":["/usr/bin/who"],"timeout_secs":5,"max_output_bytes":16384}}'::jsonb
+        '{"source":"linux_w_who_preset","user_sessions_command":{"argv":["/usr/bin/who"],"max_timeout_secs":5,"max_output_bytes":16384}}'::jsonb
     ),
     (
         '00000000-0000-4000-8000-000000000071',
@@ -431,7 +431,7 @@ latency_down_windows = {{latency_down_windows}}
 auto_ospf_enabled = {{auto_ospf_enabled}}
 auto_ospf_min_cost_delta = {{auto_ospf_min_cost_delta}}
 auto_ospf_healthy_windows = {{auto_ospf_healthy_windows}}
-auto_ospf_updater = { argv = {{updater_argv}}, timeout_secs = 10, max_output_bytes = 16384 }
+auto_ospf_updater = { argv = {{updater_argv}}, max_timeout_secs = 10, max_output_bytes = 16384 }
 $$,
         '{"expandable":true,"affected_sections":["network"],"patch_only":true,"predefined":true}'::jsonb,
         TRUE

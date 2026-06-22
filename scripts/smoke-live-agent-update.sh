@@ -201,10 +201,13 @@ stop_agent() {
 start_agent() {
   local label="$1"
   agent_log="$SMOKE_TMPDIR/agent-$label.log"
-  VPSMAN_AGENT_CONFIG="$agent_config" \
-  VPSMAN_UPDATE_ROOT_CERT_PEM="$ca_cert" \
-  RUST_LOG="${VPSMAN_SMOKE_AGENT_RUST_LOG:-vpsman_agent=warn}" \
-    "$agent_bin" run >"$agent_log" 2>&1 &
+  (
+    cd "$SMOKE_TMPDIR"
+    VPSMAN_AGENT_CONFIG="$agent_config" \
+    VPSMAN_UPDATE_ROOT_CERT_PEM="$ca_cert" \
+    RUST_LOG="${VPSMAN_SMOKE_AGENT_RUST_LOG:-vpsman_agent=warn}" \
+      "$agent_bin" run
+  ) >"$agent_log" 2>&1 &
   agent_pid="$!"
   smoke_track_pid "$agent_pid"
 }
@@ -298,6 +301,35 @@ wait_update_heartbeat_observed() {
   done
 }
 
+wait_agent_update_lifecycle_audit() {
+  local action="$1"
+  local job_metadata_key="$2"
+  local job_id="$3"
+  local sha_metadata_key="$4"
+  local sha="$5"
+  local deadline=$((SECONDS + 35))
+  until api_get "/api/v1/audit?limit=100" | jq -e \
+    --arg action "$action" \
+    --arg client "$client_id" \
+    --arg job_key "$job_metadata_key" \
+    --arg job_id "$job_id" \
+    --arg sha_key "$sha_metadata_key" \
+    --arg sha "$sha" '
+      any(.[]; .action == $action
+        and .target == ("client:" + $client)
+        and .metadata[$job_key] == $job_id
+        and .metadata[$sha_key] == $sha)
+    ' >/dev/null; do
+    if (( SECONDS >= deadline )); then
+      api_get "/api/v1/audit?limit=100" >&2 || true
+      smoke_dump_logs "agent update lifecycle audit was not observed" \
+        "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$SMOKE_TMPDIR"/agent-*.log "$https_log"
+      exit 1
+    fi
+    sleep 0.5
+  done
+}
+
 start_api "first"
 
 auth_json="$(curl -fsS \
@@ -336,11 +368,14 @@ smoke_create_direct_agent_config \
 start_agent "initial"
 wait_agent_online
 
+reject_job_id="$(cat /proc/sys/kernel/random/uuid)"
 reject_body="$(jq -nc \
+  --arg job_id "$reject_job_id" \
   --arg client "$client_id" \
   --arg artifact_url "$artifact_url" \
   --arg sha "$artifact_sha" \
   '{
+    job_id: $job_id,
     command: "agent_update",
     operation: {
       type: "agent_update",
@@ -351,7 +386,7 @@ reject_body="$(jq -nc \
     target_client_ids: [$client],
     privileged: true,
     confirmed: true,
-    timeout_secs: 30
+    max_timeout_secs: 30
   }')"
 reject_json="$SMOKE_TMPDIR/reject.json"
 reject_status="$(curl -sS -o "$reject_json" -w "%{http_code}" \
@@ -377,7 +412,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --sha256-hex "$artifact_sha" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 30 \
+    --max-timeout-secs 30 \
     --force-unprivileged \
     --confirmed)"
 stage_job_id="$(jq -r '.job_id' <<<"$stage_json")"
@@ -404,7 +439,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --staged-sha256-hex "$artifact_sha" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 30 \
+    --max-timeout-secs 30 \
     --force-unprivileged \
     --confirmed)"
 activate_job_id="$(jq -r '.job_id' <<<"$activate_json")"
@@ -430,15 +465,12 @@ if [[ -e "$staged_agent" ]]; then
   echo "agent update activation did not remove staged artifact" >&2
   exit 1
 fi
-api_get "/api/v1/audit?limit=80" | jq -e \
-  --arg activation_job "$activate_job_id" \
-  --arg client "$client_id" \
-  --arg sha "$artifact_sha" '
-  any(.[]; .action == "agent_update.activation_completed"
-    and .target == ("client:" + $client)
-    and .metadata.activation_job_id == $activation_job
-    and .metadata.artifact_sha256_hex == $sha)
-' >/dev/null
+wait_agent_update_lifecycle_audit \
+  "agent_update.activation_completed" \
+  "activation_job_id" \
+  "$activate_job_id" \
+  "artifact_sha256_hex" \
+  "$artifact_sha"
 
 stop_agent
 sleep 1
@@ -452,7 +484,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --rollback-sha256-hex "$rollback_sha" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 30 \
+    --max-timeout-secs 30 \
     --force-unprivileged \
     --confirmed)"
 rollback_job_id="$(jq -r '.job_id' <<<"$rollback_json")"
@@ -468,16 +500,12 @@ if [[ -e "$activation_marker" ]]; then
   echo "agent update rollback did not remove restart heartbeat marker" >&2
   exit 1
 fi
-api_get "/api/v1/audit?limit=100" | jq -e \
-  --arg rollback_job "$rollback_job_id" \
-  --arg client "$client_id" \
-  --arg sha "$rollback_sha" '
-  any(.[]; .action == "agent_update.rollback_completed"
-    and .target == ("client:" + $client)
-    and .metadata.rollback_job_id == $rollback_job
-    and .metadata.rollback_sha256_hex == $sha
-    and .metadata.status == "rolled_back")
-' >/dev/null
+wait_agent_update_lifecycle_audit \
+  "agent_update.rollback_completed" \
+  "rollback_job_id" \
+  "$rollback_job_id" \
+  "rollback_sha256_hex" \
+  "$rollback_sha"
 
 stop_api
 start_api "restart"

@@ -16,25 +16,25 @@ const PRIVILEGE_UNLOCK_REQUIRED: &str = concat!(
 
 const AGENT_UPDATE_USAGE: &str = concat!(
     "usage: agent-update --artifact-url <https-url> --sha256-hex <sha256> ",
-    "<target ...> [--timeout <secs>] [--privilege-ttl <15-300>] ",
+    "<target ...> [--max-timeout <secs>] [--privilege-ttl <15-300>] ",
     "[--force-unprivileged] --confirmed"
 );
 
 const AGENT_UPDATE_CHECK_USAGE: &str = concat!(
     "usage: agent-update-check [--version-url <https-url>] <target ...> ",
-    "[--no-activate] [--no-restart-agent] [--timeout <secs>] ",
+    "[--no-activate] [--no-restart-agent] [--max-timeout <secs>] ",
     "[--privilege-ttl <15-300>] [--force-unprivileged] --confirmed"
 );
 
 const AGENT_UPDATE_ACTIVATE_USAGE: &str = concat!(
     "usage: agent-update-activate --staged-sha256-hex <sha256> <target ...> ",
-    "[--restart-agent] [--timeout <secs>] [--privilege-ttl <15-300>] ",
+    "[--restart-agent] [--max-timeout <secs>] [--privilege-ttl <15-300>] ",
     "[--force-unprivileged] --confirmed"
 );
 
 const AGENT_UPDATE_ROLLBACK_USAGE: &str = concat!(
     "usage: agent-update-rollback [--rollback-sha256-hex <sha256>] <target ...> ",
-    "[--timeout <secs>] [--privilege-ttl <15-300>] ",
+    "[--max-timeout <secs>] [--privilege-ttl <15-300>] ",
     "[--force-unprivileged] --confirmed"
 );
 

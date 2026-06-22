@@ -17,7 +17,7 @@ pub(crate) struct VtyMigrationRunRequest {
     pub(crate) restore_plan_id: Uuid,
     pub(crate) archive_transfer_session_id: Uuid,
     pub(crate) note: Option<String>,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
     pub(crate) force_unprivileged: bool,
 }
@@ -57,12 +57,12 @@ pub(crate) fn parse_vty_migration_link(tokens: &[&str]) -> Result<VtyMigrationLi
 pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRunRequest> {
     let restore_plan_id = tokens
         .first()
-        .context("usage: migration-run <restore_plan_uuid> --archive-transfer-session-id <uuid> [--note <text>] [--timeout <secs>] [--force-unprivileged] --confirmed")?;
+        .context("usage: migration-run <restore_plan_uuid> --archive-transfer-session-id <uuid> [--note <text>] [--max-timeout <secs>] [--force-unprivileged] --confirmed")?;
     let mut request = VtyMigrationRunRequest {
         restore_plan_id: Uuid::parse_str(restore_plan_id).context("invalid restore plan UUID")?,
         archive_transfer_session_id: Uuid::nil(),
         note: None,
-        timeout_secs: 60,
+        max_timeout_secs: 60,
         confirmed: false,
         force_unprivileged: false,
     };
@@ -108,12 +108,12 @@ pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRun
                 );
                 index += 2;
             }
-            "--timeout" => {
-                request.timeout_secs = tokens
+            "--max-timeout" => {
+                request.max_timeout_secs = tokens
                     .get(index + 1)
-                    .context("migration-run --timeout requires a value")?
+                    .context("migration-run --max-timeout requires a value")?
                     .parse()
-                    .context("invalid migration-run --timeout")?;
+                    .context("invalid migration-run --max-timeout")?;
                 index += 2;
             }
             "--force-unprivileged" => {
@@ -128,7 +128,7 @@ pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRun
         }
     }
     anyhow::ensure!(
-        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&request.timeout_secs),
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&request.max_timeout_secs),
         "migration-run timeout out of range"
     );
     anyhow::ensure!(
@@ -172,7 +172,7 @@ pub(crate) fn submit_vty_migration_run(
         &privilege_context.password,
         &privilege_context.salt_hex,
         300,
-        request.timeout_secs,
+        request.max_timeout_secs,
         request.confirmed,
         request.force_unprivileged,
     )
@@ -213,7 +213,7 @@ mod tests {
             &archive_transfer_session_id.to_string(),
             "--note",
             "cutover",
-            "--timeout",
+            "--max-timeout",
             "120",
             "--force-unprivileged",
             "--confirmed",
@@ -228,7 +228,7 @@ mod tests {
             archive_transfer_session_id
         );
         assert_eq!(request.note.as_deref(), Some("cutover"));
-        assert_eq!(request.timeout_secs, 120);
+        assert_eq!(request.max_timeout_secs, 120);
         assert!(request.force_unprivileged);
         assert!(request.confirmed);
     }

@@ -675,7 +675,7 @@ reject_body="$(jq -nc \
     target_client_ids: [$client],
     privileged: true,
     confirmed: true,
-    timeout_secs: 30
+    max_timeout_secs: 30
   }')"
 reject_json="$SMOKE_TMPDIR/reject.json"
 reject_status="$(curl -sS -o "$reject_json" -w "%{http_code}" \
@@ -698,7 +698,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --plan-file "$network_plan_file" \
     --side left \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --force-unprivileged \
     --confirmed)"
 apply_job_id="$(jq -r '.job_id' <<<"$apply_json")"
@@ -722,7 +722,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --current-ospf-cost "$ospf_current_cost" \
     --recommended-ospf-cost "$ospf_recommended_cost" \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --force-unprivileged \
     --confirmed)"
 ospf_update_job_id="$(jq -r '.job_id' <<<"$ospf_update_json")"
@@ -740,7 +740,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --plan-file "$network_plan_file" \
     --side left \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --force-unprivileged \
     --confirmed)"
 rollback_job_id="$(jq -r '.job_id' <<<"$rollback_json")"
@@ -824,7 +824,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --plan-file "$adapter_plan_file" \
     --side left \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --force-unprivileged \
     --confirmed)"
 adapter_apply_job_id="$(jq -r '.job_id' <<<"$adapter_apply_json")"
@@ -839,7 +839,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --plan-file "$adapter_plan_file" \
     --side left \
     --super-salt-hex "$super_salt_hex" \
-    --timeout-secs 10 \
+    --max-timeout-secs 10 \
     --force-unprivileged \
     --confirmed)"
 adapter_rollback_job_id="$(jq -r '.job_id' <<<"$adapter_rollback_json")"

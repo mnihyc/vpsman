@@ -64,7 +64,7 @@ async fn run_custom_metrics_command(
     child.stdin(Stdio::null());
     let result = run_child_with_bounded_output(
         child,
-        command.timeout_secs.clamp(1, 30),
+        command.max_timeout_secs.clamp(1, 30),
         command.max_output_bytes.clamp(1024, 64 * 1024) as usize,
         ChildCleanupPolicy::ProcessGroup,
     )

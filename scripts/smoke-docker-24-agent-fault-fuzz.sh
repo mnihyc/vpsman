@@ -125,9 +125,9 @@ agent_status() {
 
 wait_online_count() {
   local expected="$1"
-  local timeout_secs="$2"
+  local max_timeout_secs="$2"
   local label="$3"
-  local deadline=$((SECONDS + timeout_secs))
+  local deadline=$((SECONDS + max_timeout_secs))
   local online
   until [[ "${online:-}" == "$expected" ]]; do
     if ((SECONDS >= deadline)); then
@@ -144,9 +144,9 @@ wait_online_count() {
 wait_clients_status() {
   local expected="$1"
   shift
-  local timeout_secs="$1"
+  local max_timeout_secs="$1"
   shift
-  local deadline=$((SECONDS + timeout_secs))
+  local deadline=$((SECONDS + max_timeout_secs))
   local client status all_ready
   while true; do
     all_ready=1
@@ -170,8 +170,8 @@ wait_clients_status() {
 
 wait_active_gateway_sessions() {
   local expected="$1"
-  local timeout_secs="$2"
-  local deadline=$((SECONDS + timeout_secs))
+  local max_timeout_secs="$2"
+  local deadline=$((SECONDS + max_timeout_secs))
   local active
   until [[ "${active:-}" == "$expected" ]]; do
     if ((SECONDS >= deadline)); then
@@ -187,8 +187,8 @@ wait_active_gateway_sessions() {
 
 wait_telemetry_ready() {
   local expected="$1"
-  local timeout_secs="$2"
-  local deadline=$((SECONDS + timeout_secs))
+  local max_timeout_secs="$2"
+  local deadline=$((SECONDS + max_timeout_secs))
   local ready
   until (( ${ready:-0} >= expected )); do
     if ((SECONDS >= deadline)); then
@@ -523,7 +523,7 @@ expected_partial_completed=$((agent_count - ${#disconnect_indexes[@]}))
 partial_job_json="$(vpsctl_json job-shell \
   --script 'printf "fault-fuzz-partial-ok\n"' \
   --tags audit:docker-fuzz \
-  --timeout-secs 45 \
+  --max-timeout-secs 45 \
   --confirmed)"
 partial_job_id="$(jq -r '.job_id' <<<"$partial_job_json")"
 smoke_assert_job_create_queued "$partial_job_json" "$agent_count"
@@ -580,7 +580,7 @@ jq -e '
 full_job_json="$(vpsctl_json job-shell \
   --script 'printf "fault-fuzz-recovered-ok\n"' \
   --tags audit:docker-fuzz \
-  --timeout-secs 60 \
+  --max-timeout-secs 60 \
   --confirmed)"
 full_job_id="$(jq -r '.job_id' <<<"$full_job_json")"
 smoke_assert_job_create_queued "$full_job_json" "$agent_count"

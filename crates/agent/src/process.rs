@@ -18,12 +18,12 @@ pub(crate) async fn execute_process_list(
     config: &AgentConfig,
     job_id: uuid::Uuid,
     limit: u16,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
     let limit = limit.clamp(1, 512);
     let snapshot =
-        collect_process_snapshot_for_config(config, limit, timeout_secs, cancel_token).await?;
+        collect_process_snapshot_for_config(config, limit, max_timeout_secs, cancel_token).await?;
     let stdout = serde_json::to_vec(&snapshot)?;
     let mut outputs = chunked_output(job_id, OutputStream::Stdout, &stdout);
     outputs.push(CommandOutput {
@@ -67,7 +67,7 @@ struct ProcessView {
 async fn collect_process_snapshot_for_config(
     config: &AgentConfig,
     limit: u16,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
 ) -> Result<ProcessSnapshot> {
     cancel_token.check("process_list")?;
@@ -75,7 +75,7 @@ async fn collect_process_snapshot_for_config(
         AgentProcessInventorySource::LinuxProcfs => {
             let proc_root = config.execution.process_proc_root.clone();
             let snapshot = time::timeout(
-                Duration::from_secs(timeout_secs.max(1)),
+                Duration::from_secs(max_timeout_secs.max(1)),
                 tokio::task::spawn_blocking(move || {
                     collect_linux_procfs_snapshot(&proc_root, limit)
                 }),
@@ -92,7 +92,7 @@ async fn collect_process_snapshot_for_config(
                 .process_inventory_command
                 .as_ref()
                 .context("custom process inventory command is not configured")?;
-            collect_custom_process_snapshot(config, command, limit, timeout_secs, cancel_token)
+            collect_custom_process_snapshot(config, command, limit, max_timeout_secs, cancel_token)
                 .await
         }
     }
@@ -138,13 +138,16 @@ async fn collect_custom_process_snapshot(
     config: &AgentConfig,
     command: &RuntimeTunnelCommand,
     limit: u16,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cancel_token: CommandCancelToken,
 ) -> Result<ProcessSnapshot> {
     let argv = render_process_inventory_argv(config, command, limit)?;
     let output = run_json_command(
         &argv,
-        command.timeout_secs.min(timeout_secs.max(1)).clamp(1, 120),
+        command
+            .max_timeout_secs
+            .min(max_timeout_secs.max(1))
+            .clamp(1, 120),
         command.max_output_bytes.clamp(1024, 64 * 1024) as usize,
         cancel_token,
     )
@@ -256,7 +259,7 @@ fn render_process_inventory_argv(
 
 async fn run_json_command(
     argv: &[String],
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<u8>> {
@@ -265,7 +268,7 @@ async fn run_json_command(
     command.stdin(Stdio::null());
     let result = run_child_with_bounded_output_cancelable(
         command,
-        timeout_secs,
+        max_timeout_secs,
         max_output_bytes,
         ChildCleanupPolicy::ProcessGroup,
         cancel_token,

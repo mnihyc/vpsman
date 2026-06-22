@@ -34,7 +34,7 @@ pub(crate) struct JobCreateOptions {
     pub(crate) password_env: String,
     pub(crate) super_salt_hex: Option<String>,
     pub(crate) privilege_ttl_secs: u64,
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) privileged: bool,
     pub(crate) destructive: bool,
     pub(crate) confirmed: bool,
@@ -81,7 +81,7 @@ pub(crate) fn job_create(
                 &password,
                 &salt_hex,
                 options.privilege_ttl_secs,
-                options.timeout_secs,
+                options.max_timeout_secs,
                 options.force_unprivileged,
                 true,
             )?
@@ -107,7 +107,7 @@ pub(crate) fn job_create(
                 "destructive": options.destructive,
                 "confirmed": options.confirmed,
                 "force_unprivileged": options.force_unprivileged,
-                "timeout_secs": options.timeout_secs,
+                "max_timeout_secs": options.max_timeout_secs,
                 "privilege_assertion": privilege_assertion,
             }),
         )?
@@ -125,7 +125,7 @@ pub(crate) fn job_shell(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 ) -> Result<()> {
     let script = load_shell_script(script, script_file)?;
@@ -142,7 +142,7 @@ pub(crate) fn job_shell(
             password_env: &password_env,
             super_salt_hex: super_salt_hex.as_deref(),
             privilege_ttl_secs,
-            timeout_secs,
+            max_timeout_secs,
             confirmed,
             force_unprivileged: false,
         })?

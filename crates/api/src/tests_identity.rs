@@ -209,7 +209,7 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
             status: "running".to_string(),
             target_count: 1,
             payload_hash: "rotation-active-target".to_string(),
-            timeout_secs: 30,
+            max_timeout_secs: 30,
             created_at: "1700000000".to_string(),
             completed_at: None,
         });
@@ -295,7 +295,7 @@ async fn direct_agent_identity_key_change_requires_explicit_replace_and_blocks_r
             status: "queued".to_string(),
             target_count: 1,
             payload_hash: "revocation-test".to_string(),
-            timeout_secs: 30,
+            max_timeout_secs: 30,
             created_at: "1700000000".to_string(),
             completed_at: None,
         });
@@ -438,7 +438,7 @@ async fn memory_agent_inventory_preserves_unprivileged_capability_snapshot() {
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Unprivileged,
                     effective_uid: Some(1000),
-                    job_timeout_secs: 3600,
+                    max_job_timeout_secs: 3600,
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,

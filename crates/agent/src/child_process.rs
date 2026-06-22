@@ -62,13 +62,13 @@ pub(crate) enum ChildCleanupPolicy {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn run_child_with_bounded_output(
     command: tokio::process::Command,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cleanup_policy: ChildCleanupPolicy,
 ) -> Result<ChildRunResult> {
     run_child(
         command,
-        timeout_secs,
+        max_timeout_secs,
         max_output_bytes,
         cleanup_policy,
         None,
@@ -79,14 +79,14 @@ pub(crate) async fn run_child_with_bounded_output(
 
 pub(crate) async fn run_child_with_bounded_output_cancelable(
     command: tokio::process::Command,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cleanup_policy: ChildCleanupPolicy,
     cancel_token: CommandCancelToken,
 ) -> Result<ChildRunResult> {
     run_child(
         command,
-        timeout_secs,
+        max_timeout_secs,
         max_output_bytes,
         cleanup_policy,
         Some(cancel_token),
@@ -98,14 +98,14 @@ pub(crate) async fn run_child_with_bounded_output_cancelable(
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn run_child_with_streaming_output(
     command: tokio::process::Command,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cleanup_policy: ChildCleanupPolicy,
     sink: ChildOutputSink,
 ) -> Result<ChildRunResult> {
     run_child(
         command,
-        timeout_secs,
+        max_timeout_secs,
         max_output_bytes,
         cleanup_policy,
         None,
@@ -116,7 +116,7 @@ pub(crate) async fn run_child_with_streaming_output(
 
 pub(crate) async fn run_child_with_streaming_output_cancelable(
     command: tokio::process::Command,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cleanup_policy: ChildCleanupPolicy,
     sink: ChildOutputSink,
@@ -124,7 +124,7 @@ pub(crate) async fn run_child_with_streaming_output_cancelable(
 ) -> Result<ChildRunResult> {
     run_child(
         command,
-        timeout_secs,
+        max_timeout_secs,
         max_output_bytes,
         cleanup_policy,
         Some(cancel_token),
@@ -136,13 +136,13 @@ pub(crate) async fn run_child_with_streaming_output_cancelable(
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn run_pty_with_bounded_output(
     command: tokio::process::Command,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cleanup_policy: ChildCleanupPolicy,
 ) -> Result<ChildRunResult> {
     run_pty(
         command,
-        timeout_secs,
+        max_timeout_secs,
         max_output_bytes,
         cleanup_policy,
         None,
@@ -153,14 +153,14 @@ pub(crate) async fn run_pty_with_bounded_output(
 
 pub(crate) async fn run_pty_with_bounded_output_cancelable(
     command: tokio::process::Command,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cleanup_policy: ChildCleanupPolicy,
     cancel_token: CommandCancelToken,
 ) -> Result<ChildRunResult> {
     run_pty(
         command,
-        timeout_secs,
+        max_timeout_secs,
         max_output_bytes,
         cleanup_policy,
         Some(cancel_token),
@@ -172,14 +172,14 @@ pub(crate) async fn run_pty_with_bounded_output_cancelable(
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn run_pty_with_streaming_output(
     command: tokio::process::Command,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cleanup_policy: ChildCleanupPolicy,
     sink: ChildOutputSink,
 ) -> Result<ChildRunResult> {
     run_pty(
         command,
-        timeout_secs,
+        max_timeout_secs,
         max_output_bytes,
         cleanup_policy,
         None,
@@ -190,7 +190,7 @@ pub(crate) async fn run_pty_with_streaming_output(
 
 pub(crate) async fn run_pty_with_streaming_output_cancelable(
     command: tokio::process::Command,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cleanup_policy: ChildCleanupPolicy,
     sink: ChildOutputSink,
@@ -198,7 +198,7 @@ pub(crate) async fn run_pty_with_streaming_output_cancelable(
 ) -> Result<ChildRunResult> {
     run_pty(
         command,
-        timeout_secs,
+        max_timeout_secs,
         max_output_bytes,
         cleanup_policy,
         Some(cancel_token),
@@ -209,7 +209,7 @@ pub(crate) async fn run_pty_with_streaming_output_cancelable(
 
 async fn run_child(
     mut command: tokio::process::Command,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cleanup_policy: ChildCleanupPolicy,
     cancel_token: Option<CommandCancelToken>,
@@ -222,7 +222,7 @@ async fn run_child(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let timeout_secs = timeout_secs.max(1);
+    let max_timeout_secs = max_timeout_secs.max(1);
     let mut child = RunningChild::spawn(command, cleanup_policy)?;
     let stdout = child.take_stdout();
     let stderr = child.take_stderr();
@@ -239,7 +239,7 @@ async fn run_child(
         OutputStream::Stderr,
     ));
 
-    let status = match wait_for_child(&mut child, timeout_secs, cancel_token).await? {
+    let status = match wait_for_child(&mut child, max_timeout_secs, cancel_token).await? {
         ChildWaitOutcome::Completed(status) => status,
         ChildWaitOutcome::TimedOut => {
             let cleanup = child
@@ -280,7 +280,7 @@ async fn run_child(
 
 async fn run_pty(
     mut command: tokio::process::Command,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     max_output_bytes: usize,
     cleanup_policy: ChildCleanupPolicy,
     cancel_token: Option<CommandCancelToken>,
@@ -295,7 +295,7 @@ async fn run_pty(
     command.stdout(pty.stdout);
     command.stderr(pty.stderr);
 
-    let timeout_secs = timeout_secs.max(1);
+    let max_timeout_secs = max_timeout_secs.max(1);
     let mut child = RunningChild::spawn(command, cleanup_policy)?;
     let reader_task = tokio::spawn(read_bounded_pty_output_with_sink(
         tokio::fs::File::from_std(pty.master),
@@ -303,7 +303,7 @@ async fn run_pty(
         sink,
     ));
 
-    let status = match wait_for_child(&mut child, timeout_secs, cancel_token).await? {
+    let status = match wait_for_child(&mut child, max_timeout_secs, cancel_token).await? {
         ChildWaitOutcome::Completed(status) => status,
         ChildWaitOutcome::TimedOut => {
             let cleanup = child
@@ -344,10 +344,10 @@ enum ChildWaitOutcome {
 
 async fn wait_for_child(
     child: &mut RunningChild,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     cancel_token: Option<CommandCancelToken>,
 ) -> std::io::Result<ChildWaitOutcome> {
-    let timeout = time::sleep(Duration::from_secs(timeout_secs));
+    let timeout = time::sleep(Duration::from_secs(max_timeout_secs));
     tokio::pin!(timeout);
     if let Some(cancel_token) = cancel_token {
         let canceled = cancel_token.cancelled();

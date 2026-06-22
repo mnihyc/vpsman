@@ -245,7 +245,7 @@ pub(crate) async fn apply_schedule_now(
         command: String::new(),
         argv: Vec::new(),
         operation: Some(schedule.operation.clone()),
-        timeout_secs: Some(state.schedule_apply_now_timeout_secs()),
+        max_timeout_secs: Some(state.schedule_apply_now_max_timeout_secs()),
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,

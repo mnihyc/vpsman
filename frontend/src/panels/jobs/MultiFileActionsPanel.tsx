@@ -300,7 +300,7 @@ export function MultiFileActionsPanel({
         operation: confirmation.operation,
         privilegeMaterial,
         selectorExpression: confirmation.selectorExpression,
-        timeoutSecs: BULK_JOB_TIMEOUT_SECS,
+        maxTimeoutSecs: BULK_JOB_TIMEOUT_SECS,
       });
       setLastPayloadHash(built.payloadHashHex);
       setLastRunProgress(null);
@@ -313,7 +313,7 @@ export function MultiFileActionsPanel({
         argv: [],
         job_id: confirmation.jobId,
         operation: confirmation.operation,
-        timeout_secs: BULK_JOB_TIMEOUT_SECS,
+        max_timeout_secs: BULK_JOB_TIMEOUT_SECS,
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: built.privilegeAssertion,
@@ -327,7 +327,7 @@ export function MultiFileActionsPanel({
         outputs,
         targetRecords: targets,
         targets: confirmation.targets,
-        timeoutSecs: BULK_JOB_TIMEOUT_SECS,
+        maxTimeoutSecs: BULK_JOB_TIMEOUT_SECS,
       });
       setBulkProgress(finalProgress);
       try {
@@ -338,7 +338,7 @@ export function MultiFileActionsPanel({
             finalProgress = progress;
             setBulkProgress(progress);
           },
-          timeoutSecs: BULK_JOB_TIMEOUT_SECS,
+          maxTimeoutSecs: BULK_JOB_TIMEOUT_SECS,
         });
         targets = result.targets;
         outputs = await loadOutputsForSummary(job.job_id, onLoadOutputs, targets);
@@ -348,7 +348,7 @@ export function MultiFileActionsPanel({
           outputs,
           targetRecords: targets,
           targets: confirmation.targets,
-          timeoutSecs: BULK_JOB_TIMEOUT_SECS,
+          maxTimeoutSecs: BULK_JOB_TIMEOUT_SECS,
         });
       } finally {
         setBulkProgress(null);

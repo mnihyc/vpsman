@@ -469,7 +469,7 @@ fn validate_runtime_command(
     if command.argv.is_empty()
         || command.argv.len() > 32
         || !command.argv[0].starts_with('/')
-        || !(1..=120).contains(&command.timeout_secs)
+        || !(1..=120).contains(&command.max_timeout_secs)
         || !(1024..=64 * 1024).contains(&command.max_output_bytes)
     {
         return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);

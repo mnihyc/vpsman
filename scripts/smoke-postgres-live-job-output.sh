@@ -568,7 +568,7 @@ assert_agent_timeout_shell_job() {
   jq -e '
     .items[] | select(.stream == "status" and .done == true and .exit_code == 124)
     | (.data_base64 | @base64d | fromjson)
-    | .type == "command_timeout" and .timeout_secs == 1
+    | .type == "command_timeout" and .max_timeout_secs == 1
   ' <<<"$outputs_json" >/dev/null
   jq -e --arg job_id "$timeout_job_id" '
     any(.[]; .action == "job.target_result"
@@ -626,7 +626,7 @@ assert_user_sessions_no_privilege_unlock_rejection() {
       target_client_ids: [$client],
       privileged: true,
       confirmed: true,
-      timeout_secs: 10
+      max_timeout_secs: 10
     }')"
   reject_json="$SMOKE_TMPDIR/user-sessions-reject.json"
   reject_status="$(curl -sS -o "$reject_json" -w "%{http_code}" \

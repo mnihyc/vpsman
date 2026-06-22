@@ -638,7 +638,7 @@ mod tests {
         assert_eq!(status.exit_code, Some(124));
         let payload: serde_json::Value = serde_json::from_slice(&status.data).unwrap();
         assert_eq!(payload["type"], "command_timeout");
-        assert_eq!(payload["timeout_secs"], 1);
+        assert_eq!(payload["max_timeout_secs"], 1);
         assert_eq!(payload["cleanup"]["target_kind"], "process_group");
         assert_eq!(payload["cleanup"]["graceful_signal"], "SIGTERM");
         assert_eq!(payload["cleanup"]["final_running"], false);
@@ -796,7 +796,7 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&status.data).unwrap();
         assert_eq!(payload["type"], "command_timeout");
         assert_eq!(payload["mode"], "shell_script");
-        assert_eq!(payload["timeout_secs"], 1);
+        assert_eq!(payload["max_timeout_secs"], 1);
         assert_eq!(payload["cleanup"]["target_kind"], "process_group");
         assert_eq!(payload["cleanup"]["graceful_signal"], "SIGTERM");
         assert_eq!(payload["cleanup"]["final_running"], false);
@@ -2059,7 +2059,7 @@ mod tests {
                 user_sessions_source: AgentUserSessionsSource::CustomCommand,
                 user_sessions_command: Some(RuntimeTunnelCommand {
                     argv: vec![source.to_string_lossy().to_string()],
-                    timeout_secs: 2,
+                    max_timeout_secs: 2,
                     max_output_bytes: 1024,
                 }),
                 ..AgentExecutionConfig::default()
@@ -2102,7 +2102,7 @@ mod tests {
                 user_sessions_source: AgentUserSessionsSource::CustomCommand,
                 user_sessions_command: Some(RuntimeTunnelCommand {
                     argv: vec![source.to_string_lossy().to_string()],
-                    timeout_secs: 1,
+                    max_timeout_secs: 1,
                     max_output_bytes: 1024,
                 }),
                 ..AgentExecutionConfig::default()
@@ -2163,7 +2163,7 @@ mod tests {
                 process_inventory_source: AgentProcessInventorySource::CustomCommand,
                 process_inventory_command: Some(RuntimeTunnelCommand {
                     argv: vec![source.to_string_lossy().to_string(), "{limit}".to_string()],
-                    timeout_secs: 2,
+                    max_timeout_secs: 2,
                     max_output_bytes: 4096,
                 }),
                 ..AgentExecutionConfig::default()
@@ -2209,7 +2209,7 @@ mod tests {
                 process_inventory_source: AgentProcessInventorySource::CustomCommand,
                 process_inventory_command: Some(RuntimeTunnelCommand {
                     argv: vec![source.to_string_lossy().to_string()],
-                    timeout_secs: 1,
+                    max_timeout_secs: 1,
                     max_output_bytes: 4096,
                 }),
                 ..AgentExecutionConfig::default()

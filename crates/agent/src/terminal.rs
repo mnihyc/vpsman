@@ -46,20 +46,20 @@ pub(crate) async fn execute_terminal_command(
     config: &AgentConfig,
     job_id: uuid::Uuid,
     command: &JobCommand,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
 ) -> Result<Vec<CommandOutput>> {
-    execute_terminal_command_with_stream_sink(config, job_id, command, timeout_secs, None).await
+    execute_terminal_command_with_stream_sink(config, job_id, command, max_timeout_secs, None).await
 }
 
 pub(crate) async fn execute_terminal_command_with_stream_sink(
     config: &AgentConfig,
     job_id: uuid::Uuid,
     command: &JobCommand,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     stream_tx: Option<mpsc::Sender<TerminalStreamOutput>>,
 ) -> Result<Vec<CommandOutput>> {
     time::timeout(
-        Duration::from_secs(timeout_secs.max(1)),
+        Duration::from_secs(max_timeout_secs.max(1)),
         execute_terminal_command_inner(config, job_id, command, stream_tx),
     )
     .await

@@ -163,7 +163,7 @@ pub(crate) struct ClientKeyRevokeCommand {
 pub(crate) struct ComposeSecretsCommand {
     #[arg(
         long,
-        default_value = "deploy/config/secrets",
+        default_value = "config/secrets",
         help = "Directory where Docker Compose secret files are created"
     )]
     pub(crate) secrets_dir: PathBuf,
@@ -483,7 +483,7 @@ pub(crate) struct DataSourceHotConfigApplyCommand {
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
     #[arg(long, default_value_t = false)]

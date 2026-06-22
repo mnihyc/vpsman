@@ -70,14 +70,16 @@ equivalent static server.
 The compose template runs already-built release assets. It does not rebuild
 Rust or frontend code.
 
-Place release files into this checkout-local layout:
+Place release files into this deployment-directory layout. The repository
+template names that directory `deploy/`, but the directory itself can be
+renamed or copied outside a source checkout:
 
-- server ZIP contents: `deploy/runtime/server/current/`
-- extracted frontend `dist/`: `deploy/runtime/frontend/current/dist/`
-- host CLI: `deploy/runtime/cli/current/vpsctl`
-- suite config: `deploy/config/vpsman.toml`
+- server ZIP contents: `runtime/server/current/`
+- extracted frontend `dist/`: `runtime/frontend/current/dist/`
+- host CLI: `runtime/cli/current/vpsctl`
+- suite config: `config/vpsman.toml`
 - secret files referenced by suite config: generated under
-  `deploy/config/secrets/`
+  `config/secrets/`
 
 For a first Docker Compose start from GitHub Releases, let the deploy updater
 download the release, verify checksums, generate missing compose secrets, and
@@ -100,20 +102,20 @@ file for agent installs, and `operator-privilege.env` containing the generated
 `VPSMAN_SUPER_SALT_HEX`. Keep the super password in your operator password
 manager; the API never receives it.
 
-Persistent runtime data stays in checkout-local paths:
+Persistent runtime data stays under the deployment directory:
 
-- PostgreSQL: `deploy/runtime/postgres/data`
-- local object storage: `deploy/runtime/data/objects/backups` for retained
+- PostgreSQL: `runtime/postgres/data`
+- local object storage: `runtime/data/objects/backups` for retained
   backup artifacts, large job outputs, file-transfer handoffs, and uploaded
   source artifacts
 
 See `deploy/README.md` for the full compose directory layout.
 
 In Docker, keep the `.env` object-store paths under `/var/lib/vpsman`
-unchanged; compose maps them to `deploy/runtime/data`.
+unchanged; compose maps them to `runtime/data`.
 Compose also sets `VPSMAN_SUITE_CONFIG=/etc/vpsman/vpsman.toml`,
-derives `VPSMAN_POSTGRES_URL` for API and worker from `deploy/.env`, and mounts
-`deploy/config` at `/etc/vpsman`. `deploy/config/vpsman.toml` remains the single
+derives `VPSMAN_POSTGRES_URL` for API and worker from `.env`, and mounts
+`config` at `/etc/vpsman`. `config/vpsman.toml` remains the single
 authoritative compose suite config for non-secret runtime settings; the
 database password stays in `.env`. The API receives that config directory as
 writable so dashboard saves can atomically replace the TOML, while gateway,
@@ -123,9 +125,9 @@ gateway-only private-key or privilege-verifier material. Direct binary runs are
 independent of the compose layout; set `VPSMAN_SUITE_CONFIG` and
 `VPSMAN_POSTGRES_URL` yourself when you want a specific operator config file.
 
-Long-running job control uses `timeout_secs` as the agent execution budget.
+Long-running job control uses `max_timeout_secs` as the agent execution budget.
 The fleet-wide accepted maximum is `timeout.max_job_timeout_secs` in
-`deploy/config/vpsman.toml`, defaulting to 3600 seconds and configurable up to
+`config/vpsman.toml`, defaulting to 3600 seconds and configurable up to
 seven days. Requests above the configured maximum are rejected so the browser,
 CLI, API, worker, and agent agree on the exact budget. The API adds
 dispatch/event grace through `timeout.control_deadline_grace_secs`, and the
@@ -151,7 +153,7 @@ The compose template does not publish the API host port. Nginx reaches the API
 over the private Docker network, and the dashboard binds to `127.0.0.1:5173` by
 default through `VPSMAN_FRONTEND_BIND`. Gateway TCP also stays loopback-bound by
 default, and gateway control uses a shared Unix socket under
-`deploy/runtime/data`; expose agent TCP through your chosen public proxy,
+`runtime/data`; expose agent TCP through your chosen public proxy,
 firewall, or tunnel when needed. Gateway-to-API forwarding is intentionally
 plain HTTP and should stay on localhost, a Unix-adjacent private compose
 network, or another trusted private network; TLS termination belongs in the
@@ -179,8 +181,8 @@ cd deploy
 ```
 
 The update script downloads release assets, verifies `SHA256SUMS`, updates
-`deploy/runtime/server/current`, `deploy/runtime/frontend/current`, and
-`deploy/runtime/cli/current/vpsctl`, then recreates containers. It does not
+`runtime/server/current`, `runtime/frontend/current`, and
+`runtime/cli/current/vpsctl`, then recreates containers. It does not
 delete PostgreSQL or local object-storage data.
 
 ## Direct Gateway Agent Install

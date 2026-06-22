@@ -43,7 +43,7 @@ import {
   waitForBulkJobTargets,
   type BulkJobProgress,
 } from "../bulkJobProgress";
-import { DEFAULT_MAX_JOB_TIMEOUT_SECS } from "../jobTimeout";
+import { DEFAULT_MAX_JOB_TIMEOUT_SECS } from "../jobMaxTimeout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -627,7 +627,7 @@ export function FleetWorkspace({
       selectorExpression: selectorExpressionForClientIds(
         rows.map((agent) => agent.id),
       ),
-      timeoutSecs: 300,
+      maxTimeoutSecs: 300,
       updateCheckActivate: true,
       updateCheckRestartAgent: true,
       updateCheckVersionUrl: DEFAULT_UPDATE_VERSION_URL,
@@ -1196,7 +1196,7 @@ function FleetInstanceDetail({
         operation,
         privilegeMaterial,
         selectorExpression,
-        timeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+        maxTimeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
       });
       setInterfacePayloadHash(builtPrivilege.payloadHashHex);
       setInterfaceSnapshot(null);
@@ -1205,7 +1205,7 @@ function FleetInstanceDetail({
         targetCount: 1,
         targetRecords: [],
         targets: [agent],
-        timeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+        maxTimeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
       }));
       const job = await onCreateJob({
         argv: [],
@@ -1219,7 +1219,7 @@ function FleetInstanceDetail({
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: builtPrivilege.privilegeAssertion,
-        timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+        max_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
       });
       setInterfaceJobId(job.job_id);
       const targetCount = createJobTargetCount(job);
@@ -1230,7 +1230,7 @@ function FleetInstanceDetail({
           onProgress: setInterfaceProgress,
           targetCount,
           targets: [agent],
-          timeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+          maxTimeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
         },
       );
       setInterfaceProgress(progress.progress);

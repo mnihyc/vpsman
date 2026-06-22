@@ -19,10 +19,10 @@ fi
 long_running_secs="${VPSMAN_DOCKER_FLEET_LONG_RUNNING_SECS:-0}"
 simulate_api_backlog="${VPSMAN_DOCKER_FLEET_SIMULATE_API_BACKLOG:-0}"
 gateway_command_output_ttl_secs="${VPSMAN_DOCKER_FLEET_COMMAND_OUTPUT_TTL_SECS:-86400}"
-bulk_job_timeout_secs=45
-agent_job_timeout_secs=$((bulk_job_timeout_secs + 15))
+bulk_max_timeout_secs=45
+agent_max_job_timeout_secs=$((bulk_max_timeout_secs + 15))
 if ((long_running_secs > 0)); then
-  agent_job_timeout_secs=$((long_running_secs + 120))
+  agent_max_job_timeout_secs=$((long_running_secs + 120))
 fi
 rollup_bucket_secs=60
 
@@ -265,7 +265,7 @@ for ((i = 1; i <= agent_count; i += 1)); do
     "$tag_csv" \
     "$gateway_public_hex" \
     "primary=$gateway_addr=10" \
-    "$agent_job_timeout_secs"
+    "$agent_max_job_timeout_secs"
   enrolled_client_id="$logical_client_id"
   [[ -n "$first_client_id" ]] || first_client_id="$enrolled_client_id"
   if [[ -z "$second_client_id" && "$enrolled_client_id" != "$first_client_id" ]]; then
@@ -569,7 +569,7 @@ api_put "/api/v1/auth/preferences" '{
 job_json="$(vpsctl_json job-shell \
   --script 'printf "docker-bulk-ok\n"' \
   --tags provider:alpha \
-  --timeout-secs "$bulk_job_timeout_secs" \
+  --max-timeout-secs "$bulk_max_timeout_secs" \
   --confirmed)"
 job_id="$(jq -r '.job_id' <<<"$job_json")"
 jq -e --argjson alpha_count "$provider_alpha_count" '
@@ -599,7 +599,7 @@ if ((long_running_secs > 0)); then
   long_job_json="$(vpsctl_json job-shell \
     --script "printf 'docker-long-start\n'; sleep $long_running_secs; printf 'docker-long-done\n'" \
     --tags bulk-target \
-    --timeout-secs "$long_timeout" \
+    --max-timeout-secs "$long_timeout" \
     --confirmed)"
   long_job_id="$(jq -r '.job_id' <<<"$long_job_json")"
   smoke_assert_job_create_queued "$long_job_json" "$agent_count"

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
 import { buildRestoreRollbackOperation } from "../backups/restoreRollback";
-import { clampJobTimeoutSecs, DEFAULT_MAX_JOB_TIMEOUT_SECS } from "../jobTimeout";
+import { clampJobMaxTimeoutSecs, DEFAULT_MAX_JOB_TIMEOUT_SECS } from "../jobMaxTimeout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleActionDrawer } from "../components/ConsoleLayout";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
@@ -133,7 +133,7 @@ type RestoreRunInput = {
   archiveTransfer: RestoreArchiveTransferOption | null;
   dryRun: boolean;
   postRestoreArgv: string;
-  timeoutSecs: number;
+  maxTimeoutSecs: number;
   forceUnprivileged: boolean;
 };
 
@@ -329,12 +329,12 @@ export function BackupsPanel({
   const [restoreArchiveTransferKey, setRestoreArchiveTransferKey] = useState("");
   const [restoreDryRun, setRestoreDryRun] = useState(false);
   const [restorePostRestoreArgv, setRestorePostRestoreArgv] = useState("");
-  const [restoreTimeoutSecs, setRestoreTimeoutSecs] = useState(60);
+  const [restoreMaxTimeoutSecs, setRestoreMaxTimeoutSecs] = useState(60);
   const [restoreForceUnprivileged, setRestoreForceUnprivileged] =
     useState(false);
   const [rollbackRestoreJobId, setRollbackRestoreJobId] = useState("");
   const [rollbackTargetId, setRollbackTargetId] = useState("");
-  const [rollbackTimeoutSecs, setRollbackTimeoutSecs] = useState(60);
+  const [rollbackMaxTimeoutSecs, setRollbackMaxTimeoutSecs] = useState(60);
   const [rollbackForceUnprivileged, setRollbackForceUnprivileged] =
     useState(false);
   const [lastRestorePlan, setLastRestorePlan] =
@@ -723,7 +723,7 @@ export function BackupsPanel({
         operation,
         privilegeMaterial,
         selectorExpression,
-        timeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+        maxTimeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
@@ -897,7 +897,7 @@ export function BackupsPanel({
         operation,
         privilegeMaterial,
         selectorExpression,
-        timeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+        maxTimeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
@@ -987,7 +987,7 @@ export function BackupsPanel({
     const selectorExpression = selectorExpressionForClientIds([
       input.targetClientId,
     ]);
-    const boundedTimeoutSecs = clampJobTimeoutSecs(input.timeoutSecs);
+    const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(input.maxTimeoutSecs);
     const built = await buildPrivilegeForJobOperation({
       clientIds: [input.targetClientId],
       commandType: "restore",
@@ -995,7 +995,7 @@ export function BackupsPanel({
       operation,
       privilegeMaterial,
       selectorExpression,
-      timeoutSecs: boundedTimeoutSecs,
+      maxTimeoutSecs: boundedMaxTimeoutSecs,
     });
     return {
       payloadHashHex: built.payloadHashHex,
@@ -1008,7 +1008,7 @@ export function BackupsPanel({
         argv: [],
         job_id: crypto.randomUUID(),
         operation,
-        timeout_secs: boundedTimeoutSecs,
+        max_timeout_secs: boundedMaxTimeoutSecs,
         force_unprivileged: input.forceUnprivileged,
         privileged: true,
         privilege_assertion: built.privilegeAssertion,
@@ -1047,7 +1047,7 @@ export function BackupsPanel({
       archiveTransfer: selectedRestoreArchiveTransfer,
       dryRun: restoreDryRun,
       postRestoreArgv: restorePostRestoreArgv,
-      timeoutSecs: restoreTimeoutSecs,
+      maxTimeoutSecs: restoreMaxTimeoutSecs,
       forceUnprivileged: restoreForceUnprivileged,
     };
   }
@@ -1109,7 +1109,7 @@ export function BackupsPanel({
       const selectorExpression = selectorExpressionForClientIds([
         targetClientId,
       ]);
-      const boundedTimeoutSecs = clampJobTimeoutSecs(rollbackTimeoutSecs);
+      const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(rollbackMaxTimeoutSecs);
       const built = await buildPrivilegeForJobOperation({
         clientIds: [targetClientId],
         commandType: "restore_rollback",
@@ -1117,7 +1117,7 @@ export function BackupsPanel({
         operation,
         privilegeMaterial,
         selectorExpression,
-        timeoutSecs: boundedTimeoutSecs,
+        maxTimeoutSecs: boundedMaxTimeoutSecs,
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
@@ -1134,7 +1134,7 @@ export function BackupsPanel({
           argv: [],
           job_id: crypto.randomUUID(),
           operation,
-          timeout_secs: boundedTimeoutSecs,
+          max_timeout_secs: boundedMaxTimeoutSecs,
           force_unprivileged: rollbackForceUnprivileged,
           privileged: true,
           privilege_assertion: built.privilegeAssertion,
@@ -1232,7 +1232,7 @@ export function BackupsPanel({
         archiveTransfer: selectedMigrationArchiveTransfer,
         dryRun: restoreDryRun,
         postRestoreArgv: restorePostRestoreArgv,
-        timeoutSecs: restoreTimeoutSecs,
+        maxTimeoutSecs: restoreMaxTimeoutSecs,
         forceUnprivileged: restoreForceUnprivileged,
       };
       const run = await buildRestoreRunJobSnapshot(input);
@@ -2086,8 +2086,8 @@ export function BackupsPanel({
                   setRestorePostRestoreArgv(value);
                   clearBackupConfirmations(["restore-run", "migration-run"]);
                 }}
-                onRestoreTimeoutSecsChange={(value) => {
-                  setRestoreTimeoutSecs(value);
+                onRestoreMaxTimeoutSecsChange={(value) => {
+                  setRestoreMaxTimeoutSecs(value);
                   clearBackupConfirmations(["restore-run", "migration-run"]);
                 }}
                 onRunRestore={submitRestoreRun}
@@ -2098,7 +2098,7 @@ export function BackupsPanel({
                 restoreSourceId={restoreSourceId}
                 restoreTarget={restoreTarget}
                 restoreTargetId={restoreTargetId}
-                restoreTimeoutSecs={restoreTimeoutSecs}
+                restoreMaxTimeoutSecs={restoreMaxTimeoutSecs}
               />
               <RestoreRollbackForm
                 agents={agents}
@@ -2112,8 +2112,8 @@ export function BackupsPanel({
                   setRollbackRestoreJobId(value);
                   clearBackupConfirmations(["restore-rollback"]);
                 }}
-                onRestoreRollbackTimeoutSecsChange={(value) => {
-                  setRollbackTimeoutSecs(value);
+                onRestoreRollbackMaxTimeoutSecsChange={(value) => {
+                  setRollbackMaxTimeoutSecs(value);
                   clearBackupConfirmations(["restore-rollback"]);
                 }}
                 onRunRestoreRollback={submitRestoreRollback}
@@ -2124,7 +2124,7 @@ export function BackupsPanel({
                 pending={pending}
                 privilegeReady={Boolean(privilegeMaterial)}
                 restoreJobId={rollbackRestoreJobId}
-                restoreRollbackTimeoutSecs={rollbackTimeoutSecs}
+                restoreRollbackMaxTimeoutSecs={rollbackMaxTimeoutSecs}
                 targetAgent={rollbackTarget}
                 targetClientId={rollbackTargetId}
               />

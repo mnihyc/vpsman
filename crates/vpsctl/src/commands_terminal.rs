@@ -50,7 +50,7 @@ pub(crate) struct TerminalOpenCommand {
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }
@@ -72,7 +72,7 @@ pub(crate) struct TerminalInputCommand {
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }
@@ -94,7 +94,7 @@ pub(crate) struct TerminalPollCommand {
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }
@@ -118,7 +118,7 @@ pub(crate) struct TerminalResizeCommand {
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }
@@ -140,7 +140,7 @@ pub(crate) struct TerminalCloseCommand {
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
     #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) timeout_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }
@@ -173,7 +173,7 @@ pub(crate) fn terminal_open(
         &command.password_env,
         command.super_salt_hex.as_deref(),
         command.privilege_ttl_secs,
-        command.timeout_secs,
+        command.max_timeout_secs,
         command.confirmed,
     )?;
     println!("{}", enrich_terminal_open_response(session_id, &response)?);
@@ -200,7 +200,7 @@ pub(crate) fn terminal_input(
             client_id: &command.client_id,
             session_id: &session_id,
             input_payload_hash: &input_payload_hash,
-            timeout_secs: command.timeout_secs,
+            max_timeout_secs: command.max_timeout_secs,
             confirmed: command.confirmed,
         },
         &password,
@@ -219,7 +219,7 @@ pub(crate) fn terminal_input(
             &serde_json::json!({
                 "job_id": job_id,
                 "data_base64": data_base64,
-                "timeout_secs": command.timeout_secs,
+                "max_timeout_secs": command.max_timeout_secs,
                 "confirmed": command.confirmed,
                 "privilege_assertion": privilege_assertion,
             }),
@@ -249,7 +249,7 @@ pub(crate) fn terminal_poll(
             &command.password_env,
             command.super_salt_hex.as_deref(),
             command.privilege_ttl_secs,
-            command.timeout_secs,
+            command.max_timeout_secs,
             command.confirmed,
         )?
     );
@@ -278,7 +278,7 @@ pub(crate) fn terminal_resize(
             &command.password_env,
             command.super_salt_hex.as_deref(),
             command.privilege_ttl_secs,
-            command.timeout_secs,
+            command.max_timeout_secs,
             command.confirmed,
         )?
     );
@@ -306,7 +306,7 @@ pub(crate) fn terminal_close(
             &command.password_env,
             command.super_salt_hex.as_deref(),
             command.privilege_ttl_secs,
-            command.timeout_secs,
+            command.max_timeout_secs,
             command.confirmed,
         )?
     );
@@ -323,7 +323,7 @@ fn submit_terminal_operation(
     password_env: &str,
     super_salt_hex: Option<&str>,
     privilege_ttl_secs: u64,
-    timeout_secs: u64,
+    max_timeout_secs: u64,
     confirmed: bool,
 ) -> Result<String> {
     submit_privileged_operation(PrivilegedOperationRequest {
@@ -336,7 +336,7 @@ fn submit_terminal_operation(
         password_env,
         super_salt_hex,
         privilege_ttl_secs,
-        timeout_secs,
+        max_timeout_secs,
         confirmed,
         force_unprivileged: false,
     })
