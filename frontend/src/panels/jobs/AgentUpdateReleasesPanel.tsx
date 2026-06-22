@@ -1,7 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PackageCheck } from "lucide-react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
-import { CrudPager } from "../../components/CrudPager";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridColumn,
+} from "../../components/ConsoleDataGrid";
 import {
   DEFAULT_UPDATE_VERSION_URL,
   type JobDispatchPresetInput,
@@ -60,6 +63,87 @@ export function AgentUpdateReleasesPanel({
     useState<CreateAgentUpdateReleaseRequest | null>(null);
   const latestRelease = releases[0] ?? null;
   const policy = registeredUpdatePolicy(suiteConfig, suiteConfigError, suiteConfigLoading);
+  const releaseColumns = useMemo<ConsoleDataGridColumn<AgentUpdateReleaseRecord>[]>(
+    () => [
+      {
+        cell: (release) => (
+          <span className="historyPrimary">
+            <strong>{release.name}</strong>
+            <small>
+              {release.version} / {release.channel}
+            </small>
+          </span>
+        ),
+        header: "Release",
+        id: "release",
+        searchValue: (release) => `${release.name} ${release.version} ${release.channel}`,
+        sortValue: (release) => `${release.name}:${release.version}`,
+      },
+      {
+        cell: (release) => (
+          <span className={`status ${agentUpdateReleaseStatusBadgeClass(release.status)}`}>
+            {release.status}
+          </span>
+        ),
+        header: "Status",
+        id: "status",
+        searchValue: (release) => release.status,
+        sortValue: (release) => release.status,
+      },
+      {
+        cell: (release) => (
+          <span className="monoValue" title={release.artifact_sha256_hex}>
+            {shortHash(release.artifact_sha256_hex)}
+          </span>
+        ),
+        header: "Artifact",
+        id: "artifact",
+        searchValue: (release) => release.artifact_sha256_hex,
+        sortValue: (release) => release.artifact_sha256_hex,
+      },
+      {
+        cell: (release) => (
+          <span
+            className="monoValue"
+            title={release.rollback_artifact_sha256_hex ?? undefined}
+          >
+            {release.rollback_artifact_sha256_hex
+              ? shortHash(release.rollback_artifact_sha256_hex)
+              : "none"}
+          </span>
+        ),
+        header: "Rollback",
+        id: "rollback",
+        searchValue: (release) => release.rollback_artifact_sha256_hex ?? "",
+        sortValue: (release) => release.rollback_artifact_sha256_hex ?? "",
+      },
+      {
+        cell: (release) => (
+          <span className="monoValue" title={release.artifact_url_sha256_hex ?? undefined}>
+            {release.artifact_url_sha256_hex
+              ? shortHash(release.artifact_url_sha256_hex)
+              : "not stored"}
+            {release.rollback_artifact_url_sha256_hex && (
+              <small>{shortHash(release.rollback_artifact_url_sha256_hex)}</small>
+            )}
+          </span>
+        ),
+        header: "URL hash",
+        id: "urlHash",
+        searchValue: (release) =>
+          `${release.artifact_url_sha256_hex ?? ""} ${release.rollback_artifact_url_sha256_hex ?? ""}`,
+        sortValue: (release) => release.artifact_url_sha256_hex ?? "",
+      },
+      {
+        cell: (release) => formatTime(release.created_at),
+        header: "Created",
+        id: "created",
+        searchValue: (release) => formatTime(release.created_at),
+        sortValue: (release) => release.created_at,
+      },
+    ],
+    [],
+  );
 
   useEffect(() => {
     setReleaseSnapshot(null);
@@ -327,18 +411,12 @@ export function AgentUpdateReleasesPanel({
         pending={releasePending}
         title="Confirm agent update release"
       />
-      <CrudPager
-        fields={[
-          { label: "Release", value: (release) => `${release.name} ${release.version} ${release.channel}` },
-          { label: "Status", value: (release) => release.status },
-          { label: "Artifact", value: (release) => release.artifact_sha256_hex },
-          { label: "Rollback", value: (release) => release.rollback_artifact_sha256_hex },
-          { label: "URL hash", value: (release) => release.artifact_url_sha256_hex ?? "" },
-        ]}
+      <ConsoleDataGrid
+        columns={releaseColumns}
+        defaultPageSize={8}
+        expandOnRowClick
+        getRowId={(release) => release.id}
         itemLabel="releases"
-        items={releases}
-        pageSize={8}
-        title="Release records"
         empty={
           <div className="emptyState">
             <PackageCheck size={22} />
@@ -346,40 +424,27 @@ export function AgentUpdateReleasesPanel({
             <span>Record an external HTTPS artifact before enforcing registered updates.</span>
           </div>
         }
-      >
-        {(releaseRows) => (
-          <div className="table historyTable">
-            <div className="historyRow heading releaseGrid">
-              <span>Release</span>
-              <span>Status</span>
-              <span>Artifact</span>
-              <span>Rollback</span>
-              <span>URL hash</span>
-              <span>Created</span>
-            </div>
-            {releaseRows.map((release) => (
-              <div className="historyRow releaseGrid" key={release.id}>
-                <span className="historyPrimary">
-                  <strong>{release.name}</strong>
-                  <small>
-                    {release.version} / {release.channel}
-                  </small>
-                </span>
-                <span className={`status ${agentUpdateReleaseStatusBadgeClass(release.status)}`}>{release.status}</span>
-                <span className="monoValue">{shortHash(release.artifact_sha256_hex)}</span>
-                <span className="monoValue">
-                  {release.rollback_artifact_sha256_hex ? shortHash(release.rollback_artifact_sha256_hex) : "none"}
-                </span>
-                <span className="monoValue">
-                  {release.artifact_url_sha256_hex ? shortHash(release.artifact_url_sha256_hex) : "not stored"}
-                  {release.rollback_artifact_url_sha256_hex && <small>{shortHash(release.rollback_artifact_url_sha256_hex)}</small>}
-                </span>
-                <span>{formatTime(release.created_at)}</span>
-              </div>
-            ))}
+        renderExpandedRow={(release) => (
+          <div className="consoleInlineDetailGrid">
+            <span>Release ID</span>
+            <strong>{release.id}</strong>
+            <span>Artifact SHA-256</span>
+            <strong>{release.artifact_sha256_hex}</strong>
+            <span>Artifact URL hash</span>
+            <strong>{release.artifact_url_sha256_hex ?? "Not stored"}</strong>
+            <span>Rollback SHA-256</span>
+            <strong>{release.rollback_artifact_sha256_hex ?? "None"}</strong>
+            <span>Rollback URL hash</span>
+            <strong>{release.rollback_artifact_url_sha256_hex ?? "None"}</strong>
+            <span>Created</span>
+            <strong>{formatTime(release.created_at)}</strong>
           </div>
         )}
-      </CrudPager>
+        rows={releases}
+        searchPlaceholder="Search releases"
+        storageKey="vpsman.jobs.agentUpdateReleases"
+        title="Release records"
+      />
     </div>
   );
 }

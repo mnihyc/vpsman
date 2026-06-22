@@ -89,17 +89,6 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .crudToolbar {
-    align-items: stretch;
-  }
-
-  .crudSearch {
-    grid-template-columns: minmax(0, 1fr);
-    flex-basis: 100%;
-  }
-
-  .crudPageActions,
-  .crudPageSize,
   .retentionActions {
     justify-content: flex-start;
   }

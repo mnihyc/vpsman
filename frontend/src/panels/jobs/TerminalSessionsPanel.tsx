@@ -2,7 +2,10 @@ import { History, Keyboard, LogIn, Maximize2, Radio, RefreshCw, TerminalSquare, 
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CrudPager } from "../../components/CrudPager";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridColumn,
+} from "../../components/ConsoleDataGrid";
 import { terminalSessionStateBadgeClass } from "../../jobStatusPresentation";
 import type { TerminalAction } from "../jobDispatchModel";
 import type { WsTerminalOutputEvent } from "../../types";
@@ -42,6 +45,197 @@ export function TerminalSessionsPanel({
   const openSessions = sessions.filter((session) => !session.session_exited && session.state !== "closed").length;
   const replayableSessions = sessions.filter((session) => session.output_next_seq !== null).length;
   const retainedBytes = sessions.reduce((total, session) => total + (session.output_retained_bytes ?? 0), 0);
+  const terminalColumns: ConsoleDataGridColumn<TerminalSessionRecord>[] = [
+    {
+      cell: (session) => {
+        const key = `${session.client_id}:${session.session_id}`;
+        const selected = activeSession?.client_id === session.client_id && activeSession.session_id === session.session_id;
+        return (
+          <span className="historyPrimary">
+            <button
+              className={`linkLikeButton ${selected ? "activeAction" : ""}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                setActiveKey(key);
+              }}
+              type="button"
+            >
+              {clientLabel(session.client_id)}
+            </button>
+            <small>{shortId(session.session_id)}</small>
+          </span>
+        );
+      },
+      header: "Session",
+      id: "session",
+      searchValue: (session) => `${clientLabel(session.client_id)} ${session.client_id} ${session.session_id}`,
+      sortValue: (session) => `${clientLabel(session.client_id)}:${session.session_id}`,
+    },
+    {
+      cell: (session) => (
+        <span className="historyPrimary">
+          <span className={`status ${terminalSessionStateBadgeClass(session.state)}`}>{session.state}</span>
+          <small>{session.last_status}</small>
+        </span>
+      ),
+      header: "State",
+      id: "state",
+      searchValue: (session) => `${session.state} ${session.last_status}`,
+      sortValue: (session) => session.state,
+    },
+    {
+      cell: (session) => (
+        <span className="historyPrimary">
+          <strong title={formatArgv(session.argv)}>{formatArgv(session.argv) || session.last_command_type}</strong>
+          <small>{session.cwd ?? session.last_event}</small>
+        </span>
+      ),
+      header: "Command",
+      id: "command",
+      searchValue: (session) => `${formatArgv(session.argv)} ${session.last_command_type} ${session.cwd ?? ""}`,
+      sortValue: (session) => formatArgv(session.argv) || session.last_command_type,
+    },
+    {
+      cell: (session) => (
+        <span className="historyPrimary">
+          <strong>{formatWindow(session)}</strong>
+          <small>{formatLimits(session)}</small>
+        </span>
+      ),
+      header: "Window",
+      id: "window",
+      searchValue: (session) => `${formatWindow(session)} ${formatLimits(session)}`,
+      sortValue: (session) => formatWindow(session),
+    },
+    {
+      cell: (session) => (
+        <span className="historyPrimary">
+          <strong>{formatOutputRange(session)}</strong>
+          <small className={session.output_dropped_bytes || session.output_replay_truncated ? "terminalWarning" : undefined}>
+            {formatOutputRetention(session)}
+          </small>
+        </span>
+      ),
+      header: "Output",
+      id: "output",
+      searchValue: (session) => `${formatOutputRange(session)} ${formatOutputRetention(session)}`,
+      sortValue: (session) => session.output_next_seq ?? 0,
+    },
+    {
+      cell: (session) => {
+        const active = !session.session_exited && session.state !== "closed";
+        const key = `${session.client_id}:${session.session_id}`;
+        const following = followKey === key;
+        return (
+          <span className="rowActions compactRowActions">
+            <button
+              aria-label={`${following ? "Stop following" : "Follow"} terminal session ${shortId(session.session_id)}`}
+              className={`iconButton ${following ? "activeAction" : ""}`}
+              disabled={session.output_next_seq === null}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleFollow(session);
+              }}
+              title="Live follow persisted terminal output"
+              type="button"
+            >
+              <Radio size={13} />
+            </button>
+            <button
+              aria-label={`Durable replay terminal session ${shortId(session.session_id)}`}
+              className="iconButton"
+              disabled={session.output_next_seq === null || replayPendingKey === key}
+              onClick={(event) => {
+                event.stopPropagation();
+                void loadDurableReplay(session);
+              }}
+              title="Load persisted replay from server job output history"
+              type="button"
+            >
+              <History size={13} />
+            </button>
+            <button
+              aria-label={`Attach terminal session ${shortId(session.session_id)}`}
+              className="iconButton"
+              disabled={!active}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPrepareAction(session, "open");
+              }}
+              title="Prepare attach/replay"
+              type="button"
+            >
+              <LogIn size={13} />
+            </button>
+            <button
+              aria-label={`Poll terminal session ${shortId(session.session_id)}`}
+              className="iconButton"
+              disabled={!active}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPrepareAction(session, "poll");
+              }}
+              title="Prepare output poll"
+              type="button"
+            >
+              <RefreshCw size={13} />
+            </button>
+            <button
+              aria-label={`Input terminal session ${shortId(session.session_id)}`}
+              className="iconButton"
+              disabled={!active}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPrepareAction(session, "input");
+              }}
+              title="Prepare input"
+              type="button"
+            >
+              <Keyboard size={13} />
+            </button>
+            <button
+              aria-label={`Resize terminal session ${shortId(session.session_id)}`}
+              className="iconButton"
+              disabled={!active}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPrepareAction(session, "resize");
+              }}
+              title="Prepare resize"
+              type="button"
+            >
+              <Maximize2 size={13} />
+            </button>
+            <button
+              aria-label={`Close terminal session ${shortId(session.session_id)}`}
+              className="iconButton dangerAction"
+              disabled={!active}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPrepareAction(session, "close");
+              }}
+              title="Prepare close"
+              type="button"
+            >
+              <XCircle size={13} />
+            </button>
+          </span>
+        );
+      },
+      enableHiding: false,
+      header: "Actions",
+      id: "actions",
+      minSize: 240,
+      size: 260,
+    },
+    {
+      cell: (session) => formatTime(session.observed_at),
+      header: "Observed",
+      id: "observed",
+      searchValue: (session) => formatTime(session.observed_at),
+      sortValue: (session) => session.observed_at,
+    },
+  ];
 
   useEffect(() => {
     if (!lastTerminalOutputEvent || !followKey) {
@@ -166,18 +360,12 @@ export function TerminalSessionsPanel({
           }
         />
       </div>
-      <CrudPager
-        fields={[
-          { label: "VPS", value: (session) => clientLabel(session.client_id) },
-          { label: "Session", value: (session) => session.session_id },
-          { label: "State", value: (session) => `${session.state} ${session.last_status}` },
-          { label: "Command", value: (session) => `${formatArgv(session.argv)} ${session.last_command_type}` },
-          { label: "Output", value: (session) => `${formatOutputRange(session)} ${formatOutputRetention(session)}` },
-        ]}
+      <ConsoleDataGrid
+        columns={terminalColumns}
+        defaultPageSize={8}
+        expandOnRowClick
+        getRowId={(session) => `${session.client_id}:${session.session_id}`}
         itemLabel="sessions"
-        items={sessions}
-        pageSize={8}
-        title="Terminal records"
         empty={
           <div className="emptyState">
             <TerminalSquare size={22} />
@@ -185,135 +373,29 @@ export function TerminalSessionsPanel({
             <span>Terminal open, input, poll, resize, and close jobs populate this inventory.</span>
           </div>
         }
-      >
-        {(rows) => (
-          <div className="table historyTable">
-            <div className="historyRow heading terminalSessionGrid">
-              <span>Session</span>
-              <span>State</span>
-              <span>Command</span>
-              <span>Window</span>
-              <span>Output</span>
-              <span>Actions</span>
-              <span>Observed</span>
-            </div>
-            {rows.map((session) => {
-              const active = !session.session_exited && session.state !== "closed";
-              const key = `${session.client_id}:${session.session_id}`;
-              const following = followKey === key;
-              const selected = activeSession?.client_id === session.client_id && activeSession.session_id === session.session_id;
-              return (
-                <div className={`historyRow terminalSessionGrid ${selected ? "selectedTerminalSession" : ""}`} key={`${session.client_id}:${session.session_id}`}>
-                  <span className="historyPrimary">
-                    <button className="linkLikeButton" onClick={() => setActiveKey(key)} type="button">
-                      {clientLabel(session.client_id)}
-                    </button>
-                    <small>{shortId(session.session_id)}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <span className={`status ${terminalSessionStateBadgeClass(session.state)}`}>{session.state}</span>
-                    <small>{session.last_status}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <strong title={formatArgv(session.argv)}>{formatArgv(session.argv) || session.last_command_type}</strong>
-                    <small>{session.cwd ?? session.last_event}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <strong>{formatWindow(session)}</strong>
-                    <small>{formatLimits(session)}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <strong>{formatOutputRange(session)}</strong>
-                    <small className={session.output_dropped_bytes || session.output_replay_truncated ? "terminalWarning" : undefined}>
-                      {formatOutputRetention(session)}
-                    </small>
-                  </span>
-                  <span className="rowActions compactRowActions">
-                    <button
-                      aria-label={`${following ? "Stop following" : "Follow"} terminal session ${shortId(session.session_id)}`}
-                      className={`secondaryAction compactAction ${following ? "activeAction" : ""}`}
-                      disabled={session.output_next_seq === null}
-                      onClick={() => toggleFollow(session)}
-                      title="Live follow persisted terminal output"
-                      type="button"
-                    >
-                      <Radio size={13} />
-                      <span>{following ? "Live" : "Follow"}</span>
-                    </button>
-                    <button
-                      aria-label={`Durable replay terminal session ${shortId(session.session_id)}`}
-                      className="secondaryAction compactAction"
-                      disabled={session.output_next_seq === null || replayPendingKey === `${session.client_id}:${session.session_id}`}
-                      onClick={() => void loadDurableReplay(session)}
-                      title="Load persisted replay from server job output history"
-                      type="button"
-                    >
-                      <History size={13} />
-                      <span>Replay</span>
-                    </button>
-                    <button
-                      aria-label={`Attach terminal session ${shortId(session.session_id)}`}
-                      className="secondaryAction compactAction"
-                      disabled={!active}
-                      onClick={() => onPrepareAction(session, "open")}
-                      title="Prepare attach/replay"
-                      type="button"
-                    >
-                      <LogIn size={13} />
-                      <span>Attach</span>
-                    </button>
-                    <button
-                      aria-label={`Poll terminal session ${shortId(session.session_id)}`}
-                      className="secondaryAction compactAction"
-                      disabled={!active}
-                      onClick={() => onPrepareAction(session, "poll")}
-                      title="Prepare output poll"
-                      type="button"
-                    >
-                      <RefreshCw size={13} />
-                      <span>Poll</span>
-                    </button>
-                    <button
-                      aria-label={`Input terminal session ${shortId(session.session_id)}`}
-                      className="secondaryAction compactAction"
-                      disabled={!active}
-                      onClick={() => onPrepareAction(session, "input")}
-                      title="Prepare input"
-                      type="button"
-                    >
-                      <Keyboard size={13} />
-                      <span>Input</span>
-                    </button>
-                    <button
-                      aria-label={`Resize terminal session ${shortId(session.session_id)}`}
-                      className="secondaryAction compactAction"
-                      disabled={!active}
-                      onClick={() => onPrepareAction(session, "resize")}
-                      title="Prepare resize"
-                      type="button"
-                    >
-                      <Maximize2 size={13} />
-                      <span>Resize</span>
-                    </button>
-                    <button
-                      aria-label={`Close terminal session ${shortId(session.session_id)}`}
-                      className="secondaryAction compactAction dangerAction"
-                      disabled={!active}
-                      onClick={() => onPrepareAction(session, "close")}
-                      title="Prepare close"
-                      type="button"
-                    >
-                      <XCircle size={13} />
-                      <span>Close</span>
-                    </button>
-                  </span>
-                  <span>{formatTime(session.observed_at)}</span>
-                </div>
-              );
-            })}
+        renderExpandedRow={(session) => (
+          <div className="consoleInlineDetailGrid">
+            <span>Session ID</span>
+            <strong>{session.session_id}</strong>
+            <span>VPS</span>
+            <strong>{clientLabel(session.client_id)}</strong>
+            <span>Command</span>
+            <strong>{formatArgv(session.argv) || session.last_command_type}</strong>
+            <span>Working directory</span>
+            <strong>{session.cwd ?? "Not reported"}</strong>
+            <span>Output range</span>
+            <strong>{formatOutputRange(session)}</strong>
+            <span>Retention</span>
+            <strong>{formatOutputRetention(session)}</strong>
+            <span>Last event</span>
+            <strong>{session.last_event}</strong>
           </div>
         )}
-      </CrudPager>
+        rows={sessions}
+        searchPlaceholder="Search terminal sessions"
+        storageKey="vpsman.jobs.terminalSessions"
+        title="Terminal records"
+      />
       {replayPreview && (
         <div className="terminalReplayPreview" aria-label="Durable terminal replay preview">
           <div>

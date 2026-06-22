@@ -2,7 +2,10 @@ import { Database, Download, FileArchive, RefreshCw, Upload } from "lucide-react
 import { useEffect, useState } from "react";
 import type { ArtifactDownloadMode } from "../../artifactDownload";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
-import { CrudPager } from "../../components/CrudPager";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridColumn,
+} from "../../components/ConsoleDataGrid";
 import {
   artifactLifecycleStatusBadgeClass,
   fileTransferSessionStatusBadgeClass,
@@ -89,6 +92,212 @@ export function FileTransferSessionsPanel({
   const selectedHandoffTransfers = handoffCandidates.filter((transfer) => selectedHandoffKeySet.has(transferKey(transfer)));
   const handoffBusy = handoffPendingKey !== null;
   const handoffSummary = handoffError ?? handoffProgress ?? `${transfers.length} resumable upload/download states`;
+  const sourceColumns: ConsoleDataGridColumn<FileTransferSourceArtifactRecord>[] = [
+    {
+      cell: (source) => (
+        <span className="historyPrimary">
+          <strong>{source.name}</strong>
+          <small>{shortHash(source.sha256_hex)}</small>
+        </span>
+      ),
+      header: "Artifact",
+      id: "artifact",
+      searchValue: (source) => `${source.name} ${source.sha256_hex}`,
+      sortValue: (source) => source.name,
+    },
+    {
+      cell: (source) => (
+        <span
+          className={`sourceArtifactStatus status ${artifactLifecycleStatusBadgeClass(source.status)}`}
+          title={artifactLifecycleStatusTitle(source.status)}
+        >
+          {source.status}
+        </span>
+      ),
+      header: "Status",
+      id: "status",
+      searchValue: (source) => source.status,
+      sortValue: (source) => source.status,
+    },
+    {
+      cell: (source) => (
+        <span className="sourceArtifactMeta historyPrimary">
+          <strong>{formatBytes(source.size_bytes)}</strong>
+          <small>{formatTime(source.created_at)}</small>
+        </span>
+      ),
+      header: "Size",
+      id: "size",
+      searchValue: (source) => `${source.size_bytes} ${formatTime(source.created_at)}`,
+      sortValue: (source) => source.size_bytes,
+    },
+    {
+      cell: (source) => (
+        <button
+          aria-label={`Download source artifact ${source.name}`}
+          className="sourceArtifactDownload iconButton"
+          disabled={
+            sourcePendingId === source.id ||
+            source.status === "creating" ||
+            source.status === "deleting"
+          }
+          onClick={(event) => {
+            event.stopPropagation();
+            void downloadSourceArtifact(source);
+          }}
+          title={
+            source.status === "creating" || source.status === "deleting"
+              ? artifactLifecycleStatusTitle(source.status)
+              : "Download source artifact"
+          }
+          type="button"
+        >
+          <Download size={14} />
+        </button>
+      ),
+      enableHiding: false,
+      header: "Action",
+      id: "action",
+    },
+  ];
+  const transferColumns: ConsoleDataGridColumn<FileTransferSessionRecord>[] = [
+    {
+      cell: (transfer) => {
+        const key = transferKey(transfer);
+        const selectable = canCreateHandoff(transfer);
+        const evidenceLabel = handoffEvidenceLabel(transfer);
+        const evidenceTitle = handoffEvidenceTitle(transfer);
+        return (
+          <span className="rowSelectCell">
+            {selectable ? (
+              <input
+                aria-label={`Select transfer handoff session ${shortId(transfer.session_id)}`}
+                checked={selectedHandoffKeySet.has(key)}
+                disabled={handoffBusy}
+                onChange={(event) => toggleHandoffSelection(transfer, event.target.checked)}
+                onClick={(event) => event.stopPropagation()}
+                type="checkbox"
+              />
+            ) : (
+              <small title={evidenceTitle}>{evidenceLabel}</small>
+            )}
+          </span>
+        );
+      },
+      enableHiding: false,
+      header: "Select",
+      id: "select",
+    },
+    {
+      cell: (transfer) => (
+        <span className="historyPrimary">
+          <strong>{transfer.direction}</strong>
+          <small>
+            {clientLabel(transfer.client_id)} / {shortId(transfer.session_id)}
+          </small>
+        </span>
+      ),
+      header: "Session",
+      id: "session",
+      searchValue: (transfer) => `${clientLabel(transfer.client_id)} ${transfer.client_id} ${transfer.session_id} ${transfer.direction}`,
+      sortValue: (transfer) => `${transfer.direction}:${clientLabel(transfer.client_id)}`,
+    },
+    {
+      cell: (transfer) => {
+        const evidenceLabel = handoffEvidenceLabel(transfer);
+        const evidenceTitle = handoffEvidenceTitle(transfer);
+        return (
+          <span className="historyPrimary">
+            <span className={`status ${fileTransferSessionStatusBadgeClass(transfer.status)}`}>{transfer.status}</span>
+            <small title={transfer.direction === "download" ? evidenceTitle : transfer.last_event}>
+              {transfer.direction === "download" ? evidenceLabel : transfer.resumed ? "resumed" : transfer.last_event}
+            </small>
+          </span>
+        );
+      },
+      header: "Status",
+      id: "status",
+      searchValue: (transfer) => `${transfer.status} ${transfer.last_event} ${handoffEvidenceLabel(transfer)}`,
+      sortValue: (transfer) => transfer.status,
+    },
+    {
+      cell: (transfer) => (
+        <span className="transferProgressCell">
+          <span>{formatTransferProgress(transfer)}</span>
+          <span className="transferProgressTrack">
+            <span style={{ width: `${Math.round((transfer.progress_ratio ?? 0) * 100)}%` }} />
+          </span>
+        </span>
+      ),
+      header: "Progress",
+      id: "progress",
+      searchValue: (transfer) => formatTransferProgress(transfer),
+      sortValue: (transfer) => transfer.progress_ratio ?? 0,
+    },
+    {
+      cell: (transfer) => (
+        <span className="historyPrimary">
+          <strong title={transfer.path}>{transfer.path}</strong>
+          <small>{transfer.sha256_hex ? shortHash(transfer.sha256_hex) : transfer.last_command_type}</small>
+        </span>
+      ),
+      header: "Path",
+      id: "path",
+      searchValue: (transfer) => `${transfer.path} ${transfer.sha256_hex ?? ""} ${transfer.last_command_type}`,
+      sortValue: (transfer) => transfer.path,
+    },
+    {
+      cell: (transfer) => (
+        <span className="historyPrimary">
+          <strong>{transfer.rate_limit_kbps ? `${transfer.rate_limit_kbps} kbps` : "unlimited"}</strong>
+          <small>{formatChunkInfo(transfer)}</small>
+        </span>
+      ),
+      header: "Rate",
+      id: "rate",
+      searchValue: (transfer) => `${transfer.rate_limit_kbps ?? "unlimited"} ${formatChunkInfo(transfer)}`,
+      sortValue: (transfer) => transfer.rate_limit_kbps ?? 0,
+    },
+    {
+      cell: (transfer) => formatTime(transfer.observed_at),
+      header: "Observed",
+      id: "observed",
+      searchValue: (transfer) => formatTime(transfer.observed_at),
+      sortValue: (transfer) => transfer.observed_at,
+    },
+    {
+      cell: (transfer) => {
+        const key = transferKey(transfer);
+        const selectable = canCreateHandoff(transfer);
+        const evidenceLabel = handoffEvidenceLabel(transfer);
+        const evidenceTitle = handoffEvidenceTitle(transfer);
+        return (
+          <span className="rowActions">
+            {selectable ? (
+              <button
+                aria-label={`Create transfer handoff session ${shortId(transfer.session_id)}`}
+                className="iconButton"
+                disabled={handoffPendingKey === key || handoffPendingKey === "bulk"}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  reviewHandoff(transfer);
+                }}
+                title={handoffReadyTitle(transfer)}
+                type="button"
+              >
+                <Download size={14} />
+              </button>
+            ) : (
+              <small title={evidenceTitle}>{evidenceLabel}</small>
+            )}
+          </span>
+        );
+      },
+      enableHiding: false,
+      header: "Action",
+      id: "action",
+    },
+  ];
 
   useEffect(() => {
     setSourceSnapshot(null);
@@ -300,66 +509,39 @@ export function FileTransferSessionsPanel({
           pending={sourcePending}
           title="Confirm source artifact upload"
         />
-        <CrudPager
-          fields={[
-            { label: "Name", value: (source) => source.name },
-            { label: "Hash", value: (source) => source.sha256_hex },
-            { label: "Status", value: (source) => source.status },
-            { label: "Size", value: (source) => source.size_bytes },
-            { label: "Created", value: (source) => source.created_at },
-          ]}
+        <ConsoleDataGrid
+          columns={sourceColumns}
+          defaultPageSize={6}
+          expandOnRowClick
+          getRowId={(source) => source.id}
           itemLabel="artifacts"
-          items={sources}
-          pageSize={6}
-          title="Source artifacts"
           empty={
             <div className="sourceArtifactEmpty">
               <Database size={18} />
               <span>No source artifacts</span>
             </div>
           }
-        >
-          {(sourceRows) => (
-            <div className="sourceArtifactList">
-              {sourceRows.map((source) => (
-                <div className="sourceArtifactRow" key={source.id}>
-                  <span className="historyPrimary">
-                    <strong>{source.name}</strong>
-                    <small>{shortHash(source.sha256_hex)}</small>
-                  </span>
-                  <span
-                    className={`sourceArtifactStatus status ${artifactLifecycleStatusBadgeClass(source.status)}`}
-                    title={artifactLifecycleStatusTitle(source.status)}
-                  >
-                    {source.status}
-                  </span>
-                  <span className="sourceArtifactMeta historyPrimary">
-                    <strong>{formatBytes(source.size_bytes)}</strong>
-                    <small>{formatTime(source.created_at)}</small>
-                  </span>
-                  <button
-                    aria-label={`Download source artifact ${source.name}`}
-                    className="sourceArtifactDownload iconButton"
-                    disabled={
-                      sourcePendingId === source.id ||
-                      source.status === "creating" ||
-                      source.status === "deleting"
-                    }
-                    onClick={() => void downloadSourceArtifact(source)}
-                    title={
-                      source.status === "creating" || source.status === "deleting"
-                        ? artifactLifecycleStatusTitle(source.status)
-                        : "Download source artifact"
-                    }
-                    type="button"
-                  >
-                    <Download size={14} />
-                  </button>
-                </div>
-              ))}
+          renderExpandedRow={(source) => (
+            <div className="consoleInlineDetailGrid">
+              <span>Artifact ID</span>
+              <strong>{source.id}</strong>
+              <span>Name</span>
+              <strong>{source.name}</strong>
+              <span>SHA-256</span>
+              <strong>{source.sha256_hex}</strong>
+              <span>Size</span>
+              <strong>{formatBytes(source.size_bytes)}</strong>
+              <span>Status</span>
+              <strong>{source.status}</strong>
+              <span>Created</span>
+              <strong>{formatTime(source.created_at)}</strong>
             </div>
           )}
-        </CrudPager>
+          rows={sources}
+          searchPlaceholder="Search source artifacts"
+          storageKey="vpsman.jobs.fileTransferSources"
+          title="Source artifacts"
+        />
       </div>
       <div className="handoffBulkBar">
         <span className="historyPrimary">
@@ -443,19 +625,12 @@ export function FileTransferSessionsPanel({
         pending={handoffBusy}
         title="Confirm transfer handoff download"
       />
-      <CrudPager
-        fields={[
-          { label: "VPS", value: (transfer) => clientLabel(transfer.client_id) },
-          { label: "Session", value: (transfer) => transfer.session_id },
-          { label: "Direction", value: (transfer) => transfer.direction },
-          { label: "Status", value: (transfer) => `${transfer.status} ${transfer.last_event}` },
-          { label: "Path", value: (transfer) => transfer.path },
-          { label: "Hash", value: (transfer) => transfer.sha256_hex },
-        ]}
+      <ConsoleDataGrid
+        columns={transferColumns}
+        defaultPageSize={8}
+        expandOnRowClick
+        getRowId={transferKey}
         itemLabel="transfers"
-        items={transfers}
-        pageSize={8}
-        title="Transfer records"
         empty={
           <div className="emptyState">
             <FileArchive size={22} />
@@ -463,86 +638,29 @@ export function FileTransferSessionsPanel({
             <span>Resumable upload and download status events populate this inventory.</span>
           </div>
         }
-      >
-        {(transferRows) => (
-          <div className="table historyTable">
-            <div className="historyRow heading fileTransferGrid">
-              <span>Select</span>
-              <span>Session</span>
-              <span>Status</span>
-              <span>Progress</span>
-              <span>Path</span>
-              <span>Rate</span>
-              <span>Observed</span>
-              <span>Action</span>
-            </div>
-            {transferRows.map((transfer) => {
-              const key = transferKey(transfer);
-              const selectable = canCreateHandoff(transfer);
-              const evidenceLabel = handoffEvidenceLabel(transfer);
-              const evidenceTitle = handoffEvidenceTitle(transfer);
-              return (
-                <div className="historyRow fileTransferGrid" key={key}>
-                  <span className="rowSelectCell">
-                    {selectable ? (
-                      <input
-                        aria-label={`Select transfer handoff session ${shortId(transfer.session_id)}`}
-                        checked={selectedHandoffKeySet.has(key)}
-                        disabled={handoffBusy}
-                        onChange={(event) => toggleHandoffSelection(transfer, event.target.checked)}
-                        type="checkbox"
-                      />
-                    ) : (
-                      <small title={evidenceTitle}>{evidenceLabel}</small>
-                    )}
-                  </span>
-                  <span className="historyPrimary">
-                    <strong>{transfer.direction}</strong>
-                    <small>{clientLabel(transfer.client_id)} / {shortId(transfer.session_id)}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <span className={`status ${fileTransferSessionStatusBadgeClass(transfer.status)}`}>{transfer.status}</span>
-                    <small title={transfer.direction === "download" ? evidenceTitle : transfer.last_event}>
-                      {transfer.direction === "download" ? evidenceLabel : transfer.resumed ? "resumed" : transfer.last_event}
-                    </small>
-                  </span>
-                  <span className="transferProgressCell">
-                    <span>{formatTransferProgress(transfer)}</span>
-                    <span className="transferProgressTrack">
-                      <span style={{ width: `${Math.round((transfer.progress_ratio ?? 0) * 100)}%` }} />
-                    </span>
-                  </span>
-                  <span className="historyPrimary">
-                    <strong title={transfer.path}>{transfer.path}</strong>
-                    <small>{transfer.sha256_hex ? shortHash(transfer.sha256_hex) : transfer.last_command_type}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <strong>{transfer.rate_limit_kbps ? `${transfer.rate_limit_kbps} kbps` : "unlimited"}</strong>
-                    <small>{formatChunkInfo(transfer)}</small>
-                  </span>
-                  <span>{formatTime(transfer.observed_at)}</span>
-                  <span className="rowActions">
-                    {selectable ? (
-                      <button
-                        aria-label={`Create transfer handoff session ${shortId(transfer.session_id)}`}
-                        className="iconButton"
-                        disabled={handoffPendingKey === key || handoffPendingKey === "bulk"}
-                        onClick={() => reviewHandoff(transfer)}
-                        title={handoffReadyTitle(transfer)}
-                        type="button"
-                      >
-                        <Download size={14} />
-                      </button>
-                    ) : (
-                      <small title={evidenceTitle}>{evidenceLabel}</small>
-                    )}
-                  </span>
-                </div>
-              );
-            })}
+        renderExpandedRow={(transfer) => (
+          <div className="consoleInlineDetailGrid">
+            <span>Session ID</span>
+            <strong>{transfer.session_id}</strong>
+            <span>VPS</span>
+            <strong>{clientLabel(transfer.client_id)}</strong>
+            <span>Path</span>
+            <strong>{transfer.path}</strong>
+            <span>SHA-256</span>
+            <strong>{transfer.sha256_hex ?? "Not reported"}</strong>
+            <span>Progress</span>
+            <strong>{formatTransferProgress(transfer)}</strong>
+            <span>Handoff evidence</span>
+            <strong>{handoffEvidenceTitle(transfer)}</strong>
+            <span>Last event</span>
+            <strong>{transfer.last_event}</strong>
           </div>
         )}
-      </CrudPager>
+        rows={transfers}
+        searchPlaceholder="Search transfers"
+        storageKey="vpsman.jobs.fileTransferSessions"
+        title="Transfer records"
+      />
     </div>
   );
 }

@@ -18,7 +18,10 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, Plus, RefreshCw, ShieldCheck, Tag, Trash2, X } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
-import { CrudPager } from "../components/CrudPager";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridColumn,
+} from "../components/ConsoleDataGrid";
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { usePanelDisplaySettings } from "../panelDisplay";
@@ -222,6 +225,49 @@ function TagRegistry({
     });
   }
 
+  const tagColumns = useMemo<ConsoleDataGridColumn<TagView>[]>(
+    () => [
+      {
+        cell: (tag) => (
+          <span className="tags">
+            <em>{tag.name}</em>
+          </span>
+        ),
+        header: "Tag",
+        id: "tag",
+        searchValue: (tag) => tag.name,
+        sortValue: (tag) => tag.name,
+      },
+      {
+        cell: (tag) => tag.clients.length,
+        header: "Clients",
+        id: "clients",
+        searchValue: (tag) => tag.clients.length,
+        sortValue: (tag) => tag.clients.length,
+      },
+      {
+        cell: (tag) => (
+          <button
+            className="secondaryAction compactAction dangerAction"
+            disabled={pending}
+            onClick={(event) => {
+              event.stopPropagation();
+              void previewDelete(tag);
+            }}
+            type="button"
+          >
+            <Trash2 size={13} />
+            <span>Review deletion</span>
+          </button>
+        ),
+        enableHiding: false,
+        header: "Action",
+        id: "action",
+      },
+    ],
+    [pending],
+  );
+
   return (
     <>
       <form className="compactForm tagCreateForm" onSubmit={submitTag}>
@@ -234,15 +280,12 @@ function TagRegistry({
           </button>
         </div>
       </form>
-      <CrudPager
-        fields={[
-          { label: "Tag", value: (tag) => tag.name },
-          { label: "Clients", value: (tag) => tag.clients.length },
-        ]}
+      <ConsoleDataGrid
+        columns={tagColumns}
+        defaultPageSize={12}
+        expandOnRowClick
+        getRowId={(tag) => tag.name}
         itemLabel="tags"
-        items={tags}
-        pageSize={12}
-        title="Tag registry"
         empty={
           <div className="emptyState">
             <ShieldCheck size={22} />
@@ -250,31 +293,21 @@ function TagRegistry({
             <span>Create provider, country, or custom tags to target recurring VPS groups.</span>
           </div>
         }
-      >
-        {(rows) => (
-          <div className="table hierarchyTable">
-            <div className="historyRow heading tagRegistryGrid">
-              <span>Tag</span>
-              <span>Clients</span>
-              <span>Action</span>
-            </div>
-            {rows.map((tag) => (
-              <div className="historyRow tagRegistryGrid" key={tag.name}>
-                <span className="tags">
-                  <em>{tag.name}</em>
-                </span>
-                <span>{tag.clients.length}</span>
-                <span>
-                  <button className="secondaryAction compactAction dangerAction" disabled={pending} onClick={() => void previewDelete(tag)} type="button">
-                    <Trash2 size={13} />
-                    <span>Review deletion</span>
-                  </button>
-                </span>
-              </div>
-            ))}
+        renderExpandedRow={(tag) => (
+          <div className="consoleInlineDetailGrid">
+            <span>Tag</span>
+            <strong>{tag.name}</strong>
+            <span>Assigned VPSs</span>
+            <strong>{tag.clients.length}</strong>
+            <span>Clients</span>
+            <strong>{tag.clients.map((client) => client.id).join(", ") || "None"}</strong>
           </div>
         )}
-      </CrudPager>
+        rows={tags}
+        searchPlaceholder="Search tags"
+        storageKey="vpsman.tags.registry"
+        title="Tag registry"
+      />
       <TagOrderManager
         disabled={pending}
         onUpdateTagOrder={onUpdateTagOrder}
@@ -507,63 +540,116 @@ function TagAssignments({
     });
   }
 
-  return (
-    <CrudPager
-      fields={[
-        { label: "VPS", value: (agent) => formatVpsName(agent, vpsNameDisplayMode) },
-        { label: "Status", value: (agent) => agent.status },
-        { label: "Tags", value: (agent) => agent.tags.join(" ") },
-      ]}
-      itemLabel="VPSs"
-      items={agents}
-      pageSize={10}
-      title="VPS tag assignments"
-    >
-      {(rows) => (
-        <div className="table hierarchyTable">
-          <div className="historyRow heading tagAssignmentGrid">
-            <span>VPS</span>
-            <span>Status</span>
-            <span>Current tags</span>
-            <span>Add tag</span>
-          </div>
-          {rows.map((agent) => (
-            <div className="historyRow tagAssignmentGrid" key={agent.id}>
-              <span className="historyPrimary">
-                <strong title={agent.id}>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
-                <small>{agent.id}</small>
-              </span>
-              <span>{agent.status}</span>
-              <span className="tagChipList">
-                {agent.tags.map((tag) => (
-                  <button className="tagRemoveChip" disabled={pending} key={tag} onClick={() => void removeTag(agent, tag)} title={`Remove ${tag}`} type="button">
-                    <span>{tag}</span>
-                    <X size={12} />
-                  </button>
-                ))}
-              </span>
-              <span className="formRow inlineTagAdd">
-                <input
-                  aria-label={`Tag to add to ${agent.display_name}`}
-                  list="tag-options"
-                  onChange={(event) => setTagByAgent((current) => ({ ...current, [agent.id]: event.target.value }))}
-                  placeholder="tag"
-                  value={tagByAgent[agent.id] ?? ""}
-                />
-                <button className="secondaryAction compactAction" disabled={pending || !(tagByAgent[agent.id] ?? "").trim()} onClick={() => void addTag(agent)} type="button">
-                  <Plus size={13} />
-                </button>
-              </span>
-            </div>
-          ))}
-          <datalist id="tag-options">
-            {tagNames.map((tag) => (
-              <option key={tag} value={tag} />
+  const assignmentColumns = useMemo<ConsoleDataGridColumn<AgentView>[]>(
+    () => [
+      {
+        cell: (agent) => (
+          <span className="historyPrimary">
+            <strong title={agent.id}>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
+            <small>{agent.id}</small>
+          </span>
+        ),
+        header: "VPS",
+        id: "vps",
+        searchValue: (agent) => `${formatVpsName(agent, vpsNameDisplayMode)} ${agent.id}`,
+        sortValue: (agent) => formatVpsName(agent, vpsNameDisplayMode),
+      },
+      {
+        cell: (agent) => agent.status,
+        header: "Status",
+        id: "status",
+        searchValue: (agent) => agent.status,
+        sortValue: (agent) => agent.status,
+      },
+      {
+        cell: (agent) => (
+          <span className="tagChipList">
+            {agent.tags.map((tag) => (
+              <button
+                className="tagRemoveChip"
+                disabled={pending}
+                key={tag}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void removeTag(agent, tag);
+                }}
+                title={`Remove ${tag}`}
+                type="button"
+              >
+                <span>{tag}</span>
+                <X size={12} />
+              </button>
             ))}
-          </datalist>
-        </div>
-      )}
-    </CrudPager>
+          </span>
+        ),
+        header: "Current tags",
+        id: "tags",
+        searchValue: (agent) => agent.tags.join(" "),
+        sortValue: (agent) => agent.tags.join(" "),
+      },
+      {
+        cell: (agent) => (
+          <span className="formRow inlineTagAdd">
+            <input
+              aria-label={`Tag to add to ${agent.display_name}`}
+              list="tag-options"
+              onChange={(event) => setTagByAgent((current) => ({ ...current, [agent.id]: event.target.value }))}
+              onClick={(event) => event.stopPropagation()}
+              placeholder="tag"
+              value={tagByAgent[agent.id] ?? ""}
+            />
+            <button
+              className="secondaryAction compactAction"
+              disabled={pending || !(tagByAgent[agent.id] ?? "").trim()}
+              onClick={(event) => {
+                event.stopPropagation();
+                void addTag(agent);
+              }}
+              type="button"
+            >
+              <Plus size={13} />
+            </button>
+          </span>
+        ),
+        enableHiding: false,
+        header: "Add tag",
+        id: "addTag",
+      },
+    ],
+    [pending, tagByAgent, vpsNameDisplayMode],
+  );
+
+  return (
+    <>
+      <ConsoleDataGrid
+        columns={assignmentColumns}
+        defaultPageSize={10}
+        expandOnRowClick
+        getRowId={(agent) => agent.id}
+        itemLabel="VPSs"
+        renderExpandedRow={(agent) => (
+          <div className="consoleInlineDetailGrid">
+            <span>VPS</span>
+            <strong>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
+            <span>Client ID</span>
+            <strong>{agent.id}</strong>
+            <span>Status</span>
+            <strong>{agent.status}</strong>
+            <span>Tags</span>
+            <strong>{agent.tags.join(", ") || "None"}</strong>
+          </div>
+        )}
+        rows={agents}
+        searchPlaceholder="Search VPS assignments"
+        storageKey="vpsman.tags.assignments"
+        title="VPS tag assignments"
+      />
+      <datalist id="tag-options">
+        {tagNames.map((tag) => (
+          <option key={tag} value={tag} />
+        ))}
+      </datalist>
+    </>
   );
 }
 

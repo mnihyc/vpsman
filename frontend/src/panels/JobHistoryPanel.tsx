@@ -4,7 +4,6 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
-import { CrudPager } from "../components/CrudPager";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { type PrivilegeMaterial } from "../privilege";
 import type { ArtifactDownloadMode } from "../artifactDownload";
@@ -73,6 +72,9 @@ import { MultiFileActionsPanel } from "./jobs/MultiFileActionsPanel";
 import { ProcessSupervisorInventoryPanel } from "./jobs/ProcessSupervisorInventoryPanel";
 import { ServerJobsPanel } from "./jobs/ServerJobsPanel";
 import { TerminalSessionsPanel } from "./jobs/TerminalSessionsPanel";
+
+type JobOutputComparisonGroup = JobOutputComparisonRecord["groups"][number];
+type JobOutputComparisonRow = JobOutputComparisonRecord["rows"][number];
 
 function displayToken(value: string): string {
   return value.replace(/_/g, " ");
@@ -525,6 +527,192 @@ export function JobHistoryPanel({
     ],
     [openTargets],
   );
+  const targetColumns = useMemo<ConsoleDataGridColumn<JobTargetRecord>[]>(
+    () => [
+      {
+        cell: (target) => (
+          <span className="historyPrimary">
+            <strong>{clientLabel(target.client_id)}</strong>
+            <small>{shortId(target.job_id)}</small>
+          </span>
+        ),
+        header: "Client",
+        id: "client",
+        searchValue: (target) => `${clientLabel(target.client_id)} ${target.client_id} ${target.job_id}`,
+        sortValue: (target) => clientLabel(target.client_id),
+      },
+      {
+        cell: (target) => (
+          <span className={`status ${jobTargetStatusBadgeClass(target.status)}`}>
+            {target.status}
+          </span>
+        ),
+        header: "Status",
+        id: "status",
+        searchValue: (target) => target.status,
+        sortValue: (target) => target.status,
+      },
+      {
+        cell: (target) => <span title={target.message ?? undefined}>{target.message ?? "-"}</span>,
+        header: "Reason",
+        id: "reason",
+        searchValue: (target) => target.message ?? "",
+        sortValue: (target) => target.message ?? "",
+      },
+      {
+        cell: (target) => target.exit_code ?? "-",
+        header: "Exit",
+        id: "exit",
+        searchValue: (target) => target.exit_code ?? "",
+        sortValue: (target) => target.exit_code ?? Number.MAX_SAFE_INTEGER,
+      },
+      {
+        cell: (target) => (target.completed_at ? formatTime(target.completed_at) : "-"),
+        header: "Completed",
+        id: "completed",
+        searchValue: (target) => target.completed_at ?? "",
+        sortValue: (target) => target.completed_at ?? "",
+      },
+      {
+        cell: (target) => (
+          <span className="inlineActions">
+            {fileDownloadStatusByClient.has(target.client_id) ? (
+              <button
+                className="secondaryAction compactAction"
+                disabled={fileDownloadPendingClientId === target.client_id}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void downloadFileForClient(target.client_id);
+                }}
+                type="button"
+              >
+                <Download size={14} />
+                <span>
+                  {fileDownloadPendingClientId === target.client_id
+                    ? "Downloading"
+                    : "Download file"}
+                </span>
+              </button>
+            ) : (
+              "-"
+            )}
+          </span>
+        ),
+        enableHiding: false,
+        header: "Actions",
+        id: "actions",
+      },
+    ],
+    [agentNameById, fileDownloadPendingClientId, fileDownloadStatusByClient],
+  );
+  const comparisonGroupColumns = useMemo<ConsoleDataGridColumn<JobOutputComparisonGroup>[]>(
+    () => [
+      {
+        cell: (group) => (
+          <span className="historyPrimary">
+            <strong className={`status ${jobOutputComparisonStatusBadgeClass(group.status)}`}>
+              {group.status}
+            </strong>
+            <small>exit {group.exit_code ?? "-"}</small>
+          </span>
+        ),
+        header: "Outcome",
+        id: "outcome",
+        searchValue: (group) => `${group.status} ${group.exit_code ?? ""}`,
+        sortValue: (group) => group.status,
+      },
+      {
+        cell: (group) => (
+          <span className="historyPrimary">
+            <strong>{group.target_count} targets</strong>
+            <small>{clientLabel(group.representative_client_id)}</small>
+          </span>
+        ),
+        header: "Targets",
+        id: "targets",
+        searchValue: (group) => group.client_ids.map(clientLabel).join(" "),
+        sortValue: (group) => group.target_count,
+      },
+      {
+        cell: (group) => (
+          <span className="historyPrimary">
+            <strong>{outputCompareBasisLabel(group.output_compare_basis)}</strong>
+            <small>
+              {group.stream_count} chunks / {formatBytes(group.byte_count)}
+            </small>
+          </span>
+        ),
+        header: "Output",
+        id: "output",
+        searchValue: (group) => `${group.output_compare_basis} ${group.stream_count} ${group.byte_count} ${group.preview}`,
+        sortValue: (group) => group.byte_count,
+      },
+      {
+        cell: (group) => (
+          <span className="monoValue" title={group.preview}>
+            {shortHash(group.output_digest_hex)}
+          </span>
+        ),
+        header: "Digest",
+        id: "digest",
+        searchValue: (group) => `${group.output_digest_hex} ${group.preview}`,
+        sortValue: (group) => group.output_digest_hex,
+      },
+    ],
+    [agentNameById],
+  );
+  const comparisonTargetColumns = useMemo<ConsoleDataGridColumn<JobOutputComparisonRow>[]>(
+    () => [
+      {
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{clientLabel(row.client_id)}</strong>
+            <small>
+              {row.stream_count} chunks / {formatBytes(row.byte_count)}
+            </small>
+          </span>
+        ),
+        header: "Client",
+        id: "client",
+        searchValue: (row) => `${clientLabel(row.client_id)} ${row.client_id}`,
+        sortValue: (row) => clientLabel(row.client_id),
+      },
+      {
+        cell: (row) => (
+          <span className={`status ${jobOutputComparisonStatusBadgeClass(row.status)}`}>
+            {row.status} / {row.exit_code ?? "-"}
+          </span>
+        ),
+        header: "Status",
+        id: "status",
+        searchValue: (row) => `${row.status} ${row.exit_code ?? ""}`,
+        sortValue: (row) => row.status,
+      },
+      {
+        cell: (row) => (
+          <span className={row.matches_largest_group ? "status ok" : "status warn"}>
+            {row.matches_largest_group ? "largest" : row.group_id}
+          </span>
+        ),
+        header: "Group",
+        id: "group",
+        searchValue: (row) => row.group_id,
+        sortValue: (row) => row.group_id,
+      },
+      {
+        cell: (row) => (
+          <span className="monoValue" title={row.preview}>
+            {shortHash(row.output_digest_hex)}
+          </span>
+        ),
+        header: "Digest",
+        id: "digest",
+        searchValue: (row) => `${row.output_digest_hex} ${row.preview}`,
+        sortValue: (row) => row.output_digest_hex,
+      },
+    ],
+    [agentNameById],
+  );
 
   async function compareSelectedJobOutputs(
     jobId: string,
@@ -856,25 +1044,12 @@ export function JobHistoryPanel({
                       : shortId(selectedJobId))}
                 </span>
               </div>
-              <CrudPager
-                fields={[
-                  {
-                    label: "Client",
-                    value: (target) => clientLabel(target.client_id),
-                  },
-                  { label: "Status", value: (target) => target.status },
-                  { label: "Reason", value: (target) => target.message ?? "" },
-                  { label: "Exit", value: (target) => target.exit_code },
-                  {
-                    label: "Completed",
-                    value: (target) => target.completed_at,
-                  },
-                  { label: "Job", value: (target) => target.job_id },
-                ]}
+              <ConsoleDataGrid
+                columns={targetColumns}
+                defaultPageSize={10}
+                expandOnRowClick
+                getRowId={(target) => `${target.job_id}:${target.client_id}`}
                 itemLabel="targets"
-                items={targets}
-                pageSize={10}
-                title="Target result records"
                 empty={
                   <div className="emptyState">
                     <Server size={22} />
@@ -885,67 +1060,27 @@ export function JobHistoryPanel({
                     </span>
                   </div>
                 }
-              >
-                {(targetRows) => (
-                  <div className="table historyTable">
-                    <div className="historyRow heading targetHistoryGrid">
-                      <span>Client</span>
-                      <span>Status</span>
-                      <span>Reason</span>
-                      <span>Exit</span>
-                      <span>Completed</span>
-                      <span>Actions</span>
-                    </div>
-                    {targetRows.map((target) => (
-                      <div
-                        className="historyRow targetHistoryGrid"
-                        key={`${target.job_id}:${target.client_id}`}
-                      >
-                        <span className="historyPrimary">
-                          <strong>{clientLabel(target.client_id)}</strong>
-                          <small>{shortId(target.job_id)}</small>
-                        </span>
-                        <span
-                          className={`status ${jobTargetStatusBadgeClass(target.status)}`}
-                        >
-                          {target.status}
-                        </span>
-                        <span title={target.message ?? undefined}>{target.message ?? "-"}</span>
-                        <span>{target.exit_code ?? "-"}</span>
-                        <span>
-                          {target.completed_at
-                            ? formatTime(target.completed_at)
-                            : "-"}
-                        </span>
-                        <span className="inlineActions">
-                          {fileDownloadStatusByClient.has(target.client_id) ? (
-                            <button
-                              className="secondaryAction compactAction"
-                              disabled={
-                                fileDownloadPendingClientId === target.client_id
-                              }
-                              onClick={() =>
-                                void downloadFileForClient(target.client_id)
-                              }
-                              type="button"
-                            >
-                              <Download size={14} />
-                              <span>
-                                {fileDownloadPendingClientId ===
-                                target.client_id
-                                  ? "Downloading"
-                                  : "Download file"}
-                              </span>
-                            </button>
-                          ) : (
-                            "-"
-                          )}
-                        </span>
-                      </div>
-                    ))}
+                renderExpandedRow={(target) => (
+                  <div className="consoleInlineDetailGrid">
+                    <span>Client</span>
+                    <strong>{clientLabel(target.client_id)}</strong>
+                    <span>Client ID</span>
+                    <strong>{target.client_id}</strong>
+                    <span>Job ID</span>
+                    <strong>{target.job_id}</strong>
+                    <span>Status</span>
+                    <strong>{target.status}</strong>
+                    <span>Reason</span>
+                    <strong>{target.message ?? "None"}</strong>
+                    <span>Completed</span>
+                    <strong>{target.completed_at ? formatTime(target.completed_at) : "Not completed"}</strong>
                   </div>
                 )}
-              </CrudPager>
+                rows={targets}
+                searchPlaceholder="Search targets"
+                storageKey="vpsman.jobs.history.targets"
+                title="Target result records"
+              />
               <div className="outputDetail">
                 <div className="sectionHeader compact">
                   <div>
@@ -1079,135 +1214,63 @@ export function JobHistoryPanel({
                     </div>
                   )}
                   {outputComparison && outputComparison.groups.length > 0 && (
-                    <CrudPager
-                      fields={[
-                        {
-                          label: "Status",
-                          value: (group) => `${group.status} ${group.exit_code ?? "-"}`,
-                        },
-                        {
-                          label: "Targets",
-                          value: (group) => group.client_ids.map(clientLabel).join(" "),
-                        },
-                        {
-                          label: "Digest",
-                          value: (group) => group.output_digest_hex,
-                        },
-                        { label: "Preview", value: (group) => group.preview },
-                      ]}
+                    <ConsoleDataGrid
+                      columns={comparisonGroupColumns}
+                      defaultPageSize={6}
+                      expandOnRowClick
+                      getRowId={(group) => group.group_id}
                       itemLabel="groups"
-                      items={outputComparison.groups}
-                      pageSize={6}
-                      title="Grouped outcomes"
-                    >
-                      {(groups) => (
-                        <div className="table historyTable">
-                          <div className="historyRow heading comparisonGroupGrid">
-                            <span>Outcome</span>
-                            <span>Targets</span>
-                            <span>Output</span>
-                            <span>Digest</span>
-                          </div>
-                          {groups.map((group) => (
-                            <div
-                              className={`historyRow comparisonGroupGrid clickableRow ${
-                                selectedComparisonGroupId === group.group_id ? "selected" : ""
-                              }`}
-                              key={group.group_id}
-                              onClick={() => setSelectedComparisonGroupId(group.group_id)}
-                              onKeyDown={(event) => {
-                                if (event.key === "Enter" || event.key === " ") {
-                                  event.preventDefault();
-                                  setSelectedComparisonGroupId(group.group_id);
-                                }
-                              }}
-                              role="button"
-                              tabIndex={0}
-                            >
-                              <span className="historyPrimary">
-                                <strong className={`status ${jobOutputComparisonStatusBadgeClass(group.status)}`}>
-                                  {group.status}
-                                </strong>
-                                <small>exit {group.exit_code ?? "-"}</small>
-                              </span>
-                              <span className="historyPrimary">
-                                <strong>{group.target_count} targets</strong>
-                                <small>{clientLabel(group.representative_client_id)}</small>
-                              </span>
-                              <span className="historyPrimary">
-                                <strong>{outputCompareBasisLabel(group.output_compare_basis)}</strong>
-                                <small>
-                                  {group.stream_count} chunks / {formatBytes(group.byte_count)}
-                                </small>
-                              </span>
-                              <span className="monoValue" title={group.preview}>
-                                {shortHash(group.output_digest_hex)}
-                              </span>
-                            </div>
-                          ))}
+                      onOpenRow={(group) => setSelectedComparisonGroupId(group.group_id)}
+                      renderExpandedRow={(group) => (
+                        <div className="consoleInlineDetailGrid">
+                          <span>Group</span>
+                          <strong>{group.group_id}</strong>
+                          <span>Status</span>
+                          <strong>{group.status}</strong>
+                          <span>Targets</span>
+                          <strong>{group.client_ids.map(clientLabel).join(", ")}</strong>
+                          <span>Digest</span>
+                          <strong>{group.output_digest_hex}</strong>
+                          <span>Preview</span>
+                          <strong>{group.preview || "No preview"}</strong>
                         </div>
                       )}
-                    </CrudPager>
+                      rows={outputComparison.groups}
+                      searchPlaceholder="Search grouped outcomes"
+                      storageKey="vpsman.jobs.history.comparisonGroups"
+                      title="Grouped outcomes"
+                    />
                   )}
                   {outputComparison && displayedComparisonRows.length > 0 && (
-                    <CrudPager
-                      fields={[
-                        {
-                          label: "Client",
-                          value: (row) => clientLabel(row.client_id),
-                        },
-                        {
-                          label: "Status",
-                          value: (row) => `${row.status} ${row.exit_code ?? "-"}`,
-                        },
-                        {
-                          label: "Group",
-                          value: (row) => row.group_id,
-                        },
-                        { label: "Digest", value: (row) => row.output_digest_hex },
-                      ]}
+                    <ConsoleDataGrid
+                      columns={comparisonTargetColumns}
+                      defaultPageSize={8}
+                      expandOnRowClick
+                      getRowId={(row) => row.client_id}
                       itemLabel="targets"
-                      items={displayedComparisonRows}
-                      pageSize={8}
                       title={
                         selectedComparisonGroupId
                           ? `Targets in ${selectedComparisonGroupId}`
                           : "Target result details"
                       }
-                    >
-                      {(comparisonRows) => (
-                        <div className="table historyTable">
-                          <div className="historyRow heading comparisonTargetGrid">
-                            <span>Client</span>
-                            <span>Status</span>
-                            <span>Group</span>
-                            <span>Digest</span>
-                          </div>
-                          {comparisonRows.map((row) => (
-                            <div
-                              className="historyRow comparisonTargetGrid"
-                              key={row.client_id}
-                            >
-                              <span className="historyPrimary">
-                                <strong>{clientLabel(row.client_id)}</strong>
-                                <small>
-                                  {row.stream_count} chunks / {formatBytes(row.byte_count)}
-                                </small>
-                              </span>
-                              <span className={`status ${jobOutputComparisonStatusBadgeClass(row.status)}`}>
-                                {row.status} / {row.exit_code ?? "-"}
-                              </span>
-                              <span className={row.matches_largest_group ? "status ok" : "status warn"}>
-                                {row.matches_largest_group ? "largest" : row.group_id}
-                              </span>
-                              <span className="monoValue" title={row.preview}>
-                                {shortHash(row.output_digest_hex)}
-                              </span>
-                            </div>
-                          ))}
+                      renderExpandedRow={(row) => (
+                        <div className="consoleInlineDetailGrid">
+                          <span>Client</span>
+                          <strong>{clientLabel(row.client_id)}</strong>
+                          <span>Group</span>
+                          <strong>{row.group_id}</strong>
+                          <span>Digest</span>
+                          <strong>{row.output_digest_hex}</strong>
+                          <span>Output</span>
+                          <strong>{row.stream_count} chunks / {formatBytes(row.byte_count)}</strong>
+                          <span>Preview</span>
+                          <strong>{row.preview || "No preview"}</strong>
                         </div>
                       )}
-                    </CrudPager>
+                      rows={displayedComparisonRows}
+                      searchPlaceholder="Search target results"
+                      storageKey="vpsman.jobs.history.comparisonTargets"
+                    />
                   )}
                 </div>
                 {outputStreamDownloadTargets.length > 0 && (

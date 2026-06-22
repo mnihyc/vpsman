@@ -6,7 +6,10 @@ import {
   MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 } from "../jobMaxTimeout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
-import { CrudPager } from "../components/CrudPager";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridColumn,
+} from "../components/ConsoleDataGrid";
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
@@ -228,6 +231,121 @@ export function DataSourcePresetPanel({
       : lastApplyJob
         ? `Data-source patch job ${lastApplyJob.job_id} ${lastApplyJob.status}; ${lastApplyJob.target_count} target`
       : `${presets.length} presets across ${new Set(presets.map((preset) => preset.domain)).size} domains`);
+  const sourceStatusColumns = useMemo<ConsoleDataGridColumn<DataSourceStatusRecord>[]>(
+    () => [
+      {
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{formatVpsName(row, vpsNameDisplayMode)}</strong>
+            <small>{row.client_status}</small>
+          </span>
+        ),
+        header: "VPS",
+        id: "vps",
+        searchValue: (row) => `${formatVpsName(row, vpsNameDisplayMode)} ${row.client_id} ${row.client_status}`,
+        sortValue: (row) => formatVpsName(row, vpsNameDisplayMode),
+      },
+      {
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{row.module}</strong>
+            <small>{row.domain}</small>
+          </span>
+        ),
+        header: "Module",
+        id: "module",
+        searchValue: (row) => `${row.module} ${row.domain}`,
+        sortValue: (row) => row.module,
+      },
+      {
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{row.preset_name}</strong>
+            <small>{row.preset_scope}</small>
+          </span>
+        ),
+        header: "Preset",
+        id: "preset",
+        searchValue: (row) => `${row.preset_name} ${row.preset_scope}`,
+        sortValue: (row) => row.preset_name,
+      },
+      {
+        cell: (row) => row.source_kind,
+        header: "Source",
+        id: "source",
+        searchValue: (row) => row.source_kind,
+        sortValue: (row) => row.source_kind,
+      },
+      {
+        cell: (row) => (
+          <span className={`status ${dataSourceReadinessStatusBadgeClass(row.status)}`} title={row.status_reason}>
+            {row.status}
+          </span>
+        ),
+        header: "Status",
+        id: "status",
+        searchValue: (row) => `${row.status} ${row.status_reason}`,
+        sortValue: (row) => row.status,
+      },
+      {
+        cell: (row) => sourceEvidenceSummary(row),
+        header: "Evidence",
+        id: "evidence",
+        searchValue: (row) => sourceEvidenceSummary(row),
+        sortValue: (row) => sourceEvidenceSummary(row),
+      },
+    ],
+    [vpsNameDisplayMode],
+  );
+  const presetColumns = useMemo<ConsoleDataGridColumn<DataSourcePresetRecord>[]>(
+    () => [
+      {
+        cell: (preset) => (
+          <span className="historyPrimary">
+            <strong>{preset.name}</strong>
+            <small>{preset.description ?? (preset.built_in ? "built-in" : "custom")}</small>
+          </span>
+        ),
+        header: "Preset",
+        id: "preset",
+        searchValue: (preset) => `${preset.name} ${preset.description ?? ""}`,
+        sortValue: (preset) => preset.name,
+      },
+      {
+        cell: (preset) => preset.domain,
+        header: "Domain",
+        id: "domain",
+        searchValue: (preset) => preset.domain,
+        sortValue: (preset) => preset.domain,
+      },
+      {
+        cell: (preset) => (
+          <span className={`status ${preset.is_default ? "info" : preset.built_in ? "neutral" : "ok"}`}>
+            {preset.is_default ? "default" : preset.scope}
+          </span>
+        ),
+        header: "Scope",
+        id: "scope",
+        searchValue: (preset) => `${preset.scope} ${preset.is_default ? "default" : ""} ${preset.built_in ? "built-in" : "custom"}`,
+        sortValue: (preset) => `${preset.is_default ? "0" : "1"}:${preset.scope}`,
+      },
+      {
+        cell: (preset) => preset.assigned_client_count,
+        header: "Assigned",
+        id: "assigned",
+        searchValue: (preset) => preset.assigned_client_count,
+        sortValue: (preset) => preset.assigned_client_count,
+      },
+      {
+        cell: (preset) => formatTime(preset.updated_at),
+        header: "Updated",
+        id: "updated",
+        searchValue: (preset) => formatTime(preset.updated_at),
+        sortValue: (preset) => preset.updated_at,
+      },
+    ],
+    [],
+  );
 
   useEffect(() => {
     if (!lifecyclePreset) {
@@ -997,18 +1115,12 @@ export function DataSourcePresetPanel({
           <h2>Active source status</h2>
           <span>{sourceStatusSummary}</span>
         </div>
-        <CrudPager
-          fields={[
-            { label: "VPS", value: (row) => formatVpsName(row, vpsNameDisplayMode) },
-            { label: "Module", value: (row) => `${row.module} ${row.domain}` },
-            { label: "Preset", value: (row) => row.preset_name },
-            { label: "Source", value: (row) => row.source_kind },
-            { label: "Status", value: (row) => `${row.status} ${row.status_reason}` },
-          ]}
+        <ConsoleDataGrid
+          columns={sourceStatusColumns}
+          defaultPageSize={10}
+          expandOnRowClick
+          getRowId={(row) => `${row.client_id}:${row.domain}`}
           itemLabel="sources"
-          items={dataSourceStatus}
-          pageSize={10}
-          title="Active sources"
           empty={
             <div className="emptyState">
               <DatabaseZap size={22} />
@@ -1016,56 +1128,39 @@ export function DataSourcePresetPanel({
               <span>No selected source records match the current search.</span>
             </div>
           }
-        >
-          {(sourceStatusRows) => (
-            <div className="table hierarchyTable">
-              <div className="historyRow heading dataSourceStatusGrid">
-                <span>VPS</span>
-                <span>Module</span>
-                <span>Preset</span>
-                <span>Source</span>
-                <span>Status</span>
-                <span>Evidence</span>
-              </div>
-              {sourceStatusRows.map((row) => (
-                <div className="historyRow dataSourceStatusGrid" key={`${row.client_id}:${row.domain}`}>
-                  <span className="historyPrimary">
-                    <strong>{formatVpsName(row, vpsNameDisplayMode)}</strong>
-                    <small>{row.client_status}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <strong>{row.module}</strong>
-                    <small>{row.domain}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <strong>{row.preset_name}</strong>
-                    <small>{row.preset_scope}</small>
-                  </span>
-                  <span>{row.source_kind}</span>
-                  <span className={`status ${dataSourceReadinessStatusBadgeClass(row.status)}`} title={row.status_reason}>
-                    {row.status}
-                  </span>
-                  <span>{sourceEvidenceSummary(row)}</span>
-                </div>
-              ))}
+          renderExpandedRow={(row) => (
+            <div className="consoleInlineDetailGrid">
+              <span>VPS</span>
+              <strong>{formatVpsName(row, vpsNameDisplayMode)}</strong>
+              <span>Client ID</span>
+              <strong>{row.client_id}</strong>
+              <span>Domain</span>
+              <strong>{row.domain}</strong>
+              <span>Preset</span>
+              <strong>{row.preset_name}</strong>
+              <span>Source</span>
+              <strong>{row.source_kind}</strong>
+              <span>Reason</span>
+              <strong>{row.status_reason}</strong>
+              <span>Evidence</span>
+              <strong>{sourceEvidenceSummary(row)}</strong>
             </div>
           )}
-        </CrudPager>
+          rows={dataSourceStatus}
+          searchPlaceholder="Search active sources"
+          storageKey="vpsman.dataSources.activeSources"
+          title="Active sources"
+        />
       </div>
       )}
 
       {showPresetManagement && (
-      <CrudPager
-        fields={[
-          { label: "Preset", value: (preset) => preset.name },
-          { label: "Domain", value: (preset) => preset.domain },
-          { label: "Scope", value: (preset) => preset.scope },
-          { label: "Assigned", value: (preset) => preset.assigned_client_count },
-        ]}
+      <ConsoleDataGrid
+        columns={presetColumns}
+        defaultPageSize={10}
+        expandOnRowClick
+        getRowId={(preset) => preset.id}
         itemLabel="presets"
-        items={presets}
-        pageSize={10}
-        title="Preset registry"
         empty={
           <div className="emptyState">
             <DatabaseZap size={22} />
@@ -1073,33 +1168,29 @@ export function DataSourcePresetPanel({
             <span>{actionError ?? "No preset records match the current search."}</span>
           </div>
         }
-      >
-        {(presetRows) => (
-          <div className="table hierarchyTable">
-            <div className="historyRow heading dataSourcePresetGrid">
-              <span>Preset</span>
-              <span>Domain</span>
-              <span>Scope</span>
-              <span>Assigned</span>
-              <span>Updated</span>
-            </div>
-            {presetRows.map((preset) => (
-              <div className="historyRow dataSourcePresetGrid" key={preset.id}>
-                <span className="historyPrimary">
-                  <strong>{preset.name}</strong>
-                  <small>{preset.description ?? (preset.built_in ? "built-in" : "custom")}</small>
-                </span>
-                <span>{preset.domain}</span>
-                <span className={`status ${preset.is_default ? "info" : preset.built_in ? "neutral" : "ok"}`}>
-                  {preset.is_default ? "default" : preset.scope}
-                </span>
-                <span>{preset.assigned_client_count}</span>
-                <span>{formatTime(preset.updated_at)}</span>
-              </div>
-            ))}
+        renderExpandedRow={(preset) => (
+          <div className="consoleInlineDetailGrid">
+            <span>Preset ID</span>
+            <strong>{preset.id}</strong>
+            <span>Name</span>
+            <strong>{preset.name}</strong>
+            <span>Domain</span>
+            <strong>{preset.domain}</strong>
+            <span>Scope</span>
+            <strong>{preset.scope}</strong>
+            <span>Default</span>
+            <strong>{preset.is_default ? "Yes" : "No"}</strong>
+            <span>Assigned VPSs</span>
+            <strong>{preset.assigned_client_count}</strong>
+            <span>Description</span>
+            <strong>{preset.description ?? "None"}</strong>
           </div>
         )}
-      </CrudPager>
+        rows={presets}
+        searchPlaceholder="Search presets"
+        storageKey="vpsman.dataSources.presetRegistry"
+        title="Preset registry"
+      />
       )}
 
       {showPresetManagement && (

@@ -11,7 +11,6 @@ import {
   openConsoleSubpage,
   unlockPrivilegeFromTop,
 } from "./support/consoleNavigation";
-import { renderTunnelEndpointConfig } from "../src/topologyApply";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -1125,24 +1124,20 @@ test("manages data-source preset assignments from the config view", async ({
   await openConsoleSubpage(page, "Config", "Status");
 
   const panel = page.locator(".dataSourcePresetPanel");
-  const activeSourcesSearchField = panel.getByRole("combobox", {
-    name: "Active sources search field",
-  });
   const activeSourcesSearch = panel.getByRole("searchbox", {
     name: "Active sources search",
   });
   await expect(
     panel.getByRole("heading", { name: "Active source status" }),
   ).toBeVisible();
-  await expect(panel.getByLabel("Active sources table controls")).toBeVisible();
-  await expect(activeSourcesSearchField).toBeVisible();
+  const activeSourcesGrid = panel.getByLabel("Active sources data grid");
+  const activeSourceRows = activeSourcesGrid.locator(".gridBody .gridRow");
+  await expect(activeSourcesGrid).toBeVisible();
   await expect(activeSourcesSearch).toBeVisible();
   await expect(panel.getByText(/\d+ of \d+ sources/)).toBeVisible();
-  await expect(panel.getByText(/Page 1 \/ \d+/).first()).toBeVisible();
+  await expect(panel.getByText(/1 \/ \d+/).first()).toBeVisible();
   await expect(
-    panel
-      .locator(".sourceStatusSection .historyRow")
-      .filter({ hasText: "shared:vnstat-json" }),
+    activeSourceRows.filter({ hasText: "shared:vnstat-json" }),
   ).toBeVisible();
   await expect(
     panel.locator(".sourceStatusSection").getByText("vnstat", { exact: true }),
@@ -1153,61 +1148,37 @@ test("manages data-source preset assignments from the config view", async ({
       .getByText("no server store, 2 artifacts"),
   ).toBeVisible();
   await expect(
-    panel
-      .locator(".sourceStatusSection")
-      .locator(".historyRow")
+    activeSourceRows
       .filter({ hasText: "Update artifact source" })
       .filter({ hasText: "ready" }),
   ).toBeVisible();
-  await activeSourcesSearchField.selectOption("Preset");
-  await activeSourcesSearch.click();
-  await page.keyboard.type("vnstat");
+  await activeSourcesSearch.fill("vnstat");
   await expect(
-    page.getByRole("option", { name: /^shared:vnstat-json$/ }),
-  ).toBeVisible();
-  await page.keyboard.press("Enter");
-  await expect(activeSourcesSearch).toContainText("shared:vnstat-json");
-  await activeSourcesSearch.fill("");
-  await activeSourcesSearch.fill("shared:vnstat-json");
-  await expect(
-    panel
-      .locator(".sourceStatusSection .historyRow")
-      .filter({ hasText: "shared:vnstat-json" }),
+    activeSourceRows.filter({ hasText: "shared:vnstat-json" }),
   ).toBeVisible();
   await activeSourcesSearch.fill("");
 
   await openConsoleSubpage(page, "Config", "Templates");
   const presetPanel = page.locator(".dataSourcePresetPanel");
-  const presetRegistrySearchField = presetPanel.getByRole("combobox", {
-    name: "Preset registry search field",
-  });
   const presetRegistrySearch = presetPanel.getByRole("searchbox", {
     name: "Preset registry search",
   });
   await expect(
     presetPanel.getByRole("heading", { name: "Data-source presets" }),
   ).toBeVisible();
-  await expect(
-    presetPanel.getByLabel("Preset registry table controls"),
-  ).toBeVisible();
-  await expect(presetRegistrySearchField).toBeVisible();
+  const presetRegistryGrid = presetPanel.getByLabel("Preset registry data grid");
+  const presetRows = presetRegistryGrid.locator(".gridBody .gridRow");
+  await expect(presetRegistryGrid).toBeVisible();
   await expect(presetRegistrySearch).toBeVisible();
   await expect(
-    presetPanel.locator(".historyRow.dataSourcePresetGrid", {
-      hasText: "builtin:interface_counters",
-    }),
+    presetRows.filter({ hasText: "builtin:interface_counters" }),
   ).toBeVisible();
   await expect(
-    presetPanel.locator(".historyRow.dataSourcePresetGrid", {
-      hasText: "shared:vnstat-json",
-    }),
+    presetRows.filter({ hasText: "shared:vnstat-json" }),
   ).toBeVisible();
-  await presetRegistrySearchField.selectOption("Domain");
   await presetRegistrySearch.fill("runtime_traffic_accounting_source");
   await expect(
-    presetPanel.locator(".historyRow.dataSourcePresetGrid", {
-      hasText: "builtin:interface_counters",
-    }),
+    presetRows.filter({ hasText: "builtin:interface_counters" }),
   ).toBeVisible();
   await presetRegistrySearch.fill("");
   await presetPanel
@@ -1673,7 +1644,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(evidence.getByText("Managed blocks match")).toBeVisible();
 });
 
-test("authors external adapter tunnel plans from the topology panel", async ({
+test("authors custom adapter tunnel plans from the topology panel", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -1724,21 +1695,18 @@ test("authors external adapter tunnel plans from the topology panel", async ({
   await composer.getByLabel("Kind").selectOption("openvpn");
   await chooseVpsBySearch(composer, "Left VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
   await chooseVpsBySearch(composer, "Right VPS", "fra", /core-fra-02.*agent-fra-02/);
+  await expect(composer.getByLabel("Left underlay", { exact: true })).toHaveValue("198.51.100.10");
+  await expect(composer.getByLabel("Right underlay", { exact: true })).toHaveValue("203.0.113.20");
+  await composer.getByText("Allocation overrides").click();
   await composer
-    .getByLabel("Left underlay", { exact: true })
-    .fill("198.51.100.10");
-  await composer
-    .getByLabel("Right underlay", { exact: true })
-    .fill("203.0.113.20");
-  await composer
-    .getByLabel("IPv4 allocation pool", { exact: true })
+    .getByLabel("IPv4 pool override", { exact: true })
     .fill("10.255.50.0/30");
-  await activate(composer.getByRole("button", { name: "Generate endpoints" }));
-  await expect(composer.getByLabel("Left IPv4", { exact: true })).toHaveValue(
-    "10.255.50.0",
+  await activate(composer.getByRole("button", { name: "Allocate endpoints" }));
+  await expect(composer.getByLabel("Left IPv4 CIDR", { exact: true })).toHaveValue(
+    "10.255.50.0/31",
   );
-  await expect(composer.getByLabel("Right IPv4", { exact: true })).toHaveValue(
-    "10.255.50.1",
+  await expect(composer.getByLabel("Right IPv4 CIDR", { exact: true })).toHaveValue(
+    "10.255.50.1/31",
   );
   await composer
     .getByLabel("Runtime owner")
@@ -1746,9 +1714,6 @@ test("authors external adapter tunnel plans from the topology panel", async ({
   await checkControl(composer.getByLabel("Enable traffic shaping"));
   await composer.getByLabel("Egress Kbps", { exact: true }).fill("100000");
   await composer.getByLabel("Burst KB", { exact: true }).fill("4096");
-  await composer
-    .getByLabel("Topology version", { exact: true })
-    .fill("provider-a:42");
   await composer
     .getByLabel("Start argv", { exact: true })
     .fill("/usr/local/libexec/vpsman-openvpn-adapter\nstart\n{interface}");
@@ -1842,12 +1807,11 @@ test("authors external adapter tunnel plans from the topology panel", async ({
           metric: 42,
         },
       ],
-      version: "provider-a:42",
     },
   });
 });
 
-test("promotes saved observed tunnel plans into adapter contracts", async ({
+test("promotes saved observed tunnel plans into custom adapters", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -1862,7 +1826,7 @@ test("promotes saved observed tunnel plans into adapter contracts", async ({
     has: page.getByRole("heading", { name: "Tunnel promotion" }),
   });
   const adapterForm = promotionPanel.locator("form", {
-    has: page.getByRole("heading", { name: "Adapter contract" }),
+    has: page.getByRole("heading", { name: "Custom adapter" }),
   });
   await promotionPanel.scrollIntoViewIfNeeded();
   await adapterForm
@@ -1890,16 +1854,13 @@ test("promotes saved observed tunnel plans into adapter contracts", async ({
   await adapterForm.getByLabel("Egress Kbps", { exact: true }).fill("100000");
   await adapterForm.getByLabel("Burst KB", { exact: true }).fill("4096");
   await adapterForm
-    .getByLabel("Topology version", { exact: true })
-    .fill("adapter:ovpn42");
-  await adapterForm
     .getByLabel("Desired interfaces", { exact: true })
     .fill("ovpn42");
-  await activate(adapterForm.getByRole("button", { name: "Review promotion" }));
+  await activate(adapterForm.getByRole("button", { name: "Review custom adapter" }));
   await expect(
-    promotionPanel.getByText("Promote tunnel adapter"),
+    promotionPanel.getByText("Confirm custom adapter"),
   ).toBeVisible();
-  await confirmVisiblePrompt(page, "Promote adapter");
+  await confirmVisiblePrompt(page, "Save custom adapter");
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -1957,7 +1918,6 @@ test("promotes saved observed tunnel plans into adapter contracts", async ({
     },
     runtime_topology: {
       desired_interfaces: ["ovpn42"],
-      version: "adapter:ovpn42",
     },
   });
 });
@@ -2572,7 +2532,7 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   await page.getByLabel("Network apply endpoint side").selectOption("left");
   await page.getByLabel("Network apply max timeout seconds").fill("90");
   await activate(page.getByRole("button", { name: "Review apply" }));
-  await confirmVisiblePrompt(page, "Apply side");
+  await confirmVisiblePrompt(page, "Apply plan");
 
   await expect(
     page
@@ -2580,16 +2540,21 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
       .last()
       .getByText(/completed on 1 VPS/),
   ).toBeVisible();
-  const request = await page.evaluate(() => {
+  const applyRequests = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
     ).__vpsmanTestRequests;
-    return requests.jobs.at(-1);
+    return requests.jobs.slice(-2);
   });
-  expect(JSON.stringify(request)).not.toContain("local-super-password");
-  expect(request).toMatchObject({
+  expect(JSON.stringify(applyRequests)).not.toContain("local-super-password");
+  expect(JSON.stringify(applyRequests)).not.toContain("config_backend");
+  expect(JSON.stringify(applyRequests)).not.toContain("config_sha256_hex");
+  expect(JSON.stringify(applyRequests)).not.toContain("ifupdown_sha256_hex");
+  expect(applyRequests).toHaveLength(2);
+  expect(applyRequests[0]).toMatchObject({
     argv: [],
     selector_expression: "id:agent-sfo-01",
+    target_client_ids: ["agent-sfo-01"],
     command: "network_apply",
     confirmed: true,
     destructive: true,
@@ -2601,59 +2566,40 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     privileged: true,
     max_timeout_secs: 90,
   });
-  const operation = (
-    request as {
-      operation: {
-        bird2_sha256_hex: string;
-        config_backend: string;
-        config_sha256_hex: string;
-        ifupdown_sha256_hex: string;
-      };
-    }
-  ).operation;
-  const endpoint = renderTunnelEndpointConfig(tunnelPlans[0].plan, "left");
-  expect(operation.ifupdown_sha256_hex).toBe(
-    sha256Hex(new TextEncoder().encode(endpoint.ifupdownSnippet)),
-  );
-  expect(operation.config_backend).toBe("ifupdown");
-  expect(operation.config_sha256_hex).toBe(
-    sha256Hex(
-      new TextEncoder().encode(
-        [
-          "vpsman-network-backend-file-v1",
-          "backend=ifupdown",
-          "path=/etc/network/interfaces.d/vpsman-tunnels",
-          "kind=ifupdown",
-          "contents-sha256-context",
-          endpoint.ifupdownSnippet,
-          "",
-        ].join("\n"),
-      ),
-    ),
-  );
-  expect(operation.bird2_sha256_hex).toBe(
-    sha256Hex(new TextEncoder().encode(endpoint.bird2InterfaceSnippet)),
-  );
-  expectPrivilegeAssertion(request);
+  expect(applyRequests[1]).toMatchObject({
+    selector_expression: "id:agent-fra-02",
+    target_client_ids: ["agent-fra-02"],
+    command: "network_apply",
+    operation: {
+      plan: tunnelPlans[0].plan,
+      side: "right",
+      type: "network_apply",
+    },
+    max_timeout_secs: 90,
+  });
+  expectPrivilegeAssertion(applyRequests[0]);
+  expectPrivilegeAssertion(applyRequests[1]);
 
   await activate(page.getByRole("button", { name: "Review rollback" }));
-  await confirmVisiblePrompt(page, "Rollback side");
+  await confirmVisiblePrompt(page, "Rollback plan");
   await expect(
     page
       .getByLabel("Execution result")
       .last()
       .getByText(/completed on 1 VPS/),
   ).toBeVisible();
-  const rollbackRequest = await page.evaluate(() => {
+  const rollbackRequests = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
     ).__vpsmanTestRequests;
-    return requests.jobs.at(-1);
+    return requests.jobs.slice(-2);
   });
-  expect(JSON.stringify(rollbackRequest)).not.toContain("local-super-password");
-  expect(rollbackRequest).toMatchObject({
+  expect(JSON.stringify(rollbackRequests)).not.toContain("local-super-password");
+  expect(rollbackRequests).toHaveLength(2);
+  expect(rollbackRequests[0]).toMatchObject({
     argv: [],
     selector_expression: "id:agent-sfo-01",
+    target_client_ids: ["agent-sfo-01"],
     command: "network_rollback",
     confirmed: true,
     destructive: true,
@@ -2665,7 +2611,19 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     privileged: true,
     max_timeout_secs: 90,
   });
-  expectPrivilegeAssertion(rollbackRequest);
+  expect(rollbackRequests[1]).toMatchObject({
+    selector_expression: "id:agent-fra-02",
+    target_client_ids: ["agent-fra-02"],
+    command: "network_rollback",
+    operation: {
+      plan: tunnelPlans[0].plan,
+      side: "right",
+      type: "network_rollback",
+    },
+    max_timeout_secs: 90,
+  });
+  expectPrivilegeAssertion(rollbackRequests[0]);
+  expectPrivilegeAssertion(rollbackRequests[1]);
 
   await activate(page.getByRole("button", { name: "Review inspect" }));
   await confirmVisiblePrompt(page, "Inspect side");

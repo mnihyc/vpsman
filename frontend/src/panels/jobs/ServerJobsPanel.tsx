@@ -1,7 +1,10 @@
 import { RefreshCw, ShieldCheck, Trash2, XCircle } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
-import { CrudPager } from "../../components/CrudPager";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridColumn,
+} from "../../components/ConsoleDataGrid";
 import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
 import { serverJobStatusBadgeClass } from "../../jobStatusPresentation";
 import type {
@@ -81,6 +84,88 @@ export function ServerJobsPanel({
     (preview
       ? `${preview.matched_count} artifacts, ${formatBytes(preview.matched_bytes)}`
       : `${jobs.length} server jobs`);
+  const serverJobColumns = useMemo<ConsoleDataGridColumn<ServerJobRecord>[]>(
+    () => [
+      {
+        cell: (job) => (
+          <span className="historyPrimary">
+            <strong>{displayToken(job.job_type)}</strong>
+            <small>{shortId(job.id)}</small>
+          </span>
+        ),
+        header: "Job",
+        id: "job",
+        searchValue: (job) => `${job.job_type} ${job.id}`,
+        sortValue: (job) => job.job_type,
+      },
+      {
+        cell: (job) => (
+          <span className="historyPrimary">
+            <span className={`status ${serverJobStatusBadgeClass(job.status)}`}>
+              {displayToken(job.status)}
+            </span>
+            <small>{job.error ?? job.expression ?? "no details"}</small>
+          </span>
+        ),
+        header: "Status",
+        id: "status",
+        searchValue: (job) => `${job.status} ${job.error ?? ""} ${job.expression ?? ""}`,
+        sortValue: (job) => job.status,
+      },
+      {
+        cell: (job) => (
+          <span className="historyPrimary">
+            <strong>{job.matched_count}</strong>
+            <small>{formatBytes(job.matched_bytes)}</small>
+          </span>
+        ),
+        header: "Matched",
+        id: "matched",
+        searchValue: (job) => `${job.matched_count} ${formatBytes(job.matched_bytes)}`,
+        sortValue: (job) => job.matched_count,
+      },
+      {
+        cell: (job) => (
+          <span className="historyPrimary">
+            <strong>{job.deleted_count}</strong>
+            <small>{formatBytes(job.deleted_bytes)}</small>
+          </span>
+        ),
+        header: "Deleted",
+        id: "deleted",
+        searchValue: (job) => `${job.deleted_count} ${formatBytes(job.deleted_bytes)}`,
+        sortValue: (job) => job.deleted_count,
+      },
+      {
+        cell: (job) => formatTime(job.created_at),
+        header: "Created",
+        id: "created",
+        searchValue: (job) => formatTime(job.created_at),
+        sortValue: (job) => job.created_at,
+      },
+      {
+        cell: (job) => (
+          <button
+            className="secondaryAction compactAction dangerAction"
+            disabled={pendingJobId === job.id || job.status !== "queued"}
+            onClick={(event) => {
+              event.stopPropagation();
+              reviewCancelJob(job);
+            }}
+            title="Cancel queued server job"
+            type="button"
+          >
+            <XCircle size={14} />
+            Cancel
+          </button>
+        ),
+        enableHiding: false,
+        header: "Action",
+        id: "action",
+      },
+    ],
+    [pendingJobId],
+  );
 
   async function previewCleanup() {
     const reviewGeneration = captureReviewGeneration();
@@ -324,18 +409,12 @@ export function ServerJobsPanel({
             Refresh
           </button>
         </div>
-        <CrudPager
-          fields={[
-            { label: "Type", value: (job) => job.job_type },
-            { label: "Status", value: (job) => job.status },
-            { label: "Matched", value: (job) => job.matched_count },
-            { label: "Deleted", value: (job) => job.deleted_count },
-            { label: "Created", value: (job) => formatTime(job.created_at) },
-          ]}
+        <ConsoleDataGrid
+          columns={serverJobColumns}
+          defaultPageSize={10}
+          expandOnRowClick
+          getRowId={(job) => job.id}
           itemLabel="jobs"
-          items={jobs}
-          pageSize={10}
-          title="Server job records"
           empty={
             <div className="emptyState">
               <Trash2 size={22} />
@@ -343,55 +422,29 @@ export function ServerJobsPanel({
               <span>Artifact cleanup jobs appear here.</span>
             </div>
           }
-        >
-          {(rows) => (
-            <div className="table historyTable">
-              <div className="historyRow serverJobGrid heading">
-                <span>Job</span>
-                <span>Status</span>
-                <span>Matched</span>
-                <span>Deleted</span>
-                <span>Created</span>
-                <span>Action</span>
-              </div>
-              {rows.map((job) => (
-                <div className="historyRow serverJobGrid" key={job.id}>
-                  <span className="historyPrimary">
-                    <strong>{displayToken(job.job_type)}</strong>
-                    <small>{shortId(job.id)}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <span className={`status ${serverJobStatusBadgeClass(job.status)}`}>
-                      {displayToken(job.status)}
-                    </span>
-                    <small>{job.error ?? job.expression ?? "no details"}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <strong>{job.matched_count}</strong>
-                    <small>{formatBytes(job.matched_bytes)}</small>
-                  </span>
-                  <span className="historyPrimary">
-                    <strong>{job.deleted_count}</strong>
-                    <small>{formatBytes(job.deleted_bytes)}</small>
-                  </span>
-                  <span>{formatTime(job.created_at)}</span>
-                  <span>
-                    <button
-                      className="secondaryAction compactAction dangerAction"
-                      disabled={pendingJobId === job.id || job.status !== "queued"}
-                      onClick={() => reviewCancelJob(job)}
-                      title="Cancel queued server job"
-                      type="button"
-                    >
-                      <XCircle size={14} />
-                      Cancel
-                    </button>
-                  </span>
-                </div>
-              ))}
+          renderExpandedRow={(job) => (
+            <div className="consoleInlineDetailGrid">
+              <span>Job ID</span>
+              <strong>{job.id}</strong>
+              <span>Type</span>
+              <strong>{displayToken(job.job_type)}</strong>
+              <span>Status</span>
+              <strong>{displayToken(job.status)}</strong>
+              <span>Expression</span>
+              <strong>{job.expression ?? "Not recorded"}</strong>
+              <span>Matched bytes</span>
+              <strong>{formatBytes(job.matched_bytes)}</strong>
+              <span>Deleted bytes</span>
+              <strong>{formatBytes(job.deleted_bytes)}</strong>
+              <span>Error</span>
+              <strong>{job.error ?? "None"}</strong>
             </div>
           )}
-        </CrudPager>
+          rows={jobs}
+          searchPlaceholder="Search server jobs"
+          storageKey="vpsman.jobs.serverJobs"
+          title="Server job records"
+        />
         <ConfirmationPrompt
           confirmLabel="Cancel job"
           detail="Cancel the reviewed queued server-side maintenance job."

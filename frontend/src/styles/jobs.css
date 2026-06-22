@@ -1690,7 +1690,7 @@
   min-width: max(100%, 1120px);
 }
 
-.terminalSessionsPanel > .crudPager,
+.terminalSessionsPanel .consoleDataGrid,
 .terminalSessionsPanel > .terminalReplayPreview {
   border-top: 1px solid #eef1f6;
 }

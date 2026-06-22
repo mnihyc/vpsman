@@ -1,5 +1,9 @@
+import { useMemo } from "react";
 import { TerminalSquare } from "lucide-react";
-import { CrudPager } from "../../components/CrudPager";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridColumn,
+} from "../../components/ConsoleDataGrid";
 import type { ProcessSupervisorInventoryRecord } from "../../types";
 import { formatTime, shortId, statusClass } from "../../utils";
 
@@ -14,6 +18,74 @@ export function ProcessSupervisorInventoryPanel({
   loading: boolean;
   onRefresh: () => void;
 }) {
+  const columns = useMemo<ConsoleDataGridColumn<ProcessSupervisorInventoryRecord>[]>(
+    () => [
+      {
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{row.name}</strong>
+            <small>{clientLabel(row.client_id)}</small>
+          </span>
+        ),
+        header: "Process",
+        id: "process",
+        searchValue: (row) => `${row.name} ${clientLabel(row.client_id)} ${row.client_id}`,
+        sortValue: (row) => row.name,
+      },
+      {
+        cell: (row) => (
+          <span className="historyPrimary">
+            <span className={`status ${statusClass(row.status)}`}>{row.status}</span>
+            <small>{formatRestartEvidence(row)}</small>
+          </span>
+        ),
+        header: "Status",
+        id: "status",
+        searchValue: (row) => `${row.status} ${formatRestartEvidence(row)}`,
+        sortValue: (row) => row.status,
+      },
+      {
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{row.pid ?? "-"}</strong>
+            <small>{formatProcessRuntime(row)}</small>
+          </span>
+        ),
+        header: "PID",
+        id: "pid",
+        searchValue: (row) => `${row.pid ?? ""} ${formatProcessRuntime(row)}`,
+        sortValue: (row) => row.pid ?? 0,
+      },
+      {
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{row.source_command_type}</strong>
+            <small>{shortId(row.source_job_id)}</small>
+          </span>
+        ),
+        header: "Source",
+        id: "source",
+        searchValue: (row) => `${row.source_command_type} ${row.source_job_id}`,
+        sortValue: (row) => row.source_command_type,
+      },
+      {
+        cell: (row) => formatUnixTime(row.started_unix),
+        header: "Started",
+        id: "started",
+        searchValue: (row) => formatUnixTime(row.started_unix),
+        sortValue: (row) => row.started_unix ?? 0,
+      },
+      {
+        cell: (row) => formatTime(row.observed_at),
+        header: "Observed",
+        id: "observed",
+        searchValue: (row) => formatTime(row.observed_at),
+        sortValue: (row) => row.observed_at,
+      },
+    ],
+    [clientLabel],
+  );
+
   return (
     <div className="fleetPanel">
       <div className="sectionHeader">
@@ -25,18 +97,12 @@ export function ProcessSupervisorInventoryPanel({
           Refresh
         </button>
       </div>
-      <CrudPager
-        fields={[
-          { label: "Process", value: (row) => row.name },
-          { label: "VPS", value: (row) => clientLabel(row.client_id) },
-          { label: "Status", value: (row) => `${row.status} ${formatRestartEvidence(row)} ${formatProcessRuntime(row)}` },
-          { label: "PID", value: (row) => row.pid },
-          { label: "Source", value: (row) => `${row.source_command_type} ${row.source_job_id}` },
-        ]}
+      <ConsoleDataGrid
+        columns={columns}
+        defaultPageSize={10}
+        expandOnRowClick
+        getRowId={(row) => `${row.client_id}:${row.name}`}
         itemLabel="processes"
-        items={inventory}
-        pageSize={10}
-        title="Process records"
         empty={
           <div className="emptyState">
             <TerminalSquare size={22} />
@@ -44,42 +110,27 @@ export function ProcessSupervisorInventoryPanel({
             <span>Process start, status, restart, log, and stop jobs populate this inventory.</span>
           </div>
         }
-      >
-        {(rows) => (
-          <div className="table historyTable">
-            <div className="historyRow heading supervisorInventoryGrid">
-              <span>Process</span>
-              <span>Status</span>
-              <span>PID</span>
-              <span>Source</span>
-              <span>Started</span>
-              <span>Observed</span>
-            </div>
-            {rows.map((row) => (
-              <div className="historyRow supervisorInventoryGrid" key={`${row.client_id}:${row.name}`}>
-                <span className="historyPrimary">
-                  <strong>{row.name}</strong>
-                  <small>{clientLabel(row.client_id)}</small>
-                </span>
-                <span className="historyPrimary">
-                  <span className={`status ${statusClass(row.status)}`}>{row.status}</span>
-                  <small>{formatRestartEvidence(row)}</small>
-                </span>
-                <span className="historyPrimary">
-                  <strong>{row.pid ?? "-"}</strong>
-                  <small>{formatProcessRuntime(row)}</small>
-                </span>
-                <span className="historyPrimary">
-                  <strong>{row.source_command_type}</strong>
-                  <small>{shortId(row.source_job_id)}</small>
-                </span>
-                <span>{formatUnixTime(row.started_unix)}</span>
-                <span>{formatTime(row.observed_at)}</span>
-              </div>
-            ))}
+        renderExpandedRow={(row) => (
+          <div className="consoleInlineDetailGrid">
+            <span>Process</span>
+            <strong>{row.name}</strong>
+            <span>VPS</span>
+            <strong>{clientLabel(row.client_id)}</strong>
+            <span>PID</span>
+            <strong>{row.pid ?? "Not reported"}</strong>
+            <span>Source job</span>
+            <strong>{row.source_job_id}</strong>
+            <span>Runtime evidence</span>
+            <strong>{formatProcessRuntime(row)}</strong>
+            <span>Started</span>
+            <strong>{formatUnixTime(row.started_unix)}</strong>
           </div>
         )}
-      </CrudPager>
+        rows={inventory}
+        searchPlaceholder="Search processes"
+        storageKey="vpsman.jobs.processSupervisorInventory"
+        title="Process records"
+      />
     </div>
   );
 }
