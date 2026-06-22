@@ -33,7 +33,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
     let mut rate_limit_kbps = 0_u32;
     let mut existing_policy = FileExistingPolicy::Replace;
     let mut poll_interval_ms = 250_u64;
-    let mut max_polls = 1200_u32;
+    let mut max_polls = 0_u32;
     let mut multi_target_policy = FileTransferMultiTargetPolicy::SameOffset;
     let mut target_tokens = Vec::new();
     let mut index = 0;
@@ -207,7 +207,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
             }
             "--max-polls" => {
                 max_polls =
-                    parse_bounded_u64("--max-polls", tokens.get(index + 1).copied(), 1, 100_000)?
+                    parse_bounded_u64("--max-polls", tokens.get(index + 1).copied(), 0, 100_000)?
                         as u32;
                 index += 2;
             }
@@ -215,7 +215,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
                 max_polls = parse_bounded_u64(
                     "--max-polls",
                     Some(value.trim_start_matches("--max-polls=")),
-                    1,
+                    0,
                     100_000,
                 )? as u32;
                 index += 1;
@@ -298,7 +298,7 @@ pub(crate) fn parse_vty_file_transfer_download(
     let mut chunk_size_bytes = FILE_TRANSFER_CHUNK_BYTES as u32;
     let mut rate_limit_kbps = 0_u32;
     let mut poll_interval_ms = 250_u64;
-    let mut max_polls = 1200_u32;
+    let mut max_polls = 0_u32;
     let mut multi_target_policy = FileTransferDownloadMultiTargetPolicy::SingleTarget;
     let mut target_tokens = Vec::new();
     let mut index = 0;
@@ -445,7 +445,7 @@ pub(crate) fn parse_vty_file_transfer_download(
             }
             "--max-polls" => {
                 max_polls =
-                    parse_bounded_u64("--max-polls", tokens.get(index + 1).copied(), 1, 100_000)?
+                    parse_bounded_u64("--max-polls", tokens.get(index + 1).copied(), 0, 100_000)?
                         as u32;
                 index += 2;
             }
@@ -453,7 +453,7 @@ pub(crate) fn parse_vty_file_transfer_download(
                 max_polls = parse_bounded_u64(
                     "--max-polls",
                     Some(value.trim_start_matches("--max-polls=")),
-                    1,
+                    0,
                     100_000,
                 )? as u32;
                 index += 1;
@@ -641,6 +641,7 @@ mod tests {
         assert!(request.clients.is_empty());
         assert_eq!(request.tags, vec!["id:edge-a"]);
         assert!(request.confirmed);
+        assert_eq!(request.max_polls, 0);
     }
 
     #[test]
@@ -666,6 +667,35 @@ mod tests {
         assert!(request.clients.is_empty());
         assert_eq!(request.tags, vec!["id:edge-a"]);
         assert!(request.confirmed);
+        assert_eq!(request.max_polls, 0);
+    }
+
+    #[test]
+    fn parses_vty_resumable_file_transfer_max_polls_override() {
+        let upload = parse_vty_file_transfer_upload(&[
+            "--source",
+            "/tmp/source.bin",
+            "--path",
+            "/tmp/remote.bin",
+            "--max-polls",
+            "7",
+            "id:edge-a",
+            "--confirmed",
+        ])
+        .unwrap();
+        assert_eq!(upload.max_polls, 7);
+
+        let download = parse_vty_file_transfer_download(&[
+            "--path",
+            "/tmp/remote.bin",
+            "--destination",
+            "/tmp/local.bin",
+            "--max-polls=0",
+            "id:edge-a",
+            "--confirmed",
+        ])
+        .unwrap();
+        assert_eq!(download.max_polls, 0);
     }
 
     #[test]

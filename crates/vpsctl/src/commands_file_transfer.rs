@@ -570,9 +570,10 @@ pub(crate) fn wait_for_transfer_status(
     max_polls: u32,
 ) -> Result<Vec<TransferClientStatus>> {
     let interval = Duration::from_millis(poll_interval_ms.clamp(100, 10_000));
-    let max_polls = max_polls.clamp(1, 100_000);
+    let max_polls = transfer_poll_limit(max_polls);
     let mut statuses = BTreeMap::new();
-    for poll in 0..max_polls {
+    let mut polls = 0_u32;
+    loop {
         let outputs = fetch_job_outputs(api_url, token, job_id, Some("status"))
             .context("failed to fetch file transfer job outputs")?;
         for output in &outputs {
@@ -605,11 +606,20 @@ pub(crate) fn wait_for_transfer_status(
             );
             return Ok(statuses.into_values().collect());
         }
-        if poll + 1 < max_polls {
-            thread::sleep(interval);
+        polls = polls.saturating_add(1);
+        if max_polls.is_some_and(|max_polls| polls >= max_polls) {
+            anyhow::bail!("{expected_status_type} job {job_id} exceeded max polls");
         }
+        thread::sleep(interval);
     }
-    anyhow::bail!("{expected_status_type} job {job_id} exceeded max polls")
+}
+
+fn transfer_poll_limit(max_polls: u32) -> Option<u32> {
+    if max_polls == 0 {
+        None
+    } else {
+        Some(max_polls.clamp(1, 100_000))
+    }
 }
 
 fn fetch_job_outputs(
@@ -985,6 +995,13 @@ mod tests {
             FileTransferMultiTargetPolicy::IndependentOffsets
         );
         assert!(FileTransferMultiTargetPolicy::parse("unknown").is_err());
+    }
+
+    #[test]
+    fn transfer_poll_limit_zero_is_unlimited() {
+        assert_eq!(transfer_poll_limit(0), None);
+        assert_eq!(transfer_poll_limit(1), Some(1));
+        assert_eq!(transfer_poll_limit(100_001), Some(100_000));
     }
 
     #[test]

@@ -244,9 +244,9 @@ cargo run -p vpsctl -- file-transfer-download \
   --confirmed
 ```
 
-CLI/VTY transfers expose `--poll-interval-ms` and `--max-polls` for unusually
-slow links. The browser console uses the job `max_timeout_secs` plus control-plane
-grace for each transfer-step wait.
+CLI/VTY transfers wait for backend terminal state by default; `--max-polls 0`
+means unlimited, and a nonzero `--max-polls` is an explicit operator cap.
+The browser console uses backend terminal state for each transfer-step wait.
 
 Inspect sessions and materialize a completed download through server-side
 handoff:
