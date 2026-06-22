@@ -84,7 +84,8 @@
 
   .preferenceResetRow,
   .preferenceTagVisibilityToolbar,
-  .tagCreateForm .formRow {
+  .tagCreateForm .formRow,
+  .accessQueueRow {
     grid-template-columns: minmax(0, 1fr);
   }
 

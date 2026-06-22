@@ -12,7 +12,7 @@ import {
   Wifi,
 } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
-import { CrudPager } from "../components/CrudPager";
+import { ConsoleDataGrid, type ConsoleDataGridColumn } from "../components/ConsoleDataGrid";
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { VpsCombobox } from "../components/VpsCombobox";
@@ -27,6 +27,7 @@ import type {
 import type {
   AgentIdentityView,
   ClientKeyRevocationView,
+  KeyLifecycleClientView,
   KeyLifecycleReportView,
   UpsertAgentIdentityRequest,
 } from "../typesAccess";
@@ -53,6 +54,9 @@ const accessSubpages = [
 ] as const;
 
 type AccessSubpage = (typeof accessSubpages)[number];
+type VpsNameDisplayMode = ReturnType<
+  typeof usePanelDisplaySettings
+>["vpsNameDisplayMode"];
 type AccessConfirmationAction =
   | "agent-identity"
   | "key-revoke"
@@ -230,6 +234,183 @@ export function AccessPanel({
     revokeClientId.trim().length > 0 &&
     !revokePending &&
     !revokeReviewPending;
+  const identityColumns = useMemo<ConsoleDataGridColumn<KeyLifecycleClientView>[]>(
+    () => [
+      {
+        id: "vps",
+        header: "VPS",
+        cell: (client) => (
+          <span title={client.client_id}>
+            {formatVpsName(
+              {
+                client_id: client.client_id,
+                display_name: client.display_name,
+              },
+              vpsNameDisplayMode,
+            )}
+          </span>
+        ),
+        searchValue: (client) => `${client.display_name} ${client.client_id}`,
+        sortValue: (client) => client.display_name || client.client_id,
+        size: 250,
+      },
+      {
+        id: "status",
+        header: "Status",
+        cell: (client) => (
+          <span className={`statusPill ${statusClass(identityStatus(client))}`}>
+            {identityStatus(client)}
+          </span>
+        ),
+        searchValue: (client) => identityStatus(client),
+        sortValue: (client) => identityStatus(client),
+        size: 130,
+      },
+      {
+        id: "key",
+        header: "Current key",
+        cell: (client) =>
+          client.current_public_key_sha256_hex ? (
+            <span
+              className="monoValue"
+              title={client.current_public_key_sha256_hex}
+            >
+              {shortHash(client.current_public_key_sha256_hex)}
+            </span>
+          ) : (
+            "no key"
+          ),
+        searchValue: (client) => client.current_public_key_sha256_hex ?? "",
+        size: 180,
+      },
+      {
+        id: "revocation",
+        header: "Latest revocation",
+        cell: (client) =>
+          client.latest_revoked_at
+            ? `${formatTime(client.latest_revoked_at)} ${client.latest_revocation_reason ?? ""}`
+            : "none",
+        searchValue: (client) =>
+          `${client.latest_revoked_at ?? ""} ${client.latest_revocation_reason ?? ""}`,
+        sortValue: (client) => client.latest_revoked_at ?? "",
+        size: 260,
+      },
+    ],
+    [vpsNameDisplayMode],
+  );
+  const revocationColumns = useMemo<ConsoleDataGridColumn<ClientKeyRevocationView>[]>(
+    () => [
+      {
+        id: "vps",
+        header: "VPS",
+        cell: (revocation) => (
+          <span title={revocation.client_id}>
+            {clientDisplayNameFromMap(revocation.client_id, lifecycleNameById)}
+          </span>
+        ),
+        searchValue: (revocation) =>
+          `${clientDisplayNameFromMap(revocation.client_id, lifecycleNameById)} ${revocation.client_id}`,
+        sortValue: (revocation) =>
+          clientDisplayNameFromMap(revocation.client_id, lifecycleNameById),
+        size: 250,
+      },
+      {
+        id: "key",
+        header: "Key hash",
+        cell: (revocation) => (
+          <span className="monoValue" title={revocation.public_key_sha256_hex}>
+            {shortHash(revocation.public_key_sha256_hex)}
+          </span>
+        ),
+        searchValue: (revocation) => revocation.public_key_sha256_hex,
+        size: 180,
+      },
+      {
+        id: "reason",
+        header: "Reason",
+        cell: (revocation) => revocation.reason ?? "operator request",
+        searchValue: (revocation) => revocation.reason ?? "operator request",
+        size: 240,
+      },
+      {
+        id: "created",
+        header: "Created",
+        cell: (revocation) => formatTime(revocation.created_at),
+        sortValue: (revocation) => revocation.created_at,
+        size: 200,
+      },
+    ],
+    [lifecycleNameById],
+  );
+  const gatewaySessionColumns = useMemo<ConsoleDataGridColumn<GatewaySessionRecord>[]>(
+    () => [
+      {
+        id: "vps",
+        header: "VPS",
+        cell: (session) => (
+          <span title={session.client_id}>
+            {clientDisplayNameFromMap(session.client_id, lifecycleNameById)}
+          </span>
+        ),
+        searchValue: (session) =>
+          `${clientDisplayNameFromMap(session.client_id, lifecycleNameById)} ${session.client_id}`,
+        sortValue: (session) =>
+          clientDisplayNameFromMap(session.client_id, lifecycleNameById),
+        size: 240,
+      },
+      {
+        id: "gateway",
+        header: "Gateway",
+        cell: (session) => session.gateway_id,
+        searchValue: (session) => session.gateway_id,
+        sortValue: (session) => session.gateway_id,
+        size: 160,
+      },
+      {
+        id: "status",
+        header: "Status",
+        cell: (session) => (
+          <span className={`statusPill ${statusClass(session.status)}`}>
+            {session.status}
+          </span>
+        ),
+        searchValue: (session) => session.status,
+        sortValue: (session) => session.status,
+        size: 120,
+      },
+      {
+        id: "lastSeen",
+        header: "Last seen",
+        cell: (session) => formatTime(session.last_seen_at),
+        sortValue: (session) => session.last_seen_at,
+        size: 190,
+      },
+      {
+        id: "noiseKey",
+        header: "Noise key",
+        cell: (session) =>
+          session.noise_public_key_hex ? (
+            <span className="monoValue" title={session.noise_public_key_hex}>
+              {shortHash(session.noise_public_key_hex)}
+            </span>
+          ) : (
+            "n/a"
+          ),
+        searchValue: (session) => session.noise_public_key_hex ?? "",
+        size: 160,
+      },
+      {
+        id: "endReason",
+        header: "End reason",
+        cell: (session) =>
+          session.end_reason ?? (session.ended_at ? "ended" : "active"),
+        searchValue: (session) =>
+          session.end_reason ?? (session.ended_at ? "ended" : "active"),
+        size: 190,
+      },
+    ],
+    [lifecycleNameById],
+  );
 
   useEffect(() => {
     setActiveSubpage(accessSubpageFromRoute(routeSubpage));
@@ -264,6 +445,39 @@ export function AccessPanel({
     setRevokeSnapshot(null);
     setRevokeReviewPending(false);
     setPendingConfirmation((current) => (current === "key-revoke" ? null : current));
+  }
+
+  function prepareNewIdentity() {
+    clearIdentityReview();
+    setIdentityMode("register");
+    setIdentityClientId("");
+    setIdentityPublicKeyHex("");
+    setIdentityDisplayName("");
+    setIdentityTags("");
+    setPrivateKeyHex(null);
+    setCreatedIdentity(null);
+    setIdentityError(null);
+  }
+
+  function prepareIdentityRotation(client: KeyLifecycleClientView) {
+    clearIdentityReview();
+    setIdentityMode("rotate");
+    setIdentityClientId(client.client_id);
+    setIdentityPublicKeyHex("");
+    setIdentityDisplayName("");
+    setIdentityTags("");
+    setPrivateKeyHex(null);
+    setCreatedIdentity(null);
+    setIdentityError(null);
+    setActiveSubpage("VPS keys");
+  }
+
+  function prepareClientKeyRevoke(clientId: string, reason = "") {
+    clearRevokeReview();
+    setRevokeClientId(clientId);
+    setRevokeReason(reason);
+    setRevokeError(null);
+    setActiveSubpage("VPS keys");
   }
 
   async function setupTotp() {
@@ -613,19 +827,39 @@ export function AccessPanel({
             </section>
             <section className="controlPanel">
               <div className="sectionHeader compact">
-                <h2>Operational model</h2>
-                <span>
-                  Gateway endpoints are selected from provisioned endpoint
-                  priorities
-                </span>
+                <h2>Attention queues</h2>
+                <span>Jump from access state to the working table</span>
               </div>
-              <p className="formNoteText">
-                Agents are installed with their Noise private key, client ID,
-                trusted gateway server key, and prioritized gateway endpoints.
-                The browser panel can register the matching public identity for
-                inventory visibility, but it never issues claim tokens and
-                agents never call the panel for runtime configuration.
-              </p>
+              <div className="accessQueueList">
+                <AccessQueueRow
+                  action="Review keys"
+                  detail={`${keyLifecycleReport?.revocation_count ?? clientKeyRevocations.length} revocations retained`}
+                  label="Blocked or revoked keys"
+                  onClick={() => setActiveSubpage("VPS keys")}
+                  value={`${revokedClientCount} current blocked`}
+                />
+                <AccessQueueRow
+                  action="Open gateway"
+                  detail={`${gatewaySessions.length} recent sessions`}
+                  label="Gateway sessions"
+                  onClick={() => setActiveSubpage("Gateway")}
+                  value={`${activeGatewaySessions} active`}
+                />
+                <AccessQueueRow
+                  action="Unlock"
+                  detail={privilegeMaterial ? "ready for privileged review" : "required for key lifecycle actions"}
+                  label="Privilege state"
+                  onClick={() => setActiveSubpage("Privilege unlock")}
+                  value={vaultState}
+                />
+                <AccessQueueRow
+                  action="Open access"
+                  detail={`token in ${tokenStorageState}`}
+                  label="Browser session"
+                  onClick={() => setActiveSubpage("Privilege unlock")}
+                  value={sessionState}
+                />
+              </div>
             </section>
           </div>
         )}
@@ -720,75 +954,83 @@ export function AccessPanel({
                 <h2>Gateway agent identities</h2>
                 <span>Registered public keys and revocation state</span>
               </div>
-              <CrudPager
-                fields={[
+              <ConsoleDataGrid
+                actions={[
                   {
-                    label: "Client",
-                    value: (item) => `${item.display_name} ${item.client_id}`,
+                    label: "Rotate selected",
+                    description: (rows) =>
+                      rows.length === 1
+                        ? `Prefill key rotation for ${rows[0].display_name}.`
+                        : "Select exactly one VPS identity to rotate.",
+                    disabled: (rows) => rows.length !== 1,
+                    icon: <KeyRound size={14} />,
+                    onSelect: (rows) => prepareIdentityRotation(rows[0]),
                   },
-                  { label: "Status", value: (item) => item.status },
                   {
-                    label: "Key",
-                    value: (item) => item.current_public_key_sha256_hex ?? "",
-                  },
-                  {
-                    label: "Revoked",
-                    value: (item) => item.current_key_revoked,
+                    label: "Revoke selected",
+                    description: (rows) =>
+                      rows.length === 1
+                        ? `Prefill current key revocation for ${rows[0].display_name}.`
+                        : "Select exactly one VPS identity to revoke.",
+                    disabled: (rows) => rows.length !== 1,
+                    icon: <Ban size={14} />,
+                    onSelect: (rows) => prepareClientKeyRevoke(rows[0].client_id),
+                    tone: "danger",
                   },
                 ]}
+                columns={identityColumns}
+                defaultPageSize={10}
+                empty="No gateway agent identities"
+                expandOnRowClick
+                getRowId={(client) => client.client_id}
                 itemLabel="identities"
-                items={lifecycleClients}
-                pageSize={10}
+                renderExpandedRow={(client) => (
+                  <IdentityDetailGrid
+                    client={client}
+                    vpsNameDisplayMode={vpsNameDisplayMode}
+                  />
+                )}
+                renderSelectionPanel={(rows) => (
+                  <AccessSelectionPanel
+                    label="Selected identities"
+                    value={rows
+                      .map((client) => client.display_name || client.client_id)
+                      .join(", ")}
+                  />
+                )}
+                rowActions={[
+                  {
+                    label: "Prepare rotation",
+                    description: (rows) =>
+                      `Prefill key rotation for ${rows[0].display_name}.`,
+                    icon: <KeyRound size={14} />,
+                    onSelect: (rows) => prepareIdentityRotation(rows[0]),
+                  },
+                  {
+                    label: "Prepare revoke",
+                    description: (rows) =>
+                      `Prefill current key revocation for ${rows[0].display_name}.`,
+                    icon: <Ban size={14} />,
+                    onSelect: (rows) => prepareClientKeyRevoke(rows[0].client_id),
+                    tone: "danger",
+                  },
+                ]}
+                rows={lifecycleClients}
+                searchPlaceholder="Search VPS, status, key, or revocation"
+                singleExpandedRow
                 storageKey="vpsman.access.agentIdentities"
                 title="Gateway agent identities"
-              >
-                {(pagedClients) => (
-                  <table className="dataTable compactTable">
-                    <thead>
-                      <tr>
-                        <th>VPS</th>
-                        <th>Status</th>
-                        <th>Current key</th>
-                        <th>Latest revocation</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pagedClients.map((client) => (
-                        <tr key={client.client_id}>
-                          <td title={client.client_id}>
-                            {formatVpsName(
-                              {
-                                client_id: client.client_id,
-                                display_name: client.display_name,
-                              },
-                              vpsNameDisplayMode,
-                            )}
-                          </td>
-                          <td>
-                            <span
-                              className={`statusPill ${statusClass(client.status)}`}
-                            >
-                              {client.current_key_revoked
-                                ? "blocked"
-                                : client.status}
-                            </span>
-                          </td>
-                          <td>
-                            {client.current_public_key_sha256_hex
-                              ? shortHash(client.current_public_key_sha256_hex)
-                              : "no key"}
-                          </td>
-                          <td>
-                            {client.latest_revoked_at
-                              ? `${formatTime(client.latest_revoked_at)} ${client.latest_revocation_reason ?? ""}`
-                              : "none"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </CrudPager>
+                toolbarActions={
+                  <button
+                    className="secondaryAction compactAction"
+                    onClick={prepareNewIdentity}
+                    type="button"
+                  >
+                    <Fingerprint size={15} />
+                    <span>New</span>
+                  </button>
+                }
+              />
             </section>
 
             <section className="controlPanel">
@@ -796,43 +1038,25 @@ export function AccessPanel({
                 <h2>Client key revocations</h2>
                 <span>{clientKeyRevocations.length} retained records</span>
               </div>
-              <CrudPager
-                fields={[
-                  { label: "Client", value: (item) => item.client_id },
-                  { label: "Key", value: (item) => item.public_key_sha256_hex },
-                  { label: "Reason", value: (item) => item.reason ?? "" },
-                ]}
+              <ConsoleDataGrid
+                columns={revocationColumns}
+                defaultPageSize={8}
+                empty="No client key revocations"
+                expandOnRowClick
+                getRowId={(revocation) => revocation.id}
                 itemLabel="revocations"
-                items={clientKeyRevocations}
-                pageSize={8}
+                renderExpandedRow={(revocation) => (
+                  <RevocationDetailGrid
+                    label={lifecycleClientLabel(revocation.client_id)}
+                    revocation={revocation}
+                  />
+                )}
+                rows={clientKeyRevocations}
+                searchPlaceholder="Search VPS, key hash, reason, or operator"
+                singleExpandedRow
                 storageKey="vpsman.access.revocations"
                 title="Client key revocations"
-              >
-                {(pagedRevocations) => (
-                  <table className="dataTable compactTable">
-                    <thead>
-                      <tr>
-                        <th>VPS</th>
-                        <th>Key hash</th>
-                        <th>Reason</th>
-                        <th>Created</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pagedRevocations.map((revocation) => (
-                        <tr key={revocation.id}>
-                          <td title={revocation.client_id}>
-                            {lifecycleClientLabel(revocation.client_id)}
-                          </td>
-                          <td>{shortHash(revocation.public_key_sha256_hex)}</td>
-                          <td>{revocation.reason ?? "operator request"}</td>
-                          <td>{formatTime(revocation.created_at)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </CrudPager>
+              />
             </section>
           </div>
         )}
@@ -847,60 +1071,25 @@ export function AccessPanel({
                   recent
                 </span>
               </div>
-              <CrudPager
-                fields={[
-                  { label: "Client", value: (item) => item.client_id },
-                  { label: "Gateway", value: (item) => item.gateway_id },
-                  { label: "Status", value: (item) => item.status },
-                ]}
+              <ConsoleDataGrid
+                columns={gatewaySessionColumns}
+                defaultPageSize={12}
+                empty="No gateway sessions"
+                expandOnRowClick
+                getRowId={(session) => session.id}
                 itemLabel="gateway sessions"
-                items={gatewaySessions}
-                pageSize={12}
+                renderExpandedRow={(session) => (
+                  <GatewaySessionDetailGrid
+                    label={lifecycleClientLabel(session.client_id)}
+                    session={session}
+                  />
+                )}
+                rows={gatewaySessions}
+                searchPlaceholder="Search VPS, gateway, status, key, or reason"
+                singleExpandedRow
                 storageKey="vpsman.access.gatewaySessions"
                 title="Gateway sessions"
-              >
-                {(pagedSessions) => (
-                  <table className="dataTable compactTable">
-                    <thead>
-                      <tr>
-                        <th>VPS</th>
-                        <th>Gateway</th>
-                        <th>Status</th>
-                        <th>Last seen</th>
-                        <th>Noise key</th>
-                        <th>End reason</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {pagedSessions.map((session) => (
-                        <tr key={session.id}>
-                          <td title={session.client_id}>
-                            {lifecycleClientLabel(session.client_id)}
-                          </td>
-                          <td>{session.gateway_id}</td>
-                          <td>
-                            <span
-                              className={`statusPill ${statusClass(session.status)}`}
-                            >
-                              {session.status}
-                            </span>
-                          </td>
-                          <td>{formatTime(session.last_seen_at)}</td>
-                          <td>
-                            {session.noise_public_key_hex
-                              ? shortHash(session.noise_public_key_hex)
-                              : "n/a"}
-                          </td>
-                          <td>
-                            {session.end_reason ??
-                              (session.ended_at ? "ended" : "active")}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </CrudPager>
+              />
             </section>
           </div>
         )}
@@ -933,10 +1122,7 @@ export function AccessPanel({
         >
           <button
             className={identityMode === "register" ? "selected" : ""}
-            onClick={() => {
-              setIdentityMode("register");
-              clearIdentityReview();
-            }}
+            onClick={prepareNewIdentity}
             type="button"
           >
             New registration
@@ -1283,6 +1469,189 @@ function SummaryCard({
   );
 }
 
+function AccessQueueRow({
+  action,
+  detail,
+  label,
+  onClick,
+  value,
+}: {
+  action: string;
+  detail: string;
+  label: string;
+  onClick: () => void;
+  value: string;
+}) {
+  return (
+    <div className="accessQueueRow">
+      <div>
+        <strong>{label}</strong>
+        <span>{detail}</span>
+      </div>
+      <span className="accessQueueValue">{value}</span>
+      <button className="secondaryAction compact" onClick={onClick} type="button">
+        {action}
+      </button>
+    </div>
+  );
+}
+
+function AccessSelectionPanel({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="accessSelectionPanel">
+      <strong>{label}</strong>
+      <span>{value}</span>
+    </div>
+  );
+}
+
+function IdentityDetailGrid({
+  client,
+  vpsNameDisplayMode,
+}: {
+  client: KeyLifecycleClientView;
+  vpsNameDisplayMode: VpsNameDisplayMode;
+}) {
+  return (
+    <div className="consoleInlineDetailGrid">
+      <span>
+        <strong>VPS</strong>
+        <span>
+          {formatVpsName(
+            {
+              client_id: client.client_id,
+              display_name: client.display_name,
+            },
+            vpsNameDisplayMode,
+          )}
+        </span>
+      </span>
+      <span>
+        <strong>Client ID</strong>
+        <span className="monoValue">{client.client_id}</span>
+      </span>
+      <span>
+        <strong>Status</strong>
+        <span>{identityStatus(client)}</span>
+      </span>
+      <span>
+        <strong>Current key</strong>
+        <span className="monoValue">
+          {client.current_public_key_sha256_hex ?? "none"}
+        </span>
+      </span>
+      <span>
+        <strong>Latest revoke</strong>
+        <span>
+          {client.latest_revoked_at
+            ? formatTime(client.latest_revoked_at)
+            : "none"}
+        </span>
+      </span>
+      <span>
+        <strong>Reason</strong>
+        <span>{client.latest_revocation_reason ?? "none"}</span>
+      </span>
+    </div>
+  );
+}
+
+function RevocationDetailGrid({
+  label,
+  revocation,
+}: {
+  label: string;
+  revocation: ClientKeyRevocationView;
+}) {
+  return (
+    <div className="consoleInlineDetailGrid">
+      <span>
+        <strong>VPS</strong>
+        <span>{label}</span>
+      </span>
+      <span>
+        <strong>Client ID</strong>
+        <span className="monoValue">{revocation.client_id}</span>
+      </span>
+      <span>
+        <strong>Key hash</strong>
+        <span className="monoValue">{revocation.public_key_sha256_hex}</span>
+      </span>
+      <span>
+        <strong>Reason</strong>
+        <span>{revocation.reason ?? "operator request"}</span>
+      </span>
+      <span>
+        <strong>Revoked by</strong>
+        <span>{revocation.revoked_by ?? "unknown"}</span>
+      </span>
+      <span>
+        <strong>Created</strong>
+        <span>{formatTime(revocation.created_at)}</span>
+      </span>
+    </div>
+  );
+}
+
+function GatewaySessionDetailGrid({
+  label,
+  session,
+}: {
+  label: string;
+  session: GatewaySessionRecord;
+}) {
+  return (
+    <div className="consoleInlineDetailGrid">
+      <span>
+        <strong>VPS</strong>
+        <span>{label}</span>
+      </span>
+      <span>
+        <strong>Session ID</strong>
+        <span className="monoValue">{session.id}</span>
+      </span>
+      <span>
+        <strong>Gateway</strong>
+        <span className="monoValue">{session.gateway_id}</span>
+      </span>
+      <span>
+        <strong>Client ID</strong>
+        <span className="monoValue">{session.client_id}</span>
+      </span>
+      <span>
+        <strong>Status</strong>
+        <span>{session.status}</span>
+      </span>
+      <span>
+        <strong>Started</strong>
+        <span>{formatTime(session.started_at)}</span>
+      </span>
+      <span>
+        <strong>Last seen</strong>
+        <span>{formatTime(session.last_seen_at)}</span>
+      </span>
+      <span>
+        <strong>Ended</strong>
+        <span>{session.ended_at ? formatTime(session.ended_at) : "active"}</span>
+      </span>
+      <span>
+        <strong>End reason</strong>
+        <span>{session.end_reason ?? (session.ended_at ? "ended" : "active")}</span>
+      </span>
+      <span>
+        <strong>Noise key</strong>
+        <span className="monoValue">{session.noise_public_key_hex ?? "n/a"}</span>
+      </span>
+    </div>
+  );
+}
+
 function MetricRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="metricRow">
@@ -1290,6 +1659,10 @@ function MetricRow({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function identityStatus(client: KeyLifecycleClientView): string {
+  return client.current_key_revoked ? "blocked" : client.status;
 }
 
 function parseListInput(value: string): string[] {

@@ -17,6 +17,7 @@ import {
   Trash2,
   UserPlus,
   UserX,
+  X,
 } from "lucide-react";
 import { ConsoleDataGrid, type ConsoleDataGridColumn } from "../components/ConsoleDataGrid";
 import { parse, stringify, type TomlTable } from "smol-toml";
@@ -397,6 +398,7 @@ function SystemUsersPanel({
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedOperator = operators.find((item) => item.id === selectedId) ?? null;
+  const [editorMode, setEditorMode] = useState<"closed" | "create" | "edit">("closed");
   const [draftUsername, setDraftUsername] = useState("");
   const [draftPassword, setDraftPassword] = useState("");
   const [draftRole, setDraftRole] = useState("operator");
@@ -414,7 +416,7 @@ function SystemUsersPanel({
   } = useReviewGenerationGuard();
 
   useEffect(() => {
-    if (!selectedOperator) {
+    if (editorMode !== "edit" || !selectedOperator) {
       return;
     }
     setDraftUsername(selectedOperator.username);
@@ -425,12 +427,16 @@ function SystemUsersPanel({
     setActionError(null);
     setPendingAction(null);
     invalidateReviewGeneration();
-  }, [selectedOperator, invalidateReviewGeneration]);
+  }, [editorMode, selectedOperator, invalidateReviewGeneration]);
 
   useEffect(() => {
+    if (editorMode === "edit" && selectedId && !operators.some((operator) => operator.id === selectedId)) {
+      setSelectedId(null);
+      setEditorMode("closed");
+    }
     setPendingAction(null);
     invalidateReviewGeneration();
-  }, [operators, invalidateReviewGeneration]);
+  }, [editorMode, operators, selectedId, invalidateReviewGeneration]);
 
   const userColumns = useMemo<ConsoleDataGridColumn<OperatorView>[]>(
     () => [
@@ -491,16 +497,25 @@ function SystemUsersPanel({
   function setSelectedOperatorId(nextId: string | null) {
     invalidateUserReview();
     setSelectedId(nextId);
+    setEditorMode(nextId ? "edit" : "closed");
   }
 
   function resetCreateDraft() {
     invalidateUserReview();
     setSelectedId(null);
+    setEditorMode("create");
     setDraftUsername("");
     setDraftPassword("");
     setDraftRole("operator");
     setDraftScopes("");
     setDraftSessionTtlDays(defaultSessionTtlDays);
+    setActionError(null);
+  }
+
+  function closeEditor() {
+    invalidateUserReview();
+    setSelectedId(null);
+    setEditorMode("closed");
     setActionError(null);
   }
 
@@ -791,7 +806,11 @@ function SystemUsersPanel({
             <span>{operators.length} operator records</span>
           </div>
           <span className="sectionContext">
-            {selectedOperator ? `Selected ${selectedOperator.username}` : "Create or select an operator record"}
+            {editorMode === "edit" && selectedOperator
+              ? `Editing ${selectedOperator.username}`
+              : editorMode === "create"
+                ? "Creating new operator"
+                : "Use New or row actions"}
           </span>
         </div>
         <ConsoleDataGrid
@@ -852,11 +871,15 @@ function SystemUsersPanel({
           columns={userColumns}
           defaultPageSize={12}
           empty="No operators"
+          expandOnRowClick
           getRowId={(row) => row.id}
           itemLabel="users"
           onOpenRow={(row) => setSelectedOperatorId(row.id)}
+          renderExpandedRow={(row) => <OperatorDetailGrid operator={row} />}
+          renderSelectionPanel={(rows) => <OperatorSelectionPanel rows={rows} />}
           rows={operators}
           searchPlaceholder="Search username, role, status, or TOTP"
+          singleExpandedRow
           storageKey="vpsman.system.users"
           title="Users"
           toolbarActions={
@@ -873,17 +896,29 @@ function SystemUsersPanel({
         />
       </section>
 
+      {editorMode !== "closed" && (
       <section className="controlPanel operatorEditorPanel" aria-label="Operator user editor">
         <div className="sectionHeader fleetInstancesHeader">
           <div>
             <h2>{selectedOperator ? "Edit user" : "Create user"}</h2>
             <span>{actionError ?? (reviewPending ? "Preparing review" : canManageUsers ? "Ready" : "Admin role required for changes")}</span>
           </div>
-          {selectedOperator && (
+          <div className="sectionActions">
+            {selectedOperator && (
             <span className="sectionContext">
               {selectedOperator.status} · {selectedOperator.role} · {secondsToDays(selectedOperator.session_refresh_ttl_secs)}d session TTL
             </span>
-          )}
+            )}
+            <button
+              aria-label="Close operator editor"
+              className="iconButton"
+              onClick={closeEditor}
+              title="Close editor"
+              type="button"
+            >
+              <X size={16} />
+            </button>
+          </div>
         </div>
         <div className="operatorEditorBody">
           <div className="operatorEditorFields">
@@ -1072,6 +1107,7 @@ function SystemUsersPanel({
           </div>
         </div>
       </section>
+      )}
       <ConfirmationPrompt
         confirmLabel={pendingUserActionLabel(pendingAction)}
         detail={pendingUserActionDetail(pendingAction)}
@@ -1276,10 +1312,31 @@ function SystemSessionsPanel({
             columns={sessionColumns}
             defaultPageSize={12}
             empty="No operator sessions"
+            expandOnRowClick
             getRowId={(row) => row.id}
             itemLabel="sessions"
+            renderExpandedRow={(row) => <SessionDetailGrid session={row} />}
+            renderSelectionPanel={(rows) => (
+              <SessionSelectionPanel rows={rows} />
+            )}
+            rowActions={[
+              {
+                label: "Revoke session",
+                description: (rows) =>
+                  `Revoke the bearer session for ${rows[0].operator_username}.`,
+                tone: "danger",
+                icon: <UserX size={14} />,
+                disabled: (rows) =>
+                  reviewPending ||
+                  pending ||
+                  rows.length === 0 ||
+                  rows.some((row) => row.current || row.revoked),
+                onSelect: (rows) => void requestSessionRevoke(rows),
+              },
+            ]}
             rows={sessions}
             searchPlaceholder="Search user, role, or state"
+            singleExpandedRow
             storageKey="vpsman.system.sessions"
             title="Sessions"
           />
@@ -1293,10 +1350,13 @@ function SystemSessionsPanel({
             columns={eventColumns}
             defaultPageSize={12}
             empty="No authentication events"
+            expandOnRowClick
             getRowId={(row) => row.id}
             itemLabel="events"
+            renderExpandedRow={(row) => <AuthEventDetailGrid event={row} />}
             rows={authEvents}
             searchPlaceholder="Search username, result, reason, remote IP, or session"
+            singleExpandedRow
             storageKey="vpsman.system.authEvents"
             title="Authentication history"
           />
@@ -1329,6 +1389,187 @@ function SystemSessionsPanel({
         title={pendingRevoke?.sessions.some((session) => session.operator_role === "admin") ? "Confirm admin session revoke" : "Confirm session revoke"}
         tone="danger"
       />
+    </div>
+  );
+}
+
+function OperatorDetailGrid({ operator }: { operator: OperatorView }) {
+  return (
+    <div className="consoleInlineDetailGrid">
+      <span>
+        <strong>User</strong>
+        <span>{operator.username}</span>
+      </span>
+      <span>
+        <strong>ID</strong>
+        <span className="monoValue">{operator.id}</span>
+      </span>
+      <span>
+        <strong>Status</strong>
+        <span>{operator.status}</span>
+      </span>
+      <span>
+        <strong>Role</strong>
+        <span>{operator.role}</span>
+      </span>
+      <span>
+        <strong>Session TTL</strong>
+        <span>{secondsToDays(operator.session_refresh_ttl_secs)}d</span>
+      </span>
+      <span>
+        <strong>TOTP</strong>
+        <span>{operator.totp_enabled ? "enabled" : "off"}</span>
+      </span>
+      <span>
+        <strong>Scopes</strong>
+        <span>{operator.scopes.length > 0 ? operator.scopes.join(", ") : "role defaults"}</span>
+      </span>
+      <span>
+        <strong>Created</strong>
+        <span>{formatTime(operator.created_at)}</span>
+      </span>
+      <span>
+        <strong>Disabled</strong>
+        <span>{operator.disabled_at ? formatTime(operator.disabled_at) : "no"}</span>
+      </span>
+      <span>
+        <strong>Deleted</strong>
+        <span>{operator.deleted_at ? formatTime(operator.deleted_at) : "no"}</span>
+      </span>
+    </div>
+  );
+}
+
+function OperatorSelectionPanel({ rows }: { rows: OperatorView[] }) {
+  const adminCount = rows.filter((operator) => operator.role === "admin").length;
+  const activeCount = rows.filter((operator) => operator.status === "active").length;
+  const totpCount = rows.filter((operator) => operator.totp_enabled).length;
+  return (
+    <div className="gridSelectionSummary">
+      <span>
+        <strong>{rows.length}</strong>
+        selected
+      </span>
+      <span>
+        <strong>{adminCount}</strong>
+        admin
+      </span>
+      <span>
+        <strong>{activeCount}</strong>
+        active
+      </span>
+      <span>
+        <strong>{totpCount}</strong>
+        TOTP
+      </span>
+    </div>
+  );
+}
+
+function SessionDetailGrid({ session }: { session: OperatorSessionRecord }) {
+  return (
+    <div className="consoleInlineDetailGrid">
+      <span>
+        <strong>User</strong>
+        <span>{session.operator_username}</span>
+      </span>
+      <span>
+        <strong>Session ID</strong>
+        <span className="monoValue">{session.id}</span>
+      </span>
+      <span>
+        <strong>Operator ID</strong>
+        <span className="monoValue">{session.operator_id}</span>
+      </span>
+      <span>
+        <strong>Role</strong>
+        <span>{session.operator_role}</span>
+      </span>
+      <span>
+        <strong>State</strong>
+        <span>{session.current ? "current" : session.revoked ? "revoked" : "active"}</span>
+      </span>
+      <span>
+        <strong>Created</strong>
+        <span>{formatTime(session.created_at)}</span>
+      </span>
+      <span>
+        <strong>Access expires</strong>
+        <span>{formatTime(session.expires_at)}</span>
+      </span>
+      <span>
+        <strong>Refresh expires</strong>
+        <span>{formatTime(session.refresh_expires_at)}</span>
+      </span>
+      <span>
+        <strong>Revoked</strong>
+        <span>{session.revoked_at ? formatTime(session.revoked_at) : "no"}</span>
+      </span>
+    </div>
+  );
+}
+
+function SessionSelectionPanel({ rows }: { rows: OperatorSessionRecord[] }) {
+  const revokable = rows.filter((session) => !session.current && !session.revoked).length;
+  const current = rows.filter((session) => session.current).length;
+  const revoked = rows.filter((session) => session.revoked).length;
+  return (
+    <div className="gridSelectionSummary">
+      <span>
+        <strong>{rows.length}</strong>
+        selected
+      </span>
+      <span>
+        <strong>{revokable}</strong>
+        revokable
+      </span>
+      <span>
+        <strong>{current}</strong>
+        current
+      </span>
+      <span>
+        <strong>{revoked}</strong>
+        revoked
+      </span>
+    </div>
+  );
+}
+
+function AuthEventDetailGrid({ event }: { event: OperatorAuthEventRecord }) {
+  return (
+    <div className="consoleInlineDetailGrid">
+      <span>
+        <strong>Time</strong>
+        <span>{formatTime(event.created_at)}</span>
+      </span>
+      <span>
+        <strong>User</strong>
+        <span>{event.username}</span>
+      </span>
+      <span>
+        <strong>Operator ID</strong>
+        <span className="monoValue">{event.operator_id ?? "n/a"}</span>
+      </span>
+      <span>
+        <strong>Result</strong>
+        <span>{event.result}</span>
+      </span>
+      <span>
+        <strong>Reason</strong>
+        <span>{event.reason ?? "-"}</span>
+      </span>
+      <span>
+        <strong>Remote IP</strong>
+        <span>{event.remote_ip ?? "-"}</span>
+      </span>
+      <span>
+        <strong>Session</strong>
+        <span className="monoValue">{event.session_id ?? "-"}</span>
+      </span>
+      <span>
+        <strong>User agent</strong>
+        <span>{event.user_agent ?? "-"}</span>
+      </span>
     </div>
   );
 }

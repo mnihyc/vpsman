@@ -1984,6 +1984,32 @@
   padding: 12px;
 }
 
+.gridSelectionSummary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  color: #5f6368;
+  font-size: 12px;
+}
+
+.gridSelectionSummary span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-height: 26px;
+  border: 1px solid #dfe3eb;
+  border-radius: 999px;
+  background: #fff;
+  padding: 0 10px;
+}
+
+.gridSelectionSummary strong {
+  color: #202124;
+  font-size: 13px;
+}
+
 .fleetSelectionActions,
 .fleetInlineMutationPanel,
 .selectionStatsTabs {
