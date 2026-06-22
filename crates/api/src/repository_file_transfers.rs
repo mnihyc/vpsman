@@ -444,18 +444,8 @@ impl Repository {
                 Ok(outputs)
             }
             Self::Postgres(pool) => {
-                let session_text = session_id.to_string();
-                let rows = sqlx::query(
+                let status_rows = sqlx::query(
                     r#"
-                    WITH chunk_jobs AS (
-                        SELECT DISTINCT output.job_id
-                        FROM job_outputs output
-                        JOIN jobs job ON job.id = output.job_id
-                        WHERE output.client_id = $1
-                          AND output.stream = 'status'
-                          AND job.command_type = 'file_transfer_download_chunk'
-                          AND convert_from(output.data, 'UTF8')::jsonb ->> 'session_id' = $2
-                    )
                     SELECT
                         output.job_id,
                         output.client_id,
@@ -470,41 +460,86 @@ impl Repository {
                         output.done,
                         output.created_at::text AS created_at
                     FROM job_outputs output
-                    JOIN chunk_jobs ON chunk_jobs.job_id = output.job_id
+                    JOIN jobs job ON job.id = output.job_id
                     WHERE output.client_id = $1
+                      AND output.stream = 'status'
+                      AND job.command_type = 'file_transfer_download_chunk'
                     ORDER BY output.job_id, output.seq
                     "#,
                 )
                 .bind(client_id)
-                .bind(session_text)
+                .fetch_all(pool)
+                .await?;
+                let status_outputs = status_rows
+                    .into_iter()
+                    .map(file_transfer_chunk_output_from_row)
+                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
+                let chunk_job_ids = status_outputs
+                    .iter()
+                    .filter(|output| {
+                        parse_download_chunk_status(&output.output, session_id).is_some()
+                    })
+                    .map(|output| output.output.job_id)
+                    .collect::<BTreeSet<_>>();
+                if chunk_job_ids.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let chunk_job_ids = chunk_job_ids.into_iter().collect::<Vec<_>>();
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        output.job_id,
+                        output.client_id,
+                        output.seq,
+                        output.stream,
+                        output.data,
+                        output.storage,
+                        output.object_key,
+                        output.data_sha256_hex,
+                        output.data_size_bytes,
+                        output.exit_code,
+                        output.done,
+                        output.created_at::text AS created_at
+                    FROM job_outputs output
+                    WHERE output.client_id = $1
+                      AND output.job_id = ANY($2::uuid[])
+                    ORDER BY output.job_id, output.seq
+                    "#,
+                )
+                .bind(client_id)
+                .bind(chunk_job_ids)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
-                    .map(|row| {
-                        let data: Vec<u8> = row.try_get("data")?;
-                        Ok(FileTransferChunkOutput {
-                            output: JobOutputView {
-                                job_id: row.try_get("job_id")?,
-                                client_id: row.try_get("client_id")?,
-                                seq: row.try_get("seq")?,
-                                stream: row.try_get("stream")?,
-                                data_base64: BASE64.encode(data),
-                                storage: row.try_get("storage")?,
-                                artifact_object_key: row.try_get("object_key")?,
-                                artifact_sha256_hex: row.try_get("data_sha256_hex")?,
-                                artifact_size_bytes: row.try_get("data_size_bytes")?,
-                                exit_code: row.try_get("exit_code")?,
-                                done: row.try_get("done")?,
-                                received_at: None,
-                                created_at: row.try_get("created_at")?,
-                            },
-                        })
-                    })
+                    .map(file_transfer_chunk_output_from_row)
                     .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
                     .map_err(Into::into)
             }
         }
     }
+}
+
+fn file_transfer_chunk_output_from_row(
+    row: PgRow,
+) -> std::result::Result<FileTransferChunkOutput, sqlx::Error> {
+    let data: Vec<u8> = row.try_get("data")?;
+    Ok(FileTransferChunkOutput {
+        output: JobOutputView {
+            job_id: row.try_get("job_id")?,
+            client_id: row.try_get("client_id")?,
+            seq: row.try_get("seq")?,
+            stream: row.try_get("stream")?,
+            data_base64: BASE64.encode(data),
+            storage: row.try_get("storage")?,
+            artifact_object_key: row.try_get("object_key")?,
+            artifact_sha256_hex: row.try_get("data_sha256_hex")?,
+            artifact_size_bytes: row.try_get("data_size_bytes")?,
+            exit_code: row.try_get("exit_code")?,
+            done: row.try_get("done")?,
+            received_at: None,
+            created_at: row.try_get("created_at")?,
+        },
+    })
 }
 
 async fn file_transfer_sessions_from_outputs(

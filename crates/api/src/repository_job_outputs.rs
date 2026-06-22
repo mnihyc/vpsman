@@ -845,6 +845,13 @@ impl Repository {
         self.register_persisted_job_output_artifacts(client_id, &accepted_persisted)
             .await?;
         if result.write_result != JobOutputWriteResult::DuplicateConflict {
+            self.record_network_observations_starting_at(
+                job_id,
+                client_id,
+                seq,
+                std::slice::from_ref(output),
+            )
+            .await?;
             self.record_terminal_input_status_output(job_id, output)
                 .await?;
         }

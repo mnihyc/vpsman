@@ -8,40 +8,73 @@ import {
 } from "../src/privilege";
 import type { JobOperation } from "../src/types";
 
-const goldenOperations: Record<string, JobOperation> = {
-  shell_argv: { type: "shell", argv: ["/bin/true"], pty: false },
-  terminal_open: {
-    type: "terminal_open",
-    session_id: "61616161-2222-4333-8444-555555555555",
-    argv: ["/bin/sh", "-l"],
-    cols: 120,
-    rows: 30,
-    idle_timeout_secs: 3600,
-    flow_window_bytes: 65536,
-  },
-  file_transfer_start: {
-    type: "file_transfer_start",
-    session_id: "61616161-2222-4333-8444-555555555555",
-    path: "/tmp/upload.bin",
-    mode: 0o640,
-    size_bytes: 4,
-    sha256_hex: "11".repeat(32),
-    chunk_size_bytes: 65536,
-    rate_limit_kbps: 0,
-    existing_policy: "skip",
-    resume_token_hash: "22".repeat(32),
-  },
-  backup: {
-    type: "backup",
-    paths: ["/etc/app.conf"],
-    include_config: false,
-    follow_symlinks: false,
-  },
-};
-
 test("frontend operation canonicalization matches Rust-generated golden vectors", () => {
+  const commandTypes = new Set(PRIVILEGE_OPERATION_GOLDEN_VECTORS.map((vector) => vector.command_type));
+  expect(commandTypes).toEqual(
+    new Set([
+      "shell_argv",
+      "shell_script",
+      "terminal_open",
+      "terminal_input",
+      "terminal_poll",
+      "terminal_resize",
+      "terminal_close",
+      "config_read",
+      "hot_config",
+      "data_source_config_patch",
+      "agent_update",
+      "agent_update_activate",
+      "agent_update_rollback",
+      "agent_update_check",
+      "file_pull",
+      "file_push",
+      "file_push_chunked",
+      "file_transfer_start",
+      "file_transfer_chunk",
+      "file_transfer_commit",
+      "file_transfer_abort",
+      "file_transfer_download_start",
+      "file_transfer_download_chunk",
+      "file_stat",
+      "file_list_dir",
+      "file_read_text_false",
+      "file_read_text_true",
+      "file_write_text",
+      "file_mkdir",
+      "file_rename",
+      "file_delete",
+      "file_chmod_false",
+      "file_chmod_true",
+      "file_chown",
+      "file_copy_false",
+      "file_copy_true",
+      "file_download_false",
+      "file_download_true",
+      "file_archive_tar_false",
+      "file_archive_tar_true",
+      "user_sessions",
+      "process_list",
+      "process_start",
+      "process_stop",
+      "process_restart",
+      "process_status",
+      "process_logs",
+      "backup",
+      "restore",
+      "restore_rollback",
+      "network_apply",
+      "network_ospf_cost_update",
+      "network_rollback",
+      "network_status",
+      "network_interfaces",
+      "network_probe",
+      "network_speed_test",
+    ]),
+  );
+
   for (const vector of PRIVILEGE_OPERATION_GOLDEN_VECTORS) {
-    expect(canonicalOperationJson(goldenOperations[vector.command_type])).toBe(vector.canonical_json);
+    const operation = JSON.parse(vector.input_json) as JobOperation;
+    expect(canonicalOperationJson(operation), vector.command_type).toBe(vector.canonical_json);
   }
 });
 

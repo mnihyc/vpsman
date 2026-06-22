@@ -13,17 +13,18 @@ use sqlx::{
 use tokio::time;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+use vpsman_common::{
+    encode_json, job_command_operation_type, payload_hash, read_secret_file_ref,
+    AgentCapabilitySnapshot, JobCommand, SuiteConfig, ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS,
+    DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS, SERVER_JOB_STATUS_COMPLETED,
+    SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_QUEUED, SERVER_JOB_STATUS_RUNNING,
+    SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
+};
 #[cfg(test)]
 use vpsman_common::{
     expression_matches, parse_expression, plan_tunnel, BandwidthTier, ExpressionContext,
     OspfCostPolicy, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
     VpsMetadata,
-};
-use vpsman_common::{
-    payload_hash, read_secret_file_ref, AgentCapabilitySnapshot, JobCommand, SuiteConfig,
-    ARTIFACT_CLEANUP_RUNNING_TIMEOUT_SECS, DEFAULT_MAX_JOB_TIMEOUT_SECS,
-    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS, SERVER_JOB_STATUS_COMPLETED, SERVER_JOB_STATUS_FAILED,
-    SERVER_JOB_STATUS_QUEUED, SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 use vpsman_object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use vpsman_server_core::{
@@ -1781,7 +1782,7 @@ async fn process_due_schedule(
             id: row.try_get("id")?,
             actor_id: row.try_get("actor_id")?,
             name: row.try_get("name")?,
-            operation: row.try_get::<SqlJson<Value>, _>("operation")?.0,
+            operation: row.try_get::<SqlJson<JobCommand>, _>("operation")?.0,
             selector_expression: row.try_get("selector_expression")?,
             target_client_ids: row.try_get("target_client_ids")?,
             cron_expr: row.try_get("cron_expr")?,
@@ -1830,7 +1831,7 @@ struct DueSchedule {
     id: Uuid,
     actor_id: Option<Uuid>,
     name: String,
-    operation: Value,
+    operation: JobCommand,
     selector_expression: String,
     target_client_ids: Vec<String>,
     cron_expr: String,
@@ -1909,10 +1910,9 @@ async fn materialize_due_schedule(
         .collect::<Vec<_>>();
     targets.sort();
     targets.dedup();
-    let operation_bytes = serde_json::to_vec(&schedule.operation)?;
+    let operation = schedule.operation.clone();
+    let operation_bytes = encode_json(&operation)?;
     let command_hash = payload_hash(&operation_bytes);
-    let operation: JobCommand = serde_json::from_value(schedule.operation.clone())
-        .context("scheduled operation is not a valid job command")?;
     validate_network_apply_target(&operation, &targets)
         .map_err(|error| anyhow::anyhow!(error.code()))?;
     let target_availability = load_schedule_target_capabilities(tx, &targets).await?;
@@ -1929,11 +1929,7 @@ async fn materialize_due_schedule(
         &target_availability.capabilities,
         false,
     );
-    let operation_type = schedule
-        .operation
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
+    let operation_type = job_command_operation_type(&operation);
     let job_id = Uuid::new_v4();
     let busy_update_skips =
         load_schedule_busy_update_skips(tx, &operation, &dispatch_targets).await?;
@@ -2035,7 +2031,7 @@ async fn materialize_due_schedule(
     .bind(status)
     .bind(materialized_targets.len() as i32)
     .bind(&command_hash)
-    .bind(SqlJson(&schedule.operation))
+    .bind(SqlJson(&operation))
     .bind(schedule.id)
     .bind(&request_fingerprint)
     .bind(max_timeout_secs as i64)
@@ -2976,7 +2972,10 @@ mod schedule_tests {
             id: Uuid::nil(),
             actor_id: None,
             name: "test".to_string(),
-            operation: serde_json::json!({"type": "shell", "argv": ["/bin/true"], "pty": false}),
+            operation: JobCommand::Shell {
+                argv: vec!["/bin/true".to_string()],
+                pty: false,
+            },
             selector_expression: "tag:edge".to_string(),
             target_client_ids: vec!["edge-a".to_string()],
             cron_expr: "* * * * *".to_string(),
@@ -3340,6 +3339,68 @@ mod schedule_tests {
         let output = job_status_output(&db.pool, job_id, "edge-missing").await;
         assert_eq!(output["type"], "schedule_target_skipped");
         assert_eq!(output["reason"], "fixed_target_missing");
+        db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_due_schedule_materializes_canonical_command_hash_and_operation() {
+        let Some(db) = PgWorkerTestDb::maybe_new().await else {
+            return;
+        };
+        insert_worker_client(&db.pool, "edge-a", "online", false).await;
+        let schedule_id = insert_worker_schedule(
+            &db.pool,
+            "canonical-scheduled-shell",
+            serde_json::json!({
+                "pty": false,
+                "argv": ["/bin/sh", "-c", "printf scheduled"],
+                "type": "shell",
+            }),
+            &["edge-a"],
+        )
+        .await;
+
+        let processed = process_due_schedule(
+            &db.pool,
+            schedule_id,
+            &ScheduleDispatchConfig::new(60, DEFAULT_MAX_JOB_TIMEOUT_SECS, false),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(processed, 1);
+        let (job_id, status, failure_count, last_error) =
+            schedule_result(&db.pool, schedule_id).await;
+        assert_eq!(status.as_deref(), Some(JOB_STATUS_QUEUED));
+        assert_eq!(failure_count, 0);
+        assert_eq!(last_error, None);
+        let expected_operation = JobCommand::Shell {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf scheduled".to_string(),
+            ],
+            pty: false,
+        };
+        let expected_payload_hash = payload_hash(&encode_json(&expected_operation).unwrap());
+        let row = sqlx::query(
+            r#"
+            SELECT payload_hash, operation
+            FROM jobs
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let stored_payload_hash: String = row.try_get("payload_hash").unwrap();
+        let stored_operation: SqlJson<JobCommand> = row.try_get("operation").unwrap();
+        assert_eq!(stored_payload_hash, expected_payload_hash);
+        assert_eq!(
+            encode_json(&stored_operation.0).unwrap(),
+            encode_json(&expected_operation).unwrap()
+        );
         db.cleanup().await;
     }
 

@@ -1,9 +1,11 @@
 use std::{
+    collections::BTreeMap,
     env, fs,
     io::{self, Write},
     path::{Path, PathBuf},
 };
 
+use serde_json::Value;
 use uuid::Uuid;
 use vpsman_common::{
     agent_update_release_status_class_by_status, agent_update_release_statuses,
@@ -22,10 +24,11 @@ use vpsman_common::{
     job_status_class_by_status, job_status_classes, job_statuses,
     job_target_status_class_by_status, job_target_status_classes, job_target_statuses,
     job_target_terminal_statuses, job_terminal_statuses, migration_link_status_class_by_status,
-    migration_link_statuses, restore_plan_status_class_by_status, restore_plan_statuses,
-    schedule_privilege_intent_fields, server_job_status_class_by_status, server_job_statuses,
-    server_job_types, terminal_command_types, terminal_input_privilege_intent_fields,
-    terminal_session_events, terminal_session_state_class_by_state, terminal_session_states,
+    migration_link_statuses, plan_tunnel, restore_plan_status_class_by_status,
+    restore_plan_statuses, schedule_privilege_intent_fields, server_job_status_class_by_status,
+    server_job_statuses, server_job_types, terminal_command_types,
+    terminal_input_privilege_intent_fields, terminal_session_events,
+    terminal_session_state_class_by_state, terminal_session_states,
     terminal_session_status_class_by_status, terminal_session_statuses, topology_drift_actions,
     topology_drift_policies, topology_edge_health_status_class_by_status,
     topology_edge_health_statuses, topology_neighbor_state_class_by_state,
@@ -38,7 +41,10 @@ use vpsman_common::{
     webhook_rule_delivery_history_status_class_by_status, webhook_rule_delivery_history_statuses,
     webhook_rule_delivery_process_status_class_by_status, webhook_rule_delivery_process_statuses,
     webhook_rule_delivery_status_class_by_status, webhook_rule_delivery_statuses,
-    workflow_status_classes, FileExistingPolicy, JobCommand, TerminalUserPolicy,
+    workflow_status_classes, BandwidthTier, FileActionPolicy, FileExistingPolicy,
+    FileOwnershipPolicy, FilePushChunk, JobCommand, OspfCostPolicy, ProcessResourceLimits,
+    ProcessRestartPolicy, ProcessRunPolicy, RestoreRollbackFile, TerminalUserPolicy,
+    TunnelAddressPair, TunnelConfigBackend, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
     CURRENT_COMMAND_PROTOCOL_VERSION, MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_COLS,
     MIN_TERMINAL_ROWS,
 };
@@ -601,17 +607,81 @@ fn write_bool_map(
 }
 
 fn write_contract_golden_vectors(output: &mut Vec<u8>) -> io::Result<()> {
+    writeln!(
+        output,
+        "\nexport const PRIVILEGE_OPERATION_GOLDEN_VECTORS = ["
+    )?;
+    for vector in contract_golden_vectors()? {
+        let payload = String::from_utf8(encode_json(&vector.operation).map_err(io::Error::other)?)
+            .map_err(io::Error::other)?;
+        writeln!(
+            output,
+            "  {{ command_type: {:?}, input_json: {:?}, canonical_json: {payload:?} }},",
+            vector.command_type, vector.input_json,
+        )?;
+    }
+    writeln!(
+        output,
+        "] as const satisfies readonly {{ command_type: string; input_json: string; canonical_json: string }}[];"
+    )?;
+    Ok(())
+}
+
+struct ContractGoldenVector {
+    command_type: &'static str,
+    operation: JobCommand,
+    input_json: String,
+}
+
+fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
     let session_id =
         Uuid::parse_str("61616161-2222-4333-8444-555555555555").expect("static UUID is valid");
-    let vectors = [
-        (
+    let source_backup_request_id =
+        Uuid::parse_str("11111111-2222-4333-8444-555555555555").expect("static UUID is valid");
+    let archive_transfer_session_id =
+        Uuid::parse_str("22222222-3333-4444-8555-666666666666").expect("static UUID is valid");
+    let source_restore_job_id =
+        Uuid::parse_str("33333333-4444-4555-8666-777777777777").expect("static UUID is valid");
+    let chunk = FilePushChunk {
+        offset: 0,
+        size_bytes: 4,
+        sha256_hex: "44".repeat(32),
+        data_base64: "ZGF0YQ==".to_string(),
+    };
+    let mut env = BTreeMap::new();
+    env.insert("FOO_1".to_string(), "underscore".to_string());
+    env.insert("FOO1".to_string(), "digit".to_string());
+    env.insert("FOOA".to_string(), "alpha".to_string());
+    let process_policy = ProcessRunPolicy {
+        restart: ProcessRestartPolicy::OnFailure,
+        restart_max_retries: 2,
+        restart_backoff_secs: 7,
+        graceful_stop_secs: 9,
+    };
+    let process_limits = ProcessResourceLimits {
+        memory_max_bytes: Some(128 * 1024 * 1024),
+        pids_max: Some(64),
+        open_files_max: Some(1024),
+        cpu_shares: Some(256),
+        no_new_privileges: true,
+    };
+    let network_plan = golden_tunnel_plan()?;
+
+    let vectors = vec![
+        golden_vector(
             "shell_argv",
             JobCommand::Shell {
                 argv: vec!["/bin/true".to_string()],
                 pty: false,
             },
         ),
-        (
+        golden_vector(
+            "shell_script",
+            JobCommand::ShellScript {
+                script: "printf ok".to_string(),
+            },
+        ),
+        golden_vector(
             "terminal_open",
             JobCommand::TerminalOpen {
                 session_id,
@@ -626,7 +696,121 @@ fn write_contract_golden_vectors(output: &mut Vec<u8>) -> io::Result<()> {
                 flow_window_bytes: 64 * 1024,
             },
         ),
-        (
+        golden_vector(
+            "terminal_input",
+            JobCommand::TerminalInput {
+                session_id,
+                input_seq: 7,
+                data_base64: "bHMK".to_string(),
+            },
+        ),
+        golden_vector(
+            "terminal_poll",
+            JobCommand::TerminalPoll {
+                session_id,
+                replay_from_seq: Some(4),
+            },
+        ),
+        golden_vector(
+            "terminal_resize",
+            JobCommand::TerminalResize {
+                session_id,
+                cols: 100,
+                rows: 40,
+            },
+        ),
+        golden_vector(
+            "terminal_close",
+            JobCommand::TerminalClose {
+                session_id,
+                reason: Some("done".to_string()),
+            },
+        ),
+        golden_vector("config_read", JobCommand::ConfigRead),
+        golden_vector(
+            "hot_config",
+            JobCommand::HotConfig {
+                apply_mode: "full_override".to_string(),
+                toml: "version = 1\n".to_string(),
+                preserve_redacted: Some(false),
+                base_config_sha256_hex: Some("55".repeat(32)),
+            },
+        ),
+        golden_vector(
+            "data_source_config_patch",
+            JobCommand::DataSourceConfigPatch {
+                apply_mode: "incremental_patch".to_string(),
+                toml: "[data_sources]\n".to_string(),
+            },
+        ),
+        golden_vector(
+            "agent_update",
+            JobCommand::UpdateAgent {
+                artifact_url: "https://updates.example/vpsman-agent".to_string(),
+                sha256_hex: "66".repeat(32),
+            },
+        ),
+        golden_vector(
+            "agent_update_activate",
+            JobCommand::AgentUpdateActivate {
+                staged_sha256_hex: "66".repeat(32),
+                restart_agent: false,
+            },
+        ),
+        golden_vector(
+            "agent_update_rollback",
+            JobCommand::AgentUpdateRollback {
+                rollback_sha256_hex: Some("77".repeat(32)),
+            },
+        ),
+        golden_vector(
+            "agent_update_check",
+            JobCommand::AgentUpdateCheck {
+                version_url: Some("https://updates.example/version.json".to_string()),
+                activate: true,
+                restart_agent: true,
+            },
+        ),
+        golden_vector(
+            "file_pull",
+            JobCommand::FilePull {
+                path: "/etc/app.conf".to_string(),
+                follow_symlinks: false,
+            },
+        ),
+        golden_vector(
+            "file_push",
+            JobCommand::FilePush {
+                path: "/tmp/upload.txt".to_string(),
+                mode: 0o640,
+                size_bytes: 4,
+                sha256_hex: "11".repeat(32),
+                data_base64: "ZGF0YQ==".to_string(),
+                existing_policy: FileExistingPolicy::Skip,
+                owner: None,
+                group: None,
+                uid: None,
+                gid: None,
+                ownership_policy: FileOwnershipPolicy::Fail,
+            },
+        ),
+        golden_vector(
+            "file_push_chunked",
+            JobCommand::FilePushChunked {
+                path: "/tmp/chunked.bin".to_string(),
+                mode: 0o600,
+                size_bytes: 4,
+                sha256_hex: "22".repeat(32),
+                chunks: vec![chunk.clone()],
+                existing_policy: FileExistingPolicy::Replace,
+                owner: None,
+                group: Some("ops".to_string()),
+                uid: None,
+                gid: Some(1000),
+                ownership_policy: FileOwnershipPolicy::Ignore,
+            },
+        ),
+        golden_vector(
             "file_transfer_start",
             JobCommand::FileTransferStart {
                 session_id,
@@ -640,7 +824,270 @@ fn write_contract_golden_vectors(output: &mut Vec<u8>) -> io::Result<()> {
                 resume_token_hash: "22".repeat(32),
             },
         ),
-        (
+        golden_vector(
+            "file_transfer_chunk",
+            JobCommand::FileTransferChunk {
+                session_id,
+                offset: 0,
+                chunk: chunk.clone(),
+                resume_token_hash: "22".repeat(32),
+            },
+        ),
+        golden_vector(
+            "file_transfer_commit",
+            JobCommand::FileTransferCommit {
+                session_id,
+                resume_token_hash: "22".repeat(32),
+            },
+        ),
+        golden_vector(
+            "file_transfer_abort",
+            JobCommand::FileTransferAbort {
+                session_id,
+                resume_token_hash: "22".repeat(32),
+            },
+        ),
+        golden_vector(
+            "file_transfer_download_start",
+            JobCommand::FileTransferDownloadStart {
+                session_id,
+                path: "/var/log/syslog".to_string(),
+                chunk_size_bytes: 64 * 1024,
+                rate_limit_kbps: 0,
+                follow_symlinks: false,
+                resume_token_hash: "33".repeat(32),
+            },
+        ),
+        golden_vector(
+            "file_transfer_download_chunk",
+            JobCommand::FileTransferDownloadChunk {
+                session_id,
+                offset: 0,
+                max_bytes: 4096,
+                resume_token_hash: "33".repeat(32),
+            },
+        ),
+        golden_vector(
+            "file_stat",
+            JobCommand::FileStat {
+                path: "/etc/app.conf".to_string(),
+            },
+        ),
+        golden_vector(
+            "file_list_dir",
+            JobCommand::FileListDir {
+                path: "/etc".to_string(),
+                offset: 0,
+                limit: 250,
+                show_hidden: false,
+            },
+        ),
+        golden_vector_with_input(
+            "file_read_text_false",
+            JobCommand::FileReadText {
+                path: "/etc/app.conf".to_string(),
+                max_bytes: 1024 * 1024,
+                follow_symlinks: false,
+            },
+            explicit_follow_symlinks_false_input(&JobCommand::FileReadText {
+                path: "/etc/app.conf".to_string(),
+                max_bytes: 1024 * 1024,
+                follow_symlinks: false,
+            }),
+        ),
+        golden_vector(
+            "file_read_text_true",
+            JobCommand::FileReadText {
+                path: "/etc/app.conf".to_string(),
+                max_bytes: 1024 * 1024,
+                follow_symlinks: true,
+            },
+        ),
+        golden_vector(
+            "file_write_text",
+            JobCommand::FileWriteText {
+                path: "/etc/app.conf".to_string(),
+                mode: 0o640,
+                size_bytes: 4,
+                sha256_hex: "88".repeat(32),
+                content_base64: "ZGF0YQ==".to_string(),
+                expected_sha256_hex: Some("99".repeat(32)),
+                create: true,
+                policy: FileActionPolicy::Ensure,
+            },
+        ),
+        golden_vector(
+            "file_mkdir",
+            JobCommand::FileMkdir {
+                path: "/var/lib/app".to_string(),
+                mode: 0o750,
+                recursive: true,
+                policy: FileActionPolicy::Ensure,
+            },
+        ),
+        golden_vector(
+            "file_rename",
+            JobCommand::FileRename {
+                path: "/tmp/old".to_string(),
+                new_path: "/tmp/new".to_string(),
+                overwrite: true,
+                policy: FileActionPolicy::Ignore,
+            },
+        ),
+        golden_vector(
+            "file_delete",
+            JobCommand::FileDelete {
+                path: "/tmp/tree".to_string(),
+                recursive: true,
+                policy: FileActionPolicy::Ignore,
+            },
+        ),
+        golden_vector_with_input(
+            "file_chmod_false",
+            JobCommand::FileChmod {
+                path: "/etc/app.conf".to_string(),
+                mode: 0o640,
+                recursive: false,
+                follow_symlinks: false,
+                policy: FileActionPolicy::Fail,
+            },
+            explicit_follow_symlinks_false_input(&JobCommand::FileChmod {
+                path: "/etc/app.conf".to_string(),
+                mode: 0o640,
+                recursive: false,
+                follow_symlinks: false,
+                policy: FileActionPolicy::Fail,
+            }),
+        ),
+        golden_vector(
+            "file_chmod_true",
+            JobCommand::FileChmod {
+                path: "/etc/app.conf".to_string(),
+                mode: 0o640,
+                recursive: false,
+                follow_symlinks: true,
+                policy: FileActionPolicy::Fail,
+            },
+        ),
+        golden_vector(
+            "file_chown",
+            JobCommand::FileChown {
+                path: "/etc/app.conf".to_string(),
+                owner: Some("root".to_string()),
+                group: Some("ops".to_string()),
+                uid: None,
+                gid: Some(1000),
+                recursive: false,
+                ownership_policy: FileOwnershipPolicy::Ignore,
+                policy: FileActionPolicy::Ensure,
+            },
+        ),
+        golden_vector_with_input(
+            "file_copy_false",
+            JobCommand::FileCopy {
+                path: "/etc/app.conf".to_string(),
+                new_path: "/tmp/app.conf".to_string(),
+                overwrite: false,
+                recursive: false,
+                follow_symlinks: false,
+                policy: FileActionPolicy::Fail,
+            },
+            explicit_follow_symlinks_false_input(&JobCommand::FileCopy {
+                path: "/etc/app.conf".to_string(),
+                new_path: "/tmp/app.conf".to_string(),
+                overwrite: false,
+                recursive: false,
+                follow_symlinks: false,
+                policy: FileActionPolicy::Fail,
+            }),
+        ),
+        golden_vector(
+            "file_copy_true",
+            JobCommand::FileCopy {
+                path: "/etc/app.conf".to_string(),
+                new_path: "/tmp/app.conf".to_string(),
+                overwrite: false,
+                recursive: false,
+                follow_symlinks: true,
+                policy: FileActionPolicy::Fail,
+            },
+        ),
+        golden_vector_with_input(
+            "file_download_false",
+            JobCommand::FileDownload {
+                path: "/var/log/syslog".to_string(),
+                max_bytes: 16 * 1024 * 1024,
+                follow_symlinks: false,
+            },
+            explicit_follow_symlinks_false_input(&JobCommand::FileDownload {
+                path: "/var/log/syslog".to_string(),
+                max_bytes: 16 * 1024 * 1024,
+                follow_symlinks: false,
+            }),
+        ),
+        golden_vector(
+            "file_download_true",
+            JobCommand::FileDownload {
+                path: "/var/log/syslog".to_string(),
+                max_bytes: 16 * 1024 * 1024,
+                follow_symlinks: true,
+            },
+        ),
+        golden_vector_with_input(
+            "file_archive_tar_false",
+            JobCommand::FileArchiveTar {
+                path: "/var/lib/app".to_string(),
+                max_bytes: 16 * 1024 * 1024,
+                follow_symlinks: false,
+            },
+            explicit_follow_symlinks_false_input(&JobCommand::FileArchiveTar {
+                path: "/var/lib/app".to_string(),
+                max_bytes: 16 * 1024 * 1024,
+                follow_symlinks: false,
+            }),
+        ),
+        golden_vector(
+            "file_archive_tar_true",
+            JobCommand::FileArchiveTar {
+                path: "/var/lib/app".to_string(),
+                max_bytes: 16 * 1024 * 1024,
+                follow_symlinks: true,
+            },
+        ),
+        golden_vector("user_sessions", JobCommand::UserSessions),
+        golden_vector("process_list", JobCommand::ProcessList { limit: 25 }),
+        golden_vector(
+            "process_start",
+            JobCommand::ProcessStart {
+                name: "app".to_string(),
+                argv: vec!["/usr/bin/env".to_string(), "sh".to_string()],
+                cwd: Some("/srv/app".to_string()),
+                env,
+                policy: process_policy,
+                limits: process_limits,
+            },
+        ),
+        golden_vector(
+            "process_stop",
+            JobCommand::ProcessStop {
+                name: "app".to_string(),
+            },
+        ),
+        golden_vector(
+            "process_restart",
+            JobCommand::ProcessRestart {
+                name: "app".to_string(),
+            },
+        ),
+        golden_vector("process_status", JobCommand::ProcessStatus { name: None }),
+        golden_vector(
+            "process_logs",
+            JobCommand::ProcessLogs {
+                name: "app".to_string(),
+                max_bytes: 4096,
+            },
+        ),
+        golden_vector(
             "backup",
             JobCommand::Backup {
                 paths: vec!["/etc/app.conf".to_string()],
@@ -648,24 +1095,153 @@ fn write_contract_golden_vectors(output: &mut Vec<u8>) -> io::Result<()> {
                 follow_symlinks: false,
             },
         ),
+        golden_vector(
+            "restore",
+            JobCommand::Restore {
+                source_backup_request_id,
+                archive_transfer_session_id,
+                paths: vec!["/etc/app.conf".to_string()],
+                include_config: false,
+                destination_root: None,
+                archive_path: Some("/var/lib/vpsman/restores/app.tar".to_string()),
+                archive_size_bytes: Some(128),
+                archive_sha256_hex: Some("aa".repeat(32)),
+                dry_run: false,
+                post_restore_argv: Vec::new(),
+            },
+        ),
+        golden_vector(
+            "restore_rollback",
+            JobCommand::RestoreRollback {
+                source_restore_job_id,
+                restored_files: vec![RestoreRollbackFile {
+                    archive_path: "etc/app.conf".to_string(),
+                    destination_path: "/etc/app.conf".to_string(),
+                    rollback_path: Some("/var/lib/vpsman/rollback/app.conf".to_string()),
+                    restored_size_bytes: 4,
+                    restored_sha256_hex: "bb".repeat(32),
+                }],
+            },
+        ),
+        golden_vector(
+            "network_apply",
+            JobCommand::NetworkApply {
+                plan: Box::new(network_plan.clone()),
+                side: TunnelEndpointSide::Left,
+                config_backend: TunnelConfigBackend::Ifupdown,
+                config_sha256_hex: Some("cc".repeat(32)),
+                ifupdown_sha256_hex: "dd".repeat(32),
+                bird2_sha256_hex: "ee".repeat(32),
+            },
+        ),
+        golden_vector(
+            "network_ospf_cost_update",
+            JobCommand::NetworkOspfCostUpdate {
+                plan: Box::new(network_plan.clone()),
+                side: TunnelEndpointSide::Left,
+                current_ospf_cost: 120,
+                recommended_ospf_cost: 80,
+                bird2_sha256_hex: "ee".repeat(32),
+            },
+        ),
+        golden_vector(
+            "network_rollback",
+            JobCommand::NetworkRollback {
+                plan: Box::new(network_plan.clone()),
+                side: TunnelEndpointSide::Right,
+            },
+        ),
+        golden_vector(
+            "network_status",
+            JobCommand::NetworkStatus {
+                plan: Box::new(network_plan.clone()),
+                side: TunnelEndpointSide::Left,
+            },
+        ),
+        golden_vector("network_interfaces", JobCommand::NetworkInterfaces),
+        golden_vector(
+            "network_probe",
+            JobCommand::NetworkProbe {
+                plan: Box::new(network_plan.clone()),
+                side: TunnelEndpointSide::Left,
+                count: 3,
+                interval_ms: 500,
+            },
+        ),
+        golden_vector(
+            "network_speed_test",
+            JobCommand::NetworkSpeedTest {
+                plan: Box::new(network_plan),
+                server_side: TunnelEndpointSide::Left,
+                duration_secs: 3,
+                max_bytes: 16 * 1024 * 1024,
+                rate_limit_kbps: 100_000,
+                port: 5201,
+                connect_timeout_ms: 5000,
+            },
+        ),
     ];
-    writeln!(
-        output,
-        "\nexport const PRIVILEGE_OPERATION_GOLDEN_VECTORS = ["
-    )?;
-    for (command_type, operation) in vectors {
-        let payload = String::from_utf8(encode_json(&operation).map_err(io::Error::other)?)
-            .map_err(io::Error::other)?;
-        writeln!(
-            output,
-            "  {{ command_type: {command_type:?}, canonical_json: {payload:?} }},"
-        )?;
+    Ok(vectors)
+}
+
+fn golden_vector(command_type: &'static str, operation: JobCommand) -> ContractGoldenVector {
+    let input_json = String::from_utf8(encode_json(&operation).expect("golden vector serializes"))
+        .expect("golden vector is utf-8");
+    ContractGoldenVector {
+        command_type,
+        operation,
+        input_json,
     }
-    writeln!(
-        output,
-        "] as const satisfies readonly {{ command_type: string; canonical_json: string }}[];"
-    )?;
-    Ok(())
+}
+
+fn golden_vector_with_input(
+    command_type: &'static str,
+    operation: JobCommand,
+    input_json: String,
+) -> ContractGoldenVector {
+    ContractGoldenVector {
+        command_type,
+        operation,
+        input_json,
+    }
+}
+
+fn explicit_follow_symlinks_false_input(operation: &JobCommand) -> String {
+    let mut input = serde_json::to_value(operation).expect("golden vector serializes");
+    if let Value::Object(fields) = &mut input {
+        fields.insert("follow_symlinks".to_string(), Value::Bool(false));
+    }
+    serde_json::to_string(&input).expect("golden vector serializes")
+}
+
+fn golden_tunnel_plan() -> io::Result<vpsman_common::TunnelPlan> {
+    plan_tunnel(&TunnelPlanInput {
+        name: "left-a-right-b".to_string(),
+        interface_name: "tunab".to_string(),
+        kind: TunnelKind::Gre,
+        runtime_control: Default::default(),
+        runtime_topology: Default::default(),
+        left_client_id: "left-a".to_string(),
+        right_client_id: "right-b".to_string(),
+        left_underlay: "198.51.100.10".to_string(),
+        right_underlay: "203.0.113.20".to_string(),
+        address_pool_cidr: "10.255.0.0/30".to_string(),
+        reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(TunnelAddressPair {
+            left: "10.255.0.0".to_string(),
+            right: "10.255.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
+        bandwidth: BandwidthTier::M100,
+        latency_ms: 18.0,
+        packet_loss_ratio: 0.0,
+        preference: 1.0,
+        ospf_policy: OspfCostPolicy::default(),
+    })
+    .map_err(io::Error::other)
 }
 
 fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {

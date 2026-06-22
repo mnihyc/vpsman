@@ -1175,6 +1175,79 @@ async fn memory_final_output_insert_terminalizes_target_atomically() {
 }
 
 #[tokio::test]
+async fn final_network_status_output_records_observation() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let request = test_job_request(&["client-a"]);
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "final_network_observation",
+            &operator,
+            &["client-a".to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.claim_due_job_targets(10, 30, 0).await.unwrap().len(),
+        1
+    );
+
+    let output = CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: serde_json::to_vec(&serde_json::json!({
+            "type": "network_status",
+            "plan": "edge-a-edge-b",
+            "interface": "tunab",
+            "peer_client_id": "right-b",
+            "applied": false,
+            "runtime": {"summary": {"healthy": false}}
+        }))
+        .unwrap(),
+        exit_code: Some(0),
+        done: true,
+    };
+    let outcome = TargetDispatchOutcome {
+        status: "completed".to_string(),
+        exit_code: Some(0),
+        command_version: Some(1),
+        accepted: true,
+        message: "network_status".to_string(),
+        received_at: None,
+        outputs: vec![output.clone()],
+    };
+
+    repo.record_active_final_job_output_and_target_result_with_config(
+        job_id,
+        "client-a",
+        0,
+        &output,
+        Some("1700000000".to_string()),
+        repository_job_outputs::JobOutputPersistConfig {
+            object_store: None,
+            artifact_min_bytes: usize::MAX,
+        },
+        &outcome,
+    )
+    .await
+    .unwrap();
+
+    let observations = repo.list_network_observations(10).await.unwrap();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].job_id, job_id);
+    assert_eq!(observations[0].client_id, "client-a");
+    assert_eq!(observations[0].seq, 0);
+    assert_eq!(observations[0].kind, "network_status");
+    assert_eq!(observations[0].plan_name.as_deref(), Some("edge-a-edge-b"));
+    assert_eq!(observations[0].healthy, Some(false));
+}
+
+#[tokio::test]
 async fn memory_final_output_waits_for_lower_sequences_before_terminalizing() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();

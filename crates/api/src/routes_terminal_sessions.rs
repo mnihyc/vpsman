@@ -7,7 +7,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Deserialize;
 use uuid::Uuid;
 use vpsman_common::{
-    canonical_terminal_input_privilege_intent, id_selector_expression, payload_hash, JobCommand,
+    id_selector_expression, payload_hash, JobCommand, TerminalInputPrivilegeIntent,
     TerminalInputPrivilegeIntentInput, DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_TERMINAL_INPUT_BYTES,
 };
 
@@ -131,14 +131,13 @@ pub(crate) async fn submit_terminal_session_input(
     let data_base64 = BASE64_STANDARD.encode(&data);
     let input_payload_hash = payload_hash(&data);
     let session_id_text = session_id.to_string();
-    let intent = canonical_terminal_input_privilege_intent(TerminalInputPrivilegeIntentInput {
+    let intent = TerminalInputPrivilegeIntent::new(TerminalInputPrivilegeIntentInput {
         client_id: &client_id,
         session_id: &session_id_text,
         input_payload_hash: &input_payload_hash,
         max_timeout_secs,
         confirmed: request.confirmed,
-    })
-    .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    });
     verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     let reservation = state
         .repo
@@ -243,7 +242,36 @@ mod tests {
         repository::{MemoryState, Repository},
     };
     use uuid::Uuid;
-    use vpsman_common::{AgentCapabilitySnapshot, JobCommand};
+    use vpsman_common::{
+        canonical_terminal_input_privilege_intent, AgentCapabilitySnapshot, JobCommand,
+        TerminalInputPrivilegeIntent, TerminalInputPrivilegeIntentInput,
+    };
+
+    #[test]
+    fn terminal_input_privilege_intent_serializes_once() {
+        let typed = serde_json::to_string(&TerminalInputPrivilegeIntent::new(
+            TerminalInputPrivilegeIntentInput {
+                client_id: "edge-a",
+                session_id: "61616161-2222-4333-8444-555555555555",
+                input_payload_hash: "11",
+                max_timeout_secs: 30,
+                confirmed: true,
+            },
+        ))
+        .unwrap();
+        let canonical =
+            canonical_terminal_input_privilege_intent(TerminalInputPrivilegeIntentInput {
+                client_id: "edge-a",
+                session_id: "61616161-2222-4333-8444-555555555555",
+                input_payload_hash: "11",
+                max_timeout_secs: 30,
+                confirmed: true,
+            })
+            .unwrap();
+
+        assert_eq!(typed, canonical);
+        assert_ne!(serde_json::to_string(&canonical).unwrap(), canonical);
+    }
 
     #[tokio::test]
     async fn terminal_input_route_assigns_sequence_and_creates_internal_job() {

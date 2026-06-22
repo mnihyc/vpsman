@@ -532,7 +532,7 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["type", operation.type],
         ["path", operation.path],
         ["max_bytes", operation.max_bytes ?? 1024 * 1024],
-        ["follow_symlinks", operation.follow_symlinks ?? false],
+        ["follow_symlinks", skipFalse(operation.follow_symlinks)],
       ]);
     case "file_write_text":
       return ordered([
@@ -558,7 +558,7 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["path", operation.path],
         ["mode", operation.mode],
         ["recursive", operation.recursive ?? false],
-        ["follow_symlinks", operation.follow_symlinks ?? false],
+        ["follow_symlinks", skipFalse(operation.follow_symlinks)],
         ["policy", operation.policy ?? "fail"],
       ]);
     case "file_chown":
@@ -580,7 +580,7 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["new_path", operation.new_path],
         ["overwrite", operation.overwrite ?? false],
         ["recursive", operation.recursive ?? false],
-        ["follow_symlinks", operation.follow_symlinks ?? false],
+        ["follow_symlinks", skipFalse(operation.follow_symlinks)],
         ["policy", operation.policy ?? "fail"],
       ]);
     case "file_download":
@@ -588,14 +588,14 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["type", operation.type],
         ["path", operation.path],
         ["max_bytes", operation.max_bytes ?? FILE_BROWSER_ARCHIVE_LIMIT_BYTES],
-        ["follow_symlinks", operation.follow_symlinks ?? false],
+        ["follow_symlinks", skipFalse(operation.follow_symlinks)],
       ]);
     case "file_archive_tar":
       return ordered([
         ["type", operation.type],
         ["path", operation.path],
         ["max_bytes", operation.max_bytes ?? FILE_BROWSER_ARCHIVE_LIMIT_BYTES],
-        ["follow_symlinks", operation.follow_symlinks ?? false],
+        ["follow_symlinks", skipFalse(operation.follow_symlinks)],
       ]);
     case "user_sessions":
       return ordered([["type", operation.type]]);
@@ -770,7 +770,11 @@ function canonicalRestoreRollbackFile(file: Extract<JobOperation, { type: "resto
 }
 
 function sortedRecord(record: Record<string, string>): JsonValue {
-  return Object.fromEntries(Object.entries(record).sort(([left], [right]) => left.localeCompare(right)));
+  return Object.fromEntries(Object.entries(record).sort(([left], [right]) => rustAsciiKeyCompare(left, right)));
+}
+
+function rustAsciiKeyCompare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 async function deriveSuperHmacKey(superPassword: string, saltHex: string): Promise<CryptoKey> {

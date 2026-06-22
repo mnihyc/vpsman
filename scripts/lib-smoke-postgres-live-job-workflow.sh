@@ -3,26 +3,14 @@ start_api "first"
 auth_json="$(curl -fsS \
   -H "Content-Type: application/json" \
   -d '{"username":"postgres-live-job","password":"postgres-live-job-password"}' \
-  "$api_url/api/v1/auth/bootstrap")"
+    "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
+operator_id="$(jq -r '.operator.id' <<<"$auth_json")"
 export VPSMAN_API_TOKEN="$access_token"
 jq -e '.operator.username == "postgres-live-job" and .token_type == "Bearer"' \
   <<<"$auth_json" >/dev/null
 
-VPSMAN_GATEWAY_BIND="$gateway_addr" \
-VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
-VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
-VPSMAN_API_URL="$api_url" \
-VPSMAN_INTERNAL_TOKEN="$internal_token" \
-VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
-VPSMAN_GATEWAY_ID="postgres-live-job-gateway" \
-VPSMAN_GATEWAY_SPOOL_DIR="$SMOKE_TMPDIR/gateway-spool" \
-VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS="${VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS:-86400}" \
-RUST_LOG="vpsman_gateway=warn" \
-  target/debug/vpsman-gateway >"$gateway_log" 2>&1 &
-smoke_track_pid "$!"
-smoke_wait_tcp 127.0.0.1 "$gateway_port"
-smoke_wait_tcp 127.0.0.1 "$gateway_control_port"
+start_gateway
 
 client_id="postgres-live-job-a"
 peer_client_id="postgres-live-job-b"
@@ -48,12 +36,12 @@ smoke_create_direct_agent_config \
 VPSMAN_AGENT_CONFIG="$agent_config" \
 VPSMAN_SUPERVISOR_DIR="$agent_supervisor_dir" \
 RUST_LOG="vpsman_agent=warn" \
-  target/debug/vpsman-agent run >"$agent_log" 2>&1 &
+  bash -c 'cd "$1" && exec "$2" run' _ "$SMOKE_TMPDIR" "$ROOT_DIR/target/debug/vpsman-agent" >"$agent_log" 2>&1 &
 agent_pid="$!"
 smoke_track_pid "$agent_pid"
 VPSMAN_AGENT_CONFIG="$peer_agent_config" \
 RUST_LOG="vpsman_agent=warn" \
-  target/debug/vpsman-agent run >"$peer_agent_log" 2>&1 &
+  bash -c 'cd "$1" && exec "$2" run' _ "$SMOKE_TMPDIR" "$ROOT_DIR/target/debug/vpsman-agent" >"$peer_agent_log" 2>&1 &
 peer_agent_pid="$!"
 smoke_track_pid "$peer_agent_pid"
 wait_agent_online "$client_id"
@@ -316,6 +304,7 @@ terminal_close_job_id="$(jq -r '.job_id' <<<"$terminal_close_json")"
 smoke_assert_job_create_queued "$terminal_close_json" 1
 smoke_wait_api_job_status "$api_url" "$terminal_close_job_id" completed 45 >/dev/null
 assert_terminal_session_workflow
+run_scheduled_resume_gateway_restart_check
 
 VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
@@ -497,7 +486,8 @@ VPSMAN_API_TOKEN="$access_token" \
     --port "$speed_port" \
     --connect-timeout-ms 3000 \
     --super-salt-hex "$super_salt_hex" \
-    --max-timeout-secs 10)"
+    --max-timeout-secs 10 \
+    --confirmed)"
 network_speed_job_id="$(jq -r '.job_id' <<<"$network_speed_json")"
 smoke_assert_job_create_queued "$network_speed_json" 2
 smoke_wait_api_job_status "$api_url" "$network_speed_job_id" completed 45 >/dev/null
@@ -547,6 +537,7 @@ jq -n \
   --arg shell_job_id "$shell_job_id" \
   --arg shell_pty_job_id "$shell_pty_job_id" \
   --arg shell_script_job_id "$shell_script_job_id" \
+  --arg scheduled_resume_job_id "$scheduled_resume_job_id" \
   --arg live_stream_job_id "$live_stream_job_id" \
   --arg large_output_job_id "$large_output_job_id" \
   --arg timeout_job_id "$timeout_job_id" \
@@ -580,6 +571,7 @@ jq -n \
     shell_job_id: $shell_job_id,
     shell_pty_job_id: $shell_pty_job_id,
     shell_script_job_id: $shell_script_job_id,
+    scheduled_resume_job_id: $scheduled_resume_job_id,
     live_stream_job_id: $live_stream_job_id,
     large_output_job_id: $large_output_job_id,
     timeout_job_id: $timeout_job_id,
@@ -605,5 +597,5 @@ jq -n \
     network_speed_job_id: $network_speed_job_id,
     destination: $destination,
     sha256_hex: $sha256_hex,
-    checks: ["auth_session", "enrollment", "agent_noise_connect", "gateway_session_lifecycle", "privilege_unlocked_shell_job", "privilege_unlocked_shell_pty_job", "privilege_unlocked_shell_script_job", "job_output_follow_cli", "job_output_follow_vty", "live_shell_output_streaming", "large_job_output_artifact_retention", "agent_timeout_shell_job", "privilege_unlocked_file_pull", "job_target_status_archive_download", "terminal_session_lifecycle", "terminal_session_poll_output", "terminal_session_inventory", "resumable_file_transfer_upload", "resumable_file_transfer_download", "file_transfer_session_inventory", "no_privilege_unlock_user_sessions_rejected", "privilege_unlocked_user_sessions", "privilege_unlocked_process_start", "privilege_unlocked_process_status", "privilege_unlocked_process_logs", "privilege_unlocked_process_restart", "privilege_unlocked_process_stop", "process_supervisor_inventory", "privilege_unlocked_file_push", "job_target_output_audit", "network_status_observation", "network_probe_observation", "network_speed_observations", "network_observation_trends", "network_ospf_recommendations", "network_ospf_update_plans", "api_restart"]
+    checks: ["auth_session", "enrollment", "agent_noise_connect", "gateway_session_lifecycle", "scheduled_job_resume_payload_hash", "privilege_unlocked_shell_job", "privilege_unlocked_shell_pty_job", "privilege_unlocked_shell_script_job", "job_output_follow_cli", "job_output_follow_vty", "live_shell_output_streaming", "large_job_output_artifact_retention", "agent_timeout_shell_job", "privilege_unlocked_file_pull", "job_target_status_archive_download", "terminal_session_lifecycle", "terminal_session_poll_output", "terminal_session_inventory", "resumable_file_transfer_upload", "resumable_file_transfer_download", "file_transfer_session_inventory", "no_privilege_unlock_user_sessions_rejected", "privilege_unlocked_user_sessions", "privilege_unlocked_process_start", "privilege_unlocked_process_status", "privilege_unlocked_process_logs", "privilege_unlocked_process_restart", "privilege_unlocked_process_stop", "process_supervisor_inventory", "privilege_unlocked_file_push", "job_target_output_audit", "network_status_observation", "network_probe_observation", "network_speed_observations", "network_observation_trends", "network_ospf_recommendations", "network_ospf_update_plans", "api_restart"]
   }'

@@ -8,6 +8,9 @@ source "$ROOT_DIR/scripts/lib-smoke-process-supervisor.sh"
 smoke_enter_root
 smoke_require_tools awk base64 cmp curl docker grep jq ping ps python3 sha256sum shuf stat tar timeout
 smoke_build_binaries
+if [[ "${VPSMAN_SMOKE_SKIP_BUILD:-0}" != "1" ]]; then
+  cargo build -p vpsman-worker
+fi
 smoke_init_tmpdir "vpsman-postgres-live-job-output"
 
 pg_port="$(smoke_free_port)"
@@ -36,7 +39,9 @@ api_pid=""
 api_log=""
 agent_pid=""
 peer_agent_pid=""
+gateway_pid=""
 gateway_log="$SMOKE_TMPDIR/gateway.log"
+worker_log="$SMOKE_TMPDIR/worker.log"
 agent_log="$SMOKE_TMPDIR/agent.log"
 peer_agent_log="$SMOKE_TMPDIR/agent-peer.log"
 agent_config="$SMOKE_TMPDIR/agent.toml"
@@ -66,6 +71,10 @@ pty_payload="vpsman-shell-pty-$(date +%s%N)"
 shell_script_payload="vpsman-shell-script-$(date +%s%N)"
 live_stream_start="vpsman-live-stream-start-$(date +%s%N)"
 live_stream_end="vpsman-live-stream-end-$(date +%s%N)"
+scheduled_resume_start="vpsman-scheduled-resume-start-$(date +%s%N)"
+scheduled_resume_end="vpsman-scheduled-resume-end-$(date +%s%N)"
+scheduled_resume_schedule_id=""
+scheduled_resume_job_id=""
 large_output_size=4096
 large_output_script='i=0; while [ "$i" -lt 4096 ]; do printf A; i=$((i + 1)); done'
 file_pull_payload="vpsman-file-pull-$(date +%s%N)"
@@ -165,6 +174,50 @@ stop_api() {
   fi
 }
 
+start_gateway() {
+  VPSMAN_GATEWAY_BIND="$gateway_addr" \
+  VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
+  VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
+  VPSMAN_API_URL="$api_url" \
+  VPSMAN_INTERNAL_TOKEN="$internal_token" \
+  VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
+  VPSMAN_GATEWAY_ID="postgres-live-job-gateway" \
+  VPSMAN_GATEWAY_SPOOL_DIR="$SMOKE_TMPDIR/gateway-spool" \
+  VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS="${VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS:-86400}" \
+  RUST_LOG="vpsman_gateway=warn" \
+    target/debug/vpsman-gateway >>"$gateway_log" 2>&1 &
+  gateway_pid="$!"
+  smoke_track_pid "$gateway_pid"
+  smoke_wait_tcp 127.0.0.1 "$gateway_port"
+  smoke_wait_tcp 127.0.0.1 "$gateway_control_port"
+}
+
+stop_gateway() {
+  if [[ -n "$gateway_pid" ]]; then
+    kill "$gateway_pid" >/dev/null 2>&1 || true
+    wait "$gateway_pid" >/dev/null 2>&1 || true
+    gateway_pid=""
+  fi
+}
+
+restart_gateway() {
+  stop_gateway
+  start_gateway
+}
+
+run_worker_once() {
+  worker_log="$SMOKE_TMPDIR/worker-$(date +%s%N).log"
+  if ! timeout 45 target/debug/vpsman-worker \
+    --postgres-url "$postgres_url" \
+    --migrations-dir "$ROOT_DIR/migrations" \
+    --worker-id "postgres-live-job-worker-$(date +%s%N)" \
+    --once >"$worker_log" 2>&1; then
+    smoke_dump_logs "worker once failed for scheduled resume smoke" \
+      "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$worker_log" "$agent_log"
+    exit 1
+  fi
+}
+
 api_get() {
   local path="$1"
   curl -fsS -H "Authorization: Bearer $access_token" "$api_url$path"
@@ -189,18 +242,137 @@ wait_agent_online() {
 assert_gateway_session_active() {
   local expected_client="$1"
   local sessions_json
-  sessions_json="$(VPSMAN_API_TOKEN="$access_token" \
-    target/debug/vpsctl --api-url "$api_url" gateway-sessions --limit 20)"
-  jq -e \
-    --arg client "$expected_client" \
-    --arg gateway "postgres-live-job-gateway" '
-      any(.[]; .client_id == $client and .gateway_id == $gateway and .status == "active")
-    ' <<<"$sessions_json" >/dev/null
+  local deadline=$((SECONDS + 20))
+  until sessions_json="$(VPSMAN_API_TOKEN="$access_token" \
+    target/debug/vpsctl --api-url "$api_url" gateway-sessions --limit 20)" \
+    && jq -e \
+      --arg client "$expected_client" \
+      --arg gateway "postgres-live-job-gateway" '
+        any(.[]; .client_id == $client and .gateway_id == $gateway and .status == "active")
+      ' <<<"$sessions_json" >/dev/null; do
+    if (( SECONDS >= deadline )); then
+      smoke_dump_logs "gateway session did not become active for postgres live job smoke" \
+        "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$agent_log" "$peer_agent_log"
+      exit 1
+    fi
+    sleep 0.25
+  done
 }
 
 assert_gateway_sessions_active() {
   assert_gateway_session_active "$client_id"
   assert_gateway_session_active "$peer_client_id"
+}
+
+new_uuid() {
+  python3 - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
+}
+
+insert_due_scheduled_resume_job() {
+  scheduled_resume_schedule_id="$(new_uuid)"
+  local operation_json
+  operation_json="$(jq -nc \
+    --arg start "$scheduled_resume_start" \
+    --arg end "$scheduled_resume_end" \
+    '{pty:false, argv:["/bin/sh", "-c", ("printf " + ($start | @sh) + "; sleep 8; printf " + ($end | @sh))], type:"shell"}')"
+  docker exec -i "$container_name" psql -U vpsman -d vpsman -v ON_ERROR_STOP=1 \
+    -v schedule_id="$scheduled_resume_schedule_id" \
+    -v actor_id="$operator_id" \
+    -v client_id="$client_id" \
+    -v operation="$operation_json" <<'SQL' >/dev/null
+INSERT INTO schedules (
+    id,
+    actor_id,
+    name,
+    enabled,
+    operation,
+    selector_expression,
+    target_client_ids,
+    cron_expr,
+    timezone,
+    next_run_at,
+    catch_up_policy,
+    catch_up_limit,
+    retry_delay_secs,
+    max_failures
+)
+VALUES (
+    :'schedule_id'::uuid,
+    :'actor_id'::uuid,
+    'scheduled resume canonical hash smoke',
+    TRUE,
+    :'operation'::jsonb,
+    'id:*',
+    ARRAY[:'client_id']::text[],
+    '* * * * *',
+    'UTC',
+    now() - interval '60 seconds',
+    'skip_missed',
+    1,
+    300,
+    3
+);
+SQL
+}
+
+materialize_scheduled_resume_job() {
+  insert_due_scheduled_resume_job
+  run_worker_once
+  scheduled_resume_job_id="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc \
+    "SELECT id FROM jobs WHERE source_schedule_id = '$scheduled_resume_schedule_id' ORDER BY created_at DESC LIMIT 1")"
+  if [[ -z "$scheduled_resume_job_id" ]]; then
+    smoke_dump_logs "worker did not materialize scheduled resume job" \
+      "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$worker_log" "$agent_log"
+    exit 1
+  fi
+}
+
+wait_scheduled_resume_started() {
+  local outputs_json job_json
+  local deadline=$((SECONDS + 25))
+  until job_json="$(api_get "/api/v1/jobs/$scheduled_resume_job_id")" \
+    && outputs_json="$(api_get "/api/v1/jobs/$scheduled_resume_job_id/outputs")" \
+    && jq -e --arg start "$scheduled_resume_start" '
+      (.items // []) | any(.stream == "stdout" and ((.data_base64 | @base64d) | contains($start)))
+    ' <<<"$outputs_json" >/dev/null; do
+    if (( SECONDS >= deadline )); then
+      smoke_dump_logs "scheduled resume job did not start streaming before gateway restart" \
+        "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$worker_log" "$agent_log"
+      jq . <<<"${job_json:-{}}" >&2 || true
+      jq . <<<"${outputs_json:-{\"items\":[]}}" >&2 || true
+      exit 1
+    fi
+    sleep 0.25
+  done
+}
+
+assert_scheduled_resume_job_output() {
+  local job_json targets_json outputs_json decoded_stdout
+  job_json="$(api_get "/api/v1/jobs/$scheduled_resume_job_id")"
+  targets_json="$(api_get "/api/v1/jobs/$scheduled_resume_job_id/targets")"
+  outputs_json="$(api_get "/api/v1/jobs/$scheduled_resume_job_id/outputs")"
+
+  jq -e '.status == "completed" and .command_type == "scheduled_shell_argv" and .target_count == 1' \
+    <<<"$job_json" >/dev/null
+  jq -e --arg client "$client_id" '
+    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
+  ' <<<"$targets_json" >/dev/null
+  jq -e '.items[] | select(.stream == "status" and .done == true and .exit_code == 0)' \
+    <<<"$outputs_json" >/dev/null
+  decoded_stdout="$(jq -r '.items[] | select(.stream == "stdout") | .data_base64' <<<"$outputs_json" | base64 -d)"
+  [[ "$decoded_stdout" == "$scheduled_resume_start$scheduled_resume_end" ]]
+}
+
+run_scheduled_resume_gateway_restart_check() {
+  materialize_scheduled_resume_job
+  wait_scheduled_resume_started
+  restart_gateway
+  assert_gateway_session_active "$client_id"
+  smoke_wait_api_job_status "$api_url" "$scheduled_resume_job_id" completed 60 >/dev/null
+  assert_scheduled_resume_job_output
 }
 
 assert_gateway_session_ended() {
@@ -618,7 +790,9 @@ assert_user_sessions_no_privilege_unlock_rejection() {
   local reject_body reject_json reject_status
   reject_body="$(jq -n \
     --arg client "$client_id" \
+    --arg job_id "$(new_uuid)" \
     '{
+      job_id: $job_id,
       command: "user_sessions",
       argv: [],
       operation: {type: "user_sessions"},
