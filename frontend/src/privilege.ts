@@ -1,5 +1,5 @@
 import type { JobOperation } from "./types";
-import { clampCommandTimeoutSecs } from "./commandTimeout";
+import { clampJobTimeoutSecs } from "./jobTimeout";
 import { FILE_BROWSER_ARCHIVE_LIMIT_BYTES } from "./fileBrowser";
 import {
   DB_PRIVILEGE_INTENT_FIELDS,
@@ -299,7 +299,7 @@ export function canonicalJobPrivilegeIntent(input: JobPrivilegeIntentInput): str
     ["command_type", input.commandType],
     ["operation_payload_hash", normalizeSha256Hex(input.operationPayloadHash)],
     ["resolved_targets", [...input.resolvedTargets].sort()],
-    ["timeout_secs", clampCommandTimeoutSecs(input.timeoutSecs)],
+    ["timeout_secs", clampJobTimeoutSecs(input.timeoutSecs)],
     ["force_unprivileged", input.forceUnprivileged],
     ["privileged", input.privileged],
   ];
@@ -352,7 +352,7 @@ export function canonicalTerminalInputPrivilegeIntent(input: TerminalInputPrivil
     ["client_id", input.clientId.trim()],
     ["session_id", input.sessionId.trim()],
     ["input_payload_hash", normalizeSha256Hex(input.inputPayloadHash)],
-    ["timeout_secs", clampCommandTimeoutSecs(input.timeoutSecs)],
+    ["timeout_secs", clampJobTimeoutSecs(input.timeoutSecs)],
     ["confirmed", input.confirmed],
   ];
   assertGeneratedFieldOrder("terminal input privilege", entries, TERMINAL_INPUT_PRIVILEGE_INTENT_FIELDS);

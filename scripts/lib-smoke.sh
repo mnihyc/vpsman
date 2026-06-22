@@ -83,7 +83,7 @@ smoke_write_enrolled_agent_config() {
   local client_private_hex="$5"
   local gateway_public_hex="$6"
   local endpoints_csv="$7"
-  local command_timeout_secs="${8:-30}"
+  local job_timeout_secs="${8:-30}"
   local network_root="${9:-}"
   local telemetry_light_secs="${10:-15}"
   local telemetry_full_secs="${11:-60}"
@@ -100,7 +100,7 @@ smoke_write_enrolled_agent_config() {
     printf 'client_private_key_hex = %s\n' "$(smoke_toml_quote "$client_private_hex")"
     printf 'server_public_key_hex = %s\n' "$(smoke_toml_quote "$gateway_public_hex")"
     printf '\n[auth]\n'
-    printf 'command_timeout_secs = %s\n' "$command_timeout_secs"
+    printf 'job_timeout_secs = %s\n' "$job_timeout_secs"
     printf 'gateway_retry_secs = 1\n'
     printf 'gateway_connect_timeout_secs = 1\n'
     if [[ -n "$network_root" ]]; then
@@ -137,7 +137,7 @@ smoke_create_direct_agent_config() {
   local tags_csv="$6"
   local gateway_public_hex="$7"
   local endpoints_csv="$8"
-  local command_timeout_secs="${9:-30}"
+  local job_timeout_secs="${9:-30}"
   local keypair private_hex public_hex
 
   keypair="$(target/debug/vpsctl noise-keygen)"
@@ -172,7 +172,7 @@ smoke_create_direct_agent_config() {
     "$private_hex" \
     "$gateway_public_hex" \
     "$endpoints_csv" \
-    "$command_timeout_secs"
+    "$job_timeout_secs"
 }
 
 smoke_build_binaries() {

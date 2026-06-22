@@ -96,6 +96,62 @@ fn migration_link_order_by(sort: Option<&str>, descending: bool) -> &'static str
 }
 
 impl Repository {
+    pub(crate) async fn migration_link_exists_for_restore_plan(
+        &self,
+        restore_plan_id: Uuid,
+    ) -> Result<bool> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .migration_links
+                .read()
+                .await
+                .iter()
+                .any(|link| link.restore_plan_id == restore_plan_id)),
+            Self::Postgres(pool) => {
+                let exists: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM migration_links
+                        WHERE restore_plan_id = $1
+                    )
+                    "#,
+                )
+                .bind(restore_plan_id)
+                .fetch_one(pool)
+                .await?;
+                Ok(exists)
+            }
+        }
+    }
+
+    pub(crate) async fn delete_migration_link_for_restore_plan(
+        &self,
+        restore_plan_id: Uuid,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                memory
+                    .migration_links
+                    .write()
+                    .await
+                    .retain(|link| link.restore_plan_id != restore_plan_id);
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    DELETE FROM migration_links
+                    WHERE restore_plan_id = $1
+                    "#,
+                )
+                .bind(restore_plan_id)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn list_migration_links(&self, limit: i64) -> Result<Vec<MigrationLinkView>> {
         match self {
             Self::Memory(memory) => {
@@ -278,6 +334,15 @@ impl Repository {
         };
         match self {
             Self::Memory(memory) => {
+                if memory
+                    .migration_links
+                    .read()
+                    .await
+                    .iter()
+                    .any(|link| link.restore_plan_id == view.restore_plan_id)
+                {
+                    anyhow::bail!("migration_link_already_exists");
+                }
                 memory.migration_links.write().await.push(view.clone());
                 memory.audits.write().await.push(migration_link_audit(
                     &view,
@@ -304,6 +369,7 @@ impl Repository {
                         note
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    ON CONFLICT (restore_plan_id) DO NOTHING
                     RETURNING created_at::text AS created_at
                     "#,
                 )
@@ -318,8 +384,12 @@ impl Repository {
                 .bind(&view.destination_root)
                 .bind(&view.status)
                 .bind(&view.note)
-                .fetch_one(&mut *tx)
+                .fetch_optional(&mut *tx)
                 .await?;
+                let Some(row) = row else {
+                    tx.commit().await?;
+                    anyhow::bail!("migration_link_already_exists");
+                };
                 let persisted = MigrationLinkView {
                     created_at: row.try_get("created_at")?,
                     ..view

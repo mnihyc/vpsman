@@ -615,7 +615,7 @@ fn job_timeout_accepts_configured_max_above_default() {
 fn omitted_job_timeout_uses_default_agent_timeout() {
     assert_eq!(
         effective_job_timeout_secs(None, 7_200).unwrap(),
-        DEFAULT_MAX_COMMAND_TIMEOUT_SECS
+        DEFAULT_MAX_JOB_TIMEOUT_SECS
     );
 }
 
@@ -623,21 +623,21 @@ fn omitted_job_timeout_uses_default_agent_timeout() {
 fn job_timeout_rejects_above_configured_max() {
     let error = effective_job_timeout_secs(Some(7_201), 7_200).unwrap_err();
 
-    assert_eq!(error.code, "command_timeout_exceeds_configured_max");
+    assert_eq!(error.code, "job_timeout_exceeds_configured_max");
 }
 
 #[test]
 fn explicit_job_timeout_overrides_agent_advertised_default() {
-    let agents = vec![test_agent(
+    let agents = [test_agent(
         "short-default",
         AgentCapabilitySnapshot {
-            command_timeout_secs: 12,
+            job_timeout_secs: 12,
             ..AgentCapabilitySnapshot::default()
         },
     )];
 
     assert_eq!(effective_job_timeout_secs(Some(90), 600).unwrap(), 90);
-    assert_eq!(agents[0].capabilities.command_timeout_secs, 12);
+    assert_eq!(agents[0].capabilities.job_timeout_secs, 12);
 }
 
 #[test]
@@ -664,6 +664,7 @@ fn test_agent(id: &str, capabilities: AgentCapabilitySnapshot) -> AgentView {
         registration_ip: None,
         last_ip: None,
         last_seen_at: None,
+        arch: Some("x86_64".to_string()),
         internal_build_number: 1,
         process_incarnation_id: None,
         stale_since: None,

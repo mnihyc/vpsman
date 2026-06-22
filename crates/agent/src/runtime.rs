@@ -18,7 +18,7 @@ use vpsman_common::{
     AgentPrivilegeMode, AgentSessionDisconnect, CommandOutput, CommandResume, Frame, JobAck,
     JobCancelAck, JobCancelRequest, JobCommand, JobCommandSafety, JobRequest, MessageKind,
     NoiseFrameStream, OutputStream, SequencedCommandOutput, ServerEndpoint, ServerHello,
-    TelemetryEnvelope, TerminalStreamOutput, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+    TelemetryEnvelope, TerminalStreamOutput, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -333,7 +333,7 @@ async fn run_unmanaged_update_check(config: &AgentConfig) {
         version_url,
         activate: config.update.unmanaged_activate,
         restart_agent: config.update.unmanaged_restart_agent,
-        timeout_secs: config.auth.command_timeout_secs.max(300),
+        timeout_secs: config.auth.job_timeout_secs.max(300),
         cancel_token: CommandCancelToken::default(),
     })
     .await
@@ -630,7 +630,7 @@ fn agent_capabilities(config: &AgentConfig) -> AgentCapabilitySnapshot {
             AgentPrivilegeMode::Unprivileged
         },
         effective_uid: Some(effective_uid),
-        command_timeout_secs: config.auth.command_timeout_secs.max(1),
+        job_timeout_secs: config.auth.job_timeout_secs.max(1),
         can_attempt_privileged_ops: true,
         can_manage_runtime_tunnels: root,
         can_apply_process_limits: root,
@@ -1192,7 +1192,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
 
     let timeout_secs = request
         .timeout_secs
-        .clamp(1, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS);
+        .clamp(1, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS);
 
     if let JobCommand::ConfigRead = &request.command {
         let result = read_redacted_config(request.job_id, config, config_path);

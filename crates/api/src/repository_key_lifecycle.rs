@@ -279,6 +279,7 @@ impl Repository {
                             registration_ip: None,
                             last_ip: None,
                             last_seen_at: None,
+                            arch: None,
                             internal_build_number: 1,
                             process_incarnation_id: None,
                             stale_since: None,

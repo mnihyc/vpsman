@@ -1418,7 +1418,7 @@ test("creates a cron schedule from a command template with target preview", asyn
 
   await activate(page.getByRole("button", { name: "Expand Create schedule" }));
   await page
-    .getByLabel("Schedule command template")
+    .getByLabel("Schedule job template")
     .selectOption("46464646-5656-4789-8abc-defdefdefdef");
   await page.getByLabel("Schedule cron expression").fill("*/15 * * * *");
   await page.getByLabel("Schedule target expression").fill("country:US");

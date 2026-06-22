@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
     render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide, TunnelPlan,
-    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -80,7 +80,7 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 2;
             }
@@ -89,7 +89,7 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
                     flag_value(value, "--timeout="),
                     "--timeout",
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }
@@ -98,7 +98,7 @@ pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRe
                     flag_value(value, "--timeout-secs="),
                     "--timeout-secs",
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }

@@ -124,7 +124,7 @@ independent of the compose layout; set `VPSMAN_SUITE_CONFIG` and
 `VPSMAN_POSTGRES_URL` yourself when you want a specific operator config file.
 
 Long-running job control uses `timeout_secs` as the agent execution budget.
-The fleet-wide accepted maximum is `timeout.max_command_timeout_secs` in
+The fleet-wide accepted maximum is `timeout.max_job_timeout_secs` in
 `deploy/config/vpsman.toml`, defaulting to 3600 seconds and configurable up to
 seven days. Requests above the configured maximum are rejected so the browser,
 CLI, API, worker, and agent agree on the exact budget. The API adds

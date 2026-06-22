@@ -323,8 +323,8 @@ pub(crate) struct SystemDashboardCapacityView {
     pub(crate) event_post_secs: Option<u64>,
     pub(crate) internal_http_read_secs: Option<u64>,
     pub(crate) control_deadline_grace_secs: Option<u64>,
-    pub(crate) max_command_timeout_secs: Option<u64>,
-    pub(crate) worker_schedule_command_secs: Option<u64>,
+    pub(crate) max_job_timeout_secs: Option<u64>,
+    pub(crate) worker_schedule_job_timeout_secs: Option<u64>,
     pub(crate) agent_offline_secs: Option<i64>,
 }
 

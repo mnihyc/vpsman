@@ -27,9 +27,9 @@ import type {
 } from "../../types";
 import { clientDisplayNameFromMap, clientDisplayNameMap, runPanelAction, shortId } from "../../utils";
 import {
-  clampCommandTimeoutSecs,
+  clampJobTimeoutSecs,
   clampInteger,
-  MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+  MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 } from "../jobDispatchModel";
 import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
 
@@ -135,7 +135,7 @@ export function TopologyOspfUpdateControls({
       const endpointTarget = builtOperation.endpoint.localClientId;
       const selectorExpression = selectorExpressionForClientIds([endpointTarget]);
       const targets = resolveAgentsById(agents, [endpointTarget]);
-      const boundedTimeoutSecs = clampCommandTimeoutSecs(timeoutSecs);
+      const boundedTimeoutSecs = clampJobTimeoutSecs(timeoutSecs);
       const builtPrivilege = await buildPrivilegeForJobOperation({
         clientIds: [endpointTarget],
         commandType: "network_ospf_cost_update",
@@ -285,7 +285,7 @@ export function TopologyOspfUpdateControls({
             <span>Timeout seconds</span>
             <input
               aria-label="OSPF update timeout seconds"
-              max={MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}
+              max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
               min={1}
               onChange={(event) => {
                 clearOspfReview();

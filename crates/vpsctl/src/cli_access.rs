@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use vpsman_common::DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
+use vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS;
 
 #[derive(Debug, Args)]
 pub(crate) struct BootstrapCommand {
@@ -482,7 +482,7 @@ pub(crate) struct DataSourceHotConfigApplyCommand {
     pub(crate) super_salt_hex: Option<String>,
     #[arg(long, default_value_t = 300)]
     pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS)]
+    #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,

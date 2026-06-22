@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use uuid::Uuid;
-use vpsman_common::{JobCommand, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS};
+use vpsman_common::{JobCommand, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS};
 
 use crate::{
     commands_backups::{
@@ -207,7 +207,7 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
     }
     ensure_backup_scope(&paths, include_config, "backup-run")?;
     anyhow::ensure!(
-        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&timeout_secs),
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&timeout_secs),
         "backup timeout out of range"
     );
     Ok(VtyBackupRunRequest {
@@ -586,7 +586,7 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
         "restore-run requires --archive-transfer-session-id"
     );
     anyhow::ensure!(
-        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&request.timeout_secs),
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&request.timeout_secs),
         "restore timeout out of range"
     );
     anyhow::ensure!(request.confirmed, "restore-run requires --confirmed");
@@ -637,7 +637,7 @@ pub(crate) fn parse_vty_restore_rollback(tokens: &[&str]) -> Result<VtyRestoreRo
         }
     }
     anyhow::ensure!(
-        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&request.timeout_secs),
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&request.timeout_secs),
         "restore rollback timeout out of range"
     );
     anyhow::ensure!(request.confirmed, "restore-rollback requires --confirmed");

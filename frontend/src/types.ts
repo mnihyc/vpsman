@@ -241,8 +241,8 @@ export type SystemDashboardCapacityRecord = {
   event_post_secs: number | null;
   internal_http_read_secs: number | null;
   control_deadline_grace_secs: number | null;
-  max_command_timeout_secs: number | null;
-  worker_schedule_command_secs: number | null;
+  max_job_timeout_secs: number | null;
+  worker_schedule_job_timeout_secs: number | null;
   agent_offline_secs: number | null;
 };
 
@@ -705,6 +705,7 @@ export type AgentView = {
   registration_ip?: string | null;
   last_ip?: string | null;
   last_seen_at?: string | null;
+  arch?: string | null;
   internal_build_number?: number;
   process_incarnation_id?: string | null;
   stale_since?: string | null;
@@ -732,7 +733,7 @@ export type DeleteAgentResponse = {
 export type AgentCapabilitySnapshot = {
   privilege_mode: "unknown" | "root" | "unprivileged";
   effective_uid?: number | null;
-  command_timeout_secs: number;
+  job_timeout_secs: number;
   can_attempt_privileged_ops: boolean;
   can_manage_runtime_tunnels: boolean;
   can_apply_process_limits: boolean;
@@ -1867,7 +1868,7 @@ export type CreateJobResponse = {
   target_count: number;
   status: JobStatus;
   timeout_secs: number;
-  max_command_timeout_secs: number;
+  max_job_timeout_secs: number;
   control_deadline_extra_secs: number;
   target_counts: {
     total: number;

@@ -1,5 +1,5 @@
 import { RotateCcw } from "lucide-react";
-import { MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS } from "../../commandTimeout";
+import { MAX_CONFIGURABLE_JOB_TIMEOUT_SECS } from "../../jobTimeout";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import type { AgentView } from "../../types";
 import { TargetImpactPreview } from "../TargetImpactPreview";
@@ -67,7 +67,7 @@ export function RestoreRollbackForm({
           <span>Timeout seconds</span>
           <input
             aria-label="Restore rollback timeout seconds"
-            max={MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}
+            max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
             min={1}
             onChange={(event) => onRestoreRollbackTimeoutSecsChange(Number(event.target.value))}
             type="number"

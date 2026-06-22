@@ -9,7 +9,7 @@ import {
   sha256Hex,
   FILE_TRANSFER_CHUNK_BYTES,
 } from "./fileTransfer";
-import { clampCommandTimeoutSecs } from "./commandTimeout";
+import { clampJobTimeoutSecs } from "./jobTimeout";
 import { JOB_TERMINAL_STATUSES } from "./generated/protocolContracts";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "./privilege";
 import { selectorExpressionForClientIds } from "./searchExpression";
@@ -481,11 +481,11 @@ async function submitTransferStep(
   targetClientIds: string[] = request.clientIds,
 ): Promise<CreateJobResponse> {
   const selectorExpression = selectorExpressionForClientIds(targetClientIds);
-  const timeoutSecs = clampCommandTimeoutSecs(request.timeoutSecs);
+  const timeoutSecs = clampJobTimeoutSecs(request.timeoutSecs);
   const timeoutOverrideSecs =
     request.timeoutOverrideSecs === undefined
       ? undefined
-      : clampCommandTimeoutSecs(request.timeoutOverrideSecs);
+      : clampJobTimeoutSecs(request.timeoutOverrideSecs);
   const built = await buildPrivilegeForJobOperation({
     clientIds: targetClientIds,
     commandType: command,

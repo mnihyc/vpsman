@@ -63,6 +63,7 @@ pub struct CapabilitySkip {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TargetCapability {
     pub client_id: String,
+    pub arch: Option<String>,
     pub capabilities: AgentCapabilitySnapshot,
 }
 

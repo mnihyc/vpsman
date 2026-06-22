@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
     validate_file_transfer_download_session, validate_file_transfer_session, FileExistingPolicy,
-    FILE_TRANSFER_CHUNK_BYTES, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+    FILE_TRANSFER_CHUNK_BYTES, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
     MAX_FILE_TRANSFER_RATE_LIMIT_KBPS,
 };
 
@@ -91,7 +91,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
                     "--timeout",
                     tokens.get(index + 1).copied(),
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 2;
             }
@@ -100,7 +100,7 @@ pub(crate) fn parse_vty_file_transfer_upload(tokens: &[&str]) -> Result<FileTran
                     "--timeout",
                     Some(value.trim_start_matches("--timeout=")),
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }
@@ -338,7 +338,7 @@ pub(crate) fn parse_vty_file_transfer_download(
                     "--timeout",
                     tokens.get(index + 1).copied(),
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 2;
             }
@@ -347,7 +347,7 @@ pub(crate) fn parse_vty_file_transfer_download(
                     "--timeout",
                     Some(value.trim_start_matches("--timeout=")),
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }

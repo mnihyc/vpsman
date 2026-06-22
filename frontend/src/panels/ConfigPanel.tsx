@@ -16,10 +16,10 @@ import { usePanelDisplaySettings } from "../panelDisplay";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../privilege";
 import { parseSearchExpression, selectorExpressionForClientIds } from "../searchExpression";
 import {
-  clampCommandTimeoutSecs,
+  clampJobTimeoutSecs,
   clampInteger,
-  DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
-  MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+  DEFAULT_MAX_JOB_TIMEOUT_SECS,
+  MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 } from "./jobDispatchModel";
 import type {
   AgentView,
@@ -502,7 +502,7 @@ function BulkConfigApply({
   const [rendered, setRendered] = useState<HotConfigRuleTemplateRenderResponse | null>(null);
   const [applySnapshot, setApplySnapshot] = useState<BulkConfigApplySnapshot | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_MAX_COMMAND_TIMEOUT_SECS);
+  const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
   const {
@@ -590,7 +590,7 @@ function BulkConfigApply({
     const frozenPrivilegeMaterial = privilegeMaterial;
     const frozenSelector = selectorExpression.trim();
     const frozenValuesText = valuesText;
-    const boundedTimeoutSecs = clampCommandTimeoutSecs(timeoutSecs);
+    const boundedTimeoutSecs = clampJobTimeoutSecs(timeoutSecs);
     setReviewStatus("Preparing bulk config review");
     try {
       await runAction(async () => {
@@ -770,7 +770,7 @@ function BulkConfigApply({
         <div className="inlinePrivilege">
           <input
             aria-label="Config apply timeout seconds"
-            max={MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}
+            max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
             min={1}
             onChange={(event) => {
               setTimeoutSecs(Number(event.target.value));
@@ -857,7 +857,7 @@ function SingleVpsConfig({
   const [redactedToml, setRedactedToml] = useState("");
   const [baseHash, setBaseHash] = useState("");
   const [lastJobId, setLastJobId] = useState<string | null>(null);
-  const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_MAX_COMMAND_TIMEOUT_SECS);
+  const [timeoutSecs, setTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
   const [singleApplySnapshot, setSingleApplySnapshot] = useState<SingleConfigApplySnapshot | null>(null);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
@@ -889,7 +889,7 @@ function SingleVpsConfig({
     const reviewGeneration = captureReviewGeneration();
     const frozenTarget = singleTarget;
     const frozenPrivilegeMaterial = privilegeMaterial;
-    const boundedTimeoutSecs = clampCommandTimeoutSecs(timeoutSecs);
+    const boundedTimeoutSecs = clampJobTimeoutSecs(timeoutSecs);
     await runAction(async () => {
       if (!frozenTarget || !frozenPrivilegeMaterial) {
         throw new Error("Select one VPS and unlock privilege");
@@ -958,7 +958,7 @@ function SingleVpsConfig({
     const frozenPrivilegeMaterial = privilegeMaterial;
     const frozenToml = redactedToml;
     const frozenBaseHash = baseHash;
-    const boundedTimeoutSecs = clampCommandTimeoutSecs(timeoutSecs);
+    const boundedTimeoutSecs = clampJobTimeoutSecs(timeoutSecs);
     setReviewStatus("Preparing single config review");
     try {
       await runAction(async () => {
@@ -1056,7 +1056,7 @@ function SingleVpsConfig({
         <div className="inlinePrivilege">
           <input
             aria-label="Single config timeout seconds"
-            max={MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}
+            max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
             min={1}
             onChange={(event) => {
               clearSingleConfigReview();

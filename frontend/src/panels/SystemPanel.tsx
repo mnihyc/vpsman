@@ -1659,7 +1659,7 @@ function SystemDashboardPanel({
             <SystemStatusTile icon={<Network size={18} />} label="Event post" value={secondsOrUnset(dashboard?.capacity.event_post_secs)} />
             <SystemStatusTile icon={<TimerReset size={18} />} label="Internal HTTP read" value={secondsOrUnset(dashboard?.capacity.internal_http_read_secs)} />
             <SystemStatusTile icon={<TimerReset size={18} />} label="Control grace" value={secondsOrUnset(dashboard?.capacity.control_deadline_grace_secs)} />
-            <SystemStatusTile icon={<Activity size={18} />} label="Schedule command" value={secondsOrUnset(dashboard?.capacity.worker_schedule_command_secs)} />
+            <SystemStatusTile icon={<Activity size={18} />} label="Schedule job" value={secondsOrUnset(dashboard?.capacity.worker_schedule_job_timeout_secs)} />
           </div>
         </section>
       </div>
@@ -1940,7 +1940,7 @@ function SystemConfigPanel({
                   <ConfigNumber path="worker.tick_secs" label="Tick seconds" parsed={parsedDraft} onChange={updateField} />
                   <ConfigNumber path="worker.worker_lease_secs" label="Worker lease seconds" parsed={parsedDraft} onChange={updateField} />
                   <ConfigNumber path="worker.agent_offline_timeout_secs" label="Offline timeout seconds" parsed={parsedDraft} onChange={updateField} />
-                  <ConfigNumber path="worker.schedule_command_timeout_secs" label="Schedule command timeout" parsed={parsedDraft} onChange={updateField} />
+                  <ConfigNumber path="worker.schedule_job_timeout_secs" label="Schedule job timeout" parsed={parsedDraft} onChange={updateField} />
                 </ConfigGroup>
                 <ConfigGroup title="Capacity" description="Fleet defaults sized for 20-50 VPS operation.">
                   <ConfigNumber path="capacity.api_db_pool" label="API DB pool" parsed={parsedDraft} onChange={updateField} />

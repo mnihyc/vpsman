@@ -880,8 +880,8 @@ pub struct AgentCapabilitySnapshot {
     pub privilege_mode: AgentPrivilegeMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_uid: Option<u32>,
-    #[serde(default = "default_agent_command_timeout_secs")]
-    pub command_timeout_secs: u64,
+    #[serde(default = "default_agent_job_timeout_secs")]
+    pub job_timeout_secs: u64,
     #[serde(default)]
     pub can_attempt_privileged_ops: bool,
     #[serde(default)]
@@ -897,7 +897,7 @@ impl Default for AgentCapabilitySnapshot {
         Self {
             privilege_mode: AgentPrivilegeMode::Unknown,
             effective_uid: None,
-            command_timeout_secs: default_agent_command_timeout_secs(),
+            job_timeout_secs: default_agent_job_timeout_secs(),
             can_attempt_privileged_ops: false,
             can_manage_runtime_tunnels: false,
             can_apply_process_limits: false,
@@ -906,12 +906,12 @@ impl Default for AgentCapabilitySnapshot {
     }
 }
 
-fn default_agent_command_timeout_secs() -> u64 {
-    DEFAULT_MAX_COMMAND_TIMEOUT_SECS
+fn default_agent_job_timeout_secs() -> u64 {
+    DEFAULT_MAX_JOB_TIMEOUT_SECS
 }
 
-pub const DEFAULT_MAX_COMMAND_TIMEOUT_SECS: u64 = 3600;
-pub const MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
+pub const DEFAULT_MAX_JOB_TIMEOUT_SECS: u64 = 3600;
+pub const MAX_CONFIGURABLE_JOB_TIMEOUT_SECS: u64 = 7 * 24 * 60 * 60;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AgentHello {

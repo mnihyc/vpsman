@@ -35,6 +35,7 @@ use crate::{
     repository::{MemoryState, Repository},
     repository_backups::BackupRequestSourceLink,
     repository_ingest::upsert_memory_agent,
+    repository_job_outputs,
     routes_backups::{
         abort_backup_artifact_upload_session, commit_backup_artifact_upload_session,
         create_backup_artifact_handoff, create_backup_artifact_upload_session,
@@ -46,7 +47,7 @@ use crate::{
     },
     routes_jobs::create_job,
     state::AppState,
-    unix_now,
+    unix_now, TargetDispatchOutcome,
 };
 
 const TEST_INTERNAL_TOKEN: &str = "test-internal-token-value-32-plus-chars";
@@ -394,6 +395,104 @@ async fn backup_job_dispatch_terminal_failure_marks_backup_request_failed() {
     assert!(audits
         .iter()
         .any(|audit| audit.action == "backup.execution_failed"));
+}
+
+#[tokio::test]
+async fn async_backup_final_failure_marks_backup_request_failed() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let operator = backup_test_operator();
+    let operation = JobCommand::Backup {
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        follow_symlinks: false,
+    };
+    let command_hash = payload_hash(&encode_json(&operation).unwrap());
+    let request = CreateJobRequest {
+        job_id: Some(Uuid::new_v4()),
+        selector_expression: "id:client-a".to_string(),
+        target_client_ids: vec!["client-a".to_string()],
+        destructive: true,
+        confirmed: true,
+        command: "backup".to_string(),
+        argv: Vec::new(),
+        operation: Some(operation),
+        timeout_secs: Some(30),
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: None,
+    };
+    let job_id = repo
+        .record_dispatching_job(
+            request.job_id.unwrap(),
+            &request,
+            &command_hash,
+            "async_backup_failure",
+            &operator,
+            &["client-a".to_string()],
+        )
+        .await
+        .unwrap();
+    repo.claim_due_job_targets(10, 30, 0).await.unwrap();
+    let backup_request = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        follow_symlinks: false,
+        confirmed: true,
+        note: Some("source job request".to_string()),
+        privilege_assertion: None,
+    };
+    repo.record_backup_request_with_source(
+        &backup_request,
+        &command_hash,
+        "client:client-a",
+        &operator,
+        BackupRequestStatus::RequestedMetadataOnly,
+        BackupRequestSourceLink {
+            job_id: Some(job_id),
+            schedule_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let output = CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: br#"{"type":"backup","status":"failed","message":"disk full"}"#.to_vec(),
+        exit_code: Some(1),
+        done: true,
+    };
+    let outcome = TargetDispatchOutcome {
+        status: "failed".to_string(),
+        exit_code: Some(1),
+        command_version: Some(1),
+        accepted: true,
+        message: "disk full".to_string(),
+        received_at: Some("1700000000".to_string()),
+        outputs: vec![output.clone()],
+    };
+
+    let result = repo
+        .record_active_final_job_output_and_target_result_with_config(
+            job_id,
+            "client-a",
+            0,
+            &output,
+            outcome.received_at.clone(),
+            repository_job_outputs::JobOutputPersistConfig {
+                object_store: None,
+                artifact_min_bytes: usize::MAX,
+            },
+            &outcome,
+        )
+        .await
+        .unwrap();
+
+    assert!(result.target_terminalized);
+    let backups = repo.list_backup_requests(10).await.unwrap();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(backups[0].status, "execution_failed");
 }
 
 #[tokio::test]

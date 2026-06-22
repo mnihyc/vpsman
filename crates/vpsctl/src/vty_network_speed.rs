@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
     render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide, TunnelPlan,
-    DEFAULT_MAX_COMMAND_TIMEOUT_SECS, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+    DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
     NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
     NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
     NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
@@ -39,7 +39,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
     let mut rate_limit_kbps = 100_000_u32;
     let mut port = 5201_u16;
     let mut connect_timeout_ms = 5_000_u16;
-    let mut timeout_secs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
+    let mut timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     let mut privilege_ttl_secs = 300_u64;
     let mut confirmed = false;
 
@@ -157,7 +157,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 2;
             }
@@ -166,7 +166,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
                     flag_value(value, "--timeout="),
                     "--timeout",
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }
@@ -175,7 +175,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
                     flag_value(value, "--timeout-secs="),
                     "--timeout-secs",
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }

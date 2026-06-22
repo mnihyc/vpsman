@@ -1,15 +1,20 @@
 use axum::{extract::State, Json};
 use tokio::sync::broadcast;
 use uuid::Uuid;
-use vpsman_common::AgentHello;
+use vpsman_common::{AgentHello, JobCommand};
 
 use crate::{
     gateway_client::GatewayDispatchClient,
-    model::{CreateBackupRequest, CreateMigrationLinkRequest, CreateRestorePlanRequest},
+    model::{
+        CreateBackupRequest, CreateJobRequest, CreateMigrationLinkRequest,
+        CreateMigrationRunRequest, CreateRestorePlanRequest,
+    },
     repository::{MemoryState, Repository},
     repository_ingest::upsert_memory_agent,
     routes_backups::create_backup_request,
-    routes_migrations::{create_migration_link, validate_create_migration_link},
+    routes_migrations::{
+        create_migration_link, create_migration_run, validate_create_migration_link,
+    },
     routes_restores::create_restore_plan,
     state::AppState,
 };
@@ -77,6 +82,74 @@ async fn migration_link_records_restore_plan_identity_and_audit() {
     assert!(audits
         .iter()
         .any(|audit| audit.action == "migration.linked_metadata_only"));
+}
+
+#[tokio::test]
+async fn migration_run_validation_failure_creates_no_link_or_job() {
+    let repo = seeded_migration_repo().await;
+    let source_backup_id = create_source_backup(&repo).await;
+    let restore_plan_id = create_restore_plan_record(&repo, source_backup_id).await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+
+    let first_error = create_migration_run(
+        State(state.clone()),
+        headers.clone(),
+        Json(migration_run_request(restore_plan_id, source_backup_id)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(first_error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(first_error.code, "restore_source_backup_artifact_required");
+    assert_eq!(repo.list_migration_links(10).await.unwrap().len(), 0);
+    assert_eq!(repo.list_jobs(10).await.unwrap().len(), 0);
+
+    let error = create_migration_run(
+        State(state),
+        headers,
+        Json(migration_run_request(restore_plan_id, source_backup_id)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(error.code, "restore_source_backup_artifact_required");
+    assert_eq!(repo.list_migration_links(10).await.unwrap().len(), 0);
+    assert_eq!(repo.list_jobs(10).await.unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn migration_run_existing_link_returns_conflict_without_restore_job() {
+    let repo = seeded_migration_repo().await;
+    let source_backup_id = create_source_backup(&repo).await;
+    let restore_plan_id = create_restore_plan_record(&repo, source_backup_id).await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+
+    let (_, Json(_)) = create_migration_link(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateMigrationLinkRequest {
+            restore_plan_id,
+            confirmed: true,
+            note: Some("already linked".to_string()),
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let error = create_migration_run(
+        State(state),
+        headers,
+        Json(migration_run_request(restore_plan_id, source_backup_id)),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(error.code, "migration_link_already_exists");
+    assert_eq!(repo.list_migration_links(10).await.unwrap().len(), 1);
+    assert_eq!(repo.list_jobs(10).await.unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -155,6 +228,46 @@ async fn create_restore_plan_record(repo: &Repository, source_backup_id: Uuid) -
         .await
         .unwrap();
     view.id
+}
+
+fn migration_run_request(
+    restore_plan_id: Uuid,
+    source_backup_id: Uuid,
+) -> CreateMigrationRunRequest {
+    let operation = JobCommand::Restore {
+        source_backup_request_id: source_backup_id,
+        archive_transfer_session_id: Uuid::new_v4(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        destination_root: Some("/restore".to_string()),
+        archive_path: Some("/var/lib/vpsman/archive.tar".to_string()),
+        archive_size_bytes: Some(1024),
+        archive_sha256_hex: Some("a".repeat(64)),
+        dry_run: false,
+        post_restore_argv: Vec::new(),
+    };
+    CreateMigrationRunRequest {
+        link: CreateMigrationLinkRequest {
+            restore_plan_id,
+            confirmed: true,
+            note: Some("run migration".to_string()),
+            privilege_assertion: None,
+        },
+        job: CreateJobRequest {
+            job_id: Some(Uuid::new_v4()),
+            selector_expression: "id:rebuilt-client".to_string(),
+            target_client_ids: vec!["rebuilt-client".to_string()],
+            destructive: true,
+            confirmed: true,
+            command: "restore".to_string(),
+            argv: Vec::new(),
+            operation: Some(operation),
+            timeout_secs: Some(60),
+            force_unprivileged: false,
+            privileged: true,
+            privilege_assertion: None,
+        },
+    }
 }
 
 fn test_state(repo: Repository) -> AppState {

@@ -115,8 +115,8 @@ use state::{AppState, UpdateReleasePolicy, DEFAULT_ARTIFACT_MAX_BYTES};
 use tokio::{sync::broadcast, time};
 use tracing::info;
 use vpsman_common::{
-    read_secret_file_ref, SuiteConfig, DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
-    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+    read_secret_file_ref, SuiteConfig, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
 const DEFAULT_BACKUP_OBJECT_STORE_DIR: &str = "deploy/runtime/data/objects/backups";
@@ -235,10 +235,10 @@ struct Args {
     control_deadline_grace_secs: u64,
     #[arg(
         long,
-        env = "VPSMAN_MAX_COMMAND_TIMEOUT_SECS",
-        default_value_t = DEFAULT_MAX_COMMAND_TIMEOUT_SECS
+        env = "VPSMAN_MAX_JOB_TIMEOUT_SECS",
+        default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS
     )]
-    max_command_timeout_secs: u64,
+    max_job_timeout_secs: u64,
     #[arg(long, env = "VPSMAN_DISPATCHER_BATCH", default_value_t = 128)]
     dispatcher_batch: i64,
     #[arg(long, env = "VPSMAN_DISPATCHER_IN_FLIGHT", default_value_t = 64)]
@@ -369,9 +369,9 @@ impl Args {
             config.timeout.control_deadline_grace_secs,
         );
         apply_u64_default(
-            &mut self.max_command_timeout_secs,
-            "VPSMAN_MAX_COMMAND_TIMEOUT_SECS",
-            config.timeout.max_command_timeout_secs,
+            &mut self.max_job_timeout_secs,
+            "VPSMAN_MAX_JOB_TIMEOUT_SECS",
+            config.timeout.max_job_timeout_secs,
         );
         apply_i64_default(
             &mut self.dispatcher_batch,
@@ -617,9 +617,9 @@ async fn main() -> Result<()> {
             event_post_secs: args.event_post_secs.clamp(1, 3600),
             internal_http_read_secs: args.internal_http_read_secs.clamp(1, 3600),
             control_deadline_grace_secs: args.control_deadline_grace_secs.clamp(0, 3600),
-            max_command_timeout_secs: args
-                .max_command_timeout_secs
-                .clamp(1, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS),
+            max_job_timeout_secs: args
+                .max_job_timeout_secs
+                .clamp(1, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS),
         },
     };
     state

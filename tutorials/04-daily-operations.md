@@ -365,10 +365,10 @@ longer resolves, due runs and Apply now keep the reviewed schedule runnable by
 recording that fixed ID as skipped and dispatching the remaining available
 targets.
 
-Manual **Apply now** runs use the same schedule command timeout source as the
-worker: `worker.schedule_command_timeout_secs`, then legacy
-`timeout.worker_schedule_command_secs`, then the 30 second default, with the
-existing target capability clamp applied during job creation.
+Manual **Apply now** runs use the same schedule job timeout source as the
+worker: `worker.schedule_job_timeout_secs`, then legacy
+`timeout.worker_schedule_job_timeout_secs`, then the 30 second default. The
+server-issued job timeout is authoritative for scheduled and Apply now jobs.
 
 Submitted and scheduled jobs enter the durable queue first. As soon as the
 dispatcher claims any target and gives it a control deadline, the parent job is

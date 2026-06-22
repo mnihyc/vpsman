@@ -64,7 +64,7 @@ treated as destructive.
 settings. Runtime data stays under `runtime/`; do not move the config into
 `runtime/`.
 
-Command execution budgets are bounded by `[timeout].max_command_timeout_secs`.
+Job execution budgets are bounded by `[timeout].max_job_timeout_secs`.
 The default is 3600 seconds; raise it explicitly for multi-hour maintenance
 jobs so API validation, worker schedules, frontend signing, CLI submission, and
 agent capability checks share the same maximum.

@@ -326,6 +326,23 @@ async fn expire_control_timeout_targets(state: &AppState) -> Result<()> {
         )
         .await?;
     for target in expired {
+        if let Err(error) = state
+            .repo
+            .record_backup_request_terminal_for_target_status(
+                target.job_id,
+                &target.client_id,
+                &target.status,
+                None,
+            )
+            .await
+        {
+            warn!(
+                %error,
+                job_id = %target.job_id,
+                client_id = %target.client_id,
+                "backup request terminal status update failed after deadline expiry"
+            );
+        }
         if target.status == TARGET_STATUS_CONTROL_TIMEOUT {
             state
                 .repo

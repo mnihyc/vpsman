@@ -1175,6 +1175,118 @@ async fn memory_final_output_insert_terminalizes_target_atomically() {
 }
 
 #[tokio::test]
+async fn memory_final_output_waits_for_lower_sequences_before_terminalizing() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let request = test_job_request(&["client-a"]);
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let job_id = repo
+        .record_dispatching_job(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "final_output_contiguous",
+            &operator,
+            &["client-a".to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.claim_due_job_targets(10, 30, 0).await.unwrap().len(),
+        1
+    );
+    let persist = repository_job_outputs::JobOutputPersistConfig {
+        object_store: None,
+        artifact_min_bytes: usize::MAX,
+    };
+    let final_output = CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: br#"{"type":"completed"}"#.to_vec(),
+        exit_code: Some(0),
+        done: true,
+    };
+    let outcome = TargetDispatchOutcome {
+        status: "completed".to_string(),
+        exit_code: Some(0),
+        command_version: Some(1),
+        accepted: true,
+        message: "ok".to_string(),
+        received_at: None,
+        outputs: vec![final_output.clone()],
+    };
+
+    let early_final = repo
+        .record_active_final_job_output_and_target_result_with_config(
+            job_id,
+            "client-a",
+            1,
+            &final_output,
+            Some("1700000000".to_string()),
+            persist,
+            &outcome,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        early_final.write_result,
+        repository_job_outputs::JobOutputWriteResult::Inserted
+    );
+    assert!(!early_final.target_terminalized);
+    assert_eq!(
+        repo.list_job_targets(job_id).await.unwrap()[0].status,
+        "dispatching"
+    );
+
+    let stdout = CommandOutput {
+        job_id,
+        stream: OutputStream::Stdout,
+        data: b"ready\n".to_vec(),
+        exit_code: None,
+        done: false,
+    };
+    repo.record_active_job_output_chunk_checked_with_config(
+        job_id,
+        "client-a",
+        0,
+        &stdout,
+        Some("1700000001".to_string()),
+        persist,
+    )
+    .await
+    .unwrap();
+    let candidate = repo
+        .contiguous_final_job_output_candidate(job_id, "client-a")
+        .await
+        .unwrap()
+        .expect("stored final should become contiguous");
+    assert_eq!(candidate.seq, 1);
+
+    let finalized = repo
+        .record_active_final_job_output_and_target_result_with_config(
+            job_id,
+            "client-a",
+            candidate.seq,
+            &candidate.output,
+            candidate.received_at,
+            persist,
+            &outcome,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        finalized.write_result,
+        repository_job_outputs::JobOutputWriteResult::DuplicateIdentical
+    );
+    assert!(finalized.target_terminalized);
+    assert_eq!(
+        repo.list_job_targets(job_id).await.unwrap()[0].status,
+        "completed"
+    );
+}
+
+#[tokio::test]
 async fn memory_dispatch_claims_one_exclusive_target_per_client_per_batch() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
@@ -2349,6 +2461,7 @@ async fn seed_never_connected_memory_agent(repo: &Repository, client_id: &str) {
         registration_ip: None,
         last_ip: None,
         last_seen_at: None,
+        arch: None,
         internal_build_number: 1,
         process_incarnation_id: None,
         stale_since: None,

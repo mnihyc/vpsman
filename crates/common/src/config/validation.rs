@@ -6,7 +6,7 @@ use super::models::{
 };
 use crate::{
     validate_runtime_topology_intent, validate_runtime_tunnel_control, RuntimeTunnelManager,
-    TunnelConfigBackend, TunnelEndpointSide, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+    TunnelConfigBackend, TunnelEndpointSide, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
 pub const INCREMENTAL_CONFIG_PATCH_SECTIONS: &[&str] =
@@ -114,8 +114,8 @@ fn validate_noise_config(config: &AgentNoiseConfig) -> Result<(), String> {
 }
 
 fn validate_auth_config(config: &AgentAuthConfig) -> Result<(), String> {
-    if !(1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&config.command_timeout_secs) {
-        return Err("command_timeout_secs_out_of_range".to_string());
+    if !(1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&config.job_timeout_secs) {
+        return Err("job_timeout_secs_out_of_range".to_string());
     }
     if !(1..=3600).contains(&config.gateway_retry_secs) {
         return Err("gateway_retry_secs_out_of_range".to_string());

@@ -812,14 +812,13 @@ async fn execute_user_sessions(
     timeout_secs: u64,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
-    let (args, command_source, command_timeout_secs) =
-        user_sessions_argv(config, timeout_secs.max(1))?;
+    let (args, command_source, job_timeout_secs) = user_sessions_argv(config, timeout_secs.max(1))?;
     let mut outputs = execute_shell_command(
         config,
         job_id,
         &args,
         false,
-        command_timeout_secs,
+        job_timeout_secs,
         cancel_token,
         None,
     )

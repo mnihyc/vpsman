@@ -1728,6 +1728,7 @@ pub(crate) async fn upsert_memory_agent_with_remote_ip(
             agent.internal_build_number = hello.internal_build_number.max(1);
         }
         agent.process_incarnation_id = Some(hello.process_incarnation_id);
+        agent.arch = (!hello.arch.trim().is_empty()).then(|| hello.arch.clone());
         agent.capabilities = hello.capabilities.clone();
         return;
     }
@@ -1739,6 +1740,7 @@ pub(crate) async fn upsert_memory_agent_with_remote_ip(
         registration_ip: remote_ip.map(str::to_string),
         last_ip: remote_ip.map(str::to_string),
         last_seen_at: Some(now),
+        arch: (!hello.arch.trim().is_empty()).then(|| hello.arch.clone()),
         internal_build_number: hello.internal_build_number.max(1),
         process_incarnation_id: Some(hello.process_incarnation_id),
         stale_since: None,

@@ -1038,7 +1038,7 @@ export function SchedulesPanel({
             <label>
               <span>Template</span>
               <select
-                aria-label="Schedule command template"
+                aria-label="Schedule job template"
                 onChange={(event) => selectCommandTemplate(event.target.value)}
                 value={selectedTemplateId}
               >
@@ -1071,7 +1071,7 @@ export function SchedulesPanel({
             <label>
               <span>Command argv</span>
               <textarea
-                aria-label="Schedule command argv"
+                aria-label="Schedule job argv"
                 disabled={selectedTemplate !== null}
                 onChange={(event) => setCommandText(event.target.value)}
                 rows={3}

@@ -46,6 +46,7 @@ mod tests {
             registration_ip: None,
             last_ip: None,
             last_seen_at: Some("2026-06-08T01:00:00Z".to_string()),
+            arch: None,
             internal_build_number: 42,
             process_incarnation_id: None,
             stale_since: None,

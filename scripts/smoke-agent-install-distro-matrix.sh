@@ -39,7 +39,7 @@ client_private_key_hex = "111111111111111111111111111111111111111111111111111111
 server_public_key_hex = "2222222222222222222222222222222222222222222222222222222222222222"
 
 [auth]
-command_timeout_secs = 3600
+job_timeout_secs = 3600
 
 [[tcp_endpoints]]
 label = "local"

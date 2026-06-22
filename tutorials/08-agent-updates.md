@@ -92,8 +92,11 @@ cargo run -p vpsctl -- agent-update-release-latest --name vpsman-agent --channel
 When `require_registered_agent_updates` is enabled, every explicit update
 lifecycle job is hash-bound to the release registry: manual staging and
 activation require the registered primary artifact SHA, rollback requires the
-registered rollback artifact SHA, and manifest-check jobs are rejected because
-the agent chooses the downloaded bytes from an external manifest.
+registered rollback artifact SHA, and manifest-check jobs must use an explicit
+resolvable manifest whose per-target architecture artifact hashes are all
+registered. A check is rejected before dispatch when the manifest is missing,
+the target architecture is unsupported, or any stageable artifact hash is not in
+the release registry.
 
 ## Dispatch A Direct Update Job
 

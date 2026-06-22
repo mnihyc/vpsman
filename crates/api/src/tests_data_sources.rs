@@ -742,7 +742,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Root,
                     effective_uid: Some(0),
-                    command_timeout_secs: 3600,
+                    job_timeout_secs: 3600,
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: true,
                     can_apply_process_limits: true,
@@ -764,7 +764,7 @@ async fn data_source_status_links_selected_presets_to_live_source_evidence() {
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Unprivileged,
                     effective_uid: Some(1000),
-                    command_timeout_secs: 3600,
+                    job_timeout_secs: 3600,
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,

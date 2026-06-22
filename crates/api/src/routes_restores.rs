@@ -4,7 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use vpsman_common::{encode_json, payload_hash, JobCommand, DEFAULT_MAX_COMMAND_TIMEOUT_SECS};
+use vpsman_common::{encode_json, payload_hash, JobCommand, DEFAULT_MAX_JOB_TIMEOUT_SECS};
 
 use crate::{
     error::ApiError,
@@ -59,7 +59,7 @@ pub(crate) async fn create_restore_plan(
         command_type: "restore",
         operation_payload_hash: &command_hash,
         resolved_targets: &resolved_targets,
-        timeout_secs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
+        timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
         force_unprivileged: false,
         privileged: true,
     });

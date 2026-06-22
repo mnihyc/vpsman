@@ -12,7 +12,9 @@ use crate::{
         ListQuery, MigrationLinkStatus, MigrationLinkView, RestorePlanStatus,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
-    routes_jobs::create_job_with_operator,
+    routes_jobs::{
+        create_job_with_operator, effective_job_timeout_secs, validate_restore_archive_binding,
+    },
     security::{operator_has_scope, SCOPE_BACKUPS_READ},
     state::AppState,
 };
@@ -52,17 +54,7 @@ pub(crate) async fn create_migration_link(
     verify_migration_link_privilege(&state, &request, &restore_plan).await?;
     Ok((
         StatusCode::CREATED,
-        Json(
-            state
-                .repo
-                .record_migration_link(
-                    &request,
-                    &restore_plan,
-                    &operator,
-                    MigrationLinkStatus::LinkedMetadataOnly,
-                )
-                .await?,
-        ),
+        Json(record_migration_link_or_conflict(&state, &request, &restore_plan, &operator).await?),
     ))
 }
 
@@ -89,32 +81,29 @@ pub(crate) async fn create_migration_run(
         ));
     }
     ensure_migration_run_job_matches_plan(&request, &restore_plan)?;
+    verify_migration_link_privilege(&state, &request.link, &restore_plan).await?;
     if state
         .repo
-        .query_migration_links(&ListQuery {
-            limit: Some(1000),
-            offset: None,
-            q: None,
-            sort: None,
-            dir: None,
-        })
+        .migration_link_exists_for_restore_plan(request.link.restore_plan_id)
         .await?
-        .iter()
-        .any(|link| link.restore_plan_id == restore_plan.id)
     {
         return Err(ApiError::conflict("migration_link_already_exists"));
     }
-    verify_migration_link_privilege(&state, &request.link, &restore_plan).await?;
-    let (_, Json(restore_job)) = create_job_with_operator(&state, &operator, request.job).await?;
-    let migration_link = state
-        .repo
-        .record_migration_link(
-            &request.link,
-            &restore_plan,
-            &operator,
-            MigrationLinkStatus::LinkedMetadataOnly,
-        )
-        .await?;
+    preflight_migration_restore_job(&state, &request).await?;
+    let migration_link =
+        record_migration_link_or_conflict(&state, &request.link, &restore_plan, &operator).await?;
+    let restore_plan_id = request.link.restore_plan_id;
+    let restore_job_result = create_job_with_operator(&state, &operator, request.job).await;
+    let (_, Json(restore_job)) = match restore_job_result {
+        Ok(response) => response,
+        Err(error) => {
+            state
+                .repo
+                .delete_migration_link_for_restore_plan(restore_plan_id)
+                .await?;
+            return Err(error);
+        }
+    };
     Ok((
         StatusCode::CREATED,
         Json(CreateMigrationRunResponse {
@@ -122,6 +111,59 @@ pub(crate) async fn create_migration_run(
             restore_job,
         }),
     ))
+}
+
+async fn record_migration_link_or_conflict(
+    state: &AppState,
+    request: &CreateMigrationLinkRequest,
+    restore_plan: &MigrationLinkRestorePlan,
+    operator: &crate::model::AuthContext,
+) -> Result<MigrationLinkView, ApiError> {
+    state
+        .repo
+        .record_migration_link(
+            request,
+            restore_plan,
+            operator,
+            MigrationLinkStatus::LinkedMetadataOnly,
+        )
+        .await
+        .map_err(|error| {
+            if error.to_string().contains("migration_link_already_exists") {
+                ApiError::conflict("migration_link_already_exists")
+            } else {
+                ApiError::from(error)
+            }
+        })
+}
+
+async fn preflight_migration_restore_job(
+    state: &AppState,
+    request: &CreateMigrationRunRequest,
+) -> Result<(), ApiError> {
+    if !request.job.privileged {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
+    effective_job_timeout_secs(request.job.timeout_secs, state.max_job_timeout_secs())?;
+    let selection = request.job.target_selection()?;
+    let resolved_agents = state.repo.resolve_bulk_targets(&selection).await?.targets;
+    let targets = request.job.fixed_target_ids()?;
+    if targets
+        .iter()
+        .any(|target| !resolved_agents.iter().any(|agent| agent.id == *target))
+    {
+        return Err(ApiError::conflict("fixed_target_not_found"));
+    }
+    let command = request.job.job_command()?;
+    validate_restore_archive_binding(state, &command, &targets).await?;
+    if !state.gateway.configured() {
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "gateway_control_url_missing",
+            error: anyhow::anyhow!("gateway_control_url_missing"),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_create_migration_link(

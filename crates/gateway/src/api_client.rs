@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fs,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -141,6 +142,7 @@ impl GatewayControlClient {
                     command_output: None,
                     created_at: time::Instant::now(),
                     created_unix: unix_now(),
+                    enqueue_seq: self.forwarder.next_enqueue_seq(),
                 },
                 self.timeouts.clone(),
             )
@@ -175,6 +177,7 @@ impl GatewayControlClient {
                     command_output: Some(CommandOutputReplayRef::from(value)),
                     created_at: time::Instant::now(),
                     created_unix: unix_now(),
+                    enqueue_seq: self.forwarder.next_enqueue_seq(),
                 },
                 self.timeouts.clone(),
             )
@@ -271,6 +274,7 @@ struct GatewayEventForwarder {
     metrics: Arc<GatewayForwardMetrics>,
     spool: Arc<GatewayForwardSpool>,
     runtime_config: Arc<GatewayForwardRuntimeConfig>,
+    enqueue_seq: AtomicU64,
 }
 
 struct GatewayForwardQueue {
@@ -343,6 +347,7 @@ struct GatewayForwardEvent {
     command_output: Option<CommandOutputReplayRef>,
     created_at: time::Instant,
     created_unix: u64,
+    enqueue_seq: u64,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -381,6 +386,7 @@ enum GatewayForwardQueueItem {
     Spooled {
         path: PathBuf,
         created_unix: u64,
+        enqueue_seq: u64,
         disk_bytes: u64,
         kind: GatewayForwardEventKind,
         critical: bool,
@@ -394,6 +400,7 @@ struct GatewayPendingSpoolCandidate {
     target_key: String,
     path: PathBuf,
     created_unix: u64,
+    enqueue_seq: u64,
     disk_bytes: u64,
     kind: GatewayForwardEventKind,
     critical: bool,
@@ -423,6 +430,8 @@ struct SpooledGatewayForwardHeader {
     kind: GatewayForwardEventKind,
     critical: bool,
     created_unix: u64,
+    #[serde(default)]
+    enqueue_seq: u64,
     body_sha256_hex: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     command_output: Option<CommandOutputReplayRef>,
@@ -461,6 +470,38 @@ fn current_gateway_http_timeouts(timeouts: &StdRwLock<GatewayHttpTimeouts>) -> G
         .read()
         .map(|timeouts| *timeouts)
         .unwrap_or_default()
+}
+
+fn initial_gateway_enqueue_seq() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or_else(|_| unix_now())
+}
+
+fn initial_gateway_enqueue_seq_for_spool(spool: &GatewayForwardSpool) -> u64 {
+    let mut enqueue_seq = initial_gateway_enqueue_seq();
+    if !spool.config.enabled {
+        return enqueue_seq;
+    }
+    let pending_dir = spool.pending_dir();
+    let Ok(entries) = fs::read_dir(&pending_dir) else {
+        return enqueue_seq;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("spool") {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let Ok(event) = decode_spooled_event(&path, &bytes) else {
+            continue;
+        };
+        enqueue_seq = enqueue_seq.max(event.enqueue_seq);
+    }
+    enqueue_seq
 }
 
 const PER_TARGET_QUEUE_CAPACITY: usize = 512;
@@ -540,18 +581,27 @@ impl GatewayEventForwarder {
     }
 
     fn with_config(spool_config: GatewaySpoolConfig, forward_config: GatewayForwardConfig) -> Self {
+        let spool = Arc::new(GatewayForwardSpool::new(spool_config));
+        let enqueue_seq = initial_gateway_enqueue_seq_for_spool(&spool);
         Self {
             queues: Mutex::default(),
             telemetry_pending: Arc::default(),
             critical_failure_handler: Arc::default(),
             metrics: Arc::default(),
-            spool: Arc::new(GatewayForwardSpool::new(spool_config)),
+            spool,
             runtime_config: Arc::new(GatewayForwardRuntimeConfig::new(forward_config)),
+            enqueue_seq: AtomicU64::new(enqueue_seq),
         }
     }
 
     fn set_runtime_config(&self, config: GatewayForwardConfig) {
         self.runtime_config.set(config);
+    }
+
+    fn next_enqueue_seq(&self) -> u64 {
+        self.enqueue_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
     }
 
     fn start_spool_replay(self: &Arc<Self>, timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>) {
@@ -684,6 +734,33 @@ impl GatewayEventForwarder {
         event: GatewayForwardEvent,
         timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
     ) -> Result<()> {
+        if event_spools_under_pressure(&event) && self.spool.target_has_pending(&target_key).await {
+            return match self
+                .spool_event_for_later_replay(
+                    &target_key,
+                    &event,
+                    GatewayForwardDropReason::TargetQueueFull,
+                )
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    warn!(
+                        %error,
+                        path = %event.path,
+                        kind = ?event.kind,
+                        target_key,
+                        "failed to spool critical gateway output behind pending replay fence"
+                    );
+                    self.drop_enqueue_event(
+                        &target_key,
+                        event,
+                        GatewayForwardDropReason::TargetQueueFull,
+                    )
+                    .await
+                }
+            };
+        }
         if self.metrics.current_queue_depth.load(Ordering::Relaxed) >= GLOBAL_QUEUE_CAPACITY {
             if event_spools_under_pressure(&event) {
                 return match self
@@ -781,6 +858,7 @@ impl GatewayEventForwarder {
         timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
     ) -> Result<()> {
         let event_unix = item.created_unix();
+        let event_enqueue_seq = item.enqueue_seq();
         let sender = {
             let mut queues = self.queues.lock().await;
             self.reap_idle_queues_locked(&mut queues, unix_now());
@@ -895,6 +973,7 @@ impl GatewayEventForwarder {
                             path = %path.display(),
                             kind = ?kind,
                             target_key,
+                            enqueue_seq = event_enqueue_seq,
                             "target queue full while replaying spooled gateway event; preserving spool file for later replay"
                         );
                         anyhow::bail!("gateway_forwarder_event_replay_deferred:target_queue_full")
@@ -1066,6 +1145,7 @@ impl GatewayForwardSpool {
             kind: event.kind,
             critical: event.critical,
             created_unix: event.created_unix,
+            enqueue_seq: event.enqueue_seq,
             body_sha256_hex: payload_hash(&event.body),
             command_output: event
                 .command_output
@@ -1140,6 +1220,7 @@ impl GatewayForwardSpool {
         Ok(GatewayForwardQueueItem::Spooled {
             path: final_path,
             created_unix: event.created_unix,
+            enqueue_seq: event.enqueue_seq,
             disk_bytes,
             kind: event.kind,
             critical: event.critical,
@@ -1189,12 +1270,26 @@ impl GatewayForwardSpool {
                 target_key,
                 path,
                 created_unix,
+                enqueue_seq: event.enqueue_seq,
                 disk_bytes,
                 kind: event.kind,
                 critical: event.critical,
             });
         }
-        candidates.sort_by_key(|candidate| candidate.created_unix);
+        candidates.sort_by(|left, right| {
+            (
+                left.enqueue_seq,
+                left.created_unix,
+                left.target_key.as_str(),
+                left.path.as_os_str(),
+            )
+                .cmp(&(
+                    right.enqueue_seq,
+                    right.created_unix,
+                    right.target_key.as_str(),
+                    right.path.as_os_str(),
+                ))
+        });
         let mut items = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             if let Err(error) =
@@ -1213,6 +1308,7 @@ impl GatewayForwardSpool {
                 GatewayForwardQueueItem::Spooled {
                     path: candidate.path,
                     created_unix: candidate.created_unix,
+                    enqueue_seq: candidate.enqueue_seq,
                     disk_bytes: candidate.disk_bytes,
                     kind: candidate.kind,
                     critical: candidate.critical,
@@ -1288,6 +1384,29 @@ impl GatewayForwardSpool {
             .with_context(|| format!("failed to decode gateway spool header {}", path.display()))?;
         validate_spooled_header(path, &header)?;
         Ok(header)
+    }
+
+    async fn target_has_pending(&self, target_key: &str) -> bool {
+        if !self.config.enabled {
+            return false;
+        }
+        let pending_dir = self.pending_dir();
+        let Ok(mut entries) = tokio::fs::read_dir(&pending_dir).await else {
+            return false;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("spool") {
+                continue;
+            }
+            let Some((_, pending_target_key)) = parse_spool_filename(&path) else {
+                continue;
+            };
+            if pending_target_key == target_key {
+                return true;
+            }
+        }
+        false
     }
 
     async fn remove_spooled_file(&self, path: &Path, disk_bytes: u64) {
@@ -2189,6 +2308,14 @@ impl GatewayForwardQueueItem {
             Self::Telemetry { created_unix } => *created_unix,
         }
     }
+
+    fn enqueue_seq(&self) -> u64 {
+        match self {
+            Self::Event { event, .. } => event.enqueue_seq,
+            Self::Spooled { enqueue_seq, .. } => *enqueue_seq,
+            Self::Telemetry { .. } => 0,
+        }
+    }
 }
 
 fn parse_spool_filename(path: &Path) -> Option<(u64, String)> {
@@ -2262,6 +2389,7 @@ fn decode_spooled_event(path: &Path, bytes: &[u8]) -> Result<GatewayForwardEvent
         command_output: header.command_output,
         created_at,
         created_unix: header.created_unix,
+        enqueue_seq: header.enqueue_seq,
     })
 }
 
@@ -2354,6 +2482,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tokio::sync::oneshot;
 
+    static TEST_ENQUEUE_SEQ: AtomicU64 = AtomicU64::new(1);
+
     fn test_event(path: &str, body: &[u8]) -> GatewayForwardEvent {
         let kind = GatewayForwardEventKind::for_path(path);
         GatewayForwardEvent {
@@ -2366,6 +2496,7 @@ mod tests {
             command_output: None,
             created_at: time::Instant::now(),
             created_unix: unix_now(),
+            enqueue_seq: TEST_ENQUEUE_SEQ.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -2970,6 +3101,145 @@ mod tests {
             }
         ));
         let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pending_spool_items_replay_by_durable_enqueue_sequence() {
+        let dir = std::env::temp_dir().join(format!(
+            "vpsman-gateway-spool-replay-order-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let forwarder = GatewayEventForwarder::with_spool_config(GatewaySpoolConfig::enabled(
+            dir.clone(),
+            1024 * 1024,
+            8 * 1024 * 1024,
+            30,
+        ));
+        let mut later = test_event(COMMAND_OUTPUT_PATH, br#"{"seq":2}"#);
+        later.created_unix = 100;
+        later.enqueue_seq = 2;
+        let mut earlier = test_event(COMMAND_OUTPUT_PATH, br#"{"seq":1}"#);
+        earlier.created_unix = 100;
+        earlier.enqueue_seq = 1;
+
+        let GatewayForwardQueueItem::Spooled {
+            path: later_path, ..
+        } = forwarder
+            .spool
+            .spool_event("client-a", &later)
+            .await
+            .unwrap()
+        else {
+            panic!("spool_event must return a spooled item");
+        };
+        let GatewayForwardQueueItem::Spooled {
+            path: earlier_path, ..
+        } = forwarder
+            .spool
+            .spool_event("client-a", &earlier)
+            .await
+            .unwrap()
+        else {
+            panic!("spool_event must return a spooled item");
+        };
+
+        let replay = forwarder.spool.pending_items().await;
+
+        assert_eq!(replay.len(), 2);
+        assert_eq!(replay[0].0, "client-a");
+        assert_eq!(replay[1].0, "client-a");
+        assert!(matches!(
+            replay[0].1,
+            GatewayForwardQueueItem::Spooled { enqueue_seq: 1, .. }
+        ));
+        assert!(matches!(
+            replay[1].1,
+            GatewayForwardQueueItem::Spooled { enqueue_seq: 2, .. }
+        ));
+        let _ = std::fs::remove_file(earlier_path);
+        let _ = std::fs::remove_file(later_path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn forwarder_enqueue_sequence_starts_after_existing_spool() {
+        let dir = std::env::temp_dir().join(format!(
+            "vpsman-gateway-spool-seed-seq-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let config = GatewaySpoolConfig::enabled(dir.clone(), 1024 * 1024, 8 * 1024 * 1024, 30);
+        let forwarder = GatewayEventForwarder::with_spool_config(config.clone());
+        let mut existing = test_event(COMMAND_OUTPUT_PATH, br#"{"seq":1}"#);
+        existing.enqueue_seq = u64::MAX - 4;
+        let GatewayForwardQueueItem::Spooled { path, .. } = forwarder
+            .spool
+            .spool_event("client-a", &existing)
+            .await
+            .unwrap()
+        else {
+            panic!("spool_event must return a spooled item");
+        };
+
+        let restarted = GatewayEventForwarder::with_spool_config(config);
+
+        assert!(restarted.next_enqueue_seq() > existing.enqueue_seq);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn pending_spool_file_fences_later_critical_output_for_target() {
+        let dir = std::env::temp_dir().join(format!(
+            "vpsman-gateway-spool-fence-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let forwarder = GatewayEventForwarder::with_spool_config(GatewaySpoolConfig::enabled(
+            dir.clone(),
+            1024 * 1024,
+            8 * 1024 * 1024,
+            30,
+        ));
+        let first = test_event(COMMAND_OUTPUT_PATH, br#"{"seq":1}"#);
+        let GatewayForwardQueueItem::Spooled {
+            path: first_path, ..
+        } = forwarder
+            .spool
+            .spool_event("client-a", &first)
+            .await
+            .unwrap()
+        else {
+            panic!("spool_event must return a spooled item");
+        };
+        let second = test_event(COMMAND_OUTPUT_PATH, br#"{"seq":2}"#);
+
+        forwarder
+            .enqueue("client-a".to_string(), second, test_timeouts())
+            .await
+            .unwrap();
+
+        let replay = forwarder.spool.pending_items().await;
+        assert_eq!(replay.len(), 2);
+        assert_eq!(
+            forwarder
+                .metrics
+                .current_queue_depth
+                .load(Ordering::Relaxed),
+            0
+        );
+        if let GatewayForwardQueueItem::Spooled {
+            path, disk_bytes, ..
+        } = &replay[0].1
+        {
+            forwarder.spool.remove_spooled_file(path, *disk_bytes).await;
+        }
+        if let GatewayForwardQueueItem::Spooled {
+            path, disk_bytes, ..
+        } = &replay[1].1
+        {
+            forwarder.spool.remove_spooled_file(path, *disk_bytes).await;
+        }
+        let _ = std::fs::remove_file(first_path);
         let _ = std::fs::remove_dir_all(dir);
     }
 

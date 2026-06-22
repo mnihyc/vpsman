@@ -200,7 +200,7 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
                 capabilities: AgentCapabilitySnapshot {
                     privilege_mode: AgentPrivilegeMode::Unprivileged,
                     effective_uid: Some(1000),
-                    command_timeout_secs: 3600,
+                    job_timeout_secs: 3600,
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
                     can_apply_process_limits: false,

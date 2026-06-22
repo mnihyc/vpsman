@@ -22,7 +22,7 @@ function runningTarget(startedAt: string, deadlineAt: string): JobTargetRecord {
   };
 }
 
-test("bulk progress does not mark grace before command timeout", () => {
+test("bulk progress does not mark grace before job timeout", () => {
   const progress = buildBulkJobProgress({
     jobId: "job-a",
     nowMs: 1_700_000_020_000,
@@ -37,7 +37,7 @@ test("bulk progress does not mark grace before command timeout", () => {
   expect(bulkProgressLabel(progress)).not.toContain("deadline overdue");
 });
 
-test("bulk progress labels backend control grace after command timeout", () => {
+test("bulk progress labels backend control grace after job timeout", () => {
   const progress = buildBulkJobProgress({
     jobId: "job-a",
     nowMs: 1_700_000_070_000,

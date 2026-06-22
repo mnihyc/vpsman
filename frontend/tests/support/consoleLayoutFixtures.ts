@@ -561,7 +561,7 @@ const systemDashboard = {
     event_post_secs: 15,
     internal_http_read_secs: 15,
     worker_db_pool: 8,
-    worker_schedule_command_secs: 30,
+    worker_schedule_job_timeout_secs: 30,
   },
   current: {
     cancellations: {
@@ -687,7 +687,7 @@ reconnect_grace_secs = 60
 tick_secs = 30
 worker_lease_secs = 60
 agent_offline_timeout_secs = 300
-schedule_command_timeout_secs = 30
+schedule_job_timeout_secs = 30
 
 [capacity]
 api_db_pool = 32
@@ -749,7 +749,7 @@ const suiteConfigValidation = {
     "timeout.gateway_reconnect_grace_secs",
     "api.job_output_artifact_min_bytes",
     "api.require_registered_agent_updates",
-    "worker.schedule_command_timeout_secs",
+    "worker.schedule_job_timeout_secs",
     "worker.tick_secs",
     "worker.worker_lease_secs",
     "worker.agent_offline_timeout_secs",
@@ -757,7 +757,7 @@ const suiteConfigValidation = {
     "worker.webhook_rule_*",
     "worker.backup_policy_prune_*",
     "worker.require_registered_agent_updates",
-    "timeout.worker_schedule_command_secs",
+    "timeout.worker_schedule_job_timeout_secs",
     "timeout.agent_offline_secs",
     "api.alert_*",
   ],

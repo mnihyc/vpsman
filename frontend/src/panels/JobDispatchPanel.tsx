@@ -43,11 +43,11 @@ import {
 } from "../resumableFileTransfer";
 import {
   buildOperation,
-  clampCommandTimeoutSecs,
+  clampJobTimeoutSecs,
   clampInteger,
-  effectiveCommandTimeoutSecs,
+  effectiveJobTimeoutSecs,
   operationCommandLabel,
-  parseOptionalCommandTimeoutSecs,
+  parseOptionalJobTimeoutSecs,
   parseBackupPaths,
   supervisorReady,
   terminalReady,
@@ -368,7 +368,7 @@ export function JobDispatchPanel({
       setSelectorExpression(dispatchPreset.selectorExpression);
     }
     if (dispatchPreset.timeoutSecs !== undefined) {
-      setTimeoutSecs(String(clampCommandTimeoutSecs(dispatchPreset.timeoutSecs)));
+      setTimeoutSecs(String(clampJobTimeoutSecs(dispatchPreset.timeoutSecs)));
     } else if (dispatchPreset.mode === "agent_update_activate" || dispatchPreset.mode === "agent_update_rollback") {
       setTimeoutSecs("60");
     } else if (dispatchPreset.mode.startsWith("agent_update")) {
@@ -612,7 +612,7 @@ export function JobDispatchPanel({
   const dispatchConfirmationTargets =
     activeDispatchConfirmation?.targets ?? preview?.targets ?? expressionTargets;
   const dispatchConfirmationTimeoutSecs =
-    activeDispatchConfirmation?.timeoutSecs ?? effectiveCommandTimeoutSecs(timeoutSecs);
+    activeDispatchConfirmation?.timeoutSecs ?? effectiveJobTimeoutSecs(timeoutSecs);
   const dispatchConfirmationForceUnprivileged =
     activeDispatchConfirmation?.forceUnprivileged ??
     (supportsForceUnprivileged ? forceUnprivileged : false);
@@ -774,8 +774,8 @@ export function JobDispatchPanel({
       throw new Error("Privilege unlock is locked");
     }
     const selector = selectorExpression.trim();
-    const timeoutOverride = parseOptionalCommandTimeoutSecs(timeoutSecs);
-    const timeout = timeoutOverride ?? effectiveCommandTimeoutSecs(timeoutSecs);
+    const timeoutOverride = parseOptionalJobTimeoutSecs(timeoutSecs);
+    const timeout = timeoutOverride ?? effectiveJobTimeoutSecs(timeoutSecs);
     const frozenForceUnprivileged = supportsForceUnprivileged ? forceUnprivileged : false;
     const operationLabel = operationCommandLabel(mode, commandText);
     const base = {
@@ -952,7 +952,7 @@ export function JobDispatchPanel({
       return;
     }
     if (typeof defaults.timeout_secs === "number") {
-      setTimeoutSecs(String(clampCommandTimeoutSecs(defaults.timeout_secs)));
+      setTimeoutSecs(String(clampJobTimeoutSecs(defaults.timeout_secs)));
     }
     if (typeof defaults.force_unprivileged === "boolean") {
       setForceUnprivileged(defaults.force_unprivileged);
@@ -1078,7 +1078,7 @@ export function JobDispatchPanel({
       filePushMode,
       null,
     );
-    const timeoutOverride = parseOptionalCommandTimeoutSecs(timeoutSecs);
+    const timeoutOverride = parseOptionalJobTimeoutSecs(timeoutSecs);
     return {
       name,
       scope_kind: templateScopeKind,
@@ -1249,7 +1249,7 @@ export function JobDispatchPanel({
 
   async function trackDispatchProgress(job: CreateJobResponse, targets: AgentView[], jobTimeoutSecs?: number) {
     const targetCount = createJobTargetCount(job);
-    const boundedJobTimeoutSecs = clampCommandTimeoutSecs(jobTimeoutSecs ?? effectiveCommandTimeoutSecs(timeoutSecs));
+    const boundedJobTimeoutSecs = clampJobTimeoutSecs(jobTimeoutSecs ?? effectiveJobTimeoutSecs(timeoutSecs));
     setLastDispatchProgress(null);
     setDispatchProgress(buildBulkJobProgress({
       jobId: job.job_id,

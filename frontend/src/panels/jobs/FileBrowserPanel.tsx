@@ -24,7 +24,7 @@ import { css } from "@codemirror/lang-css";
 import { html } from "@codemirror/lang-html";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
-import { DEFAULT_MAX_COMMAND_TIMEOUT_SECS } from "../../commandTimeout";
+import { DEFAULT_MAX_JOB_TIMEOUT_SECS } from "../../jobTimeout";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import {
@@ -224,7 +224,7 @@ export function FileBrowserPanel({
     if (!privilegeMaterial) {
       throw new Error("Privilege unlock is locked");
     }
-    const timeoutSecs = DEFAULT_MAX_COMMAND_TIMEOUT_SECS;
+    const timeoutSecs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     const selectorExpression = selectorExpressionForClientIds([selectedAgent.id]);
     const built = await buildPrivilegeForJobOperation({
       clientIds: [selectedAgent.id],

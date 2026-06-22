@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
     payload_hash, render_tunnel_endpoint_config, JobCommand, TunnelEndpointSide, TunnelPlan,
-    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -98,7 +98,7 @@ pub(crate) fn parse_vty_tunnel_ospf_cost_update(
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 2;
             }
@@ -107,7 +107,7 @@ pub(crate) fn parse_vty_tunnel_ospf_cost_update(
                     flag_value(value, "--timeout="),
                     "--timeout",
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }
@@ -116,7 +116,7 @@ pub(crate) fn parse_vty_tunnel_ospf_cost_update(
                     flag_value(value, "--timeout-secs="),
                     "--timeout-secs",
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }

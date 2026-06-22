@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use uuid::Uuid;
-use vpsman_common::MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS;
+use vpsman_common::MAX_CONFIGURABLE_JOB_TIMEOUT_SECS;
 
 use crate::{
     commands_migrations::{migration_link_with_credentials, migration_run_with_credentials},
@@ -128,7 +128,7 @@ pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRun
         }
     }
     anyhow::ensure!(
-        (1..=MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS).contains(&request.timeout_secs),
+        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&request.timeout_secs),
         "migration-run timeout out of range"
     );
     anyhow::ensure!(

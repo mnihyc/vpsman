@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
 import { buildRestoreRollbackOperation } from "../backups/restoreRollback";
-import { clampCommandTimeoutSecs, DEFAULT_MAX_COMMAND_TIMEOUT_SECS } from "../commandTimeout";
+import { clampJobTimeoutSecs, DEFAULT_MAX_JOB_TIMEOUT_SECS } from "../jobTimeout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleActionDrawer } from "../components/ConsoleLayout";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
@@ -723,7 +723,7 @@ export function BackupsPanel({
         operation,
         privilegeMaterial,
         selectorExpression,
-        timeoutSecs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
+        timeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
@@ -897,7 +897,7 @@ export function BackupsPanel({
         operation,
         privilegeMaterial,
         selectorExpression,
-        timeoutSecs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
+        timeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
       });
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
@@ -987,7 +987,7 @@ export function BackupsPanel({
     const selectorExpression = selectorExpressionForClientIds([
       input.targetClientId,
     ]);
-    const boundedTimeoutSecs = clampCommandTimeoutSecs(input.timeoutSecs);
+    const boundedTimeoutSecs = clampJobTimeoutSecs(input.timeoutSecs);
     const built = await buildPrivilegeForJobOperation({
       clientIds: [input.targetClientId],
       commandType: "restore",
@@ -1109,7 +1109,7 @@ export function BackupsPanel({
       const selectorExpression = selectorExpressionForClientIds([
         targetClientId,
       ]);
-      const boundedTimeoutSecs = clampCommandTimeoutSecs(rollbackTimeoutSecs);
+      const boundedTimeoutSecs = clampJobTimeoutSecs(rollbackTimeoutSecs);
       const built = await buildPrivilegeForJobOperation({
         clientIds: [targetClientId],
         commandType: "restore_rollback",

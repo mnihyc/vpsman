@@ -53,7 +53,7 @@ Target statuses are:
   dispatch/ACK, internal HTTP/event-post, and `control_deadline_grace_secs`
   grace time so healthy long-running commands near their own timeout are not
   mislabeled as `control_timeout` because of gateway/API latency. The accepted
-  execution-budget maximum is `timeout.max_command_timeout_secs`, exposed to
+  execution-budget maximum is `timeout.max_job_timeout_secs`, exposed to
   the frontend/CLI and enforced by API request validation rather than silent
   truncation.
 - `agent_lost` and `control_timeout` are deliberately separate. `agent_lost`

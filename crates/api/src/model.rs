@@ -64,6 +64,8 @@ pub(crate) struct AgentView {
     pub(crate) registration_ip: Option<String>,
     pub(crate) last_ip: Option<String>,
     pub(crate) last_seen_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) arch: Option<String>,
     pub(crate) internal_build_number: u64,
     pub(crate) process_incarnation_id: Option<Uuid>,
     pub(crate) stale_since: Option<String>,
@@ -965,7 +967,7 @@ pub(crate) struct CreateJobResponse {
     pub(crate) target_count: usize,
     pub(crate) status: String,
     pub(crate) timeout_secs: u64,
-    pub(crate) max_command_timeout_secs: u64,
+    pub(crate) max_job_timeout_secs: u64,
     pub(crate) control_deadline_extra_secs: u64,
     pub(crate) target_counts: CreateJobTargetCounts,
 }

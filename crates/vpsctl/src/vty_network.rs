@@ -6,7 +6,7 @@ use vpsman_common::{
     backend_config_signature_payload, payload_hash, plan_tunnel,
     render_tunnel_endpoint_backend_config, render_tunnel_endpoint_config, BandwidthTier,
     JobCommand, TunnelAddressFamily, TunnelAddressPair, TunnelConfigBackend, TunnelEndpointSide,
-    TunnelPlan, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+    TunnelPlan, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -561,7 +561,7 @@ fn parse_vty_tunnel_change(
                     next_value(tokens, index, tokens[index])?,
                     tokens[index],
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 2;
             }
@@ -570,7 +570,7 @@ fn parse_vty_tunnel_change(
                     flag_value(value, "--timeout="),
                     "--timeout",
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }
@@ -579,7 +579,7 @@ fn parse_vty_tunnel_change(
                     flag_value(value, "--timeout-secs="),
                     "--timeout-secs",
                     1,
-                    MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
+                    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
                 )?;
                 index += 1;
             }

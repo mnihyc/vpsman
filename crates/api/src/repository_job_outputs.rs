@@ -40,6 +40,12 @@ pub(crate) struct FinalJobOutputRecordResult {
     pub(crate) target_terminalized: bool,
 }
 
+pub(crate) struct PendingFinalJobOutput {
+    pub(crate) seq: i32,
+    pub(crate) output: CommandOutput,
+    pub(crate) received_at: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct JobOutputArtifactRef {
     pub(crate) object_key: String,
@@ -572,70 +578,77 @@ impl Repository {
                 };
                 let mut target_terminalized = false;
                 if write_result != JobOutputWriteResult::DuplicateConflict {
-                    let completed_at = unix_now().to_string();
-                    let statuses = {
-                        let mut targets = memory.job_targets.write().await;
-                        let Some(target) = targets.iter_mut().find(|target| {
-                            target.job_id == job_id
-                                && target.client_id == client_id
-                                && target.completed_at.is_none()
-                                && target_status_is_active(&target.status)
-                        }) else {
-                            anyhow::bail!("job_target_not_active");
-                        };
-                        target.status = outcome.status.clone();
-                        target.message = Some(outcome.message.clone());
-                        target.exit_code = outcome.exit_code;
-                        target
-                            .started_at
-                            .get_or_insert_with(|| completed_at.clone());
-                        target.completed_at = Some(completed_at.clone());
-                        target_terminalized = true;
-                        targets
-                            .iter()
-                            .filter(|target| target.job_id == job_id)
-                            .map(|target| target.status.clone())
-                            .collect::<Vec<_>>()
+                    let sequence_contiguous = {
+                        let stored = memory.job_outputs.read().await;
+                        job_output_sequence_contiguous_in_views(&stored, job_id, client_id, seq)
                     };
-                    self.finalize_active_terminal_input_request_for_target_status(
-                        job_id,
-                        client_id,
-                        &outcome.status,
-                    )
-                    .await?;
-                    memory.audits.write().await.push(AuditLogView {
-                        id: Uuid::new_v4(),
-                        actor_id: None,
-                        action: "job.target_result".to_string(),
-                        target: format!("client:{client_id}"),
-                        command_hash: None,
-                        metadata: serde_json::json!({
-                            "job_id": job_id,
-                            "status": outcome.status,
-                            "exit_code": outcome.exit_code,
-                            "accepted": outcome.accepted,
-                            "message": outcome.message,
-                            "received_at": outcome.received_at,
-                        }),
-                        created_at: completed_at.clone(),
-                    });
-                    if !statuses.is_empty()
-                        && !statuses
-                            .iter()
-                            .any(|status| target_status_is_active(status))
-                    {
-                        let status = aggregate_job_status_from_statuses(&statuses, statuses.len())
-                            .to_string();
-                        if let Some(job) = memory
-                            .jobs
-                            .write()
-                            .await
-                            .iter_mut()
-                            .find(|job| job.id == job_id && job.completed_at.is_none())
+                    if sequence_contiguous {
+                        let completed_at = unix_now().to_string();
+                        let statuses = {
+                            let mut targets = memory.job_targets.write().await;
+                            let Some(target) = targets.iter_mut().find(|target| {
+                                target.job_id == job_id
+                                    && target.client_id == client_id
+                                    && target.completed_at.is_none()
+                                    && target_status_is_active(&target.status)
+                            }) else {
+                                anyhow::bail!("job_target_not_active");
+                            };
+                            target.status = outcome.status.clone();
+                            target.message = Some(outcome.message.clone());
+                            target.exit_code = outcome.exit_code;
+                            target
+                                .started_at
+                                .get_or_insert_with(|| completed_at.clone());
+                            target.completed_at = Some(completed_at.clone());
+                            target_terminalized = true;
+                            targets
+                                .iter()
+                                .filter(|target| target.job_id == job_id)
+                                .map(|target| target.status.clone())
+                                .collect::<Vec<_>>()
+                        };
+                        self.finalize_active_terminal_input_request_for_target_status(
+                            job_id,
+                            client_id,
+                            &outcome.status,
+                        )
+                        .await?;
+                        memory.audits.write().await.push(AuditLogView {
+                            id: Uuid::new_v4(),
+                            actor_id: None,
+                            action: "job.target_result".to_string(),
+                            target: format!("client:{client_id}"),
+                            command_hash: None,
+                            metadata: serde_json::json!({
+                                "job_id": job_id,
+                                "status": outcome.status,
+                                "exit_code": outcome.exit_code,
+                                "accepted": outcome.accepted,
+                                "message": outcome.message,
+                                "received_at": outcome.received_at,
+                            }),
+                            created_at: completed_at.clone(),
+                        });
+                        if !statuses.is_empty()
+                            && !statuses
+                                .iter()
+                                .any(|status| target_status_is_active(status))
                         {
-                            job.status = status.clone();
-                            job.completed_at = Some(completed_at);
-                            terminal_status = Some(status);
+                            let status =
+                                aggregate_job_status_from_statuses(&statuses, statuses.len())
+                                    .to_string();
+                            if let Some(job) = memory
+                                .jobs
+                                .write()
+                                .await
+                                .iter_mut()
+                                .find(|job| job.id == job_id && job.completed_at.is_none())
+                            {
+                                job.status = status.clone();
+                                job.completed_at = Some(completed_at);
+                                terminal_status = Some(status);
+                            }
                         }
                     }
                 }
@@ -741,32 +754,34 @@ impl Repository {
                     }
                 };
                 let mut target_terminalized = false;
-                if write_result != JobOutputWriteResult::DuplicateConflict {
+                if write_result != JobOutputWriteResult::DuplicateConflict
+                    && job_output_sequence_contiguous_in_tx(&mut tx, job_id, client_id, seq).await?
+                {
                     let updated = sqlx::query(
-                        r#"
-                        UPDATE job_targets
-                        SET status = $3,
-                            message = $4,
-                            exit_code = $5,
-                            started_at = COALESCE(started_at, now()),
-                            completed_at = now(),
-                            result_received_at = COALESCE($6::timestamptz, now()),
-                            dispatch_lease_until = NULL,
-                            last_dispatch_error = CASE WHEN $3 IN ('failed', 'control_timeout', 'agent_lost') THEN $4 ELSE NULL END
-                        WHERE job_id = $1
-                          AND client_id = $2
-                          AND completed_at IS NULL
-                          AND status IN ('queued', 'dispatching', 'running')
-                        "#,
-                    )
-                    .bind(job_id)
-                    .bind(client_id)
-                    .bind(&outcome.status)
-                    .bind(&outcome.message)
-                    .bind(outcome.exit_code)
-                    .bind(outcome.received_at.as_deref())
-                    .execute(&mut *tx)
-                    .await?;
+                            r#"
+                            UPDATE job_targets
+                            SET status = $3,
+                                message = $4,
+                                exit_code = $5,
+                                started_at = COALESCE(started_at, now()),
+                                completed_at = now(),
+                                result_received_at = COALESCE($6::timestamptz, now()),
+                                dispatch_lease_until = NULL,
+                                last_dispatch_error = CASE WHEN $3 IN ('failed', 'control_timeout', 'agent_lost') THEN $4 ELSE NULL END
+                            WHERE job_id = $1
+                              AND client_id = $2
+                              AND completed_at IS NULL
+                              AND status IN ('queued', 'dispatching', 'running')
+                            "#,
+                        )
+                        .bind(job_id)
+                        .bind(client_id)
+                        .bind(&outcome.status)
+                        .bind(&outcome.message)
+                        .bind(outcome.exit_code)
+                        .bind(outcome.received_at.as_deref())
+                        .execute(&mut *tx)
+                        .await?;
                     if updated.rows_affected() == 0 {
                         anyhow::bail!("job_target_not_active");
                     }
@@ -777,11 +792,11 @@ impl Repository {
                     .await?;
                     sqlx::query(
                         r#"
-                        INSERT INTO audit_logs (
-                            id, actor_id, action, target, command_hash, metadata
-                        )
-                        VALUES ($1, NULL, $2, $3, NULL, $4)
-                        "#,
+                            INSERT INTO audit_logs (
+                                id, actor_id, action, target, command_hash, metadata
+                            )
+                            VALUES ($1, NULL, $2, $3, NULL, $4)
+                            "#,
                     )
                     .bind(Uuid::new_v4())
                     .bind("job.target_result")
@@ -837,6 +852,13 @@ impl Repository {
             .await?;
         self.refresh_terminal_sessions_for_client(client_id).await?;
         if result.target_terminalized {
+            self.record_backup_request_terminal_for_target_status(
+                job_id,
+                client_id,
+                &outcome.status,
+                None,
+            )
+            .await?;
             self.record_job_target_webhook_event(job_id, client_id, outcome)
                 .await?;
             if let Some(status) = terminal_status {
@@ -901,6 +923,117 @@ impl Repository {
                 } else {
                     Ok(Some(JobOutputWriteResult::DuplicateConflict))
                 }
+            }
+        }
+    }
+
+    pub(crate) async fn contiguous_final_job_output_candidate(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+    ) -> Result<Option<PendingFinalJobOutput>> {
+        match self {
+            Self::Memory(memory) => {
+                let stored = memory.job_outputs.read().await;
+                let mut done_outputs = stored
+                    .iter()
+                    .filter(|output| {
+                        output.job_id == job_id && output.client_id == client_id && output.done
+                    })
+                    .collect::<Vec<_>>();
+                done_outputs.sort_by_key(|output| output.seq);
+                for output in done_outputs {
+                    if job_output_sequence_contiguous_in_views(
+                        &stored, job_id, client_id, output.seq,
+                    ) {
+                        return Ok(Some(PendingFinalJobOutput {
+                            seq: output.seq,
+                            output: command_output_from_view(output)?,
+                            received_at: output.received_at.clone(),
+                        }));
+                    }
+                }
+                Ok(None)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        job_id,
+                        client_id,
+                        seq,
+                        stream,
+                        data,
+                        storage,
+                        object_key,
+                        data_sha256_hex,
+                        data_size_bytes,
+                        exit_code,
+                        done,
+                        received_at::text AS received_at,
+                        created_at::text AS created_at
+                    FROM job_outputs
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND done = TRUE
+                    ORDER BY seq
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .fetch_all(pool)
+                .await?;
+                for row in rows {
+                    let view = job_output_view_from_row(row)?;
+                    if self
+                        .job_output_sequence_contiguous(job_id, client_id, view.seq)
+                        .await?
+                    {
+                        return Ok(Some(PendingFinalJobOutput {
+                            seq: view.seq,
+                            output: command_output_from_view(&view)?,
+                            received_at: view.received_at,
+                        }));
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    async fn job_output_sequence_contiguous(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        final_seq: i32,
+    ) -> Result<bool> {
+        match self {
+            Self::Memory(memory) => {
+                let stored = memory.job_outputs.read().await;
+                Ok(job_output_sequence_contiguous_in_views(
+                    &stored, job_id, client_id, final_seq,
+                ))
+            }
+            Self::Postgres(pool) => {
+                if final_seq < 0 {
+                    return Ok(false);
+                }
+                let count: i64 = sqlx::query_scalar(
+                    r#"
+                    SELECT COUNT(DISTINCT seq)
+                    FROM job_outputs
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND seq >= 0
+                      AND seq <= $3
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(final_seq)
+                .fetch_one(pool)
+                .await?;
+                Ok(count == i64::from(final_seq) + 1)
             }
         }
     }
@@ -1492,6 +1625,85 @@ fn job_output_view_matches_stored(existing: &JobOutputView, output: &StoredJobOu
         && existing.artifact_size_bytes == output.artifact_size_bytes
         && existing.exit_code == output.exit_code
         && existing.done == output.done
+}
+
+fn command_output_from_view(view: &JobOutputView) -> Result<CommandOutput> {
+    Ok(CommandOutput {
+        job_id: view.job_id,
+        stream: output_stream_from_name(&view.stream)?,
+        data: BASE64.decode(&view.data_base64)?,
+        exit_code: view.exit_code,
+        done: view.done,
+    })
+}
+
+fn output_stream_from_name(value: &str) -> Result<OutputStream> {
+    match value {
+        "stdout" => Ok(OutputStream::Stdout),
+        "stderr" => Ok(OutputStream::Stderr),
+        "pty" => Ok(OutputStream::Pty),
+        "status" => Ok(OutputStream::Status),
+        _ => anyhow::bail!("unknown job output stream: {value}"),
+    }
+}
+
+fn job_output_sequence_contiguous_in_views(
+    outputs: &[JobOutputView],
+    job_id: Uuid,
+    client_id: &str,
+    final_seq: i32,
+) -> bool {
+    if final_seq < 0 {
+        return false;
+    }
+    let mut expected = 0_i32;
+    let present = outputs
+        .iter()
+        .filter(|output| {
+            output.job_id == job_id
+                && output.client_id == client_id
+                && output.seq >= 0
+                && output.seq <= final_seq
+        })
+        .map(|output| output.seq)
+        .collect::<BTreeSet<_>>();
+    for seq in present {
+        if seq != expected {
+            return false;
+        }
+        if seq == final_seq {
+            return true;
+        }
+        expected = expected.saturating_add(1);
+    }
+    false
+}
+
+async fn job_output_sequence_contiguous_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    job_id: Uuid,
+    client_id: &str,
+    final_seq: i32,
+) -> Result<bool> {
+    if final_seq < 0 {
+        return Ok(false);
+    }
+    let count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(DISTINCT seq)
+        FROM job_outputs
+        WHERE job_id = $1
+          AND client_id = $2
+          AND seq >= 0
+          AND seq <= $3
+        "#,
+    )
+    .bind(job_id)
+    .bind(client_id)
+    .bind(final_seq)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(count == i64::from(final_seq) + 1)
 }
 
 fn job_output_row_matches_stored(row: &sqlx::postgres::PgRow, output: &StoredJobOutput) -> bool {

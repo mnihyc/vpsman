@@ -9,7 +9,7 @@ use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::{
     job_command_safety, job_command_safety_by_operation_type, payload_hash, CommandOutput,
-    JobCommand, JobCommandSafety, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, JOB_COMMAND_SAFETY_EXCLUSIVE,
+    JobCommand, JobCommandSafety, DEFAULT_MAX_JOB_TIMEOUT_SECS, JOB_COMMAND_SAFETY_EXCLUSIVE,
 };
 use vpsman_server_core::{
     target_status_is_active, JOB_STATUS_CANCELED, JOB_STATUS_COMPLETED, JOB_STATUS_PARTIAL_SUCCESS,
@@ -215,6 +215,18 @@ fn schedule_target_operational_failure_status<'a>(
         Some(TARGET_STATUS_REJECTED)
     } else {
         None
+    }
+}
+
+fn backup_request_terminal_status_for_target(status: &str) -> Option<BackupRequestStatus> {
+    match status {
+        TARGET_STATUS_CANCELED => Some(BackupRequestStatus::ExecutionCanceled),
+        TARGET_STATUS_FAILED
+        | TARGET_STATUS_REJECTED
+        | TARGET_STATUS_AGENT_LOST
+        | TARGET_STATUS_AGENT_TIMEOUT
+        | TARGET_STATUS_CONTROL_TIMEOUT => Some(BackupRequestStatus::ExecutionFailed),
+        _ => None,
     }
 }
 
@@ -1374,7 +1386,7 @@ impl Repository {
                     payload_hash: command_hash.to_string(),
                     timeout_secs: request
                         .timeout_secs
-                        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
+                        .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
                         .max(1),
                     created_at: created_at.clone(),
                     completed_at: Some(created_at.clone()),
@@ -1435,11 +1447,7 @@ impl Repository {
                 .bind(command_hash)
                 .bind(operation.clone().map(sqlx::types::Json))
                 .bind(request_fingerprint)
-                .bind(
-                    request
-                        .timeout_secs
-                        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS) as i64,
-                )
+                .bind(request.timeout_secs.unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS) as i64)
                 .execute(&mut *tx)
                 .await?;
                 for client_id in &resolved_targets {
@@ -1630,7 +1638,7 @@ impl Repository {
                     payload_hash: command_hash.to_string(),
                     timeout_secs: request
                         .timeout_secs
-                        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
+                        .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
                         .max(1),
                     created_at: created_at.clone(),
                     completed_at: None,
@@ -1649,7 +1657,7 @@ impl Repository {
                     job_id,
                     request
                         .timeout_secs
-                        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
+                        .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
                         .max(1),
                 );
                 if let Some(schedule_id) = source_schedule_id {
@@ -1796,7 +1804,7 @@ impl Repository {
                 .bind(sqlx::types::Json(operation.clone()))
                 .bind(source_schedule_id)
                 .bind(request_fingerprint)
-                .bind(request.timeout_secs.unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS) as i64)
+                .bind(request.timeout_secs.unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS) as i64)
                 .execute(&mut *tx)
                 .await?;
                 for client_id in resolved_targets {
@@ -1963,7 +1971,7 @@ impl Repository {
                     let timeout_secs = timeouts
                         .get(&target.job_id)
                         .copied()
-                        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
+                        .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
                         .max(1);
                     target.status = TARGET_STATUS_DISPATCHING.to_string();
                     target.started_at.get_or_insert_with(|| now.clone());
@@ -2393,6 +2401,13 @@ impl Repository {
         unique_job_ids.dedup();
         for job_id in &unique_job_ids {
             self.refresh_job_status_from_targets(*job_id).await?;
+            self.record_backup_request_terminal_for_target_status(
+                *job_id,
+                client_id,
+                TARGET_STATUS_AGENT_LOST,
+                None,
+            )
+            .await?;
         }
         Ok(unique_job_ids)
     }
@@ -2788,6 +2803,13 @@ impl Repository {
             }
         }
         let status = self.refresh_job_status_from_targets(job_id).await?;
+        self.record_backup_request_terminal_for_target_status(
+            job_id,
+            client_id,
+            TARGET_STATUS_AGENT_LOST,
+            None,
+        )
+        .await?;
         self.record_job_target_webhook_event(job_id, client_id, &outcome)
             .await?;
         Ok(status)
@@ -2829,7 +2851,7 @@ impl Repository {
                     let timeout_secs = timeouts
                         .get(&target.job_id)
                         .copied()
-                        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
+                        .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
                         .max(1)
                         .saturating_add(control_deadline_extra_secs);
                     if now.saturating_sub(started_at) < timeout_secs {
@@ -3196,6 +3218,15 @@ impl Repository {
                     }),
                     created_at: now,
                 });
+                for client_id in &canceled_targets {
+                    self.record_backup_request_terminal_for_target_status(
+                        job_id,
+                        client_id,
+                        TARGET_STATUS_CANCELED,
+                        None,
+                    )
+                    .await?;
+                }
                 Ok(JobCancelPlan {
                     cancel_targets,
                     pending_canceled,
@@ -3268,6 +3299,10 @@ impl Repository {
                 .fetch_all(&mut *tx)
                 .await?;
                 let pending_canceled = pending_rows.len();
+                let pending_client_ids = pending_rows
+                    .iter()
+                    .map(|row| row.try_get("client_id").map_err(Into::into))
+                    .collect::<Result<Vec<String>>>()?;
                 for row in &pending_rows {
                     let client_id: String = row.try_get("client_id")?;
                     finalize_active_terminal_input_request_for_terminal_target_in_tx(
@@ -3302,6 +3337,15 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
+                for client_id in &pending_client_ids {
+                    self.record_backup_request_terminal_for_target_status(
+                        job_id,
+                        client_id,
+                        TARGET_STATUS_CANCELED,
+                        None,
+                    )
+                    .await?;
+                }
                 Ok(JobCancelPlan {
                     cancel_targets,
                     pending_canceled,
@@ -3319,11 +3363,11 @@ impl Repository {
         applied: bool,
         message: &str,
     ) -> Result<()> {
+        let mut terminalized = false;
         match self {
             Self::Memory(memory) => {
                 if applied {
                     let now = unix_now().to_string();
-                    let mut terminalized = false;
                     if let Some(target) =
                         memory.job_targets.write().await.iter_mut().find(|target| {
                             target.job_id == job_id
@@ -3375,6 +3419,7 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 if applied && updated.rows_affected() > 0 {
+                    terminalized = true;
                     finalize_active_terminal_input_request_for_terminal_target_in_tx(
                         &mut tx, job_id, client_id,
                     )
@@ -3383,6 +3428,15 @@ impl Repository {
                 }
                 tx.commit().await?;
             }
+        }
+        if terminalized {
+            self.record_backup_request_terminal_for_target_status(
+                job_id,
+                client_id,
+                TARGET_STATUS_CANCELED,
+                None,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -3740,6 +3794,32 @@ impl Repository {
         }
         self.record_job_status_webhook_event(job_id, status).await?;
         self.record_schedule_job_outcome(job_id, status).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn record_backup_request_terminal_for_target_status(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        target_status: &str,
+        operator: Option<&AuthContext>,
+    ) -> Result<()> {
+        let Some(backup_status) = backup_request_terminal_status_for_target(target_status) else {
+            return Ok(());
+        };
+        let Some(operation) = self.job_operation(job_id).await? else {
+            return Ok(());
+        };
+        if !matches!(operation, JobCommand::Backup { .. }) {
+            return Ok(());
+        }
+        self.mark_open_backup_request_execution_terminal(
+            job_id,
+            client_id,
+            backup_status,
+            operator,
+        )
+        .await?;
         Ok(())
     }
 

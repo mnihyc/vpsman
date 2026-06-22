@@ -14,7 +14,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use vpsman_common::{
-    encode_json, payload_hash, JobCommand, PrivilegeAssertion, DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
+    encode_json, payload_hash, JobCommand, PrivilegeAssertion, DEFAULT_MAX_JOB_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -392,7 +392,7 @@ pub(crate) async fn create_backup_request(
         command_type: "backup",
         operation_payload_hash: &command_hash,
         resolved_targets: &resolved_targets,
-        timeout_secs: DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
+        timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
         force_unprivileged: false,
         privileged: true,
     });

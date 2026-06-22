@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { DatabaseZap, SlidersHorizontal } from "lucide-react";
 import {
-  clampCommandTimeoutSecs,
-  DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
-  MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
-} from "../commandTimeout";
+  clampJobTimeoutSecs,
+  DEFAULT_MAX_JOB_TIMEOUT_SECS,
+  MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+} from "../jobTimeout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { CrudPager } from "../components/CrudPager";
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
@@ -152,7 +152,7 @@ export function DataSourcePresetPanel({
   );
   const [renderClientId, setRenderClientId] = useState("");
   const [renderedHotConfig, setRenderedHotConfig] = useState<DataSourceHotConfigResponse | null>(null);
-  const [applyTimeoutSecs, setApplyTimeoutSecs] = useState(DEFAULT_MAX_COMMAND_TIMEOUT_SECS);
+  const [applyTimeoutSecs, setApplyTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
   const [lastApplyJob, setLastApplyJob] = useState<CreateJobResponse | null>(null);
   const [lastApplyPayloadHash, setLastApplyPayloadHash] = useState<string | null>(null);
   const [lifecyclePresetId, setLifecyclePresetId] = useState("");
@@ -392,7 +392,7 @@ export function DataSourcePresetPanel({
     const frozenClientId = renderClientId;
     const frozenRendered = renderedHotConfig?.client_id === renderClientId ? renderedHotConfig : null;
     const frozenPrivilegeMaterial = privilegeMaterial;
-    const timeoutSecs = clampCommandTimeoutSecs(applyTimeoutSecs);
+    const timeoutSecs = clampJobTimeoutSecs(applyTimeoutSecs);
     setReviewStatus("Preparing data-source apply review");
     try {
       await runPanelAction(setPending, setActionError, async () => {
@@ -854,7 +854,7 @@ export function DataSourcePresetPanel({
               <input
                 aria-label="Data-source apply timeout"
                 min={1}
-                max={MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS}
+                max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
                 onChange={(event) => {
                   setApplyTimeoutSecs(Number(event.target.value));
                   clearApplyConfirmation();

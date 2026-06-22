@@ -2,12 +2,12 @@ import { parseFileMode, type FilePushPayload } from "../fileTransfer";
 import { parseCommandArgv } from "../privilege";
 import type { JobOperation } from "../types";
 export {
-  clampCommandTimeoutSecs,
-  effectiveCommandTimeoutSecs,
-  parseOptionalCommandTimeoutSecs,
-  DEFAULT_MAX_COMMAND_TIMEOUT_SECS,
-  MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
-} from "../commandTimeout";
+  clampJobTimeoutSecs,
+  effectiveJobTimeoutSecs,
+  parseOptionalJobTimeoutSecs,
+  DEFAULT_MAX_JOB_TIMEOUT_SECS,
+  MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+} from "../jobTimeout";
 
 export type DispatchMode =
   | "shell"

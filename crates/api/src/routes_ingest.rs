@@ -242,8 +242,12 @@ pub(crate) async fn ingest_command_output(
                 .publish_job_finished_after_refresh(event.job_id, refreshed)
                 .await?;
             if outcome.status == TARGET_STATUS_COMPLETED {
-                if let Err(error) =
-                    try_auto_record_backup_artifact_from_ingest(&state, &event).await
+                if let Err(error) = try_auto_record_backup_artifact_for_job_target(
+                    &state,
+                    event.job_id,
+                    &event.client_id,
+                )
+                .await
                 {
                     warn!(
                         ?error,
@@ -291,6 +295,13 @@ pub(crate) async fn ingest_command_output(
             .repo
             .mark_job_target_running(event.job_id, &event.client_id, &message)
             .await?;
+        finalize_contiguous_final_job_output_if_ready(
+            &state,
+            event.job_id,
+            &event.client_id,
+            persist_config,
+        )
+        .await?;
     }
     if event.output.stream == OutputStream::Status && is_terminal_command_type(&job.command_type) {
         state
@@ -304,11 +315,76 @@ pub(crate) async fn ingest_command_output(
     }))
 }
 
-async fn try_auto_record_backup_artifact_from_ingest(
+async fn finalize_contiguous_final_job_output_if_ready(
     state: &AppState,
-    event: &GatewayCommandOutputIngest,
+    job_id: uuid::Uuid,
+    client_id: &str,
+    persist_config: JobOutputPersistConfig<'_>,
 ) -> Result<(), ApiError> {
-    let Some(context) = state.repo.get_job_completion_context(event.job_id).await? else {
+    let Some(candidate) = state
+        .repo
+        .contiguous_final_job_output_candidate(job_id, client_id)
+        .await?
+    else {
+        return Ok(());
+    };
+    let received_at = candidate
+        .received_at
+        .clone()
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let outcome = target_outcome_from_done_output(job_id, &candidate.output, received_at);
+    let record_result = match state
+        .repo
+        .record_active_final_job_output_and_target_result_with_config(
+            job_id,
+            client_id,
+            candidate.seq,
+            &candidate.output,
+            outcome.received_at.clone(),
+            persist_config,
+            &outcome,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(error) if error.to_string().contains("job_target_not_active") => {
+            return Ok(());
+        }
+        Err(error) if error.to_string().contains("job_target_not_found") => {
+            return Err(ApiError::not_found("job_target_not_found"));
+        }
+        Err(error) => return Err(ApiError::from(error)),
+    };
+    if record_result.write_result == JobOutputWriteResult::DuplicateConflict {
+        return Err(ApiError::conflict("job_output_sequence_conflict"));
+    }
+    if record_result.target_terminalized {
+        let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
+        state
+            .publish_job_finished_after_refresh(job_id, refreshed)
+            .await?;
+        if outcome.status == TARGET_STATUS_COMPLETED {
+            if let Err(error) =
+                try_auto_record_backup_artifact_for_job_target(state, job_id, client_id).await
+            {
+                warn!(
+                    ?error,
+                    job_id = %job_id,
+                    client_id,
+                    "backup artifact auto-record failed after deferred command output finalization"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn try_auto_record_backup_artifact_for_job_target(
+    state: &AppState,
+    job_id: uuid::Uuid,
+    client_id: &str,
+) -> Result<(), ApiError> {
+    let Some(context) = state.repo.get_job_completion_context(job_id).await? else {
         return Ok(());
     };
     if !matches!(context.operation, JobCommand::Backup { .. }) {
@@ -330,9 +406,9 @@ async fn try_auto_record_backup_artifact_from_ingest(
     try_auto_record_backup_artifact(
         state,
         &operator,
-        &event.client_id,
+        client_id,
         &context.payload_hash,
-        event.job_id,
+        job_id,
         &[],
     )
     .await

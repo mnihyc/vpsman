@@ -8,7 +8,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 use vpsman_common::{
     canonical_terminal_input_privilege_intent, id_selector_expression, payload_hash, JobCommand,
-    TerminalInputPrivilegeIntentInput, DEFAULT_MAX_COMMAND_TIMEOUT_SECS, MAX_TERMINAL_INPUT_BYTES,
+    TerminalInputPrivilegeIntentInput, DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_TERMINAL_INPUT_BYTES,
 };
 
 use crate::{
@@ -120,12 +120,10 @@ pub(crate) async fn submit_terminal_session_input(
     }
     let timeout_secs = request
         .timeout_secs
-        .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS)
+        .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
         .max(1);
-    if timeout_secs > state.max_command_timeout_secs() {
-        return Err(ApiError::bad_request(
-            "command_timeout_exceeds_configured_max",
-        ));
+    if timeout_secs > state.max_job_timeout_secs() {
+        return Err(ApiError::bad_request("job_timeout_exceeds_configured_max"));
     }
     let data = terminal_input_request_data(&request)?;
     let data_base64 = BASE64_STANDARD.encode(&data);
@@ -354,6 +352,7 @@ mod tests {
             registration_ip: None,
             last_ip: None,
             last_seen_at: Some("2026-06-21T00:00:00Z".to_string()),
+            arch: None,
             internal_build_number: 1,
             process_incarnation_id: Some(Uuid::new_v4()),
             stale_since: None,

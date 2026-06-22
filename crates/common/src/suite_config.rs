@@ -2,7 +2,7 @@ use std::{fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DEFAULT_MAX_COMMAND_TIMEOUT_SECS, MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS};
+use crate::{DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -78,7 +78,7 @@ pub struct SuiteWorkerConfig {
     pub backup_policy_prune_include_disabled: Option<bool>,
     pub backup_policy_prune_delete_objects: Option<bool>,
     pub backup_policy_prune_object_store_dir: Option<String>,
-    pub schedule_command_timeout_secs: Option<u64>,
+    pub schedule_job_timeout_secs: Option<u64>,
     pub require_registered_agent_updates: Option<bool>,
 }
 
@@ -111,8 +111,8 @@ pub struct SuiteCapacityConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SuiteTimeoutConfig {
-    pub max_command_timeout_secs: Option<u64>,
-    pub worker_schedule_command_secs: Option<u64>,
+    pub max_job_timeout_secs: Option<u64>,
+    pub worker_schedule_job_timeout_secs: Option<u64>,
     pub agent_offline_secs: Option<i64>,
     pub gateway_reconnect_grace_secs: Option<u64>,
     pub internal_http_connect_secs: Option<u64>,
@@ -181,26 +181,26 @@ impl SuiteConfig {
         }
         validate_optional_u64(self.worker.tick_secs, 1, 3600, "worker.tick_secs")?;
         validate_optional_u64(
-            self.timeout.max_command_timeout_secs,
+            self.timeout.max_job_timeout_secs,
             1,
-            MAX_CONFIGURABLE_COMMAND_TIMEOUT_SECS,
-            "timeout.max_command_timeout_secs",
+            MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+            "timeout.max_job_timeout_secs",
         )?;
         validate_optional_u64(
-            self.worker.schedule_command_timeout_secs,
+            self.worker.schedule_job_timeout_secs,
             1,
             self.timeout
-                .max_command_timeout_secs
-                .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS),
-            "worker.schedule_command_timeout_secs",
+                .max_job_timeout_secs
+                .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS),
+            "worker.schedule_job_timeout_secs",
         )?;
         validate_optional_u64(
-            self.timeout.worker_schedule_command_secs,
+            self.timeout.worker_schedule_job_timeout_secs,
             1,
             self.timeout
-                .max_command_timeout_secs
-                .unwrap_or(DEFAULT_MAX_COMMAND_TIMEOUT_SECS),
-            "timeout.worker_schedule_command_secs",
+                .max_job_timeout_secs
+                .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS),
+            "timeout.worker_schedule_job_timeout_secs",
         )?;
         validate_optional_i64(
             self.worker.agent_offline_timeout_secs,
@@ -364,13 +364,13 @@ impl SuiteConfig {
                 "gateway.reconnect_grace_secs".to_string(),
                 "gateway.command_output_event_ttl_secs".to_string(),
                 "timeout.gateway_reconnect_grace_secs".to_string(),
-                "timeout.max_command_timeout_secs".to_string(),
+                "timeout.max_job_timeout_secs".to_string(),
                 "api.job_output_artifact_min_bytes".to_string(),
                 "api.artifact_max_bytes".to_string(),
                 "api.require_registered_agent_updates".to_string(),
                 "api.trusted_proxy_cidrs".to_string(),
                 "api.operator_auth_*".to_string(),
-                "worker.schedule_command_timeout_secs".to_string(),
+                "worker.schedule_job_timeout_secs".to_string(),
                 "worker.tick_secs".to_string(),
                 "worker.worker_lease_secs".to_string(),
                 "worker.agent_offline_timeout_secs".to_string(),
@@ -378,7 +378,7 @@ impl SuiteConfig {
                 "worker.webhook_rule_*".to_string(),
                 "worker.backup_policy_prune_*".to_string(),
                 "worker.require_registered_agent_updates".to_string(),
-                "timeout.worker_schedule_command_secs".to_string(),
+                "timeout.worker_schedule_job_timeout_secs".to_string(),
                 "timeout.agent_offline_secs".to_string(),
                 "api.alert_*".to_string(),
             ],

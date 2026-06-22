@@ -11,6 +11,7 @@ pub mod suite_config;
 pub mod template;
 pub mod tlv;
 pub mod transport;
+pub mod update_manifest;
 
 pub use auth::*;
 pub use config::*;
@@ -25,3 +26,4 @@ pub use suite_config::*;
 pub use template::*;
 pub use tlv::*;
 pub use transport::*;
+pub use update_manifest::*;
