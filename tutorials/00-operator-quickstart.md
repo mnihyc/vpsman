@@ -139,17 +139,17 @@ cargo run -p vpsctl -- terminal-poll \
 Terminal input order is assigned by the server for the selected client and
 session; operators submit only the bytes to write.
 
-## 6. Choose Data Sources
+## 6. Choose Templates
 
-Use presets instead of editing hardcoded commands per VPS:
+Use templates instead of editing hardcoded commands per VPS:
 
 ```sh
 cargo run -p vpsctl -- source-templates --domain telemetry_metrics_source
 cargo run -p vpsctl -- source-status --client-id "$EDGE_CLIENT_ID"
-cargo run -p vpsctl -- source-config-patch --client-id "$EDGE_CLIENT_ID" --format toml
+cargo run -p vpsctl -- template-runtime-config --client-id "$EDGE_CLIENT_ID" --format toml
 ```
 
-Assign shared presets to tags or explicit clients, and reserve VPS-local presets
+Assign shared templates to tags or explicit clients, and reserve VPS-local templates
 for machine-specific custom commands.
 
 ## 7. Back Up And Restore

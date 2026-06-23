@@ -1,10 +1,7 @@
 use std::{os::unix::fs::PermissionsExt, path::Path};
 
 use super::*;
-use crate::network_apply::{
-    execute_network_apply_command, execute_network_rollback_command, NetworkApplyInput,
-    NetworkRollbackInput,
-};
+use crate::network_managed_files::managed_block;
 use vpsman_common::{
     plan_tunnel, render_tunnel_endpoint_config, AgentNetworkConfig, BandwidthTier, OspfCostPolicy,
     RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager, TunnelKind, TunnelPlanInput,
@@ -29,7 +26,7 @@ async fn reports_managed_file_status_for_applied_and_absent_blocks() {
         .await
         .unwrap();
     let plan = test_plan();
-    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let config = AgentConfig {
         client_id: "left-a".to_string(),
         display_name: "left-a".to_string(),
@@ -41,14 +38,16 @@ async fn reports_managed_file_status_for_applied_and_absent_blocks() {
         ..AgentConfig::default()
     };
 
-    execute_network_apply_command(NetworkApplyInput {
-        job_id,
-        config: &config,
-        plan: &plan,
-        side: TunnelEndpointSide::Left,
-        max_timeout_secs: 5,
-        cancel_token: CommandCancelToken::default(),
-    })
+    tokio::fs::write(
+        &ifupdown_path,
+        managed_block(&plan, &endpoint, "ifupdown", &endpoint.ifupdown_snippet),
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        &bird_path,
+        managed_block(&plan, &endpoint, "bird2", &endpoint.bird2_interface_snippet),
+    )
     .await
     .unwrap();
     let outputs = execute_network_status_command(NetworkStatusInput {
@@ -86,16 +85,12 @@ async fn reports_managed_file_status_for_applied_and_absent_blocks() {
         "skipped"
     );
 
-    execute_network_rollback_command(NetworkRollbackInput {
-        job_id,
-        config: &config,
-        plan: &plan,
-        side: TunnelEndpointSide::Left,
-        max_timeout_secs: 5,
-        cancel_token: CommandCancelToken::default(),
-    })
-    .await
-    .unwrap();
+    tokio::fs::write(&ifupdown_path, "existing\n")
+        .await
+        .unwrap();
+    tokio::fs::write(&bird_path, "existing bird\n")
+        .await
+        .unwrap();
     let outputs = execute_network_status_command(NetworkStatusInput {
         job_id,
         config: &config,
@@ -127,12 +122,11 @@ async fn reports_malformed_or_non_utf8_managed_files_without_writing() {
         .unwrap();
     let plan = test_plan();
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let malformed_block = managed_block(&plan, &endpoint, "ifupdown", &endpoint.ifupdown_snippet);
+    let malformed_begin = malformed_block.lines().next().unwrap();
     tokio::fs::write(
         &ifupdown_path,
-        format!(
-            "# vpsman-managed ifupdown begin left-a right-b left-right tunlr\n{}\n",
-            endpoint.ifupdown_snippet
-        ),
+        format!("{malformed_begin}\n{}\n", endpoint.ifupdown_snippet),
     )
     .await
     .unwrap();
@@ -170,10 +164,7 @@ async fn reports_malformed_or_non_utf8_managed_files_without_writing() {
     assert_eq!(status["files"][1]["utf8"], false);
     assert_eq!(
         tokio::fs::read_to_string(&ifupdown_path).await.unwrap(),
-        format!(
-            "# vpsman-managed ifupdown begin left-a right-b left-right tunlr\n{}\n",
-            endpoint.ifupdown_snippet
-        )
+        format!("{malformed_begin}\n{}\n", endpoint.ifupdown_snippet)
     );
 }
 

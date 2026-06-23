@@ -1,4 +1,4 @@
-import { Activity, DatabaseBackup, Download, PackageCheck, Settings2, Upload } from "lucide-react";
+import { Activity, DatabaseBackup, Download, PackageCheck, Upload } from "lucide-react";
 import { FILE_TRANSFER_CHUNK_BYTES, MAX_CHUNKED_FILE_PUSH_BYTES } from "../../fileTransfer";
 import {
   COMMAND_ARGV_PLACEHOLDER,
@@ -32,7 +32,6 @@ export function OperationModeTabs({
     { label: "File push", mode: "file_push" },
     { label: "Resumable upload", mode: "file_transfer_upload" },
     { label: "Resumable download", mode: "file_transfer_download" },
-    { label: "Full config", mode: "hot_config" },
     { label: "Manual update", mode: "agent_update" },
     { label: "Check update", mode: "agent_update_check" },
     { label: "Activate", mode: "agent_update_activate" },
@@ -106,7 +105,6 @@ export function JobOperationEditor({
   fileTransferSourceArtifactId,
   fileTransferSources,
   fileTransferUploadSourceKind,
-  hotConfigToml,
   mode,
   processLimit,
   setBackupIncludeConfig,
@@ -143,7 +141,6 @@ export function JobOperationEditor({
   setFileTransferSessionId,
   setFileTransferSourceArtifactId,
   setFileTransferUploadSourceKind,
-  setHotConfigToml,
   setProcessLimit,
   setSupervisorAction,
   setSupervisorArgv,
@@ -208,7 +205,6 @@ export function JobOperationEditor({
   fileTransferSourceArtifactId: string;
   fileTransferSources: FileTransferSourceArtifactRecord[];
   fileTransferUploadSourceKind: "local-file" | "source-artifact";
-  hotConfigToml: string;
   mode: DispatchMode;
   processLimit: number;
   setBackupIncludeConfig: (value: boolean) => void;
@@ -245,7 +241,6 @@ export function JobOperationEditor({
   setFileTransferSessionId: (value: string) => void;
   setFileTransferSourceArtifactId: (value: string) => void;
   setFileTransferUploadSourceKind: (value: "local-file" | "source-artifact") => void;
-  setHotConfigToml: (value: string) => void;
   setProcessLimit: (value: number) => void;
   setSupervisorAction: (value: SupervisorAction) => void;
   setSupervisorArgv: (value: string) => void;
@@ -638,28 +633,6 @@ export function JobOperationEditor({
       <div className="operationNote">
         <strong>User sessions</strong>
         <span>Source: w/who on selected VPSs</span>
-      </div>
-    );
-  }
-
-  if (mode === "hot_config") {
-    return (
-      <div className="operationNote compactOperation">
-        <Settings2 size={18} />
-        <div>
-          <strong>Full agent config override</strong>
-          <span>Replaces the agent config after validation and writes a rollback file</span>
-        </div>
-        <label className="wideField">
-          <span>TOML</span>
-          <textarea
-            aria-label="Full override config TOML"
-            onChange={(event) => setHotConfigToml(event.target.value)}
-            placeholder={`client_id = "edge-a"\ndisplay_name = "edge-a"`}
-            rows={6}
-            value={hotConfigToml}
-          />
-        </label>
       </div>
     );
   }

@@ -155,7 +155,7 @@ enum VtyInventoryCommand {
         client_id: Option<String>,
         domain: Option<String>,
     },
-    SourceConfigPatch {
+    TemplateRuntimeConfig {
         client_id: String,
         format: String,
     },
@@ -268,7 +268,7 @@ pub(crate) fn is_vty_inventory_command(command: &str) -> bool {
             | "fleet-alert-notification-dispatch"
             | "fleet-alert-notification-process"
             | "source-template-assignments"
-            | "source-config-patch"
+            | "template-runtime-config"
             | "source-template-assign"
             | "bulk-resolve"
             | "telemetry-rollups"
@@ -698,8 +698,8 @@ pub(crate) fn submit_vty_inventory_command(
             &source_template_assignments_path(client_id.as_deref(), domain.as_deref()),
             token,
         ),
-        VtyInventoryCommand::SourceConfigPatch { client_id, format } => {
-            let body = http_get(api_url, &source_config_patch_path(&client_id), token)?;
+        VtyInventoryCommand::TemplateRuntimeConfig { client_id, format } => {
+            let body = http_get(api_url, &template_runtime_config_path(&client_id), token)?;
             match format.as_str() {
                 "json" => Ok(body),
                 "toml" => {
@@ -912,7 +912,7 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
         "fleet-alert-notification-dispatch" => parse_fleet_alert_notification_dispatch(&parts),
         "fleet-alert-notification-process" => parse_fleet_alert_notification_process(&parts),
         "source-template-assignments" => parse_source_template_assignments(&parts),
-        "source-config-patch" => parse_source_config_patch(&parts),
+        "template-runtime-config" => parse_template_runtime_config(&parts),
         "source-template-assign" => parse_source_template_assign(&parts),
         "bulk-resolve" => Ok(VtyInventoryCommand::BulkResolve {
             tags: parts
@@ -2161,7 +2161,7 @@ fn parse_source_template_filter_args(
     Ok((client_id, domain))
 }
 
-fn parse_source_config_patch(parts: &[&str]) -> Result<VtyInventoryCommand> {
+fn parse_template_runtime_config(parts: &[&str]) -> Result<VtyInventoryCommand> {
     let mut client_id = None;
     let mut format = "toml".to_string();
     let mut index = 1;
@@ -2190,8 +2190,8 @@ fn parse_source_config_patch(parts: &[&str]) -> Result<VtyInventoryCommand> {
         matches!(format.as_str(), "toml" | "json"),
         "--format must be toml or json"
     );
-    Ok(VtyInventoryCommand::SourceConfigPatch {
-        client_id: client_id.context("source-config-patch requires --client-id")?,
+    Ok(VtyInventoryCommand::TemplateRuntimeConfig {
+        client_id: client_id.context("template-runtime-config requires --client-id")?,
         format,
     })
 }
@@ -2727,9 +2727,9 @@ fn source_template_filtered_path(
     }
 }
 
-fn source_config_patch_path(client_id: &str) -> String {
+fn template_runtime_config_path(client_id: &str) -> String {
     format!(
-        "/api/v1/source-config-patch?client_id={}",
+        "/api/v1/template-runtime-config?client_id={}",
         percent_encode_query_value(client_id)
     )
 }

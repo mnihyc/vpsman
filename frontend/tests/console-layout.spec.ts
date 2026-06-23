@@ -3,7 +3,6 @@ import {
   backupId,
   installConsoleApiMock,
   ospfUpdatePlans,
-  sha256Hex,
   tunnelPlans,
 } from "./support/consoleLayoutFixtures";
 import { DEFAULT_UPDATE_VERSION_URL } from "../src/jobDispatchPreset";
@@ -337,7 +336,7 @@ test("renders an operational cloud-console fleet workspace", async ({
   await activate(coreDetail.getByRole("tab", { name: "Network" }));
   await expect(coreDetail.getByText("BGP/OSPF")).toBeVisible();
   await expect(
-    coreDetail.getByText("Client-managed runtime tunnels enabled"),
+    coreDetail.getByText("Server-managed runtime tunnels enabled"),
   ).toBeVisible();
   await expect(coreDetail.getByText("bgp, bird2")).toBeVisible();
   await expect(coreDetail.getByText(/tunab/).first()).toBeVisible();
@@ -875,7 +874,7 @@ test("keeps console layout usable on desktop and mobile widths", async ({
     await expect(page.locator(".scopeSelector")).toBeHidden();
     await page.getByRole("combobox", { name: "Console page" }).selectOption("Config::templates");
     await expect(
-      page.getByRole("heading", { name: "Agent config", exact: true }),
+      page.getByRole("heading", { name: "Runtime config", exact: true }),
     ).toBeVisible();
     await expect(page.getByText("Active source status").first()).toBeVisible();
   }
@@ -1112,7 +1111,7 @@ test("packs dashboard top VPS cards by label length", async ({
   expect(shortest / longest).toBeLessThan(0.6);
 });
 
-test("manages source template assignments from the config view", async ({
+test("manages template assignments from the config view", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -1174,12 +1173,12 @@ test("manages source template assignments from the config view", async ({
 
   const templatePanel = page.locator(".sourceTemplatePanel");
   const templateRegistrySearch = templatePanel.getByRole("searchbox", {
-    name: "Source template registry search",
+    name: "Template registry search",
   });
   await expect(
     templatePanel.getByRole("heading", { name: "Templates" }),
   ).toBeVisible();
-  const templateRegistryGrid = templatePanel.getByLabel("Source template registry data grid");
+  const templateRegistryGrid = templatePanel.getByLabel("Template registry data grid");
   const templateRows = templateRegistryGrid.locator(".gridBody .gridRow");
   await expect(templateRegistryGrid).toBeVisible();
   await expect(templateRegistrySearch).toBeVisible();
@@ -1195,8 +1194,8 @@ test("manages source template assignments from the config view", async ({
   await expect(
     templateRegistryGrid.getByRole("button", { name: "Action" }),
   ).toBeDisabled();
-  await expect(templatePanel.getByText("Assign source template")).toBeVisible();
-  await expect(templatePanel.getByText("Render template patch")).toBeVisible();
+  await expect(templatePanel.getByText("Assign template")).toBeVisible();
+  await expect(templatePanel.getByText("Render runtime config")).toBeVisible();
   await expect(templatePanel.getByText("Assign selected template")).toHaveCount(0);
   await expect(templatePanel.getByText("Render selected config")).toHaveCount(0);
   await expect(templatePanel.getByText(/selected templates/)).toHaveCount(0);
@@ -1228,7 +1227,7 @@ test("manages source template assignments from the config view", async ({
   await expect(templatePanel.getByText("2/3 matching VPSs")).toBeVisible();
   await activate(templatePanel.getByRole("button", { name: "Review assignment" }));
   await expect(
-    templatePanel.getByText("Confirm source template assignment"),
+    templatePanel.getByText("Confirm template assignment"),
   ).toBeVisible();
   await confirmVisiblePrompt(page, "Confirm");
 
@@ -1280,12 +1279,12 @@ test("prefills registered agent update shortcuts into dispatch", async ({
   );
 });
 
-test("renders patch generators and submits explicit agent config apply modes", async ({
+test("renders patch generators and submits explicit runtime config patch modes", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "agent config patch generator editing is covered in the desktop console layout",
+    "runtime config patch generator editing is covered in the desktop console layout",
   );
 
   await page.goto("/");
@@ -1310,7 +1309,7 @@ test("renders patch generators and submits explicit agent config apply modes", a
   );
   await activate(bulk.getByRole("button", { name: "Render patch" }));
   await expect(
-    bulk.getByLabel("Rendered bulk agent patch TOML"),
+    bulk.getByLabel("Rendered bulk runtime config patch TOML"),
   ).toHaveValue(
     /\[update\][\s\S]*unmanaged_enabled = false[\s\S]*version\.json/,
   );
@@ -1325,29 +1324,26 @@ test("renders patch generators and submits explicit agent config apply modes", a
   await expect(bulk.getByRole("button", { name: "Review apply" })).toBeEnabled();
   await activate(bulk.getByRole("button", { name: "Review apply" }));
   await expect(page.getByText("Confirm bulk patch")).toBeVisible();
-  await confirmVisiblePrompt(page, "Apply agent config patch");
+  await confirmVisiblePrompt(page, "Apply runtime config patch");
 
   const request = await page.evaluate(() => {
     const requests = (
-      window as unknown as { __vpsmanTestRequests: { jobs: any[] } }
+      window as unknown as {
+        __vpsmanTestRequests: { runtimeConfigPatches: any[] };
+      }
     ).__vpsmanTestRequests;
-    return requests.jobs.at(-1);
+    return requests.runtimeConfigPatches.at(-1);
   });
   expect(request).toMatchObject({
-    command: "source_config_patch",
-    operation: {
-      apply_mode: "incremental_patch",
-      type: "source_config_patch",
-    },
+    confirmed: true,
     selector_expression: "id:agent-sfo-01",
     target_client_ids: ["agent-sfo-01"],
   });
-  expect((request as { operation: { toml: string } }).operation.toml).toContain(
-    "[update]",
-  );
-  expect((request as { operation: { toml: string } }).operation.toml).toContain(
+  expect((request as { toml: string }).toml).toContain("[update]");
+  expect((request as { toml: string }).toml).toContain(
     "unmanaged_enabled = false",
   );
+  expect(JSON.stringify(request)).not.toContain("local-super-password");
 });
 
 test("uses an exact VPS combobox for single config jobs", async ({
@@ -1377,7 +1373,7 @@ test("uses an exact VPS combobox for single config jobs", async ({
     /core-fra-02.*agent-fra-02/,
   );
   await expect(targetPicker).toHaveValue("core-fra-02 (ra02)");
-  await activate(page.getByRole("button", { name: "Read agent config" }));
+  await activate(page.getByRole("button", { name: "Read runtime config" }));
 
   await expect
     .poll(async () =>
@@ -1401,32 +1397,17 @@ test("uses an exact VPS combobox for single config jobs", async ({
     target_client_ids: ["agent-fra-02"],
   });
 
-  const configEditor = page.getByLabel("VPS redacted agent config TOML");
+  const configEditor = page.getByLabel("VPS redacted runtime config TOML");
   await expect(configEditor).toHaveValue(/client_id = "agent-fra-02"/);
   await expect(configEditor).toHaveValue(
     /unmanaged_version_url = "https:\/\/github\.com\/mnihyc\/vpsman\/releases\/latest\/download\/version\.json"/,
   );
-  await activate(page.getByRole("button", { name: "Review apply" }));
-  await expect(page.getByText("Confirm full config override")).toBeVisible();
-  await confirmVisiblePrompt(page, "Apply full config");
-
-  const applyRequest = await page.evaluate(() => {
-    const requests = (
-      window as unknown as { __vpsmanTestRequests: { jobs: any[] } }
-    ).__vpsmanTestRequests;
-    return requests.jobs.at(-1);
-  });
-  expect(applyRequest).toMatchObject({
-    command: "hot_config",
-    operation: {
-      apply_mode: "full_override",
-      base_config_sha256_hex: "b".repeat(64),
-      preserve_redacted: true,
-      type: "hot_config",
-    },
-    selector_expression: "id:agent-fra-02",
-    target_client_ids: ["agent-fra-02"],
-  });
+  await expect(
+    page.getByText(
+      "Runtime changes are made through Bulk patch or template assignment and then pushed as runtime config sync jobs.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review apply" })).toHaveCount(0);
 });
 
 test("creates a cron schedule from a command template with target preview", async ({
@@ -1754,6 +1735,7 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
   await composer.getByLabel("Name", { exact: true }).fill("external-openvpn");
   await composer.getByLabel("Interface", { exact: true }).fill("ovpn42");
   await composer.getByLabel("Kind").selectOption("openvpn");
+  await checkControl(composer.getByLabel("Plan enabled"));
   await chooseVpsBySearch(composer, "Left VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
   await chooseVpsBySearch(composer, "Right VPS", "fra", /core-fra-02.*agent-fra-02/);
   await expect(composer.getByLabel("Left underlay", { exact: true })).toHaveValue("198.51.100.10");
@@ -1772,7 +1754,7 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
   await composer
     .getByLabel("Runtime owner")
     .selectOption("external_managed_adapter");
-  await checkControl(composer.getByLabel("Enable traffic shaping"));
+  await checkControl(composer.getByLabel("Traffic shaping"));
   await composer.getByLabel("Egress Kbps", { exact: true }).fill("100000");
   await composer.getByLabel("Burst KB", { exact: true }).fill("4096");
   await composer
@@ -1787,6 +1769,7 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
   await composer
     .getByLabel("Traffic argv", { exact: true })
     .fill("/usr/local/libexec/vpsman-openvpn-adapter\nshape\n{interface}");
+  await composer.getByText("Topology evidence").click();
   await composer
     .getByLabel("Desired interfaces", { exact: true })
     .fill("ovpn42");
@@ -1814,6 +1797,7 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
     return requests.tunnelPlans.at(-1);
   });
   expect(request).toMatchObject({
+    enabled: true,
     interface_name: "ovpn42",
     address_pool_cidr: "10.255.50.0/30",
     ipv4_tunnel: {
@@ -1913,7 +1897,7 @@ test("promotes saved observed tunnel plans into custom adapters", async ({
   await adapterForm
     .getByLabel("Traffic argv", { exact: true })
     .fill("/usr/local/libexec/vpsman-openvpn-adapter\nshape\n{interface}");
-  await checkControl(adapterForm.getByLabel("Enable traffic shaping"));
+  await checkControl(adapterForm.getByLabel("Enable shaping"));
   await adapterForm.getByLabel("Egress Kbps", { exact: true }).fill("100000");
   await adapterForm.getByLabel("Burst KB", { exact: true }).fill("4096");
   await adapterForm.getByText("Topology evidence").click();
@@ -1983,6 +1967,105 @@ test("promotes saved observed tunnel plans into custom adapters", async ({
     runtime_topology: {
       desired_interfaces: ["ovpn42"],
     },
+  });
+});
+
+test("promotes telemetry candidates with explicit activation toggle", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dense telemetry promotion is covered in the desktop console layout",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Topology", "Promotion");
+
+  const promotionPanel = page.locator(".scheduleComposer", {
+    has: page.getByRole("heading", { name: "Tunnel promotion" }),
+  });
+  const externalForm = promotionPanel.locator("form", {
+    has: page.getByRole("heading", { name: "External observe" }),
+  });
+  await promotionPanel.scrollIntoViewIfNeeded();
+  await externalForm
+    .getByLabel("Observed interface")
+    .selectOption("agent-sfo-01:wg-import");
+  await chooseVpsBySearch(
+    externalForm,
+    "External observe peer VPS",
+    "fra",
+    /core-fra-02.*agent-fra-02/,
+  );
+  await expect(externalForm.getByLabel("Plan enabled")).not.toBeChecked();
+  await externalForm.getByLabel("Self IPv4 CIDR").fill("10.255.60.0/31");
+  await externalForm.getByLabel("Peer IPv4 CIDR").fill("10.255.60.1/31");
+
+  await activate(externalForm.getByRole("button", { name: "Save observed plan" }));
+  const prompt = promotionPanel.locator(".confirmationPrompt").last();
+  await expect(prompt.getByText("Confirm external observe")).toBeVisible();
+  await expect(prompt.getByText("Deferred")).toBeVisible();
+  await confirmVisiblePrompt(page, "Promote observed plan");
+  await expect(prompt).toBeHidden();
+
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const requests = (
+          window as unknown as {
+            __vpsmanTestRequests: { tunnelPlanTelemetryPromotions: unknown[] };
+          }
+        ).__vpsmanTestRequests;
+        return requests.tunnelPlanTelemetryPromotions.length;
+      }),
+    )
+    .toBe(1);
+
+  let request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { tunnelPlanTelemetryPromotions: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.tunnelPlanTelemetryPromotions.at(-1);
+  });
+  expect(request).toMatchObject({
+    client_id: "agent-sfo-01",
+    enabled: false,
+    interface: "wg-import",
+    peer_client_id: "agent-fra-02",
+  });
+
+  await checkControl(externalForm.getByLabel("Plan enabled"));
+  await activate(externalForm.getByRole("button", { name: "Save observed plan" }));
+  const enabledPrompt = promotionPanel.locator(".confirmationPrompt").last();
+  await expect(enabledPrompt.getByText("Enabled now")).toBeVisible();
+  await confirmVisiblePrompt(page, "Promote observed plan");
+
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const requests = (
+          window as unknown as {
+            __vpsmanTestRequests: { tunnelPlanTelemetryPromotions: unknown[] };
+          }
+        ).__vpsmanTestRequests;
+        return requests.tunnelPlanTelemetryPromotions.length;
+      }),
+    )
+    .toBe(2);
+
+  request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { tunnelPlanTelemetryPromotions: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.tunnelPlanTelemetryPromotions.at(-1);
+  });
+  expect(request).toMatchObject({
+    enabled: true,
+    interface: "wg-import",
   });
 });
 
@@ -2580,121 +2663,28 @@ test("promotes retained backup output into a stored artifact", async ({
   });
 });
 
-test("dispatches topology network apply, rollback, status, probe, and speed test with local privilege unlock", async ({
+test("dispatches topology network tests and OSPF plan updates with local privilege unlock", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "network apply privilege unlock flow is covered in the desktop console layout",
+    "network test privilege unlock flow is covered in the desktop console layout",
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Topology", "Apply / rollback");
+  await openConsoleSubpage(page, "Topology", "Tests");
 
   await expect(
-    page.getByRole("heading", { name: "Network apply" }),
+    page.getByRole("heading", { name: "Network tests" }),
   ).toBeVisible();
-  await unlockPrivilegeFor(page, "Topology", "Apply / rollback");
+  await unlockPrivilegeFor(page, "Topology", "Tests");
   await expect(
     page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
   ).toBeVisible();
 
-  await page.getByLabel("Network apply plan").selectOption(tunnelPlans[0].id);
-  await page.getByLabel("Network apply endpoint side").selectOption("left");
-  await page.getByLabel("Network apply max timeout seconds").fill("90");
-  await activate(page.getByRole("button", { name: "Review apply" }));
-  await confirmVisiblePrompt(page, "Apply plan");
-
-  await expect(
-    page
-      .getByLabel("Execution result")
-      .last()
-      .getByText(/completed on 1 VPS/),
-  ).toBeVisible();
-  const applyRequests = await page.evaluate(() => {
-    const requests = (
-      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
-    ).__vpsmanTestRequests;
-    return requests.jobs.slice(-2);
-  });
-  expect(JSON.stringify(applyRequests)).not.toContain("local-super-password");
-  expect(JSON.stringify(applyRequests)).not.toContain("config_backend");
-  expect(JSON.stringify(applyRequests)).not.toContain("config_sha256_hex");
-  expect(JSON.stringify(applyRequests)).not.toContain("ifupdown_sha256_hex");
-  expect(applyRequests).toHaveLength(2);
-  expect(applyRequests[0]).toMatchObject({
-    argv: [],
-    selector_expression: "id:agent-sfo-01",
-    target_client_ids: ["agent-sfo-01"],
-    command: "network_apply",
-    confirmed: true,
-    destructive: true,
-    operation: {
-      plan: tunnelPlans[0].plan,
-      side: "left",
-      type: "network_apply",
-    },
-    privileged: true,
-    max_timeout_secs: 90,
-  });
-  expect(applyRequests[1]).toMatchObject({
-    selector_expression: "id:agent-fra-02",
-    target_client_ids: ["agent-fra-02"],
-    command: "network_apply",
-    operation: {
-      plan: tunnelPlans[0].plan,
-      side: "right",
-      type: "network_apply",
-    },
-    max_timeout_secs: 90,
-  });
-  expectPrivilegeAssertion(applyRequests[0]);
-  expectPrivilegeAssertion(applyRequests[1]);
-
-  await activate(page.getByRole("button", { name: "Review rollback" }));
-  await confirmVisiblePrompt(page, "Rollback plan");
-  await expect(
-    page
-      .getByLabel("Execution result")
-      .last()
-      .getByText(/completed on 1 VPS/),
-  ).toBeVisible();
-  const rollbackRequests = await page.evaluate(() => {
-    const requests = (
-      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
-    ).__vpsmanTestRequests;
-    return requests.jobs.slice(-2);
-  });
-  expect(JSON.stringify(rollbackRequests)).not.toContain("local-super-password");
-  expect(rollbackRequests).toHaveLength(2);
-  expect(rollbackRequests[0]).toMatchObject({
-    argv: [],
-    selector_expression: "id:agent-sfo-01",
-    target_client_ids: ["agent-sfo-01"],
-    command: "network_rollback",
-    confirmed: true,
-    destructive: true,
-    operation: {
-      plan: tunnelPlans[0].plan,
-      side: "left",
-      type: "network_rollback",
-    },
-    privileged: true,
-    max_timeout_secs: 90,
-  });
-  expect(rollbackRequests[1]).toMatchObject({
-    selector_expression: "id:agent-fra-02",
-    target_client_ids: ["agent-fra-02"],
-    command: "network_rollback",
-    operation: {
-      plan: tunnelPlans[0].plan,
-      side: "right",
-      type: "network_rollback",
-    },
-    max_timeout_secs: 90,
-  });
-  expectPrivilegeAssertion(rollbackRequests[0]);
-  expectPrivilegeAssertion(rollbackRequests[1]);
+  await page.getByLabel("Network test plan").selectOption(tunnelPlans[0].id);
+  await page.getByLabel("Network test endpoint side").selectOption("left");
+  await page.getByLabel("Network test max timeout seconds").fill("90");
 
   await activate(page.getByRole("button", { name: "Review inspect" }));
   await confirmVisiblePrompt(page, "Inspect side");
@@ -2711,6 +2701,8 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     return requests.jobs.at(-1);
   });
   expect(JSON.stringify(statusRequest)).not.toContain("local-super-password");
+  expect(JSON.stringify(statusRequest)).not.toContain("config_backend");
+  expect(JSON.stringify(statusRequest)).not.toContain("config_sha256_hex");
   expect(statusRequest).toMatchObject({
     argv: [],
     selector_expression: "id:agent-sfo-01",
@@ -2804,72 +2796,6 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
     max_timeout_secs: 90,
   });
   expectPrivilegeAssertion(speedRequest);
-
-  await openConsoleSubpage(page, "Topology", "OSPF");
-  await expect(
-    page.getByRole("heading", { name: "OSPF cost apply" }),
-  ).toBeVisible();
-  await unlockPrivilegeFor(page, "Topology", "OSPF");
-  await page
-    .getByLabel("OSPF update plan")
-    .selectOption(ospfUpdatePlans[0].plan_id);
-  await page.getByLabel("OSPF update endpoint side").selectOption("left");
-  await page.getByLabel("OSPF update max timeout seconds").fill("45");
-  await activate(page.getByRole("button", { name: "Review cost apply" }));
-  await confirmVisiblePrompt(page, "Apply cost");
-  await expect(
-    page
-      .getByLabel("Execution result")
-      .last()
-      .getByText(/completed on 1 VPS/),
-  ).toBeVisible();
-  const ospfRequest = await page.evaluate(() => {
-    const requests = (
-      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
-    ).__vpsmanTestRequests;
-    return requests.jobs.at(-1);
-  });
-  const proposedPlan = {
-    ...tunnelPlans[0].plan,
-    recommended_ospf_cost: ospfUpdatePlans[0].recommended_ospf_cost,
-  };
-  expect(JSON.stringify(ospfRequest)).not.toContain("local-super-password");
-  expect(ospfRequest).toMatchObject({
-    argv: [],
-    selector_expression: "id:agent-sfo-01",
-    command: "network_ospf_cost_update",
-    confirmed: true,
-    destructive: true,
-    operation: {
-      current_ospf_cost: ospfUpdatePlans[0].current_ospf_cost,
-      plan: proposedPlan,
-      recommended_ospf_cost: ospfUpdatePlans[0].recommended_ospf_cost,
-      side: "left",
-      type: "network_ospf_cost_update",
-    },
-    privileged: true,
-    max_timeout_secs: 45,
-  });
-  const ospfOperation = (
-    ospfRequest as {
-      operation: {
-        bird2_sha256_hex: string;
-        current_ospf_cost: number;
-        plan: unknown;
-        recommended_ospf_cost: number;
-        side: string;
-        type: string;
-      };
-    }
-  ).operation;
-  expect(ospfOperation.bird2_sha256_hex).toBe(
-    sha256Hex(
-      new TextEncoder().encode(
-        ospfUpdatePlans[0].proposed_left_bird2_interface_snippet,
-      ),
-    ),
-  );
-  expectPrivilegeAssertion(ospfRequest);
   await expect(page.getByLabel("Execution result").last()).toBeVisible();
   await activate(page.getByRole("button", { name: "Open job details" }).last());
   await expect(
@@ -2878,4 +2804,32 @@ test("dispatches topology network apply, rollback, status, probe, and speed test
   await expect(
     page.getByRole("heading", { name: "Target results" }),
   ).toBeVisible();
+
+  await openConsoleSubpage(page, "Topology", "OSPF");
+  await expect(
+    page.getByRole("heading", { name: "OSPF cost" }),
+  ).toBeVisible();
+  await page
+    .getByLabel("OSPF update plan")
+    .selectOption(ospfUpdatePlans[0].plan_id);
+  await activate(page.getByRole("button", { name: "Review cost update" }));
+  await confirmVisiblePrompt(page, "Update cost");
+  const ospfRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          tunnelPlanOspfCostUpdates: Array<{ plan_id: string; body: unknown }>;
+        };
+      }
+    ).__vpsmanTestRequests;
+    return requests.tunnelPlanOspfCostUpdates.at(-1);
+  });
+  expect(ospfRequest).toMatchObject({
+    plan_id: ospfUpdatePlans[0].plan_id,
+    body: {
+      confirmed: true,
+      current_ospf_cost: ospfUpdatePlans[0].current_ospf_cost,
+      recommended_ospf_cost: ospfUpdatePlans[0].recommended_ospf_cost,
+    },
+  });
 });

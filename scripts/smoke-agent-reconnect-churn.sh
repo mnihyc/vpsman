@@ -220,10 +220,7 @@ smoke_write_enrolled_agent_config \
   "$client_private_hex" \
   "$gateway_public_hex" \
   "latency-drop-proxy=$proxy_addr=10" \
-  30 \
-  "$network_root" \
-  5 \
-  60
+  "$network_root"
 
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
 VPSMAN_GATEWAY_CONTROL_BIND="$gateway_control_addr" \

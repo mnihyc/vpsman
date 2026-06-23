@@ -951,17 +951,17 @@ async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
         .await,
     );
     assert_scope_forbidden(
-        routes_inventory::list_hot_config_patch_generators(
+        routes_inventory::list_runtime_config_patch_generators(
             axum::extract::State(state.clone()),
             viewer_headers.clone(),
         )
         .await,
     );
     assert_scope_forbidden(
-        routes_inventory::render_source_config_patch(
+        routes_inventory::render_template_runtime_config(
             axum::extract::State(state.clone()),
             viewer_headers.clone(),
-            axum::extract::Query(SourceConfigPatchQuery {
+            axum::extract::Query(TemplateRuntimeConfigQuery {
                 client_id: "client-a".to_string(),
             }),
         )

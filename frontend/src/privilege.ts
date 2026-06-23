@@ -412,19 +412,12 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
       return ordered([["type", operation.type], ["path", operation.path]]);
     case "config_read":
       return ordered([["type", operation.type]]);
-    case "hot_config":
+    case "runtime_config_sync":
       return ordered([
         ["type", operation.type],
-        ["apply_mode", operation.apply_mode],
-        ["toml", operation.toml],
-        ["preserve_redacted", optional(operation.preserve_redacted)],
-        ["base_config_sha256_hex", optional(operation.base_config_sha256_hex)],
-      ]);
-    case "source_config_patch":
-      return ordered([
-        ["type", operation.type],
-        ["apply_mode", operation.apply_mode],
-        ["toml", operation.toml],
+        ["desired_version", operation.desired_version],
+        ["reason", operation.reason],
+        ["config", operation.config],
       ]);
     case "agent_update":
       return ordered([
@@ -645,22 +638,6 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["source_restore_job_id", operation.source_restore_job_id],
         ["restored_files", operation.restored_files.map(canonicalRestoreRollbackFile)],
       ]);
-    case "network_apply":
-      return ordered([
-        ["type", operation.type],
-        ["plan", operation.plan as JsonValue],
-        ["side", operation.side],
-      ]);
-    case "network_ospf_cost_update":
-      return ordered([
-        ["type", operation.type],
-        ["plan", operation.plan as JsonValue],
-        ["side", operation.side],
-        ["current_ospf_cost", operation.current_ospf_cost],
-        ["recommended_ospf_cost", operation.recommended_ospf_cost],
-        ["bird2_sha256_hex", operation.bird2_sha256_hex],
-      ]);
-    case "network_rollback":
     case "network_status":
       return ordered([["type", operation.type], ["plan", operation.plan as JsonValue], ["side", operation.side]]);
     case "network_interfaces":

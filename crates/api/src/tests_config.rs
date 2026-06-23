@@ -7,18 +7,19 @@ use crate::{
     job_request::validate_job_command,
     model::{
         AuthContext, CreateJobRequest, OperatorPreferences, OperatorView,
-        RenderHotConfigPatchGeneratorRequest, UpsertHotConfigPatchGeneratorRequest,
+        RenderRuntimeConfigPatchGeneratorRequest, UpsertRuntimeConfigPatchGeneratorRequest,
     },
     repository::{MemoryState, Repository},
     repository_ingest::upsert_memory_agent,
     routes_jobs::create_job,
+    runtime_config::{compose_runtime_config, request_runtime_config_reload_for_agent},
     state::AppState,
 };
 use uuid::Uuid;
 use vpsman_common::{
-    AgentCapabilitySnapshot, AgentConfig, AgentHello, AgentPrivilegeMode, AgentUpdateConfig,
-    JobCommand, HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE,
-    SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH,
+    runtime_config_content_hash, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode,
+    AgentRuntimeConfig, AgentUpdateConfig, JobCommand, MAX_RUNTIME_CONFIG_FIELD_BYTES,
+    MAX_RUNTIME_CONFIG_REASON_BYTES,
 };
 
 async fn wait_for_job_status(
@@ -59,35 +60,6 @@ fn memory_admin() -> AuthContext {
 }
 
 #[test]
-fn validates_hot_config_job_document() {
-    let config = AgentConfig {
-        display_name: "edge-a".to_string(),
-        tags: vec!["bgp".to_string()],
-        ..AgentConfig::default()
-    };
-    let command = JobCommand::HotConfig {
-        apply_mode: HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE.to_string(),
-        toml: toml::to_string_pretty(&config).unwrap(),
-        preserve_redacted: None,
-        base_config_sha256_hex: None,
-    };
-
-    validate_job_command(&command).unwrap();
-}
-
-#[test]
-fn rejects_invalid_hot_config_job_document() {
-    let command = JobCommand::HotConfig {
-        apply_mode: HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE.to_string(),
-        toml: "client_id = ''".to_string(),
-        preserve_redacted: None,
-        base_config_sha256_hex: None,
-    };
-
-    assert!(validate_job_command(&command).is_err());
-}
-
-#[test]
 fn autonomous_updater_defaults_disabled_with_official_manifest_defaults() {
     let update = AgentUpdateConfig::default();
 
@@ -103,9 +75,93 @@ fn autonomous_updater_defaults_disabled_with_official_manifest_defaults() {
 }
 
 #[tokio::test]
-async fn hot_config_patch_generators_keep_built_ins_immutable_and_custom_generators_editable() {
+async fn agent_requested_runtime_config_reload_compares_hash_before_queuing() {
     let repo = Repository::Memory(MemoryState::default());
-    let generators = repo.list_hot_config_patch_generators().await.unwrap();
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        )
+        .await;
+    }
+    let state = test_state(repo.clone());
+    let desired = compose_runtime_config(&state, "client-a", 7).await.unwrap();
+    let current_hash = runtime_config_content_hash(&desired).unwrap();
+
+    let no_op = request_runtime_config_reload_for_agent(
+        &state,
+        "client-a",
+        &current_hash,
+        "agent_reconnect_runtime_config_check",
+    )
+    .await
+    .unwrap();
+    assert!(no_op.is_empty());
+    assert!(repo.list_jobs(10).await.unwrap().is_empty());
+
+    repo.upsert_runtime_config_overrides(
+        &["client-a".to_string()],
+        "telemetry_light_secs = 30\n",
+        "operator runtime config update",
+        &memory_admin(),
+    )
+    .await
+    .unwrap();
+    let queued = request_runtime_config_reload_for_agent(
+        &state,
+        "client-a",
+        &current_hash,
+        "agent_reconnect_runtime_config_check",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].target_count, 1);
+    let jobs = repo.list_jobs(10).await.unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].actor_id, None);
+    assert_eq!(jobs[0].target_count, 1);
+}
+
+#[test]
+fn runtime_config_sync_reason_uses_four_kibibyte_limit() {
+    let max_reason = "x".repeat(MAX_RUNTIME_CONFIG_REASON_BYTES);
+    validate_job_command(&JobCommand::RuntimeConfigSync {
+        desired_version: 1,
+        reason: max_reason,
+        config: Box::new(AgentRuntimeConfig {
+            version: 1,
+            ..AgentRuntimeConfig::default()
+        }),
+    })
+    .unwrap();
+
+    let oversized_reason = "x".repeat(MAX_RUNTIME_CONFIG_REASON_BYTES + 1);
+    assert!(validate_job_command(&JobCommand::RuntimeConfigSync {
+        desired_version: 1,
+        reason: oversized_reason,
+        config: Box::new(AgentRuntimeConfig {
+            version: 1,
+            ..AgentRuntimeConfig::default()
+        }),
+    })
+    .is_err());
+}
+
+#[tokio::test]
+async fn runtime_config_patch_generators_keep_built_ins_immutable_and_custom_generators_editable() {
+    let repo = Repository::Memory(MemoryState::default());
+    let generators = repo.list_runtime_config_patch_generators().await.unwrap();
     let enable = generators
         .iter()
         .find(|generator| generator.name == "Autonomous updater enabled")
@@ -118,9 +174,9 @@ async fn hot_config_patch_generators_keep_built_ins_immutable_and_custom_generat
     assert!(disable.built_in);
 
     let rendered = repo
-        .render_hot_config_patch_generator(
+        .render_runtime_config_patch_generator(
             enable.id,
-            &RenderHotConfigPatchGeneratorRequest {
+            &RenderRuntimeConfigPatchGeneratorRequest {
                 values: serde_json::json!({}),
             },
         )
@@ -133,8 +189,8 @@ async fn hot_config_patch_generators_keep_built_ins_immutable_and_custom_generat
 
     let operator = memory_admin();
     let built_in_edit = repo
-        .upsert_hot_config_patch_generator(
-            &UpsertHotConfigPatchGeneratorRequest {
+        .upsert_runtime_config_patch_generator(
+            &UpsertRuntimeConfigPatchGeneratorRequest {
                 id: Some(enable.id),
                 name: "Autonomous updater enabled edited".to_string(),
                 category: "update".to_string(),
@@ -151,11 +207,11 @@ async fn hot_config_patch_generators_keep_built_ins_immutable_and_custom_generat
     assert!(built_in_edit
         .unwrap_err()
         .to_string()
-        .contains("hot_config_patch_generator_builtin_immutable"));
+        .contains("runtime_config_patch_generator_builtin_immutable"));
 
     let custom = repo
-        .upsert_hot_config_patch_generator(
-            &UpsertHotConfigPatchGeneratorRequest {
+        .upsert_runtime_config_patch_generator(
+            &UpsertRuntimeConfigPatchGeneratorRequest {
                 id: None,
                 name: "Custom updater enabled".to_string(),
                 category: "update".to_string(),
@@ -174,8 +230,8 @@ async fn hot_config_patch_generators_keep_built_ins_immutable_and_custom_generat
     assert!(!custom.built_in);
 
     let edited = repo
-        .upsert_hot_config_patch_generator(
-            &UpsertHotConfigPatchGeneratorRequest {
+        .upsert_runtime_config_patch_generator(
+            &UpsertRuntimeConfigPatchGeneratorRequest {
                 id: Some(custom.id),
                 name: "Custom updater enabled edited".to_string(),
                 category: "update".to_string(),
@@ -194,17 +250,17 @@ async fn hot_config_patch_generators_keep_built_ins_immutable_and_custom_generat
     assert!(!edited.built_in);
 
     let built_in_delete = repo
-        .delete_hot_config_patch_generator(disable.id, &operator)
+        .delete_runtime_config_patch_generator(disable.id, &operator)
         .await;
     assert!(built_in_delete
         .unwrap_err()
         .to_string()
-        .contains("hot_config_patch_generator_builtin_immutable"));
+        .contains("runtime_config_patch_generator_builtin_immutable"));
 
-    repo.delete_hot_config_patch_generator(custom.id, &operator)
+    repo.delete_runtime_config_patch_generator(custom.id, &operator)
         .await
         .unwrap();
-    let after_delete = repo.list_hot_config_patch_generators().await.unwrap();
+    let after_delete = repo.list_runtime_config_patch_generators().await.unwrap();
     assert!(!after_delete
         .iter()
         .any(|generator| generator.id == custom.id));
@@ -213,55 +269,49 @@ async fn hot_config_patch_generators_keep_built_ins_immutable_and_custom_generat
         .any(|generator| generator.id == disable.id));
 }
 
-#[test]
-fn validates_source_config_patch_job_document() {
-    for toml in [
-        "[telemetry]\nproc_root = \"/tmp/vpsman-proc\"\n",
-        "[update]\nunmanaged_enabled = true\n",
-    ] {
-        let command = JobCommand::SourceConfigPatch {
-            apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
-            toml: toml.to_string(),
-        };
+#[tokio::test]
+async fn runtime_config_patch_generator_fields_use_four_kibibyte_limit() {
+    let state = test_state(Repository::Memory(MemoryState::default()));
+    let headers = crate::test_auth_headers(&state).await;
+    let max_name = "x".repeat(MAX_RUNTIME_CONFIG_FIELD_BYTES);
 
-        validate_job_command(&command).unwrap();
-    }
-}
+    let Json(saved) = crate::routes_inventory::upsert_runtime_config_patch_generator(
+        State(state.clone()),
+        headers.clone(),
+        Json(UpsertRuntimeConfigPatchGeneratorRequest {
+            id: None,
+            name: max_name.clone(),
+            category: "network".to_string(),
+            domain: "runtime".to_string(),
+            description: "operator-managed generator".to_string(),
+            field_schema: serde_json::json!({}),
+            raw_generator_body: "[telemetry]\nfull_secs = 300\n".to_string(),
+            docs_metadata: serde_json::json!({}),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved.name, max_name);
 
-#[test]
-fn rejects_invalid_source_config_patch_job_document() {
-    assert!(validate_job_command(&JobCommand::SourceConfigPatch {
-        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
-        toml: String::new(),
-    })
-    .is_err());
-    assert!(validate_job_command(&JobCommand::SourceConfigPatch {
-        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
-        toml: "client_id = \"other\"".to_string(),
-    })
-    .is_err());
-    assert!(validate_job_command(&JobCommand::SourceConfigPatch {
-        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
-        toml: "[auth]\nmax_job_timeout_secs = 10".to_string(),
-    })
-    .is_err());
-}
-
-#[test]
-fn rejects_ambiguous_config_apply_modes() {
-    let config = AgentConfig::default();
-    assert!(validate_job_command(&JobCommand::HotConfig {
-        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
-        toml: toml::to_string_pretty(&config).unwrap(),
-        preserve_redacted: None,
-        base_config_sha256_hex: None,
-    })
-    .is_err());
-    assert!(validate_job_command(&JobCommand::SourceConfigPatch {
-        apply_mode: HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE.to_string(),
-        toml: "[update]\nunmanaged_enabled = true\n".to_string(),
-    })
-    .is_err());
+    let error = crate::routes_inventory::upsert_runtime_config_patch_generator(
+        State(state),
+        headers,
+        Json(UpsertRuntimeConfigPatchGeneratorRequest {
+            id: None,
+            name: "x".repeat(MAX_RUNTIME_CONFIG_FIELD_BYTES + 1),
+            category: "network".to_string(),
+            domain: "runtime".to_string(),
+            description: "operator-managed generator".to_string(),
+            field_schema: serde_json::json!({}),
+            raw_generator_body: "[telemetry]\nfull_secs = 300\n".to_string(),
+            docs_metadata: serde_json::json!({}),
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "runtime_config_patch_generator_invalid");
 }
 
 #[test]

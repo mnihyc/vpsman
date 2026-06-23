@@ -57,7 +57,7 @@ const allViews: ScreenshotEntry[] = [
     heading: "Webhook delivery maintenance",
     id: "05d-fleet-notification-maintenance",
   },
-  { view: "Config", heading: "Agent config overview", id: "06-config-overview" },
+  { view: "Config", heading: "Runtime config overview", id: "06-config-overview" },
   {
     view: "Config",
     subpage: "Bulk patch",
@@ -149,9 +149,9 @@ const allViews: ScreenshotEntry[] = [
   },
   {
     view: "Topology",
-    subpage: "Apply / rollback",
-    heading: "Network apply",
-    id: "27-topology-apply",
+    subpage: "Tests",
+    heading: "Network tests",
+    id: "27-topology-tests",
   },
   {
     view: "Topology",
@@ -267,7 +267,7 @@ async function navigateAndScreenshot(
   projectDir: string,
   projectName: string,
 ) {
-  const visibleView = entry.view === "Config" ? "Agent config" : entry.view;
+  const visibleView = entry.view === "Config" ? "Runtime config" : entry.view;
   const label = entry.subpage
     ? `${visibleView} / ${entry.subpage}${entry.tab ? ` / ${entry.tab}` : ""}`
     : visibleView;

@@ -1,77 +1,32 @@
 import { useMemo, useState } from "react";
 import { Gauge, ShieldCheck } from "lucide-react";
-import {
-  buildBulkJobProgress,
-  createJobTargetCount,
-  formatTargetAvailabilitySummary,
-  waitForBulkJobTargets,
-  type BulkJobProgress,
-} from "../../bulkJobProgress";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
-import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
-import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
-import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
 import { usePanelDisplaySettings } from "../../panelDisplay";
-import { buildPrivilegeForJobOperation, type PrivilegeAssertion, type PrivilegeMaterial } from "../../privilege";
-import { selectorExpressionForClientIds } from "../../searchExpression";
-import { buildNetworkOspfCostUpdateOperation } from "../../topologyApply";
 import type {
   AgentView,
-  CreateJobRequest,
-  CreateJobResponse,
-  JobOperation,
-  JobTargetRecord,
   NetworkOspfUpdatePlanRecord,
-  TunnelEndpointSide,
   TunnelPlanRecord,
+  UpdateTunnelPlanOspfCostRequest,
 } from "../../types";
-import { clientDisplayNameFromMap, clientDisplayNameMap, runPanelAction, shortId } from "../../utils";
-import {
-  clampJobMaxTimeoutSecs,
-  clampInteger,
-  MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
-} from "../jobDispatchModel";
+import { clientDisplayNameFromMap, clientDisplayNameMap, runPanelAction } from "../../utils";
 import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
 
 export function TopologyOspfUpdateControls({
   agents,
-  onCreateJob,
-  onLoadTargets,
-  onOpenJobDetails,
-  onOpenPrivilegeUnlock,
   ospfUpdatePlans,
-  privilegeMaterial,
-  setPrivilegeMaterial,
   tunnelPlans,
+  onUpdateTunnelPlanOspfCost,
 }: {
   agents: AgentView[];
-  onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
-  onOpenJobDetails?: (jobId: string) => void;
-  onOpenPrivilegeUnlock: () => void;
   ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
-  privilegeMaterial: PrivilegeMaterial | null;
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   tunnelPlans: TunnelPlanRecord[];
+  onUpdateTunnelPlanOspfCost: (planId: string, request: UpdateTunnelPlanOspfCostRequest) => Promise<void>;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const {
-    captureReviewGeneration,
-    invalidateReviewGeneration,
-    isReviewGenerationCurrent,
-  } = useReviewGenerationGuard();
   const [selectedPlanId, setSelectedPlanId] = useState(() => ospfUpdatePlans[0]?.plan_id ?? "");
-  const [side, setSide] = useState<TunnelEndpointSide>("left");
-  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(60);
-  const [forceUnprivileged, setForceUnprivileged] = useState(false);
-  const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
-  const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
-  const [ospfSnapshot, setOspfSnapshot] = useState<OspfUpdateSnapshot | null>(null);
-  const [jobProgress, setJobProgress] = useState<BulkJobProgress | null>(null);
-  const [lastJobProgress, setLastJobProgress] = useState<BulkJobProgress | null>(null);
+  const [snapshot, setSnapshot] = useState<OspfUpdateSnapshot | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const [reviewPending, setReviewPending] = useState(false);
 
   const selectedUpdatePlan =
     ospfUpdatePlans.find((plan) => plan.plan_id === selectedPlanId) ?? ospfUpdatePlans[0] ?? null;
@@ -81,156 +36,57 @@ export function TopologyOspfUpdateControls({
   );
   const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
   const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
-  const targetClientId =
-    side === "left" ? selectedUpdatePlan?.left_client_id : selectedUpdatePlan?.right_client_id;
-  const mutationTargets = resolveAgentsById(agents, targetClientId ? [targetClientId] : []);
-  const visibleJobProgress = jobProgress ?? lastJobProgress;
+  const planTargets = resolveAgentsById(
+    agents,
+    selectedUpdatePlan ? [selectedUpdatePlan.left_client_id, selectedUpdatePlan.right_client_id] : [],
+  );
   const status =
     actionError ??
-    (reviewPending
-      ? "Preparing OSPF review"
-      : visibleJobProgress
-      ? `OSPF result for job ${shortId(visibleJobProgress.jobId)}`
-      : lastJob
-        ? `OSPF update job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
-      : privilegeMaterial
-        ? "Ready"
-        : "Locked");
-  const canSubmit =
+    (pending
+      ? "Updating OSPF cost"
+      : selectedUpdatePlan
+        ? `${selectedUpdatePlan.current_ospf_cost} to ${selectedUpdatePlan.recommended_ospf_cost}`
+        : "No OSPF cost changes");
+  const canReview =
     !pending &&
-    !ospfSnapshot &&
+    !snapshot &&
     !!selectedUpdatePlan &&
     !!selectedTunnelPlan &&
-    !!targetClientId &&
-    !!privilegeMaterial &&
     selectedUpdatePlan.current_ospf_cost !== selectedUpdatePlan.recommended_ospf_cost;
 
-  function clearOspfReview() {
-    invalidateReviewGeneration();
-    setOspfSnapshot(null);
-  }
-
-  async function openOspfPrompt() {
+  function openReview() {
+    if (!selectedUpdatePlan || !selectedTunnelPlan) {
+      setActionError("Select an OSPF update plan");
+      return;
+    }
+    if (selectedUpdatePlan.current_ospf_cost === selectedUpdatePlan.recommended_ospf_cost) {
+      setActionError("OSPF cost already matches the recommendation");
+      return;
+    }
     setActionError(null);
-    const reviewGeneration = captureReviewGeneration();
-    setReviewPending(true);
-    try {
-      await waitForReviewRender();
-      await runPanelAction(setPending, setActionError, async () => {
-      if (!selectedUpdatePlan || !selectedTunnelPlan || !targetClientId) {
-        throw new Error("Select an OSPF update plan");
-      }
-      if (!privilegeMaterial) {
-        throw new Error("Privilege unlock is locked");
-      }
-      if (selectedUpdatePlan.current_ospf_cost === selectedUpdatePlan.recommended_ospf_cost) {
-        throw new Error("OSPF cost is already at the recommended value");
-      }
-      const builtOperation = await buildNetworkOspfCostUpdateOperation(
-        selectedTunnelPlan.plan,
-        side,
-        selectedUpdatePlan.current_ospf_cost,
-        selectedUpdatePlan.recommended_ospf_cost,
-      );
-      const endpointTarget = builtOperation.endpoint.localClientId;
-      const selectorExpression = selectorExpressionForClientIds([endpointTarget]);
-      const targets = resolveAgentsById(agents, [endpointTarget]);
-      const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
-      const builtPrivilege = await buildPrivilegeForJobOperation({
-        clientIds: [endpointTarget],
-        commandType: "network_ospf_cost_update",
-        forceUnprivileged,
-        operation: builtOperation.operation,
-        privilegeMaterial,
-        selectorExpression,
-        maxTimeoutSecs: boundedMaxTimeoutSecs,
-      });
-      if (!isReviewGenerationCurrent(reviewGeneration)) {
-        return;
-      }
-      setOspfSnapshot({
-        detail: `OSPF cost update on ${vpsCountLabel(targets.length)}.`,
-        forceUnprivileged,
-        jobId: crypto.randomUUID(),
-        items: [
-          { label: "Operation", value: "OSPF cost update" },
-          { label: "Selector", value: selectorExpression },
-          { label: "Targets", value: formatTargetAvailabilitySummary(targets) },
-          { label: "Plan", value: selectedUpdatePlan.plan_name },
-          { label: "Endpoint", value: side },
-          {
-            label: "Cost",
-            value: `${selectedUpdatePlan.current_ospf_cost} to ${selectedUpdatePlan.recommended_ospf_cost}`,
-          },
-          { label: "Max timeout", value: `${boundedMaxTimeoutSecs}s` },
-          { label: "Privilege unlock", value: "Unlocked locally" },
-          { label: "Privilege", value: forceUnprivileged ? "Forced best effort" : "Root required" },
-        ],
-        operation: builtOperation.operation,
-        payloadHashHex: builtPrivilege.payloadHashHex,
-        privilegeAssertion: builtPrivilege.privilegeAssertion,
-        selectorExpression,
-        targetClientId: endpointTarget,
-        targets,
-        maxTimeoutSecs: boundedMaxTimeoutSecs,
-      });
-    });
-    } finally {
-      setReviewPending(false);
-    }
-  }
-
-  function clearExecutionResults() {
-    setJobProgress(null);
-    setLastJobProgress(null);
-    setLastJob(null);
-  }
-
-  async function submitOspfCostUpdate(snapshot: OspfUpdateSnapshot) {
-    setOspfSnapshot(null);
-    clearExecutionResults();
-    await runPanelAction(setPending, setActionError, async () => {
-      const job = await onCreateJob({
-        argv: [],
-        selector_expression: snapshot.selectorExpression,
-        target_client_ids: [snapshot.targetClientId],
-        command: "network_ospf_cost_update",
+    setSnapshot({
+      detail: `Update the server-managed tunnel plan cost and push runtime config to both endpoints if the plan is enabled.`,
+      items: [
+        { label: "Plan", value: selectedUpdatePlan.plan_name },
+        { label: "Endpoints", value: `${clientLabel(selectedUpdatePlan.left_client_id)} / ${clientLabel(selectedUpdatePlan.right_client_id)}` },
+        { label: "Interface", value: selectedUpdatePlan.interface_name },
+        { label: "Cost", value: `${selectedUpdatePlan.current_ospf_cost} to ${selectedUpdatePlan.recommended_ospf_cost}` },
+        { label: "Sync", value: selectedTunnelPlan.enabled ? "Now" : "Deferred" },
+      ],
+      planId: selectedUpdatePlan.plan_id,
+      request: {
         confirmed: true,
-        destructive: true,
-        operation: snapshot.operation,
-        force_unprivileged: snapshot.forceUnprivileged,
-        job_id: snapshot.jobId,
-        privileged: true,
-        privilege_assertion: snapshot.privilegeAssertion,
-        max_timeout_secs: snapshot.maxTimeoutSecs,
-      });
-      setLastPayloadHash(snapshot.payloadHashHex);
-      setLastJob(job);
-      await trackOspfProgress(job, snapshot.targets, snapshot.maxTimeoutSecs);
+        current_ospf_cost: selectedUpdatePlan.current_ospf_cost,
+        recommended_ospf_cost: selectedUpdatePlan.recommended_ospf_cost,
+      },
     });
   }
 
-  async function trackOspfProgress(job: CreateJobResponse, targets: AgentView[], maxTimeoutSecsForSnapshot: number) {
-    const targetCount = createJobTargetCount(job);
-    setLastJobProgress(null);
-    setJobProgress(buildBulkJobProgress({
-      jobId: job.job_id,
-      targetCount,
-      targetRecords: [],
-      targets,
-      maxTimeoutSecs: maxTimeoutSecsForSnapshot,
-    }));
-    try {
-      const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
-        onProgress: setJobProgress,
-        targetCount,
-        targets,
-        maxTimeoutSecs: maxTimeoutSecsForSnapshot,
-      });
-      setLastJobProgress(result.progress);
-    } finally {
-      setJobProgress(null);
-    }
+  async function applySnapshot(next: OspfUpdateSnapshot) {
+    setSnapshot(null);
+    await runPanelAction(setPending, setActionError, async () => {
+      await onUpdateTunnelPlanOspfCost(next.planId, next.request);
+    });
   }
 
   if (ospfUpdatePlans.length === 0) {
@@ -241,7 +97,7 @@ export function TopologyOspfUpdateControls({
     <section className="fleetPanel commandComposer">
       <div className="sectionHeader">
         <div>
-          <h2>OSPF cost apply</h2>
+          <h2>OSPF cost</h2>
           <span>{status}</span>
         </div>
         <ShieldCheck size={20} />
@@ -253,7 +109,8 @@ export function TopologyOspfUpdateControls({
             <select
               aria-label="OSPF update plan"
               onChange={(event) => {
-                clearOspfReview();
+                setSnapshot(null);
+                setActionError(null);
                 setSelectedPlanId(event.target.value);
               }}
               value={selectedUpdatePlan?.plan_id ?? ""}
@@ -265,36 +122,6 @@ export function TopologyOspfUpdateControls({
               ))}
             </select>
           </label>
-          <label>
-            <span>Endpoint side</span>
-            <select
-              aria-label="OSPF update endpoint side"
-              onChange={(event) => {
-                clearOspfReview();
-                setSide(event.target.value as TunnelEndpointSide);
-              }}
-              value={side}
-            >
-              <option value="left">Left endpoint</option>
-              <option value="right">Right endpoint</option>
-            </select>
-          </label>
-        </div>
-        <div className="dispatchControls">
-          <label>
-            <span>Max timeout seconds</span>
-            <input
-              aria-label="OSPF update max timeout seconds"
-              max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
-              min={1}
-              onChange={(event) => {
-                clearOspfReview();
-                setMaxTimeoutSecs(Number(event.target.value));
-              }}
-              type="number"
-              value={maxTimeoutSecs}
-            />
-          </label>
         </div>
         {selectedUpdatePlan && (
           <div className="operationNote">
@@ -302,88 +129,40 @@ export function TopologyOspfUpdateControls({
               {selectedUpdatePlan.current_ospf_cost} to {selectedUpdatePlan.recommended_ospf_cost}
             </strong>
             <span>
-              {selectedUpdatePlan.interface_name} / {targetClientId ? clientLabel(targetClientId) : "Unknown VPS"}
+              {selectedUpdatePlan.interface_name} / {clientLabel(selectedUpdatePlan.left_client_id)} / {clientLabel(selectedUpdatePlan.right_client_id)}
             </span>
           </div>
         )}
         <TargetImpactPreview
-          forceUnprivileged={forceUnprivileged}
-          mode="root_network_mutation"
-          targets={mutationTargets}
-          title="OSPF mutation impact"
+          mode="generic"
+          targets={planTargets}
+          title="Plan endpoint visibility"
         />
-        <label className="checkLine">
-          <input
-            aria-label="Force unprivileged OSPF best effort"
-            checked={forceUnprivileged}
-            onChange={(event) => {
-              clearOspfReview();
-              setForceUnprivileged(event.target.checked);
-            }}
-            type="checkbox"
-          />
-          <span>Force unprivileged best effort</span>
-        </label>
         <ConfirmationPrompt
-          confirmLabel="Apply cost"
-          detail={ospfSnapshot?.detail ?? ""}
-          expiresAtUnix={ospfSnapshot?.privilegeAssertion.expires_unix}
-          items={ospfSnapshot?.items ?? []}
-          onCancel={() => setOspfSnapshot(null)}
-          onConfirm={() => ospfSnapshot && void submitOspfCostUpdate(ospfSnapshot)}
-          open={ospfSnapshot !== null}
+          confirmLabel="Update cost"
+          detail={snapshot?.detail ?? ""}
+          items={snapshot?.items ?? []}
+          onCancel={() => setSnapshot(null)}
+          onConfirm={() => snapshot && void applySnapshot(snapshot)}
+          open={snapshot !== null}
           pending={pending}
           title="Confirm OSPF cost update"
-          tone="danger"
+          tone="normal"
         />
-        {visibleJobProgress && (
-          <ExecutionResultPanel
-            loading={jobProgress !== null}
-            onClearResults={clearExecutionResults}
-            onOpenJobDetails={onOpenJobDetails}
-            progress={visibleJobProgress}
-          />
-        )}
         <div className="dispatchActions">
-          <button className="primaryAction" disabled={!canSubmit} onClick={openOspfPrompt} type="button">
+          <button className="primaryAction" disabled={!canReview} onClick={openReview} type="button">
             <Gauge size={17} />
-            Review cost apply
+            Review cost update
           </button>
         </div>
       </div>
-      <PrivilegeVaultBox
-        clearVaultLabel="Clear OSPF vault"
-        labelPrefix="OSPF"
-        lastPayloadHash={lastPayloadHash}
-        lockPrivilegeLabel="Lock OSPF privilege"
-        onOpenUnlock={onOpenPrivilegeUnlock}
-        onPrivilegeMaterialChange={(material) => {
-          clearOspfReview();
-          setPrivilegeMaterial(material);
-        }}
-        privilegeMaterial={privilegeMaterial}
-        unlockRedirectLabel="Unlock OSPF"
-        unlockLabel="Unlock OSPF"
-        usePrivilegeLabel="Unlock OSPF privilege"
-      />
     </section>
   );
 }
 
 type OspfUpdateSnapshot = {
   detail: string;
-  forceUnprivileged: boolean;
-  jobId: string;
   items: Array<{ label: string; value: string }>;
-  operation: JobOperation;
-  payloadHashHex: string;
-  privilegeAssertion: PrivilegeAssertion;
-  selectorExpression: string;
-  targetClientId: string;
-  targets: AgentView[];
-  maxTimeoutSecs: number;
+  planId: string;
+  request: UpdateTunnelPlanOspfCostRequest;
 };
-
-function vpsCountLabel(count: number): string {
-  return `${count} VPS${count === 1 ? "" : "s"}`;
-}

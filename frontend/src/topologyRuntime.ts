@@ -107,6 +107,7 @@ export function normalizeTelemetryPromotionRequest(
     latency_ms: request.latency_ms ?? 20,
     packet_loss_ratio: request.packet_loss_ratio ?? 0,
     preference: request.preference ?? 1,
+    enabled: Boolean(request.enabled),
   };
 }
 

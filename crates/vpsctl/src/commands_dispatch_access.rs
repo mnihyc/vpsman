@@ -498,26 +498,12 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::SourceConfigPatch(command) => {
-            commands_inventory::source_config_patch(
+        Command::TemplateRuntimeConfig(command) => {
+            commands_inventory::template_runtime_config(
                 api_url,
                 token,
                 command.client_id,
                 command.format,
-            )?;
-            Ok(None)
-        }
-        Command::SourceConfigPatchApply(command) => {
-            commands_inventory::source_config_patch_apply(
-                api_url,
-                token,
-                command.client_id,
-                command.password_env,
-                command.super_salt_hex,
-                command.privilege_ttl_secs,
-                command.max_timeout_secs,
-                command.confirmed,
-                command.force_unprivileged,
             )?;
             Ok(None)
         }

@@ -25,7 +25,7 @@ use crate::{
     selector_expression::parse_selector_expression,
     state::AppState,
 };
-use vpsman_common::{encode_json, payload_hash, PrivilegeAssertion};
+use vpsman_common::{encode_json, payload_hash, JobCommand, PrivilegeAssertion};
 
 #[derive(Clone, Copy)]
 enum ScheduleTargetResolutionMode {
@@ -373,7 +373,17 @@ fn validate_schedule_definition(request: ScheduleDefinitionRef<'_>) -> Result<()
     if !(1..=100).contains(&request.max_failures) {
         return Err(ApiError::bad_request("schedule_max_failures_out_of_range"));
     }
-    validate_job_command(request.operation)
+    validate_job_command(request.operation)?;
+    validate_schedulable_job_command(request.operation)
+}
+
+fn validate_schedulable_job_command(command: &JobCommand) -> Result<(), ApiError> {
+    if matches!(command, JobCommand::RuntimeConfigSync { .. }) {
+        return Err(ApiError::bad_request(
+            "runtime_config_sync_is_server_issued",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_defer_schedule_request(request: &DeferScheduleRequest) -> Result<(), ApiError> {

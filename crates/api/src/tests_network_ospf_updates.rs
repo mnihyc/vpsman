@@ -56,7 +56,7 @@ async fn builds_reviewed_ospf_update_plan_from_observed_recommendation() {
         ospf_policy: OspfCostPolicy::default(),
     };
     let plan = plan_tunnel(&input).unwrap();
-    repo.record_tunnel_plan(&input, &plan, &operator)
+    repo.record_tunnel_plan(&input, &plan, true, &operator)
         .await
         .unwrap();
     let job_id = Uuid::new_v4();

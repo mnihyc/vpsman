@@ -54,8 +54,6 @@ const PRIVILEGE_REQUIRED_COMMANDS: &[&str] = &[
     "file-transfer-upload",
     "file-transfer-download",
     "user-sessions",
-    "hot-config",
-    "source-config-patch-apply",
     "agent-update",
     "agent-update-activate",
     "agent-update-rollback",
@@ -71,9 +69,6 @@ const PRIVILEGE_REQUIRED_COMMANDS: &[&str] = &[
     "restore-rollback",
     "migration-link",
     "migration-run",
-    "tunnel-apply",
-    "tunnel-ospf-cost-update",
-    "tunnel-rollback",
     "tunnel-status",
     "tunnel-probe",
     "tunnel-speed-test",
@@ -81,17 +76,12 @@ const PRIVILEGE_REQUIRED_COMMANDS: &[&str] = &[
 
 const FORCE_UNPRIVILEGED_COMMANDS: &[&str] = &[
     "process-start",
-    "hot-config",
-    "source-config-patch-apply",
     "agent-update",
     "agent-update-activate",
     "agent-update-rollback",
     "restore-run",
     "restore-rollback",
     "migration-run",
-    "tunnel-apply",
-    "tunnel-ospf-cost-update",
-    "tunnel-rollback",
 ];
 
 const ROOT_SENSITIVE_CAPABILITIES: &[&str] = &[
@@ -194,7 +184,7 @@ mod tests {
         let degraded = render_vty_degraded_policy();
 
         assert!(capabilities.contains("force_unprivileged_supported"));
-        assert!(capabilities.contains("tunnel-apply"));
+        assert!(capabilities.contains("tunnel-speed-test"));
         assert!(capabilities.contains("plaintext super password"));
         assert!(degraded.contains("target_skipped_job_partial_success"));
         assert!(degraded.contains("--force-unprivileged"));

@@ -23,7 +23,6 @@ use vpsman_server_core::{
 
 use crate::{
     error::ApiError,
-    job_target_validation::validate_network_apply_target,
     model::{
         AgentView, AuthContext, CancelJobRequest, CancelJobResponse, CancelJobTargetResult,
         CreateJobRequest, CreateJobResponse, CreateJobTargetCounts, WsEvent,
@@ -179,10 +178,25 @@ pub(crate) async fn create_job_from_terminal_input_route(
     .await
 }
 
+pub(crate) async fn create_job_from_internal_operator_mutation(
+    state: &AppState,
+    operator: &AuthContext,
+    request: CreateJobRequest,
+) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
+    create_job_inner(
+        state,
+        operator,
+        request,
+        JobPrivilegeSource::InternalOperatorMutation,
+    )
+    .await
+}
+
 enum JobPrivilegeSource {
     RequestAssertion,
     SavedSchedule(Uuid),
     TerminalInputRoute,
+    InternalOperatorMutation,
 }
 
 #[derive(Clone, Debug)]
@@ -207,6 +221,7 @@ async fn create_job_inner(
         return Err(ApiError::conflict("destructive_confirmation_required"));
     }
     let job_command = request.job_command()?;
+    validate_job_command_source(&job_command, &privilege_source)?;
     if matches!(job_command, JobCommand::TerminalInput { .. })
         && !matches!(privilege_source, JobPrivilegeSource::TerminalInputRoute)
     {
@@ -271,11 +286,14 @@ async fn create_job_inner(
     if matches!(job_command, JobCommand::ConfigRead) && resolved_targets.len() != 1 {
         return Err(ApiError::conflict("config_read_requires_single_target"));
     }
+    vpsman_server_core::validate_network_command_targets(&job_command, &resolved_targets)
+        .map_err(|error| ApiError::bad_request(error.code()))?;
     validate_restore_archive_binding(state, &job_command, &resolved_targets).await?;
     let source_schedule_id = match &privilege_source {
         JobPrivilegeSource::RequestAssertion => None,
         JobPrivilegeSource::SavedSchedule(schedule_id) => Some(*schedule_id),
         JobPrivilegeSource::TerminalInputRoute => None,
+        JobPrivilegeSource::InternalOperatorMutation => None,
     };
     let effective_max_timeout_secs =
         effective_job_max_timeout_secs(request.max_timeout_secs, state.max_job_timeout_secs())?;
@@ -320,7 +338,6 @@ async fn create_job_inner(
         )
         .await;
     }
-    validate_network_apply_target(&job_command, &resolved_targets)?;
     if matches!(privilege_source, JobPrivilegeSource::RequestAssertion) {
         let privilege_intent = JobPrivilegeIntent::new(JobPrivilegeIntentInput {
             selector_expression: &request.selector_expression,
@@ -471,6 +488,23 @@ async fn create_job_inner(
             target_counts,
         }),
     ))
+}
+
+fn validate_job_command_source(
+    job_command: &JobCommand,
+    privilege_source: &JobPrivilegeSource,
+) -> Result<(), ApiError> {
+    if matches!(job_command, JobCommand::RuntimeConfigSync { .. })
+        && !matches!(
+            privilege_source,
+            JobPrivilegeSource::InternalOperatorMutation
+        )
+    {
+        return Err(ApiError::bad_request(
+            "runtime_config_sync_is_server_issued",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -683,9 +717,7 @@ fn confirmation_error_code(command: &JobCommand) -> &'static str {
     match command {
         JobCommand::Backup { .. } => "backup_confirmation_required",
         JobCommand::NetworkSpeedTest { .. } => "network_speed_test_confirmation_required",
-        JobCommand::HotConfig { .. }
-        | JobCommand::SourceConfigPatch { .. }
-        | JobCommand::UpdateAgent { .. }
+        JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
         | JobCommand::AgentUpdateCheck { .. } => "config_update_confirmation_required",

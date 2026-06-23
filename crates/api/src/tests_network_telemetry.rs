@@ -350,7 +350,7 @@ async fn telemetry_tunnel_readback_exposes_redacted_adapter_health() {
 
 async fn save_tunnel_plan(repo: &Repository, input: TunnelPlanInput) -> TunnelPlanView {
     let plan = plan_tunnel(&input).unwrap();
-    repo.record_tunnel_plan(&input, &plan, &operator_context())
+    repo.record_tunnel_plan(&input, &plan, true, &operator_context())
         .await
         .unwrap()
 }

@@ -18,7 +18,6 @@ Generate or obtain these values before running the installer on a VPS:
 
 Optional values:
 
-- `VPSMAN_AGENT_DISPLAY_NAME`: friendly name stored in `agent.toml`.
 - `VPSMAN_AGENT_BINARY_URL`: release artifact URL to download before installing.
 - `VPSMAN_AGENT_BINARY_SHA256`: required 64-character SHA-256 hex when
   `VPSMAN_AGENT_BINARY_URL` is set.
@@ -54,7 +53,6 @@ Root service example:
 curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \
   VPSMAN_INSTALL_MODE=root \
   VPSMAN_AGENT_CLIENT_ID=agent-nrt-04 \
-  VPSMAN_AGENT_DISPLAY_NAME=edge-nrt-04 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10,backup=gw-backup.example.com:9443=20' \
@@ -73,21 +71,16 @@ curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-a
   bash
 ```
 
-The installer writes `agent.toml`, installs a systemd unit, and starts the agent
+The installer writes a bootstrap-only `agent.toml`, installs a systemd unit, and starts the agent
 unless `VPSMAN_AGENT_ENABLE_SERVICE=0` is set for an intentional staging-only
 install.
 It does not call `/api`, `/.well-known`, or any panel-side lookup endpoint. The
-installer writes an `[update]` section with the official GitHub `version.json`
-release manifest, 24 hour interval, 24 hour jitter, activation enabled, and
-service-manager restart enabled. Autonomous updates remain disabled unless the
-install command sets `VPSMAN_AGENT_UNMANAGED_UPDATE_ENABLED=1` or a later
-incremental config patch enables `update.unmanaged_enabled`. When enabled, the
-agent uses the manifest's tag-pinned asset URL, verifies `SHA256SUMS`, stages
-the matching musl agent asset, activates it, and restarts itself. The installed
-systemd unit sets `VPSMAN_AGENT_RESTART_MODE=signal_only`, so systemd performs
-the restart after activation. Override
-`VPSMAN_AGENT_UNMANAGED_UPDATE_VERSION_URL` or `update.unmanaged_version_url`
-only when using a different external release host.
+local file contains only the client id, gateway endpoints and priority, Noise
+key material, server trust, and gateway retry/connect timing. Display names,
+tags, update policy, execution policy, telemetry, backup limits, and tunnel
+settings are server runtime config. Configure them through the API/frontend/CLI
+after registering the identity; runtime changes are pushed as visible
+`runtime_config_sync` jobs after the agent connects.
 
 Runtime command traffic is protected by the gateway Noise session. No extra
 server-side command-authentication key is provisioned. Operator authentication

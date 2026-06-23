@@ -32,10 +32,6 @@ fi
 
 cat >"$config_a" <<'TOML'
 client_id = "install-smoke-a"
-display_name = "install-smoke-a"
-telemetry_light_secs = 15
-telemetry_full_secs = 60
-tags = ["edge"]
 
 [noise]
 mode = "enrolled_ik"
@@ -43,7 +39,8 @@ client_private_key_hex = "111111111111111111111111111111111111111111111111111111
 server_public_key_hex = "2222222222222222222222222222222222222222222222222222222222222222"
 
 [auth]
-max_job_timeout_secs = 3600
+gateway_retry_secs = 60
+gateway_connect_timeout_secs = 10
 
 [[tcp_endpoints]]
 label = "primary"
@@ -53,10 +50,6 @@ TOML
 
 cat >"$config_b" <<'TOML'
 client_id = "install-smoke-b"
-display_name = "install-smoke-b"
-telemetry_light_secs = 15
-telemetry_full_secs = 60
-tags = []
 
 [noise]
 mode = "enrolled_ik"
@@ -64,7 +57,8 @@ client_private_key_hex = "555555555555555555555555555555555555555555555555555555
 server_public_key_hex = "6666666666666666666666666666666666666666666666666666666666666666"
 
 [auth]
-max_job_timeout_secs = 3600
+gateway_retry_secs = 60
+gateway_connect_timeout_secs = 10
 
 [[tcp_endpoints]]
 label = "primary"

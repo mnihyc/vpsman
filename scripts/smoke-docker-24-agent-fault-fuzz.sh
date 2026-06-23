@@ -609,6 +609,7 @@ tunnel_plan_json="$(vpsctl_json tunnel-plan \
   --bandwidth 1000m \
   --latency-ms 18 \
   --save \
+  --enabled \
   --confirmed)"
 jq -e '.name == "docker-fault-fuzz-gre" and .status == "planned"' <<<"$tunnel_plan_json" >/dev/null
 

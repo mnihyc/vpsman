@@ -79,6 +79,7 @@ cargo run -p vpsctl -- tunnel-plan \
   --bandwidth 100m \
   --latency-ms 20 \
   --save \
+  --enabled \
   --confirmed
 ```
 
@@ -93,14 +94,16 @@ cargo run -p vpsctl -- tunnel-plan-export \
 
 In the frontend, use Topology -> Plans -> Export JSON for the selected saved
 plan. The exported file is the inner runtime `TunnelPlan` object expected by
-apply/status/probe/rollback commands, not the full saved-plan database record.
+status, probe, and speed-test commands, not the full saved-plan database record.
 
-Apply, inspect, and roll back one endpoint side at a time:
+Enable or update the saved plan to apply desired tunnel state. Disable or edit
+the plan to roll it back. Status, probe, and speed-test commands remain
+explicit inspection tools:
 
 ```sh
-cargo run -p vpsctl -- tunnel-apply --plan-file ./plan.json --side left --confirmed
 cargo run -p vpsctl -- tunnel-status --plan-file ./plan.json --side left
-cargo run -p vpsctl -- tunnel-rollback --plan-file ./plan.json --side left --confirmed
+cargo run -p vpsctl -- tunnel-probe --plan-file ./plan.json --side left
+cargo run -p vpsctl -- tunnel-speed-test --plan-file ./plan.json --confirmed
 ```
 
 Unprivileged agents report degraded mutation capability by default. Use
@@ -126,6 +129,7 @@ cargo run -p vpsctl -- tunnel-promote-external-observe \
   --side left \
   --bandwidth 1000m \
   --latency-ms 8 \
+  --enabled \
   --confirmed
 ```
 
@@ -217,7 +221,7 @@ configured burst tier.
 - Use `tunnel-plan-export` or the frontend Export JSON action to obtain
   `plan.json` from saved plans.
 - Keep source choices such as `ip`, `tc`, `ping`, `vnstat`, and Bird2 hooks in
-  presets or agent config.
+  templates or server runtime config.
 - Treat imported tunnels as first-class topology edges even when another
   program owns their process.
 - Always inspect status/probe/speed evidence before changing OSPF cost.

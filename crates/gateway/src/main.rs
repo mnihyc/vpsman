@@ -21,9 +21,10 @@ use tokio::{
 use tracing::{debug, info, warn};
 use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, read_secret_file_ref, AgentHello,
-    AgentSessionDisconnect, AgentUpdateVerificationRequest, AgentUpdateVerificationResult,
-    CommandResume, Frame, GatewayAgentHelloIngest, GatewayAgentUpdateVerificationIngest,
-    GatewayCommandOutputIngest, GatewaySessionLifecycleIngest, GatewayTelemetryIngest,
+    AgentRuntimeConfigReloadRequest, AgentSessionDisconnect, AgentUpdateVerificationRequest,
+    AgentUpdateVerificationResult, CommandResume, Frame, GatewayAgentHelloIngest,
+    GatewayAgentUpdateVerificationIngest, GatewayCommandOutputIngest,
+    GatewayRuntimeConfigReloadRequest, GatewaySessionLifecycleIngest, GatewayTelemetryIngest,
     GatewayTerminalOutputIngest, JobAck, JobCancelAck, MessageKind, NoiseFrameStream,
     SequencedCommandOutput, ServerHello, SuiteConfig, TelemetryEnvelope,
 };
@@ -987,6 +988,30 @@ async fn handle_agent_frame(
             )
             .await?;
             *outbound_seq += 1;
+        }
+        MessageKind::ConfigUpdate => {
+            let request: AgentRuntimeConfigReloadRequest = decode_json(&frame.decoded_payload()?)?;
+            validate_telemetry_session_client_id(client_id.as_deref(), &request.client_id)?;
+            let active_process_incarnation_id = process_incarnation_id
+                .as_ref()
+                .copied()
+                .context("runtime_config_reload_before_hello")?;
+            let target_key = request.client_id.clone();
+            let ingest = GatewayRuntimeConfigReloadRequest {
+                gateway_id: context.args.gateway_id.clone(),
+                gateway_session_id: context.session_id,
+                process_incarnation_id: active_process_incarnation_id,
+                remote_ip: Some(context.remote_ip.to_string()),
+                request,
+            };
+            context
+                .control
+                .post(
+                    &target_key,
+                    "/internal/v1/gateway/runtime-config-reload",
+                    &ingest,
+                )
+                .await?;
         }
         MessageKind::CommandOutput => {
             let sequenced: SequencedCommandOutput = decode_json(&frame.decoded_payload()?)?;

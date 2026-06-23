@@ -12,7 +12,7 @@ use vpsman_common::{
     TunnelEndpointSide, TunnelPlan, MANAGED_BIRD2_FILE,
 };
 
-use crate::network_apply::{
+use crate::network_managed_files::{
     managed_block, managed_block_bounds, managed_destination, read_existing_regular_file,
 };
 use crate::network_runtime::render_runtime_adapter_command;

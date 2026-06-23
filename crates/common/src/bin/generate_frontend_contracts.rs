@@ -727,22 +727,6 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
         ),
         golden_vector("config_read", JobCommand::ConfigRead),
         golden_vector(
-            "hot_config",
-            JobCommand::HotConfig {
-                apply_mode: "full_override".to_string(),
-                toml: "version = 1\n".to_string(),
-                preserve_redacted: Some(false),
-                base_config_sha256_hex: Some("55".repeat(32)),
-            },
-        ),
-        golden_vector(
-            "source_config_patch",
-            JobCommand::SourceConfigPatch {
-                apply_mode: "incremental_patch".to_string(),
-                toml: "[source_templates]\n".to_string(),
-            },
-        ),
-        golden_vector(
             "agent_update",
             JobCommand::UpdateAgent {
                 artifact_url: "https://updates.example/vpsman-agent".to_string(),
@@ -1120,30 +1104,6 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
                     restored_size_bytes: 4,
                     restored_sha256_hex: "bb".repeat(32),
                 }],
-            },
-        ),
-        golden_vector(
-            "network_apply",
-            JobCommand::NetworkApply {
-                plan: Box::new(network_plan.clone()),
-                side: TunnelEndpointSide::Left,
-            },
-        ),
-        golden_vector(
-            "network_ospf_cost_update",
-            JobCommand::NetworkOspfCostUpdate {
-                plan: Box::new(network_plan.clone()),
-                side: TunnelEndpointSide::Left,
-                current_ospf_cost: 120,
-                recommended_ospf_cost: 80,
-                bird2_sha256_hex: "ee".repeat(32),
-            },
-        ),
-        golden_vector(
-            "network_rollback",
-            JobCommand::NetworkRollback {
-                plan: Box::new(network_plan.clone()),
-                side: TunnelEndpointSide::Right,
             },
         ),
         golden_vector(

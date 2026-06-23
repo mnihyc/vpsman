@@ -32,20 +32,6 @@ pub fn validate_agent_config_shape(config: &AgentConfig) -> Result<(), String> {
     Ok(())
 }
 
-pub fn validate_hot_config_update(
-    current: &AgentConfig,
-    updated: &AgentConfig,
-) -> Result<(), String> {
-    validate_agent_config_shape(updated)?;
-    if updated.client_id != current.client_id {
-        return Err("hot_config_cannot_change_client_id".to_string());
-    }
-    if updated.noise != current.noise {
-        return Err("hot_config_cannot_change_noise_identity".to_string());
-    }
-    Ok(())
-}
-
 pub fn validate_incremental_config_patch_section(section: &str) -> Result<(), String> {
     if INCREMENTAL_CONFIG_PATCH_SECTIONS.contains(&section) {
         Ok(())
@@ -72,7 +58,7 @@ fn validate_identifier(value: &str, field: &str, max_len: usize) -> Result<(), S
 
 fn validate_display_name(value: &str) -> Result<(), String> {
     if value.trim().is_empty() {
-        return Err("display_name_required".to_string());
+        return Ok(());
     }
     if value.len() > 256 || value.as_bytes().contains(&0) {
         return Err("display_name_invalid".to_string());

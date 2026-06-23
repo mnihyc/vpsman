@@ -353,16 +353,8 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_network::tunnel_promote_custom_adapter(api_url, token, request)?;
             Ok(None)
         }
-        Command::TunnelApply(request) => {
-            commands_network::tunnel_apply(api_url, token, request)?;
-            Ok(None)
-        }
         Command::TunnelOspfCostUpdate(request) => {
             commands_network::tunnel_ospf_cost_update(api_url, token, request)?;
-            Ok(None)
-        }
-        Command::TunnelRollback(request) => {
-            commands_network::tunnel_rollback(api_url, token, request)?;
             Ok(None)
         }
         Command::TunnelStatus(request) => {

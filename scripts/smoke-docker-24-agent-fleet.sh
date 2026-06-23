@@ -20,10 +20,6 @@ long_running_secs="${VPSMAN_DOCKER_FLEET_LONG_RUNNING_SECS:-0}"
 simulate_api_backlog="${VPSMAN_DOCKER_FLEET_SIMULATE_API_BACKLOG:-0}"
 gateway_command_output_ttl_secs="${VPSMAN_DOCKER_FLEET_COMMAND_OUTPUT_TTL_SECS:-86400}"
 bulk_max_timeout_secs=45
-agent_max_job_timeout_secs=$((bulk_max_timeout_secs + 15))
-if ((long_running_secs > 0)); then
-  agent_max_job_timeout_secs=$((long_running_secs + 120))
-fi
 rollup_bucket_secs=60
 
 run_id="docker-fleet-$(date +%s%N)"
@@ -264,8 +260,7 @@ for ((i = 1; i <= agent_count; i += 1)); do
     "$display_name" \
     "$tag_csv" \
     "$gateway_public_hex" \
-    "primary=$gateway_addr=10" \
-    "$agent_max_job_timeout_secs"
+    "primary=$gateway_addr=10"
   enrolled_client_id="$logical_client_id"
   [[ -n "$first_client_id" ]] || first_client_id="$enrolled_client_id"
   if [[ -z "$second_client_id" && "$enrolled_client_id" != "$first_client_id" ]]; then
@@ -546,6 +541,7 @@ api_post "/api/v1/tunnel-plans" "$(jq -n \
   "latency_ms": 12,
   "packet_loss_ratio": 0,
   "preference": 1.0,
+  "enabled": true,
   "confirmed": true
 }')" | jq -e '.name == "docker-fleet-gre" and .status == "planned"' >/dev/null
 

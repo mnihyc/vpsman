@@ -1,10 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { DatabaseZap, Pencil, Plus, SlidersHorizontal, UserPlus } from "lucide-react";
-import {
-  clampJobMaxTimeoutSecs,
-  DEFAULT_MAX_JOB_TIMEOUT_SECS,
-  MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
-} from "../jobMaxTimeout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -12,16 +7,13 @@ import {
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
-import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { sourceReadinessStatusBadgeClass } from "../jobStatusPresentation";
 import { usePanelDisplaySettings } from "../panelDisplay";
-import { buildPrivilegeForJobOperation, type PrivilegeAssertion, type PrivilegeMaterial } from "../privilege";
 import {
   agentsMatchingExpression,
   parseSearchExpression,
-  selectorExpressionForClientIds,
 } from "../searchExpression";
 import type {
   AgentView,
@@ -29,10 +21,8 @@ import type {
   AssignSourceTemplateResponse,
   BulkResolveResponse,
   CloneSourceTemplateRequest,
-  CreateJobRequest,
-  CreateJobResponse,
   CreateSourceTemplateRequest,
-  SourceConfigPatchResponse,
+  TemplateRuntimeConfigResponse,
   SourceTemplateAssignmentRecord,
   SourceTemplateDiffRequest,
   SourceTemplateDiffResponse,
@@ -40,7 +30,6 @@ import type {
   SourceTemplateTestRequest,
   SourceTemplateTestResponse,
   SourceStatusRecord,
-  JobOperation,
   JsonValue,
   UpdateSourceTemplateRequest,
   UpdateSourceTemplateResponse,
@@ -73,7 +62,7 @@ const SOURCE_TEMPLATE_DOMAINS = [
 
 const DEFAULT_DEFINITION = "{\n  \"source\": \"custom\"\n}";
 const SOURCE_TEMPLATE_SELECTOR_STORAGE_KEY = "vpsman.sourceTemplates.assignmentSelectorExpression";
-type SourceTemplateConfirmationAction = "assignment" | "apply" | "lifecycle-update";
+type SourceTemplateConfirmationAction = "assignment" | "lifecycle-update";
 
 type SourceTemplateAssignmentSnapshot = {
   domain: string;
@@ -83,18 +72,6 @@ type SourceTemplateAssignmentSnapshot = {
   targetClientIds: string[];
   targets: AgentView[];
   assignments: AssignSourceTemplateResponse["assignments"];
-};
-
-type SourceTemplateApplySnapshot = {
-  clientId: string;
-  clientLabel: string;
-  jobId: string;
-  operation: JobOperation;
-  payloadHashHex: string;
-  privilegeAssertion: PrivilegeAssertion;
-  rendered: SourceConfigPatchResponse;
-  selectorExpression: string;
-  maxTimeoutSecs: number;
 };
 
 type SourceTemplateLifecycleUpdateSnapshot = {
@@ -112,17 +89,13 @@ export function SourceTemplatePanel({
   sourceStatus,
   onAssignTemplate,
   onCloneTemplate,
-  onCreateJob,
   onCreateTemplate,
   onDiffTemplate,
-  onOpenPrivilegeUnlock,
-  onRenderHotConfig,
+  onRenderTemplateRuntimeConfig,
   onResolveBulk,
   onTestTemplate,
   onUpdateTemplate,
-  privilegeMaterial,
   templates,
-  setPrivilegeMaterial,
 }: {
   activeSubpage: "templates";
   agents: AgentView[];
@@ -130,17 +103,13 @@ export function SourceTemplatePanel({
   sourceStatus: SourceStatusRecord[];
   onAssignTemplate: (request: AssignSourceTemplateRequest) => Promise<AssignSourceTemplateResponse>;
   onCloneTemplate: (templateId: string, request: CloneSourceTemplateRequest) => Promise<void>;
-  onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onCreateTemplate: (request: CreateSourceTemplateRequest) => Promise<void>;
   onDiffTemplate: (templateId: string, request: SourceTemplateDiffRequest) => Promise<SourceTemplateDiffResponse>;
-  onOpenPrivilegeUnlock: () => void;
-  onRenderHotConfig: (clientId: string) => Promise<SourceConfigPatchResponse>;
+  onRenderTemplateRuntimeConfig: (clientId: string) => Promise<TemplateRuntimeConfigResponse>;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
   onTestTemplate: (templateId: string, request: SourceTemplateTestRequest) => Promise<SourceTemplateTestResponse>;
   onUpdateTemplate: (templateId: string, request: UpdateSourceTemplateRequest) => Promise<UpdateSourceTemplateResponse>;
-  privilegeMaterial: PrivilegeMaterial | null;
   templates: SourceTemplateRecord[];
-  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const createFormRef = useRef<HTMLFormElement | null>(null);
@@ -158,10 +127,8 @@ export function SourceTemplatePanel({
     readLocalString(SOURCE_TEMPLATE_SELECTOR_STORAGE_KEY, ""),
   );
   const [renderClientId, setRenderClientId] = useState("");
-  const [renderedHotConfig, setRenderedHotConfig] = useState<SourceConfigPatchResponse | null>(null);
-  const [applyMaxTimeoutSecs, setApplyMaxTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
-  const [lastApplyJob, setLastApplyJob] = useState<CreateJobResponse | null>(null);
-  const [lastApplyPayloadHash, setLastApplyPayloadHash] = useState<string | null>(null);
+  const [renderedTemplateRuntimeConfig, setRenderedTemplateRuntimeConfig] =
+    useState<TemplateRuntimeConfigResponse | null>(null);
   const [lifecycleTemplateId, setLifecycleTemplateId] = useState("");
   const [lifecycleDescription, setLifecycleDescription] = useState("");
   const [lifecycleDefinitionText, setLifecycleDefinitionText] = useState(DEFAULT_DEFINITION);
@@ -176,7 +143,6 @@ export function SourceTemplatePanel({
   const [pendingConfirmation, setPendingConfirmation] = useState<SourceTemplateConfirmationAction | null>(null);
   const [assignmentSnapshot, setAssignmentSnapshot] =
     useState<SourceTemplateAssignmentSnapshot | null>(null);
-  const [applySnapshot, setApplySnapshot] = useState<SourceTemplateApplySnapshot | null>(null);
   const [lifecycleUpdateSnapshot, setLifecycleUpdateSnapshot] =
     useState<SourceTemplateLifecycleUpdateSnapshot | null>(null);
   const {
@@ -231,10 +197,8 @@ export function SourceTemplatePanel({
     lifecycleStatus ??
     (sourceStatus.length > 0 ? sourceStatusSummary : null) ??
     (lastAssignment
-      ? `${lastAssignment.target_count} source template assignments evaluated`
-      : lastApplyJob
-        ? `Source template patch job ${lastApplyJob.job_id} ${lastApplyJob.status}; ${lastApplyJob.target_count} target`
-      : `${templates.length} source templates across ${new Set(templates.map((template) => template.domain)).size} domains`);
+      ? `${lastAssignment.target_count} template assignments evaluated`
+      : `${templates.length} templates across ${new Set(templates.map((template) => template.domain)).size} domains`);
   const sourceStatusColumns = useMemo<ConsoleDataGridColumn<SourceStatusRecord>[]>(
     () => [
       {
@@ -268,7 +232,7 @@ export function SourceTemplatePanel({
             <small>{row.template_scope}</small>
           </span>
         ),
-        header: "Source template",
+        header: "Template",
         id: "template",
         searchValue: (row) => `${row.template_name} ${row.template_scope}`,
         sortValue: (row) => row.template_name,
@@ -310,7 +274,7 @@ export function SourceTemplatePanel({
             <small>{template.description ?? (template.built_in ? "built-in" : "custom")}</small>
           </span>
         ),
-        header: "Source template",
+        header: "Template",
         id: "template",
         searchValue: (template) => `${template.name} ${template.description ?? ""}`,
         sortValue: (template) => template.name,
@@ -357,7 +321,7 @@ export function SourceTemplatePanel({
         description: (rows) =>
           rows.length === 1
             ? `Load ${rows[0].name} into the assignment form.`
-            : "Select exactly one source template to assign.",
+            : "Select exactly one template to assign.",
         disabled: (rows) => rows.length !== 1,
         icon: <UserPlus size={14} />,
         onSelect: (rows) => prepareTemplateAssignment(rows[0]),
@@ -367,7 +331,7 @@ export function SourceTemplatePanel({
         description: (rows) =>
           rows.length === 1
             ? `Load ${rows[0].name} into the lifecycle form.`
-            : "Select exactly one source template to edit or test.",
+            : "Select exactly one template to edit or test.",
         disabled: (rows) => rows.length !== 1,
         icon: <Pencil size={14} />,
         onSelect: (rows) => prepareTemplateLifecycle(rows[0]),
@@ -485,106 +449,20 @@ export function SourceTemplatePanel({
     });
   }
 
-  async function previewHotConfig(event: FormEvent<HTMLFormElement>) {
+  async function previewTemplateRuntimeConfig(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     clearApplyConfirmation();
     const reviewGeneration = captureReviewGeneration();
     const frozenClientId = renderClientId;
-    setReviewStatus("Rendering source config");
+    setReviewStatus("Rendering template runtime config");
     try {
       await runPanelAction(setPending, setActionError, async () => {
         await waitForReviewRender();
-        const rendered = await onRenderHotConfig(frozenClientId);
+        const rendered = await onRenderTemplateRuntimeConfig(frozenClientId);
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
         }
-        setRenderedHotConfig(rendered);
-        setLastApplyJob(null);
-        setApplySnapshot(null);
-        setPendingConfirmation((current) => (current === "apply" ? null : current));
-      });
-    } finally {
-      if (isReviewGenerationCurrent(reviewGeneration)) {
-        setReviewStatus(null);
-      }
-    }
-  }
-
-  async function applyRenderedHotConfig(snapshot: SourceTemplateApplySnapshot) {
-    await runPanelAction(setPending, setActionError, async () => {
-      const response = await onCreateJob({
-        argv: [],
-        selector_expression: snapshot.selectorExpression,
-        target_client_ids: [snapshot.clientId],
-        command: "source_config_patch",
-        confirmed: true,
-        destructive: false,
-        force_unprivileged: false,
-        job_id: snapshot.jobId,
-        operation: snapshot.operation,
-        privileged: true,
-        privilege_assertion: snapshot.privilegeAssertion,
-        max_timeout_secs: snapshot.maxTimeoutSecs,
-      });
-      setRenderedHotConfig(snapshot.rendered);
-      setLastApplyJob(response);
-      setLastApplyPayloadHash(snapshot.payloadHashHex);
-      setApplySnapshot(null);
-    });
-  }
-
-  async function confirmApplyRenderedHotConfig() {
-    clearApplyConfirmation();
-    const reviewGeneration = captureReviewGeneration();
-    const frozenClientId = renderClientId;
-    const frozenRendered = renderedHotConfig?.client_id === renderClientId ? renderedHotConfig : null;
-    const frozenPrivilegeMaterial = privilegeMaterial;
-    const maxTimeoutSecs = clampJobMaxTimeoutSecs(applyMaxTimeoutSecs);
-    setReviewStatus("Preparing template apply review");
-    try {
-      await runPanelAction(setPending, setActionError, async () => {
-        await waitForReviewRender();
-        if (!frozenClientId) {
-          throw new Error("Select a VPS before applying a source template patch");
-        }
-        if (!frozenPrivilegeMaterial) {
-          throw new Error("Unlock privilege before applying a source template patch");
-        }
-        const rendered = frozenRendered ?? await onRenderHotConfig(frozenClientId);
-        if (!isReviewGenerationCurrent(reviewGeneration)) {
-          return;
-        }
-        const operation: JobOperation = {
-          type: "source_config_patch",
-          apply_mode: "incremental_patch",
-          toml: rendered.toml,
-        };
-        const selectorExpression = selectorExpressionForClientIds([frozenClientId]);
-        const built = await buildPrivilegeForJobOperation({
-          clientIds: [frozenClientId],
-          commandType: "source_config_patch",
-          operation,
-          privilegeMaterial: frozenPrivilegeMaterial,
-          selectorExpression,
-          maxTimeoutSecs,
-        });
-        if (!isReviewGenerationCurrent(reviewGeneration)) {
-          return;
-        }
-        const target = agents.find((agent) => agent.id === frozenClientId);
-        setRenderedHotConfig(rendered);
-        setApplySnapshot({
-          clientId: frozenClientId,
-          clientLabel: target ? formatVpsName(target, vpsNameDisplayMode) : frozenClientId,
-          jobId: crypto.randomUUID(),
-          operation,
-          payloadHashHex: built.payloadHashHex,
-          privilegeAssertion: built.privilegeAssertion,
-          rendered,
-          selectorExpression,
-          maxTimeoutSecs,
-        });
-        setPendingConfirmation("apply");
+        setRenderedTemplateRuntimeConfig(rendered);
       });
     } finally {
       if (isReviewGenerationCurrent(reviewGeneration)) {
@@ -681,15 +559,9 @@ export function SourceTemplatePanel({
         return;
       }
       await executeAssignment();
-    } else if (action === "apply") {
-      if (!applySnapshot) {
-        setActionError("Template apply confirmation snapshot is missing; review the apply again");
-        return;
-      }
-      await applyRenderedHotConfig(applySnapshot);
     } else {
       if (!lifecycleUpdateSnapshot) {
-        setActionError("Source template update confirmation snapshot is missing; review the update again");
+        setActionError("Template update confirmation snapshot is missing; review the update again");
         return;
       }
       await executeLifecycleTemplateUpdate(lifecycleUpdateSnapshot);
@@ -698,22 +570,18 @@ export function SourceTemplatePanel({
 
   const sourceTemplateConfirmationTitle =
     pendingConfirmation === "assignment"
-      ? "Confirm source template assignment"
-      : pendingConfirmation === "apply"
-        ? "Apply source template patch"
-        : "Update source template";
+      ? "Confirm template assignment"
+      : "Update template";
   const sourceTemplateConfirmationDetail =
     pendingConfirmation === "assignment"
-      ? "Confirm the chosen source template and resolved VPS assignment set."
-      : pendingConfirmation === "apply"
-        ? "Confirm the rendered incremental config patch for the selected VPS."
-        : "Confirm updating this source template for assigned VPSs.";
+      ? "Confirm the chosen template and resolved VPS assignment set."
+      : "Confirm updating this template for assigned VPSs.";
   const sourceTemplateConfirmationItems =
     pendingConfirmation === "assignment"
       ? [
           { label: "Domain", value: assignmentSnapshot?.domain ?? assignDomain },
           {
-            label: "Source template",
+            label: "Template",
             value:
               assignmentSnapshot?.templateName ??
               (effectiveTemplateId ? shortId(effectiveTemplateId) : "none"),
@@ -737,24 +605,13 @@ export function SourceTemplatePanel({
               : "Review assignment to freeze targets",
           },
         ]
-      : pendingConfirmation === "apply"
-        ? [
-            {
-              label: "VPS",
-              value: applySnapshot?.clientLabel ?? "none",
-            },
-            { label: "Max timeout", value: `${applySnapshot?.maxTimeoutSecs ?? 0}s` },
-            { label: "Payload", value: applySnapshot?.payloadHashHex ? shortId(applySnapshot.payloadHashHex) : "-" },
-          ]
-        : [
-            { label: "Source template", value: lifecycleUpdateSnapshot?.templateName ?? "none" },
+      : [
+            { label: "Template", value: lifecycleUpdateSnapshot?.templateName ?? "none" },
             { label: "Assigned", value: `${lifecycleUpdateSnapshot?.assignedClientCount ?? 0} VPSs` },
           ];
 
   function clearApplyConfirmation() {
     invalidateReviewGeneration();
-    setApplySnapshot(null);
-    setPendingConfirmation((current) => (current === "apply" ? null : current));
     setReviewStatus(null);
   }
 
@@ -822,8 +679,6 @@ export function SourceTemplatePanel({
         onCancel={() => {
           if (pendingConfirmation === "assignment") {
             setAssignmentSnapshot(null);
-          } else if (pendingConfirmation === "apply") {
-            setApplySnapshot(null);
           } else if (pendingConfirmation === "lifecycle-update") {
             setLifecycleUpdateSnapshot(null);
           }
@@ -833,7 +688,7 @@ export function SourceTemplatePanel({
         open={pendingConfirmation !== null}
         pending={pending}
         title={sourceTemplateConfirmationTitle}
-        tone={pendingConfirmation === "apply" ? "danger" : "normal"}
+        tone="normal"
       />
       )}
 
@@ -844,12 +699,12 @@ export function SourceTemplatePanel({
         defaultPageSize={10}
         expandOnRowClick
         getRowId={(template) => template.id}
-        itemLabel="source templates"
+        itemLabel="templates"
         empty={
           <div className="emptyState">
             <DatabaseZap size={22} />
-            <strong>No source templates</strong>
-            <span>{actionError ?? "No source template records match the current search."}</span>
+            <strong>No templates</strong>
+            <span>{actionError ?? "No template records match the current search."}</span>
           </div>
         }
         renderExpandedRow={(template) => (
@@ -892,9 +747,9 @@ export function SourceTemplatePanel({
         )}
         rowActions={templateActions}
         rows={templates}
-        searchPlaceholder="Search source templates"
+        searchPlaceholder="Search templates"
         storageKey="vpsman.sourceTemplates.registry"
-        title="Source template registry"
+        title="Template registry"
         toolbarActions={
           <button className="secondaryAction compactAction" onClick={prepareNewTemplate} type="button">
             <Plus size={15} />
@@ -954,7 +809,7 @@ export function SourceTemplatePanel({
       <div className="timeline templateAssignmentSummary">
         <SlidersHorizontal size={18} />
         <div>
-          <strong>{assignments.length} source template assignment records</strong>
+          <strong>{assignments.length} template assignment records</strong>
           <span>{assignmentSummary(assignments, lastAssignment)}</span>
         </div>
       </div>
@@ -963,9 +818,9 @@ export function SourceTemplatePanel({
       {showTemplateManagement && (
       <div className="managementGrid templateManagementGrid">
         <form className="compactForm templateForm" onSubmit={submitCreate} ref={createFormRef}>
-          <strong>Source template definition</strong>
+          <strong>Template definition</strong>
           <span className="formHint">
-            Create one reusable source template. Scope decides whether it is shared or owned by one VPS.
+            Create one reusable template. Scope decides whether it is shared or owned by one VPS.
           </span>
           <div className="formRow templateFormRow">
             <label>
@@ -1019,7 +874,7 @@ export function SourceTemplatePanel({
           <label>
             <span>Definition JSON</span>
             <textarea
-              aria-label="Source template definition JSON"
+              aria-label="Template definition JSON"
               onChange={(event) => setDefinitionText(event.target.value)}
               value={definitionText}
             />
@@ -1029,14 +884,14 @@ export function SourceTemplatePanel({
             disabled={pending || !createName.trim() || (createScope === "vps_local" && !ownerClientId)}
             type="submit"
           >
-            Save source template
+            Save template
           </button>
         </form>
 
         <form className="compactForm templateForm" onSubmit={submitAssignment} ref={assignmentFormRef}>
-          <strong>Assign source template</strong>
+          <strong>Assign template</strong>
           <span className="formHint">
-            Assign one source template to a selector-resolved VPS set; preview target count before confirmation.
+            Assign one template to a selector-resolved VPS set; preview target count before confirmation.
           </span>
           <div className="formRow templateFormRow">
             <label>
@@ -1115,22 +970,22 @@ export function SourceTemplatePanel({
           )}
         </form>
 
-        <form className="compactForm templateForm" onSubmit={previewHotConfig}>
-          <strong>Render template patch</strong>
+        <form className="compactForm templateForm" onSubmit={previewTemplateRuntimeConfig}>
+          <strong>Render runtime config</strong>
           <span className="formHint">
-            Review the agent config patch generated from one VPS's assigned source templates.
+            Review the runtime config generated from one VPS's assigned templates.
           </span>
           <label>
             <span>Review VPS</span>
             <VpsCombobox
               agents={agents}
-              ariaLabel="Source template patch preview VPS"
+              ariaLabel="Template runtime config preview VPS"
               onChange={(value) => {
                 if (value === renderClientId) {
                   return;
                 }
                 setRenderClientId(value);
-                setRenderedHotConfig(null);
+                setRenderedTemplateRuntimeConfig(null);
                 clearApplyConfirmation();
               }}
               placeholder="Search review VPS"
@@ -1138,67 +993,32 @@ export function SourceTemplatePanel({
             />
           </label>
           <button className="secondaryAction" disabled={pending || !renderClientId} type="submit">
-            Render patch
+            Render config
           </button>
-          {renderedHotConfig && (
+          {renderedTemplateRuntimeConfig && (
             <div className="configPreview">
               <div className="previewMeta">
-                <span>{renderedHotConfig.assignments.length} resolved source templates</span>
-                <span>{renderedHotConfig.unsupported_domains.length} notes</span>
+                <span>{renderedTemplateRuntimeConfig.assignments.length} resolved templates</span>
+                <span>{renderedTemplateRuntimeConfig.unsupported_domains.length} notes</span>
               </div>
-              <textarea aria-label="Rendered source template patch TOML" readOnly value={renderedHotConfig.toml} />
+              <textarea aria-label="Rendered template runtime config TOML" readOnly value={renderedTemplateRuntimeConfig.toml} />
             </div>
           )}
-          <div className="inlinePrivilege">
-            <label>
-              <span>Max timeout seconds</span>
-              <input
-                aria-label="Template apply max timeout seconds"
-                min={1}
-                max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
-                onChange={(event) => {
-                  setApplyMaxTimeoutSecs(Number(event.target.value));
-                  clearApplyConfirmation();
-                }}
-                type="number"
-                value={applyMaxTimeoutSecs}
-              />
-            </label>
-          </div>
-          <PrivilegeVaultBox
-            labelPrefix="Source"
-            lastPayloadHash={lastApplyPayloadHash}
-            onOpenUnlock={onOpenPrivilegeUnlock}
-            onPrivilegeMaterialChange={(material) => {
-              setPrivilegeMaterial(material);
-              clearApplyConfirmation();
-            }}
-            privilegeMaterial={privilegeMaterial}
-            unlockRedirectLabel="Unlock source privilege"
-          />
-          {pendingConfirmation !== "apply" && (
-            <button
-              className="secondaryAction"
-              disabled={pending || !renderClientId || !privilegeMaterial}
-              onClick={() => void confirmApplyRenderedHotConfig()}
-              type="button"
-            >
-              Review apply
-            </button>
-          )}
-          {lastApplyJob && <span>Job {shortId(lastApplyJob.job_id)} {lastApplyJob.status}</span>}
+          <span className="formHint">
+            Template assignment and template updates are effective immediately; this render is for inspection only.
+          </span>
         </form>
 
         <form className="compactForm templateForm" onSubmit={(event) => event.preventDefault()} ref={lifecycleFormRef}>
-          <strong>Source template lifecycle</strong>
+          <strong>Template lifecycle</strong>
           <span className="formHint">
-            Diff, test, clone, or update a saved source template. Updates report affected VPS count before commit.
+            Diff, test, clone, or update a saved template. Updates report affected VPS count before commit.
           </span>
           <div className="formRow templateFormRow">
             <label>
               <span>Template</span>
               <select
-                aria-label="Lifecycle source template"
+                aria-label="Lifecycle template"
                 onChange={(event) => setLifecycleTemplateId(event.target.value)}
                 value={effectiveLifecycleTemplateId}
               >
@@ -1212,7 +1032,7 @@ export function SourceTemplatePanel({
             <label>
               <span>Clone name</span>
               <input
-                aria-label="Clone source template name"
+                aria-label="Clone template name"
                 onChange={(event) => setLifecycleCloneName(event.target.value)}
                 placeholder="shared:copy"
                 value={lifecycleCloneName}
@@ -1222,7 +1042,7 @@ export function SourceTemplatePanel({
           <label>
             <span>Description</span>
             <input
-              aria-label="Lifecycle source template description"
+              aria-label="Lifecycle template description"
               onChange={(event) => {
                 setLifecycleDescription(event.target.value);
                 clearLifecycleUpdateConfirmation();
@@ -1234,7 +1054,7 @@ export function SourceTemplatePanel({
           <label>
             <span>Definition JSON</span>
             <textarea
-              aria-label="Lifecycle source template definition JSON"
+              aria-label="Lifecycle template definition JSON"
               onChange={(event) => {
                 setLifecycleDefinitionText(event.target.value);
                 clearLifecycleUpdateConfirmation();
@@ -1306,7 +1126,7 @@ function defaultCloneName(name: string): string {
 function parseDefinition(value: string): JsonValue {
   const parsed = JSON.parse(value) as JsonValue;
   if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") {
-    throw new Error("Source template definition must be a JSON object");
+    throw new Error("Template definition must be a JSON object");
   }
   return parsed;
 }
@@ -1316,11 +1136,11 @@ function assignmentSummary(
   lastAssignment: AssignSourceTemplateResponse | null,
 ): string {
   if (lastAssignment?.confirmation_required) {
-    return "Confirmation required before changing multiple VPS source template selections";
+    return "Confirmation required before changing multiple VPS template selections";
   }
   const domains = new Set(assignments.map((assignment) => assignment.domain));
   return domains.size === 0
-    ? "No VPS source template assignments loaded"
+    ? "No VPS template assignments loaded"
     : `${domains.size} domains with explicit VPS source selections`;
 }
 

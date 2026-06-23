@@ -18,11 +18,12 @@ use vpsman_common::CURRENT_COMMAND_PROTOCOL_VERSION;
 use vpsman_common::{
     decode_json, decode_noise_key_hex, encode_json, job_command_min_supported_protocol_version,
     job_command_protocol_version, job_command_safety, job_command_type_label,
-    maybe_compress_payload, payload_hash, AgentCapabilitySnapshot, AgentConfig, AgentHello,
-    AgentPrivilegeMode, AgentSessionDisconnect, AgentUpdateVerificationResult, CommandOutput,
-    CommandResume, Frame, JobAck, JobCancelAck, JobCancelRequest, JobCommand, JobCommandSafety,
-    JobRequest, MessageKind, NoiseFrameStream, OutputStream, SequencedCommandOutput,
-    ServerEndpoint, ServerHello, TelemetryEnvelope, TerminalStreamOutput,
+    maybe_compress_payload, payload_hash, runtime_config_content_hash, AgentCapabilitySnapshot,
+    AgentConfig, AgentHello, AgentPrivilegeMode, AgentRuntimeConfig,
+    AgentRuntimeConfigReloadRequest, AgentSessionDisconnect, AgentUpdateVerificationResult,
+    CommandOutput, CommandResume, Frame, JobAck, JobCancelAck, JobCancelRequest, JobCommand,
+    JobCommandSafety, JobRequest, MessageKind, NoiseFrameStream, OutputStream,
+    SequencedCommandOutput, ServerEndpoint, ServerHello, TelemetryEnvelope, TerminalStreamOutput,
     MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
@@ -33,15 +34,13 @@ use crate::{
         command_canceled_output, command_timeout_output, run_cancelable, CommandCancelToken,
         CommandCanceled,
     },
-    config_update::{apply_hot_config_update, apply_source_config_patch, read_redacted_config},
+    config_update::read_redacted_config,
     executor::execute_job_command_with_config_cancel_and_output_sink,
-    network_apply::{
-        execute_network_apply_command, execute_network_ospf_cost_update_command,
-        execute_network_rollback_command, NetworkApplyInput, NetworkOspfCostUpdateInput,
-        NetworkRollbackInput,
-    },
     network_probe::{execute_network_probe_command, NetworkProbeInput},
-    network_runtime::{execute_runtime_tunnel_reconcile_report, NetworkRuntimeReconcileInput},
+    network_runtime::{
+        execute_runtime_tunnel_reconcile_report, execute_runtime_tunnel_remove_report,
+        NetworkRuntimeReconcileInput, NetworkRuntimeRemoveInput,
+    },
     network_speed::{execute_network_speed_test_command, NetworkSpeedTestInput},
     network_status::{execute_network_status_command, NetworkStatusInput},
     restore::{execute_restore_command, RestoreCommandInput},
@@ -170,6 +169,7 @@ async fn connect_and_stream(
     mark_gateway_connected().await;
 
     let mut seq = 2_u64;
+    request_runtime_config_reload(&mut stream, &mut seq, config).await?;
     for output in drain_pending_terminal_final_events().await {
         send_json_frame(
             &mut stream,
@@ -339,6 +339,24 @@ async fn connect_and_stream(
     }
 }
 
+async fn request_runtime_config_reload(
+    stream: &mut NoiseFrameStream<TcpStream>,
+    seq: &mut u64,
+    config: &AgentConfig,
+) -> Result<()> {
+    let runtime_config = AgentRuntimeConfig::from_agent_config(0, config);
+    let current_content_hash = runtime_config_content_hash(&runtime_config)
+        .context("failed to hash current runtime config")?;
+    let request = AgentRuntimeConfigReloadRequest {
+        client_id: config.client_id.clone(),
+        current_content_hash,
+        reason: "agent_reconnect_runtime_config_check".to_string(),
+    };
+    send_json_frame(stream, MessageKind::ConfigUpdate, 0, *seq, &request).await?;
+    *seq += 1;
+    Ok(())
+}
+
 async fn connect_tcp_endpoint(endpoint: &str, max_timeout_secs: u64) -> Result<TcpStream> {
     let mut addrs = tokio::net::lookup_host(endpoint)
         .await
@@ -498,6 +516,109 @@ async fn reconcile_configured_runtime_tunnels(
     })
 }
 
+async fn apply_runtime_config_sync(
+    job_id: uuid::Uuid,
+    config: &mut AgentConfig,
+    runtime_config: &AgentRuntimeConfig,
+    desired_version: u64,
+    reason: &str,
+) -> Result<Vec<CommandOutput>> {
+    anyhow::ensure!(
+        runtime_config.version == desired_version,
+        "runtime config version mismatch"
+    );
+    let previous_tunnels = config.network.runtime_status_telemetry_plans.clone();
+    let desired_tunnels = runtime_config
+        .network
+        .runtime_status_telemetry_plans
+        .clone();
+    let stale_tunnels = previous_tunnels
+        .iter()
+        .filter(|previous| {
+            !desired_tunnels
+                .iter()
+                .any(|desired| runtime_tunnel_identity_matches(previous, desired))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut removals = Vec::with_capacity(stale_tunnels.len());
+    for stale in &stale_tunnels {
+        match execute_runtime_tunnel_remove_report(NetworkRuntimeRemoveInput {
+            config,
+            plan: &stale.plan,
+            side: stale.endpoint_side,
+            max_timeout_secs: config.network.runtime_command_timeout_secs.max(1),
+            #[cfg(test)]
+            effective_uid_override: None,
+        })
+        .await
+        {
+            Ok(report) => removals.push(runtime_reconcile_summary(
+                "runtime_config_sync_remove",
+                stale.plan_id.as_deref(),
+                report,
+                None,
+            )),
+            Err(error) => removals.push(runtime_reconcile_summary(
+                "runtime_config_sync_remove",
+                stale.plan_id.as_deref(),
+                serde_json::json!({
+                    "type": "runtime_tunnel_remove",
+                    "status": "failed",
+                    "plan": stale.plan.name,
+                    "interface": stale.plan.interface_name,
+                    "side": endpoint_side_name(stale.endpoint_side),
+                    "manager": stale.plan.runtime_control.manager,
+                }),
+                Some(error.to_string()),
+            )),
+        }
+    }
+
+    runtime_config.apply_to_agent_config(config);
+    let reconcile = reconcile_configured_runtime_tunnels(config, "runtime_config_sync").await;
+    let removal_failed = removals
+        .iter()
+        .any(|removal| removal.get("status").and_then(serde_json::Value::as_str) == Some("failed"));
+    let reconcile_failed =
+        reconcile.get("status").and_then(serde_json::Value::as_str) == Some("failed");
+    let status = if removal_failed || reconcile_failed {
+        "failed"
+    } else {
+        "applied"
+    };
+    let body = serde_json::json!({
+        "type": "runtime_config_sync",
+        "status": status,
+        "job_id": job_id,
+        "desired_version": desired_version,
+        "reason": reason,
+        "client_id": &config.client_id,
+        "removed_tunnel_count": removals.len(),
+        "removals": removals,
+        "reconcile": reconcile,
+        "bootstrap_config_persisted": false,
+    });
+    Ok(vec![CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: serde_json::to_vec(&body)?,
+        exit_code: Some(if status == "applied" { 0 } else { 1 }),
+        done: true,
+    }])
+}
+
+fn runtime_tunnel_identity_matches(
+    left: &vpsman_common::AgentRuntimeStatusTelemetryPlan,
+    right: &vpsman_common::AgentRuntimeStatusTelemetryPlan,
+) -> bool {
+    left.endpoint_side == right.endpoint_side
+        && left.plan_id == right.plan_id
+        && left.plan.name == right.plan.name
+        && left.plan.interface_name == right.plan.interface_name
+}
+
 fn runtime_reconcile_summary(
     trigger: &'static str,
     plan_id: Option<&str>,
@@ -577,26 +698,6 @@ fn log_supervisor_startup_reconcile(report: &serde_json::Value) {
         no_retries_remaining = report["no_retries_remaining"].as_u64().unwrap_or_default(),
         "process supervisor startup reconcile completed"
     );
-}
-
-fn attach_runtime_reconcile_report(
-    outputs: &mut [CommandOutput],
-    report: serde_json::Value,
-) -> Result<()> {
-    let Some(output) = outputs
-        .iter_mut()
-        .rev()
-        .find(|output| output.stream == OutputStream::Status && output.done)
-    else {
-        return Ok(());
-    };
-    let mut status: serde_json::Value =
-        serde_json::from_slice(&output.data).context("config update status output was not JSON")?;
-    if let Some(object) = status.as_object_mut() {
-        object.insert("runtime_reconcile".to_string(), report);
-        output.data = serde_json::to_vec(&status)?;
-    }
-    Ok(())
 }
 
 fn endpoint_side_name(side: vpsman_common::TunnelEndpointSide) -> &'static str {
@@ -1270,62 +1371,25 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
         return Ok(true);
     }
-    if let JobCommand::HotConfig {
-        apply_mode: _,
-        toml,
-        preserve_redacted,
-        base_config_sha256_hex,
+    if let JobCommand::RuntimeConfigSync {
+        desired_version,
+        reason,
+        config: runtime_config,
     } = &request.command
     {
-        let outputs = match apply_hot_config_update(
+        let outputs = match apply_runtime_config_sync(
             request.job_id,
             config,
-            config_path,
-            toml,
-            preserve_redacted.unwrap_or(false),
-            base_config_sha256_hex.as_deref(),
-        ) {
-            Ok(mut outputs) => {
-                let reconcile =
-                    reconcile_configured_runtime_tunnels(config, "hot_config_update").await;
-                log_configured_runtime_tunnel_reconcile(&reconcile);
-                if let Err(error) = attach_runtime_reconcile_report(&mut outputs, reconcile) {
-                    warn!(%error, "failed to attach runtime tunnel reconcile report to full config output");
-                }
-                outputs
-            }
-            Err(error) => {
-                command_result_outputs(request.job_id, "hot_config", max_timeout_secs, Err(error))
-            }
-        };
-        remember_completed_command_outputs(
-            command_runtime,
-            request.job_id,
-            request_payload_hash,
-            &outputs,
+            runtime_config,
+            *desired_version,
+            reason,
         )
-        .await?;
-        send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
-        return Ok(true);
-    }
-    if let JobCommand::SourceConfigPatch {
-        apply_mode: _,
-        toml,
-    } = &request.command
-    {
-        let outputs = match apply_source_config_patch(request.job_id, config, config_path, toml) {
-            Ok(mut outputs) => {
-                let reconcile =
-                    reconcile_configured_runtime_tunnels(config, "source_config_patch").await;
-                log_configured_runtime_tunnel_reconcile(&reconcile);
-                if let Err(error) = attach_runtime_reconcile_report(&mut outputs, reconcile) {
-                    warn!(%error, "failed to attach runtime tunnel reconcile report to source template config patch output");
-                }
-                outputs
-            }
+        .await
+        {
+            Ok(outputs) => outputs,
             Err(error) => command_result_outputs(
                 request.job_id,
-                "source_config_patch",
+                "runtime_config_sync",
                 max_timeout_secs,
                 Err(error),
             ),
@@ -1502,9 +1566,7 @@ async fn execute_authorized_command(
     let request_payload_hash = command_payload_hash(&request.command)?;
     cancel_token.check(operation_type)?;
     match &request.command {
-        JobCommand::ConfigRead
-        | JobCommand::HotConfig { .. }
-        | JobCommand::SourceConfigPatch { .. } => {
+        JobCommand::ConfigRead => {
             anyhow::bail!("config updates must run on the main agent task")
         }
         JobCommand::Backup {
@@ -1562,48 +1624,6 @@ async fn execute_authorized_command(
                 job_id: request.job_id,
                 source_restore_job_id: *source_restore_job_id,
                 restored_files,
-                max_timeout_secs,
-                cancel_token: cancel_token.clone(),
-            })
-            .await
-        }
-        JobCommand::NetworkApply { plan, side } => {
-            execute_network_apply_command(NetworkApplyInput {
-                job_id: request.job_id,
-                config: &config,
-                plan,
-                side: *side,
-                max_timeout_secs,
-                cancel_token: cancel_token.clone(),
-            })
-            .await
-        }
-        JobCommand::NetworkRollback { plan, side } => {
-            execute_network_rollback_command(NetworkRollbackInput {
-                job_id: request.job_id,
-                config: &config,
-                plan,
-                side: *side,
-                max_timeout_secs,
-                cancel_token: cancel_token.clone(),
-            })
-            .await
-        }
-        JobCommand::NetworkOspfCostUpdate {
-            plan,
-            side,
-            current_ospf_cost,
-            recommended_ospf_cost,
-            bird2_sha256_hex,
-        } => {
-            execute_network_ospf_cost_update_command(NetworkOspfCostUpdateInput {
-                job_id: request.job_id,
-                config: &config,
-                plan,
-                side: *side,
-                current_ospf_cost: *current_ospf_cost,
-                recommended_ospf_cost: *recommended_ospf_cost,
-                bird2_sha256_hex,
                 max_timeout_secs,
                 cancel_token: cancel_token.clone(),
             })

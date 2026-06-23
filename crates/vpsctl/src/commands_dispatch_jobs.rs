@@ -527,32 +527,6 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::HotConfig {
-            config_file,
-            clients,
-            tags,
-            password_env,
-            super_salt_hex,
-            privilege_ttl_secs,
-            max_timeout_secs,
-            confirmed,
-            force_unprivileged,
-        } => {
-            commands_config::hot_config(
-                api_url,
-                token,
-                config_file,
-                clients,
-                tags,
-                password_env,
-                super_salt_hex,
-                privilege_ttl_secs,
-                max_timeout_secs,
-                confirmed,
-                force_unprivileged,
-            )?;
-            Ok(None)
-        }
         Command::ConfigPatch {
             config_file,
             clients,
@@ -560,9 +534,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             password_env,
             super_salt_hex,
             privilege_ttl_secs,
-            max_timeout_secs,
             confirmed,
-            force_unprivileged,
         } => {
             commands_config::config_patch(
                 api_url,
@@ -573,9 +545,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 password_env,
                 super_salt_hex,
                 privilege_ttl_secs,
-                max_timeout_secs,
                 confirmed,
-                force_unprivileged,
             )?;
             Ok(None)
         }

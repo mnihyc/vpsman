@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    OspfCostPolicy, RuntimeTunnelCommand, TunnelConfigBackend, TunnelEndpointSide, TunnelPlan,
-    DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    auth::payload_hash, OspfCostPolicy, RuntimeTunnelCommand, TunnelConfigBackend,
+    TunnelEndpointSide, TunnelPlan, DEFAULT_MAX_JOB_TIMEOUT_SECS,
 };
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -15,12 +15,15 @@ pub struct ServerEndpoint {
     pub priority: u16,
 }
 
-pub const MAX_AGENT_HOT_CONFIG_BYTES: usize = 64 * 1024;
+pub const MAX_RUNTIME_CONFIG_PATCH_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_RUNTIME_CONFIG_FIELD_BYTES: usize = 4 * 1024;
+pub const MAX_RUNTIME_CONFIG_REASON_BYTES: usize = MAX_RUNTIME_CONFIG_FIELD_BYTES;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     pub client_id: String,
+    #[serde(default)]
     pub display_name: String,
     pub tcp_endpoints: Vec<ServerEndpoint>,
     #[serde(default)]
@@ -37,9 +40,91 @@ pub struct AgentConfig {
     pub telemetry: AgentTelemetryConfig,
     #[serde(default)]
     pub network: AgentNetworkConfig,
+    #[serde(default = "default_telemetry_light_secs")]
     pub telemetry_light_secs: u64,
+    #[serde(default = "default_telemetry_full_secs")]
     pub telemetry_full_secs: u64,
+    #[serde(default)]
     pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRuntimeConfig {
+    pub version: u64,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub backup: AgentBackupConfig,
+    #[serde(default)]
+    pub update: AgentUpdateConfig,
+    #[serde(default)]
+    pub execution: AgentExecutionConfig,
+    #[serde(default)]
+    pub telemetry: AgentTelemetryConfig,
+    #[serde(default)]
+    pub network: AgentNetworkConfig,
+    #[serde(default = "default_telemetry_light_secs")]
+    pub telemetry_light_secs: u64,
+    #[serde(default = "default_telemetry_full_secs")]
+    pub telemetry_full_secs: u64,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+impl AgentRuntimeConfig {
+    pub fn from_agent_config(version: u64, config: &AgentConfig) -> Self {
+        Self {
+            version,
+            display_name: config.display_name.clone(),
+            backup: config.backup.clone(),
+            update: config.update.clone(),
+            execution: config.execution.clone(),
+            telemetry: config.telemetry.clone(),
+            network: config.network.clone(),
+            telemetry_light_secs: config.telemetry_light_secs,
+            telemetry_full_secs: config.telemetry_full_secs,
+            tags: config.tags.clone(),
+        }
+    }
+
+    pub fn apply_to_agent_config(&self, config: &mut AgentConfig) {
+        if !self.display_name.is_empty() {
+            config.display_name = self.display_name.clone();
+        }
+        config.backup = self.backup.clone();
+        config.update = self.update.clone();
+        config.execution = self.execution.clone();
+        config.telemetry = self.telemetry.clone();
+        config.network = self.network.clone();
+        config.telemetry_light_secs = self.telemetry_light_secs;
+        config.telemetry_full_secs = self.telemetry_full_secs;
+        config.tags = self.tags.clone();
+    }
+}
+
+pub fn runtime_config_content_hash(config: &AgentRuntimeConfig) -> serde_json::Result<String> {
+    let mut normalized = config.clone();
+    normalized.version = 0;
+    let payload = serde_json::to_vec(&normalized)?;
+    Ok(payload_hash(&payload))
+}
+
+impl Default for AgentRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            display_name: String::new(),
+            backup: AgentBackupConfig::default(),
+            update: AgentUpdateConfig::default(),
+            execution: AgentExecutionConfig::default(),
+            telemetry: AgentTelemetryConfig::default(),
+            network: AgentNetworkConfig::default(),
+            telemetry_light_secs: default_telemetry_light_secs(),
+            telemetry_full_secs: default_telemetry_full_secs(),
+            tags: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -53,6 +138,7 @@ pub struct AgentNoiseConfig {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAuthConfig {
+    #[serde(default = "default_agent_max_job_timeout_secs")]
     pub max_job_timeout_secs: u64,
     #[serde(default = "default_agent_gateway_retry_secs")]
     pub gateway_retry_secs: u64,
@@ -131,6 +217,18 @@ pub fn default_agent_gateway_retry_secs() -> u64 {
 
 pub fn default_agent_gateway_connect_timeout_secs() -> u64 {
     10
+}
+
+pub fn default_agent_max_job_timeout_secs() -> u64 {
+    DEFAULT_MAX_JOB_TIMEOUT_SECS
+}
+
+pub fn default_telemetry_light_secs() -> u64 {
+    15
+}
+
+pub fn default_telemetry_full_secs() -> u64 {
+    60
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -5,7 +5,7 @@ export async function activate(locator: Locator) {
 }
 
 export async function openConsoleSubpage(page: Page, view: string, subpage: string) {
-  const viewLabel = view === "Config" ? "Agent config" : view;
+  const viewLabel = view === "Config" ? "Runtime config" : view;
   const mobilePageSelector = page.locator(".mobilePageSelector");
   if (await mobilePageSelector.isVisible()) {
     await mobilePageSelector.selectOption({ label: `${viewLabel} / ${subpage}` });

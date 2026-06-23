@@ -8,9 +8,8 @@ use sqlx::{
 use tokio::sync::broadcast;
 use uuid::Uuid;
 use vpsman_common::{
-    payload_hash, plan_tunnel, render_tunnel_endpoint_config, AgentCapabilitySnapshot, AgentHello,
-    AgentUpdateHeartbeat, BandwidthTier, CommandOutput, GatewayAgentHelloIngest, JobCommand,
-    OspfCostPolicy, OutputStream, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+    payload_hash, AgentCapabilitySnapshot, AgentHello, AgentUpdateHeartbeat, CommandOutput,
+    GatewayAgentHelloIngest, JobCommand, OutputStream,
 };
 use vpsman_server_core::{
     JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_COMPLETED,
@@ -401,35 +400,6 @@ async fn postgres_network_operator(repo: &Repository) -> AuthContext {
     }
 }
 
-fn postgres_test_plan_input() -> TunnelPlanInput {
-    TunnelPlanInput {
-        name: "pg-edge-a-edge-b".to_string(),
-        interface_name: "pgab".to_string(),
-        kind: TunnelKind::Gre,
-        runtime_control: Default::default(),
-        runtime_topology: Default::default(),
-        left_client_id: "pg-left-a".to_string(),
-        right_client_id: "pg-right-b".to_string(),
-        left_underlay: "198.51.100.10".to_string(),
-        right_underlay: "203.0.113.20".to_string(),
-        address_pool_cidr: "10.250.0.0/30".to_string(),
-        reserved_addresses: Vec::new(),
-        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
-            left: "10.250.0.0".to_string(),
-            right: "10.250.0.1".to_string(),
-            prefix_len: 31,
-        }),
-        ipv6_address_pool_cidr: None,
-        ipv6_tunnel: None,
-        latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
-        latency_ms: 18.0,
-        packet_loss_ratio: 0.0,
-        preference: 1.0,
-        ospf_policy: OspfCostPolicy::default(),
-    }
-}
-
 #[tokio::test]
 async fn postgres_operator_login_throttle_persists_locked_username_bucket() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
@@ -694,121 +664,6 @@ async fn postgres_dispatch_claim_binds_incarnation_and_keeps_deadline_immutable(
     .unwrap();
     let stale_null_claim = db.repo.claim_due_job_targets(10, 1, 0).await.unwrap();
     assert!(stale_null_claim.is_empty());
-    db.cleanup().await;
-}
-
-#[tokio::test]
-async fn postgres_completed_ospf_cost_update_syncs_canonical_tunnel_plan_cost_once() {
-    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
-        return;
-    };
-    let operator = postgres_network_operator(&db.repo).await;
-    let input = postgres_test_plan_input();
-    let plan = plan_tunnel(&input).unwrap();
-    insert_client(&db.pool, &input.left_client_id, Some(Uuid::new_v4())).await;
-    insert_client(&db.pool, &input.right_client_id, Some(Uuid::new_v4())).await;
-    db.repo
-        .record_tunnel_plan(&input, &plan, &operator)
-        .await
-        .unwrap();
-
-    let current_ospf_cost = plan.recommended_ospf_cost;
-    let recommended_ospf_cost = current_ospf_cost + 10;
-    let mut proposed_plan = plan.clone();
-    proposed_plan.recommended_ospf_cost = recommended_ospf_cost;
-    let endpoint = render_tunnel_endpoint_config(&proposed_plan, TunnelEndpointSide::Left).unwrap();
-    let operation = JobCommand::NetworkOspfCostUpdate {
-        plan: Box::new(proposed_plan.clone()),
-        side: TunnelEndpointSide::Left,
-        current_ospf_cost,
-        recommended_ospf_cost,
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
-    };
-    let job_id = Uuid::new_v4();
-
-    db.repo
-        .record_tunnel_plan_execution(job_id, &operation, "failed")
-        .await
-        .unwrap();
-    let plans = db.repo.list_tunnel_plans().await.unwrap();
-    assert_eq!(plans[0].recommended_ospf_cost, i32::from(current_ospf_cost));
-    assert_eq!(plans[0].plan.recommended_ospf_cost, current_ospf_cost);
-
-    db.repo
-        .record_tunnel_plan_execution(job_id, &operation, "completed")
-        .await
-        .unwrap();
-    db.repo
-        .record_tunnel_plan_execution(job_id, &operation, "completed")
-        .await
-        .unwrap();
-    let plans = db.repo.list_tunnel_plans().await.unwrap();
-    assert_eq!(
-        plans[0].recommended_ospf_cost,
-        i32::from(recommended_ospf_cost)
-    );
-    assert_eq!(plans[0].plan.recommended_ospf_cost, recommended_ospf_cost);
-    assert_eq!(plans[0].left_status, "planned");
-    assert_eq!(plans[0].right_status, "planned");
-    assert_eq!(plans[0].status, "planned");
-    assert_eq!(plans[0].last_apply_job_id, None);
-    assert_eq!(plans[0].last_rollback_job_id, None);
-
-    let job_id_string = job_id.to_string();
-    let first_audit_count: i64 = sqlx::query_scalar(
-        r#"
-        SELECT count(*)
-        FROM audit_logs
-        WHERE action = 'network.tunnel_plan_ospf_cost_updated'
-          AND metadata->>'job_id' = $1
-        "#,
-    )
-    .bind(&job_id_string)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(first_audit_count, 1);
-
-    let stale_job_id = Uuid::new_v4();
-    let stale_recommended = recommended_ospf_cost + 10;
-    let mut stale_plan = proposed_plan;
-    stale_plan.recommended_ospf_cost = stale_recommended;
-    let stale_endpoint =
-        render_tunnel_endpoint_config(&stale_plan, TunnelEndpointSide::Left).unwrap();
-    let stale_operation = JobCommand::NetworkOspfCostUpdate {
-        plan: Box::new(stale_plan),
-        side: TunnelEndpointSide::Left,
-        current_ospf_cost,
-        recommended_ospf_cost: stale_recommended,
-        bird2_sha256_hex: payload_hash(stale_endpoint.bird2_interface_snippet.as_bytes()),
-    };
-    db.repo
-        .record_tunnel_plan_execution(stale_job_id, &stale_operation, "completed")
-        .await
-        .unwrap();
-    let plans = db.repo.list_tunnel_plans().await.unwrap();
-    assert_eq!(
-        plans[0].recommended_ospf_cost,
-        i32::from(recommended_ospf_cost)
-    );
-    assert_eq!(plans[0].plan.recommended_ospf_cost, recommended_ospf_cost);
-
-    let stale_job_id_string = stale_job_id.to_string();
-    let stale_audit_count: i64 = sqlx::query_scalar(
-        r#"
-        SELECT count(*)
-        FROM audit_logs
-        WHERE action = 'network.tunnel_plan_ospf_cost_updated'
-          AND metadata->>'job_id' = $1
-          AND metadata->>'result' = 'stale_ignored'
-        "#,
-    )
-    .bind(&stale_job_id_string)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(stale_audit_count, 1);
-
     db.cleanup().await;
 }
 

@@ -37,9 +37,11 @@ service_enable_requested() {
   is_true "${VPSMAN_AGENT_ENABLE_SERVICE:-${VPSMAN_ENABLE_SERVICE:-1}}"
 }
 
-require_uint() {
-  local name="$1" value="${!1:-}"
-  [[ "$value" =~ ^[0-9]+$ ]] || die "$name must be an unsigned integer"
+reject_runtime_config_env() {
+  local name
+  for name in "$@"; do
+    [[ -z "${!name:-}" ]] || die "$name is server runtime config; do not set it in bootstrap agent install"
+  done
 }
 
 cleanup_paths=()
@@ -146,6 +148,17 @@ require_env VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX
 require_env VPSMAN_GATEWAY_ENDPOINTS
 require_hex32 VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX
 require_hex32 VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX
+reject_runtime_config_env \
+  VPSMAN_AGENT_DISPLAY_NAME \
+  VPSMAN_TELEMETRY_LIGHT_SECS \
+  VPSMAN_TELEMETRY_FULL_SECS \
+  VPSMAN_MAX_JOB_TIMEOUT_SECS \
+  VPSMAN_AGENT_UNMANAGED_UPDATE_ENABLED \
+  VPSMAN_AGENT_UNMANAGED_UPDATE_VERSION_URL \
+  VPSMAN_AGENT_UNMANAGED_UPDATE_INTERVAL_SECS \
+  VPSMAN_AGENT_UNMANAGED_UPDATE_JITTER_SECS \
+  VPSMAN_AGENT_UNMANAGED_UPDATE_ACTIVATE \
+  VPSMAN_AGENT_UNMANAGED_UPDATE_RESTART_AGENT
 
 if [[ "$install_mode" == "root" ]]; then
   [[ "$(id -u)" -eq 0 ]] || die "root install mode must run as root"
@@ -194,31 +207,15 @@ else
 fi
 
 config_file="$config_dir/agent.toml"
-VPSMAN_AGENT_UNMANAGED_UPDATE_INTERVAL_SECS="${VPSMAN_AGENT_UNMANAGED_UPDATE_INTERVAL_SECS:-86400}"
-VPSMAN_AGENT_UNMANAGED_UPDATE_JITTER_SECS="${VPSMAN_AGENT_UNMANAGED_UPDATE_JITTER_SECS:-86400}"
-require_uint VPSMAN_AGENT_UNMANAGED_UPDATE_INTERVAL_SECS
-require_uint VPSMAN_AGENT_UNMANAGED_UPDATE_JITTER_SECS
 {
   printf 'client_id = %s\n' "$(toml_quote "$VPSMAN_AGENT_CLIENT_ID")"
-  printf 'display_name = %s\n' "$(toml_quote "${VPSMAN_AGENT_DISPLAY_NAME:-$VPSMAN_AGENT_CLIENT_ID}")"
-  printf 'telemetry_light_secs = %s\n' "${VPSMAN_TELEMETRY_LIGHT_SECS:-15}"
-  printf 'telemetry_full_secs = %s\n' "${VPSMAN_TELEMETRY_FULL_SECS:-60}"
-  printf 'tags = []\n'
   printf '\n[noise]\n'
   printf 'mode = "enrolled_ik"\n'
   printf 'client_private_key_hex = %s\n' "$(toml_quote "$VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX")"
   printf 'server_public_key_hex = %s\n' "$(toml_quote "$VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX")"
   printf '\n[auth]\n'
-  printf 'max_job_timeout_secs = %s\n' "${VPSMAN_MAX_JOB_TIMEOUT_SECS:-3600}"
   printf 'gateway_retry_secs = %s\n' "${VPSMAN_GATEWAY_RETRY_SECS:-60}"
   printf 'gateway_connect_timeout_secs = %s\n' "${VPSMAN_GATEWAY_CONNECT_TIMEOUT_SECS:-10}"
-  printf '\n[update]\n'
-  printf 'unmanaged_enabled = %s\n' "$(is_true "${VPSMAN_AGENT_UNMANAGED_UPDATE_ENABLED:-0}" && printf true || printf false)"
-  printf 'unmanaged_version_url = %s\n' "$(toml_quote "${VPSMAN_AGENT_UNMANAGED_UPDATE_VERSION_URL:-https://github.com/mnihyc/vpsman/releases/latest/download/version.json}")"
-  printf 'unmanaged_interval_secs = %s\n' "$VPSMAN_AGENT_UNMANAGED_UPDATE_INTERVAL_SECS"
-  printf 'unmanaged_jitter_secs = %s\n' "$VPSMAN_AGENT_UNMANAGED_UPDATE_JITTER_SECS"
-  printf 'unmanaged_activate = %s\n' "$(is_true "${VPSMAN_AGENT_UNMANAGED_UPDATE_ACTIVATE:-1}" && printf true || printf false)"
-  printf 'unmanaged_restart_agent = %s\n' "$(is_true "${VPSMAN_AGENT_UNMANAGED_UPDATE_RESTART_AGENT:-1}" && printf true || printf false)"
 } >"$config_file"
 
 first=1

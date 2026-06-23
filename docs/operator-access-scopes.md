@@ -27,8 +27,8 @@ role receives the scopes needed for normal daily operation. The default
 - `templates:read`: built-in and user-defined command templates and their operation payloads.
 - `schedules:read`: saved schedule definitions, target snapshots, timing, and
   recurring operation payloads.
-- `config:read`: source template definitions, template assignments,
-  diff/test output, rendered agent config, agent config patch generators,
+- `config:read`: template definitions, template assignments,
+  diff/test output, rendered runtime config, runtime config patch generators,
   rendered incremental config patches, and private agent-update release metadata.
 - `network:read`: full tunnel plans, exportable runtime `plan.json` details,
   OSPF update plans, raw network observations, and topology history exports.

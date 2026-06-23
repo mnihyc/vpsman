@@ -14,7 +14,7 @@ use crate::{
         UpdateSourceTemplateResponse,
     },
     repository::Repository,
-    repository_source_config_patch::render_source_template_candidate,
+    repository_template_runtime_config::render_template_runtime_candidate,
     source_template_builtins::builtin_source_templates,
     unix_now,
 };
@@ -357,7 +357,7 @@ impl Repository {
         let mut candidate = template.clone();
         candidate.definition = request.definition.clone();
         let (valid, renderable, error, sections, toml, unsupported_domains, render_notes) =
-            match render_source_template_candidate(&candidate) {
+            match render_template_runtime_candidate(&candidate) {
                 Ok(rendered) => {
                     let renderable = rendered.unsupported_domains.is_empty();
                     (

@@ -1,10 +1,9 @@
 use super::{
-    default_agent_backup_max_archive_bytes, validate_agent_config_shape,
-    validate_hot_config_update, AgentBackupConfig, AgentConfig, AgentExecutionConfig,
-    AgentExecutionEnvironmentPolicy, AgentExecutionProcessCleanupPolicy, AgentExecutionPtyPolicy,
-    AgentNetworkConfig, AgentNetworkPreset, AgentNoiseConfig, AgentNoiseMode,
-    AgentProcessInventorySource, AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource,
-    AgentTelemetryConfig, AgentTelemetrySource, AgentUserSessionsSource,
+    default_agent_backup_max_archive_bytes, validate_agent_config_shape, AgentBackupConfig,
+    AgentConfig, AgentExecutionConfig, AgentExecutionEnvironmentPolicy,
+    AgentExecutionProcessCleanupPolicy, AgentExecutionPtyPolicy, AgentNetworkConfig,
+    AgentNetworkPreset, AgentProcessInventorySource, AgentRuntimeStatusTelemetryPlan,
+    AgentRuntimeTrafficSource, AgentTelemetryConfig, AgentTelemetrySource, AgentUserSessionsSource,
 };
 use crate::{
     plan_tunnel, BandwidthTier, OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl,
@@ -46,6 +45,40 @@ root_dir = "/tmp/vpsman-network-root"
     assert!(!config.network.auto_ospf_enabled);
     assert_eq!(config.network.auto_ospf_min_cost_delta, 5);
     assert_eq!(config.network.auto_ospf_healthy_windows, 2);
+}
+
+#[test]
+fn bootstrap_agent_config_defaults_runtime_auth_timeout() {
+    let config: AgentConfig = toml::from_str(
+        r#"
+client_id = "agent-a"
+
+[noise]
+mode = "enrolled_ik"
+client_private_key_hex = "1111111111111111111111111111111111111111111111111111111111111111"
+server_public_key_hex = "2222222222222222222222222222222222222222222222222222222222222222"
+
+[auth]
+gateway_retry_secs = 1
+gateway_connect_timeout_secs = 1
+
+[[tcp_endpoints]]
+label = "primary"
+tcp_addr = "127.0.0.1:9443"
+priority = 10
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.auth.max_job_timeout_secs,
+        DEFAULT_MAX_JOB_TIMEOUT_SECS
+    );
+    assert!(config.display_name.is_empty());
+    assert_eq!(config.telemetry_light_secs, 15);
+    assert_eq!(config.telemetry_full_secs, 60);
+    assert!(config.tags.is_empty());
+    validate_agent_config_shape(&config).unwrap();
 }
 
 #[test]
@@ -333,7 +366,7 @@ fn validates_telemetry_source_selection() {
 }
 
 #[test]
-fn validates_network_apply_root() {
+fn validates_runtime_network_root() {
     let valid = AgentConfig {
         network: AgentNetworkConfig {
             apply_enabled: true,
@@ -680,34 +713,4 @@ fn validates_network_apply_root() {
         validate_agent_config_shape(&invalid_runtime_status_telemetry).unwrap_err(),
         "network_runtime_status_telemetry_control_invalid"
     );
-}
-
-#[test]
-fn rejects_hot_config_identity_and_secret_changes() {
-    let current = AgentConfig {
-        auth: super::AgentAuthConfig {
-            max_job_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
-            ..Default::default()
-        },
-        noise: AgentNoiseConfig {
-            mode: AgentNoiseMode::EnrolledIk,
-            client_private_key_hex: Some("22".repeat(32)),
-            server_public_key_hex: Some("33".repeat(32)),
-        },
-        ..AgentConfig::default()
-    };
-    let mut updated = current.clone();
-    updated.display_name = "new display".to_string();
-    updated.auth.max_job_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS + 60;
-    validate_hot_config_update(&current, &updated).unwrap();
-
-    updated.client_id = "other".to_string();
-    assert_eq!(
-        validate_hot_config_update(&current, &updated).unwrap_err(),
-        "hot_config_cannot_change_client_id"
-    );
-
-    let mut updated = current.clone();
-    updated.update.unmanaged_interval_secs = 3600;
-    validate_hot_config_update(&current, &updated).unwrap();
 }

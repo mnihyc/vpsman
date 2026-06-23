@@ -29,7 +29,7 @@ use vpsman_common::{
 use vpsman_object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use vpsman_server_core::{
     job_command_type_label, scheduled_command_type_label, split_targets_by_capability,
-    validate_network_apply_target, CapabilitySkip, TargetCapability, JOB_STATUS_QUEUED,
+    validate_network_command_targets, CapabilitySkip, TargetCapability, JOB_STATUS_QUEUED,
     JOB_STATUS_SKIPPED, TARGET_STATUS_QUEUED, TARGET_STATUS_SKIPPED,
 };
 
@@ -1913,7 +1913,7 @@ async fn materialize_due_schedule(
     let operation = schedule.operation.clone();
     let operation_bytes = encode_json(&operation)?;
     let command_hash = payload_hash(&operation_bytes);
-    validate_network_apply_target(&operation, &targets)
+    validate_network_command_targets(&operation, &targets)
         .map_err(|error| anyhow::anyhow!(error.code()))?;
     let target_availability = load_schedule_target_capabilities(tx, &targets).await?;
     let available_targets = available_schedule_targets(&targets, &target_availability);

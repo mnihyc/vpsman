@@ -44,6 +44,83 @@ print(hasher.hexdigest())
 PY
 }
 
+smoke_job_privilege_assertion() {
+  local password="$1"
+  local salt_hex="$2"
+  local selector_expression="$3"
+  local command_type="$4"
+  local operation_json="$5"
+  local max_timeout_secs="$6"
+  local force_unprivileged="$7"
+  local privileged="$8"
+  local ttl_secs="${9:-300}"
+  shift 9
+  python3 - \
+    "$password" \
+    "$salt_hex" \
+    "$selector_expression" \
+    "$command_type" \
+    "$operation_json" \
+    "$max_timeout_secs" \
+    "$force_unprivileged" \
+    "$privileged" \
+    "$ttl_secs" \
+    "$@" <<'PY'
+import hashlib
+import hmac
+import json
+import os
+import sys
+import time
+
+password, salt_hex, selector, command_type, operation_json = sys.argv[1:6]
+max_timeout_secs = max(1, int(sys.argv[6]))
+force_unprivileged = sys.argv[7].lower() == "true"
+privileged = sys.argv[8].lower() == "true"
+ttl_secs = int(sys.argv[9])
+targets = sorted(sys.argv[10:])
+
+operation_hash = hashlib.sha256(operation_json.encode()).hexdigest()
+intent = {
+    "version": 1,
+    "action": "job.dispatch",
+    "selector_expression": selector.strip(),
+    "command_type": command_type,
+    "operation_payload_hash": operation_hash,
+    "resolved_targets": targets,
+    "max_timeout_secs": max_timeout_secs,
+    "force_unprivileged": force_unprivileged,
+    "privileged": privileged,
+}
+intent_json = json.dumps(intent, separators=(",", ":"))
+intent_hash = hashlib.sha256(intent_json.encode()).hexdigest()
+
+salt = bytes.fromhex(salt_hex)
+hasher = hashlib.sha256()
+hasher.update(b"vpsman-super-key-v1")
+hasher.update(len(salt).to_bytes(8, "big"))
+hasher.update(salt)
+hasher.update(password.encode())
+key = hasher.digest()
+
+nonce = os.urandom(16)
+issued = int(time.time())
+expires = issued + ttl_secs
+mac = hmac.new(key, digestmod=hashlib.sha256)
+mac.update(b"vpsman-gateway-privilege-assertion-v1")
+mac.update(intent_hash.encode())
+mac.update(nonce)
+mac.update(issued.to_bytes(8, "big"))
+mac.update(expires.to_bytes(8, "big"))
+print(json.dumps({
+    "nonce_hex": nonce.hex(),
+    "issued_unix": issued,
+    "expires_unix": expires,
+    "assertion_hex": mac.hexdigest(),
+}, separators=(",", ":")))
+PY
+}
+
 smoke_agent_config_client_id() {
   local config_path="$1"
   sed -n 's/^client_id = "\(.*\)"$/\1/p' "$config_path" | head -n 1
@@ -78,32 +155,26 @@ smoke_csv_to_toml_string_array() {
 smoke_write_enrolled_agent_config() {
   local config_path="$1"
   local client_id="$2"
-  local display_name="$3"
-  local tags_csv="$4"
+  local _display_name="$3"
+  local _tags_csv="$4"
   local client_private_hex="$5"
   local gateway_public_hex="$6"
   local endpoints_csv="$7"
-  local max_job_timeout_secs="${8:-30}"
-  local network_root="${9:-}"
-  local telemetry_light_secs="${10:-15}"
-  local telemetry_full_secs="${11:-60}"
+  local network_root="${8:-}"
 
   mkdir -p "$(dirname "$config_path")"
   {
     printf 'client_id = %s\n' "$(smoke_toml_quote "$client_id")"
-    printf 'display_name = %s\n' "$(smoke_toml_quote "${display_name:-$client_id}")"
-    printf 'telemetry_light_secs = %s\n' "$telemetry_light_secs"
-    printf 'telemetry_full_secs = %s\n' "$telemetry_full_secs"
-    printf 'tags = [%s]\n' "$(smoke_csv_to_toml_string_array "$tags_csv")"
     printf '\n[noise]\n'
     printf 'mode = "enrolled_ik"\n'
     printf 'client_private_key_hex = %s\n' "$(smoke_toml_quote "$client_private_hex")"
     printf 'server_public_key_hex = %s\n' "$(smoke_toml_quote "$gateway_public_hex")"
     printf '\n[auth]\n'
-    printf 'max_job_timeout_secs = %s\n' "$max_job_timeout_secs"
     printf 'gateway_retry_secs = 1\n'
     printf 'gateway_connect_timeout_secs = 1\n'
     if [[ -n "$network_root" ]]; then
+      # Test-only sandbox root for smokes that inspect local files before
+      # server runtime config is pushed.
       printf '\n[network]\n'
       printf 'root_dir = %s\n' "$(smoke_toml_quote "$network_root")"
     fi
@@ -137,7 +208,6 @@ smoke_create_direct_agent_config() {
   local tags_csv="$6"
   local gateway_public_hex="$7"
   local endpoints_csv="$8"
-  local max_job_timeout_secs="${9:-30}"
   local keypair private_hex public_hex
 
   keypair="$(target/debug/vpsctl noise-keygen)"
@@ -171,8 +241,7 @@ smoke_create_direct_agent_config() {
     "$tags_csv" \
     "$private_hex" \
     "$gateway_public_hex" \
-    "$endpoints_csv" \
-    "$max_job_timeout_secs"
+    "$endpoints_csv"
 }
 
 smoke_build_binaries() {

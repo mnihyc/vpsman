@@ -1,10 +1,11 @@
-# This mirrors the direct-gateway one-line installer output, plus optional
-# sections that can be added later through config management.
+# Bootstrap-only agent config.
+#
+# The API owns runtime config. Do not put backup, update, execution,
+# telemetry, tunnel, routing, traffic, template, or policy sections in this
+# file. Agents load this file only to connect and authenticate to the gateway;
+# server-managed runtime config is pushed as exclusive runtime_config_sync jobs.
+
 client_id = "agent-nrt-04"
-display_name = "edge-nrt-04"
-telemetry_light_secs = 15
-telemetry_full_secs = 60
-tags = []
 
 [noise]
 # Generated before install with `vpsctl noise-keygen`; register the matching
@@ -14,113 +15,17 @@ client_private_key_hex = "111111111111111111111111111111111111111111111111111111
 server_public_key_hex = "2222222222222222222222222222222222222222222222222222222222222222"
 
 [auth]
-max_job_timeout_secs = 3600
+# Bootstrap connectivity only. Job/runtime limits are server-managed runtime
+# config after the agent connects.
 gateway_retry_secs = 60
 gateway_connect_timeout_secs = 10
-
-[backup]
-# Optional. The one-line installer does not write this section; omitted values
-# use safe defaults until backup workflows are configured.
-max_uncompressed_bytes = 1048576
-max_archive_bytes = 2097152
-
-[update]
-# The autonomous updater is configured with production defaults but is disabled
-# unless the installer or a later incremental config patch explicitly enables
-# it. Agents use the official GitHub release manifest's tag-pinned asset URL,
-# compare it with the release version embedded in the binary, verify
-# SHA256SUMS, stage newer musl agent artifacts, activate them, and restart
-# themselves when enabled.
-unmanaged_enabled = false
-unmanaged_version_url = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"
-unmanaged_interval_secs = 86400
-unmanaged_jitter_secs = 86400
-unmanaged_activate = true
-unmanaged_restart_agent = true
-
-[execution]
-# Privileged command execution defaults are selectable. Shell scripts append
-# the script body to this absolute argv prefix. Keep argv jobs as the preferred
-# mode; use shell scripts only when a workflow genuinely needs shell semantics.
-shell_script_argv = ["/bin/sh", "-lc"]
-environment_policy = "inherit" # inherit | clean | minimal_path
-environment_keep = []
-environment_set = {}
-pty_policy = "native_pty" # native_pty | disabled
-process_cleanup = "process_group" # process_group | direct_child
-# working_directory = "/var/empty"
-# User-session inventory defaults to documented Linux `w`/`who` preset
-# candidates. This TOML shows the rendered agent config; the server model
-# should manage this as a user-session inventory preset selected per VPS. Set
-# source to "custom_command" inside a preset and provide a bounded command for
-# nonstandard images or provider-installed inventory sources.
-user_sessions_source = "linux_w_who_preset"
-# user_sessions_command = { argv = ["/usr/local/libexec/vpsman-users", "{client_id}"], max_timeout_secs = 2, max_output_bytes = 4096 }
-# Process inventory defaults to Linux procfs but the root is configurable for
-# containers, test agents, or mounted host views. Custom JSON commands return
-# {"processes":[{"pid":1,"ppid":0,"uid":0,"state":"R","name":"init","command":"init","rss_kib":1024}],"truncated":false}.
-process_inventory_source = "linux_procfs"
-process_proc_root = "/proc"
-# process_inventory_command = { argv = ["/usr/local/libexec/vpsman-processes", "{limit}"], max_timeout_secs = 2, max_output_bytes = 4096 }
-
-[telemetry]
-# Source selection is explicit. The default Linux source reads cheap procfs and
-# sysfs files. Use "custom_command" to replace Linux telemetry entirely, or
-# "linux_procfs_and_custom_command" to overlay a bounded JSON-producing command
-# on top of procfs/sysfs. In the server model these values should be generated
-# from named source templates: built-in defaults, shared customizable
-# presets, and VPS-local custom presets selected per VPS.
-source = "linux_procfs"
-proc_root = "/proc"
-sys_class_net_dir = "/sys/class/net"
-hostname_file = "/etc/hostname"
-os_release_file = "/etc/os-release"
-# Example custom source. Output may include hostname, uptime_secs, cpu, memory,
-# disks, networks, and tunnels in the same JSON shape as agent metrics.
-# custom_metrics_command = { argv = ["/usr/local/libexec/vpsman-metrics-source", "{client_id}"], max_timeout_secs = 2, max_output_bytes = 4096 }
-
-[network]
-# Disabled by default so privileged network apply must be deliberately enabled
-# on BGP/Bird2-managed clients.
-apply_enabled = false
-root_dir = "/"
-# Runtime tunnel reconciliation is the strategic tunnel-management path. Keep
-# it disabled unless this agent is intentionally allowed to mutate runtime
-# tunnel state with iproute2/tc or configured custom adapters.
-runtime_reconcile_enabled = false
-runtime_ip_argv = ["/sbin/ip"]
-runtime_tc_argv = ["/sbin/tc"]
-runtime_command_timeout_secs = 10
-runtime_command_max_output_bytes = 16384
-# Optional ICMP probe base argv. Empty means use documented Linux ping preset
-# candidates (`/bin/ping`, `/usr/bin/ping`). Set this for custom wrappers,
-# nonstandard paths, or provider-specific probe behavior.
-probe_ping_argv = []
-# Traffic accumulation source selection is per runtime telemetry plan. Interface
-# counters are the default selected source. To enable the vnstat preset, set the
-# base argv here; vpsman appends "--json -i <interface>". For provider-specific
-# accounting, configure a per-plan custom JSON command inside a managed
-# traffic-accounting preset selected for that VPS/tunnel.
-runtime_vnstat_argv = []
-# Optional validation/reload hooks. These are disabled by default and must use
-# absolute executables. vpsman does not invoke a shell unless one is explicitly
-# configured in argv. If reload is enabled, validation must also be enabled.
-validate_enabled = false
-reload_enabled = false
-hook_timeout_secs = 10
-# Example curated preset for Debian/Ubuntu hosts with ifupdown2 and Bird2:
-# preset = "debian_ifupdown2_bird2"
-# Example explicit validation hooks for hosts that need custom paths or
-# arguments:
-# ifupdown_validate_argv = ["/usr/sbin/ifreload", "-a", "-s"]
-# bird2_validate_argv = ["/usr/sbin/bird", "-p", "-c", "/etc/bird/bird.conf"]
-# reload_argv = [
-#   ["/usr/sbin/ifdown", "tun0"],
-#   ["/usr/sbin/ifup", "tun0"],
-#   ["/usr/sbin/birdc", "configure"],
-# ]
 
 [[tcp_endpoints]]
 label = "primary"
 tcp_addr = "panel.example.com:9443"
 priority = 10
+
+[[tcp_endpoints]]
+label = "backup"
+tcp_addr = "panel-backup.example.com:9443"
+priority = 20

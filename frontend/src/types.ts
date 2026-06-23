@@ -1260,6 +1260,7 @@ export type PromoteTelemetryTunnelRequest = {
   latency_ms?: number | null;
   packet_loss_ratio?: number | null;
   preference?: number | null;
+  enabled: boolean;
   confirmed: boolean;
 };
 
@@ -1565,13 +1566,11 @@ export type JobOperation =
   | { type: "file_pull"; path: string; follow_symlinks: boolean }
   | { type: "config_read" }
   | {
-      type: "hot_config";
-      apply_mode: "full_override";
-      toml: string;
-      preserve_redacted?: boolean | null;
-      base_config_sha256_hex?: string | null;
+      type: "runtime_config_sync";
+      desired_version: number;
+      reason: string;
+      config: JsonValue;
     }
-  | { type: "source_config_patch"; apply_mode: "incremental_patch"; toml: string }
   | {
       type: "agent_update";
       artifact_url: string;
@@ -1776,24 +1775,6 @@ export type JobOperation =
       follow_symlinks: boolean;
     }
   | {
-      type: "network_apply";
-      plan: TunnelPlan;
-      side: TunnelEndpointSide;
-    }
-  | {
-      type: "network_ospf_cost_update";
-      plan: TunnelPlan;
-      side: TunnelEndpointSide;
-      current_ospf_cost: number;
-      recommended_ospf_cost: number;
-      bird2_sha256_hex: string;
-    }
-  | {
-      type: "network_rollback";
-      plan: TunnelPlan;
-      side: TunnelEndpointSide;
-    }
-  | {
       type: "network_status";
       plan: TunnelPlan;
       side: TunnelEndpointSide;
@@ -1970,6 +1951,13 @@ export type CreateBackupPolicyRequest = {
 };
 
 export type CreateTunnelPlanRequest = TunnelPlanInput & {
+  enabled: boolean;
+  confirmed: boolean;
+};
+
+export type UpdateTunnelPlanOspfCostRequest = {
+  current_ospf_cost: number;
+  recommended_ospf_cost: number;
   confirmed: boolean;
 };
 
@@ -2398,7 +2386,7 @@ export type AssignSourceTemplateResponse = {
   assignments: SourceTemplateAssignmentRecord[];
 };
 
-export type SourceConfigPatchResponse = {
+export type TemplateRuntimeConfigResponse = {
   client_id: string;
   sections: JsonValue;
   toml: string;
@@ -2408,7 +2396,28 @@ export type SourceConfigPatchResponse = {
   generated_at: string;
 };
 
-export type HotConfigPatchGeneratorRecord = {
+export type RuntimeConfigPatchRequest = {
+  selector_expression: string;
+  target_client_ids: string[];
+  toml: string;
+  reason?: string | null;
+  confirmed: boolean;
+  privilege_assertion?: PrivilegeAssertion | null;
+};
+
+export type RuntimeConfigPatchResponse = {
+  target_count: number;
+  overrides: Array<{
+    client_id: string;
+    toml: string;
+    reason: string;
+    updated_at: string;
+    updated_by: string | null;
+  }>;
+  sync_job_ids: string[];
+};
+
+export type RuntimeConfigPatchGeneratorRecord = {
   id: string;
   name: string;
   category: string;
@@ -2423,7 +2432,7 @@ export type HotConfigPatchGeneratorRecord = {
   updated_at: string;
 };
 
-export type UpsertHotConfigPatchGeneratorRequest = {
+export type UpsertRuntimeConfigPatchGeneratorRequest = {
   id?: string | null;
   name: string;
   category: string;
@@ -2435,16 +2444,16 @@ export type UpsertHotConfigPatchGeneratorRequest = {
   confirmed: boolean;
 };
 
-export type DeleteHotConfigPatchGeneratorRequest = {
+export type DeleteRuntimeConfigPatchGeneratorRequest = {
   confirmed: boolean;
   reviewed_name: string;
 };
 
-export type HotConfigPatchGeneratorRenderRequest = {
+export type RuntimeConfigPatchGeneratorRenderRequest = {
   values: JsonValue;
 };
 
-export type HotConfigPatchGeneratorRenderResponse = {
+export type RuntimeConfigPatchGeneratorRenderResponse = {
   generator_id: string;
   name: string;
   toml: string;

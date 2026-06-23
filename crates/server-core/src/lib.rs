@@ -34,14 +34,14 @@ pub const SCOPE_HISTORY_WRITE: &str = "history:write";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NetworkTargetValidationError {
-    SingleEndpointTargetMismatch,
+    EndpointTargetMismatch,
     SpeedTestTargetMismatch,
 }
 
 impl NetworkTargetValidationError {
     pub fn code(self) -> &'static str {
         match self {
-            Self::SingleEndpointTargetMismatch => "network_apply_target_mismatch",
+            Self::EndpointTargetMismatch => "network_endpoint_target_mismatch",
             Self::SpeedTestTargetMismatch => "network_speed_test_target_mismatch",
         }
     }
@@ -146,19 +146,17 @@ pub fn operator_is_active_authorized(
         .all(|scope| operator_has_scope(effective_scopes, scope))
 }
 
-pub fn validate_network_apply_target(
+pub fn validate_network_command_targets(
     command: &JobCommand,
     resolved_targets: &[String],
 ) -> Result<(), NetworkTargetValidationError> {
     let expected = match command {
-        JobCommand::NetworkApply { plan, side, .. }
-        | JobCommand::NetworkOspfCostUpdate { plan, side, .. }
-        | JobCommand::NetworkRollback { plan, side }
-        | JobCommand::NetworkStatus { plan, side }
-        | JobCommand::NetworkProbe { plan, side, .. } => match side {
-            TunnelEndpointSide::Left => &plan.left_client_id,
-            TunnelEndpointSide::Right => &plan.right_client_id,
-        },
+        JobCommand::NetworkStatus { plan, side } | JobCommand::NetworkProbe { plan, side, .. } => {
+            match side {
+                TunnelEndpointSide::Left => &plan.left_client_id,
+                TunnelEndpointSide::Right => &plan.right_client_id,
+            }
+        }
         JobCommand::NetworkSpeedTest { plan, .. } => {
             let mut expected = vec![plan.left_client_id.clone(), plan.right_client_id.clone()];
             expected.sort();
@@ -175,7 +173,7 @@ pub fn validate_network_apply_target(
     if resolved_targets.len() == 1 && resolved_targets.first() == Some(expected) {
         Ok(())
     } else {
-        Err(NetworkTargetValidationError::SingleEndpointTargetMismatch)
+        Err(NetworkTargetValidationError::EndpointTargetMismatch)
     }
 }
 
@@ -246,20 +244,8 @@ pub fn target_lacks_root_network_capability(
     command: &JobCommand,
     capabilities: &AgentCapabilitySnapshot,
 ) -> bool {
-    let root_network_operation = matches!(
-        command,
-        JobCommand::NetworkApply { .. }
-            | JobCommand::NetworkRollback { .. }
-            | JobCommand::NetworkOspfCostUpdate { .. }
-    );
-    if !root_network_operation {
-        return false;
-    }
-    match capabilities.privilege_mode {
-        AgentPrivilegeMode::Unprivileged => true,
-        AgentPrivilegeMode::Root => !capabilities.can_manage_runtime_tunnels,
-        AgentPrivilegeMode::Unknown => false,
-    }
+    let _ = (command, capabilities);
+    false
 }
 
 pub fn target_lacks_process_limit_capability(
@@ -285,9 +271,7 @@ pub fn target_lacks_agent_update_capability(
 ) -> bool {
     let agent_update_operation = matches!(
         command,
-        JobCommand::HotConfig { .. }
-            | JobCommand::SourceConfigPatch { .. }
-            | JobCommand::UpdateAgent { .. }
+        JobCommand::UpdateAgent { .. }
             | JobCommand::AgentUpdateActivate { .. }
             | JobCommand::AgentUpdateRollback { .. }
             | JobCommand::AgentUpdateCheck { .. }
@@ -444,28 +428,6 @@ mod tests {
         assert_eq!(
             target_capability_failure(&JobCommand::ConfigRead, &capabilities),
             None
-        );
-    }
-
-    #[test]
-    fn hot_config_remains_host_mutation_gated() {
-        let capabilities = AgentCapabilitySnapshot {
-            privilege_mode: AgentPrivilegeMode::Unprivileged,
-            ..AgentCapabilitySnapshot::default()
-        };
-
-        assert_eq!(
-            target_capability_failure(
-                &JobCommand::HotConfig {
-                    apply_mode: vpsman_common::HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE.to_string(),
-                    toml: String::new(),
-                    preserve_redacted: None,
-                    base_config_sha256_hex: None,
-                },
-                &capabilities,
-            )
-            .map(|failure| failure.reason),
-            Some("target_agent_lacks_agent_update_capability")
         );
     }
 

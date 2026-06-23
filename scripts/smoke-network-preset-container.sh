@@ -32,7 +32,7 @@ EOF
 
 cat >/etc/network/interfaces.d/vpsman-tunnels <<'EOF'
 # vpsman-managed ifupdown begin left-a right-b left-right tunlr
-# vpsman tunnel left-right: generated plan only
+# vpsman tunnel left-right: server-managed runtime config
 auto tunlr
 iface tunlr inet static
     address 10.255.0.0

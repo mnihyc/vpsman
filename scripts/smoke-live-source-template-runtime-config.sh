@@ -7,7 +7,7 @@ source "$ROOT_DIR/scripts/lib-smoke.sh"
 smoke_enter_root
 smoke_require_tools awk base64 cp curl docker grep jq python3 timeout
 smoke_build_binaries
-smoke_init_tmpdir "vpsman-live-source template-config-patch"
+smoke_init_tmpdir "vpsman-live-source-template-runtime-config"
 
 pg_port="$(smoke_free_port)"
 api_port="$(smoke_free_port)"
@@ -20,8 +20,8 @@ gateway_control_url="http://127.0.0.1:$gateway_control_port"
 container_name="vpsman-live-source-template-patch-$(date +%s%N)"
 internal_token="smoke-internal-$(date +%s%N)"
 postgres_url="postgres://vpsman:vpsman@127.0.0.1:$pg_port/vpsman"
-operator_password="source template-patch-smoke-password"
-client_id="source template-patch-smoke-$(date +%s)"
+operator_password="source-template-runtime-config-smoke-password"
+client_id="source-template-runtime-config-smoke-$(date +%s)"
 super_password="smoke-super-password"
 super_salt_hex="102132435465768798a9bacbdcedfe0f102132435465768798a9bacbdcedfe0f"
 privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password" "$super_salt_hex")"
@@ -41,7 +41,6 @@ api_log=""
 gateway_log="$SMOKE_TMPDIR/gateway.log"
 agent_log="$SMOKE_TMPDIR/agent.log"
 agent_config="$SMOKE_TMPDIR/agent.toml"
-rollback_config="$agent_config.rollback"
 
 cleanup_live_source_template_patch_smoke() {
   smoke_cleanup
@@ -150,7 +149,7 @@ wait_agent_online() {
   local deadline=$((SECONDS + 35))
   until [[ "$status" == "online" ]]; do
     if (( SECONDS >= deadline )); then
-      smoke_dump_logs "agent did not become online for live source template patch smoke" \
+      smoke_dump_logs "agent did not become online for live template runtime config smoke" \
         "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$agent_log"
       exit 1
     fi
@@ -160,45 +159,80 @@ wait_agent_online() {
   done
 }
 
-assert_patch_persisted() {
-  local job_json targets_json outputs_json audits_json decoded_outputs
-  job_json="$(api_get "/api/v1/jobs/$job_id")"
-  targets_json="$(api_get "/api/v1/jobs/$job_id/targets")"
-  outputs_json="$(api_get "/api/v1/jobs/$job_id/outputs")"
-  audits_json="$(api_get "/api/v1/audit?limit=30")"
-
-  jq -e '.status == "completed" and .command_type == "source_config_patch" and .target_count == 1' \
-    <<<"$job_json" >/dev/null
-  jq -e --arg client "$client_id" '
-    length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
-  ' <<<"$targets_json" >/dev/null
-  jq -e --arg config_path "$agent_config" --arg rollback_path "$rollback_config" '
-    .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
-    | (.data_base64 | @base64d | fromjson)
-    | .type == "source_config_patch"
-      and .status == "applied"
-      and .config_path == $config_path
-      and .rollback_path == $rollback_path
-  ' <<<"$outputs_json" >/dev/null
-  jq -e '[.[].action] | index("job.dispatch_requested") and index("job.target_result")' \
-    <<<"$audits_json" >/dev/null
-
-  decoded_outputs="$(
-    jq -r '.items[].data_base64' <<<"$outputs_json" | while IFS= read -r item; do
-      printf '%s' "$item" | base64 -d
-      printf '\n'
-    done
+submit_config_read() {
+  local read_job_id read_body read_json privilege_assertion
+  read_job_id="$(python3 - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
+)"
+  privilege_assertion="$(
+    smoke_job_privilege_assertion \
+      "$super_password" \
+      "$super_salt_hex" \
+      "id:$client_id" \
+      "config_read" \
+      '{"type":"config_read"}' \
+      30 \
+      false \
+      true \
+      300 \
+      "$client_id"
   )"
-  if grep -F \
-    -e "$super_password" \
-    -e "$super_salt_hex" \
-    -e "client_private_key_hex" \
-    -e "privilege_assertion" \
-    -e "server_public_key_hex" \
-    <<<"$decoded_outputs" >/dev/null; then
-    echo "job outputs leaked source template patch secrets or trust anchors" >&2
-    exit 1
-  fi
+  read_body="$(jq -nc \
+    --arg job_id "$read_job_id" \
+    --arg client "$client_id" \
+    --argjson privilege_assertion "$privilege_assertion" \
+    '{
+      job_id: $job_id,
+      command: "config_read",
+      operation: {type: "config_read"},
+      selector_expression: ("id:" + $client),
+      target_client_ids: [$client],
+      privileged: true,
+      destructive: false,
+      confirmed: false,
+      force_unprivileged: false,
+      max_timeout_secs: 30,
+      privilege_assertion: $privilege_assertion
+    }')"
+  read_json="$(curl -fsS \
+    -H 'content-type: application/json' \
+    -H "Authorization: Bearer $access_token" \
+    -d "$read_body" \
+    "$api_url/api/v1/jobs")"
+  smoke_assert_job_create_queued "$read_json" 1 >/dev/null
+  smoke_wait_api_job_status "$api_url" "$read_job_id" completed 45 >/dev/null
+  printf '%s\n' "$read_job_id"
+}
+
+assert_template_runtime_config_visible() {
+  local deadline outputs_json
+  deadline=$((SECONDS + 45))
+  while (( SECONDS < deadline )); do
+    job_id="$(submit_config_read)"
+    outputs_json="$(api_get "/api/v1/jobs/$job_id/outputs")"
+    if jq -e \
+      --arg proc_root "$patch_proc_root" \
+      --arg cwd "$execution_cwd" \
+      --arg env "$execution_env_value" '
+        .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
+        | (.data_base64 | @base64d | fromjson)
+        | .type == "config_read"
+          and (.toml | contains("proc_root = \"" + $proc_root + "\""))
+          and (.toml | contains("working_directory = \"" + $cwd + "\""))
+          and (.toml | contains("environment_policy = \"clean\""))
+          and (.toml | contains($env))
+          and (.toml | contains("pty_policy = \"disabled\""))
+          and (.toml | contains("process_cleanup = \"direct_child\""))
+      ' <<<"$outputs_json" >/dev/null; then
+      return
+    fi
+    sleep 1
+  done
+  echo "template-assigned runtime config did not become visible through config_read" >&2
+  dump_job_diagnostics "last config_read did not include template runtime config" "$job_id"
+  exit 1
 }
 
 assert_execution_policy_applied() {
@@ -304,11 +338,11 @@ start_api "first"
 
 auth_json="$(curl -fsS \
   -H "Content-Type: application/json" \
-  -d "{\"username\":\"source template-patch-smoke\",\"password\":\"$operator_password\"}" \
+  -d "{\"username\":\"source-template-runtime-config-smoke\",\"password\":\"$operator_password\"}" \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
 export VPSMAN_API_TOKEN="$access_token"
-jq -e '.operator.username == "source template-patch-smoke" and .token_type == "Bearer"' \
+jq -e '.operator.username == "source-template-runtime-config-smoke" and .token_type == "Bearer"' \
   <<<"$auth_json" >/dev/null
 
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
@@ -317,18 +351,18 @@ VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
 VPSMAN_API_URL="$api_url" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
-VPSMAN_GATEWAY_ID="source template-patch-smoke-gateway" \
+VPSMAN_GATEWAY_ID="source-template-runtime-config-smoke-gateway" \
 VPSMAN_GATEWAY_SPOOL_DIR="$SMOKE_TMPDIR/gateway-spool" \
 RUST_LOG="vpsman_gateway=warn" \
   target/debug/vpsman-gateway >"$gateway_log" 2>&1 &
 smoke_track_pid "$!"
 if ! SMOKE_WAIT_TCP_SECS=90 smoke_wait_tcp 127.0.0.1 "$gateway_port"; then
-  smoke_dump_logs "gateway listener did not open for live source template patch smoke" \
+  smoke_dump_logs "gateway listener did not open for live template runtime config smoke" \
     "$SMOKE_TMPDIR"/api-*.log "$gateway_log"
   exit 1
 fi
 if ! SMOKE_WAIT_TCP_SECS=90 smoke_wait_tcp 127.0.0.1 "$gateway_control_port"; then
-  smoke_dump_logs "gateway control listener did not open for live source template patch smoke" \
+  smoke_dump_logs "gateway control listener did not open for live template runtime config smoke" \
     "$SMOKE_TMPDIR"/api-*.log "$gateway_log"
   exit 1
 fi
@@ -339,7 +373,7 @@ smoke_create_direct_agent_config \
   "$agent_config" \
   "$client_id" \
   "$client_id" \
-  "source template-patch-smoke" \
+  "source-template-runtime-config-smoke" \
   "$gateway_public_hex" \
   "primary=$gateway_addr=10"
 
@@ -391,7 +425,7 @@ VPSMAN_API_TOKEN="$access_token" \
     --confirmed >/dev/null
 
 rendered_patch="$(VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" source-config-patch \
+  target/debug/vpsctl --api-url "$api_url" template-runtime-config \
     --client-id "$client_id" \
     --format toml)"
 grep -q '\[telemetry\]' <<<"$rendered_patch"
@@ -403,71 +437,16 @@ grep -q "$execution_env_value" <<<"$rendered_patch"
 grep -q 'pty_policy = "disabled"' <<<"$rendered_patch"
 grep -q 'process_cleanup = "direct_child"' <<<"$rendered_patch"
 
-reject_body="$(jq -nc \
-  --arg client "$client_id" \
-  --arg toml "$rendered_patch" \
-  '{
-    command: "source_config_patch",
-    operation: {
-      type: "source_config_patch",
-      apply_mode: "incremental_patch",
-      toml: $toml
-    },
-    selector_expression: ("id:" + $client),
-    target_client_ids: [$client],
-    privileged: true,
-    confirmed: true,
-    max_timeout_secs: 30
-  }')"
-reject_json="$SMOKE_TMPDIR/reject.json"
-reject_status="$(curl -sS -o "$reject_json" -w "%{http_code}" \
-  -H 'content-type: application/json' \
-  -H "Authorization: Bearer $access_token" \
-  -d "$reject_body" \
-  "$api_url/api/v1/jobs")"
-if [[ "$reject_status" != "403" ]]; then
-  echo "expected no-privilege-unlock source template config patch to return 403, got $reject_status" >&2
-  cat "$reject_json" >&2 || true
-  exit 1
-fi
-jq -e '.error == "privilege_assertion_required" and .status == 403' "$reject_json" >/dev/null
 if grep -q "$patch_proc_root" "$agent_config"; then
-  echo "source template patch changed config after no-privilege-unlock rejection" >&2
+  echo "source template assignment mutated immutable bootstrap config file" >&2
   exit 1
 fi
-
-push_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
-VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" source-config-patch-apply \
-    --client-id "$client_id" \
-    --super-salt-hex "$super_salt_hex" \
-    --force-unprivileged \
-    --confirmed)"
-job_id="$(jq -r '.job_id' <<<"$push_json")"
-if ! smoke_assert_job_create_queued "$push_json" 1 || ! smoke_wait_api_job_status "$api_url" "$job_id" completed 45 >/dev/null; then
-  echo "expected privilege-unlocked source template patch to complete; got:" >&2
-  echo "$push_json" >&2
-  dump_job_diagnostics "privilege-unlocked source template patch did not complete" "$job_id"
-  exit 1
-fi
-
-grep -q "proc_root = \"$patch_proc_root\"" "$agent_config"
-grep -q "working_directory = \"$execution_cwd\"" "$agent_config"
-grep -q 'environment_policy = "clean"' "$agent_config"
-grep -q "$execution_env_value" "$agent_config"
-grep -q 'pty_policy = "disabled"' "$agent_config"
-grep -q 'process_cleanup = "direct_child"' "$agent_config"
-grep -q "display_name = \"$client_id\"" "$agent_config"
-if grep -q "$patch_proc_root" "$rollback_config"; then
-  echo "source template patch rollback captured patched proc_root instead of original config" >&2
-  exit 1
-fi
-assert_patch_persisted
+assert_template_runtime_config_visible
 assert_execution_policy_applied
 
 stop_api
 start_api "restart"
-api_get "/api/v1/auth/me" | jq -e '.username == "source template-patch-smoke"' >/dev/null
+api_get "/api/v1/auth/me" | jq -e '.username == "source-template-runtime-config-smoke"' >/dev/null
 api_get "/api/v1/source-templates" | jq -e --arg template_id "$template_id" '
   any(.[]; .id == $template_id and .domain == "telemetry_metrics_source" and .name == "smoke:custom-proc-root")
 ' >/dev/null
@@ -480,7 +459,7 @@ api_get "/api/v1/source-template-assignments?client_id=$client_id" | jq -e --arg
 api_get "/api/v1/source-template-assignments?client_id=$client_id" | jq -e --arg template_id "$execution_template_id" '
   any(.[]; .template_id == $template_id and .domain == "command_execution_policy")
 ' >/dev/null
-assert_patch_persisted
+assert_template_runtime_config_visible
 
 jq -n \
   --arg client_id "$client_id" \
@@ -493,16 +472,15 @@ jq -n \
   --arg proc_root "$patch_proc_root" \
   --arg execution_cwd "$execution_cwd" \
   '{
-    live_source_config_patch_smoke: "ok",
+    live_source_template_runtime_config_smoke: "ok",
     postgres_backed: true,
     auth_session: "persisted",
     api_restart: "verified",
-    no_privilege_unlock_rejected: true,
     command_execution_policy_fields: "verified",
     client_id: $client_id,
     template_id: $template_id,
     execution_template_id: $execution_template_id,
-    job_id: $job_id,
+    config_read_job_id: $job_id,
     execution_policy_job_id: $execution_policy_job_id,
     execution_timeout_job_id: $execution_timeout_job_id,
     terminal_reject_job_id: $terminal_reject_job_id,

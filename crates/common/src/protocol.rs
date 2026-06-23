@@ -4,8 +4,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    AgentMetrics, FilePushChunk, PrivilegeAssertion, ProtocolError, TunnelConfigBackend,
-    TunnelEndpointSide, TunnelPlan, MAX_DIRECT_FILE_DOWNLOAD_BYTES,
+    AgentMetrics, AgentRuntimeConfig, FilePushChunk, PrivilegeAssertion, ProtocolError,
+    TunnelConfigBackend, TunnelEndpointSide, TunnelPlan, MAX_DIRECT_FILE_DOWNLOAD_BYTES,
 };
 
 pub const NETWORK_SPEED_TEST_MIN_DURATION_SECS: u8 = 1;
@@ -36,8 +36,6 @@ pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const TERMINAL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const FILE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 1;
-pub const HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE: &str = "full_override";
-pub const SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH: &str = "incremental_patch";
 pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const USER_SESSIONS_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const PROCESS_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -960,6 +958,23 @@ pub struct GatewayAgentHelloIngest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AgentRuntimeConfigReloadRequest {
+    pub client_id: String,
+    pub current_content_hash: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GatewayRuntimeConfigReloadRequest {
+    pub gateway_id: String,
+    pub gateway_session_id: Uuid,
+    pub process_incarnation_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_ip: Option<String>,
+    pub request: AgentRuntimeConfigReloadRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GatewayTelemetryIngest {
     pub gateway_id: String,
     pub gateway_session_id: Uuid,
@@ -1213,8 +1228,7 @@ pub fn job_command_variant_names() -> &'static [&'static str] {
         "terminal_resize",
         "terminal_close",
         "config_read",
-        "hot_config",
-        "source_config_patch",
+        "runtime_config_sync",
         "agent_update",
         "agent_update_activate",
         "agent_update_rollback",
@@ -1250,9 +1264,6 @@ pub fn job_command_variant_names() -> &'static [&'static str] {
         "backup",
         "restore",
         "restore_rollback",
-        "network_apply",
-        "network_ospf_cost_update",
-        "network_rollback",
         "network_status",
         "network_interfaces",
         "network_probe",
@@ -1265,7 +1276,7 @@ pub const JOB_COMMAND_SAFETY_WRITE: &str = "write";
 pub const JOB_COMMAND_SAFETY_EXEC: &str = "exec";
 pub const JOB_COMMAND_SAFETY_EXCLUSIVE: &str = "exclusive";
 
-pub const JOB_COMMAND_TYPE_LABELS: [&str; 53] = [
+pub const JOB_COMMAND_TYPE_LABELS: [&str; 49] = [
     "shell_argv",
     "shell_pty",
     "shell_script",
@@ -1275,8 +1286,7 @@ pub const JOB_COMMAND_TYPE_LABELS: [&str; 53] = [
     "terminal_resize",
     "terminal_close",
     "config_read",
-    "hot_config",
-    "source_config_patch",
+    "runtime_config_sync",
     "agent_update",
     "agent_update_activate",
     "agent_update_rollback",
@@ -1312,16 +1322,13 @@ pub const JOB_COMMAND_TYPE_LABELS: [&str; 53] = [
     "backup",
     "restore",
     "restore_rollback",
-    "network_apply",
-    "network_ospf_cost_update",
-    "network_rollback",
     "network_status",
     "network_interfaces",
     "network_probe",
     "network_speed_test",
 ];
 
-pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 52] = [
+pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 48] = [
     ("shell", JOB_COMMAND_SAFETY_EXEC),
     ("shell_script", JOB_COMMAND_SAFETY_EXEC),
     ("terminal_open", JOB_COMMAND_SAFETY_EXEC),
@@ -1330,8 +1337,7 @@ pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 52] = [
     ("terminal_resize", JOB_COMMAND_SAFETY_EXEC),
     ("terminal_close", JOB_COMMAND_SAFETY_EXEC),
     ("config_read", JOB_COMMAND_SAFETY_READ),
-    ("hot_config", JOB_COMMAND_SAFETY_EXCLUSIVE),
-    ("source_config_patch", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("runtime_config_sync", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update_activate", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update_rollback", JOB_COMMAND_SAFETY_EXCLUSIVE),
@@ -1367,16 +1373,13 @@ pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 52] = [
     ("backup", JOB_COMMAND_SAFETY_READ),
     ("restore", JOB_COMMAND_SAFETY_WRITE),
     ("restore_rollback", JOB_COMMAND_SAFETY_WRITE),
-    ("network_apply", JOB_COMMAND_SAFETY_WRITE),
-    ("network_ospf_cost_update", JOB_COMMAND_SAFETY_WRITE),
-    ("network_rollback", JOB_COMMAND_SAFETY_WRITE),
     ("network_status", JOB_COMMAND_SAFETY_READ),
     ("network_interfaces", JOB_COMMAND_SAFETY_READ),
     ("network_probe", JOB_COMMAND_SAFETY_READ),
     ("network_speed_test", JOB_COMMAND_SAFETY_EXEC),
 ];
 
-pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 52] = [
+pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 48] = [
     ("shell", true),
     ("shell_script", true),
     ("terminal_open", true),
@@ -1385,8 +1388,7 @@ pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 52
     ("terminal_resize", true),
     ("terminal_close", true),
     ("config_read", false),
-    ("hot_config", true),
-    ("source_config_patch", true),
+    ("runtime_config_sync", true),
     ("agent_update", true),
     ("agent_update_activate", true),
     ("agent_update_rollback", true),
@@ -1422,16 +1424,13 @@ pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 52
     ("backup", true),
     ("restore", true),
     ("restore_rollback", true),
-    ("network_apply", true),
-    ("network_ospf_cost_update", true),
-    ("network_rollback", true),
     ("network_status", false),
     ("network_interfaces", false),
     ("network_probe", false),
     ("network_speed_test", true),
 ];
 
-pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 52] = [
+pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 48] = [
     ("shell", "shell_argv"),
     ("shell_script", "shell_script"),
     ("terminal_open", "terminal_open"),
@@ -1440,8 +1439,7 @@ pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 52] = [
     ("terminal_resize", "terminal_resize"),
     ("terminal_close", "terminal_close"),
     ("config_read", "config_read"),
-    ("hot_config", "hot_config"),
-    ("source_config_patch", "source_config_patch"),
+    ("runtime_config_sync", "runtime_config_sync"),
     ("agent_update", "agent_update"),
     ("agent_update_activate", "agent_update_activate"),
     ("agent_update_rollback", "agent_update_rollback"),
@@ -1483,16 +1481,13 @@ pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 52] = [
     ("backup", "backup"),
     ("restore", "restore"),
     ("restore_rollback", "restore_rollback"),
-    ("network_apply", "network_apply"),
-    ("network_ospf_cost_update", "network_ospf_cost_update"),
-    ("network_rollback", "network_rollback"),
     ("network_status", "network_status"),
     ("network_interfaces", "network_interfaces"),
     ("network_probe", "network_probe"),
     ("network_speed_test", "network_speed_test"),
 ];
 
-pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 53] = [
+pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 49] = [
     ("shell_argv", "shell"),
     ("shell_pty", "shell"),
     ("shell_script", "shell"),
@@ -1502,8 +1497,7 @@ pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 53] = [
     ("terminal_resize", "terminal"),
     ("terminal_close", "terminal"),
     ("config_read", "config"),
-    ("hot_config", "config"),
-    ("source_config_patch", "config"),
+    ("runtime_config_sync", "config"),
     ("agent_update", "agent_update"),
     ("agent_update_activate", "agent_update"),
     ("agent_update_rollback", "agent_update"),
@@ -1539,9 +1533,6 @@ pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 53] = [
     ("backup", "backup"),
     ("restore", "restore"),
     ("restore_rollback", "restore"),
-    ("network_apply", "network"),
-    ("network_ospf_cost_update", "network"),
-    ("network_rollback", "network"),
     ("network_status", "network"),
     ("network_interfaces", "network"),
     ("network_probe", "network"),
@@ -2587,17 +2578,10 @@ pub enum JobCommand {
         reason: Option<String>,
     },
     ConfigRead,
-    HotConfig {
-        apply_mode: String,
-        toml: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        preserve_redacted: Option<bool>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        base_config_sha256_hex: Option<String>,
-    },
-    SourceConfigPatch {
-        apply_mode: String,
-        toml: String,
+    RuntimeConfigSync {
+        desired_version: u64,
+        reason: String,
+        config: Box<AgentRuntimeConfig>,
     },
     #[serde(rename = "agent_update")]
     UpdateAgent {
@@ -2863,21 +2847,6 @@ pub enum JobCommand {
         source_restore_job_id: Uuid,
         restored_files: Vec<RestoreRollbackFile>,
     },
-    NetworkApply {
-        plan: Box<TunnelPlan>,
-        side: TunnelEndpointSide,
-    },
-    NetworkOspfCostUpdate {
-        plan: Box<TunnelPlan>,
-        side: TunnelEndpointSide,
-        current_ospf_cost: u16,
-        recommended_ospf_cost: u16,
-        bird2_sha256_hex: String,
-    },
-    NetworkRollback {
-        plan: Box<TunnelPlan>,
-        side: TunnelEndpointSide,
-    },
     NetworkStatus {
         plan: Box<TunnelPlan>,
         side: TunnelEndpointSide,
@@ -2930,9 +2899,9 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::FileCopy { .. }
         | JobCommand::FileDownload { .. }
         | JobCommand::FileArchiveTar { .. } => FILE_COMMAND_PROTOCOL_VERSION,
-        JobCommand::ConfigRead
-        | JobCommand::HotConfig { .. }
-        | JobCommand::SourceConfigPatch { .. } => CONFIG_COMMAND_PROTOCOL_VERSION,
+        JobCommand::ConfigRead | JobCommand::RuntimeConfigSync { .. } => {
+            CONFIG_COMMAND_PROTOCOL_VERSION
+        }
         JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
@@ -2948,10 +2917,7 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
         JobCommand::Restore { .. } | JobCommand::RestoreRollback { .. } => {
             RESTORE_COMMAND_PROTOCOL_VERSION
         }
-        JobCommand::NetworkApply { .. }
-        | JobCommand::NetworkOspfCostUpdate { .. }
-        | JobCommand::NetworkRollback { .. }
-        | JobCommand::NetworkStatus { .. }
+        JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkInterfaces
         | JobCommand::NetworkProbe { .. }
         | JobCommand::NetworkSpeedTest { .. } => NETWORK_COMMAND_PROTOCOL_VERSION,
@@ -2968,8 +2934,7 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::TerminalResize { .. }
         | JobCommand::TerminalClose { .. }
         | JobCommand::ConfigRead
-        | JobCommand::HotConfig { .. }
-        | JobCommand::SourceConfigPatch { .. }
+        | JobCommand::RuntimeConfigSync { .. }
         | JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
@@ -3005,9 +2970,6 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::Backup { .. }
         | JobCommand::Restore { .. }
         | JobCommand::RestoreRollback { .. }
-        | JobCommand::NetworkApply { .. }
-        | JobCommand::NetworkOspfCostUpdate { .. }
-        | JobCommand::NetworkRollback { .. }
         | JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkInterfaces
         | JobCommand::NetworkProbe { .. }
@@ -3026,8 +2988,7 @@ pub fn job_command_type_label(command: &JobCommand) -> &'static str {
         JobCommand::TerminalResize { .. } => "terminal_resize",
         JobCommand::TerminalClose { .. } => "terminal_close",
         JobCommand::ConfigRead => "config_read",
-        JobCommand::HotConfig { .. } => "hot_config",
-        JobCommand::SourceConfigPatch { .. } => "source_config_patch",
+        JobCommand::RuntimeConfigSync { .. } => "runtime_config_sync",
         JobCommand::UpdateAgent { .. } => "agent_update",
         JobCommand::AgentUpdateActivate { .. } => "agent_update_activate",
         JobCommand::AgentUpdateRollback { .. } => "agent_update_rollback",
@@ -3063,9 +3024,6 @@ pub fn job_command_type_label(command: &JobCommand) -> &'static str {
         JobCommand::Backup { .. } => "backup",
         JobCommand::Restore { .. } => "restore",
         JobCommand::RestoreRollback { .. } => "restore_rollback",
-        JobCommand::NetworkApply { .. } => "network_apply",
-        JobCommand::NetworkOspfCostUpdate { .. } => "network_ospf_cost_update",
-        JobCommand::NetworkRollback { .. } => "network_rollback",
         JobCommand::NetworkStatus { .. } => "network_status",
         JobCommand::NetworkInterfaces => "network_interfaces",
         JobCommand::NetworkProbe { .. } => "network_probe",
@@ -3084,12 +3042,10 @@ pub fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> Str
     match command {
         JobCommand::Shell { .. }
         | JobCommand::ShellScript { .. }
+        | JobCommand::RuntimeConfigSync { .. }
         | JobCommand::Backup { .. }
         | JobCommand::Restore { .. }
         | JobCommand::RestoreRollback { .. }
-        | JobCommand::NetworkApply { .. }
-        | JobCommand::NetworkOspfCostUpdate { .. }
-        | JobCommand::NetworkRollback { .. }
         | JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkInterfaces
         | JobCommand::NetworkProbe { .. }
@@ -3136,8 +3092,7 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         | JobCommand::TerminalPoll { .. }
         | JobCommand::TerminalResize { .. }
         | JobCommand::TerminalClose { .. } => JobCommandSafety::Exec,
-        JobCommand::HotConfig { .. }
-        | JobCommand::SourceConfigPatch { .. }
+        JobCommand::RuntimeConfigSync { .. }
         | JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
@@ -3156,10 +3111,7 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         | JobCommand::FileChown { .. }
         | JobCommand::FileCopy { .. }
         | JobCommand::Restore { .. }
-        | JobCommand::RestoreRollback { .. }
-        | JobCommand::NetworkApply { .. }
-        | JobCommand::NetworkOspfCostUpdate { .. }
-        | JobCommand::NetworkRollback { .. } => JobCommandSafety::Write,
+        | JobCommand::RestoreRollback { .. } => JobCommandSafety::Write,
         JobCommand::ProcessStart { .. }
         | JobCommand::ProcessStop { .. }
         | JobCommand::ProcessRestart { .. }

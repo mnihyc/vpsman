@@ -6,21 +6,23 @@ use vpsman_common::validate_incremental_config_patch_section;
 
 use crate::{
     model::{
-        AuditLogView, AuthContext, HotConfigPatchGeneratorRenderView, HotConfigPatchGeneratorView,
-        RenderHotConfigPatchGeneratorRequest, UpsertHotConfigPatchGeneratorRequest,
+        AuditLogView, AuthContext, RenderRuntimeConfigPatchGeneratorRequest,
+        RuntimeConfigPatchGeneratorRenderView, RuntimeConfigPatchGeneratorView,
+        UpsertRuntimeConfigPatchGeneratorRequest,
     },
     repository::Repository,
     unix_now,
 };
 
 impl Repository {
-    pub(crate) async fn list_hot_config_patch_generators(
+    pub(crate) async fn list_runtime_config_patch_generators(
         &self,
-    ) -> Result<Vec<HotConfigPatchGeneratorView>> {
-        self.ensure_builtin_hot_config_patch_generators().await?;
+    ) -> Result<Vec<RuntimeConfigPatchGeneratorView>> {
+        self.ensure_builtin_runtime_config_patch_generators()
+            .await?;
         match self {
             Self::Memory(memory) => {
-                let mut generators = memory.hot_config_patch_generators.read().await.clone();
+                let mut generators = memory.runtime_config_patch_generators.read().await.clone();
                 generators.sort_by(|left, right| {
                     left.category
                         .cmp(&right.category)
@@ -44,7 +46,7 @@ impl Repository {
                         actor_id,
                         created_at::text AS created_at,
                         updated_at::text AS updated_at
-                    FROM hot_config_patch_generators
+                    FROM runtime_config_patch_generators
                     ORDER BY category, name, id
                     "#,
                 )
@@ -55,14 +57,14 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn upsert_hot_config_patch_generator(
+    pub(crate) async fn upsert_runtime_config_patch_generator(
         &self,
-        request: &UpsertHotConfigPatchGeneratorRequest,
+        request: &UpsertRuntimeConfigPatchGeneratorRequest,
         operator: &AuthContext,
-    ) -> Result<HotConfigPatchGeneratorView> {
+    ) -> Result<RuntimeConfigPatchGeneratorView> {
         let id = request.id.unwrap_or_else(Uuid::new_v4);
         let now = unix_now().to_string();
-        let generator = HotConfigPatchGeneratorView {
+        let generator = RuntimeConfigPatchGeneratorView {
             id,
             name: request.name.trim().to_string(),
             category: request.category.trim().to_string(),
@@ -82,17 +84,18 @@ impl Repository {
         )?;
         match self {
             Self::Memory(memory) => {
-                self.ensure_builtin_hot_config_patch_generators().await?;
-                let mut generators = memory.hot_config_patch_generators.write().await;
+                self.ensure_builtin_runtime_config_patch_generators()
+                    .await?;
+                let mut generators = memory.runtime_config_patch_generators.write().await;
                 let saved = if let Some(existing) =
                     generators.iter_mut().find(|existing| existing.id == id)
                 {
                     anyhow::ensure!(
                         !existing.built_in,
-                        "hot_config_patch_generator_builtin_immutable"
+                        "runtime_config_patch_generator_builtin_immutable"
                     );
                     let created_at = existing.created_at.clone();
-                    *existing = HotConfigPatchGeneratorView {
+                    *existing = RuntimeConfigPatchGeneratorView {
                         id: generator.id,
                         name: generator.name.clone(),
                         category: generator.category.clone(),
@@ -115,8 +118,8 @@ impl Repository {
                     .audits
                     .write()
                     .await
-                    .push(hot_config_patch_generator_audit(
-                        "hot_config_patch_generator.saved",
+                    .push(runtime_config_patch_generator_audit(
+                        "runtime_config_patch_generator.saved",
                         &saved,
                         operator,
                         unix_now().to_string(),
@@ -126,7 +129,7 @@ impl Repository {
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-                    INSERT INTO hot_config_patch_generators (
+                    INSERT INTO runtime_config_patch_generators (
                         id,
                         name,
                         category,
@@ -149,7 +152,7 @@ impl Repository {
                         docs_metadata = EXCLUDED.docs_metadata,
                         actor_id = EXCLUDED.actor_id,
                         updated_at = now()
-                    WHERE hot_config_patch_generators.built_in = FALSE
+                    WHERE runtime_config_patch_generators.built_in = FALSE
                     RETURNING
                         id,
                         name,
@@ -176,7 +179,8 @@ impl Repository {
                 .bind(operator.operator.id)
                 .fetch_optional(pool)
                 .await?;
-                let row = row.with_context(|| "hot_config_patch_generator_builtin_immutable")?;
+                let row =
+                    row.with_context(|| "runtime_config_patch_generator_builtin_immutable")?;
                 let saved = patch_generator_from_row(row)?;
                 sqlx::query(
                     r#"
@@ -186,10 +190,12 @@ impl Repository {
                 )
                 .bind(Uuid::new_v4())
                 .bind(operator.operator.id)
-                .bind("hot_config_patch_generator.saved")
-                .bind(format!("hot_config_patch_generator:{}", saved.id))
+                .bind("runtime_config_patch_generator.saved")
+                .bind(format!("runtime_config_patch_generator:{}", saved.id))
                 .bind(Option::<String>::None)
-                .bind(hot_config_patch_generator_audit_metadata(&saved, operator))
+                .bind(runtime_config_patch_generator_audit_metadata(
+                    &saved, operator,
+                ))
                 .execute(pool)
                 .await?;
                 Ok(saved)
@@ -197,17 +203,17 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn render_hot_config_patch_generator(
+    pub(crate) async fn render_runtime_config_patch_generator(
         &self,
         generator_id: Uuid,
-        request: &RenderHotConfigPatchGeneratorRequest,
-    ) -> Result<HotConfigPatchGeneratorRenderView> {
+        request: &RenderRuntimeConfigPatchGeneratorRequest,
+    ) -> Result<RuntimeConfigPatchGeneratorRenderView> {
         let generator = self
-            .list_hot_config_patch_generators()
+            .list_runtime_config_patch_generators()
             .await?
             .into_iter()
             .find(|candidate| candidate.id == generator_id)
-            .with_context(|| format!("hot_config_patch_generator_not_found:{generator_id}"))?;
+            .with_context(|| format!("runtime_config_patch_generator_not_found:{generator_id}"))?;
         let rendered = render_generator_body(
             &generator.raw_generator_body,
             &request.values,
@@ -216,7 +222,7 @@ impl Repository {
         let patch: toml::Value =
             toml::from_str(&rendered).context("failed to parse rendered config patch TOML")?;
         let affected_sections = validate_rendered_patch(&patch)?;
-        Ok(HotConfigPatchGeneratorRenderView {
+        Ok(RuntimeConfigPatchGeneratorRenderView {
             generator_id: generator.id,
             name: generator.name,
             toml: rendered,
@@ -227,31 +233,32 @@ impl Repository {
         })
     }
 
-    pub(crate) async fn delete_hot_config_patch_generator(
+    pub(crate) async fn delete_runtime_config_patch_generator(
         &self,
         generator_id: Uuid,
         operator: &AuthContext,
     ) -> Result<()> {
         match self {
             Self::Memory(memory) => {
-                self.ensure_builtin_hot_config_patch_generators().await?;
-                let mut generators = memory.hot_config_patch_generators.write().await;
+                self.ensure_builtin_runtime_config_patch_generators()
+                    .await?;
+                let mut generators = memory.runtime_config_patch_generators.write().await;
                 let existing = generators
                     .iter()
                     .find(|generator| generator.id == generator_id)
                     .cloned()
-                    .with_context(|| "hot_config_patch_generator_not_found")?;
+                    .with_context(|| "runtime_config_patch_generator_not_found")?;
                 anyhow::ensure!(
                     !existing.built_in,
-                    "hot_config_patch_generator_builtin_immutable"
+                    "runtime_config_patch_generator_builtin_immutable"
                 );
                 generators.retain(|generator| generator.id != generator_id);
                 memory
                     .audits
                     .write()
                     .await
-                    .push(hot_config_patch_generator_audit(
-                        "hot_config_patch_generator.deleted",
+                    .push(runtime_config_patch_generator_audit(
+                        "runtime_config_patch_generator.deleted",
                         &existing,
                         operator,
                         unix_now().to_string(),
@@ -261,7 +268,7 @@ impl Repository {
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
-                    DELETE FROM hot_config_patch_generators
+                    DELETE FROM runtime_config_patch_generators
                     WHERE id = $1 AND built_in = FALSE
                     RETURNING
                         id,
@@ -284,7 +291,7 @@ impl Repository {
                 let deleted = row
                     .map(patch_generator_from_row)
                     .transpose()?
-                    .with_context(|| "hot_config_patch_generator_not_found")?;
+                    .with_context(|| "runtime_config_patch_generator_not_found")?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -293,10 +300,10 @@ impl Repository {
                 )
                 .bind(Uuid::new_v4())
                 .bind(operator.operator.id)
-                .bind("hot_config_patch_generator.deleted")
-                .bind(format!("hot_config_patch_generator:{}", deleted.id))
+                .bind("runtime_config_patch_generator.deleted")
+                .bind(format!("runtime_config_patch_generator:{}", deleted.id))
                 .bind(Option::<String>::None)
-                .bind(hot_config_patch_generator_audit_metadata(
+                .bind(runtime_config_patch_generator_audit_metadata(
                     &deleted, operator,
                 ))
                 .execute(pool)
@@ -306,14 +313,14 @@ impl Repository {
         }
     }
 
-    async fn ensure_builtin_hot_config_patch_generators(&self) -> Result<()> {
+    async fn ensure_builtin_runtime_config_patch_generators(&self) -> Result<()> {
         match self {
             Self::Memory(memory) => {
-                let mut seeded = memory.hot_config_patch_generators_seeded.write().await;
+                let mut seeded = memory.runtime_config_patch_generators_seeded.write().await;
                 if *seeded {
                     return Ok(());
                 }
-                let mut generators = memory.hot_config_patch_generators.write().await;
+                let mut generators = memory.runtime_config_patch_generators.write().await;
                 for generator in builtin_patch_generators() {
                     if !generators
                         .iter()
@@ -330,9 +337,9 @@ impl Repository {
     }
 }
 
-fn hot_config_patch_generator_audit(
+fn runtime_config_patch_generator_audit(
     action: &str,
-    generator: &HotConfigPatchGeneratorView,
+    generator: &RuntimeConfigPatchGeneratorView,
     operator: &AuthContext,
     created_at: String,
 ) -> AuditLogView {
@@ -340,15 +347,15 @@ fn hot_config_patch_generator_audit(
         id: Uuid::new_v4(),
         actor_id: Some(operator.operator.id),
         action: action.to_string(),
-        target: format!("hot_config_patch_generator:{}", generator.id),
+        target: format!("runtime_config_patch_generator:{}", generator.id),
         command_hash: None,
-        metadata: hot_config_patch_generator_audit_metadata(generator, operator),
+        metadata: runtime_config_patch_generator_audit_metadata(generator, operator),
         created_at,
     }
 }
 
-fn hot_config_patch_generator_audit_metadata(
-    generator: &HotConfigPatchGeneratorView,
+fn runtime_config_patch_generator_audit_metadata(
+    generator: &RuntimeConfigPatchGeneratorView,
     operator: &AuthContext,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -367,8 +374,8 @@ fn hot_config_patch_generator_audit_metadata(
     })
 }
 
-fn patch_generator_from_row(row: sqlx::postgres::PgRow) -> Result<HotConfigPatchGeneratorView> {
-    Ok(HotConfigPatchGeneratorView {
+fn patch_generator_from_row(row: sqlx::postgres::PgRow) -> Result<RuntimeConfigPatchGeneratorView> {
+    Ok(RuntimeConfigPatchGeneratorView {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
         category: row.try_get("category")?,
@@ -482,7 +489,7 @@ fn validate_rendered_patch(patch: &toml::Value) -> Result<Vec<String>> {
     Ok(sections)
 }
 
-fn builtin_patch_generators() -> Vec<HotConfigPatchGeneratorView> {
+fn builtin_patch_generators() -> Vec<RuntimeConfigPatchGeneratorView> {
     vec![
         predefined_patch_generator(
             "11111111-1111-4111-8111-111111111111",
@@ -550,7 +557,7 @@ fn builtin_patch_generators() -> Vec<HotConfigPatchGeneratorView> {
             "Autonomous updater disabled",
             "update",
             "agent_update",
-            "Disable agent autonomous self-update while keeping manifest URL and interval values explicit in agent config.",
+            "Disable agent autonomous self-update while keeping manifest URL and interval values explicit in runtime config.",
             serde_json::json!({
                 "fields": {
                     "unmanaged_version_url": {"type": "string", "default": "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"},
@@ -592,8 +599,8 @@ fn predefined_patch_generator(
     description: &str,
     field_schema: JsonValue,
     raw_generator_body: &str,
-) -> HotConfigPatchGeneratorView {
-    HotConfigPatchGeneratorView {
+) -> RuntimeConfigPatchGeneratorView {
+    RuntimeConfigPatchGeneratorView {
         id: Uuid::parse_str(id).expect("predefined patch generator UUID must parse"),
         name: name.to_string(),
         category: category.to_string(),

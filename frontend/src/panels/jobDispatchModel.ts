@@ -17,7 +17,6 @@ export type DispatchMode =
   | "file_push"
   | "file_transfer_upload"
   | "file_transfer_download"
-  | "hot_config"
   | "agent_update"
   | "agent_update_check"
   | "agent_update_activate"
@@ -65,7 +64,6 @@ export function buildOperation(
   supervisorCwd: string,
   supervisorEnv: string,
   supervisorLogBytes: number,
-  hotConfigToml: string,
   updateArtifactUrl: string,
   updateSha256Hex: string,
   updateCheckVersionUrl: string,
@@ -153,13 +151,6 @@ export function buildOperation(
   }
   if (mode === "user_sessions") {
     return { type: "user_sessions" };
-  }
-  if (mode === "hot_config") {
-    const toml = hotConfigToml.trim();
-    if (!toml) {
-      throw new Error("Full config TOML is required");
-    }
-    return { type: "hot_config", apply_mode: "full_override", toml };
   }
   if (mode === "agent_update") {
     if (!updateArtifactUrl.startsWith("https://")) {

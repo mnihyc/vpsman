@@ -5,9 +5,11 @@ import type {
   AssignSourceTemplateResponse,
   BulkTagMutationRequest,
   BulkResolveResponse,
+  RuntimeConfigPatchRequest,
+  RuntimeConfigPatchResponse,
   CloneSourceTemplateRequest,
   CreateSourceTemplateRequest,
-  SourceConfigPatchResponse,
+  TemplateRuntimeConfigResponse,
   SourceTemplateAssignmentRecord,
   SourceTemplateDiffRequest,
   SourceTemplateDiffResponse,
@@ -15,17 +17,17 @@ import type {
   SourceTemplateTestRequest,
   SourceTemplateTestResponse,
   SourceStatusRecord,
-  DeleteHotConfigPatchGeneratorRequest,
-  HotConfigPatchGeneratorRecord,
-  HotConfigPatchGeneratorRenderRequest,
-  HotConfigPatchGeneratorRenderResponse,
+  DeleteRuntimeConfigPatchGeneratorRequest,
+  RuntimeConfigPatchGeneratorRecord,
+  RuntimeConfigPatchGeneratorRenderRequest,
+  RuntimeConfigPatchGeneratorRenderResponse,
   JobTargetSelection,
   PrivilegeAssertion,
   TagMutationResponse,
   TagView,
   UpdateSourceTemplateRequest,
   UpdateSourceTemplateResponse,
-  UpsertHotConfigPatchGeneratorRequest,
+  UpsertRuntimeConfigPatchGeneratorRequest,
 } from "../types";
 
 export function useInventoryData(apiToken: string, onUnauthorized: () => void, onFleetChanged: () => Promise<void>) {
@@ -33,7 +35,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   const [sourceTemplates, setSourceTemplates] = useState<SourceTemplateRecord[]>([]);
   const [sourceTemplateAssignments, setSourceTemplateAssignments] = useState<SourceTemplateAssignmentRecord[]>([]);
   const [sourceStatus, setSourceStatus] = useState<SourceStatusRecord[]>([]);
-  const [hotConfigPatchGenerators, setHotConfigPatchGenerators] = useState<HotConfigPatchGeneratorRecord[]>([]);
+  const [runtimeConfigPatchGenerators, setRuntimeConfigPatchGenerators] = useState<RuntimeConfigPatchGeneratorRecord[]>([]);
   const [tagsError, setTagsError] = useState<string | null>(null);
   const [tagsLoading, setTagsLoading] = useState(false);
 
@@ -52,13 +54,13 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         apiGet<SourceTemplateRecord[]>("/api/v1/source-templates", apiToken),
         apiGet<SourceTemplateAssignmentRecord[]>("/api/v1/source-template-assignments", apiToken),
         apiGet<SourceStatusRecord[]>("/api/v1/source-status", apiToken),
-        apiGet<HotConfigPatchGeneratorRecord[]>("/api/v1/hot-config/patch-generators", apiToken),
+        apiGet<RuntimeConfigPatchGeneratorRecord[]>("/api/v1/runtime-config/patch-generators", apiToken),
       ]);
       setTags(nextTags);
       setSourceTemplates(nextSourceTemplates);
       setSourceTemplateAssignments(nextSourceTemplateAssignments);
       setSourceStatus(nextSourceStatus);
-      setHotConfigPatchGenerators(nextPatchGenerators);
+      setRuntimeConfigPatchGenerators(nextPatchGenerators);
     } catch (error) {
       if (isApiUnauthorized(error)) {
         onUnauthorized();
@@ -66,7 +68,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         setSourceTemplates([]);
         setSourceTemplateAssignments([]);
         setSourceStatus([]);
-        setHotConfigPatchGenerators([]);
+        setRuntimeConfigPatchGenerators([]);
         setTagsError("Operator login required");
         return;
       }
@@ -195,19 +197,19 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     [apiToken, loadTagInventory],
   );
 
-  const renderSourceConfigPatch = useCallback(
+  const renderTemplateRuntimeConfig = useCallback(
     async (clientId: string) =>
-      apiGet<SourceConfigPatchResponse>(
-        `/api/v1/source-config-patch?client_id=${encodeURIComponent(clientId)}`,
+      apiGet<TemplateRuntimeConfigResponse>(
+        `/api/v1/template-runtime-config?client_id=${encodeURIComponent(clientId)}`,
         apiToken,
       ),
     [apiToken],
   );
 
-  const upsertHotConfigPatchGenerator = useCallback(
-    async (request: UpsertHotConfigPatchGeneratorRequest) => {
-      const response = await apiPost<HotConfigPatchGeneratorRecord>(
-        "/api/v1/hot-config/patch-generators",
+  const upsertRuntimeConfigPatchGenerator = useCallback(
+    async (request: UpsertRuntimeConfigPatchGeneratorRequest) => {
+      const response = await apiPost<RuntimeConfigPatchGeneratorRecord>(
+        "/api/v1/runtime-config/patch-generators",
         apiToken,
         request,
       );
@@ -217,19 +219,29 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     [apiToken, loadTagInventory],
   );
 
-  const renderHotConfigPatchGenerator = useCallback(
-    async (generatorId: string, request: HotConfigPatchGeneratorRenderRequest) =>
-      apiPost<HotConfigPatchGeneratorRenderResponse>(
-        `/api/v1/hot-config/patch-generators/${encodeURIComponent(generatorId)}/render`,
+  const renderRuntimeConfigPatchGenerator = useCallback(
+    async (generatorId: string, request: RuntimeConfigPatchGeneratorRenderRequest) =>
+      apiPost<RuntimeConfigPatchGeneratorRenderResponse>(
+        `/api/v1/runtime-config/patch-generators/${encodeURIComponent(generatorId)}/render`,
         apiToken,
         request,
       ),
     [apiToken],
   );
 
-  const deleteHotConfigPatchGenerator = useCallback(
-    async (generatorId: string, request: DeleteHotConfigPatchGeneratorRequest) => {
-      await apiDelete(`/api/v1/hot-config/patch-generators/${encodeURIComponent(generatorId)}`, apiToken, request);
+  const submitRuntimeConfigPatch = useCallback(
+    async (request: RuntimeConfigPatchRequest) =>
+      apiPost<RuntimeConfigPatchResponse>(
+        "/api/v1/runtime-config/patch",
+        apiToken,
+        request,
+      ),
+    [apiToken],
+  );
+
+  const deleteRuntimeConfigPatchGenerator = useCallback(
+    async (generatorId: string, request: DeleteRuntimeConfigPatchGeneratorRequest) => {
+      await apiDelete(`/api/v1/runtime-config/patch-generators/${encodeURIComponent(generatorId)}`, apiToken, request);
       await loadTagInventory();
     },
     [apiToken, loadTagInventory],
@@ -253,19 +265,20 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     assignSourceTemplate,
     assignTag,
     bulkMutateTags,
+    submitRuntimeConfigPatch,
     cloneSourceTemplate,
     createSourceTemplate,
     createTag,
     sourceTemplateAssignments,
     sourceTemplates,
     sourceStatus,
-    deleteHotConfigPatchGenerator,
+    deleteRuntimeConfigPatchGenerator,
     deleteTag,
     diffSourceTemplate,
     loadTagInventory,
-    hotConfigPatchGenerators,
-    renderSourceConfigPatch,
-    renderHotConfigPatchGenerator,
+    runtimeConfigPatchGenerators,
+    renderTemplateRuntimeConfig,
+    renderRuntimeConfigPatchGenerator,
     resolveBulkPreview,
     resolveJobTargets,
     testSourceTemplate,
@@ -274,6 +287,6 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     tagsLoading,
     updateTagOrder,
     updateSourceTemplate,
-    upsertHotConfigPatchGenerator,
+    upsertRuntimeConfigPatchGenerator,
   };
 }

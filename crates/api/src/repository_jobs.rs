@@ -246,15 +246,13 @@ mod tests {
     #[test]
     fn exclusive_operation_types_follow_shared_command_safety() {
         let exclusive = exclusive_operation_types();
-        assert!(exclusive.contains(&"hot_config"));
+        assert!(exclusive.contains(&"runtime_config_sync"));
         assert!(exclusive.contains(&"agent_update"));
         assert!(exclusive.contains(&"agent_update_activate"));
         assert!(exclusive.contains(&"agent_update_rollback"));
         assert!(exclusive.contains(&"agent_update_check"));
-        assert!(exclusive.contains(&"source_config_patch"));
         assert!(!exclusive.contains(&"backup"));
         assert!(!exclusive.contains(&"shell"));
-        assert!(!exclusive.contains(&"network_apply"));
         assert!(!exclusive.contains(&"network_speed_test"));
         assert!(!exclusive.contains(&"network_status"));
     }
@@ -861,6 +859,14 @@ fn job_webhook_predicates(command_type: &str, status: &str, include_created: boo
     predicates
 }
 
+fn job_actor_id(operator: &AuthContext) -> Option<Uuid> {
+    if operator.operator.id.is_nil() && operator.operator.role == "system" {
+        None
+    } else {
+        Some(operator.operator.id)
+    }
+}
+
 impl Repository {
     pub(crate) async fn get_job(&self, job_id: Uuid) -> Result<Option<JobHistoryView>> {
         match self {
@@ -1375,12 +1381,13 @@ impl Repository {
             "reason": reason,
         });
         let operation = request.job_command().ok();
+        let actor_id = job_actor_id(operator);
         match self {
             Self::Memory(memory) => {
                 let created_at = unix_now().to_string();
                 memory.jobs.write().await.push(JobHistoryView {
                     id: job_id,
-                    actor_id: Some(operator.operator.id),
+                    actor_id,
                     command_type: "api_job_request".to_string(),
                     privileged: request.privileged,
                     status: status.to_string(),
@@ -1420,7 +1427,7 @@ impl Repository {
                     );
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
+                    actor_id,
                     action: format!("job.{status}"),
                     target: "api:/api/v1/jobs".to_string(),
                     command_hash: Some(command_hash.to_string()),
@@ -1441,7 +1448,7 @@ impl Repository {
                     "#,
                 )
                 .bind(job_id)
-                .bind(operator.operator.id)
+                .bind(actor_id)
                 .bind("api_job_request")
                 .bind(request.privileged)
                 .bind(status)
@@ -1481,7 +1488,7 @@ impl Repository {
                     "#,
                 )
                 .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
+                .bind(actor_id)
                 .bind(format!("job.{status}"))
                 .bind("api:/api/v1/jobs")
                 .bind(command_hash)
@@ -1498,7 +1505,7 @@ impl Repository {
             privileged: request.privileged,
             command_hash,
             resolved_targets: &resolved_targets,
-            actor_id: Some(operator.operator.id),
+            actor_id,
             source_schedule_id: None,
             operation: operation.as_ref(),
         })
@@ -1628,6 +1635,7 @@ impl Repository {
         let operation = request
             .job_command()
             .map_err(|error| anyhow::anyhow!(error.code))?;
+        let actor_id = job_actor_id(operator);
         let precompleted_by_client =
             precompleted_targets_by_client(resolved_targets, precompleted_targets)?;
         let mut finished_status = None::<String>;
@@ -1636,7 +1644,7 @@ impl Repository {
                 let created_at = unix_now().to_string();
                 memory.jobs.write().await.push(JobHistoryView {
                     id: job_id,
-                    actor_id: Some(operator.operator.id),
+                    actor_id,
                     command_type: command_type.clone(),
                     privileged: request.privileged,
                     status: JOB_STATUS_QUEUED.to_string(),
@@ -1725,7 +1733,7 @@ impl Repository {
                 }
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
-                    actor_id: Some(operator.operator.id),
+                    actor_id,
                     action: "job.dispatch_requested".to_string(),
                     target: "api:/api/v1/jobs".to_string(),
                     command_hash: Some(command_hash.to_string()),
@@ -1801,7 +1809,7 @@ impl Repository {
                     "#,
                 )
                 .bind(job_id)
-                .bind(operator.operator.id)
+                .bind(actor_id)
                 .bind(&command_type)
                 .bind(request.privileged)
                 .bind(JOB_STATUS_QUEUED)
@@ -1879,7 +1887,7 @@ impl Repository {
                     "#,
                 )
                 .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
+                .bind(actor_id)
                 .bind("job.dispatch_requested")
                 .bind("api:/api/v1/jobs")
                 .bind(command_hash)
@@ -1897,7 +1905,7 @@ impl Repository {
             privileged: request.privileged,
             command_hash,
             resolved_targets,
-            actor_id: Some(operator.operator.id),
+            actor_id,
             source_schedule_id,
             operation: Some(&operation),
         })
@@ -1907,7 +1915,7 @@ impl Repository {
                 .await?;
         }
         if let Some(status) = finished_status {
-            self.record_job_terminal_side_effects(job_id, &status, None)
+            self.record_job_terminal_side_effects(job_id, &status)
                 .await?;
         }
         Ok(job_id)
@@ -2291,12 +2299,6 @@ impl Repository {
             return Ok(None);
         };
         if job.completed_at.is_some() {
-            if job.status == JOB_STATUS_COMPLETED {
-                if let Some(operation) = self.job_operation(job_id).await? {
-                    self.repair_tunnel_plan_execution(job_id, &operation, &job.status)
-                        .await?;
-                }
-            }
             return Ok(None);
         }
         let targets = self.list_job_targets(job_id).await?;
@@ -3719,7 +3721,7 @@ impl Repository {
                     _ => {}
                 }
                 if let Some(status) = finished_status {
-                    self.record_job_terminal_side_effects(job_id, &status, None)
+                    self.record_job_terminal_side_effects(job_id, &status)
                         .await?;
                 }
                 self.record_job_target_webhook_event(job_id, client_id, outcome)
@@ -3730,7 +3732,7 @@ impl Repository {
     }
 
     pub(crate) async fn finish_job(&self, job_id: Uuid, status: &str) -> Result<bool> {
-        let completed_operation = match self {
+        let finished = match self {
             Self::Memory(memory) => {
                 let completed_at = unix_now().to_string();
                 let mut jobs = memory.jobs.write().await;
@@ -3742,12 +3744,7 @@ impl Repository {
                 };
                 job.status = status.to_string();
                 job.completed_at = Some(completed_at);
-                drop(jobs);
-                if status == JOB_STATUS_COMPLETED {
-                    memory.job_operations.read().await.get(&job_id).cloned()
-                } else {
-                    None
-                }
+                true
             }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
@@ -3756,49 +3753,28 @@ impl Repository {
                     SET status = $2, completed_at = now()
                     WHERE id = $1
                       AND completed_at IS NULL
-                    RETURNING operation
+                    RETURNING id
                     "#,
                 )
                 .bind(job_id)
                 .bind(status)
                 .fetch_optional(pool)
                 .await?;
-                let Some(row) = row else {
-                    return Ok(false);
-                };
-                if status == JOB_STATUS_COMPLETED {
-                    let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
-                    Some(operation.0)
-                } else {
-                    None
-                }
+                row.is_some()
             }
         };
-        self.record_job_terminal_side_effects(job_id, status, completed_operation)
-            .await?;
-        Ok(true)
+        if finished {
+            self.record_job_terminal_side_effects(job_id, status)
+                .await?;
+        }
+        Ok(finished)
     }
 
     pub(crate) async fn record_job_terminal_side_effects(
         &self,
         job_id: Uuid,
         status: &str,
-        completed_operation: Option<JobCommand>,
     ) -> Result<()> {
-        if status == JOB_STATUS_COMPLETED {
-            match completed_operation {
-                Some(operation) => {
-                    self.record_tunnel_plan_execution(job_id, &operation, status)
-                        .await?;
-                }
-                None => {
-                    if let Some(operation) = self.job_operation(job_id).await? {
-                        self.repair_tunnel_plan_execution(job_id, &operation, status)
-                            .await?;
-                    }
-                }
-            }
-        }
         self.record_job_status_webhook_event(job_id, status).await?;
         self.record_schedule_job_outcome(job_id, status).await?;
         Ok(())

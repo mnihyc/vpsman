@@ -1,4 +1,3 @@
-import { sha256Hex } from "./fileTransfer";
 import type {
   JobOperation,
   RuntimeTunnelFouOptions,
@@ -8,8 +7,6 @@ import type {
   TunnelPlan,
 } from "./types";
 import { DEFAULT_RUNTIME_FOU_OPTIONS } from "./topologyRuntime";
-
-const encoder = new TextEncoder();
 
 export type TunnelEndpointConfig = {
   localClientId: string;
@@ -80,57 +77,6 @@ function endpointAddressPair(
     : { local: pair.right, remote: pair.left, prefixLen: pair.prefix_len };
 }
 
-export async function buildNetworkApplyOperation(
-  plan: TunnelPlan,
-  side: TunnelEndpointSide,
-): Promise<{ endpoint: TunnelEndpointConfig; operation: JobOperation }> {
-  const endpoint = renderTunnelEndpointConfig(plan, side);
-  return {
-    endpoint,
-    operation: {
-      type: "network_apply",
-      plan,
-      side,
-    },
-  };
-}
-
-export async function buildNetworkOspfCostUpdateOperation(
-  plan: TunnelPlan,
-  side: TunnelEndpointSide,
-  currentOspfCost: number,
-  recommendedOspfCost: number,
-): Promise<{ endpoint: TunnelEndpointConfig; operation: JobOperation }> {
-  const proposedPlan = { ...plan, recommended_ospf_cost: recommendedOspfCost };
-  const endpoint = renderTunnelEndpointConfig(proposedPlan, side);
-  return {
-    endpoint,
-    operation: {
-      type: "network_ospf_cost_update",
-      plan: proposedPlan,
-      side,
-      current_ospf_cost: currentOspfCost,
-      recommended_ospf_cost: recommendedOspfCost,
-      bird2_sha256_hex: await sha256Text(endpoint.bird2InterfaceSnippet),
-    },
-  };
-}
-
-export function buildNetworkRollbackOperation(
-  plan: TunnelPlan,
-  side: TunnelEndpointSide,
-): { endpoint: TunnelEndpointConfig; operation: JobOperation } {
-  const endpoint = renderTunnelEndpointConfig(plan, side);
-  return {
-    endpoint,
-    operation: {
-      type: "network_rollback",
-      plan,
-      side,
-    },
-  };
-}
-
 export function buildNetworkStatusOperation(
   plan: TunnelPlan,
   side: TunnelEndpointSide,
@@ -190,10 +136,6 @@ export function buildNetworkSpeedTestOperation(
   };
 }
 
-function sha256Text(value: string): Promise<string> {
-  return sha256Hex(encoder.encode(value));
-}
-
 function renderIfupdownSnippet(input: {
   name: string;
   interfaceName: string;
@@ -207,7 +149,7 @@ function renderIfupdownSnippet(input: {
   if (!isLinuxTunnelKind(input.kind)) {
     throw new Error("iproute2-managed rendering requires GRE, IPIP, SIT, or FOU");
   }
-  const lines = [`# vpsman tunnel ${input.name}: generated plan only`];
+  const lines = [`# vpsman tunnel ${input.name}: server-managed runtime config`];
   if (input.ipv4) {
     lines.push(...renderIfupdownIpv4Stanza(input, input.ipv4, true));
   }

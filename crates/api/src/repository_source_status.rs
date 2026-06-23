@@ -126,7 +126,7 @@ fn derive_status(
     match domain {
         "telemetry_metrics_source" => (
             "selected".to_string(),
-            "agent is online; telemetry source is selected in agent config".to_string(),
+            "agent is online; telemetry source is selected in runtime config".to_string(),
             json!({
                 "agent_status": agent.status,
                 "continuous_status": true,
@@ -436,7 +436,7 @@ fn traffic_limit_status_source_status(
         json!({
             "continuous_status": true,
             "workflow": "runtime_traffic_limits",
-            "command_types": ["network_apply", "network_status", "tunnel_speed_test"],
+            "command_types": ["runtime_config_sync", "network_status", "tunnel_speed_test"],
             "privilege_gated": true,
             "source_kind": source_kind,
             "status_source": template.definition.get("status_source").and_then(serde_json::Value::as_str).unwrap_or("network_status_and_telemetry"),
@@ -451,12 +451,12 @@ fn routing_daemon_adapter_status(
     (
         "ready_on_demand".to_string(),
         format!(
-            "routing-daemon adapter {source_kind} is selected; topology evidence and OSPF jobs provide status"
+            "routing-daemon adapter {source_kind} is selected; topology evidence and OSPF plan mutations provide status"
         ),
         json!({
             "continuous_status": false,
             "workflow": "network_routing",
-            "command_types": ["network_status", "network_ospf_cost_update"],
+            "command_types": ["network_status", "tunnel_ospf_cost_update"],
             "privilege_gated": true,
             "source_kind": source_kind,
             "provider": template.definition.get("provider").and_then(serde_json::Value::as_str).unwrap_or("bird2"),

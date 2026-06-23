@@ -761,7 +761,7 @@ fn render_ifupdown_snippet(input: TunnelSnippetInput<'_>) -> String {
         .linux_tunnel_mode()
         .expect("iproute2-managed tunnel kind is validated before rendering");
     let mut lines = vec![format!(
-        "# vpsman tunnel {}: generated plan only",
+        "# vpsman tunnel {}: server-managed runtime config",
         input.name
     )];
     if let Some(ipv4) = input.ipv4 {
@@ -893,7 +893,7 @@ fn touched_files_for_runtime(manager: RuntimeTunnelManager) -> Vec<String> {
 }
 
 fn validation_steps_for_runtime(manager: RuntimeTunnelManager) -> Vec<String> {
-    let mut steps = vec!["review generated snippets before apply".to_string()];
+    let mut steps = vec!["review generated runtime snippets before enabling the plan".to_string()];
     match manager {
         RuntimeTunnelManager::AgentIproute2Managed => {
             steps.push(

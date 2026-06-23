@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useState, type FormEvent } from "react";
-import { FileSliders, Play, RefreshCw, Save, ServerCog, Trash2 } from "lucide-react";
+import { FileSliders, Play, RefreshCw, ServerCog, Trash2 } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -17,8 +17,14 @@ import {
   waitForBulkJobTargets,
   type BulkJobProgress,
 } from "../bulkJobProgress";
+import { sha256Hex } from "../fileTransfer";
 import { usePanelDisplaySettings } from "../panelDisplay";
-import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../privilege";
+import {
+  buildPrivilegeAssertion,
+  buildPrivilegeForJobOperation,
+  canonicalDbPrivilegeIntent,
+  type PrivilegeMaterial,
+} from "../privilege";
 import { parseSearchExpression, selectorExpressionForClientIds } from "../searchExpression";
 import {
   clampJobMaxTimeoutSecs,
@@ -31,11 +37,13 @@ import type {
   AssignSourceTemplateRequest,
   AssignSourceTemplateResponse,
   BulkResolveResponse,
+  RuntimeConfigPatchRequest,
+  RuntimeConfigPatchResponse,
   CloneSourceTemplateRequest,
   CreateSourceTemplateRequest,
   CreateJobRequest,
   CreateJobResponse,
-  SourceConfigPatchResponse,
+  TemplateRuntimeConfigResponse,
   SourceTemplateAssignmentRecord,
   SourceTemplateDiffRequest,
   SourceTemplateDiffResponse,
@@ -43,9 +51,9 @@ import type {
   SourceTemplateTestRequest,
   SourceTemplateTestResponse,
   SourceStatusRecord,
-  DeleteHotConfigPatchGeneratorRequest,
-  HotConfigPatchGeneratorRecord,
-  HotConfigPatchGeneratorRenderResponse,
+  DeleteRuntimeConfigPatchGeneratorRequest,
+  RuntimeConfigPatchGeneratorRecord,
+  RuntimeConfigPatchGeneratorRenderResponse,
   JobOperation,
   JobOutputRecord,
   JobTargetRecord,
@@ -53,7 +61,7 @@ import type {
   PrivilegeAssertion,
   UpdateSourceTemplateRequest,
   UpdateSourceTemplateResponse,
-  UpsertHotConfigPatchGeneratorRequest,
+  UpsertRuntimeConfigPatchGeneratorRequest,
 } from "../types";
 import { formatTime, formatVpsName, runPanelAction, shortId } from "../utils";
 import { SourceTemplatePanel } from "./SourceTemplatesPanel";
@@ -67,26 +75,13 @@ type BulkConfigApplySnapshot = {
   selectorExpression: string;
   clientIds: string[];
   targets: AgentView[];
-  operation: JobOperation;
+  toml: string;
   patchName: string;
   patchSections: string[];
   patchSource: "generator" | "temporary";
   maxTimeoutSecs: number;
   privilegeAssertion: PrivilegeAssertion;
   payloadHashHex: string;
-};
-
-type SingleConfigApplySnapshot = {
-  baseHash: string;
-  clientId: string;
-  jobId: string;
-  operation: JobOperation;
-  payloadHashHex: string;
-  privilegeAssertion: PrivilegeAssertion;
-  selectorExpression: string;
-  target: AgentView;
-  maxTimeoutSecs: number;
-  toml: string;
 };
 
 export function ConfigPanel({
@@ -96,27 +91,28 @@ export function ConfigPanel({
   sourceTemplates,
   sourceStatus,
   error,
-  hotConfigPatchGenerators,
+  runtimeConfigPatchGenerators,
   jobs,
   loading,
   onAssignSourceTemplate,
+  onSubmitRuntimeConfigPatch,
   onCloneSourceTemplate,
   onCreateJob,
   onCreateSourceTemplate,
   onDiffSourceTemplate,
   onLoadJobOutputs,
   onLoadJobTargets,
-  onDeleteHotConfigPatchGenerator,
+  onDeleteRuntimeConfigPatchGenerator,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
   onRefresh,
-  onRenderSourceConfigPatch,
-  onRenderHotConfigPatchGenerator,
+  onRenderTemplateRuntimeConfig,
+  onRenderRuntimeConfigPatchGenerator,
   onResolveBulk,
   onSelectSubpage,
   onTestSourceTemplate,
   onUpdateSourceTemplate,
-  onUpsertHotConfigPatchGenerator,
+  onUpsertRuntimeConfigPatchGenerator,
   privilegeMaterial,
   setPrivilegeMaterial,
 }: {
@@ -126,30 +122,31 @@ export function ConfigPanel({
   sourceTemplates: SourceTemplateRecord[];
   sourceStatus: SourceStatusRecord[];
   error: string | null;
-  hotConfigPatchGenerators: HotConfigPatchGeneratorRecord[];
+  runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
   jobs: Array<{ id: string; command_type: string; status: string; created_at: string }>;
   loading: boolean;
   onAssignSourceTemplate: (request: AssignSourceTemplateRequest) => Promise<AssignSourceTemplateResponse>;
+  onSubmitRuntimeConfigPatch: (request: RuntimeConfigPatchRequest) => Promise<RuntimeConfigPatchResponse>;
   onCloneSourceTemplate: (templateId: string, request: CloneSourceTemplateRequest) => Promise<void>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onCreateSourceTemplate: (request: CreateSourceTemplateRequest) => Promise<void>;
   onDiffSourceTemplate: (templateId: string, request: SourceTemplateDiffRequest) => Promise<SourceTemplateDiffResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
-  onDeleteHotConfigPatchGenerator: (
+  onDeleteRuntimeConfigPatchGenerator: (
     generatorId: string,
-    request: DeleteHotConfigPatchGeneratorRequest,
+    request: DeleteRuntimeConfigPatchGeneratorRequest,
   ) => Promise<void>;
   onOpenJobDetails: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onRefresh: () => void;
-  onRenderSourceConfigPatch: (clientId: string) => Promise<SourceConfigPatchResponse>;
-  onRenderHotConfigPatchGenerator: (generatorId: string, request: { values: JsonValue }) => Promise<HotConfigPatchGeneratorRenderResponse>;
+  onRenderTemplateRuntimeConfig: (clientId: string) => Promise<TemplateRuntimeConfigResponse>;
+  onRenderRuntimeConfigPatchGenerator: (generatorId: string, request: { values: JsonValue }) => Promise<RuntimeConfigPatchGeneratorRenderResponse>;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
   onSelectSubpage: (subpage: string) => void;
   onTestSourceTemplate: (templateId: string, request: SourceTemplateTestRequest) => Promise<SourceTemplateTestResponse>;
   onUpdateSourceTemplate: (templateId: string, request: UpdateSourceTemplateRequest) => Promise<UpdateSourceTemplateResponse>;
-  onUpsertHotConfigPatchGenerator: (request: UpsertHotConfigPatchGeneratorRequest) => Promise<HotConfigPatchGeneratorRecord>;
+  onUpsertRuntimeConfigPatchGenerator: (request: UpsertRuntimeConfigPatchGeneratorRequest) => Promise<RuntimeConfigPatchGeneratorRecord>;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
@@ -167,17 +164,13 @@ export function ConfigPanel({
           sourceStatus={sourceStatus}
           onAssignTemplate={onAssignSourceTemplate}
           onCloneTemplate={onCloneSourceTemplate}
-          onCreateJob={onCreateJob}
           onCreateTemplate={onCreateSourceTemplate}
           onDiffTemplate={onDiffSourceTemplate}
-          onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-          onRenderHotConfig={onRenderSourceConfigPatch}
+          onRenderTemplateRuntimeConfig={onRenderTemplateRuntimeConfig}
           onResolveBulk={onResolveBulk}
           onTestTemplate={onTestSourceTemplate}
           onUpdateTemplate={onUpdateSourceTemplate}
-          privilegeMaterial={privilegeMaterial}
           templates={sourceTemplates}
-          setPrivilegeMaterial={setPrivilegeMaterial}
         />
       </section>
     );
@@ -189,7 +182,7 @@ export function ConfigPanel({
         <div className="sectionHeader">
           <div>
             <h2>{configTitle(subpage)}</h2>
-            <span>{actionError ?? error ?? (loading ? "Refreshing agent config state" : "Agent config workflows")}</span>
+            <span>{actionError ?? error ?? (loading ? "Refreshing runtime config state" : "Runtime config workflows")}</span>
           </div>
           <button className="secondaryAction" disabled={loading || pending} onClick={onRefresh} type="button">
             <RefreshCw size={15} />
@@ -201,7 +194,7 @@ export function ConfigPanel({
             sourceTemplateAssignments={sourceTemplateAssignments}
             sourceTemplates={sourceTemplates}
             sourceStatus={sourceStatus}
-            hotConfigPatchGenerators={hotConfigPatchGenerators}
+            runtimeConfigPatchGenerators={runtimeConfigPatchGenerators}
             jobs={jobs}
             onSelectSubpage={onSelectSubpage}
           />
@@ -209,16 +202,17 @@ export function ConfigPanel({
         {subpage === "bulk" && (
           <BulkConfigApply
             agents={agents}
-            hotConfigPatchGenerators={hotConfigPatchGenerators}
-            onDeleteHotConfigPatchGenerator={onDeleteHotConfigPatchGenerator}
+            runtimeConfigPatchGenerators={runtimeConfigPatchGenerators}
+            onSubmitRuntimeConfigPatch={onSubmitRuntimeConfigPatch}
+            onDeleteRuntimeConfigPatchGenerator={onDeleteRuntimeConfigPatchGenerator}
             onCreateJob={onCreateJob}
             onLoadJobOutputs={onLoadJobOutputs}
             onLoadJobTargets={onLoadJobTargets}
             onOpenJobDetails={onOpenJobDetails}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-            onRenderHotConfigPatchGenerator={onRenderHotConfigPatchGenerator}
+            onRenderRuntimeConfigPatchGenerator={onRenderRuntimeConfigPatchGenerator}
             onResolveBulk={onResolveBulk}
-            onUpsertHotConfigPatchGenerator={onUpsertHotConfigPatchGenerator}
+            onUpsertRuntimeConfigPatchGenerator={onUpsertRuntimeConfigPatchGenerator}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
             runAction={(action) => runPanelAction(setPending, setActionError, action)}
@@ -248,28 +242,28 @@ function ConfigOverview({
   sourceTemplateAssignments,
   sourceTemplates,
   sourceStatus,
-  hotConfigPatchGenerators,
+  runtimeConfigPatchGenerators,
   jobs,
   onSelectSubpage,
 }: {
   sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
   sourceTemplates: SourceTemplateRecord[];
   sourceStatus: SourceStatusRecord[];
-  hotConfigPatchGenerators: HotConfigPatchGeneratorRecord[];
+  runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
   jobs: Array<{ id: string; command_type: string; status: string; created_at: string }>;
   onSelectSubpage: (subpage: string) => void;
 }) {
   const configJobs = jobs
-    .filter((job) => ["config_read", "hot_config", "source_config_patch"].includes(job.command_type))
+    .filter((job) => ["config_read", "runtime_config_sync"].includes(job.command_type))
     .slice(0, 5);
   const sourceIssues = sourceStatus.filter((row) => row.status !== "ok").length;
   const workflowCards = [
     {
-      action: "Read / edit VPS config",
-      detail: "Base-hash guarded full override",
+      action: "Read VPS config",
+      detail: "Bootstrap-safe runtime view",
       subpage: "single",
       title: "VPS config",
-      value: "Read one VPS config, edit redacted TOML, then apply a guarded full override.",
+      value: "Read one VPS runtime config without exposing mutable bootstrap credentials.",
     },
     {
       action: "Apply incremental patch",
@@ -280,23 +274,23 @@ function ConfigOverview({
     },
     {
       action: "Manage patch generators",
-      detail: `${hotConfigPatchGenerators.length} saved generators`,
+      detail: `${runtimeConfigPatchGenerators.length} saved generators`,
       subpage: "bulk",
       title: "Patch generators",
       value: "Reusable generators that render temporary incremental patches.",
     },
     {
-      action: "Manage source templates",
+      action: "Manage templates",
       detail: `${sourceTemplates.length} templates / ${sourceTemplateAssignments.length} assignments`,
       subpage: "templates",
-      title: "Source templates",
-      value: "Persistent source definitions bound to VPSs and manually applied.",
+      title: "Templates",
+      value: "Persistent runtime inputs assigned to VPSs; changes push immediately after confirmation.",
     },
     {
-      action: "Inspect source status",
+      action: "Inspect template status",
       detail: `${sourceIssues} needing review`,
       subpage: "templates",
-      title: "Source status",
+      title: "Template status",
       value: "Current template selection, source kind, readiness, and evidence per VPS.",
     },
   ];
@@ -311,7 +305,7 @@ function ConfigOverview({
     },
     {
       term: "Templates",
-      meaning: "Persistent source definitions assigned to VPSs and applied after review.",
+      meaning: "Persistent runtime inputs assigned to VPSs; confirmed changes push immediately.",
     },
     {
       term: "Command templates",
@@ -330,12 +324,12 @@ function ConfigOverview({
     <>
       <div className="metricGrid">
         <div className="metricCard">
-          <strong>{hotConfigPatchGenerators.length}</strong>
+          <strong>{runtimeConfigPatchGenerators.length}</strong>
           <span>patch generators</span>
         </div>
         <div className="metricCard">
           <strong>{sourceTemplates.length}</strong>
-          <span>source templates</span>
+          <span>templates</span>
         </div>
         <div className="metricCard">
           <strong>{sourceTemplateAssignments.length}</strong>
@@ -343,7 +337,7 @@ function ConfigOverview({
         </div>
         <div className="metricCard">
           <strong>{sourceIssues}</strong>
-          <span>source checks needing review</span>
+          <span>template checks needing review</span>
         </div>
       </div>
       <div className="configWorkflowGrid">
@@ -358,7 +352,7 @@ function ConfigOverview({
           </button>
         ))}
       </div>
-      <div className="configTermMap" aria-label="Agent config terminology">
+      <div className="configTermMap" aria-label="Runtime config terminology">
         {termMap.map((item) => (
           <span key={item.term} title={item.meaning}>
             <strong>{item.term}</strong>
@@ -389,35 +383,37 @@ function ConfigOverview({
 
 function BulkConfigApply({
   agents,
-  hotConfigPatchGenerators,
-  onDeleteHotConfigPatchGenerator,
+  runtimeConfigPatchGenerators,
+  onSubmitRuntimeConfigPatch,
+  onDeleteRuntimeConfigPatchGenerator,
   onCreateJob,
   onLoadJobOutputs,
   onLoadJobTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
-  onRenderHotConfigPatchGenerator,
+  onRenderRuntimeConfigPatchGenerator,
   onResolveBulk,
-  onUpsertHotConfigPatchGenerator,
+  onUpsertRuntimeConfigPatchGenerator,
   pending,
   privilegeMaterial,
   runAction,
   setPrivilegeMaterial,
 }: {
   agents: AgentView[];
-  hotConfigPatchGenerators: HotConfigPatchGeneratorRecord[];
-  onDeleteHotConfigPatchGenerator: (
+  runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
+  onSubmitRuntimeConfigPatch: (request: RuntimeConfigPatchRequest) => Promise<RuntimeConfigPatchResponse>;
+  onDeleteRuntimeConfigPatchGenerator: (
     generatorId: string,
-    request: DeleteHotConfigPatchGeneratorRequest,
+    request: DeleteRuntimeConfigPatchGeneratorRequest,
   ) => Promise<void>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
-  onRenderHotConfigPatchGenerator: (generatorId: string, request: { values: JsonValue }) => Promise<HotConfigPatchGeneratorRenderResponse>;
+  onRenderRuntimeConfigPatchGenerator: (generatorId: string, request: { values: JsonValue }) => Promise<RuntimeConfigPatchGeneratorRenderResponse>;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
-  onUpsertHotConfigPatchGenerator: (request: UpsertHotConfigPatchGeneratorRequest) => Promise<HotConfigPatchGeneratorRecord>;
+  onUpsertRuntimeConfigPatchGenerator: (request: UpsertRuntimeConfigPatchGeneratorRequest) => Promise<RuntimeConfigPatchGeneratorRecord>;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
@@ -429,9 +425,9 @@ function BulkConfigApply({
   const [valuesText, setValuesText] = useState("");
   const [temporaryToml, setTemporaryToml] = useState("");
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
-  const [rendered, setRendered] = useState<HotConfigPatchGeneratorRenderResponse | null>(null);
+  const [rendered, setRendered] = useState<RuntimeConfigPatchGeneratorRenderResponse | null>(null);
   const [applySnapshot, setApplySnapshot] = useState<BulkConfigApplySnapshot | null>(null);
-  const [deleteGenerator, setDeleteGenerator] = useState<HotConfigPatchGeneratorRecord | null>(null);
+  const [deleteGenerator, setDeleteGenerator] = useState<RuntimeConfigPatchGeneratorRecord | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
@@ -441,7 +437,7 @@ function BulkConfigApply({
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
-  const selectedGenerator = hotConfigPatchGenerators.find((generator) => generator.id === (generatorId || hotConfigPatchGenerators[0]?.id));
+  const selectedGenerator = runtimeConfigPatchGenerators.find((generator) => generator.id === (generatorId || runtimeConfigPatchGenerators[0]?.id));
   const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
   const ready = Boolean(
     selectorExpression.trim() &&
@@ -449,7 +445,7 @@ function BulkConfigApply({
       !selectorParse.error &&
       (patchMode === "temporary" ? temporaryToml.trim() : selectedGenerator),
   );
-  const patchGeneratorColumns = useMemo<ConsoleDataGridColumn<HotConfigPatchGeneratorRecord>[]>(
+  const patchGeneratorColumns = useMemo<ConsoleDataGridColumn<RuntimeConfigPatchGeneratorRecord>[]>(
     () => [
       {
         cell: (generator) => (
@@ -498,7 +494,7 @@ function BulkConfigApply({
     ],
     [],
   );
-  const patchGeneratorActions = useMemo<ConsoleDataGridAction<HotConfigPatchGeneratorRecord>[]>(
+  const patchGeneratorActions = useMemo<ConsoleDataGridAction<RuntimeConfigPatchGeneratorRecord>[]>(
     () => [
       {
         icon: <Play size={14} />,
@@ -546,7 +542,7 @@ function BulkConfigApply({
     setReviewStatus(null);
   }
 
-  function loadPatchGeneratorForApply(generator: HotConfigPatchGeneratorRecord) {
+  function loadPatchGeneratorForApply(generator: RuntimeConfigPatchGeneratorRecord) {
     setPatchMode("generator");
     setGeneratorId(generator.id);
     setValuesText(formatJsonObject(exampleValuesForGenerator(generator)));
@@ -554,9 +550,9 @@ function BulkConfigApply({
     clearBulkConfigReview();
   }
 
-  async function clonePatchGenerator(generator: HotConfigPatchGeneratorRecord) {
+  async function clonePatchGenerator(generator: RuntimeConfigPatchGeneratorRecord) {
     await runAction(async () => {
-      await onUpsertHotConfigPatchGenerator({
+      await onUpsertRuntimeConfigPatchGenerator({
         category: generator.category,
         description: generator.description,
         docs_metadata: generator.docs_metadata,
@@ -575,7 +571,7 @@ function BulkConfigApply({
       return;
     }
     await runAction(async () => {
-      await onDeleteHotConfigPatchGenerator(generator.id, {
+      await onDeleteRuntimeConfigPatchGenerator(generator.id, {
         confirmed: true,
         reviewed_name: generator.name,
       });
@@ -621,12 +617,12 @@ function BulkConfigApply({
     const reviewGeneration = captureReviewGeneration();
     const frozenGeneratorId = selectedGenerator.id;
     const frozenValuesText = valuesText;
-    setReviewStatus("Rendering agent config patch");
+    setReviewStatus("Rendering runtime config patch");
     try {
       await runAction(async () => {
         const frozenValues = parseJsonObject(frozenValuesText);
         await waitForReviewRender();
-        const nextRendered = await onRenderHotConfigPatchGenerator(frozenGeneratorId, { values: frozenValues });
+        const nextRendered = await onRenderRuntimeConfigPatchGenerator(frozenGeneratorId, { values: frozenValues });
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
         }
@@ -682,7 +678,7 @@ function BulkConfigApply({
         let patchSections = inferTomlSections(toml);
         if (frozenPatchMode === "generator") {
           const frozenValues = parseJsonObject(frozenValuesText);
-          const nextRendered = await onRenderHotConfigPatchGenerator(frozenGenerator!.id, { values: frozenValues });
+          const nextRendered = await onRenderRuntimeConfigPatchGenerator(frozenGenerator!.id, { values: frozenValues });
           if (!isReviewGenerationCurrent(reviewGeneration)) {
             return;
           }
@@ -691,18 +687,17 @@ function BulkConfigApply({
           patchSections = nextRendered.affected_sections;
           setRendered(nextRendered);
         }
-        const operation: JobOperation = {
-          type: "source_config_patch",
-          apply_mode: "incremental_patch",
-          toml,
-        };
-        const built = await buildPrivilegeForJobOperation({
-          clientIds,
-          commandType: "source_config_patch",
-          operation,
+        const patchPayloadHashHex = await sha256Hex(new TextEncoder().encode(toml));
+        const privilegeAssertion = await buildPrivilegeAssertion({
+          intent: canonicalDbPrivilegeIntent({
+            action: "runtime_config.patch",
+            target: "runtime_config",
+            selectorExpression: frozenSelector,
+            resolvedTargets: clientIds,
+            confirmed: true,
+            payloadHash: patchPayloadHashHex,
+          }),
           privilegeMaterial: frozenPrivilegeMaterial,
-          selectorExpression: frozenSelector,
-          maxTimeoutSecs: boundedMaxTimeoutSecs,
         });
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
@@ -711,12 +706,12 @@ function BulkConfigApply({
         setApplySnapshot({
           clientIds,
           jobId: crypto.randomUUID(),
-          operation,
+          toml,
           patchName,
           patchSections,
           patchSource: frozenPatchMode,
-          payloadHashHex: built.payloadHashHex,
-          privilegeAssertion: built.privilegeAssertion,
+          payloadHashHex: patchPayloadHashHex,
+          privilegeAssertion,
           selectorExpression: frozenSelector,
           targets: nextPreview.targets,
           maxTimeoutSecs: boundedMaxTimeoutSecs,
@@ -737,39 +732,34 @@ function BulkConfigApply({
       if (!snapshot) {
         throw new Error("Bulk patch confirmation snapshot is missing; review the apply again");
       }
-      const response = await onCreateJob({
-        argv: [],
-        command: "source_config_patch",
+      const response = await onSubmitRuntimeConfigPatch({
         confirmed: true,
-        destructive: true,
-        force_unprivileged: false,
-        job_id: snapshot.jobId,
-        operation: snapshot.operation,
-        privileged: true,
-        privilege_assertion: snapshot.privilegeAssertion,
+        reason: snapshot.patchName,
         selector_expression: snapshot.selectorExpression,
         target_client_ids: snapshot.clientIds,
-        max_timeout_secs: snapshot.maxTimeoutSecs,
+        toml: snapshot.toml,
+        privilege_assertion: snapshot.privilegeAssertion,
       });
+      const firstJobId = response.sync_job_ids[0] ?? snapshot.jobId;
       const initial = buildBulkJobProgress({
-        targetCount: createJobTargetCount(response),
-        jobId: response.job_id,
+        targetCount: response.target_count,
+        jobId: firstJobId,
         targetRecords: [],
         targets: snapshot.targets,
         maxTimeoutSecs: snapshot.maxTimeoutSecs,
       });
       setProgress(initial);
-      const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
-        targetCount: createJobTargetCount(response),
+      const waited = await waitForBulkJobTargets(firstJobId, onLoadJobTargets, {
+        targetCount: 1,
         onProgress: setProgress,
         targets: snapshot.targets,
         maxTimeoutSecs: snapshot.maxTimeoutSecs,
       });
-      const outputs = await onLoadJobOutputs(response.job_id).catch(() => []);
+      const outputs = await onLoadJobOutputs(firstJobId).catch(() => []);
       setProgress(
         buildBulkJobProgress({
-          targetCount: createJobTargetCount(response),
-          jobId: response.job_id,
+          targetCount: response.target_count,
+          jobId: firstJobId,
           outputs,
           targetRecords: waited.targets,
           targets: snapshot.targets,
@@ -817,7 +807,7 @@ function BulkConfigApply({
               }}
               value={selectedGenerator?.id ?? ""}
             >
-              {hotConfigPatchGenerators.map((generator) => (
+              {runtimeConfigPatchGenerators.map((generator) => (
                 <option key={generator.id} value={generator.id}>
                   {generator.name}
                 </option>
@@ -836,11 +826,11 @@ function BulkConfigApply({
             <button className="secondaryAction" disabled={pending || !selectedGenerator} onClick={renderPatch} type="button">
               Render patch
             </button>
-            {rendered && <textarea aria-label="Rendered bulk agent patch TOML" readOnly rows={8} value={rendered.toml} />}
+            {rendered && <textarea aria-label="Rendered bulk runtime config patch TOML" readOnly rows={8} value={rendered.toml} />}
           </>
         ) : (
           <textarea
-            aria-label="Temporary bulk agent patch TOML"
+            aria-label="Temporary bulk runtime config patch TOML"
             onChange={(event) => {
               setTemporaryToml(event.target.value);
               clearBulkConfigReview();
@@ -896,7 +886,7 @@ function BulkConfigApply({
           </label>
         </div>
         <PrivilegeVaultBox
-          labelPrefix="Agent config"
+          labelPrefix="Runtime config"
           lastPayloadHash={null}
           onOpenUnlock={onOpenPrivilegeUnlock}
           onPrivilegeMaterialChange={(material) => {
@@ -904,7 +894,7 @@ function BulkConfigApply({
             clearBulkConfigReview();
           }}
           privilegeMaterial={privilegeMaterial}
-          unlockRedirectLabel="Unlock agent config privilege"
+          unlockRedirectLabel="Unlock runtime config privilege"
         />
         {reviewStatus && <span className="formHint">{reviewStatus}</span>}
         <button className="primaryAction" disabled={pending || !ready} onClick={() => void reviewApply()} type="button">
@@ -921,7 +911,7 @@ function BulkConfigApply({
         />
       )}
       <ConfirmationPrompt
-        confirmLabel="Apply agent config patch"
+        confirmLabel="Apply runtime config patch"
         detail={`Apply one generated incremental patch to ${applySnapshot?.clientIds.length ?? 0} frozen VPS targets.`}
         expiresAtUnix={applySnapshot?.privilegeAssertion.expires_unix}
         items={[
@@ -970,7 +960,7 @@ function BulkConfigApply({
           </div>
         )}
         rowActions={patchGeneratorActions}
-        rows={hotConfigPatchGenerators}
+        rows={runtimeConfigPatchGenerators}
         searchPlaceholder="Search patch generators"
         storageKey="vpsman.config.patchGenerators"
         title="Patch generators"
@@ -1022,9 +1012,7 @@ function SingleVpsConfig({
   const [baseHash, setBaseHash] = useState("");
   const [lastJobId, setLastJobId] = useState<string | null>(null);
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
-  const [singleApplySnapshot, setSingleApplySnapshot] = useState<SingleConfigApplySnapshot | null>(null);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
-  const [reviewStatus, setReviewStatus] = useState<string | null>(null);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -1036,8 +1024,6 @@ function SingleVpsConfig({
 
   function clearSingleConfigReview() {
     invalidateReviewGeneration();
-    setSingleApplySnapshot(null);
-    setReviewStatus(null);
   }
 
   function selectClientId(value: string) {
@@ -1112,96 +1098,6 @@ function SingleVpsConfig({
       }
       setRedactedToml(config.toml);
       setBaseHash(config.baseHash);
-      setSingleApplySnapshot(null);
-    });
-  }
-
-  async function reviewConfigApply() {
-    const reviewGeneration = captureReviewGeneration();
-    const frozenTarget = singleTarget;
-    const frozenPrivilegeMaterial = privilegeMaterial;
-    const frozenToml = redactedToml;
-    const frozenBaseHash = baseHash;
-    const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
-    setReviewStatus("Preparing VPS config review");
-    try {
-      await runAction(async () => {
-        await waitForReviewRender();
-        if (!frozenTarget || !frozenPrivilegeMaterial || !frozenToml || !frozenBaseHash) {
-          throw new Error("Read one VPS config before applying");
-        }
-        const operation: JobOperation = {
-          type: "hot_config",
-          apply_mode: "full_override",
-          toml: frozenToml,
-          preserve_redacted: true,
-          base_config_sha256_hex: frozenBaseHash,
-        };
-        const selectorExpressionForTarget = selectorExpressionForClientIds([frozenTarget.id]);
-        const built = await buildPrivilegeForJobOperation({
-          clientIds: [frozenTarget.id],
-          commandType: "hot_config",
-          operation,
-          privilegeMaterial: frozenPrivilegeMaterial,
-          selectorExpression: selectorExpressionForTarget,
-          maxTimeoutSecs: boundedMaxTimeoutSecs,
-        });
-        if (!isReviewGenerationCurrent(reviewGeneration)) {
-          return;
-        }
-        setSingleApplySnapshot({
-          baseHash: frozenBaseHash,
-          clientId: frozenTarget.id,
-          jobId: crypto.randomUUID(),
-          operation,
-          payloadHashHex: built.payloadHashHex,
-          privilegeAssertion: built.privilegeAssertion,
-          selectorExpression: selectorExpressionForTarget,
-          target: frozenTarget,
-          maxTimeoutSecs: boundedMaxTimeoutSecs,
-          toml: frozenToml,
-        });
-      });
-    } finally {
-      setReviewStatus(null);
-    }
-  }
-
-  async function applyConfig(snapshot: SingleConfigApplySnapshot) {
-    setSingleApplySnapshot(null);
-    await runAction(async () => {
-      const response = await onCreateJob({
-        argv: [],
-        command: "hot_config",
-        confirmed: true,
-        destructive: true,
-        force_unprivileged: false,
-        job_id: snapshot.jobId,
-        operation: snapshot.operation,
-        privileged: true,
-        privilege_assertion: snapshot.privilegeAssertion,
-        selector_expression: snapshot.selectorExpression,
-        target_client_ids: [snapshot.clientId],
-        max_timeout_secs: snapshot.maxTimeoutSecs,
-      });
-      setLastJobId(response.job_id);
-      const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
-        targetCount: createJobTargetCount(response),
-        onProgress: setProgress,
-        targets: [snapshot.target],
-        maxTimeoutSecs: snapshot.maxTimeoutSecs,
-      });
-      const outputs = await onLoadJobOutputs(response.job_id).catch(() => []);
-      setProgress(
-        buildBulkJobProgress({
-          targetCount: createJobTargetCount(response),
-          jobId: response.job_id,
-          outputs,
-          targetRecords: waited.targets,
-          targets: [snapshot.target],
-          maxTimeoutSecs: snapshot.maxTimeoutSecs,
-        }),
-      );
     });
   }
 
@@ -1234,7 +1130,7 @@ function SingleVpsConfig({
           </label>
         </div>
         <PrivilegeVaultBox
-          labelPrefix="Agent config"
+          labelPrefix="Runtime config"
           lastPayloadHash={null}
           onOpenUnlock={onOpenPrivilegeUnlock}
           onPrivilegeMaterialChange={(material) => {
@@ -1242,11 +1138,11 @@ function SingleVpsConfig({
             setPrivilegeMaterial(material);
           }}
           privilegeMaterial={privilegeMaterial}
-          unlockRedirectLabel="Unlock agent config privilege"
+          unlockRedirectLabel="Unlock runtime config privilege"
         />
         <button className="secondaryAction" disabled={pending || !singleTarget || !privilegeMaterial} onClick={readConfig} type="button">
           <ServerCog size={16} />
-          Read agent config
+          Read runtime config
         </button>
         {lastJobId && (
           <button className="secondaryAction" onClick={() => onOpenJobDetails(lastJobId)} type="button">
@@ -1255,44 +1151,18 @@ function SingleVpsConfig({
         )}
       </div>
       <div className="compactForm configTomlEditor">
-        <strong>Redacted agent TOML</strong>
-        <span>{baseHash ? `base ${shortId(baseHash)}` : "Read one VPS config before editing"}</span>
+        <strong>Redacted runtime TOML</strong>
+        <span>{baseHash ? `base ${shortId(baseHash)} / immutable bootstrap view` : "Read one VPS config before viewing"}</span>
         <textarea
-          aria-label="VPS redacted agent config TOML"
-          onChange={(event) => {
-            clearSingleConfigReview();
-            setRedactedToml(event.target.value);
-          }}
+          aria-label="VPS redacted runtime config TOML"
+          readOnly
           rows={22}
           value={redactedToml}
         />
-        <button
-          className="primaryAction"
-          disabled={pending || !singleTarget || !privilegeMaterial || !baseHash || !redactedToml || singleApplySnapshot !== null}
-          onClick={() => void reviewConfigApply()}
-          type="button"
-        >
-          <Save size={16} />
-          Review apply
-        </button>
-        {reviewStatus && <span className="formHint">{reviewStatus}</span>}
+        <span className="formHint">
+          Runtime changes are made through Bulk patch or template assignment and then pushed as runtime config sync jobs.
+        </span>
       </div>
-      <ConfirmationPrompt
-        confirmLabel="Apply full config"
-        detail="Apply the redacted-preserve agent TOML only if the VPS config hash still matches the read base."
-        expiresAtUnix={singleApplySnapshot?.privilegeAssertion.expires_unix}
-        items={[
-          { label: "Target", value: singleApplySnapshot ? formatVpsName(singleApplySnapshot.target, vpsNameDisplayMode) : "-" },
-          { label: "Base hash", value: singleApplySnapshot?.baseHash ?? "-" },
-          { label: "Payload", value: singleApplySnapshot?.payloadHashHex ? shortId(singleApplySnapshot.payloadHashHex) : "-" },
-          { label: "Policy", value: "preserve redacted fields" },
-        ]}
-        onCancel={() => setSingleApplySnapshot(null)}
-        onConfirm={() => singleApplySnapshot && void applyConfig(singleApplySnapshot)}
-        open={singleApplySnapshot !== null}
-        pending={pending}
-        title="Confirm full config override"
-      />
       {progress && (
         <ExecutionResultPanel
           loading={pending}
@@ -1312,7 +1182,7 @@ function configTitle(subpage: string): string {
     case "single":
       return "VPS config";
     default:
-      return "Agent config overview";
+      return "Runtime config overview";
   }
 }
 
@@ -1344,7 +1214,7 @@ function inferTomlSections(toml: string): string[] {
   return sections.length > 0 ? sections : ["root"];
 }
 
-function exampleValuesForGenerator(generator: HotConfigPatchGeneratorRecord): Record<string, JsonValue> {
+function exampleValuesForGenerator(generator: RuntimeConfigPatchGeneratorRecord): Record<string, JsonValue> {
   const schema = asRecord(generator.field_schema) ?? {};
   const fields = asRecord(schema.fields) ?? asRecord(schema.properties) ?? {};
   const values: Record<string, JsonValue> = {};

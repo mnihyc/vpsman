@@ -7,8 +7,8 @@ use tracing::warn;
 use vpsman_common::{
     is_terminal_command_type, AgentUpdateVerificationResult, CommandOutput,
     GatewayAgentHelloIngest, GatewayAgentUpdateVerificationIngest, GatewayCommandOutputIngest,
-    GatewaySessionLifecycleIngest, GatewayTelemetryIngest, GatewayTerminalOutputIngest, JobCommand,
-    OutputStream,
+    GatewayRuntimeConfigReloadRequest, GatewaySessionLifecycleIngest, GatewayTelemetryIngest,
+    GatewayTerminalOutputIngest, JobCommand, OutputStream, MAX_RUNTIME_CONFIG_REASON_BYTES,
 };
 use vpsman_server_core::{
     target_status_is_active, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
@@ -23,6 +23,7 @@ use crate::{
         AuthContext, GatewayIdentityValidationRequest, GatewayIdentityValidationResponse, WsEvent,
     },
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
+    runtime_config::request_runtime_config_reload_for_agent,
     state::AppState,
     TargetDispatchOutcome,
 };
@@ -128,6 +129,45 @@ pub(crate) async fn ingest_agent_hello(
     Ok(Json(IngestResponse {
         accepted: true,
         message: "agent hello recorded".to_string(),
+    }))
+}
+
+pub(crate) async fn request_runtime_config_reload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(event): Json<GatewayRuntimeConfigReloadRequest>,
+) -> Result<Json<IngestResponse>, ApiError> {
+    state.require_internal_gateway(&headers)?;
+    validate_gateway_runtime_config_reload(&event)?;
+    if !state
+        .repo
+        .active_gateway_session_matches(
+            &event.gateway_id,
+            &event.request.client_id,
+            event.gateway_session_id,
+            event.process_incarnation_id,
+        )
+        .await?
+    {
+        return Ok(Json(IngestResponse {
+            accepted: false,
+            message: "gateway session not active".to_string(),
+        }));
+    }
+    let sync_jobs = request_runtime_config_reload_for_agent(
+        &state,
+        &event.request.client_id,
+        &event.request.current_content_hash,
+        event.request.reason.trim(),
+    )
+    .await?;
+    Ok(Json(IngestResponse {
+        accepted: true,
+        message: if sync_jobs.is_empty() {
+            "runtime config already current".to_string()
+        } else {
+            format!("runtime config sync queued: {}", sync_jobs.len())
+        },
     }))
 }
 
@@ -744,6 +784,37 @@ fn validate_gateway_agent_hello(event: &GatewayAgentHelloIngest) -> Result<(), A
     validate_gateway_remote_ip(event.remote_ip.as_deref())?;
     if let Some(key) = event.noise_public_key_hex.as_deref() {
         validate_noise_public_key(key)?;
+    }
+    Ok(())
+}
+
+fn validate_gateway_runtime_config_reload(
+    event: &GatewayRuntimeConfigReloadRequest,
+) -> Result<(), ApiError> {
+    if event.gateway_id.trim().is_empty()
+        || event.request.client_id.trim().is_empty()
+        || event.request.client_id.len() > 128
+        || event.gateway_session_id == uuid::Uuid::nil()
+        || event.process_incarnation_id == uuid::Uuid::nil()
+    {
+        return Err(ApiError::bad_request(
+            "invalid_gateway_runtime_config_reload",
+        ));
+    }
+    let hash = event.request.current_content_hash.trim();
+    if hash.len() != 64 || !hash.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(ApiError::bad_request(
+            "invalid_gateway_runtime_config_reload",
+        ));
+    }
+    let reason = event.request.reason.trim();
+    if reason.is_empty()
+        || reason.len() > MAX_RUNTIME_CONFIG_REASON_BYTES
+        || reason.chars().any(char::is_control)
+    {
+        return Err(ApiError::bad_request(
+            "invalid_gateway_runtime_config_reload",
+        ));
     }
     Ok(())
 }

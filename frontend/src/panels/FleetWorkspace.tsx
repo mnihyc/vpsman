@@ -110,7 +110,7 @@ import type {
   BulkTagMutationRequest,
   CreateJobRequest,
   CreateJobResponse,
-  SourceConfigPatchResponse,
+  TemplateRuntimeConfigResponse,
   SourceTemplateAssignmentRecord,
   SourceStatusRecord,
   FleetAlertPolicyRecord,
@@ -241,7 +241,7 @@ export function FleetWorkspace({
   onBulkMutateTags,
   onNavigatePanel,
   onOpenJobDispatchPreset,
-  onRenderSourceConfigPatch,
+  onRenderTemplateRuntimeConfig,
   onDeleteFleetAlertNotificationChannel,
   onDeleteFleetAlertPolicy,
   onDeleteWebhookRule,
@@ -292,9 +292,9 @@ export function FleetWorkspace({
   ) => Promise<TagMutationResponse>;
   onNavigatePanel?: (view: ActiveView, subpage: string) => void;
   onOpenJobDispatchPreset: (preset: JobDispatchPresetInput) => void;
-  onRenderSourceConfigPatch: (
+  onRenderTemplateRuntimeConfig: (
     clientId: string,
-  ) => Promise<SourceConfigPatchResponse>;
+  ) => Promise<TemplateRuntimeConfigResponse>;
   onDeleteFleetAlertNotificationChannel: (
     channelId: string,
     reviewedName: string,
@@ -874,7 +874,7 @@ export function FleetWorkspace({
                 onLoadJobTargets={onLoadJobTargets}
                 onOpenJobDetails={onOpenJobDetails}
                 onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-                onRenderSourceConfigPatch={onRenderSourceConfigPatch}
+                onRenderTemplateRuntimeConfig={onRenderTemplateRuntimeConfig}
                 onUpdateAgentAlias={onUpdateAgentAlias}
                 privilegeMaterial={privilegeMaterial}
                 showCountryFlags={preferences.show_country_flags}
@@ -1038,7 +1038,7 @@ function FleetInstanceDetail({
   onLoadJobTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
-  onRenderSourceConfigPatch,
+  onRenderTemplateRuntimeConfig,
   onUpdateAgentAlias,
   privilegeMaterial,
   showCountryFlags,
@@ -1067,9 +1067,9 @@ function FleetInstanceDetail({
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
-  onRenderSourceConfigPatch: (
+  onRenderTemplateRuntimeConfig: (
     clientId: string,
-  ) => Promise<SourceConfigPatchResponse>;
+  ) => Promise<TemplateRuntimeConfigResponse>;
   onUpdateAgentAlias: (
     clientId: string,
     displayName: string,
@@ -1109,7 +1109,7 @@ function FleetInstanceDetail({
   const [configPending, setConfigPending] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
   const [configPreview, setConfigPreview] =
-    useState<SourceConfigPatchResponse | null>(null);
+    useState<TemplateRuntimeConfigResponse | null>(null);
   const country = countryFromTags(agent.tags);
   const provider = providerFromTags(agent.tags);
   const displayOnlyTags = displayTags(
@@ -1123,7 +1123,7 @@ function FleetInstanceDetail({
   const agentLabel = formatVpsName(agent, vpsNameDisplayMode);
   const configPreviewSummary = configPreview
     ? `${configPreview.assignments.length} assignments · ${configPreview.unsupported_domains.length} unsupported domains`
-    : "Load redacted hot-config view for this VPS.";
+    : "Load redacted runtime config view for this VPS.";
 
   useEffect(() => {
     setAliasDraft(agent.display_name ?? "");
@@ -1255,7 +1255,7 @@ function FleetInstanceDetail({
 
   async function loadRenderedConfig() {
     await runPanelAction(setConfigPending, setConfigError, async () => {
-      setConfigPreview(await onRenderSourceConfigPatch(agent.id));
+      setConfigPreview(await onRenderTemplateRuntimeConfig(agent.id));
     });
   }
 
@@ -1747,14 +1747,14 @@ function ConfigPreviewBlock({
   error: string | null;
   onLoad: () => void;
   pending: boolean;
-  preview: SourceConfigPatchResponse | null;
+  preview: TemplateRuntimeConfigResponse | null;
   summary: string;
 }) {
   return (
     <div className="timeline configPreviewBlock">
       <FileCog size={18} />
       <div>
-        <strong>Rendered custom agent config</strong>
+        <strong>Rendered runtime config</strong>
         <span>{summary}</span>
         <button
           className="secondaryAction compactAction"
@@ -6628,7 +6628,7 @@ function formatTunnelCapability(
     return "Unknown";
   }
   if (capabilities.can_manage_runtime_tunnels) {
-    return "Client-managed runtime tunnels enabled";
+    return "Server-managed runtime tunnels enabled";
   }
   return capabilities.can_attempt_privileged_ops
     ? "Unprivileged best-effort, root operations may be ineffective"

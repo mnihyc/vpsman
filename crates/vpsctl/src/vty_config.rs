@@ -1,41 +1,12 @@
-use std::path::PathBuf;
-
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use uuid::Uuid;
-use vpsman_common::{
-    validate_agent_config_shape, validate_incremental_config_patch_section, AgentConfig,
-    JobCommand, DEFAULT_MAX_JOB_TIMEOUT_SECS, HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE,
-    MAX_AGENT_HOT_CONFIG_BYTES, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
-    SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH,
-};
+use vpsman_common::{JobCommand, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS};
 
 use crate::{
-    commands_config::validate_update_input,
-    commands_schedules::selector_expression_from_targets,
-    http::{http_get, http_post_json},
-    privilege::build_privilege_for_job_command,
-    util::percent_encode_query_value,
-    vty_jobs::VtyJobSelection,
+    commands_config::validate_update_input, commands_schedules::selector_expression_from_targets,
+    http::http_post_json, privilege::build_privilege_for_job_command, vty_jobs::VtyJobSelection,
 };
-
-#[derive(Debug)]
-pub(crate) struct VtyHotConfigRequest {
-    config_file: PathBuf,
-    selection: VtyJobSelection,
-    max_timeout_secs: u64,
-    privilege_ttl_secs: u64,
-    force_unprivileged: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct VtySourceConfigPatchApplyRequest {
-    client_id: String,
-    max_timeout_secs: u64,
-    privilege_ttl_secs: u64,
-    confirmed: bool,
-    force_unprivileged: bool,
-}
 
 #[derive(Debug)]
 pub(crate) struct VtyAgentUpdateRequest {
@@ -85,146 +56,6 @@ struct VtyBulkResolveResponse {
 #[derive(Debug, Deserialize)]
 struct VtyTarget {
     id: String,
-}
-
-pub(crate) fn parse_vty_hot_config(tokens: &[&str]) -> Result<VtyHotConfigRequest> {
-    let mut config_file = None;
-    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
-    let mut privilege_ttl_secs = 300_u64;
-    let mut force_unprivileged = false;
-    let mut target_tokens = Vec::new();
-    let mut index = 0;
-    while index < tokens.len() {
-        match tokens[index] {
-            "--config-file" => {
-                config_file = Some(PathBuf::from(
-                    tokens
-                        .get(index + 1)
-                        .context("--config-file requires a path")?,
-                ));
-                index += 2;
-            }
-            "--max-timeout" => {
-                max_timeout_secs = tokens
-                    .get(index + 1)
-                    .context("--max-timeout requires a value")?
-                    .parse()
-                    .context("--max-timeout must be an integer")?;
-                index += 2;
-            }
-            "--privilege-ttl" => {
-                privilege_ttl_secs = tokens
-                    .get(index + 1)
-                    .context("--privilege-ttl requires a value")?
-                    .parse()
-                    .context("--privilege-ttl must be an integer")?;
-                index += 2;
-            }
-            "--force-unprivileged" => {
-                force_unprivileged = true;
-                index += 1;
-            }
-            value if value.starts_with("--") && value != "--confirmed" => {
-                anyhow::bail!("unknown hot-config flag {value}");
-            }
-            value => {
-                target_tokens.push(value);
-                index += 1;
-            }
-        }
-    }
-    anyhow::ensure!(
-        (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&max_timeout_secs),
-        "hot-config --max-timeout must be between 1 and {MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}"
-    );
-    anyhow::ensure!(
-        (15..=300).contains(&privilege_ttl_secs),
-        "hot-config --privilege-ttl must be between 15 and 300"
-    );
-    let selection = VtyJobSelection::parse(&target_tokens)?;
-    anyhow::ensure!(
-        selection.confirmed,
-        "hot-config requires --confirmed because it applies a full agent config override"
-    );
-    Ok(VtyHotConfigRequest {
-        config_file: config_file.context("hot-config requires --config-file <path>")?,
-        selection,
-        max_timeout_secs,
-        privilege_ttl_secs,
-        force_unprivileged,
-    })
-}
-
-pub(crate) fn parse_vty_source_config_patch_apply(
-    tokens: &[&str],
-) -> Result<VtySourceConfigPatchApplyRequest> {
-    let mut client_id = None;
-    let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
-    let mut privilege_ttl_secs = 300_u64;
-    let mut confirmed = false;
-    let mut force_unprivileged = false;
-    let mut index = 0;
-    while index < tokens.len() {
-        match tokens[index] {
-            "--client-id" => {
-                client_id = Some(
-                    tokens
-                        .get(index + 1)
-                        .context("--client-id requires a value")?
-                        .to_string(),
-                );
-                index += 2;
-            }
-            "--max-timeout" => {
-                max_timeout_secs = tokens
-                    .get(index + 1)
-                    .context("--max-timeout requires a value")?
-                    .parse()
-                    .context("--max-timeout must be an integer")?;
-                index += 2;
-            }
-            "--privilege-ttl" => {
-                privilege_ttl_secs = tokens
-                    .get(index + 1)
-                    .context("--privilege-ttl requires a value")?
-                    .parse()
-                    .context("--privilege-ttl must be an integer")?;
-                index += 2;
-            }
-            "--confirmed" => {
-                confirmed = true;
-                index += 1;
-            }
-            "--force-unprivileged" => {
-                force_unprivileged = true;
-                index += 1;
-            }
-            value => {
-                anyhow::bail!("unknown source-config-patch-apply flag {value}");
-            }
-        }
-    }
-    validate_config_dispatch_bounds(
-        max_timeout_secs,
-        privilege_ttl_secs,
-        "source-config-patch-apply",
-    )?;
-    let client_id = client_id.context("source-config-patch-apply requires --client-id <id>")?;
-    anyhow::ensure!(
-        !client_id.is_empty() && client_id.len() <= 128,
-        "--client-id must be between 1 and 128 bytes"
-    );
-    anyhow::ensure!(
-        confirmed,
-        "source-config-patch-apply requires --confirmed because it applies an incremental config patch"
-    );
-    Ok(VtySourceConfigPatchApplyRequest {
-        client_id,
-        max_timeout_secs,
-        privilege_ttl_secs,
-        confirmed,
-        force_unprivileged,
-    })
 }
 
 pub(crate) fn parse_vty_agent_update(tokens: &[&str]) -> Result<VtyAgentUpdateRequest> {
@@ -545,100 +376,6 @@ pub(crate) fn parse_vty_agent_update_rollback(
     })
 }
 
-pub(crate) fn submit_vty_hot_config(
-    api_url: &str,
-    token: Option<&str>,
-    password: &str,
-    salt_hex: &str,
-    request: VtyHotConfigRequest,
-) -> Result<String> {
-    let toml_document = std::fs::read_to_string(&request.config_file).with_context(|| {
-        format!(
-            "failed to read full config override {}",
-            request.config_file.display()
-        )
-    })?;
-    anyhow::ensure!(
-        toml_document.len() <= MAX_AGENT_HOT_CONFIG_BYTES,
-        "full config override exceeds {} bytes",
-        MAX_AGENT_HOT_CONFIG_BYTES
-    );
-    let config: AgentConfig = toml::from_str(&toml_document).with_context(|| {
-        format!(
-            "failed to parse full config override {}",
-            request.config_file.display()
-        )
-    })?;
-    validate_agent_config_shape(&config)
-        .map_err(|message| anyhow::anyhow!("invalid full config override: {message}"))?;
-    let operation = JobCommand::HotConfig {
-        apply_mode: HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE.to_string(),
-        toml: toml_document,
-        preserve_redacted: None,
-        base_config_sha256_hex: None,
-    };
-
-    submit_vty_config_operation(
-        api_url,
-        token,
-        password,
-        salt_hex,
-        "hot_config",
-        operation,
-        request.selection,
-        request.max_timeout_secs,
-        request.privilege_ttl_secs,
-        request.force_unprivileged,
-    )
-}
-
-pub(crate) fn submit_vty_source_config_patch_apply(
-    api_url: &str,
-    token: Option<&str>,
-    password: &str,
-    salt_hex: &str,
-    request: VtySourceConfigPatchApplyRequest,
-) -> Result<String> {
-    #[derive(Deserialize)]
-    struct RenderedPatch {
-        toml: String,
-    }
-
-    let body = http_get(
-        api_url,
-        &format!(
-            "/api/v1/source-config-patch?client_id={}",
-            percent_encode_query_value(&request.client_id)
-        ),
-        token,
-    )?;
-    let rendered: RenderedPatch =
-        serde_json::from_str(&body).context("failed to parse rendered source template patch")?;
-    validate_source_config_patch(&rendered.toml)?;
-    let operation = JobCommand::SourceConfigPatch {
-        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
-        toml: rendered.toml,
-    };
-    let selection = VtyJobSelection {
-        clients: vec![request.client_id],
-        tags: Vec::new(),
-        destructive: false,
-        confirmed: request.confirmed,
-    };
-    submit_vty_config_operation(
-        api_url,
-        token,
-        password,
-        salt_hex,
-        "source_config_patch",
-        operation,
-        selection,
-        request.max_timeout_secs,
-        request.privilege_ttl_secs,
-        request.force_unprivileged,
-    )
-}
-
 pub(crate) fn submit_vty_agent_update(
     api_url: &str,
     token: Option<&str>,
@@ -772,32 +509,6 @@ fn validate_sha256(value: &str, label: &str) -> Result<String> {
     Ok(value)
 }
 
-fn validate_source_config_patch(toml_document: &str) -> Result<()> {
-    anyhow::ensure!(
-        !toml_document.is_empty(),
-        "rendered source template config patch is empty"
-    );
-    anyhow::ensure!(
-        toml_document.len() <= MAX_AGENT_HOT_CONFIG_BYTES,
-        "rendered source template config patch exceeds {} bytes",
-        MAX_AGENT_HOT_CONFIG_BYTES
-    );
-    let value: toml::Value = toml::from_str(toml_document)
-        .context("rendered source template config patch is invalid TOML")?;
-    let table = value
-        .as_table()
-        .context("rendered source template config patch must be a TOML table")?;
-    anyhow::ensure!(
-        !table.is_empty(),
-        "rendered source template config patch has no sections"
-    );
-    for section in table.keys() {
-        validate_incremental_config_patch_section(section)
-            .map_err(|message| anyhow::anyhow!(message))?;
-    }
-    Ok(())
-}
-
 fn submit_vty_config_operation(
     api_url: &str,
     token: Option<&str>,
@@ -868,67 +579,8 @@ fn submit_vty_config_operation(
 mod tests {
     use super::{
         parse_vty_agent_update, parse_vty_agent_update_activate, parse_vty_agent_update_check,
-        parse_vty_agent_update_rollback, parse_vty_hot_config, parse_vty_source_config_patch_apply,
+        parse_vty_agent_update_rollback,
     };
-
-    #[test]
-    fn parses_hot_config_request() {
-        let request = parse_vty_hot_config(&[
-            "--config-file",
-            "./agent.toml",
-            "id:edge-a",
-            "tag:bgp",
-            "--max-timeout",
-            "45",
-            "--privilege-ttl",
-            "120",
-            "--force-unprivileged",
-            "--confirmed",
-        ])
-        .unwrap();
-
-        assert_eq!(
-            request.config_file,
-            std::path::PathBuf::from("./agent.toml")
-        );
-        assert!(request.selection.clients.is_empty());
-        assert_eq!(request.selection.tags, vec!["bgp", "id:edge-a"]);
-        assert_eq!(request.max_timeout_secs, 45);
-        assert_eq!(request.privilege_ttl_secs, 120);
-        assert!(request.force_unprivileged);
-        assert!(request.selection.confirmed);
-    }
-
-    #[test]
-    fn rejects_unconfirmed_hot_config() {
-        assert!(parse_vty_hot_config(&["--config-file", "./agent.toml", "tag:bgp"]).is_err());
-    }
-
-    #[test]
-    fn parses_source_config_patch_apply_request() {
-        let request = parse_vty_source_config_patch_apply(&[
-            "--client-id",
-            "edge-a",
-            "--max-timeout",
-            "45",
-            "--privilege-ttl",
-            "120",
-            "--force-unprivileged",
-            "--confirmed",
-        ])
-        .unwrap();
-
-        assert_eq!(request.client_id, "edge-a");
-        assert_eq!(request.max_timeout_secs, 45);
-        assert_eq!(request.privilege_ttl_secs, 120);
-        assert!(request.force_unprivileged);
-        assert!(request.confirmed);
-    }
-
-    #[test]
-    fn rejects_unconfirmed_source_config_patch_apply() {
-        assert!(parse_vty_source_config_patch_apply(&["--client-id", "edge-a"]).is_err());
-    }
 
     #[test]
     fn parses_agent_update_request() {

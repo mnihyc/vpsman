@@ -317,7 +317,6 @@ export function JobDispatchPanel({
   } | null>(null);
   const [deleteTemplateSnapshot, setDeleteTemplateSnapshot] =
     useState<CommandTemplateRecord | null>(null);
-  const [hotConfigToml, setHotConfigToml] = useState("");
   const [updateArtifactUrl, setUpdateArtifactUrl] = useState("");
   const [updateSha256Hex, setUpdateSha256Hex] = useState("");
   const [updateCheckVersionUrl, setUpdateCheckVersionUrl] = useState(DEFAULT_UPDATE_VERSION_URL);
@@ -473,7 +472,6 @@ export function JobDispatchPanel({
     fileTransferSourceArtifactId,
     fileTransferUploadSourceKind,
     forceUnprivileged,
-    hotConfigToml,
     mode,
     privilegeMaterial,
     processLimit,
@@ -584,9 +582,7 @@ export function JobDispatchPanel({
                 ? fileTransferUploadReady
                 : mode === "file_transfer_download"
                   ? fileTransferDownloadReady
-                  : mode === "hot_config"
-                    ? hotConfigToml.trim().length > 0
-                    : mode === "agent_update"
+                  : mode === "agent_update"
                         ? updateArtifactUrl.startsWith("https://") &&
                           /^[0-9a-fA-F]{64}$/.test(updateSha256Hex.trim())
                         : mode === "agent_update_check"
@@ -891,7 +887,6 @@ export function JobDispatchPanel({
       supervisorCwd,
       supervisorEnv,
       supervisorLogBytes,
-      hotConfigToml,
       updateArtifactUrl,
       updateSha256Hex,
       updateCheckVersionUrl,
@@ -1065,7 +1060,6 @@ export function JobDispatchPanel({
       supervisorCwd,
       supervisorEnv,
       supervisorLogBytes,
-      hotConfigToml,
       updateArtifactUrl,
       updateSha256Hex,
       updateCheckVersionUrl,
@@ -1481,7 +1475,6 @@ export function JobDispatchPanel({
           fileTransferRateLimit={fileTransferRateLimit}
           fileTransferResumeToken={fileTransferResumeToken}
           fileTransferSessionId={fileTransferSessionId}
-          hotConfigToml={hotConfigToml}
           mode={mode}
           processLimit={processLimit}
           setCommandText={setCommandText}
@@ -1515,7 +1508,6 @@ export function JobDispatchPanel({
           setFileTransferRateLimit={setFileTransferRateLimit}
           setFileTransferResumeToken={setFileTransferResumeToken}
           setFileTransferSessionId={setFileTransferSessionId}
-          setHotConfigToml={setHotConfigToml}
           setProcessLimit={setProcessLimit}
           setSupervisorAction={setSupervisorAction}
           setSupervisorArgv={setSupervisorArgv}

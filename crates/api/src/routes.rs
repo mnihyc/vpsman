@@ -46,17 +46,18 @@ use crate::{
     routes_ingest::{
         ingest_agent_hello, ingest_command_output, ingest_gateway_session_ended,
         ingest_gateway_session_started, ingest_telemetry, ingest_terminal_output,
-        validate_agent_identity, verify_agent_update_artifact,
+        request_runtime_config_reload, validate_agent_identity, verify_agent_update_artifact,
     },
     routes_inventory::{
         assign_agent_tag, assign_source_template, bulk_mutate_tags, clone_source_template,
-        create_source_template, create_tag, delete_agent, delete_hot_config_patch_generator,
-        delete_tag, diff_source_template, fleet_summary, list_agents, list_gateway_sessions,
-        list_hot_config_patch_generators, list_source_status, list_source_template_assignments,
-        list_source_templates, list_tags, list_telemetry_network_rates, list_telemetry_rollups,
-        list_telemetry_tunnels, render_hot_config_patch_generator, render_source_config_patch,
+        create_server_runtime_config_patch_request, create_source_template, create_tag,
+        delete_agent, delete_runtime_config_patch_generator, delete_tag, diff_source_template,
+        fleet_summary, list_agents, list_gateway_sessions, list_runtime_config_patch_generators,
+        list_source_status, list_source_template_assignments, list_source_templates, list_tags,
+        list_telemetry_network_rates, list_telemetry_rollups, list_telemetry_tunnels,
+        render_runtime_config_patch_generator, render_template_runtime_config,
         resolve_bulk_targets, test_source_template, update_agent_alias, update_source_template,
-        update_tag_order, upsert_hot_config_patch_generator,
+        update_tag_order, upsert_runtime_config_patch_generator,
     },
     routes_job_history::{
         compare_job_outputs, download_file_download_bundle, download_file_download_for_client,
@@ -75,7 +76,7 @@ use crate::{
         allocate_tunnel_endpoints, create_tunnel_plan, disable_tunnel_plan, enable_tunnel_plan,
         export_tunnel_plan, get_topology_graph, list_network_ospf_recommendations,
         list_network_ospf_update_plans, list_tunnel_plans, promote_telemetry_tunnel_plan,
-        promote_tunnel_plan_to_custom_adapter,
+        promote_tunnel_plan_to_custom_adapter, update_tunnel_plan_ospf_cost,
     },
     routes_restores::{create_restore_plan, list_restore_plans},
     routes_schedules::{
@@ -101,13 +102,17 @@ use crate::{
     routes_ws::ws_handler,
     state::AppState,
 };
-use vpsman_common::MAX_CHUNKED_FILE_PUSH_BYTES;
+use vpsman_common::{MAX_CHUNKED_FILE_PUSH_BYTES, MAX_RUNTIME_CONFIG_PATCH_BYTES};
 
 const JSON_BODY_OVERHEAD_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BODY_BYTES: usize =
     base64_json_body_limit(MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES, 64 * 1024);
 pub(crate) const MAX_JOB_CREATE_BODY_BYTES: usize =
     base64_json_body_limit(MAX_CHUNKED_FILE_PUSH_BYTES, JSON_BODY_OVERHEAD_BYTES);
+// Runtime TOML is carried as a JSON string; escaping can double the HTTP body
+// while the validated TOML payload remains capped at MAX_RUNTIME_CONFIG_PATCH_BYTES.
+pub(crate) const MAX_RUNTIME_CONFIG_PATCH_BODY_BYTES: usize =
+    (MAX_RUNTIME_CONFIG_PATCH_BYTES * 2) + JSON_BODY_OVERHEAD_BYTES;
 
 const fn base64_json_body_limit(raw_payload_bytes: usize, json_overhead_bytes: usize) -> usize {
     (raw_payload_bytes.div_ceil(3) * 4) + json_overhead_bytes
@@ -288,20 +293,25 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/source-status", get(list_source_status))
         .route(
-            "/api/v1/source-config-patch",
-            get(render_source_config_patch),
+            "/api/v1/template-runtime-config",
+            get(render_template_runtime_config),
         )
         .route(
-            "/api/v1/hot-config/patch-generators",
-            get(list_hot_config_patch_generators).post(upsert_hot_config_patch_generator),
+            "/api/v1/runtime-config/patch",
+            post(create_server_runtime_config_patch_request)
+                .layer(DefaultBodyLimit::max(MAX_RUNTIME_CONFIG_PATCH_BODY_BYTES)),
         )
         .route(
-            "/api/v1/hot-config/patch-generators/{generator_id}",
-            delete(delete_hot_config_patch_generator),
+            "/api/v1/runtime-config/patch-generators",
+            get(list_runtime_config_patch_generators).post(upsert_runtime_config_patch_generator),
         )
         .route(
-            "/api/v1/hot-config/patch-generators/{generator_id}/render",
-            post(render_hot_config_patch_generator),
+            "/api/v1/runtime-config/patch-generators/{generator_id}",
+            delete(delete_runtime_config_patch_generator),
+        )
+        .route(
+            "/api/v1/runtime-config/patch-generators/{generator_id}/render",
+            post(render_runtime_config_patch_generator),
         )
         .route("/api/v1/agents/{client_id}/tags", post(assign_agent_tag))
         .route("/api/v1/agents/{client_id}/alias", post(update_agent_alias))
@@ -473,6 +483,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(disable_tunnel_plan),
         )
         .route(
+            "/api/v1/tunnel-plans/{plan_id}/ospf-cost",
+            post(update_tunnel_plan_ospf_cost),
+        )
+        .route(
             "/api/v1/tunnel-plans/promote-telemetry",
             post(promote_telemetry_tunnel_plan),
         )
@@ -537,6 +551,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(validate_agent_identity),
         )
         .route("/internal/v1/gateway/agent-hello", post(ingest_agent_hello))
+        .route(
+            "/internal/v1/gateway/runtime-config-reload",
+            post(request_runtime_config_reload),
+        )
         .route(
             "/internal/v1/gateway/session-started",
             post(ingest_gateway_session_started),

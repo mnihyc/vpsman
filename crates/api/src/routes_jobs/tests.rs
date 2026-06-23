@@ -1,7 +1,6 @@
 use uuid::Uuid;
 use vpsman_common::{
-    plan_tunnel, AgentCapabilitySnapshot, AgentPrivilegeMode, BandwidthTier, OspfCostPolicy,
-    ProcessResourceLimits, ProcessRunPolicy, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+    AgentCapabilitySnapshot, AgentPrivilegeMode, ProcessResourceLimits, ProcessRunPolicy,
 };
 
 use super::*;
@@ -294,64 +293,6 @@ fn aggregate_job_status_uses_terminal_target_states() {
 }
 
 #[test]
-fn capability_split_skips_only_explicit_unprivileged_root_network_targets() {
-    let command = network_rollback_command();
-    let targets = vec![
-        "root-a".to_string(),
-        "user-b".to_string(),
-        "legacy-c".to_string(),
-    ];
-    let agents = vec![
-        test_agent(
-            "root-a",
-            AgentCapabilitySnapshot {
-                privilege_mode: AgentPrivilegeMode::Root,
-                can_manage_runtime_tunnels: true,
-                ..Default::default()
-            },
-        ),
-        test_agent(
-            "user-b",
-            AgentCapabilitySnapshot {
-                privilege_mode: AgentPrivilegeMode::Unprivileged,
-                effective_uid: Some(1000),
-                can_attempt_privileged_ops: true,
-                ..Default::default()
-            },
-        ),
-        test_agent("legacy-c", AgentCapabilitySnapshot::default()),
-    ];
-
-    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, false);
-
-    assert_eq!(dispatch, vec!["root-a".to_string(), "legacy-c".to_string()]);
-    assert_eq!(skipped_client_ids(&skipped), vec!["user-b"]);
-    assert_eq!(
-        skipped[0].failure.reason,
-        "target_agent_lacks_root_runtime_network_capability"
-    );
-}
-
-#[test]
-fn capability_split_allows_forced_unprivileged_best_effort() {
-    let command = network_rollback_command();
-    let targets = vec!["user-b".to_string()];
-    let agents = vec![test_agent(
-        "user-b",
-        AgentCapabilitySnapshot {
-            privilege_mode: AgentPrivilegeMode::Unprivileged,
-            effective_uid: Some(1000),
-            ..Default::default()
-        },
-    )];
-
-    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, true);
-
-    assert_eq!(dispatch, targets);
-    assert!(skipped.is_empty());
-}
-
-#[test]
 fn capability_split_does_not_gate_non_network_commands() {
     let command = JobCommand::Shell {
         argv: vec!["uptime".to_string()],
@@ -522,6 +463,30 @@ fn capability_split_allows_config_read_for_unprivileged_targets() {
 }
 
 #[test]
+fn capability_split_allows_runtime_config_sync_for_unprivileged_targets() {
+    let command = JobCommand::RuntimeConfigSync {
+        desired_version: 1,
+        reason: "test-runtime-config-sync".to_string(),
+        config: Box::new(Default::default()),
+    };
+    let targets = vec!["user-b".to_string()];
+    let agents = vec![test_agent(
+        "user-b",
+        AgentCapabilitySnapshot {
+            privilege_mode: AgentPrivilegeMode::Unprivileged,
+            effective_uid: Some(1000),
+            can_attempt_privileged_ops: false,
+            ..Default::default()
+        },
+    )];
+
+    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, false);
+
+    assert_eq!(dispatch, targets);
+    assert!(skipped.is_empty());
+}
+
+#[test]
 fn capability_split_skips_restore_for_unprivileged_targets() {
     let command = restore_rollback_command();
     let targets = vec!["user-b".to_string()];
@@ -567,40 +532,6 @@ fn capability_split_force_sends_update_and_restore_best_effort() {
         assert_eq!(dispatch, targets);
         assert!(skipped.is_empty());
     }
-}
-
-#[test]
-fn capability_degraded_outcome_records_operator_hint() {
-    let (_dispatch, skipped) = split_targets_by_capability(
-        &network_rollback_command(),
-        &["user-b".to_string()],
-        &[test_agent(
-            "user-b",
-            AgentCapabilitySnapshot {
-                privilege_mode: AgentPrivilegeMode::Unprivileged,
-                effective_uid: Some(1000),
-                ..Default::default()
-            },
-        )],
-        false,
-    );
-    let outcome =
-        capability_degraded_outcome(Uuid::new_v4(), &skipped[0], &network_rollback_command())
-            .unwrap();
-    let status: serde_json::Value = serde_json::from_slice(&outcome.outputs[0].data).unwrap();
-
-    assert_eq!(outcome.status, "skipped");
-    assert_eq!(outcome.exit_code, Some(0));
-    assert_eq!(outcome.outputs[0].exit_code, Some(0));
-    assert!(!outcome.accepted);
-    assert_eq!(
-        status["reason"],
-        "target_agent_lacks_root_runtime_network_capability"
-    );
-    assert!(status["hint"]
-        .as_str()
-        .unwrap()
-        .contains("force_unprivileged"));
 }
 
 #[test]
@@ -670,41 +601,6 @@ fn test_agent(id: &str, capabilities: AgentCapabilitySnapshot) -> AgentView {
         stale_since: None,
         stale_reason: None,
         capabilities,
-    }
-}
-
-fn network_rollback_command() -> JobCommand {
-    JobCommand::NetworkRollback {
-        plan: Box::new(
-            plan_tunnel(&TunnelPlanInput {
-                name: "edge-a-edge-b".to_string(),
-                interface_name: "tunab".to_string(),
-                kind: TunnelKind::Gre,
-                runtime_control: Default::default(),
-                runtime_topology: Default::default(),
-                left_client_id: "root-a".to_string(),
-                right_client_id: "user-b".to_string(),
-                left_underlay: "198.51.100.10".to_string(),
-                right_underlay: "203.0.113.20".to_string(),
-                address_pool_cidr: "10.255.0.0/30".to_string(),
-                reserved_addresses: Vec::new(),
-                ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
-                    left: "10.255.0.0".to_string(),
-                    right: "10.255.0.1".to_string(),
-                    prefix_len: 31,
-                }),
-                ipv6_address_pool_cidr: None,
-                ipv6_tunnel: None,
-                latency_primary_family: Default::default(),
-                bandwidth: BandwidthTier::M100,
-                latency_ms: 18.0,
-                packet_loss_ratio: 0.0,
-                preference: 1.0,
-                ospf_policy: OspfCostPolicy::default(),
-            })
-            .unwrap(),
-        ),
-        side: TunnelEndpointSide::Left,
     }
 }
 

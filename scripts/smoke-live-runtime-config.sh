@@ -7,7 +7,7 @@ source "$ROOT_DIR/scripts/lib-smoke.sh"
 smoke_enter_root
 smoke_require_tools awk base64 cp curl docker grep jq python3 sed shuf timeout
 smoke_build_binaries
-smoke_init_tmpdir "vpsman-live-hot-config"
+smoke_init_tmpdir "vpsman-live-runtime-config"
 
 pg_port="$(smoke_free_port)"
 api_port="$(smoke_free_port)"
@@ -17,12 +17,12 @@ gateway_control_port="$(smoke_free_port)"
 api_url="http://127.0.0.1:$api_port"
 gateway_addr="127.0.0.1:$gateway_port"
 gateway_control_url="http://127.0.0.1:$gateway_control_port"
-container_name="vpsman-live-hot-config-$(date +%s%N)"
+container_name="vpsman-live-runtime-config-$(date +%s%N)"
 internal_token="smoke-internal-$(date +%s%N)"
 postgres_url="postgres://vpsman:vpsman@127.0.0.1:$pg_port/vpsman"
-operator_password="hot-config-smoke-password"
-client_id="hot-config-smoke-$(date +%s)"
-updated_display_name="$client_id-updated"
+operator_password="runtime-config-smoke-password"
+client_id="runtime-config-smoke-$(date +%s)"
+runtime_proc_root="$SMOKE_TMPDIR/runtime-proc-root"
 super_password="smoke-super-password"
 super_salt_hex="00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
 privilege_verifier_key_hex="$(smoke_privilege_verifier_key_hex "$super_password" "$super_salt_hex")"
@@ -36,14 +36,13 @@ api_log=""
 gateway_log="$SMOKE_TMPDIR/gateway.log"
 agent_log="$SMOKE_TMPDIR/agent.log"
 agent_config="$SMOKE_TMPDIR/agent.toml"
-hot_config="$SMOKE_TMPDIR/hot-agent.toml"
-rollback_config="$agent_config.rollback"
+runtime_patch="$SMOKE_TMPDIR/runtime-config-patch.toml"
 
-cleanup_live_hot_config_smoke() {
+cleanup_live_runtime_config_smoke() {
   smoke_cleanup
   docker rm -f "$container_name" >/dev/null 2>&1 || true
 }
-trap cleanup_live_hot_config_smoke EXIT
+trap cleanup_live_runtime_config_smoke EXIT
 
 docker run --rm -d \
   --name "$container_name" \
@@ -111,7 +110,7 @@ start_api() {
     fi
     sleep 0.5
   done
-  smoke_dump_logs "live hot-config API failed to start" "$SMOKE_TMPDIR"/api-"$label"-*.log
+  smoke_dump_logs "live runtime config API failed to start" "$SMOKE_TMPDIR"/api-"$label"-*.log
   exit 1
 }
 
@@ -125,7 +124,7 @@ wait_agent_online() {
   local deadline=$((SECONDS + 35))
   until [[ "$status" == "online" ]]; do
     if (( SECONDS >= deadline )); then
-      smoke_dump_logs "agent did not become online for live hot-config smoke" \
+      smoke_dump_logs "agent did not become online for live runtime config smoke" \
         "$SMOKE_TMPDIR"/api-*.log "$gateway_log" "$agent_log"
       exit 1
     fi
@@ -135,25 +134,25 @@ wait_agent_online() {
   done
 }
 
-assert_hot_config_persisted() {
+assert_runtime_config_sync_persisted() {
   local job_json targets_json outputs_json audits_json decoded_outputs
   job_json="$(api_get "/api/v1/jobs/$job_id")"
   targets_json="$(api_get "/api/v1/jobs/$job_id/targets")"
   outputs_json="$(api_get "/api/v1/jobs/$job_id/outputs")"
   audits_json="$(api_get "/api/v1/audit?limit=20")"
 
-  jq -e '.status == "completed" and .command_type == "hot_config" and .target_count == 1' \
+  jq -e '.status == "completed" and .command_type == "runtime_config_sync" and .target_count == 1' \
     <<<"$job_json" >/dev/null
   jq -e --arg client "$client_id" '
     length == 1 and .[0].client_id == $client and .[0].status == "completed" and .[0].exit_code == 0
   ' <<<"$targets_json" >/dev/null
-  jq -e --arg config_path "$agent_config" --arg rollback_path "$rollback_config" '
+  jq -e '
     .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
     | (.data_base64 | @base64d | fromjson)
-    | .type == "hot_config"
+    | .type == "runtime_config_sync"
       and .status == "applied"
-      and .config_path == $config_path
-      and .rollback_path == $rollback_path
+      and .bootstrap_config_persisted == false
+      and .reason == "CLI config patch"
   ' <<<"$outputs_json" >/dev/null
   jq -e '[.[].action] | index("job.dispatch_requested") and index("job.target_result")' \
     <<<"$audits_json" >/dev/null
@@ -171,20 +170,80 @@ assert_hot_config_persisted() {
     -e "privilege_assertion" \
     -e "server_public_key_hex" \
     <<<"$decoded_outputs" >/dev/null; then
-    echo "job outputs leaked hot-config secrets or trust anchors" >&2
+    echo "job outputs leaked runtime config secrets or trust anchors" >&2
     exit 1
   fi
+}
+
+submit_config_read() {
+  local read_job_id read_body read_json privilege_assertion
+  read_job_id="$(python3 - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
+)"
+  privilege_assertion="$(
+    smoke_job_privilege_assertion \
+      "$super_password" \
+      "$super_salt_hex" \
+      "id:$client_id" \
+      "config_read" \
+      '{"type":"config_read"}' \
+      30 \
+      false \
+      true \
+      300 \
+      "$client_id"
+  )"
+  read_body="$(jq -nc \
+    --arg job_id "$read_job_id" \
+    --arg client "$client_id" \
+    --argjson privilege_assertion "$privilege_assertion" \
+    '{
+      job_id: $job_id,
+      command: "config_read",
+      operation: {type: "config_read"},
+      selector_expression: ("id:" + $client),
+      target_client_ids: [$client],
+      privileged: true,
+      destructive: false,
+      confirmed: false,
+      force_unprivileged: false,
+      max_timeout_secs: 30,
+      privilege_assertion: $privilege_assertion
+    }')"
+  read_json="$(curl -fsS \
+    -H 'content-type: application/json' \
+    -H "Authorization: Bearer $access_token" \
+    -d "$read_body" \
+    "$api_url/api/v1/jobs")"
+  smoke_assert_job_create_queued "$read_json" 1 >/dev/null
+  smoke_wait_api_job_status "$api_url" "$read_job_id" completed 45 >/dev/null
+  printf '%s\n' "$read_job_id"
+}
+
+assert_runtime_config_visible() {
+  local read_job_id outputs_json
+  read_job_id="$(submit_config_read)"
+  outputs_json="$(api_get "/api/v1/jobs/$read_job_id/outputs")"
+  jq -e --arg proc_root "$runtime_proc_root" '
+    .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
+    | (.data_base64 | @base64d | fromjson)
+    | .type == "config_read"
+      and (.toml | contains("[telemetry]"))
+      and (.toml | contains("proc_root = \"" + $proc_root + "\""))
+  ' <<<"$outputs_json" >/dev/null
 }
 
 start_api "first"
 
 auth_json="$(curl -fsS \
   -H "Content-Type: application/json" \
-  -d "{\"username\":\"hot-config-smoke\",\"password\":\"$operator_password\"}" \
+  -d "{\"username\":\"runtime-config-smoke\",\"password\":\"$operator_password\"}" \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
 export VPSMAN_API_TOKEN="$access_token"
-jq -e '.operator.username == "hot-config-smoke" and .token_type == "Bearer"' \
+jq -e '.operator.username == "runtime-config-smoke" and .token_type == "Bearer"' \
   <<<"$auth_json" >/dev/null
 
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
@@ -193,7 +252,7 @@ VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
 VPSMAN_API_URL="$api_url" \
 VPSMAN_INTERNAL_TOKEN="$internal_token" \
 VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
-VPSMAN_GATEWAY_ID="hot-config-smoke-gateway" \
+VPSMAN_GATEWAY_ID="runtime-config-smoke-gateway" \
 VPSMAN_GATEWAY_SPOOL_DIR="$SMOKE_TMPDIR/gateway-spool" \
 RUST_LOG="vpsman_gateway=warn" \
   target/debug/vpsman-gateway >"$gateway_log" 2>&1 &
@@ -207,19 +266,14 @@ smoke_create_direct_agent_config \
   "$agent_config" \
   "$client_id" \
   "$client_id" \
-  "hot-config-smoke" \
+  "runtime-config-smoke" \
   "$gateway_public_hex" \
   "primary=$gateway_addr=10"
-updated_display_name="$client_id-updated"
-
-cp "$agent_config" "$hot_config"
-sed -i \
-  -e "s/^display_name = .*/display_name = \"$updated_display_name\"/" \
-  -e 's/^telemetry_light_secs = .*/telemetry_light_secs = 10/' \
-  -e 's/^telemetry_full_secs = .*/telemetry_full_secs = 30/' \
-  "$hot_config"
-perl -0pi -e 's/^tags = \[(?:\n(?:    .*\n)*|[^\n]*)\]/tags = ["hot-config-smoke", "updated-live"]/m' \
-  "$hot_config"
+mkdir -p "$runtime_proc_root"
+cat >"$runtime_patch" <<PATCH
+[telemetry]
+proc_root = "$runtime_proc_root"
+PATCH
 
 VPSMAN_AGENT_CONFIG="$agent_config" \
 RUST_LOG="vpsman_agent=warn" \
@@ -229,77 +283,67 @@ wait_agent_online
 
 reject_body="$(jq -nc \
   --arg client "$client_id" \
-  --rawfile toml "$hot_config" \
+  --rawfile toml "$runtime_patch" \
   '{
-    command: "hot_config",
-    operation: {
-      type: "hot_config",
-      apply_mode: "full_override",
-      toml: $toml
-    },
     selector_expression: ("id:" + $client),
     target_client_ids: [$client],
-    privileged: true,
+    toml: $toml,
+    reason: "smoke reject",
     confirmed: true,
-    max_timeout_secs: 30
   }')"
 reject_json="$SMOKE_TMPDIR/reject.json"
 reject_status="$(curl -sS -o "$reject_json" -w "%{http_code}" \
   -H 'content-type: application/json' \
   -H "Authorization: Bearer $access_token" \
   -d "$reject_body" \
-  "$api_url/api/v1/jobs")"
+  "$api_url/api/v1/runtime-config/patch")"
 if [[ "$reject_status" != "403" ]]; then
-  echo "expected no-privilege-unlock hot-config to return 403, got $reject_status" >&2
+  echo "expected no-privilege-unlock runtime config patch to return 403, got $reject_status" >&2
   cat "$reject_json" >&2 || true
   exit 1
 fi
 jq -e '.error == "privilege_assertion_required" and .status == 403' "$reject_json" >/dev/null
-grep -q "display_name = \"$client_id\"" "$agent_config"
-if grep -q "$updated_display_name" "$agent_config"; then
-  echo "hot config changed after no-privilege-unlock rejection" >&2
+if grep -q "$runtime_proc_root" "$agent_config"; then
+  echo "runtime config patch changed bootstrap config after no-privilege-unlock rejection" >&2
   exit 1
 fi
 
 push_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
-  target/debug/vpsctl --api-url "$api_url" hot-config \
-    --config-file "$hot_config" \
+  target/debug/vpsctl --api-url "$api_url" config-patch \
+    --config-file "$runtime_patch" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
-    --force-unprivileged \
     --confirmed)"
-job_id="$(jq -r '.job_id' <<<"$push_json")"
-smoke_assert_job_create_queued "$push_json" 1
+job_id="$(jq -r '.sync_job_ids[0]' <<<"$push_json")"
+jq -e '.target_count == 1 and (.sync_job_ids | length == 1)' <<<"$push_json" >/dev/null
 smoke_wait_api_job_status "$api_url" "$job_id" completed 45 >/dev/null
 
-grep -q "display_name = \"$updated_display_name\"" "$agent_config"
-grep -q 'telemetry_light_secs = 10' "$agent_config"
-grep -q 'telemetry_full_secs = 30' "$agent_config"
-grep -q '^tags = \[' "$agent_config"
-grep -q '"hot-config-smoke"' "$agent_config"
-grep -q '"updated-live"' "$agent_config"
-grep -q "display_name = \"$client_id\"" "$rollback_config"
-grep -q 'telemetry_light_secs = 15' "$rollback_config"
+if grep -q "$runtime_proc_root" "$agent_config"; then
+  echo "runtime config patch mutated immutable bootstrap config file" >&2
+  exit 1
+fi
 
-assert_hot_config_persisted
+assert_runtime_config_sync_persisted
+assert_runtime_config_visible
 
 stop_api
 start_api "restart"
-api_get "/api/v1/auth/me" | jq -e '.username == "hot-config-smoke"' >/dev/null
-assert_hot_config_persisted
+api_get "/api/v1/auth/me" | jq -e '.username == "runtime-config-smoke"' >/dev/null
+assert_runtime_config_sync_persisted
 
 jq -n \
   --arg client_id "$client_id" \
   --arg job_id "$job_id" \
-  --arg display_name "$updated_display_name" \
+  --arg proc_root "$runtime_proc_root" \
   '{
-    live_hot_config_smoke: "ok",
+    live_runtime_config_smoke: "ok",
     postgres_backed: true,
     auth_session: "persisted",
     api_restart: "verified",
     no_privilege_unlock_rejected: true,
     client_id: $client_id,
     job_id: $job_id,
-    display_name: $display_name
+    runtime_proc_root: $proc_root,
+    bootstrap_config_immutable: true
   }'

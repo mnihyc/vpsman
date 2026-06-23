@@ -12,6 +12,7 @@ import type {
   TunnelPlan,
   TopologyGraph,
   TunnelPlanRecord,
+  UpdateTunnelPlanOspfCostRequest,
 } from "../types";
 import type { PromoteTunnelPlanToCustomAdapterRequest } from "../typesTopology";
 
@@ -159,6 +160,18 @@ export function useTopologyData(
     [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
   );
 
+  const updateTunnelPlanOspfCost = useCallback(
+    async (planId: string, request: UpdateTunnelPlanOspfCostRequest) => {
+      await apiPost<TunnelPlanRecord>(
+        `/api/v1/tunnel-plans/${encodeURIComponent(planId)}/ospf-cost`,
+        apiToken,
+        request,
+      );
+      await Promise.all([loadTunnelPlans(), loadTopologyGraph(), loadOspfUpdatePlans(), onAuditChanged()]);
+    },
+    [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged],
+  );
+
   const promoteTelemetryTunnel = useCallback(
     async (request: PromoteTelemetryTunnelRequest) => {
       await apiPost<TunnelPlanRecord>("/api/v1/tunnel-plans/promote-telemetry", apiToken, request);
@@ -192,6 +205,7 @@ export function useTopologyData(
     promoteTelemetryTunnel,
     promoteTunnelPlanToCustomAdapter,
     setTunnelPlanEnabled,
+    updateTunnelPlanOspfCost,
     topologyError,
     topologyGraph,
     topologyLoading,

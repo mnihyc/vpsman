@@ -527,6 +527,16 @@ pub(crate) struct CreateTunnelPlanRequest {
     #[serde(flatten)]
     pub(crate) input: TunnelPlanInput,
     #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct UpdateTunnelPlanOspfCostRequest {
+    pub(crate) current_ospf_cost: u16,
+    pub(crate) recommended_ospf_cost: u16,
+    #[serde(default)]
     pub(crate) confirmed: bool,
 }
 
@@ -574,6 +584,8 @@ pub(crate) struct PromoteTelemetryTunnelRequest {
     pub(crate) latency_ms: Option<f64>,
     pub(crate) packet_loss_ratio: Option<f64>,
     pub(crate) preference: Option<f64>,
+    #[serde(default)]
+    pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) confirmed: bool,
 }

@@ -20,8 +20,7 @@ import { decodeOutputPreview, formatTime, shortId } from "../../utils";
 import { readableTelemetryToken } from "../../topologyRuntime";
 
 const networkCommands = new Set([
-  "network_apply",
-  "network_rollback",
+  "runtime_config_sync",
   "network_status",
   "network_probe",
   "network_speed_test",
@@ -320,7 +319,7 @@ export function TopologyEvidencePanel({
           <div className="emptyState">
             <Activity size={22} />
             <strong>No topology evidence</strong>
-            <span>Network apply, rollback, status, and probe results will appear here.</span>
+            <span>Sync, status, probe, and speed-test results will appear here.</span>
           </div>
         )}
       </div>

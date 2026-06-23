@@ -42,7 +42,7 @@ fn recognizes_inventory_commands() {
         "fleet-alert-notification-process --dry-run"
     ));
     assert!(is_vty_inventory_command(
-        "source-config-patch --client-id edge-a"
+        "template-runtime-config --client-id edge-a"
     ));
     assert!(is_vty_inventory_command("bulk-resolve edge bgp"));
     assert!(is_vty_inventory_command(
@@ -147,9 +147,9 @@ fn parses_inventory_commands() {
         }
     );
     assert_eq!(
-        parse_vty_inventory_command("source-config-patch --client-id=edge/a --format=json")
+        parse_vty_inventory_command("template-runtime-config --client-id=edge/a --format=json")
             .unwrap(),
-        VtyInventoryCommand::SourceConfigPatch {
+        VtyInventoryCommand::TemplateRuntimeConfig {
             client_id: "edge/a".to_string(),
             format: "json".to_string(),
         }
@@ -381,10 +381,10 @@ fn rejects_invalid_inventory_commands() {
         "/api/v1/source-status?client_id=edge%2Fa&domain=telemetry%2Fsource"
     );
     assert_eq!(
-        super::source_config_patch_path("edge/a"),
-        "/api/v1/source-config-patch?client_id=edge%2Fa"
+        super::template_runtime_config_path("edge/a"),
+        "/api/v1/template-runtime-config?client_id=edge%2Fa"
     );
-    assert!(parse_vty_inventory_command("source-config-patch --format xml").is_err());
+    assert!(parse_vty_inventory_command("template-runtime-config --format xml").is_err());
     assert!(parse_vty_inventory_command("fleet-alerts --severity noisy").is_err());
     assert!(parse_vty_inventory_command("fleet-alerts --limit=0").is_err());
     assert!(parse_vty_inventory_command("fleet-alerts --operator-state noisy").is_err());

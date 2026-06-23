@@ -819,7 +819,7 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     {
       view: "Config",
       subpage: "Overview",
-      marker: "Agent config overview",
+      marker: "Runtime config overview",
       screenshot: "page-config-overview",
     },
     {
@@ -920,9 +920,9 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     },
     {
       view: "Topology",
-      subpage: "Apply / rollback",
-      marker: "Network apply",
-      screenshot: "page-topology-apply-rollback",
+      subpage: "Tests",
+      marker: "Network tests",
+      screenshot: "page-topology-tests",
     },
     {
       view: "Topology",

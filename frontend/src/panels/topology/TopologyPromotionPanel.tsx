@@ -155,6 +155,7 @@ export function TopologyPromotionPanel({
         { label: "Peer", value: clientLabel(request.peer_client_id) },
         { label: "Name", value: request.name ?? "generated" },
         { label: "Side", value: request.side ?? "left" },
+        { label: "Activation", value: request.enabled ? "Enabled now" : "Deferred" },
       ],
       request,
     });
@@ -343,6 +344,14 @@ export function TopologyPromotionPanel({
                 <option value="left">Left</option>
                 <option value="right">Right</option>
               </select>
+            </label>
+            <label className="checkLine">
+              <input
+                checked={promoteForm.enabled}
+                onChange={(event) => setPromotionField("enabled", event.target.checked)}
+                type="checkbox"
+              />
+              <span>Plan enabled</span>
             </label>
           </div>
           <div className="dispatchControls">
@@ -786,6 +795,7 @@ function initialTelemetryPromotionForm(preferences: OperatorPreferences): Promot
     latency_ms: 20,
     packet_loss_ratio: 0,
     preference: 1,
+    enabled: false,
     confirmed: false,
   };
 }

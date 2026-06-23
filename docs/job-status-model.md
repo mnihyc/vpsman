@@ -67,9 +67,9 @@ Target statuses are:
   rewrite output history, target state, or parent job state.
 - Agent-side timeouts are reported as structured `command_timeout` status
   output and map to `agent_timeout`. Operator cancellation is operational for
-  active shell/script/PTY children, backup, restore, network apply/rollback,
-  OSPF updates, network status/probe/speed-test, resumable file-transfer
-  steps, and terminal operations:
+  active shell/script/PTY children, backup, restore, runtime config sync,
+  network status/probe/speed-test, resumable file-transfer steps, and terminal
+  operations:
   cancel requests are acknowledged as accepted while the worker is still
   finalizing, the agent interrupts the operation through its cancel token, and
   the terminal target state becomes `canceled` only after the agent emits

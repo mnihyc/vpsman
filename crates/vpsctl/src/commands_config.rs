@@ -3,15 +3,17 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
-    validate_agent_config_shape, validate_incremental_config_patch_section, AgentConfig,
-    JobCommand, HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE, MAX_AGENT_HOT_CONFIG_BYTES,
-    SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH,
+    payload_hash, validate_incremental_config_patch_section, JobCommand,
+    MAX_RUNTIME_CONFIG_PATCH_BYTES,
 };
 
 use crate::commands_schedules::selector_expression_from_targets;
 use crate::http::{http_get, http_post_json};
 use crate::jobs::{resolve_target_ids, submit_privileged_operation, PrivilegedOperationRequest};
-use crate::privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex};
+use crate::privilege::{
+    build_privilege_for_db, build_privilege_for_job_command, load_super_password,
+    load_super_salt_hex, DbPrivilegeRequest,
+};
 use crate::util::percent_encode_path_segment;
 
 pub(crate) struct AgentUpdateOptions {
@@ -55,68 +57,6 @@ pub(crate) struct AgentUpdateReleaseRecordOptions {
     pub(crate) confirmed: bool,
 }
 
-pub(crate) fn hot_config(
-    api_url: &str,
-    token: Option<&str>,
-    config_file: PathBuf,
-    clients: Vec<String>,
-    tags: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    max_timeout_secs: u64,
-    confirmed: bool,
-    force_unprivileged: bool,
-) -> Result<()> {
-    anyhow::ensure!(
-        confirmed,
-        "hot-config requires --confirmed because it applies a full agent config override"
-    );
-    let toml_document = std::fs::read_to_string(&config_file).with_context(|| {
-        format!(
-            "failed to read full config override {}",
-            config_file.display()
-        )
-    })?;
-    anyhow::ensure!(
-        toml_document.len() <= MAX_AGENT_HOT_CONFIG_BYTES,
-        "full config override exceeds {} bytes",
-        MAX_AGENT_HOT_CONFIG_BYTES
-    );
-    let config: AgentConfig = toml::from_str(&toml_document).with_context(|| {
-        format!(
-            "failed to parse full config override {}",
-            config_file.display()
-        )
-    })?;
-    validate_agent_config_shape(&config)
-        .map_err(|message| anyhow::anyhow!("invalid full config override: {message}"))?;
-    let operation = JobCommand::HotConfig {
-        apply_mode: HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE.to_string(),
-        toml: toml_document,
-        preserve_redacted: None,
-        base_config_sha256_hex: None,
-    };
-    println!(
-        "{}",
-        submit_privileged_operation(PrivilegedOperationRequest {
-            api_url,
-            token,
-            operation: &operation,
-            command_label: "hot_config",
-            clients: &clients,
-            tags: &tags,
-            password_env: &password_env,
-            super_salt_hex: super_salt_hex.as_deref(),
-            privilege_ttl_secs,
-            max_timeout_secs,
-            confirmed,
-            force_unprivileged,
-        })?
-    );
-    Ok(())
-}
-
 pub(crate) fn config_patch(
     api_url: &str,
     token: Option<&str>,
@@ -126,38 +66,49 @@ pub(crate) fn config_patch(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
-    max_timeout_secs: u64,
     confirmed: bool,
-    force_unprivileged: bool,
 ) -> Result<()> {
     anyhow::ensure!(
         confirmed,
-        "config-patch requires --confirmed because it applies an incremental agent config patch"
+        "config-patch requires --confirmed because it changes server-managed runtime config"
     );
     let toml_document = std::fs::read_to_string(&config_file)
         .with_context(|| format!("failed to read config patch {}", config_file.display()))?;
     validate_incremental_config_patch(&toml_document)
         .with_context(|| format!("invalid config patch {}", config_file.display()))?;
-    let operation = JobCommand::SourceConfigPatch {
-        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
-        toml: toml_document,
-    };
+    let selector_expression = selector_expression_from_targets(&clients, &tags);
+    let target_ids = resolve_target_ids(api_url, token, &clients, &tags)?;
+    let password = load_super_password(&password_env)?;
+    let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
+    let patch_hash = payload_hash(toml_document.as_bytes());
+    let privilege_assertion = build_privilege_for_db(
+        DbPrivilegeRequest {
+            action: "runtime_config.patch",
+            target: "runtime_config",
+            selector_expression: Some(&selector_expression),
+            resolved_targets: &target_ids,
+            confirmed: true,
+            payload_hash: Some(&patch_hash),
+        },
+        &password,
+        &salt_hex,
+        privilege_ttl_secs,
+    )?;
     println!(
         "{}",
-        submit_privileged_operation(PrivilegedOperationRequest {
+        http_post_json(
             api_url,
+            "/api/v1/runtime-config/patch",
             token,
-            operation: &operation,
-            command_label: "source_config_patch",
-            clients: &clients,
-            tags: &tags,
-            password_env: &password_env,
-            super_salt_hex: super_salt_hex.as_deref(),
-            privilege_ttl_secs,
-            max_timeout_secs,
-            confirmed,
-            force_unprivileged,
-        })?
+            &serde_json::json!({
+                "selector_expression": selector_expression,
+                "target_client_ids": target_ids,
+                "toml": toml_document,
+                "reason": "CLI config patch",
+                "confirmed": true,
+                "privilege_assertion": privilege_assertion,
+            }),
+        )?
     );
     Ok(())
 }
@@ -480,9 +431,9 @@ fn validate_incremental_config_patch(toml_document: &str) -> Result<()> {
         "incremental config patch is empty"
     );
     anyhow::ensure!(
-        toml_document.len() <= MAX_AGENT_HOT_CONFIG_BYTES,
+        toml_document.len() <= MAX_RUNTIME_CONFIG_PATCH_BYTES,
         "incremental config patch exceeds {} bytes",
-        MAX_AGENT_HOT_CONFIG_BYTES
+        MAX_RUNTIME_CONFIG_PATCH_BYTES
     );
     let value: toml::Value =
         toml::from_str(toml_document).context("incremental config patch is invalid TOML")?;

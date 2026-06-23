@@ -120,10 +120,7 @@ smoke_write_enrolled_agent_config \
   "$client_private_hex" \
   "$gateway_public_hex" \
   "local=$gateway_addr=10" \
-  30 \
-  "$network_root" \
-  5 \
-  60
+  "$network_root"
 
 VPSMAN_GATEWAY_BIND="$gateway_addr" \
 VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \

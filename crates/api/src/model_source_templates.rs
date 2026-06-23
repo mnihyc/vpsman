@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use vpsman_common::PrivilegeAssertion;
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct SourceTemplateView {
@@ -125,7 +126,7 @@ pub(crate) struct SourceStatusQuery {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct SourceConfigPatchQuery {
+pub(crate) struct TemplateRuntimeConfigQuery {
     pub(crate) client_id: String,
 }
 
@@ -150,7 +151,7 @@ pub(crate) struct AssignSourceTemplateResponse {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct SourceConfigPatchView {
+pub(crate) struct TemplateRuntimeConfigView {
     pub(crate) client_id: String,
     pub(crate) sections: serde_json::Value,
     pub(crate) toml: String,
@@ -158,6 +159,35 @@ pub(crate) struct SourceConfigPatchView {
     pub(crate) unsupported_domains: Vec<String>,
     pub(crate) render_notes: Vec<String>,
     pub(crate) generated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigOverrideView {
+    pub(crate) client_id: String,
+    pub(crate) toml: String,
+    pub(crate) reason: String,
+    pub(crate) updated_at: String,
+    pub(crate) updated_by: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RuntimeConfigPatchRequest {
+    #[serde(default)]
+    pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
+    pub(crate) toml: String,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigPatchResponse {
+    pub(crate) target_count: usize,
+    pub(crate) overrides: Vec<RuntimeConfigOverrideView>,
+    pub(crate) sync_job_ids: Vec<Uuid>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -178,7 +208,7 @@ pub(crate) struct SourceStatusView {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct HotConfigPatchGeneratorView {
+pub(crate) struct RuntimeConfigPatchGeneratorView {
     pub(crate) id: Uuid,
     pub(crate) name: String,
     pub(crate) category: String,
@@ -194,7 +224,7 @@ pub(crate) struct HotConfigPatchGeneratorView {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub(crate) struct UpsertHotConfigPatchGeneratorRequest {
+pub(crate) struct UpsertRuntimeConfigPatchGeneratorRequest {
     pub(crate) id: Option<Uuid>,
     pub(crate) name: String,
     pub(crate) category: String,
@@ -209,20 +239,20 @@ pub(crate) struct UpsertHotConfigPatchGeneratorRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DeleteHotConfigPatchGeneratorRequest {
+pub(crate) struct DeleteRuntimeConfigPatchGeneratorRequest {
     #[serde(default)]
     pub(crate) confirmed: bool,
     pub(crate) reviewed_name: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub(crate) struct RenderHotConfigPatchGeneratorRequest {
+pub(crate) struct RenderRuntimeConfigPatchGeneratorRequest {
     #[serde(default)]
     pub(crate) values: serde_json::Value,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct HotConfigPatchGeneratorRenderView {
+pub(crate) struct RuntimeConfigPatchGeneratorRenderView {
     pub(crate) generator_id: Uuid,
     pub(crate) name: String,
     pub(crate) toml: String,

@@ -44,6 +44,18 @@ CREATE TABLE client_source_template_assignments (
 CREATE INDEX client_source_template_assignments_template_idx
     ON client_source_template_assignments (template_id);
 
+CREATE TABLE client_runtime_config_overrides (
+    client_id TEXT PRIMARY KEY REFERENCES clients(id) ON DELETE CASCADE,
+    toml TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    updated_by UUID REFERENCES operators(id) ON DELETE SET NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT client_runtime_config_overrides_toml_check
+        CHECK (octet_length(toml) > 0 AND octet_length(toml) <= 4194304),
+    CONSTRAINT client_runtime_config_overrides_reason_check
+        CHECK (octet_length(reason) <= 4096)
+);
+
 CREATE TABLE file_transfer_sessions (
     session_id UUID NOT NULL,
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
@@ -310,7 +322,7 @@ INSERT INTO source_templates (
     )
 ON CONFLICT (id) DO NOTHING;
 
-CREATE TABLE hot_config_patch_generators (
+CREATE TABLE runtime_config_patch_generators (
     id UUID PRIMARY KEY,
     name TEXT NOT NULL,
     category TEXT NOT NULL,
@@ -323,17 +335,16 @@ CREATE TABLE hot_config_patch_generators (
     actor_id UUID REFERENCES operators(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT hot_config_patch_generators_name_not_empty CHECK (length(trim(name)) > 0),
-    CONSTRAINT hot_config_patch_generators_category_not_empty CHECK (length(trim(category)) > 0),
-    CONSTRAINT hot_config_patch_generators_domain_not_empty CHECK (length(trim(domain)) > 0),
-    CONSTRAINT hot_config_patch_generators_schema_object CHECK (jsonb_typeof(field_schema) = 'object'),
-    CONSTRAINT hot_config_patch_generators_docs_object CHECK (jsonb_typeof(docs_metadata) = 'object')
+    CONSTRAINT runtime_config_patch_generators_name_check CHECK (length(trim(name)) > 0 AND octet_length(name) <= 4096),
+    CONSTRAINT runtime_config_patch_generators_category_check CHECK (length(trim(category)) > 0 AND octet_length(category) <= 4096),
+    CONSTRAINT runtime_config_patch_generators_domain_check CHECK (length(trim(domain)) > 0 AND octet_length(domain) <= 4096),
+    CONSTRAINT runtime_config_patch_generators_description_check CHECK (length(trim(description)) > 0 AND octet_length(description) <= 4096),
+    CONSTRAINT runtime_config_patch_generators_body_check CHECK (length(trim(raw_generator_body)) > 0 AND octet_length(raw_generator_body) <= 16384),
+    CONSTRAINT runtime_config_patch_generators_schema_object CHECK (jsonb_typeof(field_schema) = 'object'),
+    CONSTRAINT runtime_config_patch_generators_docs_object CHECK (jsonb_typeof(docs_metadata) = 'object')
 );
 
-CREATE INDEX hot_config_patch_generators_category_idx
-    ON hot_config_patch_generators (category, name);
-
-INSERT INTO hot_config_patch_generators (
+INSERT INTO runtime_config_patch_generators (
     id, name, category, domain, description, field_schema, raw_generator_body, docs_metadata, built_in
 )
 VALUES

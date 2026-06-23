@@ -90,7 +90,7 @@ export function targetImpactModeForDispatch(mode: string): TargetImpactMode {
   ) {
     return "agent_update";
   }
-  if (mode === "hot_config" || mode === "backup") {
+  if (mode === "backup") {
     return "agent_update";
   }
   return "generic";

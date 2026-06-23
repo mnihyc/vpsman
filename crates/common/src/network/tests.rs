@@ -590,7 +590,7 @@ fn validates_runtime_topology_intent_routes_and_stale_interfaces() {
 }
 
 #[test]
-fn renders_side_specific_tunnel_apply_snippets() {
+fn renders_side_specific_runtime_tunnel_snippets() {
     let plan = plan_tunnel(&TunnelPlanInput {
         name: "lax-hkg".to_string(),
         interface_name: "tun42".to_string(),

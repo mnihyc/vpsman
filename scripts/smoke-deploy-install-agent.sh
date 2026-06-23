@@ -33,7 +33,6 @@ fake_agent_sha="$(sha256sum "$fake_agent" | awk '{print $1}')"
 common_env=(
   VPSMAN_INSTALL_MODE=user
   VPSMAN_AGENT_CLIENT_ID=deploy-smoke-a
-  VPSMAN_AGENT_DISPLAY_NAME=deploy-smoke-a
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=1111111111111111111111111111111111111111111111111111111111111111
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=2222222222222222222222222222222222222222222222222222222222222222
   VPSMAN_GATEWAY_ENDPOINTS=primary=127.0.0.1:9443=10
@@ -95,5 +94,20 @@ if env \
 fi
 grep -q "VPSMAN_AGENT_BINARY_SHA256 must be exactly 64 hex characters" \
   "$SMOKE_TMPDIR/missing-hash.log"
+
+if env \
+  PATH="$fake_bin_dir:$PATH" \
+  VPSMAN_FAKE_SYSTEMCTL_LOG="$fake_systemctl_log" \
+  VPSMAN_AGENT_HOME="$SMOKE_TMPDIR/obsolete-env-home" \
+  VPSMAN_AGENT_DISPLAY_NAME=obsolete-local-display \
+  VPSMAN_AGENT_BINARY_PATH="$fake_agent" \
+  VPSMAN_AGENT_ENABLE_SERVICE=0 \
+  "${common_env[@]}" \
+  bash deploy/install-agent.sh >"$SMOKE_TMPDIR/obsolete-env.log" 2>&1; then
+  echo "expected deploy installer to reject runtime config env in bootstrap install" >&2
+  exit 1
+fi
+grep -q "VPSMAN_AGENT_DISPLAY_NAME is server runtime config" \
+  "$SMOKE_TMPDIR/obsolete-env.log"
 
 jq -n '{deploy_install_agent: "ok"}'

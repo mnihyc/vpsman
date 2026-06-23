@@ -2223,7 +2223,8 @@ impl GatewayForwardEventKind {
             "/internal/v1/gateway/command-output" => Self::CommandOutput,
             "/internal/v1/gateway/session-started"
             | "/internal/v1/gateway/session-ended"
-            | "/internal/v1/gateway/agent-hello" => Self::Lifecycle,
+            | "/internal/v1/gateway/agent-hello"
+            | "/internal/v1/gateway/runtime-config-reload" => Self::Lifecycle,
             "/internal/v1/gateway/terminal-output" => Self::TerminalOutput,
             _ => Self::Other,
         }

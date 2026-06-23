@@ -13,18 +13,20 @@ use crate::{
         AgentView, AssignSourceTemplateRequest, AssignTagRequest, BulkResolveRequest,
         BulkResolveResponse, BulkTagMutationRequest, CloneSourceTemplateRequest,
         CreateSourceTemplateRequest, CreateTagRequest, DeleteAgentRequest, DeleteAgentResponse,
-        DeleteHotConfigPatchGeneratorRequest, DeleteTagRequest, FleetSummary, GatewaySessionView,
-        HistoryQuery, HotConfigPatchGeneratorRenderView, HotConfigPatchGeneratorView,
-        RenderHotConfigPatchGeneratorRequest, SourceConfigPatchQuery, SourceConfigPatchView,
-        SourceStatusQuery, SourceStatusView, SourceTemplateAssignmentQuery,
-        SourceTemplateAssignmentView, SourceTemplateDiffRequest, SourceTemplateDiffView,
-        SourceTemplateQuery, SourceTemplateTestView, SourceTemplateView, TagMutationResponse,
-        TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
-        TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView, TestSourceTemplateRequest,
+        DeleteRuntimeConfigPatchGeneratorRequest, DeleteTagRequest, FleetSummary,
+        GatewaySessionView, HistoryQuery, RenderRuntimeConfigPatchGeneratorRequest,
+        RuntimeConfigPatchGeneratorRenderView, RuntimeConfigPatchGeneratorView,
+        RuntimeConfigPatchRequest, RuntimeConfigPatchResponse, SourceStatusQuery, SourceStatusView,
+        SourceTemplateAssignmentQuery, SourceTemplateAssignmentView, SourceTemplateDiffRequest,
+        SourceTemplateDiffView, SourceTemplateQuery, SourceTemplateTestView, SourceTemplateView,
+        TagMutationResponse, TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView,
+        TelemetryRollupQuery, TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView,
+        TemplateRuntimeConfigQuery, TemplateRuntimeConfigView, TestSourceTemplateRequest,
         UpdateAgentAliasRequest, UpdateSourceTemplateRequest, UpdateSourceTemplateResponse,
-        UpdateTagOrderRequest, UpsertHotConfigPatchGeneratorRequest, WsEvent,
+        UpdateTagOrderRequest, UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
+    runtime_config::{push_runtime_config_for_clients, validate_runtime_config_patch_toml},
     security::{SCOPE_CONFIG_READ, SCOPE_FLEET_READ},
     selector_expression::parse_selector_expression,
     source_template_builtins::SOURCE_TEMPLATE_DOMAINS,
@@ -32,6 +34,7 @@ use crate::{
     util::limit_or_default,
 };
 use tracing::warn;
+use vpsman_common::{payload_hash, MAX_RUNTIME_CONFIG_FIELD_BYTES};
 
 const MAX_TEMPLATE_NAME_BYTES: usize = 128;
 const MAX_TEMPLATE_DESCRIPTION_BYTES: usize = 1024;
@@ -244,92 +247,94 @@ pub(crate) async fn list_source_templates(
     ))
 }
 
-pub(crate) async fn list_hot_config_patch_generators(
+pub(crate) async fn list_runtime_config_patch_generators(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<HotConfigPatchGeneratorView>>, ApiError> {
+) -> Result<Json<Vec<RuntimeConfigPatchGeneratorView>>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
-    Ok(Json(state.repo.list_hot_config_patch_generators().await?))
+    Ok(Json(
+        state.repo.list_runtime_config_patch_generators().await?,
+    ))
 }
 
-pub(crate) async fn upsert_hot_config_patch_generator(
+pub(crate) async fn upsert_runtime_config_patch_generator(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<UpsertHotConfigPatchGeneratorRequest>,
-) -> Result<Json<HotConfigPatchGeneratorView>, ApiError> {
+    Json(request): Json<UpsertRuntimeConfigPatchGeneratorRequest>,
+) -> Result<Json<RuntimeConfigPatchGeneratorView>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
-    validate_hot_config_patch_generator(&request)?;
+    validate_runtime_config_patch_generator(&request)?;
     if !request.confirmed {
         return Err(ApiError::bad_request(
-            "hot_config_patch_generator_confirmation_required",
+            "runtime_config_patch_generator_confirmation_required",
         ));
     }
     Ok(Json(
         state
             .repo
-            .upsert_hot_config_patch_generator(&request, &operator)
+            .upsert_runtime_config_patch_generator(&request, &operator)
             .await
-            .map_err(hot_config_patch_generator_error)?,
+            .map_err(runtime_config_patch_generator_error)?,
     ))
 }
 
-pub(crate) async fn render_hot_config_patch_generator(
+pub(crate) async fn render_runtime_config_patch_generator(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(generator_id): Path<uuid::Uuid>,
-    Json(request): Json<RenderHotConfigPatchGeneratorRequest>,
-) -> Result<Json<HotConfigPatchGeneratorRenderView>, ApiError> {
+    Json(request): Json<RenderRuntimeConfigPatchGeneratorRequest>,
+) -> Result<Json<RuntimeConfigPatchGeneratorRenderView>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
     Ok(Json(
         state
             .repo
-            .render_hot_config_patch_generator(generator_id, &request)
+            .render_runtime_config_patch_generator(generator_id, &request)
             .await
-            .map_err(hot_config_patch_generator_error)?,
+            .map_err(runtime_config_patch_generator_error)?,
     ))
 }
 
-pub(crate) async fn delete_hot_config_patch_generator(
+pub(crate) async fn delete_runtime_config_patch_generator(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(generator_id): Path<uuid::Uuid>,
-    Json(request): Json<DeleteHotConfigPatchGeneratorRequest>,
+    Json(request): Json<DeleteRuntimeConfigPatchGeneratorRequest>,
 ) -> Result<StatusCode, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
     if !request.confirmed {
         return Err(ApiError::bad_request(
-            "hot_config_patch_generator_delete_confirmation_required",
+            "runtime_config_patch_generator_delete_confirmation_required",
         ));
     }
     validate_short_required_value(
         &request.reviewed_name,
-        "hot_config_patch_generator_delete_review_invalid",
+        "runtime_config_patch_generator_delete_review_invalid",
     )?;
     let existing = state
         .repo
-        .list_hot_config_patch_generators()
+        .list_runtime_config_patch_generators()
         .await?
         .into_iter()
         .find(|generator| generator.id == generator_id)
-        .ok_or_else(|| ApiError::not_found("hot_config_patch_generator_not_found"))?;
+        .ok_or_else(|| ApiError::not_found("runtime_config_patch_generator_not_found"))?;
     if existing.name != request.reviewed_name.trim() {
         return Err(ApiError::conflict(
-            "hot_config_patch_generator_delete_review_stale",
+            "runtime_config_patch_generator_delete_review_stale",
         ));
     }
     state
         .repo
-        .delete_hot_config_patch_generator(generator_id, &operator)
+        .delete_runtime_config_patch_generator(generator_id, &operator)
         .await
-        .map_err(hot_config_patch_generator_error)?;
+        .map_err(runtime_config_patch_generator_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -418,13 +423,26 @@ pub(crate) async fn update_source_template(
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
     validate_source_template_candidate(&request.description, &request.definition)?;
-    Ok(Json(
-        state
+    let response = state
+        .repo
+        .update_source_template(template_id, &request, &operator)
+        .await
+        .map_err(source_template_lifecycle_error)?;
+    if !response.confirmation_required && response.affected_client_count > 0 {
+        let assignments = state
             .repo
-            .update_source_template(template_id, &request, &operator)
-            .await
-            .map_err(source_template_lifecycle_error)?,
-    ))
+            .list_source_template_assignments(None, Some(&response.template.domain))
+            .await?;
+        let affected = assignments
+            .into_iter()
+            .filter(|assignment| assignment.template_id == response.template.id)
+            .map(|assignment| assignment.client_id)
+            .collect::<Vec<_>>();
+        let _sync_jobs =
+            push_runtime_config_for_clients(&state, &operator, affected, "source_template_updated")
+                .await?;
+    }
+    Ok(Json(response))
 }
 
 pub(crate) async fn list_source_template_assignments(
@@ -470,11 +488,11 @@ pub(crate) async fn list_source_status(
     ))
 }
 
-pub(crate) async fn render_source_config_patch(
+pub(crate) async fn render_template_runtime_config(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<SourceConfigPatchQuery>,
-) -> Result<Json<SourceConfigPatchView>, ApiError> {
+    Query(query): Query<TemplateRuntimeConfigQuery>,
+) -> Result<Json<TemplateRuntimeConfigView>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
@@ -482,9 +500,88 @@ pub(crate) async fn render_source_config_patch(
     Ok(Json(
         state
             .repo
-            .render_source_config_patch(&query.client_id)
+            .render_template_runtime_config(&query.client_id)
             .await?,
     ))
+}
+
+pub(crate) async fn create_server_runtime_config_patch_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut request): Json<RuntimeConfigPatchRequest>,
+) -> Result<Json<RuntimeConfigPatchResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "config:write")
+        .await?;
+    validate_server_runtime_config_patch_request(&request)?;
+    let target_client_ids = if request.selector_expression.trim().is_empty() {
+        verified_fixed_target_ids(
+            &state,
+            &request.target_client_ids,
+            "runtime_config_patch_targets_not_found",
+        )
+        .await?
+    } else {
+        parse_selector_expression(&request.selector_expression)
+            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
+        state
+            .repo
+            .resolve_bulk_targets(&BulkResolveRequest {
+                selector_expression: request.selector_expression.trim().to_string(),
+            })
+            .await?
+            .targets
+            .into_iter()
+            .map(|agent| agent.id)
+            .collect::<Vec<_>>()
+    };
+    if target_client_ids.is_empty() {
+        return Err(ApiError::bad_request(
+            "runtime_config_patch_targets_required",
+        ));
+    }
+    request.target_client_ids = target_client_ids;
+    let patch_hash = payload_hash(request.toml.as_bytes());
+    let selector_expression = request.selector_expression.trim().to_string();
+    let selector_for_intent =
+        (!selector_expression.is_empty()).then_some(selector_expression.as_str());
+    let intent = DbPrivilegeIntent::new(
+        "runtime_config.patch",
+        "runtime_config",
+        selector_for_intent,
+        &request.target_client_ids,
+        true,
+        Some(&patch_hash),
+    );
+    verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+    let reason = request
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("operator_bulk_runtime_config_patch")
+        .to_string();
+    let overrides = state
+        .repo
+        .upsert_runtime_config_overrides(
+            &request.target_client_ids,
+            &request.toml,
+            &reason,
+            &operator,
+        )
+        .await?;
+    let sync_jobs = push_runtime_config_for_clients(
+        &state,
+        &operator,
+        request.target_client_ids.clone(),
+        &reason,
+    )
+    .await?;
+    Ok(Json(RuntimeConfigPatchResponse {
+        target_count: request.target_client_ids.len(),
+        overrides,
+        sync_job_ids: sync_jobs.into_iter().map(|job| job.job_id).collect(),
+    }))
 }
 
 pub(crate) async fn assign_source_template(
@@ -503,12 +600,25 @@ pub(crate) async fn assign_source_template(
         "source_template_assignment_targets_not_found",
     )
     .await?;
-    Ok(Json(
-        state
-            .repo
-            .assign_source_template(&request, &operator)
-            .await?,
-    ))
+    let response = state
+        .repo
+        .assign_source_template(&request, &operator)
+        .await?;
+    if !response.confirmation_required && response.target_count > 0 {
+        let affected = response
+            .assignments
+            .iter()
+            .map(|assignment| assignment.client_id.clone())
+            .collect::<Vec<_>>();
+        let _sync_jobs = push_runtime_config_for_clients(
+            &state,
+            &operator,
+            affected,
+            "source_template_assigned",
+        )
+        .await?;
+    }
+    Ok(Json(response))
 }
 
 fn validate_client_id(client_id: &str) -> Result<(), ApiError> {
@@ -609,8 +719,8 @@ fn validate_create_source_template(request: &CreateSourceTemplateRequest) -> Res
     validate_source_template_candidate(&request.description, &request.definition)
 }
 
-fn validate_hot_config_patch_generator(
-    request: &UpsertHotConfigPatchGeneratorRequest,
+fn validate_runtime_config_patch_generator(
+    request: &UpsertRuntimeConfigPatchGeneratorRequest,
 ) -> Result<(), ApiError> {
     for value in [
         request.name.as_str(),
@@ -618,31 +728,33 @@ fn validate_hot_config_patch_generator(
         request.domain.as_str(),
         request.description.as_str(),
     ] {
-        if value.trim().is_empty() || value.len() > 512 {
-            return Err(ApiError::bad_request("hot_config_patch_generator_invalid"));
+        if value.trim().is_empty() || value.len() > MAX_RUNTIME_CONFIG_FIELD_BYTES {
+            return Err(ApiError::bad_request(
+                "runtime_config_patch_generator_invalid",
+            ));
         }
     }
     if request.raw_generator_body.trim().is_empty()
         || request.raw_generator_body.len() > MAX_PATCH_GENERATOR_BODY_BYTES
     {
         return Err(ApiError::bad_request(
-            "hot_config_patch_generator_body_invalid",
+            "runtime_config_patch_generator_body_invalid",
         ));
     }
     if !request.field_schema.is_object() || !request.docs_metadata.is_object() {
         return Err(ApiError::bad_request(
-            "hot_config_patch_generator_metadata_invalid",
+            "runtime_config_patch_generator_metadata_invalid",
         ));
     }
     Ok(())
 }
 
-fn hot_config_patch_generator_error(error: anyhow::Error) -> ApiError {
+fn runtime_config_patch_generator_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("not_found") {
-        ApiError::not_found("hot_config_patch_generator_not_found")
-    } else if message.contains("hot_config_patch_generator_builtin_immutable") {
-        ApiError::conflict("hot_config_patch_generator_builtin_immutable")
+        ApiError::not_found("runtime_config_patch_generator_not_found")
+    } else if message.contains("runtime_config_patch_generator_builtin_immutable") {
+        ApiError::conflict("runtime_config_patch_generator_builtin_immutable")
     } else {
         ApiError::from(error)
     }
@@ -728,6 +840,55 @@ fn validate_assign_source_template(request: &AssignSourceTemplateRequest) -> Res
     parse_selector_expression(&request.selector_expression)
         .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
     Ok(())
+}
+
+fn validate_server_runtime_config_patch_request(
+    request: &RuntimeConfigPatchRequest,
+) -> Result<(), ApiError> {
+    if !request.confirmed {
+        return Err(ApiError::conflict(
+            "runtime_config_patch_confirmation_required",
+        ));
+    }
+    if request.selector_expression.trim().is_empty() && request.target_client_ids.is_empty() {
+        return Err(ApiError::bad_request(
+            "runtime_config_patch_targets_required",
+        ));
+    }
+    if !request.selector_expression.trim().is_empty() {
+        parse_selector_expression(&request.selector_expression)
+            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
+    }
+    if request.toml.trim().is_empty()
+        || request.toml.len() > vpsman_common::MAX_RUNTIME_CONFIG_PATCH_BYTES
+    {
+        return Err(ApiError::bad_request("runtime_config_patch_toml_invalid"));
+    }
+    validate_runtime_config_patch_toml(&request.toml)
+        .map_err(runtime_config_patch_validation_error)?;
+    if let Some(reason) = request.reason.as_deref() {
+        if reason.len() > vpsman_common::MAX_RUNTIME_CONFIG_REASON_BYTES
+            || reason.chars().any(char::is_control)
+        {
+            return Err(ApiError::bad_request("runtime_config_patch_reason_invalid"));
+        }
+    }
+    Ok(())
+}
+
+fn runtime_config_patch_validation_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("runtime_config_patch_bootstrap_field_forbidden") {
+        ApiError::bad_request("runtime_config_patch_bootstrap_field_forbidden")
+    } else if message.contains("runtime_config_patch_managed_tunnel_plans_forbidden") {
+        ApiError::bad_request("runtime_config_patch_managed_tunnel_plans_forbidden")
+    } else if message.contains("runtime_config_patch_toml_invalid")
+        || message.contains("failed to parse runtime config patch TOML")
+    {
+        ApiError::bad_request("runtime_config_patch_toml_invalid")
+    } else {
+        ApiError::bad_request("runtime_config_patch_invalid")
+    }
 }
 
 async fn verified_fixed_target_ids(

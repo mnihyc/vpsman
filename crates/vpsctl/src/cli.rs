@@ -13,18 +13,18 @@ use crate::cli_access::{
     OperatorAuthEventsCommand, OperatorCreateCommand, OperatorLifecycleCommand,
     OperatorPasswordResetCommand, OperatorSessionRevokeCommand, OperatorSessionsCommand,
     OperatorUpdateCommand, RefreshCommand, ScheduleCreateCommand, ScheduleDeferCommand,
-    ScheduleMutationCommand, ScheduleUpdateCommand, SourceConfigPatchApplyCommand,
-    SourceConfigPatchCommand, SourceStatusCommand, SourceTemplateAssignCommand,
-    SourceTemplateAssignmentListCommand, SourceTemplateCloneCommand, SourceTemplateCreateCommand,
-    SourceTemplateDiffCommand, SourceTemplateListCommand, SourceTemplateTestCommand,
-    SourceTemplateUpdateCommand, TelemetryNetworkRatesCommand, TelemetryRollupsCommand,
-    TelemetryTunnelsCommand, TotpConfirmCommand, TotpPasswordCommand,
+    ScheduleMutationCommand, ScheduleUpdateCommand, SourceStatusCommand,
+    SourceTemplateAssignCommand, SourceTemplateAssignmentListCommand, SourceTemplateCloneCommand,
+    SourceTemplateCreateCommand, SourceTemplateDiffCommand, SourceTemplateListCommand,
+    SourceTemplateTestCommand, SourceTemplateUpdateCommand, TelemetryNetworkRatesCommand,
+    TelemetryRollupsCommand, TelemetryTunnelsCommand, TemplateRuntimeConfigCommand,
+    TotpConfirmCommand, TotpPasswordCommand,
 };
 use crate::cli_update::{AgentUpdateReleaseLatestArgs, AgentUpdateReleaseRecordArgs};
 use crate::commands_network::{
-    TunnelAllocateCommand, TunnelApplyCommand, TunnelOspfCostUpdateCommand, TunnelPlanCommand,
-    TunnelPlanExportCommand, TunnelProbeCommand, TunnelPromoteCustomAdapterCommand,
-    TunnelRollbackCommand, TunnelSpeedTestCommand, TunnelStatusCommand,
+    TunnelAllocateCommand, TunnelOspfCostUpdateCommand, TunnelPlanCommand, TunnelPlanExportCommand,
+    TunnelProbeCommand, TunnelPromoteCustomAdapterCommand, TunnelSpeedTestCommand,
+    TunnelStatusCommand,
 };
 use crate::commands_terminal::{
     TerminalCloseCommand, TerminalInputCommand, TerminalOpenCommand, TerminalPollCommand,
@@ -115,8 +115,7 @@ pub(crate) enum Command {
     SourceTemplateUpdate(SourceTemplateUpdateCommand),
     SourceStatus(SourceStatusCommand),
     SourceTemplateAssignments(SourceTemplateAssignmentListCommand),
-    SourceConfigPatch(SourceConfigPatchCommand),
-    SourceConfigPatchApply(SourceConfigPatchApplyCommand),
+    TemplateRuntimeConfig(TemplateRuntimeConfigCommand),
     SourceTemplateAssign(SourceTemplateAssignCommand),
     Jobs {
         #[arg(long, default_value_t = 50)]
@@ -395,26 +394,6 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },
-    HotConfig {
-        #[arg(long)]
-        config_file: PathBuf,
-        #[arg(long, value_delimiter = ',')]
-        clients: Vec<String>,
-        #[arg(long, value_delimiter = ',')]
-        tags: Vec<String>,
-        #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-        password_env: String,
-        #[arg(long)]
-        super_salt_hex: Option<String>,
-        #[arg(long, default_value_t = 300)]
-        privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        max_timeout_secs: u64,
-        #[arg(long, default_value_t = false)]
-        confirmed: bool,
-        #[arg(long, default_value_t = false)]
-        force_unprivileged: bool,
-    },
     ConfigPatch {
         #[arg(long)]
         config_file: PathBuf,
@@ -428,12 +407,8 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
-        #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-        max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
-        #[arg(long, default_value_t = false)]
-        force_unprivileged: bool,
     },
     AgentUpdate {
         #[arg(long)]
@@ -1048,9 +1023,7 @@ pub(crate) enum Command {
     TunnelPlanExport(TunnelPlanExportCommand),
     TunnelPromoteExternalObserve(crate::commands_network::TunnelPromoteExternalObserveCommand),
     TunnelPromoteCustomAdapter(TunnelPromoteCustomAdapterCommand),
-    TunnelApply(TunnelApplyCommand),
     TunnelOspfCostUpdate(TunnelOspfCostUpdateCommand),
-    TunnelRollback(TunnelRollbackCommand),
     TunnelStatus(TunnelStatusCommand),
     TunnelProbe(TunnelProbeCommand),
     TunnelSpeedTest(TunnelSpeedTestCommand),

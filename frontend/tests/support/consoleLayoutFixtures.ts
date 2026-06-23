@@ -1282,7 +1282,7 @@ const sourceStatus = [
   },
 ];
 
-const hotConfigPatchGenerators = [
+const runtimeConfigPatchGenerators = [
   {
     actor_id: null,
     built_in: true,
@@ -1485,7 +1485,7 @@ export const tunnelPlans = [
       ifupdown_file: "/etc/network/interfaces.d/vpsman-tunnels",
       bird2_file: "/etc/bird/vpsman-ospf.conf",
       ifupdown_snippet: [
-        "# vpsman tunnel sfo-fra-gre: generated plan only",
+        "# vpsman tunnel sfo-fra-gre: server-managed runtime config",
         "auto tunab",
         "iface tunab inet static",
         "    address 10.255.0.0",
@@ -1506,7 +1506,7 @@ export const tunnelPlans = [
         "/etc/network/interfaces.d/vpsman-tunnels",
         "/etc/bird/vpsman-ospf.conf",
       ],
-      validation_steps: ["review generated snippets before apply"],
+      validation_steps: ["review generated runtime snippets before enabling the plan"],
       rollback_notes: ["remove only the vpsman-managed blocks"],
       conflicts: [],
       mutates_host: false,
@@ -2108,7 +2108,7 @@ export async function installConsoleApiMock(
       sourceTemplateAssignmentsFixture,
       sourceTemplatesFixture,
       sourceStatusFixture,
-      hotConfigPatchGeneratorsFixture,
+      runtimeConfigPatchGeneratorsFixture,
       jobCommandTypeByOperationTypeFixture,
       commandTemplatesFixture,
       clientKeyRevocationsFixture,
@@ -2189,10 +2189,11 @@ export async function installConsoleApiMock(
         artifactCleanupPreviews: [] as unknown[],
         bulkTagMutations: [] as unknown[],
         bulkResolve: [] as unknown[],
+        runtimeConfigPatches: [] as unknown[],
         sourceConfigPatchs: [] as unknown[],
         sourceTemplateAssignments: [] as unknown[],
         sourceTemplates: [] as unknown[],
-        hotConfigPatchGenerators: [] as unknown[],
+        runtimeConfigPatchGenerators: [] as unknown[],
         agentIdentities: [] as unknown[],
         clientKeyRevocations: [] as unknown[],
         fleetAlertNotificationDispatches: [] as unknown[],
@@ -2219,6 +2220,8 @@ export async function installConsoleApiMock(
         tunnelPlanAdapterPromotions: [] as unknown[],
         tunnelPlanAllocations: [] as unknown[],
         tunnelPlanEnabledMutations: [] as unknown[],
+        tunnelPlanOspfCostUpdates: [] as unknown[],
+        tunnelPlanTelemetryPromotions: [] as unknown[],
         tunnelPlans: [] as unknown[],
         webhookDeliveryRotations: [] as unknown[],
         webhookRuleDispatches: [] as unknown[],
@@ -3492,6 +3495,49 @@ export async function installConsoleApiMock(
         if (pathname === "/api/v1/telemetry/tunnels" && method === "GET")
           return jsonResponse([
             {
+              client_id: "agent-sfo-01",
+              observed_at: "2026-05-31T10:01:00Z",
+              interface: "wg-import",
+              kind: "wireguard",
+              ownership_mode: "runtime_observed",
+              mutation_policy: "observe_only_import_candidate",
+              promotion_required: true,
+              plan_correlation: "unmatched_observed_tunnel",
+              plan_id: null,
+              plan_name: null,
+              plan_runtime_manager: null,
+              endpoint_side: null,
+              peer_client_id: null,
+              source: "sysfs_proc_net_dev",
+              operstate: "up",
+              mtu: 1420,
+              link_type: null,
+              address: null,
+              rx_bytes: 1048576,
+              tx_bytes: 2097152,
+              traffic_source: "interface_counters",
+              traffic_status: "ok",
+              traffic_reason: null,
+              traffic_checked_unix: 1780202460,
+              adapter_health: null,
+              latency_monitoring_enabled: null,
+              latency_status: null,
+              latency_reason: null,
+              latency_primary_family: "ipv4",
+              latency_target: null,
+              latency_checked_unix: null,
+              latency_avg_ms: null,
+              packet_loss_ratio: null,
+              latency_healthy_windows: null,
+              latency_missed_windows: null,
+              auto_ospf_enabled: null,
+              auto_ospf_status: null,
+              auto_ospf_reason: null,
+              auto_ospf_current_cost: null,
+              auto_ospf_recommended_cost: null,
+              auto_ospf_updated_unix: null,
+            },
+            {
               client_id: "agent-fra-02",
               observed_at: "2026-05-31T10:02:00Z",
               interface: "tunab",
@@ -3648,17 +3694,17 @@ export async function installConsoleApiMock(
           return jsonResponse(sourceStatusFixture);
         }
         if (
-          pathname === "/api/v1/hot-config/patch-generators" &&
+          pathname === "/api/v1/runtime-config/patch-generators" &&
           method === "GET"
         ) {
-          return jsonResponse(hotConfigPatchGeneratorsFixture);
+          return jsonResponse(runtimeConfigPatchGeneratorsFixture);
         }
         if (
-          pathname === "/api/v1/hot-config/patch-generators" &&
+          pathname === "/api/v1/runtime-config/patch-generators" &&
           method === "POST"
         ) {
           const body = await readJsonBody(input, init);
-          requests.hotConfigPatchGenerators.push(body);
+          requests.runtimeConfigPatchGenerators.push(body);
           const request = body as {
             category?: string;
             description?: string;
@@ -3685,16 +3731,16 @@ export async function installConsoleApiMock(
           });
         }
         if (
-          pathname.startsWith("/api/v1/hot-config/patch-generators/") &&
+          pathname.startsWith("/api/v1/runtime-config/patch-generators/") &&
           pathname.endsWith("/render") &&
           method === "POST"
         ) {
           const generatorId =
-            pathname.split("/").at(-2) ?? hotConfigPatchGeneratorsFixture[0].id;
+            pathname.split("/").at(-2) ?? runtimeConfigPatchGeneratorsFixture[0].id;
           const generator =
-            hotConfigPatchGeneratorsFixture.find(
+            runtimeConfigPatchGeneratorsFixture.find(
               (record: { id: string }) => record.id === generatorId,
-            ) ?? hotConfigPatchGeneratorsFixture[0];
+            ) ?? runtimeConfigPatchGeneratorsFixture[0];
           const body = await readJsonBody(input, init);
           const values =
             asFixtureRecord(asFixtureRecord(body)?.values) ?? {};
@@ -3717,7 +3763,7 @@ export async function installConsoleApiMock(
           });
         }
         if (
-          pathname.startsWith("/api/v1/hot-config/patch-generators/") &&
+          pathname.startsWith("/api/v1/runtime-config/patch-generators/") &&
           method === "DELETE"
         ) {
           return new Response(null, { status: 204 });
@@ -3756,7 +3802,7 @@ export async function installConsoleApiMock(
           });
         }
         if (
-          pathname === "/api/v1/source-config-patch" &&
+          pathname === "/api/v1/template-runtime-config" &&
           method === "GET"
         ) {
           const clientId =
@@ -4479,6 +4525,26 @@ export async function installConsoleApiMock(
           }
           return jsonResponse({ code: "tunnel_plan_not_found" }, 400);
         }
+        const tunnelPlanOspfCostMatch = pathname.match(
+          /^\/api\/v1\/tunnel-plans\/([^/]+)\/ospf-cost$/,
+        );
+        if (tunnelPlanOspfCostMatch && method === "POST") {
+          const planId = decodeURIComponent(tunnelPlanOspfCostMatch[1]);
+          const body = await readJsonBody(input, init);
+          requests.tunnelPlanOspfCostUpdates.push({ body, plan_id: planId });
+          const plan = tunnelPlansFixture.find((record) => record.id === planId);
+          if (plan) {
+            plan.plan = {
+              ...plan.plan,
+              recommended_ospf_cost:
+                (body as { recommended_ospf_cost?: number })
+                  .recommended_ospf_cost ?? plan.plan.recommended_ospf_cost,
+            };
+            plan.updated_at = "2026-06-02T10:08:00Z";
+            return jsonResponse(plan);
+          }
+          return jsonResponse({ code: "tunnel_plan_not_found" }, 400);
+        }
         if (
           pathname === "/api/v1/tunnel-plans/allocate" &&
           method === "POST"
@@ -4512,9 +4578,55 @@ export async function installConsoleApiMock(
           });
         }
         if (pathname === "/api/v1/tunnel-plans" && method === "POST") {
-          const body = await readJsonBody(input, init);
+          const body = (await readJsonBody(input, init)) as {
+            enabled?: boolean;
+            interface_name?: string;
+            kind?: string;
+            left_client_id?: string;
+            name?: string;
+            right_client_id?: string;
+          };
           requests.tunnelPlans.push(body);
-          return jsonResponse(tunnelPlansFixture[0]);
+          return jsonResponse({
+            ...tunnelPlansFixture[0],
+            enabled: body.enabled ?? false,
+            id: "bbbbbbbb-aaaa-4bbb-8ccc-eeeeeeeeeeee",
+            kind: body.kind ?? tunnelPlansFixture[0].kind,
+            left_client_id: body.left_client_id ?? tunnelPlansFixture[0].left_client_id,
+            name: body.name ?? tunnelPlansFixture[0].name,
+            plan: {
+              ...tunnelPlansFixture[0].plan,
+              interface_name:
+                body.interface_name ?? tunnelPlansFixture[0].plan.interface_name,
+            },
+            right_client_id: body.right_client_id ?? tunnelPlansFixture[0].right_client_id,
+            updated_at: "2026-06-02T10:08:00Z",
+          });
+        }
+        if (
+          pathname === "/api/v1/tunnel-plans/promote-telemetry" &&
+          method === "POST"
+        ) {
+          const body = (await readJsonBody(input, init)) as {
+            enabled?: boolean;
+            interface?: string;
+            kind?: string;
+            name?: string;
+          };
+          requests.tunnelPlanTelemetryPromotions.push(body);
+          return jsonResponse({
+            ...tunnelPlansFixture[1],
+            enabled: body.enabled ?? false,
+            id: "cccccccc-aaaa-4bbb-8ccc-eeeeeeeeeeee",
+            kind: body.kind ?? tunnelPlansFixture[1].kind,
+            name: body.name ?? tunnelPlansFixture[1].name,
+            plan: {
+              ...tunnelPlansFixture[1].plan,
+              interface_name:
+                body.interface ?? tunnelPlansFixture[1].plan.interface_name,
+            },
+            updated_at: "2026-06-02T10:09:00Z",
+          });
         }
         if (
           pathname === "/api/v1/tunnel-plans/promote-custom-adapter" &&
@@ -4664,6 +4776,29 @@ export async function installConsoleApiMock(
             targets,
           });
         }
+        if (
+          pathname === "/api/v1/runtime-config/patch" &&
+          method === "POST"
+        ) {
+          const body = await readJsonBody(input, init);
+          requests.runtimeConfigPatches.push(body);
+          const targets = resolveBulkTargets(body);
+          return jsonResponse({
+            target_count: targets.length,
+            overrides: targets.map((agent) => ({
+              client_id: agent.id,
+              reason:
+                (body as { reason?: string | null }).reason ??
+                "Runtime config patch",
+              toml: (body as { toml?: string }).toml ?? "",
+              updated_at: "2026-06-02T10:08:00Z",
+              updated_by: "99999999-aaaa-4bbb-8ccc-000000000001",
+            })),
+            sync_job_ids: targets.map((_, index) =>
+              `99999999-9999-4999-8999-${String(index + 1).padStart(12, "0")}`,
+            ),
+          });
+        }
         if (pathname === "/api/v1/jobs" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.jobs.push(body);
@@ -4773,7 +4908,7 @@ export async function installConsoleApiMock(
       sourceTemplateAssignmentsFixture: sourceTemplateAssignments,
       sourceTemplatesFixture: sourceTemplates,
       sourceStatusFixture: sourceStatus,
-      hotConfigPatchGeneratorsFixture: hotConfigPatchGenerators,
+      runtimeConfigPatchGeneratorsFixture: runtimeConfigPatchGenerators,
       jobCommandTypeByOperationTypeFixture: JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
       commandTemplatesFixture: commandTemplates,
       clientKeyRevocationsFixture: clientKeyRevocations,

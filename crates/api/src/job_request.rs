@@ -2,17 +2,15 @@ use anyhow::Result;
 use uuid::Uuid;
 use vpsman_common::{
     job_command_min_supported_protocol_version as common_job_command_min_supported_protocol_version,
-    job_command_protocol_version as common_job_command_protocol_version, payload_hash,
-    render_tunnel_endpoint_config, validate_agent_config_shape,
-    validate_incremental_config_patch_section, validate_runtime_topology_intent,
-    validate_runtime_tunnel_control, AgentConfig, JobCommand, ProcessResourceLimits,
-    ProcessRunPolicy, RestoreRollbackFile, HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE,
-    MAX_AGENT_HOT_CONFIG_BYTES, MAX_SHELL_SCRIPT_BYTES, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
+    job_command_protocol_version as common_job_command_protocol_version,
+    render_tunnel_endpoint_config, validate_runtime_topology_intent,
+    validate_runtime_tunnel_control, JobCommand, ProcessResourceLimits, ProcessRunPolicy,
+    RestoreRollbackFile, MAX_SHELL_SCRIPT_BYTES, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
     NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
     NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
     NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
     NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
-    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS, SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH,
+    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
 };
 
 use crate::{
@@ -221,33 +219,21 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             Ok(())
         }
         JobCommand::ConfigRead => Ok(()),
-        JobCommand::HotConfig {
-            apply_mode,
-            toml,
-            preserve_redacted: _,
-            base_config_sha256_hex,
+        JobCommand::RuntimeConfigSync {
+            desired_version,
+            reason,
+            config,
         } => {
-            if apply_mode != HOT_CONFIG_APPLY_MODE_FULL_OVERRIDE {
-                return Err(ApiError::bad_request(
-                    "hot_config_apply_mode_must_be_full_override",
-                ));
+            if *desired_version == 0 || config.version != *desired_version {
+                return Err(ApiError::bad_request("runtime_config_version_invalid"));
             }
-            validate_hot_config_document(toml)?;
-            if let Some(base_config_sha256_hex) = base_config_sha256_hex {
-                validate_sha256_hex(
-                    base_config_sha256_hex,
-                    "hot_config_base_config_sha256_invalid",
-                )?;
+            if reason.trim().is_empty()
+                || reason.len() > vpsman_common::MAX_RUNTIME_CONFIG_REASON_BYTES
+                || reason.chars().any(char::is_control)
+            {
+                return Err(ApiError::bad_request("runtime_config_reason_invalid"));
             }
             Ok(())
-        }
-        JobCommand::SourceConfigPatch { apply_mode, toml } => {
-            if apply_mode != SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH {
-                return Err(ApiError::bad_request(
-                    "source_template_config_apply_mode_must_be_incremental_patch",
-                ));
-            }
-            validate_source_config_patch_document(toml)
         }
         JobCommand::UpdateAgent {
             artifact_url,
@@ -299,26 +285,6 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
         JobCommand::RestoreRollback { restored_files, .. } => {
             validate_restore_rollback_operation(restored_files)
         }
-        JobCommand::NetworkApply { plan, side } => validate_network_apply_operation(plan, *side),
-        JobCommand::NetworkOspfCostUpdate {
-            plan,
-            side,
-            current_ospf_cost,
-            recommended_ospf_cost,
-            bird2_sha256_hex,
-        } => validate_network_ospf_cost_update_operation(
-            plan,
-            *side,
-            *current_ospf_cost,
-            *recommended_ospf_cost,
-            bird2_sha256_hex,
-        ),
-        JobCommand::NetworkRollback { plan, side } => validate_network_plan_side(
-            plan,
-            *side,
-            "network_rollback_plan_must_be_observe_plan",
-            "network_rollback_plan_invalid",
-        ),
         JobCommand::NetworkStatus { plan, side } => validate_network_plan_side(
             plan,
             *side,
@@ -512,66 +478,6 @@ fn validate_post_restore_argv(argv: &[String]) -> Result<(), ApiError> {
         .any(|part| part.is_empty() || part.len() > 4096 || part.contains('\0'))
     {
         return Err(ApiError::bad_request("restore_post_restore_argv_invalid"));
-    }
-    Ok(())
-}
-
-fn validate_network_apply_operation(
-    plan: &vpsman_common::TunnelPlan,
-    side: vpsman_common::TunnelEndpointSide,
-) -> Result<(), ApiError> {
-    if plan.mutates_host {
-        return Err(ApiError::bad_request(
-            "network_apply_plan_must_be_observe_plan",
-        ));
-    }
-    validate_runtime_tunnel_control(&plan.runtime_control)
-        .map_err(|_| ApiError::bad_request("network_runtime_control_invalid"))?;
-    validate_runtime_topology_intent(&plan.runtime_topology, &plan.interface_name).map_err(
-        |error| match error {
-            vpsman_common::NetworkPlanError::InvalidRuntimeTunnelRoute => {
-                ApiError::bad_request("network_runtime_route_invalid")
-            }
-            _ => ApiError::bad_request("network_runtime_topology_invalid"),
-        },
-    )?;
-    render_tunnel_endpoint_config(plan, side)
-        .map_err(|_| ApiError::bad_request("network_apply_plan_invalid"))?;
-    Ok(())
-}
-
-fn validate_network_ospf_cost_update_operation(
-    plan: &vpsman_common::TunnelPlan,
-    side: vpsman_common::TunnelEndpointSide,
-    current_ospf_cost: u16,
-    recommended_ospf_cost: u16,
-    bird2_sha256_hex: &str,
-) -> Result<(), ApiError> {
-    if plan.mutates_host {
-        return Err(ApiError::bad_request(
-            "network_ospf_cost_update_plan_must_be_observe_plan",
-        ));
-    }
-    validate_runtime_tunnel_control(&plan.runtime_control)
-        .map_err(|_| ApiError::bad_request("network_runtime_control_invalid"))?;
-    validate_runtime_topology_intent(&plan.runtime_topology, &plan.interface_name)
-        .map_err(|_| ApiError::bad_request("network_runtime_topology_invalid"))?;
-    if current_ospf_cost == recommended_ospf_cost {
-        return Err(ApiError::bad_request("network_ospf_cost_update_noop"));
-    }
-    if plan.recommended_ospf_cost != recommended_ospf_cost {
-        return Err(ApiError::bad_request(
-            "network_ospf_cost_update_plan_cost_mismatch",
-        ));
-    }
-    let endpoint = render_tunnel_endpoint_config(plan, side)
-        .map_err(|_| ApiError::bad_request("network_ospf_cost_update_plan_invalid"))?;
-    if payload_hash(endpoint.bird2_interface_snippet.as_bytes())
-        != normalize_sha256(bird2_sha256_hex)?
-    {
-        return Err(ApiError::bad_request(
-            "network_ospf_cost_update_bird2_hash_mismatch",
-        ));
     }
     Ok(())
 }
@@ -779,42 +685,6 @@ fn validate_process_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_hot_config_document(toml_document: &str) -> Result<(), ApiError> {
-    if toml_document.is_empty() {
-        return Err(ApiError::bad_request("hot_config_required"));
-    }
-    if toml_document.len() > MAX_AGENT_HOT_CONFIG_BYTES {
-        return Err(ApiError::bad_request("hot_config_too_large"));
-    }
-    let config = toml::from_str::<AgentConfig>(toml_document)
-        .map_err(|_| ApiError::bad_request("hot_config_invalid_toml"))?;
-    validate_agent_config_shape(&config)
-        .map_err(|_| ApiError::bad_request("hot_config_invalid"))?;
-    Ok(())
-}
-
-fn validate_source_config_patch_document(toml_document: &str) -> Result<(), ApiError> {
-    if toml_document.is_empty() {
-        return Err(ApiError::bad_request("source_config_patch_required"));
-    }
-    if toml_document.len() > MAX_AGENT_HOT_CONFIG_BYTES {
-        return Err(ApiError::bad_request("source_config_patch_too_large"));
-    }
-    let value = toml::from_str::<toml::Value>(toml_document)
-        .map_err(|_| ApiError::bad_request("source_config_patch_invalid_toml"))?;
-    let table = value
-        .as_table()
-        .ok_or_else(|| ApiError::bad_request("source_config_patch_invalid"))?;
-    if table.is_empty() {
-        return Err(ApiError::bad_request("source_config_patch_empty"));
-    }
-    for section in table.keys() {
-        validate_incremental_config_patch_section(section)
-            .map_err(|_| ApiError::bad_request("config_patch_section_not_allowed"))?;
-    }
-    Ok(())
-}
-
 fn validate_update_agent(artifact_url: &str, sha256_hex: &str) -> Result<(), ApiError> {
     if artifact_url.is_empty() || artifact_url.len() > 2048 || artifact_url.as_bytes().contains(&0)
     {
@@ -885,14 +755,6 @@ fn validate_sha256_hex(value: &str, error_code: &'static str) -> Result<(), ApiE
     } else {
         Err(ApiError::bad_request(error_code))
     }
-}
-
-fn normalize_sha256(value: &str) -> Result<String, ApiError> {
-    let normalized = value.trim().to_ascii_lowercase();
-    if !is_sha256_hex(&normalized) {
-        return Err(ApiError::bad_request("invalid_sha256"));
-    }
-    Ok(normalized)
 }
 
 fn is_fixed_hex(value: &str, len: usize) -> bool {

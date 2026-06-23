@@ -4,11 +4,10 @@ use axum::{extract::State, http::StatusCode, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use tokio::sync::broadcast;
 use vpsman_common::{
-    payload_hash, plan_tunnel, render_tunnel_endpoint_config, AgentCapabilitySnapshot, AgentHello,
-    AgentPrivilegeMode, BandwidthTier, JobCommand, OspfCostPolicy, RuntimeTunnelCommand,
-    RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelRoute, RuntimeTunnelTopologyIntent,
-    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput, CURRENT_COMMAND_PROTOCOL_VERSION,
-    MANAGED_BIRD2_FILE, MIN_COMMAND_PROTOCOL_VERSION,
+    plan_tunnel, AgentCapabilitySnapshot, AgentHello, BandwidthTier, JobCommand, OspfCostPolicy,
+    RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelTopologyIntent, TunnelEndpointSide,
+    TunnelKind, TunnelPlan, TunnelPlanInput, CURRENT_COMMAND_PROTOCOL_VERSION, MANAGED_BIRD2_FILE,
+    MIN_COMMAND_PROTOCOL_VERSION,
 };
 
 use crate::{
@@ -67,7 +66,7 @@ async fn tunnel_plan_records_non_mutating_plan_and_audit() {
     };
     let plan = plan_tunnel(&input).unwrap();
     let view = repo
-        .record_tunnel_plan(&input, &plan, &operator)
+        .record_tunnel_plan(&input, &plan, true, &operator)
         .await
         .unwrap();
     let plans = repo.list_tunnel_plans().await.unwrap();
@@ -108,7 +107,7 @@ async fn allocate_tunnel_endpoints_skips_existing_plan_addresses() {
         prefix_len: 31,
     });
     let plan = plan_tunnel(&input).unwrap();
-    repo.record_tunnel_plan(&input, &plan, &operator)
+    repo.record_tunnel_plan(&input, &plan, true, &operator)
         .await
         .unwrap();
 
@@ -247,7 +246,7 @@ async fn export_tunnel_plan_returns_inner_plan_json() {
     let input = test_plan_input();
     let plan = plan_tunnel(&input).unwrap();
     let view = repo
-        .record_tunnel_plan(&input, &plan, &operator)
+        .record_tunnel_plan(&input, &plan, true, &operator)
         .await
         .unwrap();
 
@@ -264,6 +263,17 @@ async fn export_tunnel_plan_returns_inner_plan_json() {
     assert_eq!(exported.name, plan.name);
     assert_eq!(exported.interface_name, plan.interface_name);
     assert_eq!(exported.ipv4_tunnel, plan.ipv4_tunnel);
+}
+
+#[test]
+fn create_tunnel_plan_request_defaults_enabled_false_when_omitted() {
+    let mut payload = serde_json::to_value(test_plan_input()).unwrap();
+    payload["confirmed"] = serde_json::Value::Bool(true);
+
+    let request: CreateTunnelPlanRequest = serde_json::from_value(payload).unwrap();
+
+    assert!(request.confirmed);
+    assert!(!request.enabled);
 }
 
 #[tokio::test]
@@ -304,7 +314,7 @@ async fn deleting_agent_soft_deletes_tunnel_plans_for_either_endpoint() {
 
     let endpoint_as_right = test_plan_input();
     let endpoint_as_right_plan = plan_tunnel(&endpoint_as_right).unwrap();
-    repo.record_tunnel_plan(&endpoint_as_right, &endpoint_as_right_plan, &operator)
+    repo.record_tunnel_plan(&endpoint_as_right, &endpoint_as_right_plan, true, &operator)
         .await
         .unwrap();
 
@@ -322,7 +332,7 @@ async fn deleting_agent_soft_deletes_tunnel_plans_for_either_endpoint() {
         prefix_len: 31,
     });
     let endpoint_as_left_plan = plan_tunnel(&endpoint_as_left).unwrap();
-    repo.record_tunnel_plan(&endpoint_as_left, &endpoint_as_left_plan, &operator)
+    repo.record_tunnel_plan(&endpoint_as_left, &endpoint_as_left_plan, true, &operator)
         .await
         .unwrap();
 
@@ -340,7 +350,7 @@ async fn deleting_agent_soft_deletes_tunnel_plans_for_either_endpoint() {
         prefix_len: 31,
     });
     let survivor_plan = plan_tunnel(&survivor).unwrap();
-    repo.record_tunnel_plan(&survivor, &survivor_plan, &operator)
+    repo.record_tunnel_plan(&survivor, &survivor_plan, true, &operator)
         .await
         .unwrap();
 
@@ -421,7 +431,7 @@ async fn tunnel_plan_enabled_state_is_explicit_and_controls_ospf_recommendations
     let input = test_plan_input();
     let plan = plan_tunnel(&input).unwrap();
     let created = repo
-        .record_tunnel_plan(&input, &plan, &operator)
+        .record_tunnel_plan(&input, &plan, true, &operator)
         .await
         .unwrap();
     assert!(created.enabled);
@@ -449,10 +459,17 @@ async fn tunnel_plan_enabled_state_is_explicit_and_controls_ospf_recommendations
 
     let edited_plan = plan_tunnel(&input).unwrap();
     let edited = repo
-        .record_tunnel_plan(&input, &edited_plan, &operator)
+        .record_tunnel_plan(&input, &edited_plan, true, &operator)
         .await
         .unwrap();
-    assert!(!edited.enabled);
+    assert!(edited.enabled);
+    assert_eq!(
+        repo.list_network_ospf_recommendations(10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 
     let enabled = repo
         .set_tunnel_plan_enabled(created.id, true, &operator)
@@ -483,6 +500,10 @@ async fn tunnel_plan_enabled_state_is_explicit_and_controls_ospf_recommendations
 #[tokio::test]
 async fn create_tunnel_plan_accepts_external_observed_import() {
     let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        seed_online_agent(memory, "left-a").await;
+        seed_online_agent(memory, "right-b").await;
+    }
     let mut input = test_plan_input();
     input.name = "wg-import".to_string();
     input.interface_name = "wg42".to_string();
@@ -504,6 +525,7 @@ async fn create_tunnel_plan_accepts_external_observed_import() {
         headers,
         Json(CreateTunnelPlanRequest {
             input,
+            enabled: true,
             confirmed: true,
         }),
     )
@@ -523,7 +545,113 @@ async fn create_tunnel_plan_accepts_external_observed_import() {
     assert!(view.plan.ifupdown_snippet.contains("external observed"));
 
     let audits = repo.list_audit_logs(10).await.unwrap();
-    assert_eq!(audits[0].metadata["runtime_manager"], "external_observed");
+    let audit = audits
+        .iter()
+        .find(|audit| audit.action == "network.tunnel_plan_created")
+        .expect("tunnel plan creation audit");
+    assert_eq!(audit.metadata["runtime_manager"], "external_observed");
+}
+
+#[tokio::test]
+async fn create_disabled_tunnel_plan_does_not_issue_runtime_sync() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        seed_online_agent(memory, "left-a").await;
+        seed_online_agent(memory, "right-b").await;
+    }
+    let input = test_plan_input();
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (status, Json(view)) = crate::routes_network::create_tunnel_plan(
+        State(state),
+        headers,
+        Json(CreateTunnelPlanRequest {
+            input,
+            enabled: false,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(!view.enabled);
+    assert!(repo.list_jobs(10).await.unwrap().is_empty());
+    let audits = repo.list_audit_logs(10).await.unwrap();
+    let audit = audits
+        .iter()
+        .find(|audit| audit.action == "network.tunnel_plan_created")
+        .expect("tunnel plan creation audit");
+    assert_eq!(audit.metadata["enabled"], false);
+}
+
+#[tokio::test]
+async fn updating_enabled_tunnel_plan_pushes_old_and_new_endpoint_configs() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        seed_online_agent(memory, "left-a").await;
+        seed_online_agent(memory, "right-b").await;
+        seed_online_agent(memory, "left-c").await;
+        seed_online_agent(memory, "right-d").await;
+    }
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let input = test_plan_input();
+    let (_status, Json(_created)) = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input,
+            enabled: true,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory.jobs.write().await.clear();
+        memory.job_targets.write().await.clear();
+    }
+
+    let mut updated = test_plan_input();
+    updated.left_client_id = "left-c".to_string();
+    updated.right_client_id = "right-d".to_string();
+    updated.left_underlay = "198.51.100.30".to_string();
+    updated.right_underlay = "198.51.100.40".to_string();
+    updated.ipv4_tunnel = Some(vpsman_common::TunnelAddressPair {
+        left: "10.10.1.0".to_string(),
+        right: "10.10.1.1".to_string(),
+        prefix_len: 31,
+    });
+    let (_status, Json(_updated)) = crate::routes_network::create_tunnel_plan(
+        State(state),
+        headers,
+        Json(CreateTunnelPlanRequest {
+            input: updated,
+            enabled: true,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let jobs = repo.list_jobs(10).await.unwrap();
+    let mut synced_clients = Vec::new();
+    for job in &jobs {
+        let targets = repo.list_job_targets(job.id).await.unwrap();
+        assert_eq!(targets.len(), 1);
+        synced_clients.push(targets[0].client_id.clone());
+    }
+    synced_clients.sort();
+    assert_eq!(
+        synced_clients,
+        vec![
+            "left-a".to_string(),
+            "left-c".to_string(),
+            "right-b".to_string(),
+            "right-d".to_string(),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -538,6 +666,7 @@ async fn create_tunnel_plan_requires_explicit_confirmation() {
         headers,
         Json(CreateTunnelPlanRequest {
             input,
+            enabled: true,
             confirmed: false,
         }),
     )
@@ -563,6 +692,7 @@ async fn create_tunnel_plan_rejects_custom_kind_without_external_runtime_manager
         headers,
         Json(CreateTunnelPlanRequest {
             input,
+            enabled: true,
             confirmed: true,
         }),
     )
@@ -571,467 +701,6 @@ async fn create_tunnel_plan_rejects_custom_kind_without_external_runtime_manager
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "unsupported_tunnel_kind_for_runtime_manager");
-}
-
-#[tokio::test]
-async fn completed_network_jobs_update_tunnel_plan_endpoint_state() {
-    let repo = Repository::Memory(MemoryState::default());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "network-operator".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-            status: "active".to_string(),
-            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
-            created_at: crate::unix_now().to_string(),
-            disabled_at: None,
-            deleted_at: None,
-        },
-        session_id: Uuid::nil(),
-    };
-    let input = test_plan_input();
-    let plan = plan_tunnel(&input).unwrap();
-    repo.record_tunnel_plan(&input, &plan, &operator)
-        .await
-        .unwrap();
-    let _left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
-    let left_job = Uuid::new_v4();
-    repo.record_tunnel_plan_execution(
-        left_job,
-        &JobCommand::NetworkApply {
-            plan: Box::new(plan.clone()),
-            side: TunnelEndpointSide::Left,
-        },
-        "completed",
-    )
-    .await
-    .unwrap();
-    let plans = repo.list_tunnel_plans().await.unwrap();
-    assert_eq!(plans[0].left_status, "applied");
-    assert_eq!(plans[0].right_status, "planned");
-    assert_eq!(plans[0].status, "partially_applied");
-    assert_eq!(plans[0].last_apply_job_id, Some(left_job));
-
-    let _right = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
-    repo.record_tunnel_plan_execution(
-        Uuid::new_v4(),
-        &JobCommand::NetworkApply {
-            plan: Box::new(plan.clone()),
-            side: TunnelEndpointSide::Right,
-        },
-        "completed",
-    )
-    .await
-    .unwrap();
-    let plans = repo.list_tunnel_plans().await.unwrap();
-    assert_eq!(plans[0].left_status, "applied");
-    assert_eq!(plans[0].right_status, "applied");
-    assert_eq!(plans[0].status, "applied");
-
-    let rollback_job = Uuid::new_v4();
-    repo.record_tunnel_plan_execution(
-        rollback_job,
-        &JobCommand::NetworkRollback {
-            plan: Box::new(plan),
-            side: TunnelEndpointSide::Left,
-        },
-        "completed",
-    )
-    .await
-    .unwrap();
-    let plans = repo.list_tunnel_plans().await.unwrap();
-    assert_eq!(plans[0].left_status, "rolled_back");
-    assert_eq!(plans[0].right_status, "applied");
-    assert_eq!(plans[0].status, "partially_rolled_back");
-    assert_eq!(plans[0].last_rollback_job_id, Some(rollback_job));
-    let audits = repo.list_audit_logs(10).await.unwrap();
-    assert!(audits
-        .iter()
-        .any(|audit| audit.action == "network.tunnel_plan_applied"));
-    assert!(audits
-        .iter()
-        .any(|audit| audit.action == "network.tunnel_plan_rolled_back"));
-}
-
-#[tokio::test]
-async fn completed_ospf_cost_update_syncs_canonical_tunnel_plan_cost_only() {
-    let repo = Repository::Memory(MemoryState::default());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "network-operator".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-            status: "active".to_string(),
-            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
-            created_at: crate::unix_now().to_string(),
-            disabled_at: None,
-            deleted_at: None,
-        },
-        session_id: Uuid::nil(),
-    };
-    let input = test_plan_input();
-    let plan = plan_tunnel(&input).unwrap();
-    repo.record_tunnel_plan(&input, &plan, &operator)
-        .await
-        .unwrap();
-
-    let current_ospf_cost = plan.recommended_ospf_cost;
-    let recommended_ospf_cost = current_ospf_cost + 10;
-    let mut proposed_plan = plan.clone();
-    proposed_plan.recommended_ospf_cost = recommended_ospf_cost;
-    let endpoint = render_tunnel_endpoint_config(&proposed_plan, TunnelEndpointSide::Left).unwrap();
-    let operation = JobCommand::NetworkOspfCostUpdate {
-        plan: Box::new(proposed_plan.clone()),
-        side: TunnelEndpointSide::Left,
-        current_ospf_cost,
-        recommended_ospf_cost,
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
-    };
-    let job_id = Uuid::new_v4();
-
-    repo.record_tunnel_plan_execution(job_id, &operation, "failed")
-        .await
-        .unwrap();
-    let plans = repo.list_tunnel_plans().await.unwrap();
-    assert_eq!(plans[0].recommended_ospf_cost, i32::from(current_ospf_cost));
-    assert_eq!(plans[0].plan.recommended_ospf_cost, current_ospf_cost);
-
-    repo.record_tunnel_plan_execution(job_id, &operation, "completed")
-        .await
-        .unwrap();
-    repo.record_tunnel_plan_execution(job_id, &operation, "completed")
-        .await
-        .unwrap();
-    let plans = repo.list_tunnel_plans().await.unwrap();
-    assert_eq!(
-        plans[0].recommended_ospf_cost,
-        i32::from(recommended_ospf_cost)
-    );
-    assert_eq!(plans[0].plan.recommended_ospf_cost, recommended_ospf_cost);
-    assert_eq!(plans[0].left_status, "planned");
-    assert_eq!(plans[0].right_status, "planned");
-    assert_eq!(plans[0].status, "planned");
-    assert_eq!(plans[0].last_apply_job_id, None);
-    assert_eq!(plans[0].last_rollback_job_id, None);
-
-    let stale_job_id = Uuid::new_v4();
-    let stale_recommended = recommended_ospf_cost + 10;
-    let mut stale_plan = proposed_plan;
-    stale_plan.recommended_ospf_cost = stale_recommended;
-    let stale_endpoint =
-        render_tunnel_endpoint_config(&stale_plan, TunnelEndpointSide::Left).unwrap();
-    let stale_operation = JobCommand::NetworkOspfCostUpdate {
-        plan: Box::new(stale_plan),
-        side: TunnelEndpointSide::Left,
-        current_ospf_cost,
-        recommended_ospf_cost: stale_recommended,
-        bird2_sha256_hex: payload_hash(stale_endpoint.bird2_interface_snippet.as_bytes()),
-    };
-    repo.record_tunnel_plan_execution(stale_job_id, &stale_operation, "completed")
-        .await
-        .unwrap();
-    let plans = repo.list_tunnel_plans().await.unwrap();
-    assert_eq!(
-        plans[0].recommended_ospf_cost,
-        i32::from(recommended_ospf_cost)
-    );
-    assert_eq!(plans[0].plan.recommended_ospf_cost, recommended_ospf_cost);
-
-    let job_id_string = job_id.to_string();
-    let stale_job_id_string = stale_job_id.to_string();
-    let audits = repo.list_audit_logs(20).await.unwrap();
-    assert_eq!(
-        audits
-            .iter()
-            .filter(|audit| {
-                audit.action == "network.tunnel_plan_ospf_cost_updated"
-                    && audit.metadata["job_id"].as_str() == Some(job_id_string.as_str())
-            })
-            .count(),
-        1
-    );
-    assert!(audits.iter().any(|audit| {
-        audit.action == "network.tunnel_plan_ospf_cost_updated"
-            && audit.metadata["job_id"].as_str() == Some(stale_job_id_string.as_str())
-            && audit.metadata["result"].as_str() == Some("stale_ignored")
-    }));
-}
-
-#[tokio::test]
-async fn completed_network_job_refresh_repairs_missing_tunnel_plan_execution_once() {
-    let memory = MemoryState::default();
-    let repo = Repository::Memory(memory.clone());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "network-operator".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-            status: "active".to_string(),
-            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
-            created_at: crate::unix_now().to_string(),
-            disabled_at: None,
-            deleted_at: None,
-        },
-        session_id: Uuid::nil(),
-    };
-    let input = test_plan_input();
-    let plan = plan_tunnel(&input).unwrap();
-    repo.record_tunnel_plan(&input, &plan, &operator)
-        .await
-        .unwrap();
-
-    let _left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
-    let job_id = Uuid::new_v4();
-    let operation = JobCommand::NetworkApply {
-        plan: Box::new(plan.clone()),
-        side: TunnelEndpointSide::Left,
-    };
-    seed_completed_network_job(&memory, job_id, operation).await;
-
-    repo.refresh_job_status_from_targets(job_id).await.unwrap();
-    repo.refresh_job_status_from_targets(job_id).await.unwrap();
-
-    let plans = repo.list_tunnel_plans().await.unwrap();
-    assert_eq!(plans[0].left_status, "applied");
-    assert_eq!(plans[0].right_status, "planned");
-    assert_eq!(plans[0].status, "partially_applied");
-    assert_eq!(plans[0].last_apply_job_id, Some(job_id));
-
-    let job_id_string = job_id.to_string();
-    let audits = repo.list_audit_logs(20).await.unwrap();
-    let repaired_audit_count = audits
-        .iter()
-        .filter(|audit| {
-            audit.action == "network.tunnel_plan_applied"
-                && audit.metadata["job_id"].as_str() == Some(job_id_string.as_str())
-        })
-        .count();
-    assert_eq!(repaired_audit_count, 1);
-}
-
-#[tokio::test]
-async fn completed_network_job_refresh_does_not_rewrite_newer_tunnel_plan_execution() {
-    let memory = MemoryState::default();
-    let repo = Repository::Memory(memory.clone());
-    let operator = AuthContext {
-        operator: OperatorView {
-            id: Uuid::nil(),
-            username: "network-operator".to_string(),
-            role: "admin".to_string(),
-            scopes: vec!["*".to_string()],
-            preferences: crate::model::OperatorPreferences::default(),
-            totp_enabled: false,
-            status: "active".to_string(),
-            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
-            created_at: crate::unix_now().to_string(),
-            disabled_at: None,
-            deleted_at: None,
-        },
-        session_id: Uuid::nil(),
-    };
-    let input = test_plan_input();
-    let plan = plan_tunnel(&input).unwrap();
-    repo.record_tunnel_plan(&input, &plan, &operator)
-        .await
-        .unwrap();
-
-    let _left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
-    let old_job = Uuid::new_v4();
-    seed_completed_network_job(
-        &memory,
-        old_job,
-        JobCommand::NetworkApply {
-            plan: Box::new(plan.clone()),
-            side: TunnelEndpointSide::Left,
-        },
-    )
-    .await;
-
-    let _right = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
-    let newer_job = Uuid::new_v4();
-    repo.record_tunnel_plan_execution(
-        newer_job,
-        &JobCommand::NetworkApply {
-            plan: Box::new(plan.clone()),
-            side: TunnelEndpointSide::Right,
-        },
-        "completed",
-    )
-    .await
-    .unwrap();
-
-    repo.refresh_job_status_from_targets(old_job).await.unwrap();
-
-    let plans = repo.list_tunnel_plans().await.unwrap();
-    assert_eq!(plans[0].left_status, "planned");
-    assert_eq!(plans[0].right_status, "applied");
-    assert_eq!(plans[0].status, "partially_applied");
-    assert_eq!(plans[0].last_apply_job_id, Some(newer_job));
-
-    let old_job_string = old_job.to_string();
-    let audits = repo.list_audit_logs(20).await.unwrap();
-    assert!(!audits.iter().any(|audit| {
-        audit.action == "network.tunnel_plan_applied"
-            && audit.metadata["job_id"].as_str() == Some(old_job_string.as_str())
-    }));
-}
-
-async fn seed_completed_network_job(memory: &MemoryState, job_id: Uuid, operation: JobCommand) {
-    let completed_at = unix_now().to_string();
-    memory.jobs.write().await.push(JobHistoryView {
-        id: job_id,
-        actor_id: None,
-        command_type: "network_apply".to_string(),
-        privileged: true,
-        status: "completed".to_string(),
-        target_count: 1,
-        payload_hash: payload_hash(format!("{operation:?}").as_bytes()),
-        max_timeout_secs: 30,
-        created_at: completed_at.clone(),
-        completed_at: Some(completed_at.clone()),
-    });
-    memory
-        .job_operations
-        .write()
-        .await
-        .insert(job_id, operation);
-    memory.job_targets.write().await.push(JobTargetView {
-        job_id,
-        client_id: "client-a".to_string(),
-        status: "completed".to_string(),
-        message: None,
-        exit_code: Some(0),
-        started_at: Some(completed_at.clone()),
-        deadline_at: None,
-        completed_at: Some(completed_at),
-        process_incarnation_id: None,
-    });
-}
-
-async fn wait_for_job_status(
-    repo: &crate::repository::Repository,
-    job_id: uuid::Uuid,
-    expected: &str,
-) {
-    for _ in 0..50 {
-        let jobs = repo.list_jobs(100).await.unwrap();
-        if jobs
-            .iter()
-            .any(|job| job.id == job_id && job.status == expected)
-        {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("job {job_id} did not reach status {expected}");
-}
-
-#[test]
-fn network_apply_validation_rejects_mutating_plan() {
-    let plan = test_plan();
-    let command = JobCommand::NetworkApply {
-        plan: Box::new(plan.clone()),
-        side: TunnelEndpointSide::Left,
-    };
-    validate_job_command(&command).unwrap();
-
-    let mut mutating_plan = plan;
-    mutating_plan.mutates_host = true;
-    let mutating = JobCommand::NetworkApply {
-        plan: Box::new(mutating_plan),
-        side: TunnelEndpointSide::Left,
-    };
-    let error = validate_job_command(&mutating).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_apply_plan_must_be_observe_plan");
-}
-
-#[test]
-fn network_validation_rejects_invalid_runtime_tunnel_control() {
-    let mut plan = test_plan();
-    plan.runtime_control = RuntimeTunnelControl {
-        manager: RuntimeTunnelManager::ExternalObserved,
-        restart: Some(RuntimeTunnelCommand {
-            argv: vec!["/usr/local/libexec/restart-tunnel".to_string()],
-            max_timeout_secs: 10,
-            max_output_bytes: 4096,
-        }),
-        ..RuntimeTunnelControl::default()
-    };
-    let command = JobCommand::NetworkApply {
-        plan: Box::new(plan),
-        side: TunnelEndpointSide::Left,
-    };
-
-    let error = validate_job_command(&command).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_runtime_control_invalid");
-}
-
-#[test]
-fn network_apply_validation_rejects_invalid_runtime_topology() {
-    let mut plan = test_plan();
-    plan.runtime_topology = RuntimeTunnelTopologyIntent {
-        desired_interfaces: vec!["other0".to_string()],
-        ..RuntimeTunnelTopologyIntent::default()
-    };
-    let command = JobCommand::NetworkApply {
-        plan: Box::new(plan),
-        side: TunnelEndpointSide::Left,
-    };
-
-    let error = validate_job_command(&command).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_runtime_topology_invalid");
-}
-
-#[test]
-fn network_apply_validation_rejects_invalid_runtime_route() {
-    let mut plan = test_plan();
-    plan.runtime_topology = RuntimeTunnelTopologyIntent {
-        desired_interfaces: vec![plan.interface_name.clone()],
-        routes: vec![RuntimeTunnelRoute {
-            destination_cidr: "not-cidr".to_string(),
-            ..RuntimeTunnelRoute::default()
-        }],
-        ..RuntimeTunnelTopologyIntent::default()
-    };
-    let command = JobCommand::NetworkApply {
-        plan: Box::new(plan),
-        side: TunnelEndpointSide::Left,
-    };
-
-    let error = validate_job_command(&command).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_runtime_route_invalid");
-}
-
-#[test]
-fn network_rollback_validation_rejects_mutating_plan() {
-    let mut plan = test_plan();
-    let command = JobCommand::NetworkRollback {
-        plan: Box::new(plan.clone()),
-        side: TunnelEndpointSide::Left,
-    };
-    validate_job_command(&command).unwrap();
-
-    plan.mutates_host = true;
-    let command = JobCommand::NetworkRollback {
-        plan: Box::new(plan),
-        side: TunnelEndpointSide::Left,
-    };
-    let error = validate_job_command(&command).unwrap_err();
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_rollback_plan_must_be_observe_plan");
 }
 
 #[test]
@@ -1172,160 +841,6 @@ fn network_speed_test_validation_rejects_mutating_plan_or_unbounded_budget() {
 }
 
 #[tokio::test]
-async fn network_apply_create_job_rejects_wrong_side_target() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        upsert_memory_agent(
-            &memory.agents,
-            &AgentHello {
-                client_id: "right-b".to_string(),
-                process_incarnation_id: uuid::Uuid::new_v4(),
-                agent_version: "test".to_string(),
-                os_release: "test".to_string(),
-                arch: "x86_64".to_string(),
-                update_heartbeat: None,
-                internal_build_number: 1,
-                capabilities: Default::default(),
-            },
-        )
-        .await;
-    }
-
-    let plan = test_plan();
-    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
-    let request = CreateJobRequest {
-        job_id: Some(Uuid::new_v4()),
-        selector_expression: "id:right-b".to_string(),
-        target_client_ids: vec!["right-b".to_string()],
-        destructive: true,
-        confirmed: true,
-        command: "network_apply".to_string(),
-        argv: Vec::new(),
-        operation: Some(JobCommand::NetworkApply {
-            plan: Box::new(plan),
-            side: TunnelEndpointSide::Left,
-        }),
-        max_timeout_secs: Some(60),
-        force_unprivileged: false,
-        privileged: true,
-        privilege_assertion: None,
-    };
-    let state = test_state(repo);
-    let headers = crate::test_auth_headers(&state).await;
-    let error = create_job(State(state), headers, Json(request))
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_apply_target_mismatch");
-}
-
-#[tokio::test]
-async fn network_apply_degrades_unprivileged_target_after_privilege_verification() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        upsert_memory_agent(
-            &memory.agents,
-            &AgentHello {
-                client_id: "left-a".to_string(),
-                process_incarnation_id: uuid::Uuid::new_v4(),
-                agent_version: "test".to_string(),
-                os_release: "test".to_string(),
-                arch: "x86_64".to_string(),
-                update_heartbeat: None,
-                internal_build_number: 1,
-                capabilities: AgentCapabilitySnapshot {
-                    privilege_mode: AgentPrivilegeMode::Unprivileged,
-                    effective_uid: Some(1000),
-                    can_attempt_privileged_ops: true,
-                    ..Default::default()
-                },
-            },
-        )
-        .await;
-    }
-
-    let plan = test_plan();
-    let _endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
-    let operation = JobCommand::NetworkApply {
-        plan: Box::new(plan),
-        side: TunnelEndpointSide::Left,
-    };
-    let request = CreateJobRequest {
-        job_id: Some(Uuid::new_v4()),
-        selector_expression: "id:left-a".to_string(),
-        target_client_ids: vec!["left-a".to_string()],
-        destructive: true,
-        confirmed: true,
-        command: "network_apply".to_string(),
-        argv: Vec::new(),
-        operation: Some(operation),
-        max_timeout_secs: Some(60),
-        force_unprivileged: false,
-        privileged: true,
-        privilege_assertion: None,
-    };
-    let state = test_state_with_privilege_auto_approve(repo.clone());
-    let headers = crate::test_auth_headers(&state).await;
-    let (status, response) = create_job(State(state), headers, Json(request))
-        .await
-        .unwrap();
-    wait_for_job_status(&repo, response.job_id, "skipped").await;
-    let targets = repo.list_job_targets(response.job_id).await.unwrap();
-
-    assert_eq!(status, StatusCode::ACCEPTED);
-    assert_eq!(response.status, "skipped");
-    assert_eq!(targets[0].status, "skipped");
-}
-
-#[tokio::test]
-async fn network_rollback_create_job_rejects_wrong_side_target() {
-    let repo = Repository::Memory(MemoryState::default());
-    if let Repository::Memory(memory) = &repo {
-        upsert_memory_agent(
-            &memory.agents,
-            &AgentHello {
-                client_id: "right-b".to_string(),
-                process_incarnation_id: uuid::Uuid::new_v4(),
-                agent_version: "test".to_string(),
-                os_release: "test".to_string(),
-                arch: "x86_64".to_string(),
-                update_heartbeat: None,
-                internal_build_number: 1,
-                capabilities: Default::default(),
-            },
-        )
-        .await;
-    }
-
-    let request = CreateJobRequest {
-        job_id: Some(Uuid::new_v4()),
-        selector_expression: "id:right-b".to_string(),
-        target_client_ids: vec!["right-b".to_string()],
-        destructive: true,
-        confirmed: true,
-        command: "network_rollback".to_string(),
-        argv: Vec::new(),
-        operation: Some(JobCommand::NetworkRollback {
-            plan: Box::new(test_plan()),
-            side: TunnelEndpointSide::Left,
-        }),
-        max_timeout_secs: Some(60),
-        force_unprivileged: false,
-        privileged: true,
-        privilege_assertion: None,
-    };
-    let state = test_state(repo);
-    let headers = crate::test_auth_headers(&state).await;
-    let error = create_job(State(state), headers, Json(request))
-        .await
-        .unwrap_err();
-
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_apply_target_mismatch");
-}
-
-#[tokio::test]
 async fn network_status_create_job_rejects_wrong_side_target() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
@@ -1369,7 +884,7 @@ async fn network_status_create_job_rejects_wrong_side_target() {
         .unwrap_err();
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_apply_target_mismatch");
+    assert_eq!(error.code, "network_endpoint_target_mismatch");
 }
 
 #[tokio::test]
@@ -1418,7 +933,7 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
         .unwrap_err();
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error.code, "network_apply_target_mismatch");
+    assert_eq!(error.code, "network_endpoint_target_mismatch");
 }
 
 #[tokio::test]

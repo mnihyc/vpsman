@@ -869,7 +869,7 @@ impl Repository {
             self.record_job_target_webhook_event(job_id, client_id, outcome)
                 .await?;
             if let Some(status) = terminal_status {
-                self.record_job_terminal_side_effects(job_id, &status, None)
+                self.record_job_terminal_side_effects(job_id, &status)
                     .await?;
             }
         }

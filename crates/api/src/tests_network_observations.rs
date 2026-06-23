@@ -6,8 +6,8 @@ use axum::{
 };
 use tokio::sync::broadcast;
 use vpsman_common::{
-    observed_ospf_cost, plan_tunnel, BandwidthTier, CommandOutput, JobCommand, OspfCostPolicy,
-    OutputStream, TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
+    observed_ospf_cost, plan_tunnel, BandwidthTier, CommandOutput, OspfCostPolicy, OutputStream,
+    TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
 use crate::gateway_client::GatewayDispatchClient;
@@ -228,19 +228,9 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
         preference: 1.0,
         ospf_policy: OspfCostPolicy::default(),
     };
-    repo.record_tunnel_plan(&input, &plan, &operator)
+    repo.record_tunnel_plan(&input, &plan, true, &operator)
         .await
         .unwrap();
-    repo.record_tunnel_plan_execution(
-        Uuid::new_v4(),
-        &JobCommand::NetworkApply {
-            plan: Box::new(plan.clone()),
-            side: TunnelEndpointSide::Left,
-        },
-        "completed",
-    )
-    .await
-    .unwrap();
 
     let job_id = Uuid::new_v4();
     repo.record_network_observations(
@@ -304,7 +294,7 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
     assert_eq!(graph.edges.len(), 1);
     assert_eq!(graph.edges[0].plan_name, "edge-a-edge-b");
     assert_eq!(graph.edges[0].health, "degraded");
-    assert_eq!(graph.edges[0].status, "partially_applied");
+    assert_eq!(graph.edges[0].status, "planned");
     assert!(graph.edges[0].convergence_blocked);
     assert_eq!(
         graph.edges[0].offline_client_ids,
@@ -398,7 +388,7 @@ async fn topology_graph_ignores_observations_from_reused_plan_name_with_differen
         session_id: Uuid::nil(),
     };
     let original = test_plan();
-    repo.record_tunnel_plan(&test_plan_input("right-b"), &original, &operator)
+    repo.record_tunnel_plan(&test_plan_input("right-b"), &original, true, &operator)
         .await
         .unwrap();
 
@@ -433,7 +423,7 @@ async fn topology_graph_ignores_observations_from_reused_plan_name_with_differen
     assert!(old_observation.topology_identity_hash.is_some());
 
     let replacement = plan_tunnel(&test_plan_input("right-c")).unwrap();
-    repo.record_tunnel_plan(&test_plan_input("right-c"), &replacement, &operator)
+    repo.record_tunnel_plan(&test_plan_input("right-c"), &replacement, true, &operator)
         .await
         .unwrap();
 
@@ -529,7 +519,7 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
         preference: 1.0,
         ospf_policy: OspfCostPolicy::default(),
     };
-    repo.record_tunnel_plan(&input, &plan, &operator)
+    repo.record_tunnel_plan(&input, &plan, true, &operator)
         .await
         .unwrap();
 
@@ -638,6 +628,7 @@ async fn topology_graph_exposes_runtime_status_coverage_and_drift_policy() {
             ospf_policy: OspfCostPolicy::default(),
         },
         &plan,
+        true,
         &operator,
     )
     .await
@@ -756,6 +747,7 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
             ospf_policy: OspfCostPolicy::default(),
         },
         &plan,
+        true,
         &operator,
     )
     .await

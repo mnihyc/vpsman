@@ -808,7 +808,7 @@ fn effective_ospf_updater<'a>(
     config: &'a AgentConfig,
     telemetry_plan: &'a AgentRuntimeStatusTelemetryPlan,
 ) -> Option<&'a RuntimeTunnelCommand> {
-    // Config precedence is most local first: tunnel plan, agent config, then global/default sources.
+    // Config precedence is most local first: tunnel plan, runtime config, then global/default sources.
     telemetry_plan
         .auto_ospf_updater
         .as_ref()

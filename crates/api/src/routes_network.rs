@@ -19,9 +19,10 @@ use crate::{
         AllocateTunnelEndpointsRequest, AllocateTunnelEndpointsResponse, CreateTunnelPlanRequest,
         HistoryQuery, NetworkOspfRecommendationView, NetworkOspfUpdatePlanView,
         PromoteTelemetryTunnelRequest, PromoteTunnelPlanToCustomAdapterRequest,
-        TelemetryTunnelView, TunnelPlanView,
+        TelemetryTunnelView, TunnelPlanView, UpdateTunnelPlanOspfCostRequest,
     },
     model_topology::TopologyGraphView,
+    runtime_config::push_runtime_config_for_clients,
     security::{SCOPE_FLEET_READ, SCOPE_NETWORK_READ},
     state::AppState,
     util::limit_or_default,
@@ -55,15 +56,41 @@ pub(crate) async fn create_tunnel_plan(
     require_tunnel_plan_confirmed(request.confirmed)?;
     let plan = plan_tunnel(&request.input)
         .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            state
-                .repo
-                .record_tunnel_plan(&request.input, &plan, &operator)
-                .await?,
-        ),
-    ))
+    require_tunnel_endpoint_agents(
+        &state,
+        &request.input.left_client_id,
+        &request.input.right_client_id,
+    )
+    .await?;
+    let previous_plan = state
+        .repo
+        .list_tunnel_plans()
+        .await?
+        .into_iter()
+        .find(|plan| plan.name == request.input.name);
+    let view = state
+        .repo
+        .record_tunnel_plan(&request.input, &plan, request.enabled, &operator)
+        .await?;
+    let mut sync_client_ids = Vec::new();
+    if let Some(previous) = previous_plan.as_ref().filter(|plan| plan.enabled) {
+        sync_client_ids.push(previous.left_client_id.clone());
+        sync_client_ids.push(previous.right_client_id.clone());
+    }
+    if view.enabled {
+        sync_client_ids.push(view.left_client_id.clone());
+        sync_client_ids.push(view.right_client_id.clone());
+    }
+    if !sync_client_ids.is_empty() {
+        let reason = if view.enabled {
+            "tunnel_plan_saved_enabled"
+        } else {
+            "tunnel_plan_saved_disabled"
+        };
+        let _sync_jobs =
+            push_runtime_config_for_clients(&state, &operator, sync_client_ids, reason).await?;
+    }
+    Ok((StatusCode::CREATED, Json(view)))
 }
 
 pub(crate) async fn allocate_tunnel_endpoints(
@@ -162,6 +189,47 @@ pub(crate) async fn disable_tunnel_plan(
     mutate_tunnel_plan_enabled(state, headers, plan_id, request, false).await
 }
 
+pub(crate) async fn update_tunnel_plan_ospf_cost(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+    Json(request): Json<UpdateTunnelPlanOspfCostRequest>,
+) -> Result<Json<TunnelPlanView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    validate_tunnel_plan_ospf_cost_request(&request)?;
+    let existing = state
+        .repo
+        .get_tunnel_plan(plan_id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("tunnel_plan_not_found"))?;
+    if existing.enabled {
+        require_tunnel_endpoint_agents(&state, &existing.left_client_id, &existing.right_client_id)
+            .await?;
+    }
+    let view = state
+        .repo
+        .update_tunnel_plan_ospf_cost(
+            plan_id,
+            request.current_ospf_cost,
+            request.recommended_ospf_cost,
+            &operator,
+        )
+        .await
+        .map_err(tunnel_plan_mutation_error)?;
+    if view.enabled {
+        let _sync_jobs = push_runtime_config_for_clients(
+            &state,
+            &operator,
+            vec![view.left_client_id.clone(), view.right_client_id.clone()],
+            "tunnel_plan_ospf_cost_updated",
+        )
+        .await?;
+    }
+    Ok(Json(view))
+}
+
 async fn mutate_tunnel_plan_enabled(
     state: AppState,
     headers: HeaderMap,
@@ -173,15 +241,32 @@ async fn mutate_tunnel_plan_enabled(
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
     require_tunnel_plan_confirmed(request.confirmed)?;
-    if state.repo.get_tunnel_plan(plan_id).await?.is_none() {
-        return Err(ApiError::bad_request("tunnel_plan_not_found"));
+    let existing = state
+        .repo
+        .get_tunnel_plan(plan_id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("tunnel_plan_not_found"))?;
+    if enabled {
+        require_tunnel_endpoint_agents(&state, &existing.left_client_id, &existing.right_client_id)
+            .await?;
     }
-    Ok(Json(
-        state
-            .repo
-            .set_tunnel_plan_enabled(plan_id, enabled, &operator)
-            .await?,
-    ))
+    let view = state
+        .repo
+        .set_tunnel_plan_enabled(plan_id, enabled, &operator)
+        .await?;
+    let reason = if enabled {
+        "tunnel_plan_enabled"
+    } else {
+        "tunnel_plan_disabled"
+    };
+    let _sync_jobs = push_runtime_config_for_clients(
+        &state,
+        &operator,
+        vec![view.left_client_id.clone(), view.right_client_id.clone()],
+        reason,
+    )
+    .await?;
+    Ok(Json(view))
 }
 
 pub(crate) async fn promote_telemetry_tunnel_plan(
@@ -211,14 +296,24 @@ pub(crate) async fn promote_telemetry_tunnel_plan(
     let input = telemetry_promotion_input(&request, &report)?;
     let plan = plan_tunnel(&input)
         .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
+    require_tunnel_endpoint_agents(&state, &input.left_client_id, &input.right_client_id).await?;
     let view = state
         .repo
-        .record_tunnel_plan(&input, &plan, &operator)
+        .record_tunnel_plan(&input, &plan, request.enabled, &operator)
         .await?;
     state
         .repo
         .record_tunnel_plan_promotion_audit(&view, &operator, &report)
         .await?;
+    if view.enabled {
+        let _sync_jobs = push_runtime_config_for_clients(
+            &state,
+            &operator,
+            vec![view.left_client_id.clone(), view.right_client_id.clone()],
+            "tunnel_plan_promoted_from_telemetry",
+        )
+        .await?;
+    }
     Ok((StatusCode::CREATED, Json(view)))
 }
 
@@ -229,6 +324,46 @@ fn require_tunnel_plan_confirmed(confirmed: bool) -> Result<(), ApiError> {
         Err(ApiError::conflict(
             "tunnel_plan_mutation_requires_confirmation",
         ))
+    }
+}
+
+async fn require_tunnel_endpoint_agents(
+    state: &AppState,
+    left_client_id: &str,
+    right_client_id: &str,
+) -> Result<(), ApiError> {
+    let agents = state.repo.list_agents().await?;
+    let has_left = agents.iter().any(|agent| agent.id == left_client_id);
+    let has_right = agents.iter().any(|agent| agent.id == right_client_id);
+    if !has_left || !has_right {
+        return Err(ApiError::bad_request(
+            "tunnel_plan_endpoint_agent_not_found",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tunnel_plan_ospf_cost_request(
+    request: &UpdateTunnelPlanOspfCostRequest,
+) -> Result<(), ApiError> {
+    require_tunnel_plan_confirmed(request.confirmed)?;
+    if request.current_ospf_cost == 0 || request.recommended_ospf_cost == 0 {
+        return Err(ApiError::bad_request("tunnel_plan_ospf_cost_invalid"));
+    }
+    if request.current_ospf_cost == request.recommended_ospf_cost {
+        return Err(ApiError::bad_request("tunnel_plan_ospf_cost_noop"));
+    }
+    Ok(())
+}
+
+fn tunnel_plan_mutation_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("tunnel_plan_not_found") {
+        ApiError::not_found("tunnel_plan_not_found")
+    } else if message.contains("tunnel_plan_ospf_cost_stale") {
+        ApiError::conflict("tunnel_plan_ospf_cost_stale")
+    } else {
+        ApiError::from(error)
     }
 }
 
@@ -265,12 +400,21 @@ pub(crate) async fn promote_tunnel_plan_to_custom_adapter(
     }
     let plan = plan_tunnel(&input)
         .map_err(|error| ApiError::bad_request(tunnel_plan_error_code(error)))?;
-    Ok(Json(
-        state
-            .repo
-            .promote_tunnel_plan_to_custom_adapter(&existing, &input, &plan, &operator)
-            .await?,
-    ))
+    require_tunnel_endpoint_agents(&state, &input.left_client_id, &input.right_client_id).await?;
+    let view = state
+        .repo
+        .promote_tunnel_plan_to_custom_adapter(&existing, &input, &plan, &operator)
+        .await?;
+    if view.enabled {
+        let _sync_jobs = push_runtime_config_for_clients(
+            &state,
+            &operator,
+            vec![view.left_client_id.clone(), view.right_client_id.clone()],
+            "tunnel_plan_custom_adapter_updated",
+        )
+        .await?;
+    }
+    Ok(Json(view))
 }
 
 fn normalize_optional_string(value: Option<String>) -> Option<String> {

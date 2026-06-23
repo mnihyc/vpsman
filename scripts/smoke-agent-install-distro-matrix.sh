@@ -28,10 +28,6 @@ smoke_init_tmpdir "vpsman-agent-install-distro"
 config_file="$SMOKE_TMPDIR/agent.toml"
 cat >"$config_file" <<'TOML'
 client_id = "install-distro-smoke"
-display_name = "install-distro-smoke"
-telemetry_light_secs = 15
-telemetry_full_secs = 60
-tags = ["install-distro"]
 
 [noise]
 mode = "enrolled_ik"
@@ -39,7 +35,8 @@ client_private_key_hex = "111111111111111111111111111111111111111111111111111111
 server_public_key_hex = "2222222222222222222222222222222222222222222222222222222222222222"
 
 [auth]
-max_job_timeout_secs = 3600
+gateway_retry_secs = 60
+gateway_connect_timeout_secs = 10
 
 [[tcp_endpoints]]
 label = "local"

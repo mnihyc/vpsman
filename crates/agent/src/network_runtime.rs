@@ -104,7 +104,7 @@ async fn reconcile_runtime_tunnel(
         return Ok(serde_json::json!({
             "type": "runtime_tunnel_reconcile",
             "status": "skipped",
-            "reason": "network_apply_disabled",
+            "reason": "runtime_tunnel_mutation_disabled",
             "plan": input.plan.name,
             "interface": input.plan.interface_name,
         }));
@@ -259,7 +259,7 @@ async fn remove_runtime_tunnel(
         return Ok(serde_json::json!({
             "type": "runtime_tunnel_remove",
             "status": "skipped",
-            "reason": "network_apply_disabled",
+            "reason": "runtime_tunnel_mutation_disabled",
             "plan": input.plan.name,
             "interface": input.plan.interface_name,
         }));

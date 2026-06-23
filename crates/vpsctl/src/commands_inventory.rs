@@ -1,26 +1,16 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
-use vpsman_common::{
-    validate_incremental_config_patch_section, JobCommand, MAX_AGENT_HOT_CONFIG_BYTES,
-    SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH,
-};
 
 use crate::commands_schedules::selector_expression_from_targets;
 use crate::http::{http_get, http_post_json};
-use crate::jobs::{resolve_target_ids, submit_privileged_operation, PrivilegedOperationRequest};
+use crate::jobs::resolve_target_ids;
 use crate::privilege::{
     build_privilege_for_db, load_super_password, load_super_salt_hex, DbPrivilegeRequest,
 };
 use crate::util::percent_encode_query_value;
-
-#[derive(Debug, Deserialize)]
-struct SourceConfigPatchResponse {
-    toml: String,
-}
 
 pub(crate) fn summary(api_url: &str, token: Option<&str>) -> Result<()> {
     println!("{}", http_get(api_url, "/api/v1/fleet/summary", token)?);
@@ -765,7 +755,7 @@ pub(crate) fn source_template_assignments(
     Ok(())
 }
 
-pub(crate) fn source_config_patch(
+pub(crate) fn template_runtime_config(
     api_url: &str,
     token: Option<&str>,
     client_id: String,
@@ -775,7 +765,7 @@ pub(crate) fn source_config_patch(
         !client_id.is_empty() && client_id.len() <= 128,
         "--client-id must be between 1 and 128 bytes"
     );
-    let path = source_config_patch_path(&client_id);
+    let path = template_runtime_config_path(&client_id);
     let body = http_get(api_url, &path, token)?;
     match format.as_str() {
         "json" => println!("{body}"),
@@ -793,53 +783,6 @@ pub(crate) fn source_config_patch(
     Ok(())
 }
 
-pub(crate) fn source_config_patch_apply(
-    api_url: &str,
-    token: Option<&str>,
-    client_id: String,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    max_timeout_secs: u64,
-    confirmed: bool,
-    force_unprivileged: bool,
-) -> Result<()> {
-    anyhow::ensure!(
-        confirmed,
-        "source-config-patch-apply requires --confirmed because it applies an incremental config patch"
-    );
-    anyhow::ensure!(
-        !client_id.is_empty() && client_id.len() <= 128,
-        "--client-id must be between 1 and 128 bytes"
-    );
-    let body = http_get(api_url, &source_config_patch_path(&client_id), token)?;
-    let rendered: SourceConfigPatchResponse =
-        serde_json::from_str(&body).context("invalid source template config response")?;
-    validate_source_config_patch(&rendered.toml)?;
-    let operation = JobCommand::SourceConfigPatch {
-        apply_mode: SOURCE_CONFIG_PATCH_APPLY_MODE_INCREMENTAL_PATCH.to_string(),
-        toml: rendered.toml,
-    };
-    println!(
-        "{}",
-        submit_privileged_operation(PrivilegedOperationRequest {
-            api_url,
-            token,
-            operation: &operation,
-            command_label: "source_config_patch",
-            clients: &[client_id],
-            tags: &[],
-            password_env: &password_env,
-            super_salt_hex: super_salt_hex.as_deref(),
-            privilege_ttl_secs,
-            max_timeout_secs,
-            confirmed,
-            force_unprivileged,
-        })?
-    );
-    Ok(())
-}
-
 pub(crate) struct SourceTemplateAssignOptions {
     pub(crate) domain: String,
     pub(crate) template_id: String,
@@ -848,9 +791,9 @@ pub(crate) struct SourceTemplateAssignOptions {
     pub(crate) confirmed: bool,
 }
 
-fn source_config_patch_path(client_id: &str) -> String {
+fn template_runtime_config_path(client_id: &str) -> String {
     format!(
-        "/api/v1/source-config-patch?client_id={}",
+        "/api/v1/template-runtime-config?client_id={}",
         percent_encode_query_value(client_id)
     )
 }
@@ -1320,32 +1263,6 @@ fn validate_optional_positive(value: Option<f64>, flag: &str) -> Result<()> {
             value.is_finite() && value > 0.0,
             "{flag} must be greater than 0"
         );
-    }
-    Ok(())
-}
-
-fn validate_source_config_patch(toml_document: &str) -> Result<()> {
-    anyhow::ensure!(
-        !toml_document.is_empty(),
-        "rendered source template config patch is empty"
-    );
-    anyhow::ensure!(
-        toml_document.len() <= MAX_AGENT_HOT_CONFIG_BYTES,
-        "rendered source template config patch exceeds {} bytes",
-        MAX_AGENT_HOT_CONFIG_BYTES
-    );
-    let value: toml::Value = toml::from_str(toml_document)
-        .context("rendered source template config patch is invalid TOML")?;
-    let table = value
-        .as_table()
-        .context("rendered source template config patch must be a TOML table")?;
-    anyhow::ensure!(
-        !table.is_empty(),
-        "rendered source template config patch has no sections"
-    );
-    for section in table.keys() {
-        validate_incremental_config_patch_section(section)
-            .map_err(|message| anyhow::anyhow!(message))?;
     }
     Ok(())
 }

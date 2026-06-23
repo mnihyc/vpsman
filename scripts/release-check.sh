@@ -61,9 +61,7 @@ if [[ "${VPSMAN_RELEASE_SKIP_TESTS:-0}" == "1" ]]; then
   skip_step cargo-test-api-terminal "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step cargo-test-vpsctl-terminal "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step terminal-retention-release-gate "VPSMAN_RELEASE_SKIP_TESTS=1"
-  skip_step cargo-test-agent-network-apply "VPSMAN_RELEASE_SKIP_TESTS=1"
-  skip_step cargo-test-agent-network-runtime "VPSMAN_RELEASE_SKIP_TESTS=1"
-  skip_step cargo-test-agent-network-status "VPSMAN_RELEASE_SKIP_TESTS=1"
+  skip_step cargo-test-agent-network "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step cargo-test-api-update-releases "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step cargo-test-api-history-retention "VPSMAN_RELEASE_SKIP_TESTS=1"
   skip_step cargo-test-vpsctl-update-releases "VPSMAN_RELEASE_SKIP_TESTS=1"
@@ -80,9 +78,7 @@ else
   run_step cargo-test-api-terminal cargo test -p vpsman-api terminal
   run_step cargo-test-vpsctl-terminal cargo test -p vpsctl terminal
   run_step terminal-retention-release-gate bash scripts/smoke-terminal-retention.sh
-  run_step cargo-test-agent-network-apply cargo test -p vpsman-agent network_apply
-  run_step cargo-test-agent-network-runtime cargo test -p vpsman-agent network_runtime
-  run_step cargo-test-agent-network-status cargo test -p vpsman-agent network_status
+  run_step cargo-test-agent-network cargo test -p vpsman-agent network
   run_step cargo-test-api-update-releases cargo test -p vpsman-api tests_update_releases
   run_step cargo-test-api-history-retention cargo test -p vpsman-api history_retention
   run_step cargo-test-vpsctl-update-releases cargo test -p vpsctl update_release
@@ -157,10 +153,10 @@ if [[ "${VPSMAN_RELEASE_SKIP_SMOKES:-0}" == "1" ]]; then
   skip_step smoke-live-backup "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-backup-chunked-upload "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-minio-backup-artifact "VPSMAN_RELEASE_SKIP_SMOKES=1"
-  skip_step smoke-live-hot-config "VPSMAN_RELEASE_SKIP_SMOKES=1"
-  skip_step smoke-live-source template-config-patch "VPSMAN_RELEASE_SKIP_SMOKES=1"
+  skip_step smoke-live-runtime-config "VPSMAN_RELEASE_SKIP_SMOKES=1"
+  skip_step smoke-live-source-template-runtime-config "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-live-agent-update "VPSMAN_RELEASE_SKIP_SMOKES=1"
-  skip_step smoke-live-network-apply "VPSMAN_RELEASE_SKIP_SMOKES=1"
+  skip_step smoke-live-runtime-tunnel-sync "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-network-preset-container "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-bird2-topology-convergence "VPSMAN_RELEASE_SKIP_SMOKES=1"
   skip_step smoke-docker-50-agent-long-running-fleet "VPSMAN_RELEASE_SKIP_SMOKES=1"
@@ -205,14 +201,14 @@ else
     skip_step smoke-minio-backup-artifact \
       "VPSMAN_RELEASE_RUN_S3_SMOKES!=1; local filesystem object storage is the baseline"
   fi
-  run_step smoke-live-hot-config \
-    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-hot-config.sh
-  run_step smoke-live-source template-config-patch \
-    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-source template-config-patch.sh
+  run_step smoke-live-runtime-config \
+    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-runtime-config.sh
+  run_step smoke-live-source-template-runtime-config \
+    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-source-template-runtime-config.sh
   run_step smoke-live-agent-update \
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-agent-update.sh
-  run_step smoke-live-network-apply \
-    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-network-apply.sh
+  run_step smoke-live-runtime-tunnel-sync \
+    env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-live-runtime-tunnel-sync.sh
   run_step smoke-network-preset-container \
     bash scripts/smoke-network-preset-container.sh
   run_step smoke-bird2-topology-convergence \

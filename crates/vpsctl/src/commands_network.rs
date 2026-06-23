@@ -4,14 +4,14 @@ use anyhow::{Context, Result};
 use clap::{ArgAction, Args, ValueEnum};
 use uuid::Uuid;
 use vpsman_common::{
-    payload_hash, plan_tunnel, render_tunnel_endpoint_config, BandwidthTier, JobCommand,
-    OspfCostPolicy, TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind,
-    TunnelPlan, TunnelPlanInput, DEFAULT_MAX_JOB_TIMEOUT_SECS,
-    NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
-    NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
-    NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
-    NETWORK_SPEED_TEST_MIN_DURATION_SECS, NETWORK_SPEED_TEST_MIN_MAX_BYTES,
-    NETWORK_SPEED_TEST_MIN_PORT, NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
+    plan_tunnel, render_tunnel_endpoint_config, BandwidthTier, JobCommand, OspfCostPolicy,
+    TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlan,
+    TunnelPlanInput, DEFAULT_MAX_JOB_TIMEOUT_SECS, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
+    NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
+    NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
+    NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
+    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
 };
 
 use crate::{
@@ -108,6 +108,8 @@ pub(crate) struct TunnelPlanCommand {
     #[arg(long, default_value_t = false)]
     pub(crate) save: bool,
     #[arg(long, default_value_t = false)]
+    pub(crate) enabled: bool,
+    #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }
 
@@ -145,7 +147,7 @@ pub(crate) struct TunnelPromoteExternalObserveCommand {
     #[arg(long, value_enum, default_value = "ipv4")]
     pub(crate) latency_primary_family: TunnelAddressFamilyArg,
     #[arg(long, value_enum, default_value = "left")]
-    pub(crate) side: TunnelApplySideArg,
+    pub(crate) side: TunnelEndpointSideArg,
     #[arg(long)]
     pub(crate) name: Option<String>,
     #[arg(long, value_enum)]
@@ -156,6 +158,8 @@ pub(crate) struct TunnelPromoteExternalObserveCommand {
     pub(crate) packet_loss_ratio: Option<f64>,
     #[arg(long)]
     pub(crate) preference: Option<f64>,
+    #[arg(long, default_value_t = false)]
+    pub(crate) enabled: bool,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }
@@ -257,16 +261,16 @@ impl From<TunnelKindArg> for TunnelKind {
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
-pub(crate) enum TunnelApplySideArg {
+pub(crate) enum TunnelEndpointSideArg {
     Left,
     Right,
 }
 
-impl From<TunnelApplySideArg> for vpsman_common::TunnelEndpointSide {
-    fn from(value: TunnelApplySideArg) -> Self {
+impl From<TunnelEndpointSideArg> for vpsman_common::TunnelEndpointSide {
+    fn from(value: TunnelEndpointSideArg) -> Self {
         match value {
-            TunnelApplySideArg::Left => Self::Left,
-            TunnelApplySideArg::Right => Self::Right,
+            TunnelEndpointSideArg::Left => Self::Left,
+            TunnelEndpointSideArg::Right => Self::Right,
         }
     }
 }
@@ -307,67 +311,15 @@ impl From<BandwidthTierArg> for BandwidthTier {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct TunnelApplyCommand {
-    #[arg(long)]
-    pub(crate) plan_file: PathBuf,
-    #[arg(long, value_enum)]
-    pub(crate) side: TunnelApplySideArg,
-    #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-    pub(crate) password_env: String,
-    #[arg(long)]
-    pub(crate) super_salt_hex: Option<String>,
-    #[arg(long, default_value_t = 300)]
-    pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = 60)]
-    pub(crate) max_timeout_secs: u64,
-    #[arg(long, default_value_t = false)]
-    pub(crate) confirmed: bool,
-    #[arg(long, default_value_t = false)]
-    pub(crate) force_unprivileged: bool,
-}
-
-#[derive(Debug, Args)]
 pub(crate) struct TunnelOspfCostUpdateCommand {
     #[arg(long)]
-    pub(crate) plan_file: PathBuf,
-    #[arg(long, value_enum)]
-    pub(crate) side: TunnelApplySideArg,
+    pub(crate) plan_id: String,
     #[arg(long)]
     pub(crate) current_ospf_cost: u16,
     #[arg(long)]
     pub(crate) recommended_ospf_cost: u16,
-    #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-    pub(crate) password_env: String,
-    #[arg(long)]
-    pub(crate) super_salt_hex: Option<String>,
-    #[arg(long, default_value_t = 300)]
-    pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = 60)]
-    pub(crate) max_timeout_secs: u64,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
-    #[arg(long, default_value_t = false)]
-    pub(crate) force_unprivileged: bool,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct TunnelRollbackCommand {
-    #[arg(long)]
-    pub(crate) plan_file: PathBuf,
-    #[arg(long, value_enum)]
-    pub(crate) side: TunnelApplySideArg,
-    #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-    pub(crate) password_env: String,
-    #[arg(long)]
-    pub(crate) super_salt_hex: Option<String>,
-    #[arg(long, default_value_t = 300)]
-    pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = 60)]
-    pub(crate) max_timeout_secs: u64,
-    #[arg(long, default_value_t = false)]
-    pub(crate) confirmed: bool,
-    #[arg(long, default_value_t = false)]
-    pub(crate) force_unprivileged: bool,
 }
 
 #[derive(Debug, Args)]
@@ -375,7 +327,7 @@ pub(crate) struct TunnelStatusCommand {
     #[arg(long)]
     pub(crate) plan_file: PathBuf,
     #[arg(long, value_enum)]
-    pub(crate) side: TunnelApplySideArg,
+    pub(crate) side: TunnelEndpointSideArg,
     #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
     pub(crate) password_env: String,
     #[arg(long)]
@@ -391,7 +343,7 @@ pub(crate) struct TunnelProbeCommand {
     #[arg(long)]
     pub(crate) plan_file: PathBuf,
     #[arg(long, value_enum)]
-    pub(crate) side: TunnelApplySideArg,
+    pub(crate) side: TunnelEndpointSideArg,
     #[arg(long, default_value_t = 3)]
     pub(crate) count: u8,
     #[arg(long, default_value_t = 500)]
@@ -411,7 +363,7 @@ pub(crate) struct TunnelSpeedTestCommand {
     #[arg(long)]
     pub(crate) plan_file: PathBuf,
     #[arg(long, value_enum)]
-    pub(crate) server_side: TunnelApplySideArg,
+    pub(crate) server_side: TunnelEndpointSideArg,
     #[arg(long, default_value_t = 3)]
     pub(crate) duration_secs: u8,
     #[arg(long, default_value_t = 16 * 1024 * 1024)]
@@ -491,41 +443,6 @@ pub(crate) fn tunnel_plan_export(
     Ok(())
 }
 
-pub(crate) fn tunnel_apply(
-    api_url: &str,
-    token: Option<&str>,
-    request: TunnelApplyCommand,
-) -> Result<()> {
-    anyhow::ensure!(request.confirmed, "tunnel-apply requires --confirmed");
-    let plan = read_tunnel_plan(&request.plan_file)?;
-    let side = request.side.into();
-    let endpoint = render_tunnel_endpoint_config(&plan, side)?;
-    let operation = JobCommand::NetworkApply {
-        plan: Box::new(plan),
-        side,
-    };
-    let password = load_super_password(&request.password_env)?;
-    let salt_hex = load_super_salt_hex(request.super_salt_hex.as_deref())?;
-    println!(
-        "{}",
-        submit_network_job(
-            api_url,
-            token,
-            "network_apply",
-            vec![endpoint.local_client_id],
-            operation,
-            &password,
-            &salt_hex,
-            request.privilege_ttl_secs,
-            request.max_timeout_secs,
-            true,
-            request.confirmed,
-            request.force_unprivileged,
-        )?
-    );
-    Ok(())
-}
-
 pub(crate) fn tunnel_ospf_cost_update(
     api_url: &str,
     token: Option<&str>,
@@ -539,69 +456,17 @@ pub(crate) fn tunnel_ospf_cost_update(
         request.current_ospf_cost != request.recommended_ospf_cost,
         "tunnel-ospf-cost-update requires a changed OSPF cost"
     );
-    let mut plan = read_tunnel_plan(&request.plan_file)?;
-    plan.recommended_ospf_cost = request.recommended_ospf_cost;
-    let side = request.side.into();
-    let endpoint = render_tunnel_endpoint_config(&plan, side)?;
-    let operation = JobCommand::NetworkOspfCostUpdate {
-        plan: Box::new(plan),
-        side,
-        current_ospf_cost: request.current_ospf_cost,
-        recommended_ospf_cost: request.recommended_ospf_cost,
-        bird2_sha256_hex: payload_hash(endpoint.bird2_interface_snippet.as_bytes()),
-    };
-    let password = load_super_password(&request.password_env)?;
-    let salt_hex = load_super_salt_hex(request.super_salt_hex.as_deref())?;
     println!(
         "{}",
-        submit_network_job(
+        http_post_json(
             api_url,
+            &format!("/api/v1/tunnel-plans/{}/ospf-cost", request.plan_id),
             token,
-            "network_ospf_cost_update",
-            vec![endpoint.local_client_id],
-            operation,
-            &password,
-            &salt_hex,
-            request.privilege_ttl_secs,
-            request.max_timeout_secs,
-            true,
-            request.confirmed,
-            request.force_unprivileged,
-        )?
-    );
-    Ok(())
-}
-
-pub(crate) fn tunnel_rollback(
-    api_url: &str,
-    token: Option<&str>,
-    request: TunnelRollbackCommand,
-) -> Result<()> {
-    anyhow::ensure!(request.confirmed, "tunnel-rollback requires --confirmed");
-    let plan = read_tunnel_plan(&request.plan_file)?;
-    let side = request.side.into();
-    let endpoint = render_tunnel_endpoint_config(&plan, side)?;
-    let operation = JobCommand::NetworkRollback {
-        plan: Box::new(plan),
-        side,
-    };
-    let password = load_super_password(&request.password_env)?;
-    let salt_hex = load_super_salt_hex(request.super_salt_hex.as_deref())?;
-    println!(
-        "{}",
-        submit_network_job(
-            api_url,
-            token,
-            "network_rollback",
-            vec![endpoint.local_client_id],
-            operation,
-            &password,
-            &salt_hex,
-            request.privilege_ttl_secs,
-            request.max_timeout_secs,
-            true,
-            request.confirmed,
-            request.force_unprivileged,
+            &serde_json::json!({
+                "current_ospf_cost": request.current_ospf_cost,
+                "recommended_ospf_cost": request.recommended_ospf_cost,
+                "confirmed": request.confirmed,
+            }),
         )?
     );
     Ok(())
@@ -899,6 +764,10 @@ pub(crate) fn tunnel_plan(
         let mut body = serde_json::to_value(&input)?;
         if let Some(object) = body.as_object_mut() {
             object.insert("confirmed".to_string(), serde_json::Value::Bool(true));
+            object.insert(
+                "enabled".to_string(),
+                serde_json::Value::Bool(request.enabled),
+            );
         }
         println!(
             "{}",
@@ -1032,6 +901,7 @@ pub(crate) fn tunnel_promote_external_observe(
                 "latency_ms": request.latency_ms,
                 "packet_loss_ratio": request.packet_loss_ratio,
                 "preference": request.preference,
+                "enabled": request.enabled,
                 "confirmed": request.confirmed,
             }),
         )?

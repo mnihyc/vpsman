@@ -265,7 +265,7 @@ pub(crate) fn builtin_source_templates() -> Vec<BuiltInSourceTemplate> {
                 "Default Bird2 OSPF adapter for topology evidence, neighbor checks, and cost updates",
             definition: serde_json::json!({
                 "provider": "bird2",
-                "workflow": "network_ospf_cost_update",
+                "workflow": "tunnel_ospf_cost_update",
                 "status_source": "bird2_status"
             }),
         },

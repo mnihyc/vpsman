@@ -15,10 +15,6 @@ use crate::vty_backups::{
     submit_vty_backup_policy_upsert, submit_vty_backup_request, submit_vty_backup_run,
     submit_vty_restore_plan, submit_vty_restore_rollback, submit_vty_restore_run,
 };
-use crate::vty_config::{
-    parse_vty_hot_config, parse_vty_source_config_patch_apply, submit_vty_hot_config,
-    submit_vty_source_config_patch_apply,
-};
 use crate::vty_direct::submit_vty_direct_command;
 use crate::vty_file_transfer::{
     parse_vty_file_transfer_download, parse_vty_file_transfer_upload,
@@ -93,7 +89,7 @@ Fleet and integrations:
   source-templates | source-template-create | source-template-clone
   source-template-diff | source-template-test | source-template-update
   source-status | source-template-assignments | source-template-assign
-  source-config-patch | source-config-patch-apply
+  template-runtime-config
 
 Jobs and schedules:
   jobs | job-create | job-shell | job-targets | job-target-status-download
@@ -139,8 +135,8 @@ Backups, restores, and migrations:
 
 Network and topology:
   tunnel-plans | tunnel-plan | tunnel-plan-export | tunnel-allocate
-  tunnel-promote-external-observe | tunnel-promote-custom-adapter | tunnel-apply | tunnel-ospf-cost-update
-  tunnel-rollback | tunnel-status | tunnel-probe | tunnel-speed-test
+  tunnel-promote-external-observe | tunnel-promote-custom-adapter
+  tunnel-ospf-cost-update | tunnel-status | tunnel-probe | tunnel-speed-test
   network-observations | network-trends | network-ospf-recommendations
   network-ospf-update-plans | topology-graph
 
@@ -221,18 +217,6 @@ const FILE_TRANSFER_DOWNLOAD_USAGE: &str = concat!(
     "[--rate-limit-kbps <0-1000000>] ",
     "[--multi-target-policy single-target|per-target-files] ",
     "[--max-timeout <secs>] [--privilege-ttl <15-300>] --confirmed"
-);
-
-const HOT_CONFIG_USAGE: &str = concat!(
-    "usage: hot-config --config-file <path> <target ...> ",
-    "[--max-timeout <secs>] [--privilege-ttl <15-300>] ",
-    "[--force-unprivileged] --confirmed"
-);
-
-const SOURCE_CONFIG_PATCH_USAGE: &str = concat!(
-    "usage: source-config-patch-apply --client-id <id> ",
-    "[--max-timeout <secs>] [--privilege-ttl <15-300>] ",
-    "[--force-unprivileged] --confirmed"
 );
 
 const RESTORE_RUN_USAGE: &str = concat!(
@@ -563,56 +547,6 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                         api_url,
                         token.as_deref(),
                         &privilege_context,
-                        request,
-                    )?
-                );
-            }
-            command if command.starts_with("hot-config ") => {
-                let parts = command.split_whitespace().collect::<Vec<_>>();
-                if !privilege_context.enabled {
-                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
-                    continue;
-                }
-                let request = match parse_vty_hot_config(&parts[1..]) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        println!("usage error: {error}");
-                        println!("{HOT_CONFIG_USAGE}");
-                        continue;
-                    }
-                };
-                println!(
-                    "{}",
-                    submit_vty_hot_config(
-                        api_url,
-                        token.as_deref(),
-                        &privilege_context.password,
-                        &privilege_context.salt_hex,
-                        request,
-                    )?
-                );
-            }
-            command if command.starts_with("source-config-patch-apply ") => {
-                let parts = command.split_whitespace().collect::<Vec<_>>();
-                if !privilege_context.enabled {
-                    println!("{PRIVILEGE_UNLOCK_REQUIRED}");
-                    continue;
-                }
-                let request = match parse_vty_source_config_patch_apply(&parts[1..]) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        println!("usage error: {error}");
-                        println!("{SOURCE_CONFIG_PATCH_USAGE}");
-                        continue;
-                    }
-                };
-                println!(
-                    "{}",
-                    submit_vty_source_config_patch_apply(
-                        api_url,
-                        token.as_deref(),
-                        &privilege_context.password,
-                        &privilege_context.salt_hex,
                         request,
                     )?
                 );

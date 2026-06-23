@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use vpsman_common::DEFAULT_MAX_JOB_TIMEOUT_SECS;
-
 #[derive(Debug, Args)]
 pub(crate) struct BootstrapCommand {
     #[arg(long)]
@@ -465,29 +463,11 @@ pub(crate) struct SourceTemplateAssignmentListCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct SourceConfigPatchCommand {
+pub(crate) struct TemplateRuntimeConfigCommand {
     #[arg(long)]
     pub(crate) client_id: String,
     #[arg(long, default_value = "toml")]
     pub(crate) format: String,
-}
-
-#[derive(Debug, Args)]
-pub(crate) struct SourceConfigPatchApplyCommand {
-    #[arg(long)]
-    pub(crate) client_id: String,
-    #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
-    pub(crate) password_env: String,
-    #[arg(long)]
-    pub(crate) super_salt_hex: Option<String>,
-    #[arg(long, default_value_t = 300)]
-    pub(crate) privilege_ttl_secs: u64,
-    #[arg(long, default_value_t = DEFAULT_MAX_JOB_TIMEOUT_SECS)]
-    pub(crate) max_timeout_secs: u64,
-    #[arg(long, default_value_t = false)]
-    pub(crate) confirmed: bool,
-    #[arg(long, default_value_t = false)]
-    pub(crate) force_unprivileged: bool,
 }
 
 #[derive(Debug, Args)]

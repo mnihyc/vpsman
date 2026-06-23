@@ -1,5 +1,5 @@
-import { useMemo, useState, type FormEvent } from "react";
-import { Activity, Play, RotateCcw, Search, ShieldCheck } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Activity, Search, ShieldCheck } from "lucide-react";
 import {
   buildBulkJobProgress,
   createJobTargetCount,
@@ -15,13 +15,11 @@ import { usePanelDisplaySettings } from "../../panelDisplay";
 import { buildPrivilegeForJobOperation, type PrivilegeAssertion, type PrivilegeMaterial } from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
 import {
-  buildNetworkApplyOperation,
   buildNetworkProbeOperation,
-  buildNetworkRollbackOperation,
   buildNetworkSpeedTestOperation,
   buildNetworkStatusOperation,
   renderTunnelEndpointConfig,
-} from "../../topologyApply";
+} from "../../topologyNetworkJobs";
 import type {
   AgentView,
   CreateJobRequest,
@@ -39,9 +37,7 @@ import {
 } from "../jobDispatchModel";
 import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
 
-const ALL_PLANNED_SCOPE = "__all_planned__";
-
-export function TopologyApplyControls({
+export function TopologyNetworkTestControls({
   agents,
   onCreateJob,
   onLoadTargets,
@@ -76,35 +72,23 @@ export function TopologyApplyControls({
   const [speedRateLimitKbps, setSpeedRateLimitKbps] = useState(100_000);
   const [speedPort, setSpeedPort] = useState(5201);
   const [speedConnectTimeoutMs, setSpeedConnectTimeoutMs] = useState(5000);
-  const [forceUnprivileged, setForceUnprivileged] = useState(false);
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
-  const [lastAction, setLastAction] = useState<NetworkAction>("apply");
+  const [lastAction, setLastAction] = useState<NetworkAction>("status");
   const [networkSnapshot, setNetworkSnapshot] = useState<NetworkActionSnapshot | null>(null);
   const [jobProgress, setJobProgress] = useState<BulkJobProgress | null>(null);
   const [lastJobProgress, setLastJobProgress] = useState<BulkJobProgress | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [reviewPending, setReviewPending] = useState(false);
-  const plannedApplyPlans = useMemo(() => buildPlannedApplyPlans(tunnelPlans), [tunnelPlans]);
-  const bulkApplySelected = selectedPlanId === ALL_PLANNED_SCOPE;
-  const selectedPlan = bulkApplySelected
-    ? null
-    : (tunnelPlans.find((plan) => plan.id === selectedPlanId) ?? tunnelPlans[0] ?? null);
+  const selectedPlan = tunnelPlans.find((plan) => plan.id === selectedPlanId) ?? tunnelPlans[0] ?? null;
   const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
   const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
   const endpoint = useMemo(
     () => (selectedPlan ? renderTunnelEndpointConfig(selectedPlan.plan, side) : null),
     [selectedPlan, side],
   );
-  const mutationTargets = resolveAgentsById(
-    agents,
-    bulkApplySelected
-      ? uniqueClientIds(plannedApplyPlans.flatMap((candidate) => planClientIds(candidate.plan)))
-      : selectedPlan
-        ? planClientIds(selectedPlan)
-        : [],
-  );
+  const planTargets = resolveAgentsById(agents, selectedPlan ? planClientIds(selectedPlan) : []);
   const visibleJobProgress = jobProgress ?? lastJobProgress;
   const status =
     actionError ??
@@ -115,19 +99,10 @@ export function TopologyApplyControls({
       : lastJob
         ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
       : selectedPlan && !selectedPlan.enabled
-        ? "Plan disabled; inspect and rollback only"
+        ? "Plan disabled; inspect only"
       : privilegeMaterial
         ? "Ready"
         : "Locked");
-
-  function submitApply(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    void openNetworkPrompt("apply");
-  }
-
-  function submitRollback() {
-    void openNetworkPrompt("rollback");
-  }
 
   function submitStatus() {
     void openNetworkPrompt("status");
@@ -157,13 +132,10 @@ export function TopologyApplyControls({
         if (!privilegeMaterial) {
           throw new Error("Privilege unlock is locked");
         }
-        if (bulkApplySelected && mode !== "apply") {
-          throw new Error("All Unplanned is only available for apply");
-        }
-        if (!bulkApplySelected && (!selectedPlan || !endpoint)) {
+        if (!selectedPlan || !endpoint) {
           throw new Error("Select a tunnel plan");
         }
-        if (!bulkApplySelected && selectedPlan && !selectedPlan.enabled && !disabledPlanAllowsAction(mode)) {
+        if (!selectedPlan.enabled && mode !== "status") {
           throw new Error("Tunnel plan is disabled");
         }
         const boundedProbeCount = clampInteger(probeCount, 1, 20);
@@ -174,29 +146,24 @@ export function TopologyApplyControls({
         const boundedSpeedPort = clampInteger(speedPort, 1024, 65_535);
         const boundedSpeedConnectTimeoutMs = clampInteger(speedConnectTimeoutMs, 100, 30_000);
         const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
-        const boundedForceUnprivileged = isMutation(mode) ? forceUnprivileged : false;
         const buildSubmission = async (
           planRecord: TunnelPlanRecord,
           planSide: TunnelEndpointSide,
         ): Promise<NetworkJobSubmission> => {
           const builtOperation =
-            mode === "apply"
-              ? await buildNetworkApplyOperation(planRecord.plan, planSide)
-              : mode === "rollback"
-                ? buildNetworkRollbackOperation(planRecord.plan, planSide)
-                : mode === "status"
-                  ? buildNetworkStatusOperation(planRecord.plan, planSide)
-                  : mode === "probe"
-                    ? buildNetworkProbeOperation(planRecord.plan, planSide, boundedProbeCount, boundedProbeIntervalMs)
-                    : buildNetworkSpeedTestOperation(
-                        planRecord.plan,
-                        planSide,
-                        boundedSpeedDurationSecs,
-                        boundedSpeedMaxBytes,
-                        boundedSpeedRateLimitKbps,
-                        boundedSpeedPort,
-                        boundedSpeedConnectTimeoutMs,
-                      );
+            mode === "status"
+              ? buildNetworkStatusOperation(planRecord.plan, planSide)
+              : mode === "probe"
+                ? buildNetworkProbeOperation(planRecord.plan, planSide, boundedProbeCount, boundedProbeIntervalMs)
+                : buildNetworkSpeedTestOperation(
+                    planRecord.plan,
+                    planSide,
+                    boundedSpeedDurationSecs,
+                    boundedSpeedMaxBytes,
+                    boundedSpeedRateLimitKbps,
+                    boundedSpeedPort,
+                    boundedSpeedConnectTimeoutMs,
+                  );
           const targetClientIds =
             mode === "speed_test"
               ? [builtOperation.endpoint.localClientId, builtOperation.endpoint.peerClientId]
@@ -205,7 +172,7 @@ export function TopologyApplyControls({
           const builtPrivilege = await buildPrivilegeForJobOperation({
             clientIds: targetClientIds,
             commandType: commandName(mode),
-            forceUnprivileged: boundedForceUnprivileged,
+            forceUnprivileged: false,
             operation: builtOperation.operation,
             privilegeMaterial,
             selectorExpression,
@@ -214,8 +181,8 @@ export function TopologyApplyControls({
           return {
             command: commandName(mode),
             confirmed: requiresConfirmation(mode),
-            destructive: isMutation(mode),
-            forceUnprivileged: boundedForceUnprivileged,
+            destructive: false,
+            forceUnprivileged: false,
             jobId: crypto.randomUUID(),
             maxTimeoutSecs: boundedMaxTimeoutSecs,
             operation: builtOperation.operation,
@@ -228,21 +195,12 @@ export function TopologyApplyControls({
             targets: resolveAgentsById(agents, targetClientIds),
           };
         };
-        const submissionCandidates = bulkApplySelected
-          ? plannedApplyPlans.flatMap((candidate) => planEndpointSides(candidate.plan).map((planSide) => ({
-              plan: candidate.plan,
-              side: planSide,
-            })))
-          : selectedPlan && (mode === "apply" || mode === "rollback")
-            ? planEndpointSides(selectedPlan).map((planSide) => ({ plan: selectedPlan, side: planSide }))
-            : selectedPlan
-              ? [{ plan: selectedPlan, side }]
-              : [];
+        const submissionCandidates = selectedPlan ? [{ plan: selectedPlan, side }] : [];
         const submissions = await Promise.all(
           submissionCandidates.map((candidate) => buildSubmission(candidate.plan, candidate.side)),
         );
         if (!submissions.length) {
-          throw new Error("No unplanned tunnel plans are ready to apply");
+          throw new Error("No tunnel plan is ready for testing");
         }
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
@@ -251,23 +209,11 @@ export function TopologyApplyControls({
           agents,
           uniqueClientIds(submissions.flatMap((submission) => submission.targetClientIds)),
         );
-        const scopeLabel = bulkApplySelected
-          ? `All unplanned (${plannedApplyPlans.length})`
-          : mode === "apply" || mode === "rollback"
-            ? "Selected plan"
-            : "Selected endpoint";
-        const planLabel = bulkApplySelected
-          ? `${uniquePlanCount(submissions)} plans`
-          : submissions[0]?.planName ?? "unknown";
+        const scopeLabel = mode === "speed_test" ? "Selected plan endpoints" : "Selected endpoint";
+        const planLabel = submissions[0]?.planName ?? "unknown";
         setNetworkSnapshot({
           action: mode,
-          bulk: bulkApplySelected,
-          detail: bulkApplySelected
-            ? `Apply ${plannedApplyPlans.length} unplanned plans with ${submissions.length} endpoint jobs.`
-            : submissions.length > 1
-              ? `${actionLabel(mode)} ${submissions[0]?.planName ?? "selected plan"} on both endpoints.`
-            : `${actionLabel(mode)} ${submissions[0]?.planName ?? "selected plan"} on ${vpsCountLabel(snapshotTargets.length)}.`,
-          forceUnprivileged: boundedForceUnprivileged,
+          detail: `${actionLabel(mode)} ${submissions[0]?.planName ?? "selected plan"} on ${vpsCountLabel(snapshotTargets.length)}.`,
           items: [
             { label: "Operation", value: actionLabel(mode) },
             { label: "Scope", value: scopeLabel },
@@ -276,9 +222,6 @@ export function TopologyApplyControls({
             { label: "Endpoint", value: submissions.length > 1 ? "Both endpoints" : side },
             { label: "Max timeout", value: `${boundedMaxTimeoutSecs}s` },
             { label: "Privilege unlock", value: "Unlocked locally" },
-            ...(isMutation(mode)
-              ? [{ label: "Privilege", value: boundedForceUnprivileged ? "Forced best effort" : "Root required" }]
-              : []),
           ],
           submissions,
           targets: snapshotTargets,
@@ -354,33 +297,32 @@ export function TopologyApplyControls({
     <section className="fleetPanel commandComposer">
       <div className="sectionHeader">
         <div>
-          <h2>Network apply</h2>
+          <h2>Network tests</h2>
           <span>{status}</span>
         </div>
         <ShieldCheck size={20} />
       </div>
-      <form className="dispatchForm topologyApplyForm" onSubmit={submitApply}>
-        <div className="topologyApplyGroups">
+      <form className="dispatchForm topologyNetworkTestForm" onSubmit={(event) => event.preventDefault()}>
+        <div className="topologyNetworkTestGroups">
           <section
-            className="topologyApplyGroup"
-            title="Required for apply. Select one saved plan, or All Unplanned to apply every enabled plan with at least one endpoint still in planned status."
+            className="topologyNetworkTestGroup"
+            title="Select one saved plan for status, probe, or speed tests. Plan create/update/enable/disable applies tunnel config."
           >
-            <div className="topologyApplyGroupHeader">
-              <strong>Apply target</strong>
+            <div className="topologyNetworkTestGroupHeader">
+              <strong>Test target</strong>
               <small>Required</small>
             </div>
             <div className="dispatchControls">
               <label>
                 <span>Plan</span>
                 <select
-                  aria-label="Network apply plan"
+                  aria-label="Network test plan"
                   onChange={(event) => {
                     clearNetworkReview();
                     setSelectedPlanId(event.target.value);
                   }}
                   value={selectedPlanId}
                 >
-                  <option value={ALL_PLANNED_SCOPE}>All Unplanned ({plannedApplyPlans.length})</option>
                   {tunnelPlans.map((plan) => (
                     <option key={plan.id} value={plan.id}>
                       {plan.name}{plan.enabled ? "" : " (disabled)"}
@@ -391,7 +333,7 @@ export function TopologyApplyControls({
               <label title="Maximum wall-clock job runtime sent to the backend for each reviewed network job.">
                 <span>Max timeout</span>
                 <input
-                  aria-label="Network apply max timeout seconds"
+                  aria-label="Network test max timeout seconds"
                   max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
                   min={1}
                   onChange={(event) => {
@@ -403,14 +345,7 @@ export function TopologyApplyControls({
                 />
               </label>
             </div>
-            {bulkApplySelected ? (
-              <div className="operationNote compactTopologyNote">
-                <strong>All Unplanned ({plannedApplyPlans.length})</strong>
-                <span title="Agents apply with their configured network backend.">
-                  {plannedApplyPlans.length} plans / {vpsCountLabel(mutationTargets.length)}
-                </span>
-              </div>
-            ) : endpoint ? (
+            {endpoint ? (
               <div className="operationNote compactTopologyNote">
                 <strong>{selectedPlan?.name ?? "Selected plan"}</strong>
                 <span title={agentBackendHint(agents, selectedPlan)}>
@@ -419,63 +354,14 @@ export function TopologyApplyControls({
               </div>
             ) : null}
             <TargetImpactPreview
-              forceUnprivileged={forceUnprivileged}
-              mode="root_network_mutation"
-              targets={mutationTargets}
-              title="Network mutation impact"
+              mode="generic"
+              targets={planTargets}
+              title="Plan endpoint visibility"
             />
-            <label
-              className="checkLine"
-              title="Try the apply or rollback as the agent user instead of requiring root privilege. Host changes may fail depending on local permissions."
-            >
-              <input
-                aria-label="Force unprivileged network best effort"
-                checked={forceUnprivileged}
-                onChange={(event) => {
-                  clearNetworkReview();
-                  setForceUnprivileged(event.target.checked);
-                }}
-                type="checkbox"
-              />
-              <span>Unprivileged</span>
-            </label>
           </section>
 
-          <section className="topologyApplyGroup" title="Mutating network actions. All Unplanned is apply-only.">
-            <div className="topologyApplyGroupHeader">
-              <strong>Mutations</strong>
-              <small>Mutating</small>
-            </div>
-            <div className="topologyApplyActionRow">
-              <button
-                className="primaryAction"
-                disabled={
-                  pending ||
-                  networkSnapshot !== null ||
-                  !privilegeMaterial ||
-                  (bulkApplySelected
-                    ? plannedApplyPlans.length === 0
-                    : !selectedPlan || !endpoint || !selectedPlan.enabled)
-                }
-                type="submit"
-              >
-                <Play size={17} />
-                Review apply
-              </button>
-              <button
-                className="secondaryAction"
-                disabled={pending || networkSnapshot !== null || bulkApplySelected || !selectedPlan || !endpoint || !privilegeMaterial}
-                onClick={submitRollback}
-                type="button"
-              >
-                <RotateCcw size={17} />
-                Review rollback
-              </button>
-            </div>
-          </section>
-
-          <section className="topologyApplyGroup" title="Read-only checks for one selected endpoint side.">
-            <div className="topologyApplyGroupHeader">
+          <section className="topologyNetworkTestGroup" title="Read-only checks for one selected endpoint side.">
+            <div className="topologyNetworkTestGroupHeader">
               <strong>Checks</strong>
               <small>Single endpoint</small>
             </div>
@@ -483,8 +369,7 @@ export function TopologyApplyControls({
               <label title="Single-endpoint checks run from this side of the selected plan.">
                 <span>Endpoint</span>
                 <select
-                  aria-label="Network apply endpoint side"
-                  disabled={bulkApplySelected}
+                  aria-label="Network test endpoint side"
                   onChange={(event) => {
                     clearNetworkReview();
                     setSide(event.target.value as TunnelEndpointSide);
@@ -524,10 +409,10 @@ export function TopologyApplyControls({
                 />
               </label>
             </div>
-            <div className="topologyApplyActionRow">
+            <div className="topologyNetworkTestActionRow">
               <button
                 className="secondaryAction"
-                disabled={pending || networkSnapshot !== null || bulkApplySelected || !selectedPlan || !endpoint || !privilegeMaterial}
+                disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial}
                 onClick={submitStatus}
                 type="button"
               >
@@ -539,7 +424,6 @@ export function TopologyApplyControls({
                 disabled={
                   pending ||
                   networkSnapshot !== null ||
-                  bulkApplySelected ||
                   !selectedPlan ||
                   !endpoint ||
                   !privilegeMaterial ||
@@ -555,10 +439,10 @@ export function TopologyApplyControls({
           </section>
 
           <section
-            className="topologyApplyGroup"
+            className="topologyNetworkTestGroup"
             title="Speed tests are single-endpoint jobs and always require byte and rate safety caps."
           >
-            <div className="topologyApplyGroupHeader">
+            <div className="topologyNetworkTestGroupHeader">
               <strong>Speed test</strong>
               <small>Safety capped</small>
             </div>
@@ -634,13 +518,12 @@ export function TopologyApplyControls({
                 />
               </label>
             </div>
-            <div className="topologyApplyActionRow">
+            <div className="topologyNetworkTestActionRow">
               <button
                 className="secondaryAction"
                 disabled={
                   pending ||
                   networkSnapshot !== null ||
-                  bulkApplySelected ||
                   !selectedPlan ||
                   !endpoint ||
                   !privilegeMaterial ||
@@ -656,13 +539,7 @@ export function TopologyApplyControls({
           </section>
         </div>
         <ConfirmationPrompt
-          confirmLabel={
-            networkSnapshot
-              ? networkSnapshot.bulk
-                ? "Apply all"
-                : actionConfirmLabel(networkSnapshot.action)
-              : "Run"
-          }
+          confirmLabel={networkSnapshot ? actionConfirmLabel(networkSnapshot.action) : "Run"}
           detail={networkSnapshot?.detail ?? ""}
           expiresAtUnix={networkSnapshot ? minSubmissionExpiry(networkSnapshot.submissions) : undefined}
           items={networkSnapshot?.items ?? []}
@@ -671,7 +548,7 @@ export function TopologyApplyControls({
           open={networkSnapshot !== null}
           pending={pending}
           title={networkSnapshot ? `Confirm ${actionLabel(networkSnapshot.action).toLowerCase()}` : "Confirm network action"}
-          tone={networkSnapshot && isMutation(networkSnapshot.action) ? "danger" : "normal"}
+          tone="normal"
         />
         {visibleJobProgress && (
           <ExecutionResultPanel
@@ -695,11 +572,7 @@ export function TopologyApplyControls({
   );
 }
 
-type NetworkAction = "apply" | "rollback" | "status" | "probe" | "speed_test";
-
-type PlannedApplyPlan = {
-  plan: TunnelPlanRecord;
-};
+type NetworkAction = "status" | "probe" | "speed_test";
 
 type NetworkJobSubmission = {
   command: string;
@@ -720,25 +593,13 @@ type NetworkJobSubmission = {
 
 type NetworkActionSnapshot = {
   action: NetworkAction;
-  bulk: boolean;
   detail: string;
-  forceUnprivileged: boolean;
   items: Array<{ label: string; value: string }>;
   submissions: NetworkJobSubmission[];
   targets: AgentView[];
 };
 
-function disabledPlanAllowsAction(mode: NetworkAction): boolean {
-  return mode === "rollback" || mode === "status";
-}
-
 function commandName(mode: NetworkAction) {
-  if (mode === "apply") {
-    return "network_apply";
-  }
-  if (mode === "rollback") {
-    return "network_rollback";
-  }
   if (mode === "probe") {
     return "network_probe";
   }
@@ -749,12 +610,6 @@ function commandName(mode: NetworkAction) {
 }
 
 function actionLabel(mode: NetworkAction) {
-  if (mode === "apply") {
-    return "Apply";
-  }
-  if (mode === "rollback") {
-    return "Rollback";
-  }
   if (mode === "probe") {
     return "Probe";
   }
@@ -765,12 +620,6 @@ function actionLabel(mode: NetworkAction) {
 }
 
 function actionConfirmLabel(mode: NetworkAction): string {
-  if (mode === "apply") {
-    return "Apply plan";
-  }
-  if (mode === "rollback") {
-    return "Rollback plan";
-  }
   if (mode === "probe") {
     return "Probe latency";
   }
@@ -780,30 +629,16 @@ function actionConfirmLabel(mode: NetworkAction): string {
   return "Inspect side";
 }
 
-function isMutation(mode: NetworkAction) {
-  return mode === "apply" || mode === "rollback";
-}
-
 function requiresConfirmation(mode: NetworkAction) {
-  return isMutation(mode) || mode === "speed_test";
+  return mode === "speed_test";
 }
 
 function vpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
 }
 
-function buildPlannedApplyPlans(tunnelPlans: TunnelPlanRecord[]): PlannedApplyPlan[] {
-  return tunnelPlans
-    .filter((plan) => plan.enabled && (plan.left_status === "planned" || plan.right_status === "planned"))
-    .map((plan) => ({ plan }));
-}
-
 function uniqueClientIds(clientIds: string[]): string[] {
   return Array.from(new Set(clientIds));
-}
-
-function uniquePlanCount(submissions: NetworkJobSubmission[]): number {
-  return new Set(submissions.map((submission) => submission.planName)).size;
 }
 
 function minSubmissionExpiry(submissions: NetworkJobSubmission[]): number | undefined {
@@ -815,10 +650,6 @@ function minSubmissionExpiry(submissions: NetworkJobSubmission[]): number | unde
 
 function planClientIds(plan: TunnelPlanRecord): string[] {
   return [plan.left_client_id, plan.right_client_id];
-}
-
-function planEndpointSides(_plan: TunnelPlanRecord): TunnelEndpointSide[] {
-  return ["left", "right"];
 }
 
 function agentBackendHint(agents: AgentView[], plan: TunnelPlanRecord | null): string {

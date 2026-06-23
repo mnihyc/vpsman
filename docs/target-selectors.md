@@ -1,7 +1,7 @@
 # Target Selectors
 
 `vpsman` target selectors are expression strings used for target previews,
-bulk resolution, tag mutation, source template assignment, and expression webhook
+bulk resolution, tag mutation, template assignment, and expression webhook
 rules. Jobs and schedules store the concrete VPS IDs resolved during CLI preview
 or browser confirmation; their `selector_expression` is optional audit context,
 not dispatch authority. It is retained for operator review and for an explicit

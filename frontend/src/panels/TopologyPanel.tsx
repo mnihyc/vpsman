@@ -24,7 +24,8 @@ import {
   telemetryReasonLabel,
   telemetrySourceLabel,
 } from "../topologyRuntime";
-import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../privilege";
+import { buildPrivilegeAssertion, canonicalDbPrivilegeIntent, type PrivilegeMaterial } from "../privilege";
+import { sha256Hex } from "../fileTransfer";
 import { selectorExpressionForClientIds } from "../searchExpression";
 import type {
   AgentView,
@@ -44,6 +45,8 @@ import type {
   OperatorPreferences,
   PromoteTelemetryTunnelRequest,
   RuntimeTunnelManager,
+  RuntimeConfigPatchRequest,
+  RuntimeConfigPatchResponse,
   TelemetryTunnelRecord,
   TunnelAddressFamily,
   TunnelAddressPair,
@@ -51,6 +54,7 @@ import type {
   TunnelKind,
   TunnelPlan,
   TunnelPlanRecord,
+  UpdateTunnelPlanOspfCostRequest,
 } from "../types";
 import type { PromoteTunnelPlanToCustomAdapterRequest } from "../typesTopology";
 import {
@@ -60,7 +64,7 @@ import {
   runPanelAction,
   shortId,
 } from "../utils";
-import { TopologyApplyControls } from "./topology/TopologyApplyControls";
+import { TopologyNetworkTestControls } from "./topology/TopologyNetworkTestControls";
 import { TopologyEvidencePanel } from "./topology/TopologyEvidencePanel";
 import { TopologyGraphPanel } from "./topology/TopologyGraphPanel";
 import { TopologyOspfUpdateControls } from "./topology/TopologyOspfUpdateControls";
@@ -111,7 +115,9 @@ export function TopologyPanel({
   onPromoteTelemetryTunnel,
   onPromoteTunnelPlanToCustomAdapter,
   onRefresh,
+  onSubmitRuntimeConfigPatch,
   onSetTunnelPlanEnabled,
+  onUpdateTunnelPlanOspfCost,
   privilegeMaterial,
   setPrivilegeMaterial,
   telemetryTunnels,
@@ -144,7 +150,9 @@ export function TopologyPanel({
   onPromoteTelemetryTunnel: (request: PromoteTelemetryTunnelRequest) => Promise<void>;
   onPromoteTunnelPlanToCustomAdapter: (request: PromoteTunnelPlanToCustomAdapterRequest) => Promise<void>;
   onRefresh: () => Promise<void>;
+  onSubmitRuntimeConfigPatch: (request: RuntimeConfigPatchRequest) => Promise<RuntimeConfigPatchResponse>;
   onSetTunnelPlanEnabled: (planIds: string[], enabled: boolean) => Promise<void>;
+  onUpdateTunnelPlanOspfCost: (planId: string, request: UpdateTunnelPlanOspfCostRequest) => Promise<void>;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   telemetryTunnels: TelemetryTunnelRecord[];
@@ -570,6 +578,10 @@ export function TopologyPanel({
         error={actionError}
         items={[
           { label: "Name", value: tunnelPlanSaveSnapshot?.request.name ?? "-" },
+          {
+            label: "Status",
+            value: tunnelPlanSaveSnapshot?.request.enabled ? "Enabled" : "Disabled",
+          },
           { label: "Kind", value: tunnelPlanSaveSnapshot?.request.kind ?? "-" },
           {
             label: "Endpoints",
@@ -582,6 +594,10 @@ export function TopologyPanel({
             value: tunnelPlanSaveSnapshot
               ? runtimeManagerLabel(tunnelPlanSaveSnapshot.request.runtime_control?.manager)
               : "-",
+          },
+          {
+            label: "Sync",
+            value: tunnelPlanSaveSnapshot?.request.enabled ? "Now" : "Deferred",
           },
         ]}
         onCancel={() => setTunnelPlanSaveSnapshot(null)}
@@ -596,7 +612,7 @@ export function TopologyPanel({
       />
       <ConfirmationPrompt
         confirmLabel={tunnelPlanToggleSnapshot?.enabled ? "Enable plans" : "Disable plans"}
-        detail="Apply the reviewed lifecycle change to the selected tunnel plans."
+        detail="Confirm the reviewed lifecycle change and push runtime config to the affected agents."
         error={actionError}
         items={[
           { label: "Action", value: tunnelPlanToggleSnapshot?.enabled ? "Enable" : "Disable" },
@@ -654,14 +670,15 @@ export function TopologyPanel({
         <div className="sectionHeader">
           <div>
             <h2>Create tunnel plan</h2>
-            <span>Observe-plan only; no host mutation</span>
           </div>
           <GitBranch size={20} />
         </div>
-        <form className="dispatchForm" onSubmit={submitPlan}>
-          <div className="operationNote formSectionNote">
+        <form className="dispatchForm topologyPlanForm" onSubmit={submitPlan}>
+          <div
+            className="operationNote formSectionNote"
+            title="Name the intended tunnel and choose the link type before selecting endpoints."
+          >
             <strong>Plan identity</strong>
-            <span>Name the intended tunnel and choose the link type before selecting endpoints.</span>
           </div>
           <div className="dispatchControls">
             <label>
@@ -675,8 +692,6 @@ export function TopologyPanel({
                 onChange={(event) => setField("interface_name", event.target.value)}
               />
             </label>
-          </div>
-          <div className="dispatchControls">
             <label>
               <span>Kind</span>
               <select value={form.kind} onChange={(event) => setField("kind", event.target.value as TunnelKind)}>
@@ -700,10 +715,24 @@ export function TopologyPanel({
                 ))}
               </select>
             </label>
+            <div className="topologyLifecycleField">
+              <span>Status</span>
+              <label className="checkLine inlineCheck topologyLifecycleToggle">
+                <input
+                  aria-label="Plan enabled"
+                  checked={form.enabled}
+                  onChange={(event) => setField("enabled", event.target.checked)}
+                  type="checkbox"
+                />
+                <span>{form.enabled ? "Enabled" : "Disabled"}</span>
+              </label>
+            </div>
           </div>
-          <div className="operationNote formSectionNote">
-            <strong>Endpoints and address plan</strong>
-            <span>Pair exactly two VPSs, provide underlays, then enter or generate explicit tunnel endpoints.</span>
+          <div
+            className="operationNote formSectionNote"
+            title="Pair exactly two VPSs, provide underlays, then enter or generate explicit tunnel endpoints."
+          >
+            <strong>Endpoints</strong>
           </div>
           <div className="dispatchControls">
             <label>
@@ -840,9 +869,11 @@ export function TopologyPanel({
               />
             </label>
           </div>
-          <div className="operationNote formSectionNote">
-            <strong>Runtime ownership and traffic limits</strong>
-            <span>Choose whether the agent owns the tunnel, observes it externally, or delegates lifecycle commands to a custom adapter.</span>
+          <div
+            className="operationNote formSectionNote"
+            title="Choose whether the agent owns the tunnel, observes it externally, or delegates lifecycle commands to a custom adapter."
+          >
+            <strong>Runtime</strong>
           </div>
           <div className="dispatchControls">
             <label>
@@ -863,16 +894,14 @@ export function TopologyPanel({
                 ))}
               </select>
             </label>
-          </div>
-          <label className="checkLine">
-            <input
-              checked={trafficLimitEnabled}
-              onChange={(event) => setTrafficLimitEnabled(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Enable traffic shaping</span>
-          </label>
-          <div className="dispatchControls">
+            <label className="checkLine inlineCheck topologyLifecycleToggle">
+              <input
+                checked={trafficLimitEnabled}
+                onChange={(event) => setTrafficLimitEnabled(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Traffic shaping</span>
+            </label>
             <label>
               <span>Egress Kbps</span>
               <input
@@ -961,30 +990,30 @@ export function TopologyPanel({
               </label>
             </>
           )}
-          <div className="operationNote formSectionNote">
-            <strong>Topology evidence</strong>
-            <span>Optional desired/stale interface and route evidence helps later promotion and drift review.</span>
-          </div>
-          <div className="dispatchControls">
-            <label>
-              <span>Desired interfaces</span>
-              <input value={topologyDesiredText} onChange={(event) => setTopologyDesiredText(event.target.value)} />
-            </label>
-            <label>
-              <span>Stale interfaces</span>
-              <input value={topologyStaleText} onChange={(event) => setTopologyStaleText(event.target.value)} />
-            </label>
-          </div>
-          <div className="dispatchControls">
-            <label>
-              <span>Routes</span>
-              <textarea value={topologyRoutesText} onChange={(event) => setTopologyRoutesText(event.target.value)} />
-            </label>
-            <label>
-              <span>Stale routes</span>
-              <textarea value={topologyStaleRoutesText} onChange={(event) => setTopologyStaleRoutesText(event.target.value)} />
-            </label>
-          </div>
+          <details
+            className="operationNote formSectionNote topologyEvidenceDisclosure"
+            title="Optional desired/stale interface and route evidence helps later promotion and drift review."
+          >
+            <summary>Topology evidence</summary>
+            <div className="dispatchControls">
+              <label>
+                <span>Desired interfaces</span>
+                <input value={topologyDesiredText} onChange={(event) => setTopologyDesiredText(event.target.value)} />
+              </label>
+              <label>
+                <span>Stale interfaces</span>
+                <input value={topologyStaleText} onChange={(event) => setTopologyStaleText(event.target.value)} />
+              </label>
+              <label>
+                <span>Routes</span>
+                <textarea value={topologyRoutesText} onChange={(event) => setTopologyRoutesText(event.target.value)} />
+              </label>
+              <label>
+                <span>Stale routes</span>
+                <textarea value={topologyStaleRoutesText} onChange={(event) => setTopologyStaleRoutesText(event.target.value)} />
+              </label>
+            </div>
+          </details>
           <button className="primaryAction" disabled={pending || !ready} type="submit">
             <Save size={17} />
             Save plan
@@ -1005,7 +1034,7 @@ export function TopologyPanel({
       )}
 
       {topologySubpage === "apply" && tunnelPlans.length > 0 && (
-        <TopologyApplyControls
+        <TopologyNetworkTestControls
           agents={agents}
           onCreateJob={onCreateJob}
           onLoadTargets={onLoadTargets}
@@ -1023,14 +1052,9 @@ export function TopologyPanel({
           </section>
           <TopologyOspfUpdateControls
             agents={agents}
-            onCreateJob={onCreateJob}
-            onLoadTargets={onLoadTargets}
-            onOpenJobDetails={onOpenJobDetails}
-            onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
             ospfUpdatePlans={ospfUpdatePlans}
-            privilegeMaterial={privilegeMaterial}
-            setPrivilegeMaterial={setPrivilegeMaterial}
             tunnelPlans={tunnelPlans}
+            onUpdateTunnelPlanOspfCost={onUpdateTunnelPlanOspfCost}
           />
         </>
       )}
@@ -1138,41 +1162,32 @@ export function TopologyPanel({
       return;
     }
     await runPanelAction(setAutomationBulkPending, setAutomationBulkStatus, async () => {
-      let submitted = 0;
-      for (const target of targets) {
-        const toml = buildMonitoringConfigPatchToml(target.clientId, tunnelPlans, enabled);
-        const operation = {
-          type: "source_config_patch" as const,
-          apply_mode: "incremental_patch" as const,
-          toml,
-        };
-        const selectorExpression = selectorExpressionForClientIds([target.clientId]);
-        const maxTimeoutSecs = 120;
-        const builtPrivilege = await buildPrivilegeForJobOperation({
-          clientIds: [target.clientId],
-          commandType: "source_config_patch",
-          operation,
-          privilegeMaterial,
+      const targetClientIds = targets.map((target) => target.clientId);
+      const selectorExpression = selectorExpressionForClientIds(targetClientIds);
+      const toml = buildMonitoringConfigPatchToml(enabled);
+      const payloadHash = await sha256Hex(new TextEncoder().encode(toml));
+      const privilegeAssertion = await buildPrivilegeAssertion({
+        intent: canonicalDbPrivilegeIntent({
+          action: "runtime_config.patch",
+          target: "runtime_config",
           selectorExpression,
-          maxTimeoutSecs,
-        });
-        await onCreateJob({
-          argv: [],
-          command: "source_config_patch",
+          resolvedTargets: targetClientIds,
           confirmed: true,
-          destructive: true,
-          force_unprivileged: false,
-          job_id: crypto.randomUUID(),
-          operation,
-          privileged: true,
-          privilege_assertion: builtPrivilege.privilegeAssertion,
-          selector_expression: selectorExpression,
-          target_client_ids: [target.clientId],
-          max_timeout_secs: maxTimeoutSecs,
-        });
-        submitted += 1;
-      }
-      setAutomationBulkStatus(`${enabled ? "Enabled" : "Disabled"} monitoring on ${submitted} VPSs`);
+          payloadHash,
+        }),
+        privilegeMaterial,
+      });
+      const response = await onSubmitRuntimeConfigPatch({
+        confirmed: true,
+        reason: enabled ? "Enable tunnel monitoring defaults" : "Disable tunnel monitoring defaults",
+        selector_expression: selectorExpression,
+        target_client_ids: targetClientIds,
+        toml,
+        privilege_assertion: privilegeAssertion,
+      });
+      setAutomationBulkStatus(
+        `${enabled ? "Enabled" : "Disabled"} monitoring defaults on ${response.target_count} VPSs; ${response.sync_job_ids.length} sync jobs`,
+      );
     });
   }
 }
@@ -1283,6 +1298,7 @@ function initialTunnelPlanForm(preferences: OperatorPreferences): CreateTunnelPl
     latency_ms: 20,
     packet_loss_ratio: 0,
     preference: 1,
+    enabled: false,
     confirmed: false,
   };
 }
@@ -1320,44 +1336,12 @@ function completePairOrNull(pair: TunnelAddressPair | null): TunnelAddressPair |
   return pair;
 }
 
-function buildMonitoringConfigPatchToml(clientId: string, tunnelPlans: TunnelPlanRecord[], enabled: boolean): string {
-  const telemetryPlans = tunnelPlans.flatMap((record) => {
-    if (!record.enabled) {
-      return [];
-    }
-    const entries = [];
-    if (record.plan.left_client_id === clientId) {
-      entries.push({
-        plan_id: record.id,
-        endpoint_side: "left",
-        plan: record.plan,
-        latency_monitoring_enabled: enabled,
-        auto_ospf_enabled: enabled,
-      });
-    }
-    if (record.plan.right_client_id === clientId) {
-      entries.push({
-        plan_id: record.id,
-        endpoint_side: "right",
-        plan: record.plan,
-        latency_monitoring_enabled: enabled,
-        auto_ospf_enabled: enabled,
-      });
-    }
-    return entries;
-  });
-  if (telemetryPlans.length === 0) {
-    throw new Error("Selected VPS has no saved tunnel endpoints");
-  }
-  if (telemetryPlans.length > 16) {
-    throw new Error(`${clientId} has ${telemetryPlans.length} tunnel endpoints; agent telemetry config supports 16`);
-  }
+function buildMonitoringConfigPatchToml(enabled: boolean): string {
   return tomlDocument({
     network: {
       runtime_status_telemetry_enabled: true,
       latency_monitoring_enabled: enabled,
       auto_ospf_enabled: enabled,
-      runtime_status_telemetry_plans: telemetryPlans,
     },
   });
 }

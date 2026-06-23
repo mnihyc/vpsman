@@ -49,7 +49,7 @@ export function getHeroTitle(view: ActiveView): string {
     case "Fleet":
       return "Fleet overview";
     case "Config":
-      return "Agent config";
+      return "Runtime config";
     case "Jobs":
       return "Job history";
     case "Schedules":
@@ -72,7 +72,7 @@ export function getHeroCopy(view: ActiveView): string {
     case "Schedules":
       return "Server-side schedule registry and due-run records";
     case "Config":
-      return "Agent config patches, source templates, and guarded full overrides";
+      return "Runtime config patches, persistent templates, and guarded per-VPS reads";
     case "Audit":
       return "Operator and security events from the control plane";
     case "Tags":

@@ -1,6 +1,6 @@
-# Tutorial 05: Source Templates
+# Tutorial 05: Templates
 
-Source templates are the business model for heterogeneous VPS fleets. A VPS
+Templates are the business model for heterogeneous VPS fleets. A VPS
 selects a template for each source domain instead of forcing commands directly
 into every workflow.
 
@@ -66,17 +66,15 @@ cargo run -p vpsctl -- source-template-assign \
   --confirmed
 ```
 
-Render the selected incremental config patch for a VPS:
+Render the selected runtime config for a VPS:
 
 ```sh
-cargo run -p vpsctl -- source-config-patch --client-id edge-01
+cargo run -p vpsctl -- template-runtime-config --client-id edge-01 --format toml
 ```
 
-Apply source template config through a privileged incremental patch:
-
-```sh
-cargo run -p vpsctl -- source-config-patch-apply --client-id edge-01 --confirmed
-```
+Template assignment and template updates are the apply action. After
+confirmation, the API recomposes affected VPS runtime config and pushes visible
+`runtime_config_sync` jobs.
 
 ## Read Active Source Status
 
@@ -131,7 +129,7 @@ cargo run -p vpsctl -- source-template-update \
 ## Operator Rules
 
 - Do not hardcode `/proc`, `/sys`, `vnstat`, `ping`, `birdc`, `ip`, or `tc`
-  assumptions into workflows. Put them in templates or agent config.
+  assumptions into workflows. Put them in templates or server runtime config.
 - Prefer shared templates for provider families and VPS-local templates for one-off
   images.
 - Keep defaults cheap for 1-core, 256MB VPSs. Use custom commands only when

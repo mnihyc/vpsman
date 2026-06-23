@@ -3,7 +3,7 @@ use super::*;
 use axum::{extract::State, http::StatusCode, Json};
 use tokio::sync::broadcast;
 use vpsman_common::{
-    BandwidthTier, OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl,
+    AgentHello, BandwidthTier, OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl,
     RuntimeTunnelManager, RuntimeTunnelTopologyIntent, TunnelKind, TunnelPlanInput,
 };
 
@@ -77,6 +77,42 @@ async fn promote_observed_tunnel_plan_to_external_adapter_preserves_plan_id() {
 }
 
 #[tokio::test]
+async fn promote_disabled_tunnel_plan_to_custom_adapter_does_not_sync_runtime_config() {
+    let repo = Repository::Memory(MemoryState::default());
+    let observed = create_observed_plan_with_enabled(
+        &repo,
+        "disabled-observed-wg",
+        "wg52",
+        TunnelKind::Wireguard,
+        false,
+    )
+    .await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+
+    let Json(promoted) = crate::routes_network::promote_tunnel_plan_to_custom_adapter(
+        State(state),
+        headers,
+        Json(PromoteTunnelPlanToCustomAdapterRequest {
+            plan_id: observed.id,
+            runtime_control: full_adapter_control("/usr/local/libexec/wg-adapter"),
+            runtime_topology: None,
+            name: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(!promoted.enabled);
+    assert_eq!(
+        promoted.plan.runtime_control.manager,
+        RuntimeTunnelManager::ExternalManagedAdapter
+    );
+    assert!(repo.list_jobs(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn promote_tunnel_plan_to_custom_adapter_requires_confirmation_and_status_command() {
     let repo = Repository::Memory(MemoryState::default());
     let observed =
@@ -123,6 +159,20 @@ async fn create_observed_plan(
     interface_name: &str,
     kind: TunnelKind,
 ) -> TunnelPlanView {
+    create_observed_plan_with_enabled(repo, name, interface_name, kind, true).await
+}
+
+async fn create_observed_plan_with_enabled(
+    repo: &Repository,
+    name: &str,
+    interface_name: &str,
+    kind: TunnelKind,
+    enabled: bool,
+) -> TunnelPlanView {
+    if let Repository::Memory(memory) = repo {
+        seed_test_agent(memory, "client-a").await;
+        seed_test_agent(memory, "client-b").await;
+    }
     let mut input = test_plan_input(name, interface_name, kind);
     input.runtime_control = RuntimeTunnelControl {
         manager: RuntimeTunnelManager::ExternalObserved,
@@ -140,6 +190,7 @@ async fn create_observed_plan(
         headers,
         Json(CreateTunnelPlanRequest {
             input,
+            enabled,
             confirmed: true,
         }),
     )
@@ -149,11 +200,47 @@ async fn create_observed_plan(
     observed
 }
 
+async fn seed_test_agent(memory: &MemoryState, client_id: &str) {
+    upsert_memory_agent(
+        &memory.agents,
+        &AgentHello {
+            client_id: client_id.to_string(),
+            process_incarnation_id: uuid::Uuid::new_v4(),
+            agent_version: "test".to_string(),
+            os_release: "test".to_string(),
+            arch: "x86_64".to_string(),
+            update_heartbeat: None,
+            internal_build_number: 1,
+            capabilities: Default::default(),
+        },
+    )
+    .await;
+}
+
 fn startup_only_adapter_control() -> RuntimeTunnelControl {
     RuntimeTunnelControl {
         manager: RuntimeTunnelManager::ExternalManagedAdapter,
         startup: Some(RuntimeTunnelCommand {
             argv: vec!["/usr/local/libexec/openvpn-adapter".to_string()],
+            ..RuntimeTunnelCommand::default()
+        }),
+        ..RuntimeTunnelControl::default()
+    }
+}
+
+fn full_adapter_control(binary: &str) -> RuntimeTunnelControl {
+    RuntimeTunnelControl {
+        manager: RuntimeTunnelManager::ExternalManagedAdapter,
+        startup: Some(RuntimeTunnelCommand {
+            argv: vec![binary.to_string(), "start".to_string()],
+            ..RuntimeTunnelCommand::default()
+        }),
+        cleanup: Some(RuntimeTunnelCommand {
+            argv: vec![binary.to_string(), "cleanup".to_string()],
+            ..RuntimeTunnelCommand::default()
+        }),
+        status: Some(RuntimeTunnelCommand {
+            argv: vec![binary.to_string(), "status".to_string()],
             ..RuntimeTunnelCommand::default()
         }),
         ..RuntimeTunnelControl::default()

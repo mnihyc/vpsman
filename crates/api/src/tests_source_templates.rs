@@ -230,7 +230,7 @@ async fn curated_builtin_source_templates_are_selectable_not_default() {
         .unwrap();
     }
 
-    let rendered = repo.render_source_config_patch("edge-a").await.unwrap();
+    let rendered = repo.render_template_runtime_config("edge-a").await.unwrap();
     for (_, _, expected) in assignments {
         assert!(
             rendered.toml.contains(expected),
@@ -501,7 +501,7 @@ async fn vps_local_source_template_only_assigns_to_owner() {
 }
 
 #[tokio::test]
-async fn source_config_patch_renders_selected_templates() {
+async fn template_runtime_config_renders_selected_templates() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
@@ -624,7 +624,7 @@ async fn source_config_patch_renders_selected_templates() {
         .unwrap();
     }
 
-    let rendered = repo.render_source_config_patch("edge-a").await.unwrap();
+    let rendered = repo.render_template_runtime_config("edge-a").await.unwrap();
     assert_eq!(rendered.client_id, "edge-a");
     assert!(rendered.toml.contains("[telemetry]"));
     assert!(rendered
@@ -667,7 +667,7 @@ async fn source_config_patch_renders_selected_templates() {
 }
 
 #[tokio::test]
-async fn source_config_patch_rejects_unsafe_migrated_template_commands() {
+async fn template_runtime_config_rejects_unsafe_migrated_template_commands() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         upsert_memory_agent(
@@ -719,7 +719,10 @@ async fn source_config_patch_rejects_unsafe_migrated_template_commands() {
             });
     }
 
-    let error = repo.render_source_config_patch("edge-a").await.unwrap_err();
+    let error = repo
+        .render_template_runtime_config("edge-a")
+        .await
+        .unwrap_err();
     assert!(error
         .to_string()
         .contains("shell_script_argv_executable_must_be_absolute"));
@@ -1108,7 +1111,7 @@ async fn source_status_enriches_backup_and_update_runtime_readiness() {
         ospf_policy: OspfCostPolicy::default(),
     };
     let tunnel_plan = plan_tunnel(&tunnel_input).unwrap();
-    repo.record_tunnel_plan(&tunnel_input, &tunnel_plan, &memory_admin())
+    repo.record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &memory_admin())
         .await
         .unwrap();
     let observation_job = Uuid::new_v4();

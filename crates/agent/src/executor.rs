@@ -105,6 +105,9 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
 ) -> Result<Vec<CommandOutput>> {
     cancel_token.check(job_command_type_label(command))?;
     match command {
+        JobCommand::RuntimeConfigSync { .. } => {
+            anyhow::bail!("runtime config sync must run on the main agent task")
+        }
         JobCommand::Shell { argv, pty } => {
             execute_shell_command(
                 config,
@@ -432,14 +435,9 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             .await
         }
         JobCommand::ConfigRead
-        | JobCommand::HotConfig { .. }
-        | JobCommand::SourceConfigPatch { .. }
         | JobCommand::Backup { .. }
         | JobCommand::Restore { .. }
         | JobCommand::RestoreRollback { .. }
-        | JobCommand::NetworkApply { .. }
-        | JobCommand::NetworkOspfCostUpdate { .. }
-        | JobCommand::NetworkRollback { .. }
         | JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkProbe { .. }
         | JobCommand::NetworkSpeedTest { .. } => {

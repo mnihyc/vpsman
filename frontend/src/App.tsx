@@ -280,8 +280,8 @@ export function App() {
                 onOpenJobDispatchPreset={openJobDispatchPreset}
                 onOpenJobDetails={openJobDetails}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
-                onRenderSourceConfigPatch={
-                  dashboard.renderSourceConfigPatch
+                onRenderTemplateRuntimeConfig={
+                  dashboard.renderTemplateRuntimeConfig
                 }
                 onSelectAgent={setSelectedAgentId}
                 onUpdateAgentAlias={dashboard.updateAgentAlias}
@@ -330,34 +330,35 @@ export function App() {
                 sourceTemplates={dashboard.sourceTemplates}
                 sourceStatus={dashboard.sourceStatus}
                 error={dashboard.tagsError}
-                hotConfigPatchGenerators={dashboard.hotConfigPatchGenerators}
+                runtimeConfigPatchGenerators={dashboard.runtimeConfigPatchGenerators}
                 jobs={dashboard.jobs}
                 loading={dashboard.tagsLoading}
                 onAssignSourceTemplate={dashboard.assignSourceTemplate}
+                onSubmitRuntimeConfigPatch={dashboard.submitRuntimeConfigPatch}
                 onCloneSourceTemplate={dashboard.cloneSourceTemplate}
                 onCreateJob={dashboard.createJob}
                 onCreateSourceTemplate={dashboard.createSourceTemplate}
                 onDiffSourceTemplate={dashboard.diffSourceTemplate}
                 onLoadJobOutputs={dashboard.loadJobOutputs}
                 onLoadJobTargets={dashboard.loadJobTargets}
-                onDeleteHotConfigPatchGenerator={
-                  dashboard.deleteHotConfigPatchGenerator
+                onDeleteRuntimeConfigPatchGenerator={
+                  dashboard.deleteRuntimeConfigPatchGenerator
                 }
                 onOpenJobDetails={openJobDetails}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
                 onRefresh={dashboard.loadTagInventory}
-                onRenderSourceConfigPatch={
-                  dashboard.renderSourceConfigPatch
+                onRenderTemplateRuntimeConfig={
+                  dashboard.renderTemplateRuntimeConfig
                 }
-                onRenderHotConfigPatchGenerator={
-                  dashboard.renderHotConfigPatchGenerator
+                onRenderRuntimeConfigPatchGenerator={
+                  dashboard.renderRuntimeConfigPatchGenerator
                 }
                 onResolveBulk={dashboard.resolveBulkPreview}
                 onTestSourceTemplate={dashboard.testSourceTemplate}
                 onUpdateSourceTemplate={dashboard.updateSourceTemplate}
                 onSelectSubpage={selectSubpage}
-                onUpsertHotConfigPatchGenerator={
-                  dashboard.upsertHotConfigPatchGenerator
+                onUpsertRuntimeConfigPatchGenerator={
+                  dashboard.upsertRuntimeConfigPatchGenerator
                 }
                 privilegeMaterial={privilegeMaterial}
                 setPrivilegeMaterial={setPrivilegeMaterial}
@@ -494,7 +495,9 @@ export function App() {
                   dashboard.promoteTunnelPlanToCustomAdapter
                 }
                 onRefresh={dashboard.loadTunnelPlans}
+                onSubmitRuntimeConfigPatch={dashboard.submitRuntimeConfigPatch}
                 onSetTunnelPlanEnabled={dashboard.setTunnelPlanEnabled}
+                onUpdateTunnelPlanOspfCost={dashboard.updateTunnelPlanOspfCost}
                 privilegeMaterial={privilegeMaterial}
                 setPrivilegeMaterial={setPrivilegeMaterial}
                 topologyGraph={dashboard.topologyGraph}

@@ -15,6 +15,7 @@ use crate::network_runtime_args::{
 pub(crate) struct VtyTunnelPlanRequest {
     pub(crate) input: TunnelPlanInput,
     pub(crate) save: bool,
+    pub(crate) enabled: bool,
     pub(crate) confirmed: bool,
 }
 
@@ -56,6 +57,7 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     let mut topology_routes = Vec::<String>::new();
     let mut topology_stale_routes = Vec::<String>::new();
     let mut save = false;
+    let mut enabled = false;
     let mut confirmed = false;
 
     let mut index = 0;
@@ -63,6 +65,10 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
         match tokens[index] {
             "--save" => {
                 save = true;
+                index += 1;
+            }
+            "--enabled" => {
+                enabled = true;
                 index += 1;
             }
             "--confirmed" => {
@@ -532,6 +538,7 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     Ok(VtyTunnelPlanRequest {
         input,
         save,
+        enabled,
         confirmed,
     })
 }
@@ -725,6 +732,7 @@ mod tests {
         .unwrap();
 
         assert!(!request.save);
+        assert!(!request.enabled);
         assert_eq!(request.input.name, "lax-hkg");
         assert_eq!(request.input.interface_name, "vpnlaxhkg");
         assert_eq!(request.input.kind, TunnelKind::Gre);
@@ -764,11 +772,13 @@ mod tests {
             "--fou-port=6655",
             "--fou-peer-port=7755",
             "--fou-ipproto=47",
+            "--enabled",
             "--confirmed",
         ])
         .unwrap();
 
         assert!(request.save);
+        assert!(request.enabled);
         assert!(request.confirmed);
         assert_eq!(request.input.kind, TunnelKind::Fou);
         assert_eq!(request.input.bandwidth, BandwidthTier::M100);

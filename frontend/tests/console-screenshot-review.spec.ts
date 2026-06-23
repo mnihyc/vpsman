@@ -6,10 +6,10 @@ import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 const desktopViews = [
   { heading: "Dashboard", id: "dashboard", view: "Dashboard" },
   { heading: "Fleet overview", id: "fleet", view: "Fleet" },
-  { heading: "Agent config", id: "config-overview", view: "Config" },
-  { heading: "Agent config", id: "config-bulk", subpage: "Bulk patch", view: "Config" },
-  { heading: "Agent config", id: "config-single", subpage: "VPS config", view: "Config" },
-  { heading: "Agent config", id: "config-templates", subpage: "Templates", view: "Config" },
+  { heading: "Runtime config", id: "config-overview", view: "Config" },
+  { heading: "Runtime config", id: "config-bulk", subpage: "Bulk patch", view: "Config" },
+  { heading: "Runtime config", id: "config-single", subpage: "VPS config", view: "Config" },
+  { heading: "Runtime config", id: "config-templates", subpage: "Templates", view: "Config" },
   { heading: "Tags management", id: "tags-registry", view: "Tags" },
   { heading: "Tags management", id: "tags-assignments", subpage: "Assignments", view: "Tags" },
   { heading: "Tags management", id: "tags-bulk", subpage: "Bulk", view: "Tags" },
@@ -41,7 +41,7 @@ test("captures main console screenshots for regression review", async ({
   const manifest: Array<Record<string, unknown>> = [];
 
   for (const entry of views) {
-    const visibleView = entry.view === "Config" ? "Agent config" : entry.view;
+    const visibleView = entry.view === "Config" ? "Runtime config" : entry.view;
     if (entry.view !== "Dashboard") {
       const nav = page.getByRole("navigation", { name: "Primary console navigation" });
       await activate(

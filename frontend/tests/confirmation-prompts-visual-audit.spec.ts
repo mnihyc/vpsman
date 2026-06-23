@@ -71,7 +71,7 @@ async function captureTopologySpeedTestPrompt(
   manifest: Array<Record<string, unknown>>,
 ) {
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Topology", "Apply / rollback");
+  await openConsoleSubpage(page, "Topology", "Tests");
   await activate(page.getByRole("button", { name: "Review speed test" }));
   const prompt = page.getByLabel("Confirm speed test");
   await expect(prompt).toBeVisible();

@@ -851,13 +851,9 @@ function SortableHeaderCell<T>({
           <GripVertical size={14} />
         </button>
       )}
-      {header.isPlaceholder ? null : (
+      {header.isPlaceholder ? null : header.column.getCanSort() ? (
         <button
-          className={
-            header.column.getCanSort()
-              ? "gridHeaderButton sortable"
-              : "gridHeaderButton"
-          }
+          className="gridHeaderButton sortable"
           onClick={header.column.getToggleSortingHandler()}
           type="button"
         >
@@ -868,6 +864,10 @@ function SortableHeaderCell<T>({
               ? " ↓"
               : ""}
         </button>
+      ) : (
+        <div className="gridHeaderButton">
+          {flexRender(header.column.columnDef.header, header.getContext())}
+        </div>
       )}
       {header.column.getCanResize() && (
         <div

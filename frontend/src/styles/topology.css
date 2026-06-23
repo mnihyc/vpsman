@@ -354,8 +354,18 @@
 }
 
 .topologyPlanComposer .dispatchForm {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
+}
+
+.topologyPlanComposer .dispatchControls {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  align-items: end;
+}
+
+.topologyPlanComposer .dispatchControls > button {
+  align-self: end;
+  min-width: 0;
 }
 
 .topologyPlanComposer .formSectionNote,
@@ -363,8 +373,36 @@
   grid-column: 1 / -1;
 }
 
+.topologyLifecycleToggle {
+  align-self: end;
+  min-height: 38px;
+}
+
+.topologyLifecycleToggle span {
+  color: #202124;
+  font-weight: 700;
+}
+
+.topologyLifecycleField {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.topologyLifecycleField > span {
+  color: #5f6368;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.topologyEvidenceDisclosure > .dispatchControls {
+  margin-top: 10px;
+}
+
 .topologyPlanComposer textarea {
   min-height: 72px;
+  resize: vertical;
 }
 
 .topologyPlanComposer pre {
@@ -372,18 +410,18 @@
   overflow: auto;
 }
 
-.topologyApplyForm {
+.topologyNetworkTestForm {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.topologyApplyGroups {
+.topologyNetworkTestGroups {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
   gap: 12px;
   min-width: 0;
 }
 
-.topologyApplyGroup {
+.topologyNetworkTestGroup {
   align-content: start;
   display: grid;
   gap: 10px;
@@ -394,7 +432,7 @@
   padding: 12px;
 }
 
-.topologyApplyGroupHeader {
+.topologyNetworkTestGroupHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -405,7 +443,7 @@
   padding-bottom: 8px;
 }
 
-.topologyApplyGroupHeader strong {
+.topologyNetworkTestGroupHeader strong {
   min-width: 0;
   color: #202124;
   font-size: 13px;
@@ -415,7 +453,7 @@
   white-space: nowrap;
 }
 
-.topologyApplyGroupHeader small {
+.topologyNetworkTestGroupHeader small {
   flex: 0 0 auto;
   color: #5f6368;
   font-size: 11px;
@@ -423,13 +461,13 @@
   text-transform: uppercase;
 }
 
-.topologyApplyActionRow {
+.topologyNetworkTestActionRow {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.topologyApplyActionRow button {
+.topologyNetworkTestActionRow button {
   flex: 1 1 172px;
   min-width: 0;
   white-space: nowrap;
@@ -506,7 +544,7 @@
     padding: 10px;
   }
 
-  .topologyApplyActionRow {
+  .topologyNetworkTestActionRow {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
   }

@@ -59,7 +59,7 @@ export const navSections: readonly {
 export function viewLabel(view: ActiveView): string {
   switch (view) {
     case "Config":
-      return "Agent config";
+      return "Runtime config";
     default:
       return view;
   }
@@ -85,10 +85,10 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     { id: "bulk", label: "Bulk", description: "Selector-based tag add, remove, and delete" },
   ],
   Config: [
-    { id: "overview", label: "Overview", description: "Agent config workflow map, source selections, and recent operations" },
+    { id: "overview", label: "Overview", description: "Runtime config workflow map, template assignments, and recent operations" },
     { id: "bulk", label: "Bulk patch", description: "Temporary incremental patches and reusable patch generators" },
-    { id: "single", label: "VPS config", description: "One-VPS config read and guarded full override" },
-    { id: "templates", label: "Templates", description: "Persistent source templates, assignments, apply, and status" },
+    { id: "single", label: "VPS config", description: "One-VPS runtime config read and guarded override" },
+    { id: "templates", label: "Templates", description: "Persistent templates, assignments, render, apply, and status" },
   ],
   Jobs: [
     { id: "history", label: "History", description: "Command requests, targets, outputs, and history" },
@@ -108,10 +108,10 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
   Topology: [
     { id: "graph", label: "Graph", description: "Observed topology graph and tunnel plan summary" },
     { id: "plans", label: "Tunnel plans", description: "Saved tunnel plans and plan authoring" },
-    { id: "apply", label: "Apply / rollback", description: "Privilege-unlocked tunnel apply, rollback, status, probes, and speed tests" },
+    { id: "apply", label: "Tests", description: "Tunnel status, probes, and speed tests" },
     { id: "promotion", label: "Promotion", description: "External observe and custom adapter workflows" },
     { id: "evidence", label: "Evidence", description: "Network trends, observations, and retained plan output" },
-    { id: "ospf", label: "OSPF", description: "OSPF update recommendations and cost apply" },
+    { id: "ospf", label: "OSPF", description: "OSPF update recommendations and cost updates" },
   ],
   Backups: [
     { id: "requests", label: "Requests", description: "Backup request history and metadata" },

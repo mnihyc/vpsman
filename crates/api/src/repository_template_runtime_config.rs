@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
 
 use crate::{
-    model::{SourceConfigPatchView, SourceTemplateView},
+    model::{SourceTemplateView, TemplateRuntimeConfigView},
     repository::Repository,
     unix_now,
 };
@@ -11,21 +11,21 @@ const MAX_TEMPLATE_ARGV_ITEMS: usize = 32;
 const MAX_TEMPLATE_ARG_BYTES: usize = 4096;
 
 impl Repository {
-    pub(crate) async fn render_source_config_patch(
+    pub(crate) async fn render_template_runtime_config(
         &self,
         client_id: &str,
-    ) -> Result<SourceConfigPatchView> {
+    ) -> Result<TemplateRuntimeConfigView> {
         let agents = self.list_agents().await?;
         anyhow::ensure!(
             agents.iter().any(|agent| agent.id == client_id),
-            "source_config_patch_client_not_found:{client_id}"
+            "template_runtime_config_client_not_found:{client_id}"
         );
 
         let assignments = self
             .list_source_template_assignments(Some(client_id), None)
             .await?;
         let templates = self.list_source_templates(None).await?;
-        let mut renderer = HotConfigRenderer::default();
+        let mut renderer = RuntimeConfigRenderer::default();
 
         for assignment in &assignments {
             let template = templates
@@ -33,7 +33,7 @@ impl Repository {
                 .find(|candidate| candidate.id == assignment.template_id)
                 .with_context(|| {
                     format!(
-                        "source_config_patch_template_not_found:{}",
+                        "template_runtime_config_template_not_found:{}",
                         assignment.template_id
                     )
                 })?;
@@ -43,7 +43,7 @@ impl Repository {
         let sections = Value::Object(renderer.sections);
         let toml = toml::to_string_pretty(&sections)
             .context("failed to serialize source template config patch TOML")?;
-        Ok(SourceConfigPatchView {
+        Ok(TemplateRuntimeConfigView {
             client_id: client_id.to_string(),
             sections,
             toml,
@@ -62,10 +62,10 @@ pub(crate) struct SourceTemplateRenderCheck {
     pub(crate) render_notes: Vec<String>,
 }
 
-pub(crate) fn render_source_template_candidate(
+pub(crate) fn render_template_runtime_candidate(
     template: &SourceTemplateView,
 ) -> Result<SourceTemplateRenderCheck> {
-    let mut renderer = HotConfigRenderer::default();
+    let mut renderer = RuntimeConfigRenderer::default();
     renderer.apply_template(&template.domain, template)?;
     let sections = Value::Object(renderer.sections);
     let toml = toml::to_string_pretty(&sections)
@@ -79,13 +79,13 @@ pub(crate) fn render_source_template_candidate(
 }
 
 #[derive(Default)]
-struct HotConfigRenderer {
+struct RuntimeConfigRenderer {
     sections: Map<String, Value>,
     unsupported_domains: Vec<String>,
     render_notes: Vec<String>,
 }
 
-impl HotConfigRenderer {
+impl RuntimeConfigRenderer {
     fn apply_template(&mut self, domain: &str, template: &SourceTemplateView) -> Result<()> {
         match domain {
             "telemetry_metrics_source" => self.apply_telemetry_source(template),
@@ -105,7 +105,7 @@ impl HotConfigRenderer {
             | "update_restart_policy"
             | "update_rollback_heartbeat_source" => {
                 self.unsupported_domains.push(format!(
-                    "{domain}:{} requires a job, object-store, or release workflow rather than agent hot-config",
+                    "{domain}:{} requires a job, object-store, or release workflow rather than server runtime config",
                     template.name
                 ));
                 Ok(())
@@ -383,7 +383,7 @@ impl HotConfigRenderer {
             .or_insert_with(|| Value::Object(Map::new()));
         value
             .as_object_mut()
-            .with_context(|| format!("hot_config_section_not_object:{name}"))
+            .with_context(|| format!("runtime_config_section_not_object:{name}"))
     }
 }
 
