@@ -708,6 +708,108 @@ test("supports interactive fleet data grid controls", async ({
   ).toBeVisible();
 });
 
+test("exposes traffic columns and the VPS Traffic & Rules drilldown", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "column chooser and expanded traffic drilldown are covered in desktop navigation",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Fleet", "Instances");
+
+  const grid = page.getByLabel("VPS instance records data grid");
+  await expect(
+    grid.getByRole("columnheader", { name: /Traffic Now/ }),
+  ).toHaveCount(0);
+  for (const columnName of ["Traffic Now", "Cycle Usage", "Traffic State"]) {
+    await grid.getByLabel("VPS instance records columns").click();
+    await page.getByRole("menuitemcheckbox", { name: columnName }).click();
+  }
+  await expect(
+    grid.getByRole("columnheader", { name: /Traffic Now/ }),
+  ).toBeVisible();
+  await expect(
+    grid.getByRole("columnheader", { name: /Cycle Usage/ }),
+  ).toBeVisible();
+  await expect(
+    grid.getByRole("columnheader", { name: /Traffic State/ }),
+  ).toBeVisible();
+
+  const edgeRow = grid
+    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+    .first();
+  await edgeRow.getByLabel("Expand VPS instance records row").click();
+  const edgeDetail = grid
+    .locator(".gridExpandedRow", { hasText: "edge-sfo-01" })
+    .first();
+  await edgeDetail.getByRole("tab", { name: "Traffic & Rules" }).click();
+  await expect(
+    edgeDetail.getByRole("heading", { name: "Traffic & Rules" }),
+  ).toBeVisible();
+  await expect(edgeDetail).toContainText("traffic.reset_day");
+  await expect(edgeDetail).toContainText("traffic.quota.total");
+  await expect(edgeDetail).toContainText("eth0+tx,ens3");
+  await expect(edgeDetail).toContainText("Selected traffic");
+  await expect(edgeDetail).toContainText("Latest RX");
+  await expect(edgeDetail).toContainText("Cycle Total");
+  await expect(edgeDetail).toContainText("Matched policies");
+  await expect(edgeDetail).toContainText("Recent policy alerts");
+  await expect(edgeDetail).toContainText("edge-resource-policy");
+  await expect(edgeDetail).toContainText("80% total quota");
+
+  await edgeDetail.getByRole("button", { name: "Open Alert Policy" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Alert policies" }),
+  ).toBeVisible();
+  await expect(
+    page.locator(".consoleDetailPanelHeader strong", {
+      hasText: "Alert policy details",
+    }),
+  ).toBeVisible();
+  await expect(page.locator(".consoleDetailPanel").last()).toContainText(
+    "edge-resource-policy",
+  );
+});
+
+test("supports Config VPS Rules dry-run, confirm, and explicit unset", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "VPS Rules bulk editor is covered in desktop layout",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Config", "VPS Rules");
+
+  await expect(page.getByRole("heading", { name: "VPS Rules" })).toBeVisible();
+  const grid = page.getByLabel("VPS rule values data grid");
+  await expect(grid.getByText("3 of 3 rules")).toBeVisible();
+  await expect(grid).toContainText("traffic.reset_day");
+  await expect(grid).toContainText("traffic.selectors");
+
+  await page.getByLabel("VPS rule set values").fill(
+    "traffic.reset_day=14\ntraffic.quota.total=3TB\ntraffic.selectors=eth0+tx,ens3",
+  );
+  await page.getByRole("button", { name: "Dry-run set values" }).click();
+  await expect(page.getByText("Dry-run changed rows")).toBeVisible();
+  await expect(page.getByText("Confirm VPS rule write")).toBeVisible();
+  await page.getByRole("button", { name: "Apply VPS rules" }).click();
+  await expect(page.getByText("applied 3 VPS rule rows")).toBeVisible();
+
+  const unsetPanel = page.locator(".vpsRulesEditorSection", { hasText: "Unset values" });
+  await checkControl(unsetPanel.getByLabel("traffic.quota.total"));
+  await page.getByRole("button", { name: "Dry-run unset values" }).click();
+  const unsetPrompt = page.locator(".confirmationPrompt", {
+    hasText: "Confirm VPS rule write",
+  });
+  await expect(unsetPrompt).toBeVisible();
+  await expect(unsetPrompt.getByTitle("unset")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel" }).click();
+});
+
 test("opens manual update check dispatch from fleet selection", async ({
   page,
 }, testInfo) => {
@@ -779,14 +881,14 @@ test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
   await page.goto("/");
   await openConsoleSubpage(page, "Fleet", "Alert policies");
 
-  const grid = page.getByLabel("Alert policy rules data grid");
+  const grid = page.getByLabel("Policy groups data grid");
   await expect(grid.getByText("1 of 1 policies")).toBeVisible();
   await expect(
     grid.getByRole("columnheader", { name: "Actions" }),
   ).toHaveCount(0);
   await expect(page.getByText("Policy detail")).toHaveCount(0);
   const policySearch = grid.getByRole("searchbox", {
-    name: "Alert policy rules search",
+    name: "Policy groups search",
   });
   await policySearch.click();
   await page.keyboard.type("enabled");
@@ -798,7 +900,7 @@ test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
   const policyRow = grid
     .locator(".gridBody [role=row]", { hasText: "edge-resource-policy" })
     .first();
-  await checkControl(policyRow.getByLabel("Select Alert policy rules row"));
+  await checkControl(policyRow.getByLabel("Select Policy groups row"));
   await grid.getByRole("button", { name: "Action" }).click();
   await expect(page.getByRole("menuitem", { name: "Details" })).toBeVisible();
   await page.getByRole("menuitem", { name: "Details" }).click();
@@ -809,21 +911,70 @@ test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
   ).toBeVisible();
   const belowDetail = page.locator(".consoleDetailPanel");
   await expect(belowDetail).toContainText("edge-resource-policy");
-  await expect(belowDetail).toContainText("mem warn 0.2");
+  await expect(belowDetail).toContainText("traffic.cycle.total");
+  await expect(belowDetail).toContainText("traffic.quota.total * 0.8");
+  await expect(belowDetail).toContainText("Traffic quota threshold reached");
   await page.getByLabel("Close detail panel").click();
   await expect(page.getByText("Alert policy details")).toHaveCount(0);
 
-  await policyRow.getByLabel("Expand Alert policy rules row").click();
+  await policyRow.getByLabel("Expand Policy groups row").click();
   const inlineDetail = grid.locator(".gridExpandedRow");
   await expect(inlineDetail).toContainText("edge-resource-policy");
-  await expect(inlineDetail).toContainText("mem warn 0.2");
-  await policyRow.getByLabel("Collapse Alert policy rules row").click();
+  await expect(inlineDetail).toContainText("traffic.cycle.total");
+  await policyRow.getByLabel("Collapse Policy groups row").click();
   await expect(inlineDetail).toHaveCount(0);
+
+  await checkControl(policyRow.getByLabel("Select Policy groups row"));
+  await grid.getByRole("button", { name: "Action" }).click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+  const editor = page.locator(".consoleDetailPanel", {
+    hasText: "Edit alert policy",
+  });
+  await expect(editor.getByLabel("Policy VPS selector expression")).toContainText(
+    "tag:edge",
+  );
+  await expect(editor.getByLabel("Rule condition expression")).toHaveValue(
+    "traffic.cycle.total >= traffic.quota.total * 0.8",
+  );
+  await editor.getByRole("button", { name: "Dry-run" }).click();
+  await expect(editor.getByText("Dry-run preview")).toBeVisible();
+  await expect(editor).toContainText("80% total quota");
+  await expect(editor).toContainText("edge-sfo-01");
+  await editor.getByRole("button", { name: "Review update" }).click();
+  await expect(page.getByText("Confirm alert policy save")).toBeVisible();
+  await page.getByRole("button", { name: "Update alert policy" }).click();
+  await expect(page.getByText("saved edge-resource-policy")).toBeVisible();
+  await page.getByLabel("Close detail panel").click();
 
   await policyRow.click({ button: "right" });
   await expect(page.getByText("Row actions")).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Details" })).toBeVisible();
   await page.keyboard.press("Escape");
+});
+
+test("shows issued policy alerts in Fleet Alerts and webhook rule fixtures", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "alert and notification registry detail is covered in desktop navigation",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Fleet", "Alerts");
+  await expect(page.getByLabel("Fleet alerts", { exact: true })).toContainText(
+    "Traffic quota threshold reached",
+  );
+  await expect(page.getByLabel("Fleet alerts", { exact: true })).toContainText(
+    "traffic",
+  );
+
+  await openConsoleSubpage(page, "Fleet", "Notifications");
+  await page.getByRole("tab", { name: "Webhooks" }).click();
+  await expect(page.getByText("Webhook rules", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Webhook rules data grid")).toContainText(
+    "edge-interval-webhook",
+  );
 });
 
 test("keeps console layout usable on desktop and mobile widths", async ({

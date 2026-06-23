@@ -465,6 +465,55 @@
   min-width: 0;
 }
 
+.consoleFilterBar {
+  display: grid;
+  grid-template-columns: minmax(min(100%, 360px), 1.8fr) repeat(2, minmax(150px, 0.7fr)) minmax(170px, 0.6fr);
+  gap: 12px;
+  align-items: end;
+  min-width: 0;
+  border-bottom: 1px solid #eef1f6;
+  background: #fff;
+  padding: 0 0 14px;
+}
+
+.consoleFilterBar label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: #3c4043;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.consoleFilterBar label > span {
+  min-width: 0;
+}
+
+.consoleFilterBar select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  color: #202124;
+  padding: 0 9px;
+}
+
+.consoleFilterBar .checkLine {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  align-self: center;
+  min-height: 34px;
+}
+
+.consoleFilterBar .checkLine input {
+  flex: 0 0 auto;
+}
+
 .consoleInlineNotice {
   display: grid;
   gap: 4px;
@@ -2375,6 +2424,151 @@
   font-size: 11px;
   font-weight: 700;
   padding: 3px 7px;
+}
+
+.gridBlock {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.gridBlock > h4,
+.vpsRulesEditorSection h4 {
+  margin: 0;
+  color: #202124;
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.miniTable {
+  display: grid;
+  min-width: 0;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.miniTableRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr));
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+  padding: 9px 10px;
+  border-bottom: 1px solid #eef1f6;
+  color: #3c4043;
+  font-size: 12px;
+}
+
+.miniTableRow:last-child {
+  border-bottom: 0;
+}
+
+.miniTableRow > * {
+  min-width: 0;
+}
+
+.miniTableRow strong,
+.miniTableRow span:not(.status) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trafficRulesDetail {
+  gap: 12px;
+}
+
+.trafficRulesGridSection,
+.vpsRulesPreviewBlock {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.trafficAccountingSummary {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+}
+
+.vpsRulesWorkspace {
+  align-content: start;
+}
+
+.vpsRulesSummary {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+}
+
+.vpsRulesBulkEditor {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 14px;
+  min-width: 0;
+}
+
+.vpsRulesEditorSection {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  border-top: 1px solid #eef1f6;
+  padding-top: 12px;
+}
+
+.vpsRulesEditorSection textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 128px;
+  border: 1px solid #dfe3eb;
+  border-radius: 8px;
+  background: #fff;
+  color: #202124;
+  font: inherit;
+  line-height: 1.4;
+  padding: 10px;
+  resize: vertical;
+}
+
+.compactChecklist {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.compactChecklist .checkLine {
+  min-height: 32px;
+  border-bottom: 1px solid #eef1f6;
+}
+
+.compactChecklist .checkLine:last-child {
+  border-bottom: 0;
+}
+
+.policyRuleEditor {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.policyRuleCard {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border-top: 1px solid #eef1f6;
+  padding-top: 12px;
+}
+
+.policyRuleCardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.policyRuleFormGrid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
 }
 
 .consoleFreshnessBanner {

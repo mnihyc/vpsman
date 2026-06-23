@@ -88,6 +88,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     { id: "overview", label: "Overview", description: "Runtime config workflow map, template assignments, and recent operations" },
     { id: "bulk", label: "Bulk patch", description: "Temporary incremental patches and reusable patch generators" },
     { id: "single", label: "VPS config", description: "One-VPS runtime config read and guarded override" },
+    { id: "rules", label: "VPS Rules", description: "Per-VPS traffic rule values for accounting and alert policies" },
     { id: "templates", label: "Templates", description: "Persistent templates, assignments, render, apply, and status" },
   ],
   Jobs: [
@@ -164,16 +165,22 @@ export const defaultSubpages: Record<ActiveView, string> = Object.fromEntries(
 ) as Record<ActiveView, string>;
 
 export function normalizeSubpage(view: ActiveView, subpage: string | null | undefined): string {
-  const valid = viewSubpages[view].some((entry) => entry.id === subpage);
-  return valid && subpage ? subpage : defaultSubpages[view];
+  const requested = subpage ?? "";
+  const base = requested.split(":")[0];
+  const valid = viewSubpages[view].some(
+    (entry) => entry.id === requested || entry.id === base,
+  );
+  return valid && requested ? requested : defaultSubpages[view];
 }
 
 export function subpageLabel(view: ActiveView, subpage: string): string {
-  return viewSubpages[view].find((entry) => entry.id === subpage)?.label ?? subpage;
+  const base = subpage.split(":")[0];
+  return viewSubpages[view].find((entry) => entry.id === subpage || entry.id === base)?.label ?? subpage;
 }
 
 export function subpageDescription(view: ActiveView, subpage: string): string {
-  return viewSubpages[view].find((entry) => entry.id === subpage)?.description ?? "";
+  const base = subpage.split(":")[0];
+  return viewSubpages[view].find((entry) => entry.id === subpage || entry.id === base)?.description ?? "";
 }
 
 export const emptySummary: FleetSummary = {

@@ -173,7 +173,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
 }
 
 #[tokio::test]
-async fn fleet_alerts_apply_scoped_resource_policy_overrides() {
+async fn fleet_alert_policy_groups_issue_resource_alerts() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
     if let Repository::Memory(memory) = &repo {
@@ -214,97 +214,94 @@ async fn fleet_alerts_apply_scoped_resource_policy_overrides() {
             alert_test_rollup("edge-b", 1.2, 300, 800),
         ]);
     }
-    repo.upsert_fleet_alert_policy(
-        &CreateFleetAlertPolicyRequest {
-            id: None,
-            name: "provider-a-cpu".to_string(),
-            scope_kind: "provider".to_string(),
-            scope_value: Some("provider-a".to_string()),
-            memory_available_warning_ratio: None,
-            memory_available_critical_ratio: None,
-            disk_available_warning_ratio: None,
-            disk_available_critical_ratio: None,
-            cpu_load_warning: Some(1.0),
-            cpu_load_critical: Some(2.0),
-            priority: Some(10),
-            enabled: Some(true),
-            notes: Some("provider-a hosts are small".to_string()),
-            confirmed: true,
-        },
-        &operator,
-    )
-    .await
-    .unwrap();
-    repo.upsert_fleet_alert_policy(
-        &CreateFleetAlertPolicyRequest {
-            id: None,
-            name: "edge-memory".to_string(),
-            scope_kind: "tag".to_string(),
-            scope_value: Some("edge".to_string()),
-            memory_available_warning_ratio: Some(0.50),
-            memory_available_critical_ratio: Some(0.20),
-            disk_available_warning_ratio: None,
-            disk_available_critical_ratio: None,
-            cpu_load_warning: None,
-            cpu_load_critical: None,
-            priority: Some(20),
-            enabled: Some(true),
-            notes: None,
-            confirmed: true,
-        },
-        &operator,
-    )
-    .await
-    .unwrap();
+    let policy = repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: None,
+                name: "edge-cpu".to_string(),
+                enabled: true,
+                selector_expression: "tag:edge".to_string(),
+                rules: vec![PolicyRuleRequest {
+                    id: None,
+                    name: "cpu over one".to_string(),
+                    enabled: true,
+                    traffic_selector: None,
+                    condition_expression: "cpu.load_1 >= 0.5 + 0.5".to_string(),
+                    window_secs: 0,
+                    severity: "warning".to_string(),
+                }],
+                notes: Some("edge hosts".to_string()),
+                confirmed: true,
+                preview_hash: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    let dry_run = repo
+        .dry_run_fleet_alert_policy(&PolicyDryRunRequest {
+            id: Some(policy.id),
+            name: "edge-cpu".to_string(),
+            enabled: true,
+            selector_expression: "tag:edge".to_string(),
+            rules: vec![PolicyRuleRequest {
+                id: None,
+                name: "cpu over one".to_string(),
+                enabled: true,
+                traffic_selector: None,
+                condition_expression: "cpu.load_1 >= (0.25 + 0.75) * 1".to_string(),
+                window_secs: 0,
+                severity: "warning".to_string(),
+            }],
+            notes: Some("edge hosts".to_string()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(dry_run.matched_vps, vec!["edge-a".to_string()]);
+    assert_eq!(dry_run.rule_previews[0].true_count, 1);
+    assert_eq!(dry_run.rule_previews[0].false_count, 0);
+
+    let alerts = repo
+        .list_policy_alerts(&PolicyAlertQuery {
+            limit: Some(20),
+            client_id: Some("edge-a".to_string()),
+            severity: Some("warning".to_string()),
+            category: Some("resource".to_string()),
+            policy_group_id: Some(policy.id),
+        })
+        .await
+        .unwrap();
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].category, "resource");
+    assert_eq!(alerts[0].actual_value, Some(1.2));
+    assert_eq!(alerts[0].threshold_value, Some(1.0));
 
     let state = alert_test_state(repo);
-    let alerts = state
+    let fleet_alerts = state
         .list_fleet_alerts(FleetAlertQuery {
             limit: Some(100),
-            client_id: None,
-            severity: None,
-            category: None,
+            client_id: Some("edge-a".to_string()),
+            severity: Some("warning".to_string()),
+            category: Some("resource".to_string()),
             operator_state: None,
             include_muted: None,
         })
         .await
         .unwrap();
-    let edge_a_cpu = alerts
+    assert!(fleet_alerts
         .iter()
-        .find(|alert| {
-            alert.client_id.as_deref() == Some("edge-a") && alert.status == "cpu_load_high"
-        })
-        .expect("missing provider-scoped CPU alert");
-    assert_eq!(edge_a_cpu.severity, "warning");
-    assert_eq!(edge_a_cpu.evidence["threshold"].as_f64().unwrap(), 1.0);
-    assert!(edge_a_cpu.evidence["alert_policy"]["matched_policy_ids"]
-        .as_array()
-        .is_some_and(|ids| !ids.is_empty()));
-
-    let edge_a_memory = alerts
-        .iter()
-        .find(|alert| alert.client_id.as_deref() == Some("edge-a") && alert.status == "memory_low")
-        .expect("missing tag-scoped memory alert");
-    assert_eq!(edge_a_memory.severity, "warning");
-    assert_eq!(
-        edge_a_memory.evidence["warning_threshold"]
-            .as_f64()
-            .unwrap(),
-        0.50
-    );
-
-    assert!(!alerts
-        .iter()
-        .any(|alert| alert.client_id.as_deref() == Some("edge-b")
-            && matches!(alert.status.as_str(), "cpu_load_high" | "memory_low")));
+        .any(|alert| alert.id.starts_with("policy-alert:")));
 
     let policies = state
         .repo
-        .list_fleet_alert_policies(20, Some(true), Some("tag"), Some("edge"))
+        .list_fleet_alert_policies(20, Some(true), Some("id:edge-a"), None)
         .await
         .unwrap();
     assert_eq!(policies.len(), 1);
-    assert_eq!(policies[0].name, "edge-memory");
+    assert_eq!(policies[0].name, "edge-cpu");
+    assert_eq!(policies[0].matched_vps_count, 1);
+    assert_eq!(policies[0].active_warning_count, 1);
 }
 
 #[tokio::test]

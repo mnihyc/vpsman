@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::{
     error::ApiError,
-    fleet_alerts::{build_agent_alert_scopes, effective_policy_for_scope, FleetAlertPolicy},
+    fleet_alerts::FleetAlertPolicy,
     model::{
         AgentView, BackupRequestStatus, BackupRequestView, DashboardAgentSummaryView,
         DashboardAlertSummaryView, DashboardAvailableFiltersView, DashboardDrilldownView,
@@ -23,7 +23,6 @@ use crate::{
         DashboardWindowOptionView, FleetAlertQuery, FleetAlertView, JobHistoryView,
         OperatorPreferences, TelemetryNetworkRateView, TelemetryRollupView,
     },
-    model_alert_policies::FleetAlertPolicyOverrideView,
     state::AppState,
     unix_now,
 };
@@ -420,11 +419,6 @@ async fn build_dashboard_overview(
         .into_iter()
         .filter(|backup| scoped_client_ids.contains(&backup.client_id))
         .collect::<Vec<_>>();
-    let alert_policies = state
-        .repo
-        .list_fleet_alert_policies(1000, Some(true), None, None)
-        .await?;
-
     let latest_rollups = latest_rollups_by_client(&rollups);
     let latest_rates = latest_rates_by_client_interface(&network_rates);
     let latest_rates_by_client = network_by_client(latest_rates.values());
@@ -462,7 +456,6 @@ async fn build_dashboard_overview(
         chart_step_secs,
         preferences,
         base_policy: &base_alert_policy,
-        alert_policies: &alert_policies,
     })?;
     let network = build_network(
         &network_rates,
@@ -1049,7 +1042,6 @@ struct ResourceCurveInput<'a> {
     chart_step_secs: u64,
     preferences: &'a OperatorPreferences,
     base_policy: &'a FleetAlertPolicy,
-    alert_policies: &'a [FleetAlertPolicyOverrideView],
 }
 
 fn build_resource_curve(
@@ -1063,7 +1055,6 @@ fn build_resource_curve(
         chart_step_secs,
         preferences,
         base_policy,
-        alert_policies,
     } = input;
     let exclusions = &preferences.dashboard_curve_exclusions;
     let excluded_clients = agents
@@ -1081,7 +1072,6 @@ fn build_resource_curve(
             .or_default()
             .push(rollup);
     }
-    let alert_scopes = build_agent_alert_scopes(agents);
     let mut candidates = Vec::new();
 
     for agent in agents {
@@ -1148,19 +1138,13 @@ fn build_resource_curve(
                 peak.unwrap_or(0.0)
             }
         };
-        let scope = alert_scopes
-            .get(&agent.id)
-            .cloned()
-            .unwrap_or_else(|| crate::fleet_alerts::AgentAlertScope::from_client_id(&agent.id));
-        let (policy, _) = effective_policy_for_scope(base_policy, alert_policies, &scope)?;
-
         candidates.push(ResourceClientSeries {
             agent: agent.clone(),
             points,
             current,
             peak,
             risk_score,
-            policy,
+            policy: base_policy.clone(),
         });
     }
 

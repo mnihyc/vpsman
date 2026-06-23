@@ -9,8 +9,9 @@ use crate::{
         AgentView, BackupRequestView, FleetAlertQuery, FleetAlertView, JobHistoryView,
         JobTargetView, SourceStatusView, TelemetryRollupView, TelemetryTunnelView,
     },
-    model_alert_policies::FleetAlertPolicyOverrideView,
+    model_alert_policies::PolicyAlertQuery,
     model_alert_states::FleetAlertStateView,
+    repository_alert_policies::policy_alert_to_fleet_alert,
     state::AppState,
     unix_now,
 };
@@ -74,43 +75,35 @@ impl FleetAlertPolicy {
             cpu_load_critical,
         })
     }
-
-    pub(crate) fn with_override(&self, policy: &FleetAlertPolicyOverrideView) -> Result<Self> {
-        Self::new(
-            policy
-                .memory_available_warning_ratio
-                .unwrap_or(self.memory_available_warning_ratio),
-            policy
-                .memory_available_critical_ratio
-                .unwrap_or(self.memory_available_critical_ratio),
-            policy
-                .disk_available_warning_ratio
-                .unwrap_or(self.disk_available_warning_ratio),
-            policy
-                .disk_available_critical_ratio
-                .unwrap_or(self.disk_available_critical_ratio),
-            policy.cpu_load_warning.unwrap_or(self.cpu_load_warning),
-            policy.cpu_load_critical.unwrap_or(self.cpu_load_critical),
-        )
-    }
-
-    pub(crate) fn validate_override(policy: &FleetAlertPolicyOverrideView) -> Result<()> {
-        if !policy.has_any_threshold() {
-            anyhow::bail!("fleet alert policy must configure at least one threshold");
-        }
-        Self::default().with_override(policy).map(|_| ())
-    }
 }
 
-impl FleetAlertPolicyOverrideView {
-    pub(crate) fn has_any_threshold(&self) -> bool {
-        self.memory_available_warning_ratio.is_some()
-            || self.memory_available_critical_ratio.is_some()
-            || self.disk_available_warning_ratio.is_some()
-            || self.disk_available_critical_ratio.is_some()
-            || self.cpu_load_warning.is_some()
-            || self.cpu_load_critical.is_some()
-    }
+#[derive(Clone, Debug)]
+pub(crate) struct AgentAlertScope {
+    pub(crate) provider: Option<String>,
+    pub(crate) tags: Vec<String>,
+}
+
+pub(crate) fn build_agent_alert_scopes(agents: &[AgentView]) -> HashMap<String, AgentAlertScope> {
+    agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.id.clone(),
+                AgentAlertScope {
+                    provider: provider_from_agent(agent),
+                    tags: agent.tags.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn provider_from_agent(agent: &AgentView) -> Option<String> {
+    agent.tags.iter().find_map(|tag| {
+        tag.strip_prefix("provider:")
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+    })
 }
 
 fn validate_ratio_thresholds(name: &str, warning: f64, critical: f64) -> Result<()> {
@@ -141,94 +134,6 @@ fn validate_cpu_thresholds(warning: f64, critical: f64) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug, Default)]
-pub(crate) struct AgentAlertScope {
-    pub(crate) client_id: String,
-    pub(crate) tags: Vec<String>,
-    pub(crate) provider: Option<String>,
-}
-
-impl AgentAlertScope {
-    pub(crate) fn from_client_id(client_id: &str) -> Self {
-        Self {
-            client_id: client_id.to_string(),
-            ..Self::default()
-        }
-    }
-}
-
-pub(crate) fn build_agent_alert_scopes(agents: &[AgentView]) -> HashMap<String, AgentAlertScope> {
-    agents
-        .iter()
-        .map(|agent| {
-            (
-                agent.id.clone(),
-                AgentAlertScope {
-                    client_id: agent.id.clone(),
-                    tags: agent.tags.clone(),
-                    provider: tag_namespace_value(&agent.tags, "provider"),
-                },
-            )
-        })
-        .collect()
-}
-
-pub(crate) fn effective_policy_for_scope(
-    base: &FleetAlertPolicy,
-    policies: &[FleetAlertPolicyOverrideView],
-    scope: &AgentAlertScope,
-) -> Result<(FleetAlertPolicy, Vec<String>)> {
-    let mut matching = policies
-        .iter()
-        .filter(|policy| policy.enabled && alert_policy_matches_scope(policy, scope))
-        .collect::<Vec<_>>();
-    matching.sort_by(|left, right| {
-        alert_policy_specificity(left)
-            .cmp(&alert_policy_specificity(right))
-            .then_with(|| left.priority.cmp(&right.priority))
-            .then_with(|| left.updated_at.cmp(&right.updated_at))
-            .then_with(|| left.name.cmp(&right.name))
-    });
-
-    let mut effective = base.clone();
-    let mut matched_policy_ids = Vec::new();
-    for policy in matching {
-        effective = effective.with_override(policy)?;
-        matched_policy_ids.push(policy.id.to_string());
-    }
-    Ok((effective, matched_policy_ids))
-}
-
-fn alert_policy_matches_scope(
-    policy: &FleetAlertPolicyOverrideView,
-    scope: &AgentAlertScope,
-) -> bool {
-    match (policy.scope_kind.as_str(), policy.scope_value.as_deref()) {
-        ("global", _) => true,
-        ("provider", Some(provider)) => scope.provider.as_deref() == Some(provider),
-        ("tag", Some(tag)) => scope.tags.iter().any(|stored| stored == tag),
-        ("client", Some(client_id)) => scope.client_id == client_id,
-        _ => false,
-    }
-}
-
-fn alert_policy_specificity(policy: &FleetAlertPolicyOverrideView) -> u8 {
-    match policy.scope_kind.as_str() {
-        "global" => 0,
-        "provider" => 1,
-        "tag" => 2,
-        "client" => 3,
-        _ => 0,
-    }
-}
-
-fn tag_namespace_value(tags: &[String], namespace: &str) -> Option<String> {
-    let prefix = format!("{namespace}:");
-    tags.iter()
-        .find_map(|tag| tag.strip_prefix(&prefix).filter(|value| !value.is_empty()))
-        .map(ToString::to_string)
-}
-
 impl AppState {
     pub(crate) async fn list_fleet_alerts(
         &self,
@@ -240,22 +145,23 @@ impl AppState {
             .iter()
             .map(|agent| (agent.id.as_str(), agent))
             .collect::<HashMap<_, _>>();
-        let agent_scopes = build_agent_alert_scopes(&agents);
-        let alert_policies = self
-            .repo
-            .list_fleet_alert_policies(1000, Some(true), None, None)
-            .await?;
         append_agent_status_alerts(&mut alerts, &agents);
 
         let rollups = self.repo.list_telemetry_rollups(200, None, None).await?;
         let base_alert_policy = self.fleet_alert_policy();
-        append_resource_alerts(
-            &mut alerts,
-            &latest_rollups(rollups),
-            &base_alert_policy,
-            &alert_policies,
-            &agent_scopes,
-        )?;
+        append_resource_alerts(&mut alerts, &latest_rollups(rollups), &base_alert_policy)?;
+
+        let policy_alerts = self
+            .repo
+            .list_policy_alerts(&PolicyAlertQuery {
+                limit: Some(200),
+                client_id: None,
+                severity: None,
+                category: None,
+                policy_group_id: None,
+            })
+            .await?;
+        alerts.extend(policy_alerts.iter().map(policy_alert_to_fleet_alert));
 
         let tunnels = self.repo.list_telemetry_tunnels(200, None, None).await?;
         append_tunnel_alerts(&mut alerts, &tunnels);
@@ -312,22 +218,11 @@ fn append_resource_alerts(
     alerts: &mut Vec<FleetAlertView>,
     rollups: &HashMap<String, TelemetryRollupView>,
     policy: &FleetAlertPolicy,
-    overrides: &[FleetAlertPolicyOverrideView],
-    agent_scopes: &HashMap<String, AgentAlertScope>,
 ) -> Result<()> {
     for rollup in rollups.values() {
-        let scope = agent_scopes
-            .get(&rollup.client_id)
-            .cloned()
-            .unwrap_or_else(|| AgentAlertScope::from_client_id(&rollup.client_id));
-        let (policy, matched_policy_ids) = effective_policy_for_scope(policy, overrides, &scope)?;
         let policy_evidence = json!({
-            "matched_policy_ids": matched_policy_ids,
-            "scope": {
-                "client_id": &scope.client_id,
-                "provider": &scope.provider,
-                "tags": &scope.tags,
-            },
+            "source": "builtin_default_resource_thresholds",
+            "client_id": &rollup.client_id,
         });
 
         if rollup.cpu_load_1_max >= policy.cpu_load_critical {
@@ -909,7 +804,7 @@ mod tests {
         );
 
         let mut alerts = Vec::new();
-        append_resource_alerts(&mut alerts, &rollups, &policy, &[], &HashMap::new()).unwrap();
+        append_resource_alerts(&mut alerts, &rollups, &policy).unwrap();
 
         let cpu = find_status(&alerts, "cpu_load_high");
         assert_eq!(cpu.severity, "critical");

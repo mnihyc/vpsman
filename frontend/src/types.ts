@@ -26,6 +26,23 @@ import type {
   GeneratedWebhookRuleDeliveryHistoryStatus,
   GeneratedWebhookRuleDeliveryProcessStatus,
   GeneratedWebhookRuleDeliveryStatus,
+  PolicyAlertRecord as GeneratedPolicyAlertRecord,
+  PolicyDryRunRequest as GeneratedPolicyDryRunRequest,
+  PolicyDryRunResponse as GeneratedPolicyDryRunResponse,
+  PolicyDryRunRulePreview as GeneratedPolicyDryRunRulePreview,
+  PolicyGroupRecord as GeneratedPolicyGroupRecord,
+  PolicyGroupRequest as GeneratedPolicyGroupRequest,
+  PolicyRuleRecord as GeneratedPolicyRuleRecord,
+  PolicyRuleRequest as GeneratedPolicyRuleRequest,
+  PolicyRuleStateRecord as GeneratedPolicyRuleStateRecord,
+  TrafficAccountingRecord as GeneratedTrafficAccountingRecord,
+  TrafficAccountingSelectorBreakdown as GeneratedTrafficAccountingSelectorBreakdown,
+  VpsRuleChangePreview as GeneratedVpsRuleChangePreview,
+  VpsRuleValueRecord as GeneratedVpsRuleValueRecord,
+  VpsRulesBulkUnsetRequest as GeneratedVpsRulesBulkUnsetRequest,
+  VpsRulesBulkUpsertRequest as GeneratedVpsRulesBulkUpsertRequest,
+  VpsRulesDryRunRequest as GeneratedVpsRulesDryRunRequest,
+  VpsRulesDryRunResponse as GeneratedVpsRulesDryRunResponse,
 } from "./generated/protocolContracts";
 
 export type JobStatus = GeneratedJobStatus;
@@ -478,41 +495,25 @@ export type FleetAlertStateRequest = {
   confirmed: boolean;
 };
 
-export type FleetAlertPolicyRecord = {
-  id: string;
-  name: string;
-  scope_kind: "global" | "provider" | "tag" | "client" | string;
-  scope_value: string | null;
-  memory_available_warning_ratio: number | null;
-  memory_available_critical_ratio: number | null;
-  disk_available_warning_ratio: number | null;
-  disk_available_critical_ratio: number | null;
-  cpu_load_warning: number | null;
-  cpu_load_critical: number | null;
-  priority: number;
-  enabled: boolean;
-  notes: string | null;
-  actor_id: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
-export type FleetAlertPolicyRequest = {
-  id?: string;
-  name: string;
-  scope_kind: string;
-  scope_value?: string | null;
-  memory_available_warning_ratio?: number | null;
-  memory_available_critical_ratio?: number | null;
-  disk_available_warning_ratio?: number | null;
-  disk_available_critical_ratio?: number | null;
-  cpu_load_warning?: number | null;
-  cpu_load_critical?: number | null;
-  priority?: number;
-  enabled?: boolean;
-  notes?: string | null;
-  confirmed: boolean;
-};
+export type VpsRuleValueRecord = GeneratedVpsRuleValueRecord;
+export type VpsRuleChangePreview = GeneratedVpsRuleChangePreview;
+export type VpsRulesDryRunRequest = GeneratedVpsRulesDryRunRequest;
+export type VpsRulesDryRunResponse = GeneratedVpsRulesDryRunResponse;
+export type VpsRulesBulkUpsertRequest = GeneratedVpsRulesBulkUpsertRequest;
+export type VpsRulesBulkUnsetRequest = GeneratedVpsRulesBulkUnsetRequest;
+export type TrafficAccountingSelectorBreakdown = GeneratedTrafficAccountingSelectorBreakdown;
+export type TrafficAccountingRecord = GeneratedTrafficAccountingRecord;
+export type PolicyRuleRecord = GeneratedPolicyRuleRecord;
+export type PolicyGroupRecord = GeneratedPolicyGroupRecord;
+export type FleetAlertPolicyRecord = GeneratedPolicyGroupRecord;
+export type PolicyRuleRequest = GeneratedPolicyRuleRequest;
+export type PolicyGroupRequest = GeneratedPolicyGroupRequest;
+export type FleetAlertPolicyRequest = GeneratedPolicyGroupRequest;
+export type PolicyDryRunRequest = GeneratedPolicyDryRunRequest;
+export type PolicyDryRunRulePreview = GeneratedPolicyDryRunRulePreview;
+export type PolicyDryRunResponse = GeneratedPolicyDryRunResponse;
+export type PolicyRuleStateRecord = GeneratedPolicyRuleStateRecord;
+export type PolicyAlertRecord = GeneratedPolicyAlertRecord;
 
 export type FleetAlertNotificationChannelRecord = {
   id: string;

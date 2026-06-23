@@ -83,7 +83,8 @@ Access:
 Fleet and integrations:
   tags | tag-create <name> --confirmed | agent-tag <client_id> <tag> --confirmed
   fleet-alerts | fleet-alert-export | fleet-alert-states | fleet-alert-state-update
-  fleet-alert-policies | fleet-alert-policy-upsert
+  vps-rules | vps-rules-get | vps-rules-preview | vps-rules-upsert | vps-rules-unset
+  alert-policies | alert-policy-get | alert-policy-preview | alert-policy-upsert
   fleet-alert-notification-channels | fleet-alert-notification-channel-upsert
   fleet-alert-notifications | fleet-alert-notification-dispatch | fleet-alert-notification-process
   source-templates | source-template-create | source-template-clone

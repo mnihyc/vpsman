@@ -116,6 +116,11 @@ import type {
   FleetAlertPolicyRecord,
   FleetAlertPolicyRequest,
   FleetAlertRecord,
+  PolicyAlertRecord,
+  PolicyDryRunRequest,
+  PolicyDryRunResponse,
+  PolicyRuleRecord,
+  PolicyRuleRequest,
   FleetAlertNotificationChannelRecord,
   FleetAlertNotificationChannelRequest,
   FleetAlertNotificationDeliveryRecord,
@@ -124,6 +129,8 @@ import type {
   FleetAlertStateRecord,
   FleetAlertStateRequest,
   FleetSummary,
+  TrafficAccountingRecord,
+  TrafficAccountingSelectorBreakdown,
   WebhookRuleDeliveryRecord,
   WebhookRuleDeliveryHistoryStatus,
   WebhookDeliveryRotationRequest,
@@ -144,9 +151,16 @@ import type {
   TelemetryTunnelRecord,
   TagMutationResponse,
   TagView,
+  VpsRuleValueRecord,
 } from "../types";
 
-type FleetDetailTab = "Overview" | "Telemetry" | "Jobs" | "Network" | "Config";
+type FleetDetailTab =
+  | "Overview"
+  | "Telemetry"
+  | "Traffic & Rules"
+  | "Jobs"
+  | "Network"
+  | "Config";
 type FleetSelectionStatsMode =
   | "telemetry"
   | "network"
@@ -199,6 +213,7 @@ type WebhookDeliveryQueueSnapshot =
 const detailTabs: FleetDetailTab[] = [
   "Overview",
   "Telemetry",
+  "Traffic & Rules",
   "Jobs",
   "Network",
   "Config",
@@ -230,6 +245,9 @@ export function FleetWorkspace({
   fleetAlerts,
   fleetAlertStates,
   fleetAlertPolicies,
+  policyAlerts,
+  trafficAccounting,
+  vpsRuleValues,
   fleetAlertNotificationChannels,
   fleetAlertNotifications,
   webhookRules,
@@ -247,6 +265,7 @@ export function FleetWorkspace({
   onDeleteWebhookRule,
   onDispatchFleetAlertNotifications,
   onDispatchWebhookRules,
+  onDryRunFleetAlertPolicy,
   onDryRunWebhookRule,
   onDeleteAgent,
   onLoadJobOutputs,
@@ -279,6 +298,9 @@ export function FleetWorkspace({
   fleetAlerts: FleetAlertRecord[];
   fleetAlertStates: FleetAlertStateRecord[];
   fleetAlertPolicies: FleetAlertPolicyRecord[];
+  policyAlerts: PolicyAlertRecord[];
+  trafficAccounting: TrafficAccountingRecord[];
+  vpsRuleValues: VpsRuleValueRecord[];
   fleetAlertNotificationChannels: FleetAlertNotificationChannelRecord[];
   fleetAlertNotifications: FleetAlertNotificationDeliveryRecord[];
   webhookRules: WebhookRuleRecord[];
@@ -313,6 +335,9 @@ export function FleetWorkspace({
   onDispatchWebhookRules: (
     request: WebhookRuleDispatchRequest,
   ) => Promise<WebhookRuleDeliveryRecord[]>;
+  onDryRunFleetAlertPolicy: (
+    request: PolicyDryRunRequest,
+  ) => Promise<PolicyDryRunResponse>;
   onDryRunWebhookRule: (
     request: WebhookRuleDryRunRequest,
   ) => Promise<WebhookRuleDryRunRecord>;
@@ -370,6 +395,8 @@ export function FleetWorkspace({
   const [deletePending, setDeletePending] = useState(false);
   const [deleteReviewPending, setDeleteReviewPending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [detailTabOverride, setDetailTabOverride] =
+    useState<FleetDetailTab | null>(null);
   const deleteReviewTargetRef = useRef<string | null>(null);
   const deleteSnapshotRef = useRef<DeleteAgentConfirmationSnapshot | null>(null);
   const deleteReviewPendingRef = useRef(false);
@@ -390,14 +417,43 @@ export function FleetWorkspace({
     () => latestTelemetryTunnelsByClient(telemetryTunnels),
     [telemetryTunnels],
   );
+  const trafficByClient = useMemo(
+    () => new Map(trafficAccounting.map((record) => [record.client_id, record])),
+    [trafficAccounting],
+  );
+  const vpsRulesByClient = useMemo(() => {
+    const map = new Map<string, VpsRuleValueRecord[]>();
+    for (const rule of vpsRuleValues) {
+      const rows = map.get(rule.client_id) ?? [];
+      rows.push(rule);
+      map.set(rule.client_id, rows);
+    }
+    return map;
+  }, [vpsRuleValues]);
+  const policyAlertsByClient = useMemo(() => {
+    const map = new Map<string, PolicyAlertRecord[]>();
+    for (const alert of policyAlerts) {
+      const rows = map.get(alert.client_id) ?? [];
+      rows.push(alert);
+      map.set(alert.client_id, rows);
+    }
+    return map;
+  }, [policyAlerts]);
   const tagDisplayOrder = useMemo(() => buildTagDisplayOrder(tags), [tags]);
+  const fleetSubpageBase = activeSubpage.split(":")[0];
+  const policyFilterClientId = activeSubpage.startsWith("policies:id:")
+    ? decodeURIComponent(activeSubpage.slice("policies:id:".length))
+    : null;
+  const policyFocusId = activeSubpage.startsWith("policies:policy:")
+    ? decodeURIComponent(activeSubpage.slice("policies:policy:".length))
+    : null;
   const fleetSubpage = [
     "instances",
     "alerts",
     "policies",
     "notifications",
-  ].includes(activeSubpage)
-    ? activeSubpage
+  ].includes(fleetSubpageBase)
+    ? fleetSubpageBase
     : "instances";
 
   const clearDeleteReview = useCallback(() => {
@@ -527,6 +583,92 @@ export function FleetWorkspace({
         ),
       },
       {
+        id: "traffic_now",
+        header: "Traffic Now",
+        size: 210,
+        minSize: 160,
+        sortValue: (agent) =>
+          trafficByClient.get(agent.id)?.latest_total_bytes ?? -1,
+        searchValue: (agent) => trafficNowSummary(trafficByClient.get(agent.id)),
+        cell: (agent) => trafficNowSummary(trafficByClient.get(agent.id)),
+      },
+      {
+        id: "cycle_usage",
+        header: "Cycle Usage",
+        size: 210,
+        minSize: 160,
+        sortValue: (agent) => trafficByClient.get(agent.id)?.cycle_percent ?? -1,
+        searchValue: (agent) => cycleUsageSummary(trafficByClient.get(agent.id)),
+        cell: (agent) => cycleUsageSummary(trafficByClient.get(agent.id)),
+      },
+      {
+        id: "traffic_state",
+        header: "Traffic State",
+        size: 130,
+        minSize: 110,
+        sortValue: (agent) =>
+          trafficStateForClient(
+            trafficByClient.get(agent.id),
+            policyAlertsByClient.get(agent.id),
+          ),
+        searchValue: (agent) =>
+          trafficStateForClient(
+            trafficByClient.get(agent.id),
+            policyAlertsByClient.get(agent.id),
+          ),
+        cell: (agent) => {
+          const state = trafficStateForClient(
+            trafficByClient.get(agent.id),
+            policyAlertsByClient.get(agent.id),
+          );
+          return (
+            <ConsoleStatusBadge tone={trafficStateTone(state)}>
+              {state}
+            </ConsoleStatusBadge>
+          );
+        },
+      },
+      {
+        id: "quota",
+        header: "Quota",
+        size: 170,
+        minSize: 130,
+        searchValue: (agent) => quotaSummary(trafficByClient.get(agent.id)),
+        cell: (agent) => quotaSummary(trafficByClient.get(agent.id)),
+      },
+      {
+        id: "reset_day",
+        header: "Reset Day",
+        size: 125,
+        minSize: 105,
+        sortValue: (agent) => trafficByClient.get(agent.id)?.reset_day ?? 0,
+        searchValue: (agent) => resetDaySummary(trafficByClient.get(agent.id)),
+        cell: (agent) => resetDaySummary(trafficByClient.get(agent.id)),
+      },
+      {
+        id: "selectors",
+        header: "Selectors",
+        size: 230,
+        minSize: 160,
+        searchValue: (agent) => selectorSummary(trafficByClient.get(agent.id)),
+        cell: (agent) => (
+          <span className="monoValue">
+            {selectorSummary(trafficByClient.get(agent.id))}
+          </span>
+        ),
+      },
+      {
+        id: "active_policy_alerts",
+        header: "Active Policy Alerts",
+        size: 170,
+        minSize: 140,
+        sortValue: (agent) => policyAlertsByClient.get(agent.id)?.length ?? 0,
+        searchValue: (agent) =>
+          activePolicyAlertSummary(policyAlertsByClient.get(agent.id)),
+        cell: (agent) =>
+          activePolicyAlertSummary(policyAlertsByClient.get(agent.id)),
+      },
+      {
         id: "last_ip",
         header: "Last IP",
         size: 135,
@@ -554,7 +696,9 @@ export function FleetWorkspace({
     [
       preferences.fleet_tag_visibility_overrides,
       preferences.show_country_flags,
+      policyAlertsByClient,
       tagDisplayOrder,
+      trafficByClient,
       vpsNameDisplayMode,
     ],
   );
@@ -780,6 +924,39 @@ export function FleetWorkspace({
                   ),
               },
               {
+                label: "Open Traffic & Rules",
+                disabled: (rows) => rows.length !== 1,
+                expandRow: true,
+                onSelect: (rows) => {
+                  onSelectAgent(rows[0].id);
+                  setDetailTabOverride("Traffic & Rules");
+                },
+              },
+              {
+                label: "Edit VPS Rules",
+                disabled: (rows) => rows.length !== 1,
+                onSelect: (rows) =>
+                  onNavigatePanel?.(
+                    "Config",
+                    `rules:id:${encodeURIComponent(rows[0].id)}`,
+                  ),
+              },
+              {
+                label: "View Matching Policies",
+                disabled: (rows) => rows.length !== 1,
+                onSelect: (rows) =>
+                  onNavigatePanel?.(
+                    "Fleet",
+                    `policies:id:${encodeURIComponent(rows[0].id)}`,
+                  ),
+              },
+              {
+                label: "Copy traffic selectors",
+                disabled: (rows) => rows.length !== 1,
+                onSelect: (rows) =>
+                  void copyText(selectorSummary(trafficByClient.get(rows[0].id))),
+              },
+              {
                 label: "Open single config",
                 disabled: (rows) => rows.length !== 1,
                 onSelect: (rows) =>
@@ -831,7 +1008,17 @@ export function FleetWorkspace({
               },
             ]}
             columns={fleetColumns}
-            defaultColumnVisibility={{ last_ip: false, registration_ip: false }}
+            defaultColumnVisibility={{
+              active_policy_alerts: false,
+              cycle_usage: false,
+              last_ip: false,
+              quota: false,
+              registration_ip: false,
+              reset_day: false,
+              selectors: false,
+              traffic_now: false,
+              traffic_state: false,
+            }}
             defaultPageSize={20}
             empty={
               <div className="emptyState">
@@ -865,6 +1052,10 @@ export function FleetWorkspace({
                   (status) => status.client_id === agent.id,
                 )}
                 lastLiveEvent={lastLiveEvent}
+                policyAlerts={policyAlertsByClient.get(agent.id) ?? []}
+                policies={fleetAlertPolicies}
+                requestedTab={detailTabOverride}
+                onRequestedTabConsumed={() => setDetailTabOverride(null)}
                 latestNetworkRates={latestNetworkRates.get(agent.id) ?? []}
                 latestRollup={latestRollups.get(agent.id) ?? null}
                 latestTunnels={latestTunnels.get(agent.id) ?? []}
@@ -874,6 +1065,7 @@ export function FleetWorkspace({
                 onLoadJobTargets={onLoadJobTargets}
                 onOpenJobDetails={onOpenJobDetails}
                 onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+                onNavigatePanel={onNavigatePanel}
                 onRenderTemplateRuntimeConfig={onRenderTemplateRuntimeConfig}
                 onUpdateAgentAlias={onUpdateAgentAlias}
                 privilegeMaterial={privilegeMaterial}
@@ -889,6 +1081,8 @@ export function FleetWorkspace({
                 telemetryRollups={telemetryRollups.filter(
                   (rollup) => rollup.client_id === agent.id,
                 )}
+                trafficAccounting={trafficByClient.get(agent.id) ?? null}
+                vpsRuleValues={vpsRulesByClient.get(agent.id) ?? []}
                 vpsNameDisplayMode={vpsNameDisplayMode}
                 wsState={wsState}
               />
@@ -972,17 +1166,21 @@ export function FleetWorkspace({
           <div className="sectionHeader">
             <div>
               <h2>Alert policies</h2>
-              <span>{`${fleetAlertPolicies.length} scoped thresholds`}</span>
+              <span>{`${fleetAlertPolicies.length} policy groups`}</span>
             </div>
             <span className="sectionContext">
-              Thresholds resolve by tag, provider, client, or global scope
+              Selector expressions match VPSs; rule rows issue first-reach alerts
             </span>
           </div>
           <ConsoleFreshnessBanner error={apiError} />
           <FleetAlertPolicyManager
             agents={targetAgents}
+            onDryRun={onDryRunFleetAlertPolicy}
             onDelete={onDeleteFleetAlertPolicy}
             onUpsert={onUpsertFleetAlertPolicy}
+            policyAlerts={policyAlerts}
+            policyFocusId={policyFocusId}
+            policyFilterClientId={policyFilterClientId}
             policies={fleetAlertPolicies}
           />
         </div>
@@ -1029,6 +1227,10 @@ function FleetInstanceDetail({
   sourceTemplateAssignments,
   sourceStatus,
   lastLiveEvent,
+  policyAlerts,
+  policies,
+  requestedTab,
+  onRequestedTabConsumed,
   latestNetworkRates,
   latestRollup,
   latestTunnels,
@@ -1038,6 +1240,7 @@ function FleetInstanceDetail({
   onLoadJobTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
+  onNavigatePanel,
   onRenderTemplateRuntimeConfig,
   onUpdateAgentAlias,
   privilegeMaterial,
@@ -1047,6 +1250,8 @@ function FleetInstanceDetail({
   tagVisibilityOverrides,
   telemetryNetworkRates,
   telemetryRollups,
+  trafficAccounting,
+  vpsRuleValues,
   vpsNameDisplayMode,
   wsState,
 }: {
@@ -1054,6 +1259,10 @@ function FleetInstanceDetail({
   sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
   sourceStatus: SourceStatusRecord[];
   lastLiveEvent: string;
+  policyAlerts: PolicyAlertRecord[];
+  policies: FleetAlertPolicyRecord[];
+  requestedTab: FleetDetailTab | null;
+  onRequestedTabConsumed: () => void;
   latestNetworkRates: TelemetryNetworkRateRecord[];
   latestRollup: TelemetryRollupRecord | null;
   latestTunnels: TelemetryTunnelRecord[];
@@ -1067,6 +1276,7 @@ function FleetInstanceDetail({
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
+  onNavigatePanel?: (view: ActiveView, subpage: string) => void;
   onRenderTemplateRuntimeConfig: (
     clientId: string,
   ) => Promise<TemplateRuntimeConfigResponse>;
@@ -1082,6 +1292,8 @@ function FleetInstanceDetail({
   tagVisibilityOverrides: Record<string, boolean>;
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
+  trafficAccounting: TrafficAccountingRecord | null;
+  vpsRuleValues: VpsRuleValueRecord[];
   vpsNameDisplayMode: VpsNameDisplayMode;
   wsState: string;
 }) {
@@ -1124,6 +1336,13 @@ function FleetInstanceDetail({
   const configPreviewSummary = configPreview
     ? `${configPreview.assignments.length} assignments · ${configPreview.unsupported_domains.length} unsupported domains`
     : "Load redacted runtime config view for this VPS.";
+
+  useEffect(() => {
+    if (requestedTab) {
+      setActiveDetailTab(requestedTab);
+      onRequestedTabConsumed();
+    }
+  }, [onRequestedTabConsumed, requestedTab]);
 
   useEffect(() => {
     setAliasDraft(agent.display_name ?? "");
@@ -1514,6 +1733,16 @@ function FleetInstanceDetail({
             />
           </>
         )}
+        {activeDetailTab === "Traffic & Rules" && (
+          <TrafficRulesDetail
+            agent={agent}
+            policyAlerts={policyAlerts}
+            policies={policies}
+            onNavigatePanel={onNavigatePanel}
+            trafficAccounting={trafficAccounting}
+            vpsRuleValues={vpsRuleValues}
+          />
+        )}
         {activeDetailTab === "Jobs" && (
           <>
             <DetailLine
@@ -1769,6 +1998,554 @@ function ConfigPreviewBlock({
         {preview ? (
           <pre className="configPreviewToml">{preview.toml}</pre>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+function TrafficRulesDetail({
+  agent,
+  onNavigatePanel,
+  policyAlerts,
+  policies,
+  trafficAccounting,
+  vpsRuleValues,
+}: {
+  agent: AgentView;
+  onNavigatePanel?: (view: ActiveView, subpage: string) => void;
+  policyAlerts: PolicyAlertRecord[];
+  policies: FleetAlertPolicyRecord[];
+  trafficAccounting: TrafficAccountingRecord | null;
+  vpsRuleValues: VpsRuleValueRecord[];
+}) {
+  const policyById = new Map(policies.map((policy) => [policy.id, policy]));
+  const alertByRule = new Map(
+    policyAlerts.map((alert) => [alert.policy_rule_id, alert]),
+  );
+  const matchedPolicyIds = new Set(
+    policyAlerts.map((alert) => alert.policy_group_id),
+  );
+  const matchedPolicyRows = policies
+    .filter((policy) => matchedPolicyIds.has(policy.id))
+    .flatMap((policy) =>
+      policy.rules.map((rule) => ({
+        alert: alertByRule.get(rule.id) ?? null,
+        policy,
+        rule,
+      })),
+    );
+  const trafficRows = trafficAccounting?.selector_breakdown ?? [];
+  const selectedPolicyId = matchedPolicyRows[0]?.policy.id;
+  const trafficColumns = useMemo<
+    ConsoleDataGridColumn<TrafficAccountingSelectorBreakdown>[]
+  >(
+    () => [
+      {
+        id: "source",
+        header: "Source",
+        size: 90,
+        minSize: 80,
+        sortValue: (row) => row.source,
+        searchValue: (row) => row.source,
+        cell: (row) => row.source,
+      },
+      {
+        id: "interface",
+        header: "Interface",
+        size: 130,
+        minSize: 110,
+        sortValue: (row) => row.interface,
+        searchValue: (row) => row.interface,
+        cell: (row) => <span className="monoValue">{row.interface}</span>,
+      },
+      {
+        id: "direction",
+        header: "Direction",
+        size: 100,
+        minSize: 90,
+        sortValue: (row) => row.direction,
+        searchValue: (row) => row.direction,
+        cell: (row) => row.direction,
+      },
+      {
+        id: "latest_rx",
+        header: "Latest RX",
+        size: 120,
+        minSize: 100,
+        sortValue: (row) => row.latest_rx_bytes,
+        cell: (row) => formatBytes(row.latest_rx_bytes),
+      },
+      {
+        id: "latest_tx",
+        header: "Latest TX",
+        size: 120,
+        minSize: 100,
+        sortValue: (row) => row.latest_tx_bytes,
+        cell: (row) => formatBytes(row.latest_tx_bytes),
+      },
+      {
+        id: "cycle_rx",
+        header: "Cycle RX",
+        size: 120,
+        minSize: 100,
+        sortValue: (row) => row.cycle_rx_bytes,
+        cell: (row) => formatBytes(row.cycle_rx_bytes),
+      },
+      {
+        id: "cycle_tx",
+        header: "Cycle TX",
+        size: 120,
+        minSize: 100,
+        sortValue: (row) => row.cycle_tx_bytes,
+        cell: (row) => formatBytes(row.cycle_tx_bytes),
+      },
+      {
+        id: "cycle_total",
+        header: "Cycle Total",
+        size: 130,
+        minSize: 110,
+        sortValue: (row) => row.cycle_total_bytes,
+        cell: (row) => formatBytes(row.cycle_total_bytes),
+      },
+      {
+        id: "sample_age",
+        header: "Sample age",
+        size: 110,
+        minSize: 95,
+        sortValue: (row) => row.sample_age_secs ?? Number.MAX_SAFE_INTEGER,
+        cell: (row) => formatSampleAge(row.sample_age_secs),
+      },
+      {
+        id: "state",
+        header: "State",
+        size: 105,
+        minSize: 90,
+        sortValue: (row) => row.state,
+        searchValue: (row) =>
+          `${row.state} ${row.incomplete_reasons.join(" ")}`,
+        cell: (row) => (
+          <ConsoleStatusBadge tone={row.state === "ok" ? "ok" : "warning"}>
+            {row.state}
+          </ConsoleStatusBadge>
+        ),
+      },
+    ],
+    [],
+  );
+  const vpsRuleColumns = useMemo<ConsoleDataGridColumn<VpsRuleValueRecord>[]>(
+    () => [
+      {
+        id: "key",
+        header: "Key",
+        size: 210,
+        minSize: 160,
+        sortValue: (row) => row.key,
+        searchValue: (row) => row.key,
+        cell: (row) => <span className="monoValue">{row.key}</span>,
+      },
+      {
+        id: "raw",
+        header: "Raw value",
+        size: 150,
+        minSize: 110,
+        searchValue: (row) => row.value_raw,
+        cell: (row) => row.value_raw || "unset",
+      },
+      {
+        id: "parsed",
+        header: "Parsed value",
+        size: 240,
+        minSize: 160,
+        searchValue: (row) => row.parsed_display,
+        cell: (row) => row.parsed_display || "unset",
+      },
+      {
+        id: "state",
+        header: "State",
+        size: 105,
+        minSize: 90,
+        searchValue: (row) => row.state,
+        sortValue: (row) => row.state,
+        cell: (row) => (
+          <ConsoleStatusBadge tone={row.state === "ok" ? "ok" : "warning"}>
+            {row.state}
+          </ConsoleStatusBadge>
+        ),
+      },
+      {
+        id: "updated_by",
+        header: "Updated by",
+        size: 140,
+        minSize: 110,
+        searchValue: (row) => row.updated_by ?? "",
+        cell: (row) => row.updated_by ?? "unknown",
+      },
+      {
+        id: "updated",
+        header: "Updated at",
+        size: 155,
+        minSize: 120,
+        sortValue: (row) => row.updated_at,
+        cell: (row) => formatCompactTime(row.updated_at),
+      },
+    ],
+    [],
+  );
+  const policyColumns = useMemo<
+    ConsoleDataGridColumn<(typeof matchedPolicyRows)[number]>[]
+  >(
+    () => [
+      {
+        id: "policy",
+        header: "Policy",
+        size: 170,
+        minSize: 140,
+        sortValue: (row) => row.policy.name,
+        searchValue: (row) => row.policy.name,
+        cell: (row) => row.policy.name,
+      },
+      {
+        id: "rule",
+        header: "Rule",
+        size: 210,
+        minSize: 160,
+        searchValue: (row) =>
+          `${row.rule.name} ${row.rule.condition_expression}`,
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{row.rule.name}</strong>
+            <small className="monoValue">{row.rule.condition_expression}</small>
+          </span>
+        ),
+      },
+      {
+        id: "severity",
+        header: "Severity",
+        size: 100,
+        minSize: 90,
+        sortValue: (row) => row.rule.severity,
+        cell: (row) => (
+          <ConsoleStatusBadge
+            tone={
+              row.rule.severity === "critical"
+                ? "critical"
+                : row.rule.severity === "warning"
+                  ? "warning"
+                  : "info"
+            }
+          >
+            {row.rule.severity}
+          </ConsoleStatusBadge>
+        ),
+      },
+      {
+        id: "state",
+        header: "Current state",
+        size: 130,
+        minSize: 110,
+        sortValue: (row) => (row.alert ? 1 : 0),
+        cell: (row) => (row.alert ? "true" : "false"),
+      },
+      {
+        id: "window",
+        header: "Window",
+        size: 105,
+        minSize: 90,
+        sortValue: (row) => row.rule.window_secs,
+        cell: (row) => formatPolicyWindow(row.rule.window_secs),
+      },
+      {
+        id: "actual",
+        header: "Actual",
+        size: 120,
+        minSize: 100,
+        sortValue: (row) => row.alert?.actual_value ?? -1,
+        cell: (row) => formatMetricValue(row.alert?.actual_value),
+      },
+      {
+        id: "threshold",
+        header: "Threshold",
+        size: 135,
+        minSize: 110,
+        sortValue: (row) => row.alert?.threshold_value ?? -1,
+        cell: (row) =>
+          row.alert?.threshold_value == null
+            ? "condition value"
+            : formatMetricValue(row.alert.threshold_value),
+      },
+      {
+        id: "evaluated",
+        header: "Last evaluated",
+        size: 135,
+        minSize: 110,
+        sortValue: (row) => row.policy.last_evaluated_at ?? "",
+        cell: (row) =>
+          row.alert?.observed_at
+            ? formatCompactTime(row.alert.observed_at)
+            : row.policy.last_evaluated_at
+              ? formatCompactTime(row.policy.last_evaluated_at)
+              : "never",
+      },
+    ],
+    [],
+  );
+  const alertColumns = useMemo<ConsoleDataGridColumn<PolicyAlertRecord>[]>(
+    () => [
+      {
+        id: "time",
+        header: "Time",
+        size: 135,
+        minSize: 110,
+        sortValue: (row) => row.observed_at,
+        cell: (row) => formatCompactTime(row.observed_at),
+      },
+      {
+        id: "severity",
+        header: "Severity",
+        size: 105,
+        minSize: 90,
+        sortValue: (row) => row.severity,
+        cell: (row) => (
+          <ConsoleStatusBadge
+            tone={
+              row.severity === "critical"
+                ? "critical"
+                : row.severity === "warning"
+                  ? "warning"
+                  : "info"
+            }
+          >
+            {row.severity}
+          </ConsoleStatusBadge>
+        ),
+      },
+      {
+        id: "policy",
+        header: "Policy",
+        size: 165,
+        minSize: 130,
+        searchValue: (row) => policyById.get(row.policy_group_id)?.name ?? "",
+        cell: (row) =>
+          policyById.get(row.policy_group_id)?.name ??
+          shortId(row.policy_group_id),
+      },
+      {
+        id: "rule",
+        header: "Rule",
+        size: 185,
+        minSize: 140,
+        searchValue: (row) =>
+          policyById
+            .get(row.policy_group_id)
+            ?.rules.find((rule) => rule.id === row.policy_rule_id)?.name ?? "",
+        cell: (row) =>
+          policyById
+            .get(row.policy_group_id)
+            ?.rules.find((rule) => rule.id === row.policy_rule_id)?.name ??
+          shortId(row.policy_rule_id),
+      },
+      {
+        id: "actual",
+        header: "Actual",
+        size: 120,
+        minSize: 100,
+        sortValue: (row) => row.actual_value ?? -1,
+        cell: (row) => formatMetricValue(row.actual_value),
+      },
+      {
+        id: "threshold",
+        header: "Threshold",
+        size: 120,
+        minSize: 100,
+        sortValue: (row) => row.threshold_value ?? -1,
+        cell: (row) => formatMetricValue(row.threshold_value),
+      },
+      {
+        id: "state",
+        header: "State",
+        size: 95,
+        minSize: 80,
+        cell: () => "open",
+      },
+    ],
+    [policyById],
+  );
+
+  return (
+    <div className="trafficRulesDetail detailStack">
+      <div className="sectionHeader compactHeader">
+        <div>
+          <h4>Traffic & Rules</h4>
+          <span>
+            {formatVpsName(agent, "name_id_suffix")} ·{" "}
+            <span className="monoValue">{agent.id}</span>
+          </span>
+        </div>
+        <span className="sectionContext">
+          Last accounting sample:{" "}
+          {trafficAccounting?.last_sample_at
+            ? formatTime(trafficAccounting.last_sample_at)
+            : "none"}
+        </span>
+      </div>
+      <div className="consoleOperationsBar">
+        <span>
+          <strong>{selectorSummary(trafficAccounting)}</strong>
+          <small>{trafficAccounting?.selector_hash ?? "no selector hash"}</small>
+        </span>
+        <div className="consoleOperationsActions">
+          <button
+            className="secondaryAction compactAction"
+            type="button"
+            onClick={() =>
+              onNavigatePanel?.(
+                "Config",
+                `rules:id:${encodeURIComponent(agent.id)}`,
+              )
+            }
+          >
+            Edit VPS Rules
+          </button>
+          <button
+            className="secondaryAction compactAction"
+            disabled={!selectedPolicyId}
+            type="button"
+            onClick={() =>
+              selectedPolicyId &&
+              onNavigatePanel?.(
+                "Fleet",
+                `policies:policy:${encodeURIComponent(selectedPolicyId)}`,
+              )
+            }
+          >
+            Open Alert Policy
+          </button>
+          <button
+            className="secondaryAction compactAction"
+            type="button"
+            onClick={() => onNavigatePanel?.("Fleet", "alerts")}
+          >
+            Open Fleet Alerts
+          </button>
+        </div>
+      </div>
+      <div className="signalGrid fleetSignalGrid">
+        <Metric
+          label="Cycle used"
+          value={trafficAccounting ? formatBytes(trafficAccounting.total_bytes) : "not configured"}
+          tone="blue"
+        />
+        <Metric
+          label="Quota"
+          value={quotaSummary(trafficAccounting)}
+          tone="green"
+        />
+        <Metric
+          label="Cycle percent"
+          value={
+            trafficAccounting?.cycle_percent == null
+              ? "incomplete"
+              : `${trafficAccounting.cycle_percent.toFixed(1)}%`
+          }
+          tone="blue"
+        />
+        <Metric
+          label="Traffic state"
+          value={trafficStateForClient(trafficAccounting, policyAlerts)}
+          tone="green"
+        />
+      </div>
+      <div className="consoleInlineDetailGrid trafficAccountingSummary">
+        <span>
+          <strong>Cycle start</strong>
+          <span>{trafficAccounting?.cycle_start ?? "not configured"}</span>
+        </span>
+        <span>
+          <strong>Cycle end</strong>
+          <span>{trafficAccounting?.cycle_end ?? "not configured"}</span>
+        </span>
+        <span>
+          <strong>Reset day</strong>
+          <span>{resetDaySummary(trafficAccounting)}</span>
+        </span>
+        <span>
+          <strong>Cycle timezone</strong>
+          <span>UTC</span>
+        </span>
+        <span>
+          <strong>Last sample</strong>
+          <span>
+            {trafficAccounting?.last_sample_at
+              ? formatCompactTime(trafficAccounting.last_sample_at)
+              : "none"}
+          </span>
+        </span>
+        <span>
+          <strong>Counter epochs seen</strong>
+          <span>{trafficAccounting?.counter_epochs_seen ?? 0}</span>
+        </span>
+        <span>
+          <strong>Incomplete reasons</strong>
+          <span>{trafficAccounting?.incomplete_reasons.join(", ") || "none"}</span>
+        </span>
+      </div>
+      <div className="trafficRulesGridSection">
+        <ConsoleDataGrid
+          columns={trafficColumns}
+          defaultPageSize={5}
+          empty="No traffic selectors configured."
+          getRowId={(row) =>
+            `${row.source}:${row.interface}:${row.direction}`
+          }
+          itemLabel="selectors"
+          rows={trafficRows}
+          searchPlaceholder="Search selected traffic"
+          selectable={false}
+          storageKey={`vpsman.grid.fleet.traffic.selected.${agent.id}`}
+          title="Selected traffic"
+        />
+      </div>
+      <div className="trafficRulesGridSection">
+        <ConsoleDataGrid
+          columns={vpsRuleColumns}
+          defaultPageSize={6}
+          empty="No VPS rule values set."
+          getRowId={(row) => `${row.client_id}:${row.key}`}
+          itemLabel="values"
+          rows={vpsRuleValues}
+          searchPlaceholder="Search VPS rule values"
+          selectable={false}
+          storageKey={`vpsman.grid.fleet.traffic.rules.${agent.id}`}
+          title="VPS rule values"
+        />
+      </div>
+      <div className="trafficRulesGridSection">
+        <ConsoleDataGrid
+          columns={policyColumns}
+          defaultPageSize={6}
+          empty="No matched policy rule state for this VPS."
+          getRowId={(row) => `${row.policy.id}:${row.rule.id}`}
+          itemLabel="policy rules"
+          rows={matchedPolicyRows}
+          searchPlaceholder="Search matched policy rules"
+          selectable={false}
+          storageKey={`vpsman.grid.fleet.traffic.policies.${agent.id}`}
+          title="Matched policies"
+        />
+      </div>
+      <div className="trafficRulesGridSection">
+        <ConsoleDataGrid
+          columns={alertColumns}
+          defaultPageSize={6}
+          empty="No issued policy alerts."
+          getRowId={(row) => row.id}
+          itemLabel="alerts"
+          rows={policyAlerts}
+          searchPlaceholder="Search recent policy alerts"
+          selectable={false}
+          storageKey={`vpsman.grid.fleet.traffic.alerts.${agent.id}`}
+          title="Recent policy alerts"
+        />
       </div>
     </div>
   );
@@ -2658,60 +3435,50 @@ function shortDeliveryError(error: string | null | undefined): string {
   return trimmed.length > 96 ? `${trimmed.slice(0, 93)}...` : trimmed;
 }
 
-function thresholdSummary(policy: FleetAlertPolicyRecord): string {
-  const parts = [
-    policy.memory_available_warning_ratio == null
-      ? null
-      : `mem warn ${policy.memory_available_warning_ratio}`,
-    policy.memory_available_critical_ratio == null
-      ? null
-      : `mem crit ${policy.memory_available_critical_ratio}`,
-    policy.disk_available_warning_ratio == null
-      ? null
-      : `disk warn ${policy.disk_available_warning_ratio}`,
-    policy.disk_available_critical_ratio == null
-      ? null
-      : `disk crit ${policy.disk_available_critical_ratio}`,
-    policy.cpu_load_warning == null
-      ? null
-      : `cpu warn ${policy.cpu_load_warning}`,
-    policy.cpu_load_critical == null
-      ? null
-      : `cpu crit ${policy.cpu_load_critical}`,
-  ].filter((part): part is string => Boolean(part));
-  return parts.length > 0 ? parts.join(" · ") : "no thresholds";
-}
-
-function thresholdRequestSummary(policy: FleetAlertPolicyRequest): string {
-  const parts = [
-    policy.memory_available_warning_ratio == null
-      ? null
-      : `mem warn ${policy.memory_available_warning_ratio}`,
-    policy.memory_available_critical_ratio == null
-      ? null
-      : `mem crit ${policy.memory_available_critical_ratio}`,
-    policy.disk_available_warning_ratio == null
-      ? null
-      : `disk warn ${policy.disk_available_warning_ratio}`,
-    policy.disk_available_critical_ratio == null
-      ? null
-      : `disk crit ${policy.disk_available_critical_ratio}`,
-    policy.cpu_load_warning == null
-      ? null
-      : `cpu warn ${policy.cpu_load_warning}`,
-    policy.cpu_load_critical == null
-      ? null
-      : `cpu crit ${policy.cpu_load_critical}`,
-  ].filter((part): part is string => Boolean(part));
-  return parts.length > 0 ? parts.join(" · ") : "no thresholds";
-}
-
 function scopeSummary(scopeKind: string, scopeValue?: string | null): string {
   return scopeValue ? `${scopeKind}:${scopeValue}` : scopeKind;
 }
 
 function tokenSummary(values: string[], empty: string): string {
   return values.length > 0 ? values.join(", ") : empty;
+}
+
+function policyRulesSummary(policy: FleetAlertPolicyRecord): string {
+  if (policy.rule_count === 0) {
+    return "no rules";
+  }
+  const trafficCount = policy.rules.filter((rule) =>
+    rule.condition_expression.includes("traffic."),
+  ).length;
+  const resourceCount = policy.rule_count - trafficCount;
+  const parts = [
+    trafficCount > 0 ? `${trafficCount} traffic` : null,
+    resourceCount > 0 ? `${resourceCount} resource` : null,
+    `${policy.enabled_rule_count} enabled / ${policy.rule_count} total`,
+  ].filter((part): part is string => Boolean(part));
+  return parts.join(" · ");
+}
+
+function policyRequestRulesSummary(policy: FleetAlertPolicyRequest): string {
+  const enabled = policy.rules.filter((rule) => rule.enabled !== false).length;
+  return `${enabled} enabled / ${policy.rules.length} total`;
+}
+
+function policyActiveSummary(policy: FleetAlertPolicyRecord): string {
+  if (policy.active_critical_count > 0) {
+    return `${policy.active_critical_count} critical`;
+  }
+  if (policy.active_warning_count > 0) {
+    return `${policy.active_warning_count} warning`;
+  }
+  return "0";
+}
+
+function policyRuleLabel(rule: {
+  condition_expression: string;
+  severity: string;
+}): string {
+  return `${rule.condition_expression} · ${rule.severity}`;
 }
 
 function PolicyDetailGrid({ policy }: { policy: FleetAlertPolicyRecord }) {
@@ -2726,22 +3493,36 @@ function PolicyDetailGrid({ policy }: { policy: FleetAlertPolicyRecord }) {
         <span className="monoValue">{policy.id}</span>
       </span>
       <span>
-        <strong>Scope</strong>
-        <span className="monoValue">
-          {scopeSummary(policy.scope_kind, policy.scope_value)}
-        </span>
-      </span>
-      <span>
-        <strong>Priority</strong>
-        <span>{policy.priority}</span>
+        <strong>Selector</strong>
+        <span className="monoValue">{policy.selector_expression}</span>
       </span>
       <span>
         <strong>State</strong>
         <span>{policy.enabled ? "enabled" : "disabled"}</span>
       </span>
       <span>
-        <strong>Thresholds</strong>
-        <span>{thresholdSummary(policy)}</span>
+        <strong>Rules</strong>
+        <span>{policyRulesSummary(policy)}</span>
+      </span>
+      <span>
+        <strong>Matched VPSs</strong>
+        <span>{policy.matched_vps_count}</span>
+      </span>
+      <span>
+        <strong>Active states</strong>
+        <span>{policyActiveSummary(policy)}</span>
+      </span>
+      <span>
+        <strong>Incomplete VPSs</strong>
+        <span>{policy.incomplete_vps_count}</span>
+      </span>
+      <span>
+        <strong>Last evaluated</strong>
+        <span>
+          {policy.last_evaluated_at
+            ? formatCompactTime(policy.last_evaluated_at)
+            : "never"}
+        </span>
       </span>
       <span>
         <strong>Created</strong>
@@ -2754,6 +3535,14 @@ function PolicyDetailGrid({ policy }: { policy: FleetAlertPolicyRecord }) {
       <span>
         <strong>Notes</strong>
         <span>{policy.notes || "none"}</span>
+      </span>
+      <span>
+        <strong>Rule rows</strong>
+        <span>
+          {policy.rules.length === 0
+            ? "none"
+            : policy.rules.map(policyRuleLabel).join(" · ")}
+        </span>
       </span>
     </div>
   );
@@ -2861,15 +3650,105 @@ function WebhookRuleDetailGrid({ rule }: { rule: WebhookRuleRecord }) {
   );
 }
 
+const POLICY_WINDOWS = [0, 60, 300, 900] as const;
+const POLICY_SEVERITIES = ["info", "warning", "critical"] as const;
+
+type PolicyRuleDraft = {
+  localId: string;
+  id?: string;
+  name: string;
+  enabled: boolean;
+  condition_expression: string;
+  traffic_selector: string;
+  window_secs: string;
+  severity: string;
+};
+
+type PolicySaveSnapshot = {
+  request: FleetAlertPolicyRequest;
+  preview: PolicyDryRunResponse;
+  title: string;
+};
+
+function defaultPolicyRuleDraft(): PolicyRuleDraft {
+  return {
+    localId: crypto.randomUUID(),
+    name: "80% total quota",
+    enabled: true,
+    condition_expression: "traffic.cycle.total >= traffic.quota.total * 0.8",
+    traffic_selector: "",
+    window_secs: "0",
+    severity: "warning",
+  };
+}
+
+function draftFromPolicyRule(rule: PolicyRuleRecord): PolicyRuleDraft {
+  return {
+    localId: rule.id,
+    id: rule.id,
+    name: rule.name,
+    enabled: rule.enabled,
+    condition_expression: rule.condition_expression,
+    traffic_selector: rule.traffic_selector ?? "",
+    window_secs: String(rule.window_secs),
+    severity: rule.severity,
+  };
+}
+
+function requestRuleFromDraft(draft: PolicyRuleDraft): PolicyRuleRequest {
+  return {
+    id: draft.id,
+    name: draft.name.trim(),
+    enabled: draft.enabled,
+    condition_expression: draft.condition_expression.trim(),
+    traffic_selector: draft.traffic_selector.trim() || null,
+    window_secs: optionalInteger(draft.window_secs) ?? 0,
+    severity: draft.severity,
+  };
+}
+
+function policyRequestFromRecord(
+  policy: FleetAlertPolicyRecord,
+  overrides: Partial<FleetAlertPolicyRequest> = {},
+): FleetAlertPolicyRequest {
+  return {
+    id: policy.id,
+    name: policy.name,
+    enabled: policy.enabled,
+    selector_expression: policy.selector_expression,
+    rules: policy.rules.map((rule) => ({
+      id: rule.id,
+      name: rule.name,
+      enabled: rule.enabled,
+      condition_expression: rule.condition_expression,
+      traffic_selector: rule.traffic_selector,
+      window_secs: rule.window_secs,
+      severity: rule.severity,
+    })),
+    notes: policy.notes,
+    confirmed: true,
+    preview_hash: null,
+    ...overrides,
+  };
+}
+
 function FleetAlertPolicyManager({
   agents,
   policies,
+  policyAlerts,
+  policyFocusId,
+  policyFilterClientId,
   onDelete,
+  onDryRun,
   onUpsert,
 }: {
   agents: AgentView[];
   policies: FleetAlertPolicyRecord[];
+  policyAlerts: PolicyAlertRecord[];
+  policyFocusId: string | null;
+  policyFilterClientId: string | null;
   onDelete: (policyId: string, reviewedName: string) => Promise<void>;
+  onDryRun: (request: PolicyDryRunRequest) => Promise<PolicyDryRunResponse>;
   onUpsert: (
     request: FleetAlertPolicyRequest,
   ) => Promise<FleetAlertPolicyRecord>;
@@ -2882,23 +3761,40 @@ function FleetAlertPolicyManager({
   );
   const [deletePending, setDeletePending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [saveSnapshot, setSaveSnapshot] = useState<{
-    request: FleetAlertPolicyRequest;
-    title: string;
-  } | null>(null);
-  const [name, setName] = useState("edge-resource-policy");
-  const [scopeKind, setScopeKind] = useState("tag");
-  const [scopeValue, setScopeValue] = useState("edge");
-  const [memoryWarning, setMemoryWarning] = useState("0.20");
-  const [memoryCritical, setMemoryCritical] = useState("0.10");
-  const [diskWarning, setDiskWarning] = useState("");
-  const [diskCritical, setDiskCritical] = useState("");
-  const [cpuWarning, setCpuWarning] = useState("");
-  const [cpuCritical, setCpuCritical] = useState("");
-  const [priority, setPriority] = useState("0");
+  const [saveSnapshot, setSaveSnapshot] = useState<PolicySaveSnapshot | null>(
+    null,
+  );
+  const [name, setName] = useState("edge-traffic");
+  const [selectorExpression, setSelectorExpression] = useState("tag:edge");
   const [enabled, setEnabled] = useState(true);
   const [notes, setNotes] = useState("");
+  const [ruleDrafts, setRuleDrafts] = useState<PolicyRuleDraft[]>([
+    defaultPolicyRuleDraft(),
+  ]);
+  const [dryRunPreview, setDryRunPreview] =
+    useState<PolicyDryRunResponse | null>(null);
+  const [dryRunPending, setDryRunPending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+
+  const agentNameById = useMemo(
+    () =>
+      new Map(
+        agents.map((agent) => [
+          agent.id,
+          formatVpsName(agent, "name_id_suffix"),
+        ]),
+      ),
+    [agents],
+  );
+  const alertsByPolicy = useMemo(() => {
+    const grouped = new Map<string, PolicyAlertRecord[]>();
+    for (const alert of policyAlerts) {
+      const existing = grouped.get(alert.policy_group_id) ?? [];
+      existing.push(alert);
+      grouped.set(alert.policy_group_id, existing);
+    }
+    return grouped;
+  }, [policyAlerts]);
 
   const policyColumns = useMemo<
     ConsoleDataGridColumn<FleetAlertPolicyRecord>[]
@@ -2907,36 +3803,20 @@ function FleetAlertPolicyManager({
       {
         id: "name",
         header: "Policy",
-        size: 260,
-        minSize: 190,
+        size: 250,
+        minSize: 180,
         sortValue: (policy) => policy.name,
-        searchValue: (policy) => `${policy.name} ${policy.notes ?? ""}`,
+        searchValue: (policy) => policy.name + " " + (policy.notes ?? ""),
         cell: (policy) => (
           <span className="historyPrimary">
             <strong>{policy.name}</strong>
-            <small>{policy.notes || "no notes"}</small>
-          </span>
-        ),
-      },
-      {
-        id: "scope",
-        header: "Scope",
-        size: 170,
-        minSize: 130,
-        sortValue: (policy) =>
-          `${policy.scope_kind}:${policy.scope_value ?? ""}`,
-        searchValue: (policy) =>
-          `${policy.scope_kind} ${policy.scope_value ?? ""}`,
-        cell: (policy) => (
-          <span className="monoValue">
-            {policy.scope_kind}
-            {policy.scope_value ? `:${policy.scope_value}` : ""}
+            <small className="monoValue">{shortId(policy.id)}</small>
           </span>
         ),
       },
       {
         id: "enabled",
-        header: "State",
+        header: "Enabled",
         size: 105,
         minSize: 90,
         sortValue: (policy) => policy.enabled,
@@ -2948,30 +3828,65 @@ function FleetAlertPolicyManager({
         ),
       },
       {
-        id: "priority",
-        header: "Priority",
-        size: 95,
-        minSize: 80,
-        sortValue: (policy) => policy.priority,
-        cell: (policy) => <span className="monoValue">{policy.priority}</span>,
+        id: "selector",
+        header: "Selector",
+        size: 280,
+        minSize: 180,
+        searchValue: (policy) => policy.selector_expression,
+        sortValue: (policy) => policy.selector_expression,
+        cell: (policy) => (
+          <span className="monoValue">{policy.selector_expression}</span>
+        ),
       },
       {
-        id: "thresholds",
-        header: "Thresholds",
-        size: 360,
-        minSize: 240,
-        searchValue: thresholdSummary,
-        cell: (policy) => (
-          <span className="historyPrimary">
-            <strong>{thresholdSummary(policy)}</strong>
-            <small>Memory, disk, and CPU matrix.</small>
-          </span>
-        ),
+        id: "matched",
+        header: "Matched VPSs",
+        size: 120,
+        minSize: 95,
+        sortValue: (policy) => policy.matched_vps_count,
+        cell: (policy) => policy.matched_vps_count,
+      },
+      {
+        id: "rules",
+        header: "Rules",
+        size: 210,
+        minSize: 150,
+        searchValue: policyRulesSummary,
+        sortValue: (policy) => policy.enabled_rule_count,
+        cell: (policy) => policyRulesSummary(policy),
+      },
+      {
+        id: "active",
+        header: "Active States",
+        size: 130,
+        minSize: 105,
+        sortValue: (policy) =>
+          policy.active_critical_count * 1000 + policy.active_warning_count,
+        cell: (policy) => policyActiveSummary(policy),
+      },
+      {
+        id: "incomplete",
+        header: "Incomplete VPSs",
+        size: 135,
+        minSize: 110,
+        sortValue: (policy) => policy.incomplete_vps_count,
+        cell: (policy) => policy.incomplete_vps_count,
+      },
+      {
+        id: "last_evaluated",
+        header: "Last Evaluated",
+        size: 145,
+        minSize: 115,
+        sortValue: (policy) => policy.last_evaluated_at ?? "",
+        cell: (policy) =>
+          policy.last_evaluated_at
+            ? formatCompactTime(policy.last_evaluated_at)
+            : "never",
       },
       {
         id: "updated",
         header: "Updated",
-        size: 140,
+        size: 135,
         minSize: 110,
         sortValue: (policy) => policy.updated_at,
         cell: (policy) => formatCompactTime(policy.updated_at),
@@ -2982,35 +3897,50 @@ function FleetAlertPolicyManager({
 
   useEffect(() => {
     setSaveSnapshot(null);
-  }, [
-    name,
-    scopeKind,
-    scopeValue,
-    memoryWarning,
-    memoryCritical,
-    diskWarning,
-    diskCritical,
-    cpuWarning,
-    cpuCritical,
-    priority,
-    enabled,
-    notes,
-  ]);
+  }, [name, selectorExpression, enabled, notes, ruleDrafts]);
+
+  useEffect(() => {
+    if (!policyFocusId) {
+      return;
+    }
+    const focused = policies.find((policy) => policy.id === policyFocusId);
+    if (!focused) {
+      setStatus("Policy not found: " + shortId(policyFocusId));
+      return;
+    }
+    setEditorOpen(false);
+    setDetailPolicyId(focused.id);
+    setStatus("viewing " + focused.name);
+  }, [policies, policyFocusId]);
+
+  function currentDryRunRequest(): PolicyDryRunRequest {
+    return {
+      id: editingId ?? undefined,
+      name: name.trim(),
+      enabled,
+      selector_expression: selectorExpression.trim(),
+      rules: ruleDrafts.map(requestRuleFromDraft),
+      notes: notes.trim() || null,
+    };
+  }
+
+  function currentUpsertRequest(previewHash: string): FleetAlertPolicyRequest {
+    return {
+      ...currentDryRunRequest(),
+      confirmed: true,
+      preview_hash: previewHash,
+    };
+  }
 
   function resetForm() {
     setEditingId(null);
-    setName("edge-resource-policy");
-    setScopeKind("tag");
-    setScopeValue("edge");
-    setMemoryWarning("0.20");
-    setMemoryCritical("0.10");
-    setDiskWarning("");
-    setDiskCritical("");
-    setCpuWarning("");
-    setCpuCritical("");
-    setPriority("0");
+    setName("edge-traffic");
+    setSelectorExpression("tag:edge");
     setEnabled(true);
     setNotes("");
+    setRuleDrafts([defaultPolicyRuleDraft()]);
+    setDryRunPreview(null);
+    setSaveSnapshot(null);
     setStatus(null);
   }
 
@@ -3024,80 +3954,86 @@ function FleetAlertPolicyManager({
     setDetailPolicyId(null);
     setEditingId(policy.id);
     setName(policy.name);
-    setScopeKind(policy.scope_kind);
-    setScopeValue(policy.scope_value ?? "");
-    setMemoryWarning(
-      formatEditableNumber(policy.memory_available_warning_ratio),
-    );
-    setMemoryCritical(
-      formatEditableNumber(policy.memory_available_critical_ratio),
-    );
-    setDiskWarning(formatEditableNumber(policy.disk_available_warning_ratio));
-    setDiskCritical(formatEditableNumber(policy.disk_available_critical_ratio));
-    setCpuWarning(formatEditableNumber(policy.cpu_load_warning));
-    setCpuCritical(formatEditableNumber(policy.cpu_load_critical));
-    setPriority(String(policy.priority));
+    setSelectorExpression(policy.selector_expression);
     setEnabled(policy.enabled);
     setNotes(policy.notes ?? "");
-    setStatus(`editing ${policy.name}`);
+    setRuleDrafts(
+      policy.rules.length > 0
+        ? policy.rules.map(draftFromPolicyRule)
+        : [defaultPolicyRuleDraft()],
+    );
+    setDryRunPreview(null);
+    setSaveSnapshot(null);
+    setStatus("editing " + policy.name);
     setEditorOpen(true);
   }
 
   function openPolicyDetails(policy: FleetAlertPolicyRecord) {
     setEditorOpen(false);
     setDetailPolicyId(policy.id);
-    setStatus(`viewing ${policy.name}`);
+    setStatus("viewing " + policy.name);
   }
 
-  function requestFromPolicy(
-    policy: FleetAlertPolicyRecord,
-    overrides: Partial<FleetAlertPolicyRequest> = {},
-  ): FleetAlertPolicyRequest {
-    return {
-      id: policy.id,
-      name: policy.name,
-      scope_kind: policy.scope_kind,
-      scope_value: policy.scope_value,
-      memory_available_warning_ratio: policy.memory_available_warning_ratio,
-      memory_available_critical_ratio: policy.memory_available_critical_ratio,
-      disk_available_warning_ratio: policy.disk_available_warning_ratio,
-      disk_available_critical_ratio: policy.disk_available_critical_ratio,
-      cpu_load_warning: policy.cpu_load_warning,
-      cpu_load_critical: policy.cpu_load_critical,
-      priority: policy.priority,
-      enabled: policy.enabled,
-      notes: policy.notes,
-      confirmed: true,
-      ...overrides,
-    };
+  function updateRuleDraft(
+    localId: string,
+    patch: Partial<PolicyRuleDraft>,
+  ) {
+    setRuleDrafts((current) =>
+      current.map((draft) =>
+        draft.localId === localId ? { ...draft, ...patch } : draft,
+      ),
+    );
   }
 
-  function reviewSubmit() {
-    setSaveSnapshot({
-      request: {
-        id: editingId ?? undefined,
-        name: name.trim(),
-        scope_kind: scopeKind,
-        scope_value: scopeKind === "global" ? null : scopeValue.trim(),
-        memory_available_warning_ratio: optionalNumber(memoryWarning),
-        memory_available_critical_ratio: optionalNumber(memoryCritical),
-        disk_available_warning_ratio: optionalNumber(diskWarning),
-        disk_available_critical_ratio: optionalNumber(diskCritical),
-        cpu_load_warning: optionalNumber(cpuWarning),
-        cpu_load_critical: optionalNumber(cpuCritical),
-        priority: optionalInteger(priority) ?? 0,
-        enabled,
-        notes: notes.trim() || null,
-        confirmed: true,
-      },
-      title: editingId ? "Update alert policy" : "Create alert policy",
-    });
+  function addRuleDraft() {
+    setRuleDrafts((current) => [...current, defaultPolicyRuleDraft()]);
+  }
+
+  function removeRuleDraft(localId: string) {
+    setRuleDrafts((current) =>
+      current.length <= 1
+        ? current
+        : current.filter((draft) => draft.localId !== localId),
+    );
+  }
+
+  async function dryRunCurrentPolicy(): Promise<PolicyDryRunResponse> {
+    const request = currentDryRunRequest();
+    setDryRunPending(true);
+    setStatus("dry-running policy");
+    try {
+      const preview = await onDryRun(request);
+      setDryRunPreview(preview);
+      setStatus(
+        "dry-run matched " + preview.matched_vps_count + " VPSs",
+      );
+      return preview;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "policy dry-run failed";
+      setStatus(message);
+      throw error;
+    } finally {
+      setDryRunPending(false);
+    }
+  }
+
+  async function reviewSubmit() {
+    try {
+      const preview = await dryRunCurrentPolicy();
+      setSaveSnapshot({
+        request: currentUpsertRequest(preview.preview_hash),
+        preview,
+        title: editingId ? "Update alert policy" : "Create alert policy",
+      });
+    } catch {
+      // Status is set by dryRunCurrentPolicy.
+    }
   }
 
   async function submit() {
     const snapshot = saveSnapshot;
     if (!snapshot) {
-      setStatus("Review policy before saving");
+      setStatus("Run dry-run and review policy before saving");
       return;
     }
     setStatus(editingId ? "updating policy" : "creating policy");
@@ -3106,7 +4042,8 @@ function FleetAlertPolicyManager({
       setEditingId(policy.id);
       setEditorOpen(true);
       setSaveSnapshot(null);
-      setStatus(`saved ${policy.name}`);
+      setDryRunPreview(snapshot.preview);
+      setStatus("saved " + policy.name);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "policy save failed");
     }
@@ -3135,7 +4072,7 @@ function FleetAlertPolicyManager({
         setDetailPolicyId(null);
       }
       setDeleteRows(null);
-      setStatus(`deleted ${rows.length}`);
+      setStatus("deleted " + rows.length);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "policy delete failed";
@@ -3154,9 +4091,18 @@ function FleetAlertPolicyManager({
     setStatus(nextEnabled ? "enabling policies" : "disabling policies");
     try {
       for (const policy of rows) {
-        await onUpsert(requestFromPolicy(policy, { enabled: nextEnabled }));
+        const base = policyRequestFromRecord(policy, { enabled: nextEnabled });
+        const preview = await onDryRun({
+          id: base.id,
+          name: base.name,
+          enabled: base.enabled,
+          selector_expression: base.selector_expression,
+          rules: base.rules,
+          notes: base.notes,
+        });
+        await onUpsert({ ...base, preview_hash: preview.preview_hash });
       }
-      setStatus(`${nextEnabled ? "enabled" : "disabled"} ${rows.length}`);
+      setStatus((nextEnabled ? "enabled " : "disabled ") + rows.length);
     } catch (error) {
       setStatus(
         error instanceof Error ? error.message : "policy update failed",
@@ -3172,7 +4118,7 @@ function FleetAlertPolicyManager({
           "Open details for",
           "alert policy",
           rows[0]?.name,
-          "Opens read-only policy details below the table.",
+          "Opens policy group details below the table.",
         ),
       disabled: (rows) => rows.length !== 1,
       icon: <Eye size={14} />,
@@ -3185,7 +4131,7 @@ function FleetAlertPolicyManager({
           "Edit",
           "alert policy",
           rows[0]?.name,
-          "Opens the policy editor below the table.",
+          "Opens the policy group editor below the table.",
         ),
       disabled: (rows) => rows.length !== 1,
       icon: <Pencil size={14} />,
@@ -3194,7 +4140,7 @@ function FleetAlertPolicyManager({
     {
       label: "Enable",
       description: (rows) =>
-        `Enable ${rows.filter((policy) => !policy.enabled).length} disabled selected alert policy records.`,
+        "Enable " + rows.filter((policy) => !policy.enabled).length + " disabled selected policy groups.",
       disabled: (rows) => rows.filter((policy) => !policy.enabled).length === 0,
       icon: <Power size={14} />,
       onSelect: (rows) =>
@@ -3206,7 +4152,7 @@ function FleetAlertPolicyManager({
     {
       label: "Disable",
       description: (rows) =>
-        `Disable ${rows.filter((policy) => policy.enabled).length} enabled selected alert policy records.`,
+        "Disable " + rows.filter((policy) => policy.enabled).length + " enabled selected policy groups.",
       disabled: (rows) => rows.filter((policy) => policy.enabled).length === 0,
       icon: <PowerOff size={14} />,
       onSelect: (rows) =>
@@ -3218,7 +4164,7 @@ function FleetAlertPolicyManager({
     {
       label: "Review deletion",
       description: (rows) =>
-        `Delete ${rows.length} selected alert policy records. Existing alert states are not changed.`,
+        "Delete " + rows.length + " selected policy groups. Issued alerts remain in alert history.",
       disabled: (rows) => rows.length === 0,
       icon: <Trash2 size={14} />,
       onSelect: requestDeletePolicies,
@@ -3226,9 +4172,21 @@ function FleetAlertPolicyManager({
     },
   ];
 
+  const detailPolicy = detailPolicyId
+    ? policies.find((candidate) => candidate.id === detailPolicyId)
+    : null;
+
   return (
     <div className="consoleCrudPanel">
       <div className="consoleResourceLayout fullWidth">
+        {policyFilterClientId ? (
+          <div className="notice infoNotice">
+            Focused VPS:{" "}
+            <span className="monoValue">{policyFilterClientId}</span>. Policy
+            rows show server-evaluated match counts; open a policy dry-run to
+            inspect exact matched VPSs.
+          </div>
+        ) : null}
         <ConsoleDataGrid
           actions={policyActions}
           columns={policyColumns}
@@ -3236,12 +4194,14 @@ function FleetAlertPolicyManager({
           empty="No alert policies saved."
           getRowId={(policy) => policy.id}
           itemLabel="policies"
-          renderExpandedRow={(policy) => <PolicyDetailGrid policy={policy} />}
+          renderExpandedRow={(policy) => (
+            <PolicyDetailGrid policy={policy} />
+          )}
           rowActions={policyActions}
           rows={policies}
-          searchPlaceholder="Search policies by name, scope, thresholds, or notes"
-          storageKey="vpsman.grid.fleet.alertPolicies.v2"
-          title="Alert policy rules"
+          searchPlaceholder="Search policies by name, selector, rules, or notes"
+          storageKey="vpsman.grid.fleet.alertPolicies.v3"
+          title="Policy groups"
           toolbarActions={
             <button
               className="primaryAction compactAction"
@@ -3253,38 +4213,26 @@ function FleetAlertPolicyManager({
             </button>
           }
         />
-        {detailPolicyId && !editorOpen ? (
+        {detailPolicy && !editorOpen ? (
           <ConsoleDetailPanel
             actions={
               <button
                 className="secondaryAction"
                 type="button"
-                onClick={() => {
-                  const policy = policies.find(
-                    (candidate) => candidate.id === detailPolicyId,
-                  );
-                  if (policy) {
-                    editPolicy(policy);
-                  }
-                }}
+                onClick={() => editPolicy(detailPolicy)}
               >
                 Edit policy
               </button>
             }
-            description="Policy metadata and thresholds."
+            description="Policy group metadata, rule rows, and recent issued alerts."
             onClose={() => setDetailPolicyId(null)}
             title="Alert policy details"
           >
-            {(() => {
-              const policy = policies.find(
-                (candidate) => candidate.id === detailPolicyId,
-              );
-              return policy ? (
-                <PolicyDetailGrid policy={policy} />
-              ) : (
-                <span className="mutedText">Policy no longer exists.</span>
-              );
-            })()}
+            <PolicyDetailGrid policy={detailPolicy} />
+            <IssuedPolicyAlertList
+              alerts={alertsByPolicy.get(detailPolicy.id) ?? []}
+              agentNameById={agentNameById}
+            />
           </ConsoleDetailPanel>
         ) : null}
         {editorOpen ? (
@@ -3292,9 +4240,18 @@ function FleetAlertPolicyManager({
             actions={
               <>
                 <button
-                  className="primaryAction"
+                  className="secondaryAction"
+                  disabled={dryRunPending}
                   type="button"
-                  onClick={reviewSubmit}
+                  onClick={() => void dryRunCurrentPolicy()}
+                >
+                  Dry-run
+                </button>
+                <button
+                  className="primaryAction"
+                  disabled={dryRunPending}
+                  type="button"
+                  onClick={() => void reviewSubmit()}
                 >
                   {editingId ? "Review update" : "Review create"}
                 </button>
@@ -3307,65 +4264,19 @@ function FleetAlertPolicyManager({
                 </button>
               </>
             }
-            description="Scoped thresholds are saved records. Table context stays visible while editing."
+            description="Edit the selector expression, preview matched VPSs, then confirm the exact policy payload."
             onClose={() => setEditorOpen(false)}
             title={editingId ? "Edit alert policy" : "Create alert policy"}
           >
             <div className="consoleFormGrid">
-              <ConsoleField label="Policy name" className="fieldWide">
+              <ConsoleField label="Name" className="fieldWide">
                 <input
                   aria-label="Policy name"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                 />
               </ConsoleField>
-              <ConsoleField label="Scope kind">
-                <select
-                  aria-label="Policy scope kind"
-                  value={scopeKind}
-                  onChange={(event) => setScopeKind(event.target.value)}
-                >
-                  <option value="global">global</option>
-                  <option value="provider">provider</option>
-                  <option value="tag">tag</option>
-                  <option value="client">client</option>
-                </select>
-              </ConsoleField>
-              <ConsoleField
-                label="Scope value"
-                hint={
-                  scopeKind === "global"
-                    ? "Global policies do not need a value."
-                    : scopeKind === "client"
-                      ? "Exact VPS ID is saved; type to search names or IDs."
-                      : "Tag or provider value."
-                }
-              >
-                {scopeKind === "client" ? (
-                  <VpsCombobox
-                    agents={agents}
-                    ariaLabel="Policy scope value"
-                    onChange={setScopeValue}
-                    placeholder="Search policy VPS"
-                    value={scopeValue}
-                  />
-                ) : (
-                  <input
-                    aria-label="Policy scope value"
-                    disabled={scopeKind === "global"}
-                    value={scopeValue}
-                    onChange={(event) => setScopeValue(event.target.value)}
-                  />
-                )}
-              </ConsoleField>
-              <ConsoleField label="Priority">
-                <input
-                  aria-label="Policy priority"
-                  value={priority}
-                  onChange={(event) => setPriority(event.target.value)}
-                />
-              </ConsoleField>
-              <ConsoleField label="State">
+              <ConsoleField label="Enabled">
                 <label className="checkLine inlineCheck">
                   <input
                     checked={enabled}
@@ -3375,58 +4286,18 @@ function FleetAlertPolicyManager({
                   <span>Evaluate policy</span>
                 </label>
               </ConsoleField>
-              <div className="thresholdMatrix">
-                <div className="thresholdMatrixRow header">
-                  <span>Resource</span>
-                  <span>Warning</span>
-                  <span>Critical</span>
-                </div>
-                <div className="thresholdMatrixRow">
-                  <strong>Memory available ratio</strong>
-                  <input
-                    aria-label="Memory warning ratio"
-                    value={memoryWarning}
-                    onChange={(event) => setMemoryWarning(event.target.value)}
-                    placeholder="0.20"
-                  />
-                  <input
-                    aria-label="Memory critical ratio"
-                    value={memoryCritical}
-                    onChange={(event) => setMemoryCritical(event.target.value)}
-                    placeholder="0.10"
-                  />
-                </div>
-                <div className="thresholdMatrixRow">
-                  <strong>Disk available ratio</strong>
-                  <input
-                    aria-label="Disk warning ratio"
-                    value={diskWarning}
-                    onChange={(event) => setDiskWarning(event.target.value)}
-                    placeholder="0.15"
-                  />
-                  <input
-                    aria-label="Disk critical ratio"
-                    value={diskCritical}
-                    onChange={(event) => setDiskCritical(event.target.value)}
-                    placeholder="0.08"
-                  />
-                </div>
-                <div className="thresholdMatrixRow">
-                  <strong>CPU load</strong>
-                  <input
-                    aria-label="CPU warning load"
-                    value={cpuWarning}
-                    onChange={(event) => setCpuWarning(event.target.value)}
-                    placeholder="4.0"
-                  />
-                  <input
-                    aria-label="CPU critical load"
-                    value={cpuCritical}
-                    onChange={(event) => setCpuCritical(event.target.value)}
-                    placeholder="8.0"
-                  />
-                </div>
-              </div>
+              <ConsoleField
+                className="fieldFull"
+                hint="Use the same fleet selector expression design as saved fleet views and job targeting, including id:<client_id>, name:<name>, tag:<tag>, provider:<provider>, country:<code>, status:<state>, &&, ||, !, and parentheses."
+                label="VPS selector expression"
+              >
+                <SearchExpressionInput
+                  ariaLabel="Policy VPS selector expression"
+                  onChange={setSelectorExpression}
+                  placeholder="tag:edge && provider:hetzner"
+                  value={selectorExpression}
+                />
+              </ConsoleField>
               <ConsoleField label="Notes" className="fieldFull">
                 <textarea
                   aria-label="Policy notes"
@@ -3435,30 +4306,154 @@ function FleetAlertPolicyManager({
                 />
               </ConsoleField>
             </div>
+            <div className="gridBlock">
+              <div className="sectionHeader compactHeader">
+                <div>
+                  <h4>Rule rows</h4>
+                  <span>{ruleDrafts.length} rule rows</span>
+                </div>
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={addRuleDraft}
+                  type="button"
+                >
+                  <Plus size={14} />
+                  <span>Add rule</span>
+                </button>
+              </div>
+              <div className="policyRuleEditor">
+                {ruleDrafts.map((draft) => (
+                  <section className="policyRuleCard" key={draft.localId}>
+                    <div className="policyRuleCardHeader">
+                      <label className="checkLine inlineCheck">
+                        <input
+                          checked={draft.enabled}
+                          onChange={(event) =>
+                            updateRuleDraft(draft.localId, {
+                              enabled: event.target.checked,
+                            })
+                          }
+                          type="checkbox"
+                        />
+                        <span>Enabled</span>
+                      </label>
+                      <button
+                        className="secondaryAction compactAction"
+                        disabled={ruleDrafts.length <= 1}
+                        onClick={() => removeRuleDraft(draft.localId)}
+                        type="button"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <div className="consoleFormGrid policyRuleFormGrid">
+                      <ConsoleField label="Rule">
+                        <input
+                          aria-label="Rule name"
+                          value={draft.name}
+                          onChange={(event) =>
+                            updateRuleDraft(draft.localId, {
+                              name: event.target.value,
+                            })
+                          }
+                        />
+                      </ConsoleField>
+                      <ConsoleField label="Condition expression" className="fieldFull">
+                        <textarea
+                          aria-label="Rule condition expression"
+                          value={draft.condition_expression}
+                          onChange={(event) =>
+                            updateRuleDraft(draft.localId, {
+                              condition_expression: event.target.value,
+                            })
+                          }
+                        />
+                      </ConsoleField>
+                      <ConsoleField label="Traffic selector override">
+                        <input
+                          aria-label="Traffic selector override"
+                          placeholder="blank = VPS traffic.selectors"
+                          value={draft.traffic_selector}
+                          onChange={(event) =>
+                            updateRuleDraft(draft.localId, {
+                              traffic_selector: event.target.value,
+                            })
+                          }
+                        />
+                      </ConsoleField>
+                      <ConsoleField label="Window">
+                        <select
+                          aria-label="Rule window"
+                          value={draft.window_secs}
+                          onChange={(event) =>
+                            updateRuleDraft(draft.localId, {
+                              window_secs: event.target.value,
+                            })
+                          }
+                        >
+                          {POLICY_WINDOWS.map((windowSecs) => (
+                            <option key={windowSecs} value={String(windowSecs)}>
+                              {windowSecs === 0 ? "immediate" : windowSecs / 60 + "m"}
+                            </option>
+                          ))}
+                        </select>
+                      </ConsoleField>
+                      <ConsoleField label="Severity">
+                        <select
+                          aria-label="Rule severity"
+                          value={draft.severity}
+                          onChange={(event) =>
+                            updateRuleDraft(draft.localId, {
+                              severity: event.target.value,
+                            })
+                          }
+                        >
+                          {POLICY_SEVERITIES.map((severity) => (
+                            <option key={severity} value={severity}>
+                              {severity}
+                            </option>
+                          ))}
+                        </select>
+                      </ConsoleField>
+                    </div>
+                  </section>
+                ))}
+              </div>
+            </div>
+            {dryRunPreview ? (
+              <PolicyDryRunPreview
+                agentNameById={agentNameById}
+                preview={dryRunPreview}
+              />
+            ) : null}
           </ConsoleDetailPanel>
         ) : null}
       </div>
       {status && <small className="fleetPolicyStatus">{status}</small>}
       <ConfirmationPrompt
         confirmLabel={saveSnapshot?.title ?? "Save policy"}
-        detail="Saves the reviewed alert policy request exactly as shown."
+        detail="Saves the reviewed policy group and all rule rows with the dry-run preview hash."
         items={[
           { label: "Policy", value: saveSnapshot?.request.name ?? "-" },
           {
-            label: "Scope",
+            label: "Selector",
+            value: saveSnapshot?.request.selector_expression ?? "-",
+          },
+          {
+            label: "Matched VPSs",
             value: saveSnapshot
-              ? `${saveSnapshot.request.scope_kind}${saveSnapshot.request.scope_value ? `:${saveSnapshot.request.scope_value}` : ""}`
+              ? String(saveSnapshot.preview.matched_vps_count)
               : "-",
           },
           {
-            label: "State",
-            value: saveSnapshot?.request.enabled ? "enabled" : "disabled",
+            label: "Rules",
+            value: saveSnapshot
+              ? policyRequestRulesSummary(saveSnapshot.request)
+              : "-",
           },
           {
-            label: "Thresholds",
-            value: saveSnapshot
-              ? thresholdRequestSummary(saveSnapshot.request)
-              : "-",
+            label: "Preview hash",
+            value: saveSnapshot?.request.preview_hash ?? "-",
           },
         ]}
         onCancel={() => setSaveSnapshot(null)}
@@ -3469,7 +4464,7 @@ function FleetAlertPolicyManager({
       />
       <ConfirmationPrompt
         confirmLabel="Delete"
-        detail="Deletes selected alert policy records. Existing alert states are not changed."
+        detail="Deletes selected policy groups. Issued policy alerts remain available in Fleet alerts."
         items={[
           {
             label: "Policies",
@@ -3493,6 +4488,95 @@ function FleetAlertPolicyManager({
         title="Delete alert policies"
         tone="danger"
       />
+    </div>
+  );
+}
+
+function PolicyDryRunPreview({
+  agentNameById,
+  preview,
+}: {
+  agentNameById: Map<string, string>;
+  preview: PolicyDryRunResponse;
+}) {
+  return (
+    <div className="gridBlock">
+      <h4>Dry-run preview</h4>
+      <div className="consoleInlineDetailGrid">
+        <span>
+          <strong>Matched VPSs</strong>
+          <span>{preview.matched_vps_count}</span>
+        </span>
+        <span>
+          <strong>Incomplete VPSs</strong>
+          <span>{preview.incomplete_vps_count}</span>
+        </span>
+        <span>
+          <strong>Invalid rules</strong>
+          <span>{preview.invalid_rule_count}</span>
+        </span>
+        <span>
+          <strong>Preview hash</strong>
+          <span className="monoValue">{preview.preview_hash}</span>
+        </span>
+      </div>
+      {preview.validation_errors.length > 0 ? (
+        <div className="notice warningNotice">
+          {preview.validation_errors.join(" · ")}
+        </div>
+      ) : null}
+      <div className="miniTable">
+        {preview.rule_previews.map((rule) => (
+          <div className="miniTableRow" key={rule.rule_name + rule.condition_expression}>
+            <strong>{rule.rule_name}</strong>
+            <span className="monoValue">{rule.condition_expression}</span>
+            <span>{rule.category}</span>
+            <ConsoleStatusBadge tone={rule.severity === "critical" ? "critical" : rule.severity === "warning" ? "warning" : "info"}>
+              {rule.severity}
+            </ConsoleStatusBadge>
+            <span>{rule.true_count} true</span>
+            <span>{rule.false_count} false</span>
+            <span>{rule.incomplete_count} incomplete</span>
+          </div>
+        ))}
+      </div>
+      <div className="tokenPreview">
+        {preview.matched_vps.slice(0, 40).map((clientId) => (
+          <span className="tokenChip" key={clientId} title={clientId}>
+            {agentNameById.get(clientId) ?? clientId}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function IssuedPolicyAlertList({
+  alerts,
+  agentNameById,
+}: {
+  alerts: PolicyAlertRecord[];
+  agentNameById: Map<string, string>;
+}) {
+  return (
+    <div className="gridBlock">
+      <h4>Recent issued alerts</h4>
+      {alerts.length === 0 ? (
+        <p className="mutedText">No issued alerts for this policy.</p>
+      ) : (
+        <div className="miniTable">
+          {alerts.slice(0, 8).map((alert) => (
+            <div className="miniTableRow" key={alert.id}>
+              <ConsoleStatusBadge tone={alert.severity === "critical" ? "critical" : alert.severity === "warning" ? "warning" : "info"}>
+                {alert.severity}
+              </ConsoleStatusBadge>
+              <strong>{agentNameById.get(alert.client_id) ?? alert.client_id}</strong>
+              <span>{alert.title}</span>
+              <span>{formatCompactTime(alert.observed_at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -6655,6 +7739,167 @@ function formatBytes(value: number) {
     unit += 1;
   }
   return `${next >= 10 || unit === 0 ? Math.round(next) : next.toFixed(1)} ${units[unit]}`;
+}
+
+function formatMetricValue(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) {
+    return "-";
+  }
+  if (Math.abs(value) >= 1024) {
+    return formatBytes(value);
+  }
+  return value % 1 === 0 ? String(value) : value.toFixed(2);
+}
+
+function formatPolicyWindow(windowSecs: number): string {
+  if (windowSecs <= 0) {
+    return "immediate";
+  }
+  if (windowSecs % 60 === 0) {
+    return `${windowSecs / 60}m`;
+  }
+  return `${windowSecs}s`;
+}
+
+function formatSampleAge(seconds: number | null | undefined): string {
+  if (seconds == null) {
+    return "unknown";
+  }
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  if (seconds < 3600) {
+    return `${Math.round(seconds / 60)}m`;
+  }
+  return `${Math.round(seconds / 3600)}h`;
+}
+
+function trafficNowSummary(
+  traffic: TrafficAccountingRecord | null | undefined,
+): string {
+  if (!traffic) {
+    return "not configured";
+  }
+  if (!traffic.last_sample_at) {
+    return traffic.state === "incomplete" ? "incomplete" : "stale sample";
+  }
+  return `${formatBytes(traffic.latest_total_bytes)} total · RX ${formatBytes(
+    traffic.latest_rx_bytes,
+  )} · TX ${formatBytes(traffic.latest_tx_bytes)}`;
+}
+
+function cycleUsageSummary(
+  traffic: TrafficAccountingRecord | null | undefined,
+): string {
+  if (!traffic) {
+    return "not configured";
+  }
+  if (traffic.cycle_percent == null) {
+    return traffic.state === "incomplete" ? "incomplete" : formatBytes(traffic.total_bytes);
+  }
+  const quotaLabel =
+    traffic.quota_total_bytes != null
+      ? `${formatBytes(traffic.total_bytes)} / ${formatBytes(
+          traffic.quota_total_bytes,
+        )}`
+      : traffic.quota_tx_bytes != null && traffic.tx_bytes >= traffic.rx_bytes
+        ? `${formatBytes(traffic.tx_bytes)} TX / ${formatBytes(
+            traffic.quota_tx_bytes,
+          )} TX`
+        : traffic.quota_rx_bytes != null
+          ? `${formatBytes(traffic.rx_bytes)} RX / ${formatBytes(
+              traffic.quota_rx_bytes,
+            )} RX`
+          : formatBytes(traffic.total_bytes);
+  return `${quotaLabel} · ${traffic.cycle_percent.toFixed(0)}%`;
+}
+
+function trafficStateForClient(
+  traffic: TrafficAccountingRecord | null | undefined,
+  alerts?: PolicyAlertRecord[] | null,
+): string {
+  const activeAlerts = alerts ?? [];
+  if (activeAlerts.some((alert) => alert.severity === "critical")) {
+    return "critical";
+  }
+  if (activeAlerts.some((alert) => alert.severity === "warning")) {
+    return "warning";
+  }
+  if (!traffic) {
+    return "incomplete";
+  }
+  if (!traffic.last_sample_at) {
+    return "unknown";
+  }
+  if (traffic.state === "incomplete" || traffic.incomplete_reasons.length > 0) {
+    return "incomplete";
+  }
+  return traffic.state || "ok";
+}
+
+function trafficStateTone(
+  state: string,
+): "critical" | "warning" | "ok" | "info" | "neutral" {
+  if (state === "critical") {
+    return "critical";
+  }
+  if (state === "warning" || state === "incomplete") {
+    return "warning";
+  }
+  if (state === "ok") {
+    return "ok";
+  }
+  return "neutral";
+}
+
+function quotaSummary(traffic: TrafficAccountingRecord | null | undefined): string {
+  if (!traffic) {
+    return "not set";
+  }
+  const parts = [
+    traffic.quota_total_bytes == null
+      ? null
+      : `total ${formatBytes(traffic.quota_total_bytes)}`,
+    traffic.quota_rx_bytes == null
+      ? null
+      : `rx ${formatBytes(traffic.quota_rx_bytes)}`,
+    traffic.quota_tx_bytes == null
+      ? null
+      : `tx ${formatBytes(traffic.quota_tx_bytes)}`,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" · ") : "not set";
+}
+
+function resetDaySummary(traffic: TrafficAccountingRecord | null | undefined): string {
+  if (!traffic?.reset_day) {
+    return "not set";
+  }
+  return traffic.reset_day === 31
+    ? "31 UTC, clamps short months"
+    : `${traffic.reset_day} UTC`;
+}
+
+function selectorSummary(traffic: TrafficAccountingRecord | null | undefined): string {
+  if (!traffic || traffic.selectors.length === 0) {
+    return "not set";
+  }
+  return traffic.selectors.join(", ");
+}
+
+function activePolicyAlertSummary(alerts: PolicyAlertRecord[] | null | undefined): string {
+  const rows = alerts ?? [];
+  if (rows.length === 0) {
+    return "0";
+  }
+  const critical = rows.filter((alert) => alert.severity === "critical").length;
+  if (critical > 0) {
+    return `${critical} critical`;
+  }
+  const warning = rows.filter((alert) => alert.severity === "warning").length;
+  if (warning > 0) {
+    return `${warning} warning`;
+  }
+  return `${rows.length} info`;
 }
 
 type NetworkInterfacesSnapshot = {

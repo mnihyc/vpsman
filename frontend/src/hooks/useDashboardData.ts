@@ -426,6 +426,9 @@ export function useDashboardData(activeView: ActiveView) {
     fleetAlerts: fleet.fleetAlerts,
     fleetAlertStates: fleet.fleetAlertStates,
     fleetAlertPolicies: fleet.fleetAlertPolicies,
+    vpsRuleValues: fleet.vpsRuleValues,
+    trafficAccounting: fleet.trafficAccounting,
+    policyAlerts: fleet.policyAlerts,
     fleetAlertNotificationChannels: fleet.fleetAlertNotificationChannels,
     fleetAlertNotifications: fleet.fleetAlertNotifications,
     webhookRules: fleet.webhookRules,
@@ -456,6 +459,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadAgentUpdateReleases: jobs.loadAgentUpdateReleases,
     loadJobTargets: jobs.loadJobTargets,
     updateFleetAlertState: fleet.updateFleetAlertState,
+    dryRunFleetAlertPolicy: fleet.dryRunFleetAlertPolicy,
     upsertFleetAlertNotificationChannel:
       fleet.upsertFleetAlertNotificationChannel,
     deleteFleetAlertNotificationChannel:
@@ -553,6 +557,9 @@ export function useDashboardData(activeView: ActiveView) {
     upsertCommandTemplate: jobs.upsertCommandTemplate,
     upsertHistoryRetentionPolicy: audit.upsertHistoryRetentionPolicy,
     upsertFleetAlertPolicy: fleet.upsertFleetAlertPolicy,
+    dryRunVpsRules: fleet.dryRunVpsRules,
+    bulkUpsertVpsRules: fleet.bulkUpsertVpsRules,
+    bulkUnsetVpsRules: fleet.bulkUnsetVpsRules,
     deleteFleetAlertPolicy: fleet.deleteFleetAlertPolicy,
     updateOperatorPreferences: access.updateOperatorPreferences,
     wsState,

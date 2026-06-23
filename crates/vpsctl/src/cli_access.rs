@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::Args;
+use clap::{Args, Subcommand};
 #[derive(Debug, Args)]
 pub(crate) struct BootstrapCommand {
     #[arg(long)]
@@ -253,43 +253,150 @@ pub(crate) struct FleetAlertStateUpdateCommand {
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct FleetAlertPoliciesCommand {
+pub(crate) struct VpsRulesCommand {
+    #[command(subcommand)]
+    pub(crate) command: VpsRulesSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum VpsRulesSubcommand {
+    List(VpsRulesListCommand),
+    Get(VpsRulesGetCommand),
+    Preview(VpsRulesPreviewCommand),
+    Upsert(VpsRulesUpsertCommand),
+    Unset(VpsRulesUnsetCommand),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct VpsRulesListCommand {
+    #[arg(long, default_value_t = 50)]
+    pub(crate) limit: u16,
+    #[arg(long)]
+    pub(crate) selector: Option<String>,
+    #[arg(long)]
+    pub(crate) client_id: Option<String>,
+    #[arg(long)]
+    pub(crate) key: Option<String>,
+    #[arg(long)]
+    pub(crate) state: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct VpsRulesGetCommand {
+    #[arg(long)]
+    pub(crate) client_id: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct VpsRulesPreviewCommand {
+    #[arg(long)]
+    pub(crate) selector: String,
+    #[arg(long = "set")]
+    pub(crate) set_values: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct VpsRulesUpsertCommand {
+    #[arg(long)]
+    pub(crate) selector: String,
+    #[arg(long = "set")]
+    pub(crate) set_values: Vec<String>,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct VpsRulesUnsetCommand {
+    #[arg(long)]
+    pub(crate) selector: String,
+    #[arg(long = "key")]
+    pub(crate) keys: Vec<String>,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AlertPoliciesCommand {
+    #[command(subcommand)]
+    pub(crate) command: AlertPoliciesSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AlertPoliciesSubcommand {
+    List(AlertPoliciesListCommand),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AlertPoliciesListCommand {
     #[arg(long, default_value_t = 50)]
     pub(crate) limit: u16,
     #[arg(long)]
     pub(crate) enabled: Option<bool>,
     #[arg(long)]
-    pub(crate) scope_kind: Option<String>,
+    pub(crate) selector: Option<String>,
     #[arg(long)]
-    pub(crate) scope_value: Option<String>,
+    pub(crate) client_id: Option<String>,
 }
 
 #[derive(Debug, Args)]
-pub(crate) struct FleetAlertPolicyUpsertCommand {
+pub(crate) struct AlertPolicyCommand {
+    #[command(subcommand)]
+    pub(crate) command: AlertPolicySubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AlertPolicySubcommand {
+    Get(AlertPolicyGetCommand),
+    Preview(AlertPolicyPreviewCommand),
+    Upsert(AlertPolicyUpsertCommand),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AlertPolicyGetCommand {
+    #[arg(long)]
+    pub(crate) name: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AlertPolicyPreviewCommand {
     #[arg(long)]
     pub(crate) name: String,
     #[arg(long)]
-    pub(crate) scope_kind: String,
-    #[arg(long)]
-    pub(crate) scope_value: Option<String>,
-    #[arg(long)]
-    pub(crate) memory_available_warning_ratio: Option<f64>,
-    #[arg(long)]
-    pub(crate) memory_available_critical_ratio: Option<f64>,
-    #[arg(long)]
-    pub(crate) disk_available_warning_ratio: Option<f64>,
-    #[arg(long)]
-    pub(crate) disk_available_critical_ratio: Option<f64>,
-    #[arg(long)]
-    pub(crate) cpu_load_warning: Option<f64>,
-    #[arg(long)]
-    pub(crate) cpu_load_critical: Option<f64>,
+    pub(crate) selector: String,
+    #[arg(long = "rule")]
+    pub(crate) rules: Vec<String>,
     #[arg(long, default_value_t = 0)]
-    pub(crate) priority: i32,
+    pub(crate) window_secs: i64,
+    #[arg(long, default_value = "warning")]
+    pub(crate) severity: String,
+    #[arg(long)]
+    pub(crate) traffic_selector: Option<String>,
     #[arg(long, default_value_t = true)]
     pub(crate) enabled: bool,
     #[arg(long)]
     pub(crate) notes: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AlertPolicyUpsertCommand {
+    #[arg(long)]
+    pub(crate) name: String,
+    #[arg(long)]
+    pub(crate) selector: Option<String>,
+    #[arg(long = "rule")]
+    pub(crate) rules: Vec<String>,
+    #[arg(long, default_value_t = 0)]
+    pub(crate) window_secs: i64,
+    #[arg(long, default_value = "warning")]
+    pub(crate) severity: String,
+    #[arg(long)]
+    pub(crate) traffic_selector: Option<String>,
+    #[arg(long, default_value_t = true)]
+    pub(crate) enabled: bool,
+    #[arg(long)]
+    pub(crate) notes: Option<String>,
+    #[arg(long)]
+    pub(crate) file: Option<PathBuf>,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }

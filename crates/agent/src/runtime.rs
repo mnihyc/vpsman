@@ -674,6 +674,37 @@ fn runtime_tunnel_identity_matches(
         && left.plan_id == right.plan_id
         && left.plan.name == right.plan.name
         && left.plan.interface_name == right.plan.interface_name
+        && left.plan.kind == right.plan.kind
+        && left.plan.runtime_control.manager == right.plan.runtime_control.manager
+        && left.plan.left_client_id == right.plan.left_client_id
+        && left.plan.right_client_id == right.plan.right_client_id
+        && left.plan.left_underlay == right.plan.left_underlay
+        && left.plan.right_underlay == right.plan.right_underlay
+        && left.plan.left_tunnel_address == right.plan.left_tunnel_address
+        && left.plan.right_tunnel_address == right.plan.right_tunnel_address
+        && left.plan.tunnel_prefix_len == right.plan.tunnel_prefix_len
+        && left.plan.ipv4_tunnel == right.plan.ipv4_tunnel
+        && left.plan.ipv6_tunnel == right.plan.ipv6_tunnel
+        && runtime_tunnel_control_identity_matches(
+            &left.plan.runtime_control,
+            &right.plan.runtime_control,
+        )
+}
+
+fn runtime_tunnel_control_identity_matches(
+    left: &vpsman_common::RuntimeTunnelControl,
+    right: &vpsman_common::RuntimeTunnelControl,
+) -> bool {
+    match left.manager {
+        vpsman_common::RuntimeTunnelManager::AgentIproute2Managed => left.fou == right.fou,
+        vpsman_common::RuntimeTunnelManager::ExternalObserved => true,
+        vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter => {
+            left.startup == right.startup
+                && left.stop == right.stop
+                && left.cleanup == right.cleanup
+                && left.restart == right.restart
+        }
+    }
 }
 
 fn runtime_reconcile_summary(
@@ -2346,6 +2377,116 @@ mod tests {
         assert_eq!(applied.telemetry_light_secs, 30);
     }
 
+    #[test]
+    fn runtime_tunnel_identity_allows_in_place_policy_changes() {
+        let mut changed_cost = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+            "203.0.113.20",
+            "10.255.0.0",
+            "10.255.0.1",
+        ));
+        changed_cost.plan.recommended_ospf_cost =
+            changed_cost.plan.recommended_ospf_cost.saturating_add(10);
+        let baseline = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+            "203.0.113.20",
+            "10.255.0.0",
+            "10.255.0.1",
+        ));
+
+        assert!(runtime_tunnel_identity_matches(&baseline, &changed_cost));
+    }
+
+    #[test]
+    fn runtime_tunnel_identity_detects_immutable_plan_changes() {
+        let baseline = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+            "203.0.113.20",
+            "10.255.0.0",
+            "10.255.0.1",
+        ));
+        let changed_underlay = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+            "203.0.113.99",
+            "10.255.0.0",
+            "10.255.0.1",
+        ));
+        let changed_address = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+            "203.0.113.20",
+            "10.255.0.2",
+            "10.255.0.3",
+        ));
+
+        assert!(!runtime_tunnel_identity_matches(
+            &baseline,
+            &changed_underlay
+        ));
+        assert!(!runtime_tunnel_identity_matches(
+            &baseline,
+            &changed_address
+        ));
+    }
+
+    #[tokio::test]
+    async fn runtime_config_sync_recreates_tunnel_when_plan_identity_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "vpsman-runtime-sync-recreate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let old_plan = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+            "203.0.113.20",
+            "10.255.0.0",
+            "10.255.0.1",
+        ));
+        let new_plan = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+            "203.0.113.99",
+            "10.255.0.0",
+            "10.255.0.1",
+        ));
+        let base = AgentConfig {
+            client_id: "left-a".to_string(),
+            network: vpsman_common::AgentNetworkConfig {
+                apply_enabled: true,
+                runtime_reconcile_enabled: true,
+                root_dir: root.to_string_lossy().to_string(),
+                runtime_ip_argv: vec!["/bin/echo".to_string()],
+                runtime_tc_argv: vec!["/bin/echo".to_string()],
+                runtime_unprivileged_mutation_policy:
+                    vpsman_common::AgentRuntimeUnprivilegedMutationPolicy::TryAll,
+                runtime_status_telemetry_plans: vec![old_plan],
+                ..Default::default()
+            },
+            ..AgentConfig::default()
+        };
+        let mut desired = AgentRuntimeConfig::from_agent_config(12, &base);
+        desired.network.runtime_status_telemetry_plans = vec![new_plan];
+
+        let result = apply_runtime_config_sync(
+            uuid::Uuid::new_v4(),
+            &base,
+            &desired,
+            12,
+            "test-plan-identity-change",
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.outputs[0].exit_code, Some(0));
+        let body: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+        assert_eq!(body["status"], "applied");
+        assert_eq!(body["removed_tunnel_count"], 1);
+        assert_eq!(body["removals"][0]["plan_id"], "plan-a");
+        assert_eq!(body["reconcile"]["total"], 1);
+        assert_eq!(
+            result
+                .applied_config
+                .expect("identity change sync should apply")
+                .network
+                .runtime_status_telemetry_plans[0]
+                .plan
+                .right_underlay,
+            "203.0.113.99"
+        );
+    }
+
     #[tokio::test]
     async fn runtime_config_sync_failure_does_not_return_config_update() {
         let root =
@@ -2477,6 +2618,55 @@ mod tests {
         assert_eq!(status["type"], "command_timeout");
         assert_eq!(status["operation_type"], "runtime_config_sync");
         assert_eq!(status["max_timeout_secs"], 17);
+    }
+
+    fn runtime_sync_test_plan(
+        right_underlay: &str,
+        left_tunnel: &str,
+        right_tunnel: &str,
+    ) -> vpsman_common::TunnelPlan {
+        vpsman_common::plan_tunnel(&vpsman_common::TunnelPlanInput {
+            name: "left-right".to_string(),
+            interface_name: "tunlr".to_string(),
+            kind: vpsman_common::TunnelKind::Gre,
+            runtime_control: Default::default(),
+            runtime_topology: Default::default(),
+            left_client_id: "left-a".to_string(),
+            right_client_id: "right-b".to_string(),
+            left_underlay: "198.51.100.10".to_string(),
+            right_underlay: right_underlay.to_string(),
+            address_pool_cidr: "10.255.0.0/30".to_string(),
+            reserved_addresses: Vec::new(),
+            ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+                left: left_tunnel.to_string(),
+                right: right_tunnel.to_string(),
+                prefix_len: 31,
+            }),
+            ipv6_address_pool_cidr: None,
+            ipv6_tunnel: None,
+            latency_primary_family: Default::default(),
+            bandwidth: vpsman_common::BandwidthTier::M100,
+            latency_ms: 15.0,
+            packet_loss_ratio: 0.0,
+            preference: 1.0,
+            ospf_policy: vpsman_common::OspfCostPolicy::default(),
+        })
+        .unwrap()
+    }
+
+    fn runtime_sync_test_telemetry_plan(
+        plan: vpsman_common::TunnelPlan,
+    ) -> vpsman_common::AgentRuntimeStatusTelemetryPlan {
+        vpsman_common::AgentRuntimeStatusTelemetryPlan {
+            plan_id: Some("plan-a".to_string()),
+            endpoint_side: vpsman_common::TunnelEndpointSide::Left,
+            plan,
+            traffic_source: Default::default(),
+            traffic_command: None,
+            latency_monitoring_enabled: true,
+            auto_ospf_enabled: false,
+            auto_ospf_updater: None,
+        }
     }
 
     #[test]

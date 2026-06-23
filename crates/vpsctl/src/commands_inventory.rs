@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::commands_schedules::selector_expression_from_targets;
@@ -109,68 +109,237 @@ pub(crate) fn fleet_alert_state_update(
     Ok(())
 }
 
-pub(crate) fn fleet_alert_policies(
+pub(crate) struct VpsRulesListOptions {
+    pub(crate) limit: u16,
+    pub(crate) selector: Option<String>,
+    pub(crate) client_id: Option<String>,
+    pub(crate) key: Option<String>,
+    pub(crate) state: Option<String>,
+}
+
+pub(crate) fn vps_rules_list(
     api_url: &str,
     token: Option<&str>,
-    limit: u16,
-    enabled: Option<bool>,
-    scope_kind: Option<String>,
-    scope_value: Option<String>,
+    options: VpsRulesListOptions,
 ) -> Result<()> {
-    let path = fleet_alert_policies_path(
-        limit,
-        enabled,
-        scope_kind.as_deref(),
-        scope_value.as_deref(),
+    let path = vps_rules_path(
+        options.limit,
+        options.selector.as_deref(),
+        options.client_id.as_deref(),
+        options.key.as_deref(),
+        options.state.as_deref(),
     )?;
     println!("{}", http_get(api_url, &path, token)?);
     Ok(())
 }
 
-pub(crate) struct FleetAlertPolicyUpsertOptions {
-    pub(crate) name: String,
-    pub(crate) scope_kind: String,
-    pub(crate) scope_value: Option<String>,
-    pub(crate) memory_available_warning_ratio: Option<f64>,
-    pub(crate) memory_available_critical_ratio: Option<f64>,
-    pub(crate) disk_available_warning_ratio: Option<f64>,
-    pub(crate) disk_available_critical_ratio: Option<f64>,
-    pub(crate) cpu_load_warning: Option<f64>,
-    pub(crate) cpu_load_critical: Option<f64>,
-    pub(crate) priority: i32,
-    pub(crate) enabled: bool,
-    pub(crate) notes: Option<String>,
+pub(crate) fn vps_rules_get(api_url: &str, token: Option<&str>, client_id: String) -> Result<()> {
+    println!(
+        "{}",
+        http_get(
+            api_url,
+            &format!(
+                "/api/v1/vps-rules/effective/{}",
+                percent_encode_query_value(&client_id)
+            ),
+            token,
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) struct VpsRulesPreviewOptions {
+    pub(crate) selector: String,
+    pub(crate) set_values: Vec<String>,
+}
+
+pub(crate) fn vps_rules_preview(
+    api_url: &str,
+    token: Option<&str>,
+    options: VpsRulesPreviewOptions,
+) -> Result<()> {
+    let values = parse_key_value_args(&options.set_values)?;
+    let preview = vps_rules_dry_run(
+        api_url,
+        token,
+        "upsert",
+        &options.selector,
+        values,
+        Vec::new(),
+    )?;
+    println!("{}", serde_json::to_string_pretty(&preview)?);
+    Ok(())
+}
+
+pub(crate) struct VpsRulesUpsertOptions {
+    pub(crate) selector: String,
+    pub(crate) set_values: Vec<String>,
     pub(crate) confirmed: bool,
 }
 
-pub(crate) fn fleet_alert_policy_upsert(
+pub(crate) fn vps_rules_upsert(
     api_url: &str,
     token: Option<&str>,
-    options: FleetAlertPolicyUpsertOptions,
+    options: VpsRulesUpsertOptions,
 ) -> Result<()> {
-    validate_fleet_alert_policy_upsert(&options)?;
+    let values = parse_key_value_args(&options.set_values)?;
+    let preview = vps_rules_dry_run(
+        api_url,
+        token,
+        "upsert",
+        &options.selector,
+        values.clone(),
+        Vec::new(),
+    )?;
+    if !options.confirmed {
+        println!("{}", serde_json::to_string_pretty(&preview)?);
+        return Ok(());
+    }
+    let preview_hash = preview_hash_from_value(&preview)?;
     println!(
         "{}",
         http_post_json(
             api_url,
-            "/api/v1/fleet-alert-policies",
+            "/api/v1/vps-rules/bulk-upsert",
             token,
             &json!({
-                "name": options.name,
-                "scope_kind": options.scope_kind,
-                "scope_value": options.scope_value,
-                "memory_available_warning_ratio": options.memory_available_warning_ratio,
-                "memory_available_critical_ratio": options.memory_available_critical_ratio,
-                "disk_available_warning_ratio": options.disk_available_warning_ratio,
-                "disk_available_critical_ratio": options.disk_available_critical_ratio,
-                "cpu_load_warning": options.cpu_load_warning,
-                "cpu_load_critical": options.cpu_load_critical,
-                "priority": options.priority,
-                "enabled": options.enabled,
-                "notes": options.notes,
-                "confirmed": options.confirmed,
+                "selector_expression": options.selector,
+                "values": values,
+                "confirmed": true,
+                "preview_hash": preview_hash,
             }),
         )?
+    );
+    Ok(())
+}
+
+pub(crate) struct VpsRulesUnsetOptions {
+    pub(crate) selector: String,
+    pub(crate) keys: Vec<String>,
+    pub(crate) confirmed: bool,
+}
+
+pub(crate) fn vps_rules_unset(
+    api_url: &str,
+    token: Option<&str>,
+    options: VpsRulesUnsetOptions,
+) -> Result<()> {
+    anyhow::ensure!(
+        !options.keys.is_empty(),
+        "vps-rules unset requires at least one --key"
+    );
+    let preview = vps_rules_dry_run(
+        api_url,
+        token,
+        "unset",
+        &options.selector,
+        BTreeMap::new(),
+        options.keys.clone(),
+    )?;
+    if !options.confirmed {
+        println!("{}", serde_json::to_string_pretty(&preview)?);
+        return Ok(());
+    }
+    let preview_hash = preview_hash_from_value(&preview)?;
+    println!(
+        "{}",
+        http_post_json(
+            api_url,
+            "/api/v1/vps-rules/bulk-unset",
+            token,
+            &json!({
+                "selector_expression": options.selector,
+                "keys": options.keys,
+                "confirmed": true,
+                "preview_hash": preview_hash,
+            }),
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) struct AlertPoliciesListOptions {
+    pub(crate) limit: u16,
+    pub(crate) enabled: Option<bool>,
+    pub(crate) selector: Option<String>,
+    pub(crate) client_id: Option<String>,
+}
+
+pub(crate) fn alert_policies_list(
+    api_url: &str,
+    token: Option<&str>,
+    options: AlertPoliciesListOptions,
+) -> Result<()> {
+    let path = alert_policies_path(
+        options.limit,
+        options.enabled,
+        options.selector.as_deref(),
+        options.client_id.as_deref(),
+    )?;
+    println!("{}", http_get(api_url, &path, token)?);
+    Ok(())
+}
+
+pub(crate) fn alert_policy_get(api_url: &str, token: Option<&str>, name: String) -> Result<()> {
+    let path = alert_policies_path(1000, None, None, None)?;
+    let policies: Value = serde_json::from_str(&http_get(api_url, &path, token)?)?;
+    let policy = policies
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("name").and_then(Value::as_str) == Some(name.as_str()))
+        })
+        .cloned()
+        .with_context(|| format!("alert policy not found: {name}"))?;
+    println!("{}", serde_json::to_string_pretty(&policy)?);
+    Ok(())
+}
+
+pub(crate) struct AlertPolicyWriteOptions {
+    pub(crate) name: String,
+    pub(crate) selector: Option<String>,
+    pub(crate) rules: Vec<String>,
+    pub(crate) window_secs: i64,
+    pub(crate) severity: String,
+    pub(crate) traffic_selector: Option<String>,
+    pub(crate) enabled: bool,
+    pub(crate) notes: Option<String>,
+    pub(crate) file: Option<PathBuf>,
+    pub(crate) confirmed: bool,
+}
+
+pub(crate) fn alert_policy_preview(
+    api_url: &str,
+    token: Option<&str>,
+    options: AlertPolicyWriteOptions,
+) -> Result<()> {
+    let request = alert_policy_request(options, None)?;
+    let preview = alert_policy_dry_run(api_url, token, &request)?;
+    println!("{}", serde_json::to_string_pretty(&preview)?);
+    Ok(())
+}
+
+pub(crate) fn alert_policy_upsert(
+    api_url: &str,
+    token: Option<&str>,
+    options: AlertPolicyWriteOptions,
+) -> Result<()> {
+    let mut request = alert_policy_request(options, None)?;
+    let preview = alert_policy_dry_run(api_url, token, &request)?;
+    if !request
+        .get("confirmed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        println!("{}", serde_json::to_string_pretty(&preview)?);
+        return Ok(());
+    }
+    let preview_hash = preview_hash_from_value(&preview)?;
+    request["preview_hash"] = Value::String(preview_hash);
+    println!(
+        "{}",
+        http_post_json(api_url, "/api/v1/fleet-alert-policies", token, &request)?
     );
     Ok(())
 }
@@ -892,39 +1061,230 @@ fn fleet_alert_states_path(limit: u16, state: Option<&str>) -> Result<String> {
     Ok(format!("/api/v1/fleet-alert-states?{}", query.join("&")))
 }
 
-fn fleet_alert_policies_path(
+fn vps_rules_path(
     limit: u16,
-    enabled: Option<bool>,
-    scope_kind: Option<&str>,
-    scope_value: Option<&str>,
+    selector: Option<&str>,
+    client_id: Option<&str>,
+    key: Option<&str>,
+    state: Option<&str>,
 ) -> Result<String> {
     anyhow::ensure!(
         (1..=1000).contains(&limit),
         "--limit must be between 1 and 1000"
     );
-    if let Some(scope_kind) = scope_kind {
-        validate_alert_policy_scope_kind(scope_kind)?;
+    let mut query = vec![format!("limit={limit}")];
+    if let Some(selector) = selector {
+        query.push(format!(
+            "selector_expression={}",
+            percent_encode_query_value(selector)
+        ));
     }
-    if let Some(scope_value) = scope_value {
-        anyhow::ensure!(
-            !scope_value.is_empty() && scope_value.len() <= 128,
-            "--scope-value must be between 1 and 128 bytes"
-        );
+    if let Some(client_id) = client_id {
+        query.push(format!(
+            "client_id={}",
+            percent_encode_query_value(client_id)
+        ));
     }
+    if let Some(key) = key {
+        query.push(format!("key={}", percent_encode_query_value(key)));
+    }
+    if let Some(state) = state {
+        query.push(format!("state={}", percent_encode_query_value(state)));
+    }
+    Ok(format!("/api/v1/vps-rules?{}", query.join("&")))
+}
+
+fn alert_policies_path(
+    limit: u16,
+    enabled: Option<bool>,
+    selector: Option<&str>,
+    client_id: Option<&str>,
+) -> Result<String> {
+    anyhow::ensure!(
+        (1..=1000).contains(&limit),
+        "--limit must be between 1 and 1000"
+    );
     let mut query = vec![format!("limit={limit}")];
     if let Some(enabled) = enabled {
         query.push(format!("enabled={enabled}"));
     }
-    if let Some(scope_kind) = scope_kind {
-        query.push(format!("scope_kind={scope_kind}"));
-    }
-    if let Some(scope_value) = scope_value {
+    if let Some(selector) = selector {
         query.push(format!(
-            "scope_value={}",
-            percent_encode_query_value(scope_value)
+            "selector_expression={}",
+            percent_encode_query_value(selector)
+        ));
+    }
+    if let Some(client_id) = client_id {
+        query.push(format!(
+            "client_id={}",
+            percent_encode_query_value(client_id)
         ));
     }
     Ok(format!("/api/v1/fleet-alert-policies?{}", query.join("&")))
+}
+
+pub(crate) fn vps_rules_dry_run(
+    api_url: &str,
+    token: Option<&str>,
+    operation: &str,
+    selector: &str,
+    values: BTreeMap<String, String>,
+    keys: Vec<String>,
+) -> Result<Value> {
+    anyhow::ensure!(
+        !selector.trim().is_empty(),
+        "vps-rules dry-run requires --selector"
+    );
+    let response = http_post_json(
+        api_url,
+        "/api/v1/vps-rules/dry-run",
+        token,
+        &json!({
+            "operation": operation,
+            "selector_expression": selector,
+            "values": values,
+            "keys": keys,
+        }),
+    )?;
+    serde_json::from_str(&response).context("invalid VPS rules dry-run response")
+}
+
+pub(crate) fn parse_key_value_args(values: &[String]) -> Result<BTreeMap<String, String>> {
+    anyhow::ensure!(
+        !values.is_empty(),
+        "at least one --set key=value is required"
+    );
+    let mut parsed = BTreeMap::new();
+    for value in values {
+        let (key, raw_value) = value
+            .split_once('=')
+            .with_context(|| format!("--set must be key=value, got {value}"))?;
+        anyhow::ensure!(!key.trim().is_empty(), "--set key must not be empty");
+        anyhow::ensure!(
+            !raw_value.trim().is_empty(),
+            "--set value must not be empty"
+        );
+        anyhow::ensure!(
+            parsed
+                .insert(key.trim().to_string(), raw_value.trim().to_string())
+                .is_none(),
+            "duplicate --set key: {}",
+            key.trim()
+        );
+    }
+    Ok(parsed)
+}
+
+pub(crate) fn preview_hash_from_value(value: &Value) -> Result<String> {
+    value
+        .get("preview_hash")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .context("dry-run response missing preview_hash")
+}
+
+pub(crate) fn alert_policy_dry_run(
+    api_url: &str,
+    token: Option<&str>,
+    request: &Value,
+) -> Result<Value> {
+    let mut dry_run_request = request.clone();
+    if let Some(object) = dry_run_request.as_object_mut() {
+        object.remove("confirmed");
+        object.remove("preview_hash");
+    }
+    let response = http_post_json(
+        api_url,
+        "/api/v1/fleet-alert-policies/dry-run",
+        token,
+        &dry_run_request,
+    )?;
+    serde_json::from_str(&response).context("invalid alert policy dry-run response")
+}
+
+pub(crate) fn alert_policy_request(
+    options: AlertPolicyWriteOptions,
+    id: Option<Uuid>,
+) -> Result<Value> {
+    if let Some(file) = options.file {
+        anyhow::ensure!(
+            options.selector.is_none() && options.rules.is_empty(),
+            "--file cannot be combined with --selector or --rule"
+        );
+        let mut value: Value = serde_json::from_str(
+            &fs::read_to_string(&file)
+                .with_context(|| format!("failed to read {}", file.display()))?,
+        )
+        .with_context(|| format!("invalid JSON policy file {}", file.display()))?;
+        if let Some(object) = value.as_object_mut() {
+            object
+                .entry("confirmed".to_string())
+                .or_insert(Value::Bool(options.confirmed));
+            if let Some(id) = id {
+                object.entry("id".to_string()).or_insert(json!(id));
+            }
+        } else {
+            anyhow::bail!("policy file root must be a JSON object");
+        }
+        return Ok(value);
+    }
+    let selector = options
+        .selector
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("--selector is required without --file")?;
+    anyhow::ensure!(
+        !options.rules.is_empty(),
+        "at least one --rule expression is required without --file"
+    );
+    let rules = options
+        .rules
+        .iter()
+        .enumerate()
+        .map(|(index, expression)| {
+            policy_rule_from_expression(
+                expression,
+                index,
+                options.window_secs,
+                &options.severity,
+                options.traffic_selector.as_deref(),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(json!({
+        "id": id,
+        "name": options.name,
+        "enabled": options.enabled,
+        "selector_expression": selector,
+        "rules": rules,
+        "notes": options.notes,
+        "confirmed": options.confirmed,
+    }))
+}
+
+fn policy_rule_from_expression(
+    expression: &str,
+    index: usize,
+    window_secs: i64,
+    severity: &str,
+    traffic_selector: Option<&str>,
+) -> Result<Value> {
+    let expression = expression.trim();
+    anyhow::ensure!(
+        !expression.is_empty(),
+        "--rule condition expression must not be empty"
+    );
+    Ok(json!({
+        "name": format!("rule-{}", index + 1),
+        "enabled": true,
+        "traffic_selector": traffic_selector
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        "condition_expression": expression,
+        "window_secs": window_secs,
+        "severity": severity,
+    }))
 }
 
 fn fleet_alert_notification_channels_path(
@@ -1005,63 +1365,6 @@ fn fleet_alert_notifications_path(
         "/api/v1/fleet-alert-notifications?{}",
         query.join("&")
     ))
-}
-
-fn validate_fleet_alert_policy_upsert(options: &FleetAlertPolicyUpsertOptions) -> Result<()> {
-    anyhow::ensure!(
-        options.confirmed,
-        "fleet-alert-policy-upsert requires --confirmed"
-    );
-    anyhow::ensure!(
-        !options.name.trim().is_empty() && options.name.len() <= 128,
-        "--name must be between 1 and 128 bytes"
-    );
-    validate_alert_policy_scope_kind(&options.scope_kind)?;
-    if options.scope_kind == "global" {
-        anyhow::ensure!(
-            options
-                .scope_value
-                .as_deref()
-                .is_none_or(|value| value.trim().is_empty()),
-            "--scope-value must be omitted for global policies"
-        );
-    } else {
-        anyhow::ensure!(
-            options
-                .scope_value
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty()),
-            "--scope-value is required for scoped policies"
-        );
-    }
-    anyhow::ensure!(
-        options.memory_available_warning_ratio.is_some()
-            || options.memory_available_critical_ratio.is_some()
-            || options.disk_available_warning_ratio.is_some()
-            || options.disk_available_critical_ratio.is_some()
-            || options.cpu_load_warning.is_some()
-            || options.cpu_load_critical.is_some(),
-        "at least one threshold must be configured"
-    );
-    validate_optional_ratio(
-        options.memory_available_warning_ratio,
-        "--memory-available-warning-ratio",
-    )?;
-    validate_optional_ratio(
-        options.memory_available_critical_ratio,
-        "--memory-available-critical-ratio",
-    )?;
-    validate_optional_ratio(
-        options.disk_available_warning_ratio,
-        "--disk-available-warning-ratio",
-    )?;
-    validate_optional_ratio(
-        options.disk_available_critical_ratio,
-        "--disk-available-critical-ratio",
-    )?;
-    validate_optional_positive(options.cpu_load_warning, "--cpu-load-warning")?;
-    validate_optional_positive(options.cpu_load_critical, "--cpu-load-critical")?;
-    Ok(())
 }
 
 fn validate_fleet_alert_notification_channel_upsert(
@@ -1244,26 +1547,6 @@ fn validate_alert_policy_scope_kind(scope_kind: &str) -> Result<()> {
         matches!(scope_kind, "global" | "provider" | "tag" | "client"),
         "--scope-kind must be global, provider, tag, or client"
     );
-    Ok(())
-}
-
-fn validate_optional_ratio(value: Option<f64>, flag: &str) -> Result<()> {
-    if let Some(value) = value {
-        anyhow::ensure!(
-            value.is_finite() && (0.0..1.0).contains(&value),
-            "{flag} must be greater than 0 and below 1"
-        );
-    }
-    Ok(())
-}
-
-fn validate_optional_positive(value: Option<f64>, flag: &str) -> Result<()> {
-    if let Some(value) = value {
-        anyhow::ensure!(
-            value.is_finite() && value > 0.0,
-            "{flag} must be greater than 0"
-        );
-    }
     Ok(())
 }
 

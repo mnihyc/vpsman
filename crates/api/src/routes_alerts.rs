@@ -18,16 +18,19 @@ use crate::{
         FleetAlertNotificationDispatchRequest, FleetAlertNotificationProcessRequest,
     },
     model_alert_policies::{
-        CreateFleetAlertPolicyRequest, DeleteFleetAlertPolicyRequest, FleetAlertPolicyOverrideView,
-        FleetAlertPolicyQuery,
+        CreateFleetAlertPolicyRequest, DeleteFleetAlertPolicyRequest, FleetAlertPolicyQuery,
+        PolicyAlertQuery, PolicyAlertRecord, PolicyDryRunRequest, PolicyDryRunResponse,
+        PolicyGroupRecord, TrafficAccountingQuery, TrafficAccountingRecord, VpsRuleQuery,
+        VpsRuleValueRecord, VpsRulesBulkUnsetRequest, VpsRulesBulkUpsertRequest,
+        VpsRulesDryRunRequest, VpsRulesDryRunResponse,
     },
     model_alert_states::{
         FleetAlertExportView, FleetAlertStateQuery, FleetAlertStateView,
         UpdateFleetAlertStateRequest,
     },
     security::{
-        operator_has_scope, SCOPE_BACKUPS_READ, SCOPE_FLEET_READ, SCOPE_INTEGRATIONS_READ,
-        SCOPE_INTEGRATIONS_WRITE,
+        operator_has_scope, SCOPE_BACKUPS_READ, SCOPE_CONFIG_READ, SCOPE_FLEET_READ,
+        SCOPE_INTEGRATIONS_READ, SCOPE_INTEGRATIONS_WRITE,
     },
     state::AppState,
     unix_now,
@@ -118,7 +121,7 @@ pub(crate) async fn list_fleet_alert_policies(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<FleetAlertPolicyQuery>,
-) -> Result<Json<Vec<FleetAlertPolicyOverrideView>>, ApiError> {
+) -> Result<Json<Vec<PolicyGroupRecord>>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
@@ -129,22 +132,43 @@ pub(crate) async fn list_fleet_alert_policies(
             .list_fleet_alert_policies(
                 limit_or_default(query.limit),
                 query.enabled,
-                query.scope_kind.as_deref(),
-                query.scope_value.as_deref(),
+                query.selector_expression.as_deref(),
+                query.client_id.as_deref(),
             )
             .await?,
     ))
+}
+
+pub(crate) async fn get_fleet_alert_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(policy_id): Path<uuid::Uuid>,
+) -> Result<Json<PolicyGroupRecord>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    Ok(Json(state.repo.get_fleet_alert_policy(policy_id).await?))
+}
+
+pub(crate) async fn dry_run_fleet_alert_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<PolicyDryRunRequest>,
+) -> Result<Json<PolicyDryRunResponse>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    Ok(Json(state.repo.dry_run_fleet_alert_policy(&request).await?))
 }
 
 pub(crate) async fn upsert_fleet_alert_policy(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<CreateFleetAlertPolicyRequest>,
-) -> Result<Json<FleetAlertPolicyOverrideView>, ApiError> {
+) -> Result<Json<PolicyGroupRecord>, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
-    validate_alert_policy_request(&request)?;
     Ok(Json(
         state
             .repo
@@ -183,6 +207,101 @@ pub(crate) async fn delete_fleet_alert_policy(
         .delete_fleet_alert_policy(policy_id, &operator)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn list_vps_rules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<VpsRuleQuery>,
+) -> Result<Json<Vec<VpsRuleValueRecord>>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    Ok(Json(state.repo.list_vps_rules(&query).await?))
+}
+
+pub(crate) async fn get_effective_vps_rules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(client_id): Path<String>,
+) -> Result<Json<Vec<VpsRuleValueRecord>>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
+        .await?;
+    Ok(Json(state.repo.effective_vps_rules(&client_id).await?))
+}
+
+pub(crate) async fn dry_run_vps_rules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<VpsRulesDryRunRequest>,
+) -> Result<Json<VpsRulesDryRunResponse>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
+        .await?;
+    Ok(Json(state.repo.dry_run_vps_rules(&request).await?))
+}
+
+pub(crate) async fn bulk_upsert_vps_rules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<VpsRulesBulkUpsertRequest>,
+) -> Result<Json<VpsRulesDryRunResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "config:write")
+        .await?;
+    Ok(Json(
+        state
+            .repo
+            .bulk_upsert_vps_rules(&request, &operator)
+            .await?,
+    ))
+}
+
+pub(crate) async fn bulk_unset_vps_rules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<VpsRulesBulkUnsetRequest>,
+) -> Result<Json<VpsRulesDryRunResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "config:write")
+        .await?;
+    Ok(Json(
+        state.repo.bulk_unset_vps_rules(&request, &operator).await?,
+    ))
+}
+
+pub(crate) async fn list_traffic_accounting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<TrafficAccountingQuery>,
+) -> Result<Json<Vec<TrafficAccountingRecord>>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    Ok(Json(state.repo.list_traffic_accounting(&query).await?))
+}
+
+pub(crate) async fn get_traffic_accounting(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(client_id): Path<String>,
+) -> Result<Json<TrafficAccountingRecord>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    Ok(Json(state.repo.get_traffic_accounting(&client_id).await?))
+}
+
+pub(crate) async fn list_policy_alerts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PolicyAlertQuery>,
+) -> Result<Json<Vec<PolicyAlertRecord>>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    Ok(Json(state.repo.list_policy_alerts(&query).await?))
 }
 
 pub(crate) async fn list_fleet_alert_notification_channels(
@@ -599,14 +718,14 @@ fn validate_alert_policy_query(query: &FleetAlertPolicyQuery) -> Result<(), ApiE
             return Err(ApiError::bad_request("fleet_alert_policy_limit_invalid"));
         }
     }
-    if let Some(scope_kind) = query.scope_kind.as_deref() {
-        validate_alert_policy_scope_kind(scope_kind)?;
+    if let Some(selector) = query.selector_expression.as_deref() {
+        if selector.trim().is_empty() || selector.len() > 4096 {
+            return Err(ApiError::bad_request("fleet_alert_policy_selector_invalid"));
+        }
     }
-    if let Some(scope_value) = query.scope_value.as_deref() {
-        if scope_value.is_empty() || scope_value.len() > 128 {
-            return Err(ApiError::bad_request(
-                "fleet_alert_policy_scope_value_invalid",
-            ));
+    if let Some(client_id) = query.client_id.as_deref() {
+        if client_id.trim().is_empty() || client_id.len() > 128 {
+            return Err(ApiError::bad_request("fleet_alert_policy_client_invalid"));
         }
     }
     Ok(())
@@ -634,70 +753,6 @@ fn validate_short_required_value(value: &str, error: &'static str) -> Result<(),
     if value.is_empty() || value.len() > 128 {
         return Err(ApiError::bad_request(error));
     }
-    Ok(())
-}
-
-fn validate_alert_policy_request(request: &CreateFleetAlertPolicyRequest) -> Result<(), ApiError> {
-    if !request.confirmed {
-        return Err(ApiError::bad_request(
-            "fleet_alert_policy_confirmation_required",
-        ));
-    }
-    let name = request.name.trim();
-    if name.is_empty() || name.len() > 128 {
-        return Err(ApiError::bad_request("fleet_alert_policy_name_invalid"));
-    }
-    validate_alert_policy_scope_kind(&request.scope_kind)?;
-    if request.scope_kind.trim() == "global" {
-        if request
-            .scope_value
-            .as_deref()
-            .is_some_and(|value| !value.is_empty())
-        {
-            return Err(ApiError::bad_request(
-                "fleet_alert_global_scope_value_invalid",
-            ));
-        }
-    } else if request
-        .scope_value
-        .as_deref()
-        .unwrap_or("")
-        .trim()
-        .is_empty()
-    {
-        return Err(ApiError::bad_request(
-            "fleet_alert_policy_scope_value_required",
-        ));
-    }
-    if !has_any_threshold(request) {
-        return Err(ApiError::bad_request(
-            "fleet_alert_policy_threshold_required",
-        ));
-    }
-    validate_optional_ratio(
-        request.memory_available_warning_ratio,
-        "fleet_alert_policy_memory_warning_invalid",
-    )?;
-    validate_optional_ratio(
-        request.memory_available_critical_ratio,
-        "fleet_alert_policy_memory_critical_invalid",
-    )?;
-    validate_optional_ratio(
-        request.disk_available_warning_ratio,
-        "fleet_alert_policy_disk_warning_invalid",
-    )?;
-    validate_optional_ratio(
-        request.disk_available_critical_ratio,
-        "fleet_alert_policy_disk_critical_invalid",
-    )?;
-    validate_optional_positive(
-        request.cpu_load_warning,
-        "fleet_alert_policy_cpu_warning_invalid",
-    )?;
-    validate_optional_positive(
-        request.cpu_load_critical,
-        "fleet_alert_policy_cpu_critical_invalid",
-    )?;
     Ok(())
 }
 
@@ -746,31 +801,4 @@ fn validate_alert_policy_scope_kind(scope_kind: &str) -> Result<(), ApiError> {
             "fleet_alert_policy_scope_kind_invalid",
         ))
     }
-}
-
-fn has_any_threshold(request: &CreateFleetAlertPolicyRequest) -> bool {
-    request.memory_available_warning_ratio.is_some()
-        || request.memory_available_critical_ratio.is_some()
-        || request.disk_available_warning_ratio.is_some()
-        || request.disk_available_critical_ratio.is_some()
-        || request.cpu_load_warning.is_some()
-        || request.cpu_load_critical.is_some()
-}
-
-fn validate_optional_ratio(value: Option<f64>, code: &'static str) -> Result<(), ApiError> {
-    if let Some(value) = value {
-        if !value.is_finite() || !(0.0..1.0).contains(&value) {
-            return Err(ApiError::bad_request(code));
-        }
-    }
-    Ok(())
-}
-
-fn validate_optional_positive(value: Option<f64>, code: &'static str) -> Result<(), ApiError> {
-    if let Some(value) = value {
-        if !value.is_finite() || value <= 0.0 {
-            return Err(ApiError::bad_request(code));
-        }
-    }
-    Ok(())
 }

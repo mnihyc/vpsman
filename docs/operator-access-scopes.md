@@ -11,8 +11,9 @@ role receives the scopes needed for normal daily operation. The default
 ## Read Scopes
 
 - `fleet:read`: fleet metadata, agent inventory, gateway sessions, telemetry,
-  job status, target status, alert state, source readiness, topology
-  summaries, and other non-payload operational status.
+  job status, target status, fleet and policy alert state, traffic accounting
+  summaries, source readiness, topology summaries, and other non-payload
+  operational status.
 - `jobs:read`: durable job output payloads, output archives, file-download
   payloads, output chunks, output comparison previews, process-supervisor
   inventory, file-transfer session records, file-transfer source artifacts, and
@@ -29,7 +30,8 @@ role receives the scopes needed for normal daily operation. The default
   recurring operation payloads.
 - `config:read`: template definitions, template assignments,
   diff/test output, rendered runtime config, runtime config patch generators,
-  rendered incremental config patches, and private agent-update release metadata.
+  rendered incremental config patches, per-VPS rule values, VPS Rules dry-runs,
+  and private agent-update release metadata.
 - `network:read`: full tunnel plans, exportable runtime `plan.json` details,
   OSPF update plans, raw network observations, and topology history exports.
 - `audit:read`: audit logs and audit history exports.
@@ -42,6 +44,9 @@ Existing write scopes remain separate from read scopes. Examples include
 `history:write`. A write scope does not automatically imply the corresponding
 sensitive read scope unless the operator record explicitly has both, or the
 operator is an admin with `*`.
+
+VPS Rules writes require `config:write`. Alert policy group and notification
+channel writes require `integrations:write`.
 
 History retention writes require `history:write` plus authority for the selected
 domain. Audit retention requires `audit:read`; job-output retention requires

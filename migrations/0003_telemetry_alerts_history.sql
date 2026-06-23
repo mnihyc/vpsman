@@ -84,64 +84,167 @@ CREATE TABLE telemetry_tunnels (
 CREATE INDEX telemetry_tunnels_latest_idx
     ON telemetry_tunnels (observed_at DESC, client_id, interface);
 
-CREATE TABLE fleet_alert_policies (
-    id UUID PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
-    scope_kind TEXT NOT NULL,
-    scope_value TEXT,
-    memory_available_warning_ratio DOUBLE PRECISION,
-    memory_available_critical_ratio DOUBLE PRECISION,
-    disk_available_warning_ratio DOUBLE PRECISION,
-    disk_available_critical_ratio DOUBLE PRECISION,
-    cpu_load_warning DOUBLE PRECISION,
-    cpu_load_critical DOUBLE PRECISION,
-    priority INTEGER NOT NULL DEFAULT 0,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    notes TEXT,
-    actor_id UUID REFERENCES operators(id),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+CREATE TABLE vps_rule_values (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    value_raw TEXT NOT NULL,
+    value_json JSONB NOT NULL,
+    source_kind TEXT NOT NULL DEFAULT 'operator',
+    source_id UUID,
+    updated_by UUID REFERENCES operators(id),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK (scope_kind IN ('global', 'provider', 'tag', 'client')),
-    CHECK (
-        (scope_kind = 'global' AND scope_value IS NULL)
-        OR (scope_kind <> 'global' AND scope_value IS NOT NULL)
-    ),
-    CHECK (
-        memory_available_warning_ratio IS NULL
-        OR (memory_available_warning_ratio > 0 AND memory_available_warning_ratio < 1)
-    ),
-    CHECK (
-        memory_available_critical_ratio IS NULL
-        OR (memory_available_critical_ratio > 0 AND memory_available_critical_ratio < 1)
-    ),
-    CHECK (
-        disk_available_warning_ratio IS NULL
-        OR (disk_available_warning_ratio > 0 AND disk_available_warning_ratio < 1)
-    ),
-    CHECK (
-        disk_available_critical_ratio IS NULL
-        OR (disk_available_critical_ratio > 0 AND disk_available_critical_ratio < 1)
-    ),
-    CHECK (cpu_load_warning IS NULL OR cpu_load_warning > 0),
-    CHECK (cpu_load_critical IS NULL OR cpu_load_critical > 0),
-    CHECK (
-        memory_available_warning_ratio IS NOT NULL
-        OR memory_available_critical_ratio IS NOT NULL
-        OR disk_available_warning_ratio IS NOT NULL
-        OR disk_available_critical_ratio IS NOT NULL
-        OR cpu_load_warning IS NOT NULL
-        OR cpu_load_critical IS NOT NULL
-    )
+    PRIMARY KEY (client_id, key),
+    CHECK (key IN (
+        'traffic.reset_day',
+        'traffic.quota.total',
+        'traffic.quota.rx',
+        'traffic.quota.tx',
+        'traffic.selectors'
+    )),
+    CHECK (length(value_raw) BETWEEN 1 AND 4096),
+    CHECK (jsonb_typeof(value_json) = 'object')
 );
 
-CREATE INDEX fleet_alert_policies_match_idx
-    ON fleet_alert_policies (
-        enabled,
-        scope_kind,
-        scope_value,
-        priority DESC,
-        updated_at DESC
-    );
+CREATE INDEX vps_rule_values_key_idx
+    ON vps_rule_values (key, client_id);
+
+CREATE TABLE traffic_counter_samples (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL,
+    interface TEXT NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    rx_bytes BIGINT NOT NULL,
+    tx_bytes BIGINT NOT NULL,
+    counter_epoch BIGINT NOT NULL DEFAULT 0,
+    sample_source TEXT NOT NULL,
+    PRIMARY KEY (client_id, source_kind, interface, observed_at),
+    CHECK (source_kind IN ('host', 'tunnel')),
+    CHECK (length(interface) BETWEEN 1 AND 128),
+    CHECK (rx_bytes >= 0),
+    CHECK (tx_bytes >= 0)
+);
+
+CREATE INDEX traffic_counter_samples_lookup_idx
+    ON traffic_counter_samples (client_id, source_kind, interface, observed_at DESC);
+
+CREATE INDEX traffic_counter_samples_observed_idx
+    ON traffic_counter_samples (observed_at DESC);
+
+CREATE TABLE traffic_cycle_usage (
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    selector_hash TEXT NOT NULL,
+    selectors_json JSONB NOT NULL,
+    cycle_start TIMESTAMPTZ NOT NULL,
+    cycle_end TIMESTAMPTZ NOT NULL,
+    rx_bytes BIGINT NOT NULL DEFAULT 0,
+    tx_bytes BIGINT NOT NULL DEFAULT 0,
+    total_bytes BIGINT NOT NULL DEFAULT 0,
+    quota_rx_bytes BIGINT,
+    quota_tx_bytes BIGINT,
+    quota_total_bytes BIGINT,
+    cycle_percent DOUBLE PRECISION,
+    state TEXT NOT NULL,
+    incomplete_reasons TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    last_sample_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (client_id, selector_hash, cycle_start),
+    CHECK (jsonb_typeof(selectors_json) = 'array'),
+    CHECK (state IN ('ok', 'incomplete', 'unknown', 'stale'))
+);
+
+CREATE INDEX traffic_cycle_usage_client_idx
+    ON traffic_cycle_usage (client_id, cycle_start DESC);
+
+CREATE TABLE policy_groups (
+    id UUID PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    selector_expression TEXT NOT NULL,
+    notes TEXT,
+    created_by UUID REFERENCES operators(id),
+    updated_by UUID REFERENCES operators(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (length(trim(name)) BETWEEN 1 AND 128),
+    CHECK (length(trim(selector_expression)) BETWEEN 1 AND 4096),
+    CHECK (notes IS NULL OR length(notes) <= 1024)
+);
+
+CREATE INDEX policy_groups_enabled_idx
+    ON policy_groups (enabled, updated_at DESC, name);
+
+CREATE TABLE policy_rules (
+    id UUID PRIMARY KEY,
+    group_id UUID NOT NULL REFERENCES policy_groups(id) ON DELETE CASCADE,
+    rule_version INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    name TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    traffic_selector TEXT,
+    condition_expression TEXT NOT NULL,
+    window_secs BIGINT NOT NULL DEFAULT 0,
+    severity TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (length(trim(name)) BETWEEN 1 AND 128),
+    CHECK (severity IN ('info', 'warning', 'critical')),
+    CHECK (window_secs IN (0, 60, 300, 900)),
+    CHECK (length(trim(condition_expression)) BETWEEN 1 AND 4096)
+);
+
+CREATE INDEX policy_rules_group_idx
+    ON policy_rules (group_id, sort_order ASC, created_at ASC);
+
+CREATE TABLE policy_rule_states (
+    policy_rule_id UUID NOT NULL REFERENCES policy_rules(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    rule_version INTEGER NOT NULL,
+    condition_true BOOLEAN NOT NULL,
+    previous_condition_true BOOLEAN NOT NULL,
+    window_satisfied BOOLEAN NOT NULL,
+    first_true_at TIMESTAMPTZ,
+    last_true_at TIMESTAMPTZ,
+    last_false_at TIMESTAMPTZ,
+    last_evaluated_at TIMESTAMPTZ NOT NULL,
+    incomplete BOOLEAN NOT NULL,
+    incomplete_reasons TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    last_actual_value DOUBLE PRECISION,
+    last_threshold_value DOUBLE PRECISION,
+    last_fired_at TIMESTAMPTZ,
+    trigger_generation BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (policy_rule_id, client_id, rule_version)
+);
+
+CREATE INDEX policy_rule_states_client_idx
+    ON policy_rule_states (client_id, updated_at DESC);
+
+CREATE TABLE policy_alerts (
+    id UUID PRIMARY KEY,
+    policy_group_id UUID NOT NULL,
+    policy_rule_id UUID NOT NULL,
+    client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    trigger_generation BIGINT NOT NULL,
+    severity TEXT NOT NULL,
+    category TEXT NOT NULL,
+    title TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    actual_value DOUBLE PRECISION,
+    threshold_value DOUBLE PRECISION,
+    payload JSONB NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (policy_rule_id, client_id, trigger_generation),
+    CHECK (severity IN ('info', 'warning', 'critical')),
+    CHECK (category IN ('traffic', 'resource')),
+    CHECK (jsonb_typeof(payload) = 'object')
+);
+
+CREATE INDEX policy_alerts_recent_idx
+    ON policy_alerts (observed_at DESC, client_id, severity);
+
+CREATE INDEX policy_alerts_client_idx
+    ON policy_alerts (client_id, observed_at DESC);
 
 CREATE TABLE fleet_alert_states (
     alert_id TEXT PRIMARY KEY,

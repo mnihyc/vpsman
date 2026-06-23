@@ -138,7 +138,9 @@ Supported event predicate names include:
 - Schedule: `schedule.due`, `schedule.dispatched`, `schedule.failed`,
   `schedule.id:<id>`, `schedule.name:<name>`.
 - Alert: `alert.severity:<level>`, `alert.category:<category>`,
-  `alert.state:<state>`, `alert.open`.
+  `alert.state:<state>`, `alert.open`, `alert.policy_reached`.
+- Policy alert payloads: `policy.<path>`, `rule.<path>`, and
+  `traffic.<path>` comparisons for issued `alert.policy_reached` events.
 - Telemetry: `telemetry.rollup`, `telemetry.network_rate`, `telemetry.tunnel`,
   plus `telemetry.<path>` comparisons.
 
@@ -168,5 +170,27 @@ Examples:
 interval.30sec && status = stale
 interval.1min && provider:alpha && vps.tag not in [/^test-.*/]
 alert.open && alert.severity:critical && tag:edge
+alert.policy_reached && alert.category:traffic && traffic.cycle_percent >= 80
 job.status.become_failed && job.type:shell && job.target.status:online
 ```
+
+## Alert Policy Rule Expressions
+
+Fleet > Alert Policies use selector expressions only to choose target VPSs.
+Each rule then evaluates a full boolean condition expression against that VPS.
+Condition expressions support numeric literals, variables, comparisons,
+`+`, `-`, `*`, `/`, parentheses, unary signs, `&&`, `||`, and `!` through the
+backend stack/RPN parser.
+
+Examples:
+
+```text
+traffic.cycle.total >= traffic.quota.total * 0.8
+traffic.cycle.tx >= (traffic.quota.tx + 10GB) / 2
+cpu.load_1 >= 0.25 + 0.75
+(traffic.cycle_percent >= 80 && memory.available_ratio <= 0.2) || cpu.load_1 > 4
+```
+
+Missing variables, missing traffic selectors, unknown runtime interfaces, and
+missing quota/reset-day values make the rule state incomplete. They do not
+evaluate as zero and do not fire alerts.

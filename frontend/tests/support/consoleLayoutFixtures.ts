@@ -910,6 +910,31 @@ const fleetAlerts = [
     target_kind: "source_template",
     title: "Selected source template needs attention",
   },
+  {
+    category: "traffic",
+    client_id: "agent-sfo-01",
+    detail: "traffic.cycle.total >= traffic.quota.total * 0.8",
+    evidence: {
+      policy: { name: "edge-resource-policy" },
+      rule: {
+        condition_expression: "traffic.cycle.total >= traffic.quota.total * 0.8",
+      },
+      traffic: { cycle_percent: 80.33, reset_day: 14 },
+    },
+    escalation_level: 0,
+    id: "policy-alert:policy-alert-fixture-01",
+    muted_until_unix: null,
+    observed_at: "2026-06-23T07:31:00Z",
+    operator_state: "open",
+    severity: "warning",
+    state_actor_id: null,
+    state_reason: null,
+    state_updated_at: null,
+    status: "policy_reached",
+    target_id: "agent-sfo-01:policy-alert-fixture-01",
+    target_kind: "policy_alert",
+    title: "Traffic quota threshold reached",
+  },
 ];
 
 const fleetAlertStates = [
@@ -927,23 +952,179 @@ const fleetAlertStates = [
 
 const fleetAlertPolicies = [
   {
-    cpu_load_critical: null,
-    cpu_load_warning: null,
+    active_critical_count: 0,
+    active_warning_count: 1,
     created_at: "2026-06-02T10:00:00Z",
     created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
-    disk_available_critical_ratio: null,
-    disk_available_warning_ratio: null,
     enabled: true,
     id: "fbfbfbfb-1111-4111-8111-111111111111",
-    memory_available_critical_ratio: 0.1,
-    memory_available_warning_ratio: 0.2,
+    enabled_rule_count: 1,
+    incomplete_vps_count: 0,
+    last_evaluated_at: "2026-06-02T10:01:00Z",
+    matched_vps_count: 1,
     name: "edge-resource-policy",
-    priority: 0,
-    scope_kind: "tag",
-    scope_value: "edge",
+    notes: "Fixture policy group for edge traffic and resource alerts.",
+    rule_count: 1,
+    rules: [
+      {
+        created_at: "2026-06-02T10:00:00Z",
+        enabled: true,
+        group_id: "fbfbfbfb-1111-4111-8111-111111111111",
+        id: "fbfbfbfb-2222-4111-8111-111111111111",
+        condition_expression: "traffic.cycle.total >= traffic.quota.total * 0.8",
+        name: "80% total quota",
+        rule_version: 1,
+        severity: "warning",
+        sort_order: 0,
+        traffic_selector: null,
+        updated_at: "2026-06-02T10:00:00Z",
+        window_secs: 0,
+      },
+    ],
+    selector_expression: "tag:edge",
     updated_at: "2026-06-02T10:00:00Z",
+    updated_by: "99999999-aaaa-4bbb-8ccc-000000000001",
   },
 ];
+
+const vpsRuleValues = [
+  {
+    client_id: "agent-sfo-01",
+    key: "traffic.reset_day",
+    parsed_display: "14 UTC",
+    source_id: null,
+    source_kind: "operator",
+    state: "ok",
+    updated_at: "2026-06-02T10:00:00Z",
+    updated_by: "fixture-admin",
+    validation_errors: [],
+    value_json: 14,
+    value_raw: "14",
+  },
+  {
+    client_id: "agent-sfo-01",
+    key: "traffic.quota.total",
+    parsed_display: "3000000000000 bytes",
+    source_id: null,
+    source_kind: "operator",
+    state: "ok",
+    updated_at: "2026-06-02T10:00:00Z",
+    updated_by: "fixture-admin",
+    validation_errors: [],
+    value_json: 3000000000000,
+    value_raw: "3TB",
+  },
+  {
+    client_id: "agent-sfo-01",
+    key: "traffic.selectors",
+    parsed_display: "2 selectors",
+    source_id: null,
+    source_kind: "operator",
+    state: "ok",
+    updated_at: "2026-06-02T10:00:00Z",
+    updated_by: "fixture-admin",
+    validation_errors: [],
+    value_json: ["host:eth0+tx", "host:ens3+total"],
+    value_raw: "eth0+tx,ens3",
+  },
+];
+
+const trafficAccounting = [
+  {
+    client_id: "agent-sfo-01",
+    cycle_end: "2026-07-14T00:00:00Z",
+    cycle_percent: 80.33,
+    cycle_start: "2026-06-14T00:00:00Z",
+    counter_epochs_seen: 2,
+    incomplete_reasons: [],
+    last_sample_at: "2026-06-23T07:31:00Z",
+    latest_rx_bytes: 510000000000,
+    latest_total_bytes: 2410000000000,
+    latest_tx_bytes: 1900000000000,
+    quota_rx_bytes: null,
+    quota_total_bytes: 3000000000000,
+    quota_tx_bytes: null,
+    reset_day: 14,
+    rx_bytes: 510000000000,
+    selector_breakdown: [
+      {
+        cycle_rx_bytes: 0,
+        cycle_total_bytes: 1900000000000,
+        cycle_tx_bytes: 1900000000000,
+        direction: "tx",
+        incomplete_reasons: [],
+        interface: "eth0",
+        latest_rx_bytes: 11200000000000,
+        latest_tx_bytes: 2400000000000,
+        sample_age_secs: 60,
+        source: "host",
+        state: "ok",
+      },
+      {
+        cycle_rx_bytes: 300000000000,
+        cycle_total_bytes: 420000000000,
+        cycle_tx_bytes: 120000000000,
+        direction: "total",
+        incomplete_reasons: [],
+        interface: "ens3",
+        latest_rx_bytes: 4100000000000,
+        latest_tx_bytes: 3200000000000,
+        sample_age_secs: 60,
+        source: "host",
+        state: "ok",
+      },
+    ],
+    selector_hash: "fixture-selector-hash",
+    selectors: ["eth0+tx", "ens3"],
+    state: "ok",
+    total_bytes: 2410000000000,
+    tx_bytes: 1900000000000,
+    updated_at: "2026-06-23T07:31:30Z",
+  },
+];
+
+const policyAlerts = [
+  {
+    actual_value: 2410000000000,
+    category: "traffic",
+    client_id: "agent-sfo-01",
+    created_at: "2026-06-23T07:31:30Z",
+    detail: "traffic.cycle.total reached traffic.quota.total * 0.8",
+    id: "policy-alert-fixture-01",
+    observed_at: "2026-06-23T07:31:00Z",
+    payload: {
+      alert: { category: "traffic", severity: "warning" },
+      traffic: { cycle_percent: 80.33, reset_day: 14 },
+    },
+    policy_group_id: "fbfbfbfb-1111-4111-8111-111111111111",
+    policy_rule_id: "fbfbfbfb-2222-4111-8111-111111111111",
+    severity: "warning",
+    threshold_value: 2400000000000,
+    title: "Traffic quota threshold reached",
+    trigger_generation: 1,
+  },
+];
+
+const policyDryRunFixture = {
+  incomplete_vps_count: 0,
+  invalid_rule_count: 0,
+  matched_vps: ["agent-sfo-01"],
+  matched_vps_count: 1,
+  preview_hash:
+    "2222222222222222222222222222222222222222222222222222222222222222",
+  rule_previews: [
+    {
+      false_count: 0,
+      incomplete_count: 0,
+      category: "traffic",
+      condition_expression: "traffic.cycle.total >= traffic.quota.total * 0.8",
+      rule_name: "80% total quota",
+      severity: "warning",
+      true_count: 1,
+    },
+  ],
+  validation_errors: [],
+};
 
 const fleetAlertNotificationChannels = [
   {
@@ -2171,6 +2352,8 @@ export async function installConsoleApiMock(
       fleetAlertPoliciesFixture,
       fleetAlertStatesFixture,
       fleetAlertsFixture,
+      policyAlertsFixture,
+      policyDryRunFixture,
       fileTransferSourceArtifactsFixture,
       fileTransfersFixture,
       historyRetentionPoliciesFixture,
@@ -2190,7 +2373,9 @@ export async function installConsoleApiMock(
       tagsFixture,
       terminalSessionsFixture,
       topologyGraphFixture,
+      trafficAccountingFixture,
       tunnelPlansFixture,
+      vpsRuleValuesFixture,
       webhookDeliveriesFixture,
       webhookRulesFixture,
     }) => {
@@ -2995,6 +3180,41 @@ export async function installConsoleApiMock(
         }
         return {};
       };
+      const buildVpsRulesPreview = (body: Record<string, unknown>) => {
+        const operation = body.operation === "unset" ? "unset" : "upsert";
+        const keys =
+          operation === "unset"
+            ? ((body.keys as string[] | undefined) ?? ["traffic.quota.total"])
+            : Object.keys(
+                (body.values as Record<string, string> | undefined) ?? {
+                  "traffic.reset_day": "14",
+                },
+              );
+        return {
+          changed_row_count: keys.length,
+          changes: keys.map((key) => ({
+            action: operation === "unset" ? "unset" : "set",
+            after:
+              operation === "unset"
+                ? null
+                : ((body.values as Record<string, string> | undefined)?.[
+                    key
+                  ] ?? "14"),
+            before:
+              vpsRuleValuesFixture.find((row) => row.key === key)?.value_raw ??
+              null,
+            client_id: "agent-sfo-01",
+            display_name: "edge-sfo-01",
+            key,
+            validation: "ok",
+            validation_errors: [],
+          })),
+          invalid_row_count: 0,
+          matched_vps_count: 1,
+          preview_hash:
+            "3333333333333333333333333333333333333333333333333333333333333333",
+        };
+      };
 
       window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = input instanceof Request ? input.url : String(input);
@@ -3128,18 +3348,72 @@ export async function installConsoleApiMock(
             updated_at: "2026-06-02T10:02:00Z",
           });
         }
+        if (pathname === "/api/v1/vps-rules" && method === "GET") {
+          return jsonResponse(vpsRuleValuesFixture);
+        }
+        if (pathname === "/api/v1/vps-rules/dry-run" && method === "POST") {
+          const body = await readJsonBody(input, init);
+          return jsonResponse(buildVpsRulesPreview(body as Record<string, unknown>));
+        }
+        if (
+          (pathname === "/api/v1/vps-rules/bulk-upsert" ||
+            pathname === "/api/v1/vps-rules/bulk-unset") &&
+          method === "POST"
+        ) {
+          const body = await readJsonBody(input, init);
+          return jsonResponse(buildVpsRulesPreview(body as Record<string, unknown>));
+        }
+        if (pathname === "/api/v1/traffic-accounting" && method === "GET") {
+          return jsonResponse(trafficAccountingFixture);
+        }
+        const trafficAccountingMatch = pathname.match(/^\/api\/v1\/traffic-accounting\/([^/]+)$/);
+        if (trafficAccountingMatch && method === "GET") {
+          const clientId = decodeURIComponent(trafficAccountingMatch[1]);
+          return jsonResponse(
+            trafficAccountingFixture.find((row) => row.client_id === clientId) ?? null,
+          );
+        }
+        if (pathname === "/api/v1/policy-alerts" && method === "GET") {
+          return jsonResponse(policyAlertsFixture);
+        }
         if (pathname === "/api/v1/fleet-alert-policies" && method === "GET") {
           return jsonResponse(fleetAlertPoliciesFixture);
+        }
+        if (
+          pathname === "/api/v1/fleet-alert-policies/dry-run" &&
+          method === "POST"
+        ) {
+          return jsonResponse(policyDryRunFixture);
         }
         if (pathname === "/api/v1/fleet-alert-policies" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.fleetAlertPolicies.push(body);
+          const request = body as {
+            enabled?: boolean;
+            id?: string;
+            name?: string;
+            notes?: string | null;
+            rules?: unknown[];
+            selector_expression?: string;
+          };
           return jsonResponse({
-            ...(body as Record<string, unknown>),
+            active_critical_count: 0,
+            active_warning_count: 0,
             created_at: "2026-06-02T10:02:00Z",
             created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
-            id: "eeeeeeee-1111-4111-8111-111111111111",
+            enabled: request.enabled ?? true,
+            enabled_rule_count: request.rules?.length ?? 0,
+            id: request.id ?? "eeeeeeee-1111-4111-8111-111111111111",
+            incomplete_vps_count: 0,
+            last_evaluated_at: "2026-06-02T10:02:00Z",
+            matched_vps_count: 1,
+            name: request.name ?? "saved-policy",
+            notes: request.notes ?? null,
+            rule_count: request.rules?.length ?? 0,
+            rules: request.rules ?? [],
+            selector_expression: request.selector_expression ?? "tag:edge",
             updated_at: "2026-06-02T10:02:00Z",
+            updated_by: "99999999-aaaa-4bbb-8ccc-000000000001",
           });
         }
         if (
@@ -4978,6 +5252,8 @@ export async function installConsoleApiMock(
       fleetAlertPoliciesFixture: fleetAlertPolicies,
       fleetAlertStatesFixture: fleetAlertStates,
       fleetAlertsFixture: fleetAlerts,
+      policyAlertsFixture: policyAlerts,
+      policyDryRunFixture,
       fileTransferSourceArtifactsFixture: fileTransferSourceArtifacts,
       fileTransfersFixture: fileTransfers,
       historyRetentionPoliciesFixture: historyRetentionPolicies,
@@ -4997,7 +5273,9 @@ export async function installConsoleApiMock(
       tagsFixture: tags,
       terminalSessionsFixture: terminalSessions,
       topologyGraphFixture: topologyGraph,
+      trafficAccountingFixture: trafficAccounting,
       tunnelPlansFixture: tunnelPlans,
+      vpsRuleValuesFixture: vpsRuleValues,
       webhookDeliveriesFixture: webhookDeliveries,
       webhookRulesFixture: webhookRules,
     },

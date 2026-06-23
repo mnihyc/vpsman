@@ -11,6 +11,10 @@ interface ScreenshotEntry {
   view: string;
   subpage?: string;
   tab?: string;
+  expandVpsRow?: string;
+  detailTab?: string;
+  prepare?: "alert-policy-editor" | "vps-rules-preview";
+  requiredText?: string[];
   heading: string;
   id: string;
 }
@@ -18,6 +22,21 @@ interface ScreenshotEntry {
 const allViews: ScreenshotEntry[] = [
   { view: "Dashboard", heading: "Dashboard", id: "01-dashboard-overview" },
   { view: "Fleet", heading: "Fleet overview", id: "02-fleet-instances" },
+  {
+    view: "Fleet",
+    expandVpsRow: "edge-sfo-01",
+    detailTab: "Traffic & Rules",
+    heading: "Traffic & Rules",
+    id: "02b-fleet-traffic-rules-detail",
+    requiredText: [
+      "Selected traffic",
+      "Latest RX",
+      "Cycle Total",
+      "VPS rule values",
+      "Matched policies",
+      "Recent policy alerts",
+    ],
+  },
   {
     view: "Fleet",
     subpage: "Alerts",
@@ -29,6 +48,21 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Alert policies",
     heading: "Alert policies",
     id: "04-fleet-alert-policies",
+  },
+  {
+    view: "Fleet",
+    subpage: "Alert policies",
+    heading: "Alert policies",
+    id: "04b-fleet-alert-policies-editor",
+    prepare: "alert-policy-editor",
+    requiredText: [
+      "Create alert policy",
+      "VPS selector expression",
+      "Rule rows",
+      "Condition expression",
+      "Window",
+      "Severity",
+    ],
   },
   {
     view: "Fleet",
@@ -69,6 +103,20 @@ const allViews: ScreenshotEntry[] = [
     subpage: "VPS config",
     heading: "VPS config",
     id: "08-config-single",
+  },
+  {
+    view: "Config",
+    subpage: "VPS Rules",
+    heading: "VPS Rules",
+    id: "08b-config-vps-rules",
+    prepare: "vps-rules-preview",
+    requiredText: [
+      "Bulk rule editor",
+      "Target VPS selector",
+      "Set values",
+      "Unset values",
+      "Dry-run changed rows",
+    ],
   },
   {
     view: "Config",
@@ -294,6 +342,29 @@ async function navigateAndScreenshot(
     await tab.click();
   }
 
+  if (entry.expandVpsRow) {
+    const grid = page.getByLabel("VPS instance records data grid");
+    const row = grid
+      .locator(".gridBody [role=row]", { hasText: entry.expandVpsRow })
+      .first();
+    await expect(row).toBeVisible({ timeout: 5_000 });
+    await row.getByLabel("Expand VPS instance records row").click();
+
+    const detail = grid
+      .locator(".gridExpandedRow", { hasText: entry.expandVpsRow })
+      .first();
+    await expect(detail).toBeVisible({ timeout: 5_000 });
+
+    if (entry.detailTab) {
+      const detailTab = detail.getByRole("tab", {
+        name: entry.detailTab,
+        exact: true,
+      });
+      await expect(detailTab).toBeVisible({ timeout: 5_000 });
+      await detailTab.click();
+    }
+  }
+
   // Wait for heading or any main content
   try {
     await expect(
@@ -310,6 +381,34 @@ async function navigateAndScreenshot(
     } catch {
       await page.waitForTimeout(1_500);
     }
+  }
+
+  if (entry.prepare === "alert-policy-editor") {
+    await page.getByRole("button", { name: "Create policy" }).click();
+    await expect(
+      page.locator(".consoleDetailPanel", { hasText: "Create alert policy" }),
+    ).toBeVisible({ timeout: 5_000 });
+  }
+
+  if (entry.prepare === "vps-rules-preview") {
+    await page.getByLabel("VPS rule set values").fill(
+      "traffic.reset_day=14\ntraffic.quota.total=3TB\ntraffic.selectors=eth0+tx,ens3",
+    );
+    await page.getByRole("button", { name: "Dry-run set values" }).click();
+    await expect(page.getByText("Dry-run changed rows")).toBeVisible({
+      timeout: 5_000,
+    });
+    const prompt = page.locator(".confirmationPrompt", {
+      hasText: "Confirm VPS rule write",
+    });
+    await expect(prompt).toBeVisible({ timeout: 5_000 });
+    await prompt.getByRole("button", { name: "Cancel" }).click();
+  }
+
+  for (const text of entry.requiredText ?? []) {
+    await expect(page.getByText(text).first()).toBeVisible({
+      timeout: 5_000,
+    });
   }
 
   await page.evaluate(() => window.scrollTo(0, 0));
@@ -332,10 +431,12 @@ async function navigateAndScreenshot(
     id: entry.id,
     view: entry.view,
     subpage: entry.subpage ?? null,
-    tab: entry.tab ?? null,
-    heading: entry.heading,
-    horizontalOverflowPx,
-    screenshot: screenshotPath,
+      tab: entry.tab ?? null,
+      expandVpsRow: entry.expandVpsRow ?? null,
+      detailTab: entry.detailTab ?? null,
+      heading: entry.heading,
+      horizontalOverflowPx,
+      screenshot: screenshotPath,
   };
 }
 

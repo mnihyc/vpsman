@@ -8,6 +8,7 @@ import {
 } from "../components/ConsoleDataGrid";
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
+import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { VpsCombobox } from "../components/VpsCombobox";
@@ -55,6 +56,13 @@ import type {
   RuntimeConfigApplyStateRecord,
   RuntimeConfigPatchGeneratorRecord,
   RuntimeConfigPatchGeneratorRenderResponse,
+  TrafficAccountingRecord,
+  VpsRuleChangePreview,
+  VpsRuleValueRecord,
+  VpsRulesBulkUnsetRequest,
+  VpsRulesBulkUpsertRequest,
+  VpsRulesDryRunRequest,
+  VpsRulesDryRunResponse,
   JobOperation,
   JobOutputRecord,
   JobTargetRecord,
@@ -70,6 +78,14 @@ import { SourceTemplatePanel } from "./SourceTemplatesPanel";
 const CONFIG_BULK_SELECTOR_STORAGE_KEY = "vpsman.config.bulk.selectorExpression";
 const CONFIG_SINGLE_SELECTOR_STORAGE_KEY = "vpsman.config.single.selectorExpression";
 const CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY = "vpsman.config.single.clientId";
+const CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY = "vpsman.config.vpsRules.selectorExpression";
+const VPS_RULE_KEYS = [
+  "traffic.reset_day",
+  "traffic.quota.total",
+  "traffic.quota.rx",
+  "traffic.quota.tx",
+  "traffic.selectors",
+] as const;
 
 type BulkConfigApplySnapshot = {
   jobId: string;
@@ -88,6 +104,8 @@ type BulkConfigApplySnapshot = {
 export function ConfigPanel({
   activeSubpage,
   agents,
+  trafficAccounting,
+  vpsRuleValues,
   sourceTemplateAssignments,
   sourceTemplates,
   sourceStatus,
@@ -108,6 +126,9 @@ export function ConfigPanel({
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
   onRefresh,
+  onBulkUnsetVpsRules,
+  onBulkUpsertVpsRules,
+  onDryRunVpsRules,
   onRenderTemplateRuntimeConfig,
   onRenderRuntimeConfigPatchGenerator,
   onResolveBulk,
@@ -120,6 +141,8 @@ export function ConfigPanel({
 }: {
   activeSubpage: string;
   agents: AgentView[];
+  trafficAccounting: TrafficAccountingRecord[];
+  vpsRuleValues: VpsRuleValueRecord[];
   sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
   sourceTemplates: SourceTemplateRecord[];
   sourceStatus: SourceStatusRecord[];
@@ -143,6 +166,9 @@ export function ConfigPanel({
   onOpenJobDetails: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
   onRefresh: () => void;
+  onBulkUnsetVpsRules: (request: VpsRulesBulkUnsetRequest) => Promise<VpsRulesDryRunResponse>;
+  onBulkUpsertVpsRules: (request: VpsRulesBulkUpsertRequest) => Promise<VpsRulesDryRunResponse>;
+  onDryRunVpsRules: (request: VpsRulesDryRunRequest) => Promise<VpsRulesDryRunResponse>;
   onRenderTemplateRuntimeConfig: (clientId: string) => Promise<TemplateRuntimeConfigResponse>;
   onRenderRuntimeConfigPatchGenerator: (generatorId: string, request: { values: JsonValue }) => Promise<RuntimeConfigPatchGeneratorRenderResponse>;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
@@ -156,6 +182,9 @@ export function ConfigPanel({
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const subpage = normalizeConfigSubpage(activeSubpage);
+  const rulesSelectorPrefill = activeSubpage.startsWith("rules:id:")
+    ? `id:${decodeURIComponent(activeSubpage.slice("rules:id:".length))}`
+    : null;
 
   if (subpage === "templates") {
     return (
@@ -185,7 +214,13 @@ export function ConfigPanel({
         <div className="sectionHeader">
           <div>
             <h2>{configTitle(subpage)}</h2>
-            <span>{actionError ?? error ?? (loading ? "Refreshing runtime config state" : "Runtime config workflows")}</span>
+            <span>
+              {actionError ??
+                error ??
+                (loading
+                  ? "Refreshing runtime config state"
+                  : configSubtitle(subpage))}
+            </span>
           </div>
           <button className="secondaryAction" disabled={loading || pending} onClick={onRefresh} type="button">
             <RefreshCw size={15} />
@@ -236,6 +271,17 @@ export function ConfigPanel({
             privilegeMaterial={privilegeMaterial}
             runAction={(action) => runPanelAction(setPending, setActionError, action)}
             setPrivilegeMaterial={setPrivilegeMaterial}
+          />
+        )}
+        {subpage === "rules" && (
+          <VpsRulesPanel
+            agents={agents}
+            initialSelectorExpression={rulesSelectorPrefill}
+            onBulkUnset={onBulkUnsetVpsRules}
+            onBulkUpsert={onBulkUpsertVpsRules}
+            onDryRun={onDryRunVpsRules}
+            trafficAccounting={trafficAccounting}
+            vpsRuleValues={vpsRuleValues}
           />
         )}
       </div>
@@ -297,6 +343,13 @@ function ConfigOverview({
       value: "Persistent runtime inputs assigned to VPSs; changes push immediately after confirmation.",
     },
     {
+      action: "Edit VPS rules",
+      detail: "Traffic reset, quotas, and selectors",
+      subpage: "rules",
+      title: "VPS Rules",
+      value: "Server-side per-VPS traffic rule values used by accounting and alert policies.",
+    },
+    {
       action: "Inspect template status",
       detail: `${sourceIssues} needing review`,
       subpage: "templates",
@@ -323,7 +376,7 @@ function ConfigOverview({
     },
     {
       term: "Rules",
-      meaning: "Alert and webhook matching logic under Fleet, not agent config.",
+      meaning: "VPS Rules are per-VPS traffic values; Alert policies under Fleet evaluate them.",
     },
     {
       term: "Suite config",
@@ -1209,20 +1262,680 @@ function SingleVpsConfig({
   );
 }
 
+type VpsRulesReviewSnapshot = {
+  operation: "upsert" | "unset";
+  selectorExpression: string;
+  values: Record<string, string>;
+  keys: string[];
+  preview: VpsRulesDryRunResponse;
+};
+
+function VpsRulesPanel({
+  agents,
+  initialSelectorExpression,
+  onBulkUnset,
+  onBulkUpsert,
+  onDryRun,
+  trafficAccounting,
+  vpsRuleValues,
+}: {
+  agents: AgentView[];
+  initialSelectorExpression: string | null;
+  onBulkUnset: (request: VpsRulesBulkUnsetRequest) => Promise<VpsRulesDryRunResponse>;
+  onBulkUpsert: (request: VpsRulesBulkUpsertRequest) => Promise<VpsRulesDryRunResponse>;
+  onDryRun: (request: VpsRulesDryRunRequest) => Promise<VpsRulesDryRunResponse>;
+  trafficAccounting: TrafficAccountingRecord[];
+  vpsRuleValues: VpsRuleValueRecord[];
+}) {
+  const [selectorExpression, setSelectorExpression] = useState(
+    () =>
+      initialSelectorExpression ??
+      (readLocalString(CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY) || "tag:edge"),
+  );
+  const [keyFilter, setKeyFilter] = useState("");
+  const [stateFilter, setStateFilter] = useState("");
+  const [showIncompleteOnly, setShowIncompleteOnly] = useState(false);
+  const [valuesText, setValuesText] = useState(
+    "traffic.reset_day=14\ntraffic.quota.total=3TB\ntraffic.selectors=eth0+tx,ens3",
+  );
+  const [unsetKeys, setUnsetKeys] = useState<string[]>([]);
+  const [preview, setPreview] = useState<VpsRulesDryRunResponse | null>(null);
+  const [reviewSnapshot, setReviewSnapshot] =
+    useState<VpsRulesReviewSnapshot | null>(null);
+  const [pending, setPending] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const agentNameById = useMemo(
+    () => new Map(agents.map((agent) => [agent.id, formatVpsName(agent, "name_id_suffix")])),
+    [agents],
+  );
+  const accountingByClient = useMemo(
+    () => new Map(trafficAccounting.map((row) => [row.client_id, row])),
+    [trafficAccounting],
+  );
+  const filteredRules = useMemo(
+    () =>
+      vpsRuleValues
+        .filter((row) => {
+          if (keyFilter && row.key !== keyFilter) {
+            return false;
+          }
+          if (stateFilter && row.state !== stateFilter) {
+            return false;
+          }
+          if (showIncompleteOnly && row.state === "ok") {
+            return false;
+          }
+          return true;
+        })
+        .slice()
+        .sort(
+          (left, right) =>
+            (agentNameById.get(left.client_id) ?? left.client_id).localeCompare(
+              agentNameById.get(right.client_id) ?? right.client_id,
+            ) || left.key.localeCompare(right.key),
+        ),
+    [agentNameById, keyFilter, showIncompleteOnly, stateFilter, vpsRuleValues],
+  );
+  const incompleteClients = new Set(
+    trafficAccounting
+      .filter((row) => row.state === "incomplete" || row.incomplete_reasons.length > 0)
+      .map((row) => row.client_id),
+  );
+  const columns = useMemo<ConsoleDataGridColumn<VpsRuleValueRecord>[]>(
+    () => [
+      {
+        id: "vps",
+        header: "VPS",
+        size: 220,
+        minSize: 160,
+        searchValue: (row) => `${row.client_id} ${agentNameById.get(row.client_id) ?? ""}`,
+        sortValue: (row) => agentNameById.get(row.client_id) ?? row.client_id,
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{agentNameById.get(row.client_id) ?? row.client_id}</strong>
+            <small className="monoValue">{row.client_id}</small>
+          </span>
+        ),
+      },
+      {
+        id: "key",
+        header: "Key",
+        size: 190,
+        minSize: 150,
+        searchValue: (row) => row.key,
+        sortValue: (row) => row.key,
+        cell: (row) => <span className="monoValue">{row.key}</span>,
+      },
+      {
+        id: "value",
+        header: "Value",
+        size: 190,
+        minSize: 130,
+        searchValue: (row) => row.value_raw,
+        cell: (row) => row.value_raw,
+      },
+      {
+        id: "parsed",
+        header: "Parsed",
+        size: 220,
+        minSize: 150,
+        searchValue: (row) => row.parsed_display,
+        cell: (row) => row.parsed_display,
+      },
+      {
+        id: "state",
+        header: "State",
+        size: 110,
+        minSize: 90,
+        searchValue: (row) => row.state,
+        sortValue: (row) => row.state,
+        cell: (row) => (
+          <ConsoleStatusBadge tone={row.state === "ok" ? "ok" : "warning"}>
+            {row.state}
+          </ConsoleStatusBadge>
+        ),
+      },
+      {
+        id: "source",
+        header: "Source",
+        size: 130,
+        minSize: 100,
+        searchValue: (row) => `${row.source_kind} ${row.source_id ?? ""}`,
+        cell: (row) => row.source_kind,
+      },
+      {
+        id: "updated_by",
+        header: "Updated by",
+        size: 145,
+        minSize: 110,
+        searchValue: (row) => row.updated_by ?? "",
+        cell: (row) => row.updated_by ?? "unknown",
+      },
+      {
+        id: "updated",
+        header: "Updated",
+        size: 155,
+        minSize: 120,
+        sortValue: (row) => row.updated_at,
+        cell: (row) => formatTime(row.updated_at),
+      },
+    ],
+    [agentNameById],
+  );
+  const previewColumns = useMemo<ConsoleDataGridColumn<VpsRuleChangePreview>[]>(
+    () => [
+      {
+        id: "vps",
+        header: "VPS",
+        size: 220,
+        minSize: 150,
+        searchValue: (row) => `${row.client_id} ${row.display_name ?? ""}`,
+        sortValue: (row) => row.display_name ?? row.client_id,
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{row.display_name || row.client_id}</strong>
+            <small className="monoValue">{row.client_id}</small>
+          </span>
+        ),
+      },
+      {
+        id: "key",
+        header: "Key",
+        size: 210,
+        minSize: 150,
+        searchValue: (row) => row.key,
+        sortValue: (row) => row.key,
+        cell: (row) => <span className="monoValue">{row.key}</span>,
+      },
+      {
+        id: "before",
+        header: "Before",
+        size: 170,
+        minSize: 120,
+        searchValue: (row) => row.before ?? "",
+        cell: (row) => row.before ?? "unset",
+      },
+      {
+        id: "after",
+        header: "After",
+        size: 170,
+        minSize: 120,
+        searchValue: (row) => row.after ?? "",
+        cell: (row) => row.after ?? "unset",
+      },
+      {
+        id: "action",
+        header: "Action",
+        size: 105,
+        minSize: 90,
+        searchValue: (row) => row.action,
+        sortValue: (row) => row.action,
+        cell: (row) => row.action,
+      },
+      {
+        id: "validation",
+        header: "Validation",
+        size: 130,
+        minSize: 100,
+        searchValue: (row) => `${row.validation} ${row.validation_errors.join(" ")}`,
+        sortValue: (row) => row.validation,
+        cell: (row) => (
+          <ConsoleStatusBadge tone={row.validation === "ok" ? "ok" : "warning"}>
+            {row.validation}
+          </ConsoleStatusBadge>
+        ),
+      },
+    ],
+    [],
+  );
+  const matchedPreviewClients = useMemo(
+    () =>
+      Array.from(
+        new Map(
+          (preview?.changes ?? []).map((change) => [
+            change.client_id,
+            change.display_name || change.client_id,
+          ]),
+        ).entries(),
+      ),
+    [preview],
+  );
+
+  useEffect(() => {
+    if (initialSelectorExpression) {
+      setSelectorExpression(initialSelectorExpression);
+    }
+  }, [initialSelectorExpression]);
+
+  useEffect(() => {
+    writeLocalString(CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY, selectorExpression);
+    setReviewSnapshot(null);
+  }, [selectorExpression]);
+
+  useEffect(() => {
+    setReviewSnapshot(null);
+  }, [valuesText, unsetKeys]);
+
+  function parseSetValues(): Record<string, string> {
+    const values: Record<string, string> = {};
+    for (const rawLine of valuesText.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line) {
+        continue;
+      }
+      const equals = line.indexOf("=");
+      if (equals <= 0) {
+        throw new Error("VPS rule set values must use key=value lines");
+      }
+      const key = line.slice(0, equals).trim();
+      const value = line.slice(equals + 1).trim();
+      if (!VPS_RULE_KEYS.includes(key as (typeof VPS_RULE_KEYS)[number])) {
+        throw new Error(`Unsupported VPS rule key: ${key}`);
+      }
+      if (!value) {
+        throw new Error(`VPS rule ${key} cannot be empty; use explicit unset`);
+      }
+      if (Object.prototype.hasOwnProperty.call(values, key)) {
+        throw new Error(`Duplicate VPS rule key: ${key}`);
+      }
+      values[key] = value;
+    }
+    if (Object.keys(values).length === 0) {
+      throw new Error("Add at least one VPS rule value to set");
+    }
+    return values;
+  }
+
+  async function dryRun(operation: "upsert" | "unset") {
+    setPending(true);
+    setStatus(operation === "upsert" ? "dry-running set values" : "dry-running unset values");
+    try {
+      const values = operation === "upsert" ? parseSetValues() : {};
+      const keys = operation === "unset" ? unsetKeys : [];
+      if (operation === "unset" && keys.length === 0) {
+        throw new Error("Select at least one VPS rule key to unset");
+      }
+      const nextPreview = await onDryRun({
+        operation,
+        selector_expression: selectorExpression.trim(),
+        values,
+        keys,
+      });
+      setPreview(nextPreview);
+      setReviewSnapshot({
+        operation,
+        selectorExpression: selectorExpression.trim(),
+        values,
+        keys,
+        preview: nextPreview,
+      });
+      setStatus(
+        `${operation === "upsert" ? "set" : "unset"} dry-run matched ${nextPreview.matched_vps_count} VPSs`,
+      );
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "VPS rules dry-run failed");
+      setReviewSnapshot(null);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function applyReview() {
+    const snapshot = reviewSnapshot;
+    if (!snapshot) {
+      setStatus("Run dry-run before applying VPS rules");
+      return;
+    }
+    setPending(true);
+    try {
+      const nextPreview =
+        snapshot.operation === "upsert"
+          ? await onBulkUpsert({
+              selector_expression: snapshot.selectorExpression,
+              values: snapshot.values,
+              confirmed: true,
+              preview_hash: snapshot.preview.preview_hash,
+            })
+          : await onBulkUnset({
+              selector_expression: snapshot.selectorExpression,
+              keys: snapshot.keys,
+              confirmed: true,
+              preview_hash: snapshot.preview.preview_hash,
+            });
+      setPreview(nextPreview);
+      setReviewSnapshot(null);
+      setStatus(`applied ${nextPreview.changed_row_count} VPS rule rows`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "VPS rules apply failed");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  function toggleUnsetKey(key: string, checked: boolean) {
+    setUnsetKeys((current) =>
+      checked
+        ? Array.from(new Set([...current, key]))
+        : current.filter((stored) => stored !== key),
+    );
+  }
+
+  return (
+    <div className="consoleCrudPanel vpsRulesWorkspace">
+      <div className="consoleFilterBar">
+        <label>
+          <span>VPS selector expression</span>
+          <SearchExpressionInput
+            ariaLabel="VPS rules selector expression"
+            onChange={setSelectorExpression}
+            placeholder="provider:hetzner && tag:edge"
+            value={selectorExpression}
+          />
+        </label>
+        <label>
+          <span>Key filter</span>
+          <select value={keyFilter} onChange={(event) => setKeyFilter(event.target.value)}>
+            <option value="">all keys</option>
+            {VPS_RULE_KEYS.map((key) => (
+              <option key={key} value={key}>
+                {key}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>State filter</span>
+          <select value={stateFilter} onChange={(event) => setStateFilter(event.target.value)}>
+            <option value="">all states</option>
+            <option value="ok">ok</option>
+            <option value="invalid">invalid</option>
+            <option value="incomplete">incomplete</option>
+          </select>
+        </label>
+        <label className="checkLine inlineCheck">
+          <input
+            checked={showIncompleteOnly}
+            onChange={(event) => setShowIncompleteOnly(event.target.checked)}
+            type="checkbox"
+          />
+          <span>Show incomplete only</span>
+        </label>
+      </div>
+      <div className="consoleInlineDetailGrid vpsRulesSummary">
+        <span>
+          <strong>Rule rows</strong>
+          <span>{vpsRuleValues.length}</span>
+        </span>
+        <span>
+          <strong>Accounting records</strong>
+          <span>{trafficAccounting.length}</span>
+        </span>
+        <span>
+          <strong>Incomplete VPSs</strong>
+          <span>{incompleteClients.size}</span>
+        </span>
+        <span>
+          <strong>Current selector</strong>
+          <span className="monoValue">{selectorExpression || "unset"}</span>
+        </span>
+      </div>
+      <ConsoleDataGrid
+        columns={columns}
+        defaultPageSize={20}
+        empty="No VPS rule rows loaded."
+        getRowId={(row) => `${row.client_id}:${row.key}`}
+        itemLabel="rules"
+        renderExpandedRow={(row) => (
+          <div className="consoleInlineDetailGrid">
+            <span>
+              <strong>Client ID</strong>
+              <span className="monoValue">{row.client_id}</span>
+            </span>
+            <span>
+              <strong>Raw value</strong>
+              <span>{row.value_raw}</span>
+            </span>
+            <span>
+              <strong>Parsed JSON</strong>
+              <span className="monoValue">{jsonSummary(row.value_json)}</span>
+            </span>
+            <span>
+              <strong>Validation</strong>
+              <span>{row.validation_errors.join(", ") || "ok"}</span>
+            </span>
+            <span>
+              <strong>Accounting state</strong>
+              <span>{accountingByClient.get(row.client_id)?.state ?? "unknown"}</span>
+            </span>
+            <span>
+              <strong>Last write request ID</strong>
+              <span className="monoValue">{row.source_id ?? "unknown"}</span>
+            </span>
+          </div>
+        )}
+        rows={filteredRules}
+        searchPlaceholder="Search VPS rules by VPS, key, value, or source"
+        storageKey="vpsman.grid.config.vpsRules"
+        title="VPS rule values"
+      />
+      <section className="consoleDetailPanel">
+        <div className="consoleDetailPanelHeader">
+          <span>
+            <strong>Bulk rule editor</strong>
+            <small>Dry-run matched VPSs and changed keys before applying.</small>
+          </span>
+        </div>
+        <div className="vpsRulesBulkEditor">
+          <section className="vpsRulesEditorSection">
+            <div className="sectionHeader compactHeader">
+              <div>
+                <h4>Target VPS selector</h4>
+                <span className="monoValue">{selectorExpression || "unset"}</span>
+              </div>
+              <div className="consoleOperationsActions">
+                <button
+                  className="secondaryAction compactAction"
+                  disabled={pending}
+                  onClick={() => void dryRun("upsert")}
+                  type="button"
+                >
+                  Dry-run matched VPSs
+                </button>
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={() => setSelectorExpression("")}
+                  type="button"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+            <div className="tokenPreview">
+              {matchedPreviewClients.length === 0 ? (
+                <span className="tokenChip">No dry-run preview</span>
+              ) : (
+                matchedPreviewClients.map(([clientId, displayName]) => (
+                  <span className="tokenChip" key={clientId} title={clientId}>
+                    {displayName}
+                  </span>
+                ))
+              )}
+            </div>
+          </section>
+          <section className="vpsRulesEditorSection">
+            <div className="sectionHeader compactHeader">
+              <div>
+                <h4>Set values</h4>
+                <span>key=value lines</span>
+              </div>
+              <button
+                className="secondaryAction compactAction"
+                disabled={pending}
+                onClick={() => void dryRun("upsert")}
+                type="button"
+              >
+                Dry-run set values
+              </button>
+            </div>
+            <textarea
+              aria-label="VPS rule set values"
+              value={valuesText}
+              onChange={(event) => setValuesText(event.target.value)}
+            />
+          </section>
+          <section className="vpsRulesEditorSection">
+            <div className="sectionHeader compactHeader">
+              <div>
+                <h4>Unset values</h4>
+                <span>Explicit key checklist</span>
+              </div>
+              <button
+                className="secondaryAction compactAction"
+                disabled={pending}
+                onClick={() => void dryRun("unset")}
+                type="button"
+              >
+                Dry-run unset values
+              </button>
+            </div>
+            <div className="checkListPanel compactChecklist">
+              {VPS_RULE_KEYS.map((key) => (
+                <label className="checkLine" key={key}>
+                  <input
+                    checked={unsetKeys.includes(key)}
+                    onChange={(event) => toggleUnsetKey(key, event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span className="monoValue">{key}</span>
+                </label>
+              ))}
+            </div>
+          </section>
+        </div>
+        {preview ? (
+          <VpsRulesPreviewTable columns={previewColumns} preview={preview} />
+        ) : null}
+        {status && <small className="fleetPolicyStatus">{status}</small>}
+      </section>
+      <ConfirmationPrompt
+        confirmLabel="Apply VPS rules"
+        detail="Applies the reviewed dry-run preview by selector and preview hash."
+        items={[
+          { label: "Selector", value: reviewSnapshot?.selectorExpression ?? "-" },
+          { label: "Operation", value: reviewSnapshot?.operation ?? "-" },
+          {
+            label: "Set keys",
+            value: Object.keys(reviewSnapshot?.values ?? {}).join(", ") || "-",
+          },
+          {
+            label: "Unset keys",
+            value: reviewSnapshot?.keys.join(", ") || "-",
+          },
+          { label: "Matched VPSs", value: reviewSnapshot?.preview.matched_vps_count ?? 0 },
+          { label: "Changed rows", value: reviewSnapshot?.preview.changed_row_count ?? 0 },
+          { label: "Preview hash", value: reviewSnapshot?.preview.preview_hash ?? "-" },
+        ]}
+        onCancel={() => setReviewSnapshot(null)}
+        onConfirm={() => void applyReview()}
+        open={reviewSnapshot !== null}
+        pending={pending}
+        title="Confirm VPS rule write"
+      />
+    </div>
+  );
+}
+
+function VpsRulesPreviewTable({
+  columns,
+  preview,
+}: {
+  columns: ConsoleDataGridColumn<VpsRuleChangePreview>[];
+  preview: VpsRulesDryRunResponse;
+}) {
+  return (
+    <div className="vpsRulesPreviewBlock">
+      <div className="consoleInlineDetailGrid">
+        <span>
+          <strong>Matched VPSs</strong>
+          <span>{preview.matched_vps_count}</span>
+        </span>
+        <span>
+          <strong>Changed rows</strong>
+          <span>{preview.changed_row_count}</span>
+        </span>
+        <span>
+          <strong>Invalid rows</strong>
+          <span>{preview.invalid_row_count}</span>
+        </span>
+        <span>
+          <strong>Preview hash</strong>
+          <span className="monoValue">{preview.preview_hash}</span>
+        </span>
+      </div>
+      <ConsoleDataGrid
+        columns={columns}
+        defaultPageSize={10}
+        empty="No changed rows in dry-run preview."
+        getRowId={(change) => `${change.client_id}:${change.key}:${change.action}`}
+        itemLabel="changes"
+        rows={preview.changes}
+        searchPlaceholder="Search dry-run changes"
+        selectable={false}
+        storageKey="vpsman.grid.config.vpsRules.preview"
+        title="Dry-run changed rows"
+      />
+    </div>
+  );
+}
+
+function jsonSummary(value: JsonValue): string {
+  if (value === null) {
+    return "null";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function configTitle(subpage: string): string {
   switch (subpage) {
     case "bulk":
       return "Bulk patch";
     case "single":
       return "VPS config";
+    case "rules":
+      return "VPS Rules";
+    case "templates":
+      return "Templates";
     default:
       return "Runtime config overview";
   }
 }
 
-function normalizeConfigSubpage(value: string): "overview" | "bulk" | "single" | "templates" {
-  if (value === "bulk" || value === "single" || value === "templates") {
-    return value;
+function configSubtitle(subpage: string): string {
+  switch (subpage) {
+    case "rules":
+      return "Per-VPS traffic rule values used by traffic accounting and alert policies.";
+    case "bulk":
+      return "Reviewed runtime config patch workflow";
+    case "single":
+      return "Read and compare one VPS runtime config";
+    case "templates":
+      return "Persistent runtime config sources and assignments";
+    default:
+      return "Runtime config workflows";
+  }
+}
+
+function normalizeConfigSubpage(value: string): "overview" | "bulk" | "single" | "rules" | "templates" {
+  const base = value.split(":")[0];
+  if (base === "bulk" || base === "single" || base === "rules" || base === "templates") {
+    return base;
   }
   return "overview";
 }

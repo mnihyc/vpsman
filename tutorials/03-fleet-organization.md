@@ -92,32 +92,58 @@ cargo run -p vpsctl -- fleet-alert-export --include-muted --limit 200
 Use `--action acknowledge`, `--action escalate`, or `--action clear` for the
 same alert id when the operational state changes.
 
-For provider, tag, or client-specific thresholds, save a scoped policy:
+For per-VPS traffic accounting, save VPS Rules first. These are low-level
+server-side values keyed by VPS and rule key; the alert policy editor reads
+them but does not modify them.
 
 ```sh
-cargo run -p vpsctl -- fleet-alert-policy-upsert \
-  --name edge-resource-alerts \
-  --scope-kind tag \
-  --scope-value edge \
-  --memory-available-warning-ratio 0.35 \
-  --memory-available-critical-ratio 0.15 \
-  --cpu-load-warning 1.5 \
-  --cpu-load-critical 3.0 \
-  --priority 25 \
+cargo run -p vpsctl -- vps-rules preview \
+  --selector 'tag:edge' \
+  --set traffic.reset_day=14 \
+  --set traffic.quota.total=3TB \
+  --set traffic.selectors=eth0+tx,ens3
+
+cargo run -p vpsctl -- vps-rules upsert \
+  --selector 'tag:edge' \
+  --set traffic.reset_day=14 \
+  --set traffic.quota.total=3TB \
+  --set traffic.selectors=eth0+tx,ens3 \
   --confirmed
 ```
 
-List policy records:
+Then create a policy group. The selector chooses target VPSs using the same
+selector expressions as dispatch previews (`tag:edge`, `provider:hetzner`,
+`id:<client_id>`, boolean operators, and parentheses). Rule rows are full
+condition expressions: comparisons, arithmetic, boolean operators, and
+parentheses are evaluated by the backend expression parser from current VPS
+rule/accounting values rather than treated as plain strings.
 
 ```sh
-cargo run -p vpsctl -- fleet-alert-policies --scope-kind tag --scope-value edge
+cargo run -p vpsctl -- alert-policy preview \
+  --name edge-traffic \
+  --selector 'tag:edge' \
+  --rule 'traffic.cycle.total >= traffic.quota.total * 0.8' \
+  --severity warning
+
+cargo run -p vpsctl -- alert-policy upsert \
+  --name edge-traffic \
+  --selector 'tag:edge' \
+  --rule 'traffic.cycle.total >= traffic.quota.total * 0.8' \
+  --severity warning \
+  --confirmed
+
+cargo run -p vpsctl -- alert-policies list --selector 'tag:edge'
 ```
 
-Scoped policies cascade from global to provider, tag, and client matches.
-Higher-priority matching records override earlier values within their scope. In
-the panel these are managed through the Alert policy CRUD table, so daily edits
-are searchable, paginated, selectable, and reversible through explicit row
-actions rather than scattered cards.
+In the UI, Fleet > Instances keeps traffic columns hidden by default; enable
+them through Fields when you need operational status in the main table. Expand a
+VPS and open Traffic & Rules for counters, current cycle usage, incomplete
+reasons, matched policies, and recent issued alerts. Use Config > VPS Rules for
+bulk dry-run, preview-hash confirmation, and explicit unset actions. Use Fleet
+> Alert Policies for policy-group editing, selector dry-runs, and rule previews.
+Issued policy alerts appear in Fleet > Alerts and are delivered by the existing
+notification/webhook channels as `alert.policy_reached` events with `alert`,
+`vps`, `policy`, `rule`, and `traffic` payload roots.
 
 Route alert notifications through scoped channel presets:
 
@@ -127,7 +153,7 @@ cargo run -p vpsctl -- fleet-alert-notification-channel-upsert \
   --scope-kind tag \
   --scope-value edge \
   --min-severity warning \
-  --categories agent_status,network \
+  --categories agent_status,network,traffic \
   --operator-states open,escalated \
   --delivery-kind webhook \
   --target https://hooks.example/vpsman \

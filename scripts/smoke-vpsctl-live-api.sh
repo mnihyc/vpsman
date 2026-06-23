@@ -529,27 +529,21 @@ alert_state_clear_json="$(vpsctl_auth fleet-alert-state-update \
   --reason live-smoke-clear \
   --confirmed)"
 jq -e '.alert_id == "'"$alert_state_target_id"'" and .state == "open"' <<<"$alert_state_clear_json" >/dev/null
-alert_policy_json="$(vpsctl_auth fleet-alert-policy-upsert \
+alert_policy_json="$(vpsctl_auth alert-policy upsert \
   --name edge-resource-alerts \
-  --scope-kind tag \
-  --scope-value edge \
-  --memory-available-warning-ratio 0.35 \
-  --memory-available-critical-ratio 0.15 \
-  --cpu-load-warning 1.5 \
-  --cpu-load-critical 3.0 \
-  --priority 25 \
+  --selector 'tag:edge' \
+  --rule 'cpu.load_1 >= 1.5' \
+  --severity warning \
   --notes live-smoke \
   --confirmed)"
 jq -e '
   .name == "edge-resource-alerts" and
-  .scope_kind == "tag" and
-  .scope_value == "edge" and
-  .memory_available_warning_ratio == 0.35 and
-  .cpu_load_warning == 1.5 and
-  .priority == 25 and
-  .enabled == true
+  .selector_expression == "tag:edge" and
+  .enabled == true and
+  (.rules | length) == 1 and
+  .rules[0].condition_expression == "cpu.load_1 >= 1.5"
 ' <<<"$alert_policy_json" >/dev/null
-alert_policies_json="$(vpsctl_auth fleet-alert-policies --scope-kind tag --scope-value edge --enabled true --limit 20)"
+alert_policies_json="$(vpsctl_auth alert-policies list --selector 'tag:edge' --enabled true --limit 20)"
 jq -e 'length == 1 and .[0].name == "edge-resource-alerts"' <<<"$alert_policies_json" >/dev/null
 scoped_alert_policies_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $scoped_access_token" \
@@ -557,17 +551,17 @@ scoped_alert_policies_response="$(curl -sS -w '\n%{http_code}' \
 scoped_alert_policies_status="${scoped_alert_policies_response##*$'\n'}"
 scoped_alert_policies_body="${scoped_alert_policies_response%$'\n'*}"
 if [[ "$scoped_alert_policies_status" != "200" ]]; then
-  fail "fleet:read scoped fleet-alert-policies returned HTTP $scoped_alert_policies_status: $scoped_alert_policies_body"
+  fail "fleet:read fleet-alert-policies returned HTTP $scoped_alert_policies_status: $scoped_alert_policies_body"
 fi
 scoped_alert_policy_write_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $scoped_access_token" \
   -H "Content-Type: application/json" \
-  -d '{"name":"denied-alert-policy","scope_kind":"global","scope_value":null,"cpu_load_warning":1.0,"confirmed":true}' \
+  -d '{"name":"denied-alert-policy","enabled":true,"selector_expression":"tag:edge","rules":[{"name":"cpu","enabled":true,"traffic_selector":null,"condition_expression":"cpu.load_1 >= 1.0","window_secs":0,"severity":"warning"}],"confirmed":true}' \
   "$api_url/api/v1/fleet-alert-policies")"
 scoped_alert_policy_write_status="${scoped_alert_policy_write_response##*$'\n'}"
 scoped_alert_policy_write_body="${scoped_alert_policy_write_response%$'\n'*}"
 if [[ "$scoped_alert_policy_write_status" != "403" ]]; then
-  fail "fleet:read scoped fleet-alert-policy write returned HTTP $scoped_alert_policy_write_status: $scoped_alert_policy_write_body"
+  fail "fleet:read fleet-alert-policy write returned HTTP $scoped_alert_policy_write_status: $scoped_alert_policy_write_body"
 fi
 jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_alert_policy_write_body" >/dev/null
 alert_notification_channel_json="$(vpsctl_auth fleet-alert-notification-channel-upsert \

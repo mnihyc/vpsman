@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::util::percent_encode_query_value;
 use crate::{
+    commands_inventory,
     commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
     http::{http_get, http_post_json},
     privilege::{
@@ -86,23 +87,56 @@ enum VtyInventoryCommand {
         reason: Option<String>,
         confirmed: bool,
     },
-    FleetAlertPolicies {
+    VpsRulesList {
+        limit: u16,
+        selector: Option<String>,
+        client_id: Option<String>,
+        key: Option<String>,
+        state: Option<String>,
+    },
+    VpsRulesGet {
+        client_id: String,
+    },
+    VpsRulesPreview {
+        selector: String,
+        set_values: Vec<String>,
+    },
+    VpsRulesUpsert {
+        selector: String,
+        set_values: Vec<String>,
+        confirmed: bool,
+    },
+    VpsRulesUnset {
+        selector: String,
+        keys: Vec<String>,
+        confirmed: bool,
+    },
+    AlertPoliciesList {
         limit: u16,
         enabled: Option<bool>,
-        scope_kind: Option<String>,
-        scope_value: Option<String>,
+        selector: Option<String>,
+        client_id: Option<String>,
     },
-    FleetAlertPolicyUpsert {
+    AlertPolicyGet {
         name: String,
-        scope_kind: String,
-        scope_value: Option<String>,
-        memory_available_warning_ratio: Option<f64>,
-        memory_available_critical_ratio: Option<f64>,
-        disk_available_warning_ratio: Option<f64>,
-        disk_available_critical_ratio: Option<f64>,
-        cpu_load_warning: Option<f64>,
-        cpu_load_critical: Option<f64>,
-        priority: i32,
+    },
+    AlertPolicyPreview {
+        name: String,
+        selector: String,
+        rules: Vec<String>,
+        window_secs: i64,
+        severity: String,
+        traffic_selector: Option<String>,
+        enabled: bool,
+        notes: Option<String>,
+    },
+    AlertPolicyUpsert {
+        name: String,
+        selector: String,
+        rules: Vec<String>,
+        window_secs: i64,
+        severity: String,
+        traffic_selector: Option<String>,
         enabled: bool,
         notes: Option<String>,
         confirmed: bool,
@@ -219,14 +253,6 @@ struct FleetAlertStateListArgs {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct FleetAlertPolicyListArgs {
-    limit: u16,
-    enabled: Option<bool>,
-    scope_kind: Option<String>,
-    scope_value: Option<String>,
-}
-
-#[derive(Debug, Eq, PartialEq)]
 struct FleetAlertNotificationChannelListArgs {
     limit: u16,
     enabled: Option<bool>,
@@ -260,8 +286,15 @@ pub(crate) fn is_vty_inventory_command(command: &str) -> bool {
             | "fleet-alert-export"
             | "fleet-alert-states"
             | "fleet-alert-state-update"
-            | "fleet-alert-policies"
-            | "fleet-alert-policy-upsert"
+            | "vps-rules"
+            | "vps-rules-get"
+            | "vps-rules-preview"
+            | "vps-rules-upsert"
+            | "vps-rules-unset"
+            | "alert-policies"
+            | "alert-policy-get"
+            | "alert-policy-preview"
+            | "alert-policy-upsert"
             | "fleet-alert-notification-channels"
             | "fleet-alert-notification-channel-upsert"
             | "fleet-alert-notifications"
@@ -538,55 +571,194 @@ pub(crate) fn submit_vty_inventory_command(
                 "confirmed": confirmed,
             }),
         ),
-        VtyInventoryCommand::FleetAlertPolicies {
+        VtyInventoryCommand::VpsRulesList {
             limit,
-            enabled,
-            scope_kind,
-            scope_value,
+            selector,
+            client_id,
+            key,
+            state,
         } => http_get(
             api_url,
-            &fleet_alert_policies_path(
+            &vps_rules_path(
                 limit,
-                enabled,
-                scope_kind.as_deref(),
-                scope_value.as_deref(),
+                selector.as_deref(),
+                client_id.as_deref(),
+                key.as_deref(),
+                state.as_deref(),
             ),
             token,
         ),
-        VtyInventoryCommand::FleetAlertPolicyUpsert {
+        VtyInventoryCommand::VpsRulesGet { client_id } => http_get(
+            api_url,
+            &format!(
+                "/api/v1/vps-rules/effective/{}",
+                percent_encode_query_value(&client_id)
+            ),
+            token,
+        ),
+        VtyInventoryCommand::VpsRulesPreview {
+            selector,
+            set_values,
+        } => {
+            let values = commands_inventory::parse_key_value_args(&set_values)?;
+            let preview = commands_inventory::vps_rules_dry_run(
+                api_url,
+                token,
+                "upsert",
+                &selector,
+                values,
+                Vec::new(),
+            )?;
+            Ok(serde_json::to_string_pretty(&preview)?)
+        }
+        VtyInventoryCommand::VpsRulesUpsert {
+            selector,
+            set_values,
+            confirmed,
+        } => {
+            let values = commands_inventory::parse_key_value_args(&set_values)?;
+            let preview = commands_inventory::vps_rules_dry_run(
+                api_url,
+                token,
+                "upsert",
+                &selector,
+                values.clone(),
+                Vec::new(),
+            )?;
+            if !confirmed {
+                Ok(serde_json::to_string_pretty(&preview)?)
+            } else {
+                let preview_hash = commands_inventory::preview_hash_from_value(&preview)?;
+                http_post_json(
+                    api_url,
+                    "/api/v1/vps-rules/bulk-upsert",
+                    token,
+                    &serde_json::json!({
+                        "selector_expression": selector,
+                        "values": values,
+                        "confirmed": true,
+                        "preview_hash": preview_hash,
+                    }),
+                )
+            }
+        }
+        VtyInventoryCommand::VpsRulesUnset {
+            selector,
+            keys,
+            confirmed,
+        } => {
+            let preview = commands_inventory::vps_rules_dry_run(
+                api_url,
+                token,
+                "unset",
+                &selector,
+                Default::default(),
+                keys.clone(),
+            )?;
+            if !confirmed {
+                Ok(serde_json::to_string_pretty(&preview)?)
+            } else {
+                let preview_hash = commands_inventory::preview_hash_from_value(&preview)?;
+                http_post_json(
+                    api_url,
+                    "/api/v1/vps-rules/bulk-unset",
+                    token,
+                    &serde_json::json!({
+                        "selector_expression": selector,
+                        "keys": keys,
+                        "confirmed": true,
+                        "preview_hash": preview_hash,
+                    }),
+                )
+            }
+        }
+        VtyInventoryCommand::AlertPoliciesList {
+            limit,
+            enabled,
+            selector,
+            client_id,
+        } => http_get(
+            api_url,
+            &alert_policies_path(limit, enabled, selector.as_deref(), client_id.as_deref()),
+            token,
+        ),
+        VtyInventoryCommand::AlertPolicyGet { name } => {
+            let body = http_get(api_url, &alert_policies_path(1000, None, None, None), token)?;
+            let policies: serde_json::Value = serde_json::from_str(&body)?;
+            let policy = policies
+                .as_array()
+                .and_then(|items| {
+                    items.iter().find(|item| {
+                        item.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str())
+                    })
+                })
+                .context("alert policy not found")?;
+            Ok(serde_json::to_string_pretty(policy)?)
+        }
+        VtyInventoryCommand::AlertPolicyPreview {
             name,
-            scope_kind,
-            scope_value,
-            memory_available_warning_ratio,
-            memory_available_critical_ratio,
-            disk_available_warning_ratio,
-            disk_available_critical_ratio,
-            cpu_load_warning,
-            cpu_load_critical,
-            priority,
+            selector,
+            rules,
+            window_secs,
+            severity,
+            traffic_selector,
+            enabled,
+            notes,
+        } => {
+            let request = commands_inventory::alert_policy_request(
+                commands_inventory::AlertPolicyWriteOptions {
+                    name,
+                    selector: Some(selector),
+                    rules,
+                    window_secs,
+                    severity,
+                    traffic_selector,
+                    enabled,
+                    notes,
+                    file: None,
+                    confirmed: false,
+                },
+                None,
+            )?;
+            let preview = commands_inventory::alert_policy_dry_run(api_url, token, &request)?;
+            Ok(serde_json::to_string_pretty(&preview)?)
+        }
+        VtyInventoryCommand::AlertPolicyUpsert {
+            name,
+            selector,
+            rules,
+            window_secs,
+            severity,
+            traffic_selector,
             enabled,
             notes,
             confirmed,
-        } => http_post_json(
-            api_url,
-            "/api/v1/fleet-alert-policies",
-            token,
-            &serde_json::json!({
-                "name": name,
-                "scope_kind": scope_kind,
-                "scope_value": scope_value,
-                "memory_available_warning_ratio": memory_available_warning_ratio,
-                "memory_available_critical_ratio": memory_available_critical_ratio,
-                "disk_available_warning_ratio": disk_available_warning_ratio,
-                "disk_available_critical_ratio": disk_available_critical_ratio,
-                "cpu_load_warning": cpu_load_warning,
-                "cpu_load_critical": cpu_load_critical,
-                "priority": priority,
-                "enabled": enabled,
-                "notes": notes,
-                "confirmed": confirmed,
-            }),
-        ),
+        } => {
+            let mut request = commands_inventory::alert_policy_request(
+                commands_inventory::AlertPolicyWriteOptions {
+                    name,
+                    selector: Some(selector),
+                    rules,
+                    window_secs,
+                    severity,
+                    traffic_selector,
+                    enabled,
+                    notes,
+                    file: None,
+                    confirmed,
+                },
+                None,
+            )?;
+            let preview = commands_inventory::alert_policy_dry_run(api_url, token, &request)?;
+            if !confirmed {
+                Ok(serde_json::to_string_pretty(&preview)?)
+            } else {
+                request["preview_hash"] = serde_json::Value::String(
+                    commands_inventory::preview_hash_from_value(&preview)?,
+                );
+                http_post_json(api_url, "/api/v1/fleet-alert-policies", token, &request)
+            }
+        }
         VtyInventoryCommand::FleetAlertNotificationChannels {
             limit,
             enabled,
@@ -877,16 +1049,15 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
             })
         }
         "fleet-alert-state-update" => parse_fleet_alert_state_update(&parts),
-        "fleet-alert-policies" => {
-            let args = parse_fleet_alert_policy_list(&parts)?;
-            Ok(VtyInventoryCommand::FleetAlertPolicies {
-                limit: args.limit,
-                enabled: args.enabled,
-                scope_kind: args.scope_kind,
-                scope_value: args.scope_value,
-            })
-        }
-        "fleet-alert-policy-upsert" => parse_fleet_alert_policy_upsert(&parts),
+        "vps-rules" => parse_vps_rules_list(&parts),
+        "vps-rules-get" => parse_vps_rules_get(&parts),
+        "vps-rules-preview" => parse_vps_rules_preview(&parts),
+        "vps-rules-upsert" => parse_vps_rules_upsert(&parts),
+        "vps-rules-unset" => parse_vps_rules_unset(&parts),
+        "alert-policies" => parse_alert_policies_list(&parts),
+        "alert-policy-get" => parse_alert_policy_get(&parts),
+        "alert-policy-preview" => parse_alert_policy_write(&parts, false),
+        "alert-policy-upsert" => parse_alert_policy_write(&parts, true),
         "fleet-alert-notification-channels" => {
             let args = parse_fleet_alert_notification_channel_list(&parts)?;
             Ok(VtyInventoryCommand::FleetAlertNotificationChannels {
@@ -1432,11 +1603,204 @@ fn parse_fleet_alert_state_update(parts: &[&str]) -> Result<VtyInventoryCommand>
     })
 }
 
-fn parse_fleet_alert_policy_list(parts: &[&str]) -> Result<FleetAlertPolicyListArgs> {
+fn parse_vps_rules_list(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let mut limit = 50_u16;
+    let mut selector = None;
+    let mut client_id = None;
+    let mut key = None;
+    let mut state = None;
+    let mut index = 1;
+    while index < parts.len() {
+        match parts[index] {
+            "--limit" => {
+                limit = next_arg(parts, index, "--limit")?
+                    .parse()
+                    .context("--limit must be an integer")?;
+                index += 2;
+            }
+            "--selector" => {
+                selector = Some(next_arg(parts, index, "--selector")?.to_string());
+                index += 2;
+            }
+            "--client-id" => {
+                client_id = Some(next_arg(parts, index, "--client-id")?.to_string());
+                index += 2;
+            }
+            "--key" => {
+                key = Some(next_arg(parts, index, "--key")?.to_string());
+                index += 2;
+            }
+            "--state" => {
+                state = Some(next_arg(parts, index, "--state")?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--limit=") => {
+                limit = value
+                    .trim_start_matches("--limit=")
+                    .parse()
+                    .context("--limit must be an integer")?;
+                index += 1;
+            }
+            value if value.starts_with("--selector=") => {
+                selector = Some(value.trim_start_matches("--selector=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--client-id=") => {
+                client_id = Some(value.trim_start_matches("--client-id=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--key=") => {
+                key = Some(value.trim_start_matches("--key=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--state=") => {
+                state = Some(value.trim_start_matches("--state=").to_string());
+                index += 1;
+            }
+            value => anyhow::bail!("unexpected argument {value}"),
+        }
+    }
+    anyhow::ensure!(
+        (1..=1000).contains(&limit),
+        "vps-rules --limit must be between 1 and 1000"
+    );
+    Ok(VtyInventoryCommand::VpsRulesList {
+        limit,
+        selector,
+        client_id,
+        key,
+        state,
+    })
+}
+
+fn parse_vps_rules_get(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let mut client_id = None;
+    let mut index = 1;
+    while index < parts.len() {
+        match parts[index] {
+            "--client-id" => {
+                client_id = Some(next_arg(parts, index, "--client-id")?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--client-id=") => {
+                client_id = Some(value.trim_start_matches("--client-id=").to_string());
+                index += 1;
+            }
+            value => anyhow::bail!("unexpected argument {value}"),
+        }
+    }
+    Ok(VtyInventoryCommand::VpsRulesGet {
+        client_id: client_id.context("vps-rules-get requires --client-id")?,
+    })
+}
+
+fn parse_vps_rules_preview(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let (selector, set_values, _) = parse_vps_rule_set_args(parts, false)?;
+    Ok(VtyInventoryCommand::VpsRulesPreview {
+        selector,
+        set_values,
+    })
+}
+
+fn parse_vps_rules_upsert(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let (selector, set_values, confirmed) = parse_vps_rule_set_args(parts, true)?;
+    Ok(VtyInventoryCommand::VpsRulesUpsert {
+        selector,
+        set_values,
+        confirmed,
+    })
+}
+
+fn parse_vps_rules_unset(parts: &[&str]) -> Result<VtyInventoryCommand> {
+    let mut selector = None;
+    let mut keys = Vec::new();
+    let mut confirmed = false;
+    let mut index = 1;
+    while index < parts.len() {
+        match parts[index] {
+            "--selector" => {
+                selector = Some(next_arg(parts, index, "--selector")?.to_string());
+                index += 2;
+            }
+            "--key" => {
+                keys.push(next_arg(parts, index, "--key")?.to_string());
+                index += 2;
+            }
+            "--confirmed" => {
+                confirmed = true;
+                index += 1;
+            }
+            value if value.starts_with("--selector=") => {
+                selector = Some(value.trim_start_matches("--selector=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--key=") => {
+                keys.push(value.trim_start_matches("--key=").to_string());
+                index += 1;
+            }
+            value => anyhow::bail!("unexpected argument {value}"),
+        }
+    }
+    anyhow::ensure!(
+        !keys.is_empty(),
+        "vps-rules-unset requires at least one --key"
+    );
+    Ok(VtyInventoryCommand::VpsRulesUnset {
+        selector: selector.context("vps-rules-unset requires --selector")?,
+        keys,
+        confirmed,
+    })
+}
+
+fn parse_vps_rule_set_args(
+    parts: &[&str],
+    allow_confirmed: bool,
+) -> Result<(String, Vec<String>, bool)> {
+    let mut selector = None;
+    let mut set_values = Vec::new();
+    let mut confirmed = false;
+    let mut index = 1;
+    while index < parts.len() {
+        match parts[index] {
+            "--selector" => {
+                selector = Some(next_arg(parts, index, "--selector")?.to_string());
+                index += 2;
+            }
+            "--set" => {
+                set_values.push(next_arg(parts, index, "--set")?.to_string());
+                index += 2;
+            }
+            "--confirmed" if allow_confirmed => {
+                confirmed = true;
+                index += 1;
+            }
+            value if value.starts_with("--selector=") => {
+                selector = Some(value.trim_start_matches("--selector=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--set=") => {
+                set_values.push(value.trim_start_matches("--set=").to_string());
+                index += 1;
+            }
+            value => anyhow::bail!("unexpected argument {value}"),
+        }
+    }
+    anyhow::ensure!(
+        !set_values.is_empty(),
+        "at least one --set key=value is required"
+    );
+    Ok((
+        selector.context("vps-rules command requires --selector")?,
+        set_values,
+        confirmed,
+    ))
+}
+
+fn parse_alert_policies_list(parts: &[&str]) -> Result<VtyInventoryCommand> {
     let mut limit = 50_u16;
     let mut enabled = None;
-    let mut scope_kind = None;
-    let mut scope_value = None;
+    let mut selector = None;
+    let mut client_id = None;
     let mut index = 1;
     while index < parts.len() {
         match parts[index] {
@@ -1450,12 +1814,12 @@ fn parse_fleet_alert_policy_list(parts: &[&str]) -> Result<FleetAlertPolicyListA
                 enabled = Some(parse_bool(next_arg(parts, index, "--enabled")?)?);
                 index += 2;
             }
-            "--scope-kind" => {
-                scope_kind = Some(next_arg(parts, index, "--scope-kind")?.to_string());
+            "--selector" => {
+                selector = Some(next_arg(parts, index, "--selector")?.to_string());
                 index += 2;
             }
-            "--scope-value" => {
-                scope_value = Some(next_arg(parts, index, "--scope-value")?.to_string());
+            "--client-id" => {
+                client_id = Some(next_arg(parts, index, "--client-id")?.to_string());
                 index += 2;
             }
             value if value.starts_with("--limit=") => {
@@ -1469,12 +1833,12 @@ fn parse_fleet_alert_policy_list(parts: &[&str]) -> Result<FleetAlertPolicyListA
                 enabled = Some(parse_bool(value.trim_start_matches("--enabled="))?);
                 index += 1;
             }
-            value if value.starts_with("--scope-kind=") => {
-                scope_kind = Some(value.trim_start_matches("--scope-kind=").to_string());
+            value if value.starts_with("--selector=") => {
+                selector = Some(value.trim_start_matches("--selector=").to_string());
                 index += 1;
             }
-            value if value.starts_with("--scope-value=") => {
-                scope_value = Some(value.trim_start_matches("--scope-value=").to_string());
+            value if value.starts_with("--client-id=") => {
+                client_id = Some(value.trim_start_matches("--client-id=").to_string());
                 index += 1;
             }
             value => anyhow::bail!("unexpected argument {value}"),
@@ -1482,30 +1846,44 @@ fn parse_fleet_alert_policy_list(parts: &[&str]) -> Result<FleetAlertPolicyListA
     }
     anyhow::ensure!(
         (1..=1000).contains(&limit),
-        "fleet-alert-policies --limit must be between 1 and 1000"
+        "alert-policies --limit must be between 1 and 1000"
     );
-    if let Some(scope_kind) = scope_kind.as_deref() {
-        validate_fleet_alert_policy_scope_kind(scope_kind)?;
-    }
-    Ok(FleetAlertPolicyListArgs {
+    Ok(VtyInventoryCommand::AlertPoliciesList {
         limit,
         enabled,
-        scope_kind,
-        scope_value,
+        selector,
+        client_id,
     })
 }
 
-fn parse_fleet_alert_policy_upsert(parts: &[&str]) -> Result<VtyInventoryCommand> {
+fn parse_alert_policy_get(parts: &[&str]) -> Result<VtyInventoryCommand> {
     let mut name = None;
-    let mut scope_kind = None;
-    let mut scope_value = None;
-    let mut memory_available_warning_ratio = None;
-    let mut memory_available_critical_ratio = None;
-    let mut disk_available_warning_ratio = None;
-    let mut disk_available_critical_ratio = None;
-    let mut cpu_load_warning = None;
-    let mut cpu_load_critical = None;
-    let mut priority = 0_i32;
+    let mut index = 1;
+    while index < parts.len() {
+        match parts[index] {
+            "--name" => {
+                name = Some(next_arg(parts, index, "--name")?.to_string());
+                index += 2;
+            }
+            value if value.starts_with("--name=") => {
+                name = Some(value.trim_start_matches("--name=").to_string());
+                index += 1;
+            }
+            value => anyhow::bail!("unexpected argument {value}"),
+        }
+    }
+    Ok(VtyInventoryCommand::AlertPolicyGet {
+        name: name.context("alert-policy-get requires --name")?,
+    })
+}
+
+fn parse_alert_policy_write(parts: &[&str], apply: bool) -> Result<VtyInventoryCommand> {
+    let mut name = None;
+    let mut selector = None;
+    let mut rules = Vec::new();
+    let mut window_secs = 0_i64;
+    let mut severity = "warning".to_string();
+    let mut traffic_selector = None;
     let mut enabled = true;
     let mut notes = None;
     let mut confirmed = false;
@@ -1516,58 +1894,26 @@ fn parse_fleet_alert_policy_upsert(parts: &[&str]) -> Result<VtyInventoryCommand
                 name = Some(next_arg(parts, index, "--name")?.to_string());
                 index += 2;
             }
-            "--scope-kind" => {
-                scope_kind = Some(next_arg(parts, index, "--scope-kind")?.to_string());
+            "--selector" => {
+                selector = Some(next_arg(parts, index, "--selector")?.to_string());
                 index += 2;
             }
-            "--scope-value" => {
-                scope_value = Some(next_arg(parts, index, "--scope-value")?.to_string());
+            "--rule" => {
+                rules.push(next_arg(parts, index, "--rule")?.to_string());
                 index += 2;
             }
-            "--memory-available-warning-ratio" => {
-                memory_available_warning_ratio = Some(parse_f64_arg(
-                    parts,
-                    index,
-                    "--memory-available-warning-ratio",
-                )?);
-                index += 2;
-            }
-            "--memory-available-critical-ratio" => {
-                memory_available_critical_ratio = Some(parse_f64_arg(
-                    parts,
-                    index,
-                    "--memory-available-critical-ratio",
-                )?);
-                index += 2;
-            }
-            "--disk-available-warning-ratio" => {
-                disk_available_warning_ratio = Some(parse_f64_arg(
-                    parts,
-                    index,
-                    "--disk-available-warning-ratio",
-                )?);
-                index += 2;
-            }
-            "--disk-available-critical-ratio" => {
-                disk_available_critical_ratio = Some(parse_f64_arg(
-                    parts,
-                    index,
-                    "--disk-available-critical-ratio",
-                )?);
-                index += 2;
-            }
-            "--cpu-load-warning" => {
-                cpu_load_warning = Some(parse_f64_arg(parts, index, "--cpu-load-warning")?);
-                index += 2;
-            }
-            "--cpu-load-critical" => {
-                cpu_load_critical = Some(parse_f64_arg(parts, index, "--cpu-load-critical")?);
-                index += 2;
-            }
-            "--priority" => {
-                priority = next_arg(parts, index, "--priority")?
+            "--window-secs" => {
+                window_secs = next_arg(parts, index, "--window-secs")?
                     .parse()
-                    .context("--priority must be an integer")?;
+                    .context("--window-secs must be an integer")?;
+                index += 2;
+            }
+            "--severity" => {
+                severity = next_arg(parts, index, "--severity")?.to_string();
+                index += 2;
+            }
+            "--traffic-selector" => {
+                traffic_selector = Some(next_arg(parts, index, "--traffic-selector")?.to_string());
                 index += 2;
             }
             "--enabled" => {
@@ -1578,31 +1924,79 @@ fn parse_fleet_alert_policy_upsert(parts: &[&str]) -> Result<VtyInventoryCommand
                 notes = Some(next_arg(parts, index, "--notes")?.to_string());
                 index += 2;
             }
-            "--confirmed" => {
+            "--confirmed" if apply => {
                 confirmed = true;
+                index += 1;
+            }
+            value if value.starts_with("--name=") => {
+                name = Some(value.trim_start_matches("--name=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--selector=") => {
+                selector = Some(value.trim_start_matches("--selector=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--rule=") => {
+                rules.push(value.trim_start_matches("--rule=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--window-secs=") => {
+                window_secs = value
+                    .trim_start_matches("--window-secs=")
+                    .parse()
+                    .context("--window-secs must be an integer")?;
+                index += 1;
+            }
+            value if value.starts_with("--severity=") => {
+                severity = value.trim_start_matches("--severity=").to_string();
+                index += 1;
+            }
+            value if value.starts_with("--traffic-selector=") => {
+                traffic_selector =
+                    Some(value.trim_start_matches("--traffic-selector=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--enabled=") => {
+                enabled = parse_bool(value.trim_start_matches("--enabled="))?;
+                index += 1;
+            }
+            value if value.starts_with("--notes=") => {
+                notes = Some(value.trim_start_matches("--notes=").to_string());
                 index += 1;
             }
             value => anyhow::bail!("unexpected argument {value}"),
         }
     }
-    let scope_kind = scope_kind.context("fleet-alert-policy-upsert requires --scope-kind")?;
-    validate_fleet_alert_policy_scope_kind(&scope_kind)?;
-    anyhow::ensure!(confirmed, "fleet-alert-policy-upsert requires --confirmed");
-    Ok(VtyInventoryCommand::FleetAlertPolicyUpsert {
-        name: name.context("fleet-alert-policy-upsert requires --name")?,
-        scope_kind,
-        scope_value,
-        memory_available_warning_ratio,
-        memory_available_critical_ratio,
-        disk_available_warning_ratio,
-        disk_available_critical_ratio,
-        cpu_load_warning,
-        cpu_load_critical,
-        priority,
-        enabled,
-        notes,
-        confirmed,
-    })
+    anyhow::ensure!(
+        !rules.is_empty(),
+        "alert-policy command requires at least one --rule"
+    );
+    let name = name.context("alert-policy command requires --name")?;
+    let selector = selector.context("alert-policy command requires --selector")?;
+    if apply {
+        Ok(VtyInventoryCommand::AlertPolicyUpsert {
+            name,
+            selector,
+            rules,
+            window_secs,
+            severity,
+            traffic_selector,
+            enabled,
+            notes,
+            confirmed,
+        })
+    } else {
+        Ok(VtyInventoryCommand::AlertPolicyPreview {
+            name,
+            selector,
+            rules,
+            window_secs,
+            severity,
+            traffic_selector,
+            enabled,
+            notes,
+        })
+    }
 }
 
 fn parse_fleet_alert_notification_channel_list(
@@ -2061,12 +2455,6 @@ fn parse_csv_tokens(value: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
-}
-
-fn parse_f64_arg(parts: &[&str], index: usize, flag: &str) -> Result<f64> {
-    next_arg(parts, index, flag)?
-        .parse()
-        .with_context(|| format!("{flag} must be a number"))
 }
 
 fn parse_bool(value: &str) -> Result<bool> {
@@ -2616,24 +3004,51 @@ fn fleet_alert_states_path(limit: u16, state: Option<&str>) -> String {
     path
 }
 
-fn fleet_alert_policies_path(
+fn vps_rules_path(
+    limit: u16,
+    selector: Option<&str>,
+    client_id: Option<&str>,
+    key: Option<&str>,
+    state: Option<&str>,
+) -> String {
+    let mut path = format!("/api/v1/vps-rules?limit={limit}");
+    if let Some(selector) = selector {
+        path.push_str("&selector_expression=");
+        path.push_str(&percent_encode_query_value(selector));
+    }
+    if let Some(client_id) = client_id {
+        path.push_str("&client_id=");
+        path.push_str(&percent_encode_query_value(client_id));
+    }
+    if let Some(key) = key {
+        path.push_str("&key=");
+        path.push_str(&percent_encode_query_value(key));
+    }
+    if let Some(state) = state {
+        path.push_str("&state=");
+        path.push_str(&percent_encode_query_value(state));
+    }
+    path
+}
+
+fn alert_policies_path(
     limit: u16,
     enabled: Option<bool>,
-    scope_kind: Option<&str>,
-    scope_value: Option<&str>,
+    selector: Option<&str>,
+    client_id: Option<&str>,
 ) -> String {
     let mut path = format!("/api/v1/fleet-alert-policies?limit={limit}");
     if let Some(enabled) = enabled {
         path.push_str("&enabled=");
         path.push_str(if enabled { "true" } else { "false" });
     }
-    if let Some(scope_kind) = scope_kind {
-        path.push_str("&scope_kind=");
-        path.push_str(scope_kind);
+    if let Some(selector) = selector {
+        path.push_str("&selector_expression=");
+        path.push_str(&percent_encode_query_value(selector));
     }
-    if let Some(scope_value) = scope_value {
-        path.push_str("&scope_value=");
-        path.push_str(&percent_encode_query_value(scope_value));
+    if let Some(client_id) = client_id {
+        path.push_str("&client_id=");
+        path.push_str(&percent_encode_query_value(client_id));
     }
     path
 }

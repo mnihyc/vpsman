@@ -85,7 +85,8 @@ fleet-alerts --severity critical
 fleet-alert-states --state muted
 fleet-alert-state-update --alert-id agent_status:agent:<hash> --action acknowledge --confirmed
 fleet-alert-export --include-muted --limit 200
-fleet-alert-policies --scope-kind tag --scope-value edge
+vps-rules --selector tag:edge
+alert-policies --selector tag:edge
 fleet-alert-notification-channels --delivery-kind webhook
 fleet-alert-notification-dispatch --dry-run --include-muted
 terminal-sessions --limit 20
@@ -123,8 +124,10 @@ operator-auth-events --limit 50
 operator-sessions --limit 50
 operator-session-revoke <session_uuid> --confirmed
 fleet-alert-state-update --alert-id agent_status:agent:<hash> --action mute --muted-for-secs 14400 --reason maintenance --confirmed
-fleet-alert-policy-upsert --name edge-resource-alerts --scope-kind tag --scope-value edge --memory-available-warning-ratio 0.35 --memory-available-critical-ratio 0.15 --cpu-load-warning 1.5 --cpu-load-critical 3.0 --priority 25 --confirmed
-fleet-alert-notification-channel-upsert --name edge-webhook --scope-kind tag --scope-value edge --min-severity warning --categories agent_status,network --operator-states open,escalated --delivery-kind webhook --target https://hooks.example/vpsman --cooldown-secs 3600 --confirmed
+vps-rules-preview --selector tag:edge --set traffic.reset_day=14 --set traffic.quota.total=3TB --set traffic.selectors=eth0+tx,ens3
+vps-rules-upsert --selector tag:edge --set traffic.reset_day=14 --set traffic.quota.total=3TB --set traffic.selectors=eth0+tx,ens3 --confirmed
+alert-policy-upsert --name edge-traffic --selector tag:edge --rule 'traffic.cycle.total >= traffic.quota.total * 0.8' --severity warning --confirmed
+fleet-alert-notification-channel-upsert --name edge-webhook --scope-kind tag --scope-value edge --min-severity warning --categories agent_status,network,traffic --operator-states open,escalated --delivery-kind webhook --target https://hooks.example/vpsman --cooldown-secs 3600 --confirmed
 fleet-alert-notification-dispatch --confirmed --include-muted
 fleet-alert-notifications --status queued
 fleet-alert-notification-process --status queued --delivery-kind webhook --dry-run

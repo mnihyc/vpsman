@@ -158,6 +158,7 @@ For a broad pre-release pass:
 bash scripts/release-check.sh
 ```
 
-The alert policy variables are fleet-wide startup defaults. Change them for
-your normal operating tolerance, then use source templates and future
-per-scope policies for environment-specific behavior.
+The alert policy variables are fleet-wide startup defaults for built-in
+resource alerts. For per-VPS traffic rules and environment-specific alert
+logic, use Config > VPS Rules or `vpsctl vps-rules`, then Fleet > Alert
+Policies or `vpsctl alert-policy`.

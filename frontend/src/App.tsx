@@ -264,6 +264,9 @@ export function App() {
                 fleetAlerts={dashboard.fleetAlerts}
                 fleetAlertStates={dashboard.fleetAlertStates}
                 fleetAlertPolicies={dashboard.fleetAlertPolicies}
+                policyAlerts={dashboard.policyAlerts}
+                trafficAccounting={dashboard.trafficAccounting}
+                vpsRuleValues={dashboard.vpsRuleValues}
                 fleetAlertNotificationChannels={
                   dashboard.fleetAlertNotificationChannels
                 }
@@ -297,6 +300,7 @@ export function App() {
                 }
                 onDispatchWebhookRules={dashboard.dispatchWebhookRules}
                 onDryRunWebhookRule={dashboard.dryRunWebhookRule}
+                onDryRunFleetAlertPolicy={dashboard.dryRunFleetAlertPolicy}
                 onProcessFleetAlertNotifications={
                   dashboard.processFleetAlertNotifications
                 }
@@ -326,6 +330,8 @@ export function App() {
               <ConfigPanel
                 activeSubpage={activeSubpage}
                 agents={dashboard.agents}
+                trafficAccounting={dashboard.trafficAccounting}
+                vpsRuleValues={dashboard.vpsRuleValues}
                 sourceTemplateAssignments={dashboard.sourceTemplateAssignments}
                 sourceTemplates={dashboard.sourceTemplates}
                 sourceStatus={dashboard.sourceStatus}
@@ -348,6 +354,9 @@ export function App() {
                 onOpenJobDetails={openJobDetails}
                 onOpenPrivilegeUnlock={openPrivilegeUnlock}
                 onRefresh={dashboard.loadTagInventory}
+                onBulkUnsetVpsRules={dashboard.bulkUnsetVpsRules}
+                onBulkUpsertVpsRules={dashboard.bulkUpsertVpsRules}
+                onDryRunVpsRules={dashboard.dryRunVpsRules}
                 onRenderTemplateRuntimeConfig={
                   dashboard.renderTemplateRuntimeConfig
                 }

@@ -48,8 +48,13 @@ pub(crate) struct MemoryState {
     pub(crate) gateway_sessions: Arc<RwLock<Vec<GatewaySessionView>>>,
     pub(crate) client_status_history: Arc<RwLock<Vec<ClientStatusHistoryView>>>,
     pub(crate) tags: Arc<RwLock<Vec<String>>>,
-    pub(crate) fleet_alert_policies:
-        Arc<RwLock<Vec<crate::model_alert_policies::FleetAlertPolicyOverrideView>>>,
+    pub(crate) vps_rule_values: Arc<RwLock<Vec<crate::model_alert_policies::VpsRuleValueRecord>>>,
+    pub(crate) traffic_counter_samples:
+        Arc<RwLock<Vec<crate::model_alert_policies::TrafficCounterSampleRecord>>>,
+    pub(crate) policy_groups: Arc<RwLock<Vec<crate::model_alert_policies::PolicyGroupRecord>>>,
+    pub(crate) policy_rule_states:
+        Arc<RwLock<Vec<crate::model_alert_policies::PolicyRuleStateRecord>>>,
+    pub(crate) policy_alerts: Arc<RwLock<Vec<crate::model_alert_policies::PolicyAlertRecord>>>,
     pub(crate) fleet_alert_states: Arc<RwLock<Vec<crate::model_alert_states::FleetAlertStateView>>>,
     pub(crate) fleet_alert_notification_channels:
         Arc<RwLock<Vec<crate::model_alert_notifications::FleetAlertNotificationChannelView>>>,

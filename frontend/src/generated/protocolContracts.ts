@@ -959,6 +959,230 @@ export const TOPOLOGY_DRIFT_ACTIONS = [
 ] as const;
 export type GeneratedTopologyDriftAction = typeof TOPOLOGY_DRIFT_ACTIONS[number];
 
+export type GeneratedJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | GeneratedJsonValue[]
+  | { [key: string]: GeneratedJsonValue };
+
+export type VpsRuleValueRecord = {
+  client_id: string;
+  key: string;
+  value_raw: string;
+  value_json: GeneratedJsonValue;
+  parsed_display: string;
+  state: string;
+  validation_errors: string[];
+  source_kind: string;
+  source_id: string | null;
+  updated_by: string | null;
+  updated_at: string;
+};
+
+export type VpsRuleChangePreview = {
+  client_id: string;
+  display_name: string;
+  key: string;
+  before: string | null;
+  after: string | null;
+  action: string;
+  validation: string;
+  validation_errors: string[];
+};
+
+export type VpsRulesDryRunRequest = {
+  operation: "upsert" | "unset" | string;
+  selector_expression: string;
+  values?: Record<string, string>;
+  keys?: string[];
+};
+
+export type VpsRulesDryRunResponse = {
+  matched_vps_count: number;
+  changed_row_count: number;
+  invalid_row_count: number;
+  preview_hash: string;
+  changes: VpsRuleChangePreview[];
+};
+
+export type VpsRulesBulkUpsertRequest = {
+  selector_expression: string;
+  values: Record<string, string>;
+  confirmed: boolean;
+  preview_hash: string;
+};
+
+export type VpsRulesBulkUnsetRequest = {
+  selector_expression: string;
+  keys: string[];
+  confirmed: boolean;
+  preview_hash: string;
+};
+
+export type TrafficAccountingSelectorBreakdown = {
+  source: string;
+  interface: string;
+  direction: string;
+  latest_rx_bytes: number;
+  latest_tx_bytes: number;
+  cycle_rx_bytes: number;
+  cycle_tx_bytes: number;
+  cycle_total_bytes: number;
+  sample_age_secs: number | null;
+  state: string;
+  incomplete_reasons: string[];
+};
+
+export type TrafficAccountingRecord = {
+  client_id: string;
+  selectors: string[];
+  selector_hash: string;
+  cycle_start: string;
+  cycle_end: string;
+  reset_day: number | null;
+  rx_bytes: number;
+  tx_bytes: number;
+  total_bytes: number;
+  latest_rx_bytes: number;
+  latest_tx_bytes: number;
+  latest_total_bytes: number;
+  quota_rx_bytes: number | null;
+  quota_tx_bytes: number | null;
+  quota_total_bytes: number | null;
+  cycle_percent: number | null;
+  state: string;
+  incomplete_reasons: string[];
+  last_sample_at: string | null;
+  counter_epochs_seen: number;
+  updated_at: string;
+  selector_breakdown: TrafficAccountingSelectorBreakdown[];
+};
+
+export type PolicyRuleRecord = {
+  id: string;
+  group_id: string;
+  rule_version: number;
+  sort_order: number;
+  name: string;
+  enabled: boolean;
+  traffic_selector: string | null;
+  condition_expression: string;
+  window_secs: number;
+  severity: "info" | "warning" | "critical" | string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PolicyGroupRecord = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  selector_expression: string;
+  notes: string | null;
+  matched_vps_count: number;
+  rule_count: number;
+  enabled_rule_count: number;
+  active_warning_count: number;
+  active_critical_count: number;
+  incomplete_vps_count: number;
+  last_evaluated_at: string | null;
+  rules: PolicyRuleRecord[];
+  created_by: string | null;
+  updated_by: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PolicyRuleRequest = {
+  id?: string;
+  name: string;
+  enabled?: boolean;
+  traffic_selector?: string | null;
+  condition_expression: string;
+  window_secs?: number;
+  severity: string;
+};
+
+export type PolicyGroupRequest = {
+  id?: string;
+  name: string;
+  selector_expression: string;
+  rules: PolicyRuleRequest[];
+  enabled?: boolean;
+  notes?: string | null;
+  confirmed: boolean;
+  preview_hash?: string | null;
+};
+
+export type PolicyDryRunRequest = {
+  id?: string;
+  name: string;
+  enabled?: boolean;
+  selector_expression: string;
+  rules: PolicyRuleRequest[];
+  notes?: string | null;
+};
+
+export type PolicyDryRunRulePreview = {
+  rule_name: string;
+  condition_expression: string;
+  category: string;
+  severity: string;
+  true_count: number;
+  false_count: number;
+  incomplete_count: number;
+};
+
+export type PolicyDryRunResponse = {
+  matched_vps_count: number;
+  invalid_rule_count: number;
+  incomplete_vps_count: number;
+  preview_hash: string;
+  matched_vps: string[];
+  rule_previews: PolicyDryRunRulePreview[];
+  validation_errors: string[];
+};
+
+export type PolicyRuleStateRecord = {
+  policy_rule_id: string;
+  client_id: string;
+  rule_version: number;
+  condition_true: boolean;
+  previous_condition_true: boolean;
+  window_satisfied: boolean;
+  first_true_at: string | null;
+  last_true_at: string | null;
+  last_false_at: string | null;
+  last_evaluated_at: string;
+  incomplete: boolean;
+  incomplete_reasons: string[];
+  last_actual_value: number | null;
+  last_threshold_value: number | null;
+  last_fired_at: string | null;
+  trigger_generation: number;
+  updated_at: string;
+};
+
+export type PolicyAlertRecord = {
+  id: string;
+  policy_group_id: string;
+  policy_rule_id: string;
+  client_id: string;
+  trigger_generation: number;
+  severity: "info" | "warning" | "critical" | string;
+  category: "traffic" | "resource" | string;
+  title: string;
+  detail: string;
+  actual_value: number | null;
+  threshold_value: number | null;
+  payload: GeneratedJsonValue;
+  observed_at: string;
+  created_at: string;
+};
+
+
 export const PRIVILEGE_OPERATION_GOLDEN_VECTORS = [
   { command_type: "shell_argv", input_json: "{\"type\":\"shell\",\"argv\":[\"/bin/true\"],\"pty\":false}", canonical_json: "{\"type\":\"shell\",\"argv\":[\"/bin/true\"],\"pty\":false}" },
   { command_type: "shell_script", input_json: "{\"type\":\"shell_script\",\"script\":\"printf ok\"}", canonical_json: "{\"type\":\"shell_script\",\"script\":\"printf ok\"}" },

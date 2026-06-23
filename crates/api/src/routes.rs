@@ -7,10 +7,12 @@ use axum::{
 use crate::{
     backup_upload_sessions::MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES,
     routes_alerts::{
-        delete_fleet_alert_notification_channel, delete_fleet_alert_policy,
-        dispatch_fleet_alert_notifications, export_fleet_alerts,
-        list_fleet_alert_notification_channels, list_fleet_alert_notifications,
-        list_fleet_alert_policies, list_fleet_alert_states, list_fleet_alerts,
+        bulk_unset_vps_rules, bulk_upsert_vps_rules, delete_fleet_alert_notification_channel,
+        delete_fleet_alert_policy, dispatch_fleet_alert_notifications, dry_run_fleet_alert_policy,
+        dry_run_vps_rules, export_fleet_alerts, get_effective_vps_rules, get_fleet_alert_policy,
+        get_traffic_accounting, list_fleet_alert_notification_channels,
+        list_fleet_alert_notifications, list_fleet_alert_policies, list_fleet_alert_states,
+        list_fleet_alerts, list_policy_alerts, list_traffic_accounting, list_vps_rules,
         process_fleet_alert_notifications, update_fleet_alert_state,
         upsert_fleet_alert_notification_channel, upsert_fleet_alert_policy,
     },
@@ -197,8 +199,32 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(list_fleet_alert_policies).post(upsert_fleet_alert_policy),
         )
         .route(
+            "/api/v1/fleet-alert-policies/dry-run",
+            post(dry_run_fleet_alert_policy),
+        )
+        .route(
             "/api/v1/fleet-alert-policies/{policy_id}",
-            delete(delete_fleet_alert_policy),
+            get(get_fleet_alert_policy)
+                .put(upsert_fleet_alert_policy)
+                .delete(delete_fleet_alert_policy),
+        )
+        .route(
+            "/api/v1/fleet-alert-policies/{policy_id}/dry-run",
+            post(dry_run_fleet_alert_policy),
+        )
+        .route("/api/v1/policy-alerts", get(list_policy_alerts))
+        .route("/api/v1/vps-rules", get(list_vps_rules))
+        .route(
+            "/api/v1/vps-rules/effective/{client_id}",
+            get(get_effective_vps_rules),
+        )
+        .route("/api/v1/vps-rules/dry-run", post(dry_run_vps_rules))
+        .route("/api/v1/vps-rules/bulk-upsert", post(bulk_upsert_vps_rules))
+        .route("/api/v1/vps-rules/bulk-unset", post(bulk_unset_vps_rules))
+        .route("/api/v1/traffic-accounting", get(list_traffic_accounting))
+        .route(
+            "/api/v1/traffic-accounting/{client_id}",
+            get(get_traffic_accounting),
         )
         .route(
             "/api/v1/fleet-alert-notification-channels",

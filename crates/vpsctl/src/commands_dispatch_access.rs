@@ -255,37 +255,118 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             )?;
             Ok(None)
         }
-        Command::FleetAlertPolicies(command) => {
-            commands_inventory::fleet_alert_policies(
-                api_url,
-                token,
-                command.limit,
-                command.enabled,
-                command.scope_kind,
-                command.scope_value,
-            )?;
+        Command::VpsRules(command) => {
+            match command.command {
+                crate::cli_access::VpsRulesSubcommand::List(command) => {
+                    commands_inventory::vps_rules_list(
+                        api_url,
+                        token,
+                        commands_inventory::VpsRulesListOptions {
+                            limit: command.limit,
+                            selector: command.selector,
+                            client_id: command.client_id,
+                            key: command.key,
+                            state: command.state,
+                        },
+                    )?;
+                }
+                crate::cli_access::VpsRulesSubcommand::Get(command) => {
+                    commands_inventory::vps_rules_get(api_url, token, command.client_id)?;
+                }
+                crate::cli_access::VpsRulesSubcommand::Preview(command) => {
+                    commands_inventory::vps_rules_preview(
+                        api_url,
+                        token,
+                        commands_inventory::VpsRulesPreviewOptions {
+                            selector: command.selector,
+                            set_values: command.set_values,
+                        },
+                    )?;
+                }
+                crate::cli_access::VpsRulesSubcommand::Upsert(command) => {
+                    commands_inventory::vps_rules_upsert(
+                        api_url,
+                        token,
+                        commands_inventory::VpsRulesUpsertOptions {
+                            selector: command.selector,
+                            set_values: command.set_values,
+                            confirmed: command.confirmed,
+                        },
+                    )?;
+                }
+                crate::cli_access::VpsRulesSubcommand::Unset(command) => {
+                    commands_inventory::vps_rules_unset(
+                        api_url,
+                        token,
+                        commands_inventory::VpsRulesUnsetOptions {
+                            selector: command.selector,
+                            keys: command.keys,
+                            confirmed: command.confirmed,
+                        },
+                    )?;
+                }
+            }
             Ok(None)
         }
-        Command::FleetAlertPolicyUpsert(command) => {
-            commands_inventory::fleet_alert_policy_upsert(
-                api_url,
-                token,
-                commands_inventory::FleetAlertPolicyUpsertOptions {
-                    name: command.name,
-                    scope_kind: command.scope_kind,
-                    scope_value: command.scope_value,
-                    memory_available_warning_ratio: command.memory_available_warning_ratio,
-                    memory_available_critical_ratio: command.memory_available_critical_ratio,
-                    disk_available_warning_ratio: command.disk_available_warning_ratio,
-                    disk_available_critical_ratio: command.disk_available_critical_ratio,
-                    cpu_load_warning: command.cpu_load_warning,
-                    cpu_load_critical: command.cpu_load_critical,
-                    priority: command.priority,
-                    enabled: command.enabled,
-                    notes: command.notes,
-                    confirmed: command.confirmed,
-                },
-            )?;
+        Command::AlertPolicies(command) => {
+            match command.command {
+                crate::cli_access::AlertPoliciesSubcommand::List(command) => {
+                    commands_inventory::alert_policies_list(
+                        api_url,
+                        token,
+                        commands_inventory::AlertPoliciesListOptions {
+                            limit: command.limit,
+                            enabled: command.enabled,
+                            selector: command.selector,
+                            client_id: command.client_id,
+                        },
+                    )?;
+                }
+            }
+            Ok(None)
+        }
+        Command::AlertPolicy(command) => {
+            match command.command {
+                crate::cli_access::AlertPolicySubcommand::Get(command) => {
+                    commands_inventory::alert_policy_get(api_url, token, command.name)?;
+                }
+                crate::cli_access::AlertPolicySubcommand::Preview(command) => {
+                    commands_inventory::alert_policy_preview(
+                        api_url,
+                        token,
+                        commands_inventory::AlertPolicyWriteOptions {
+                            name: command.name,
+                            selector: Some(command.selector),
+                            rules: command.rules,
+                            window_secs: command.window_secs,
+                            severity: command.severity,
+                            traffic_selector: command.traffic_selector,
+                            enabled: command.enabled,
+                            notes: command.notes,
+                            file: None,
+                            confirmed: false,
+                        },
+                    )?;
+                }
+                crate::cli_access::AlertPolicySubcommand::Upsert(command) => {
+                    commands_inventory::alert_policy_upsert(
+                        api_url,
+                        token,
+                        commands_inventory::AlertPolicyWriteOptions {
+                            name: command.name,
+                            selector: command.selector,
+                            rules: command.rules,
+                            window_secs: command.window_secs,
+                            severity: command.severity,
+                            traffic_selector: command.traffic_selector,
+                            enabled: command.enabled,
+                            notes: command.notes,
+                            file: command.file,
+                            confirmed: command.confirmed,
+                        },
+                    )?;
+                }
+            }
             Ok(None)
         }
         Command::FleetAlertNotificationChannels(command) => {

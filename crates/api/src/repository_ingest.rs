@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use sqlx::{types::Json as SqlJson, Postgres, Row, Transaction};
 use tokio::sync::RwLock;
 use tracing::debug;
@@ -17,6 +17,7 @@ use crate::model::{
     AgentView, TelemetryNetworkRateView, TelemetryRollupView, TelemetryTunnelAdapterHealthView,
     TelemetryTunnelView,
 };
+use crate::model_alert_policies::TrafficCounterSampleRecord;
 use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
 use crate::repository_jobs::{
@@ -778,6 +779,12 @@ impl Repository {
                     &event.telemetry.metrics,
                 )
                 .await;
+                upsert_memory_traffic_counter_samples(
+                    &memory.traffic_counter_samples,
+                    &event.telemetry.client_id,
+                    &event.telemetry.metrics,
+                )
+                .await;
                 let mut tunnels = memory.telemetry_tunnels.write().await;
                 tunnels.retain(|record| record.client_id != event.telemetry.client_id);
                 tunnels.extend(event.telemetry.metrics.tunnels.iter().filter_map(|tunnel| {
@@ -810,6 +817,12 @@ impl Repository {
                 upsert_postgres_telemetry_rollup(&mut tx, &event.telemetry.client_id, metrics)
                     .await?;
                 upsert_postgres_telemetry_network_rates(
+                    &mut tx,
+                    &event.telemetry.client_id,
+                    metrics,
+                )
+                .await?;
+                upsert_postgres_traffic_counter_samples(
                     &mut tx,
                     &event.telemetry.client_id,
                     metrics,
@@ -1158,6 +1171,52 @@ async fn upsert_memory_telemetry_network_rates(
     }
 }
 
+async fn upsert_memory_traffic_counter_samples(
+    samples: &Arc<RwLock<Vec<TrafficCounterSampleRecord>>>,
+    client_id: &str,
+    metrics: &AgentMetrics,
+) {
+    let observed_at = Utc
+        .timestamp_opt(metrics.observed_unix as i64, 0)
+        .single()
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| metrics.observed_unix.to_string());
+    let mut samples = samples.write().await;
+    for network in metrics
+        .networks
+        .iter()
+        .filter(|network| valid_telemetry_name(&network.interface))
+    {
+        samples.push(TrafficCounterSampleRecord {
+            client_id: client_id.to_string(),
+            source_kind: "host".to_string(),
+            interface: network.interface.clone(),
+            observed_at: observed_at.clone(),
+            observed_unix: metrics.observed_unix as i64,
+            rx_bytes: u64_to_i64(network.rx_bytes),
+            tx_bytes: u64_to_i64(network.tx_bytes),
+            counter_epoch: 0,
+            sample_source: "agent_networks".to_string(),
+        });
+    }
+    for tunnel in metrics.tunnels.iter().filter(|tunnel| valid_tunnel(tunnel)) {
+        samples.push(TrafficCounterSampleRecord {
+            client_id: client_id.to_string(),
+            source_kind: "tunnel".to_string(),
+            interface: tunnel.interface.clone(),
+            observed_at: observed_at.clone(),
+            observed_unix: metrics.observed_unix as i64,
+            rx_bytes: u64_to_i64(tunnel.rx_bytes),
+            tx_bytes: u64_to_i64(tunnel.tx_bytes),
+            counter_epoch: 0,
+            sample_source: tunnel
+                .traffic_source
+                .clone()
+                .unwrap_or_else(|| "runtime_tunnel".to_string()),
+        });
+    }
+}
+
 async fn upsert_postgres_telemetry_rollup(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client_id: &str,
@@ -1318,6 +1377,80 @@ async fn upsert_postgres_telemetry_network_rates(
         .execute(&mut **tx)
         .await?;
     }
+    Ok(())
+}
+
+async fn upsert_postgres_traffic_counter_samples(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+    metrics: &AgentMetrics,
+) -> Result<()> {
+    for network in metrics
+        .networks
+        .iter()
+        .filter(|network| valid_telemetry_name(&network.interface))
+    {
+        insert_traffic_counter_sample(
+            tx,
+            client_id,
+            "host",
+            &network.interface,
+            metrics.observed_unix,
+            u64_to_i64(network.rx_bytes),
+            u64_to_i64(network.tx_bytes),
+            "agent_networks",
+        )
+        .await?;
+    }
+    for tunnel in metrics.tunnels.iter().filter(|tunnel| valid_tunnel(tunnel)) {
+        let sample_source = tunnel.traffic_source.as_deref().unwrap_or("runtime_tunnel");
+        insert_traffic_counter_sample(
+            tx,
+            client_id,
+            "tunnel",
+            &tunnel.interface,
+            metrics.observed_unix,
+            u64_to_i64(tunnel.rx_bytes),
+            u64_to_i64(tunnel.tx_bytes),
+            sample_source,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn insert_traffic_counter_sample(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+    source_kind: &str,
+    interface: &str,
+    observed_unix: u64,
+    rx_bytes: i64,
+    tx_bytes: i64,
+    sample_source: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at, rx_bytes, tx_bytes,
+            counter_epoch, sample_source
+        )
+        VALUES ($1, $2, $3, to_timestamp($4::double precision), $5, $6, 0, $7)
+        ON CONFLICT (client_id, source_kind, interface, observed_at) DO UPDATE SET
+            rx_bytes = EXCLUDED.rx_bytes,
+            tx_bytes = EXCLUDED.tx_bytes,
+            sample_source = EXCLUDED.sample_source
+        "#,
+    )
+    .bind(client_id)
+    .bind(source_kind)
+    .bind(interface)
+    .bind(observed_unix as f64)
+    .bind(rx_bytes)
+    .bind(tx_bytes)
+    .bind(sample_source)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 

@@ -538,6 +538,10 @@
     flex-direction: column;
   }
 
+  .consoleFilterBar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .consoleOperationsActions {
     justify-content: flex-start;
   }

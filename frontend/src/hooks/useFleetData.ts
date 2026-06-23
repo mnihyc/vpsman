@@ -14,6 +14,10 @@ import type {
   FleetAlertStateRecord,
   FleetAlertStateRequest,
   FleetSummary,
+  PolicyAlertRecord,
+  PolicyDryRunRequest,
+  PolicyDryRunResponse,
+  TrafficAccountingRecord,
   WebhookDeliveryRotationRequest,
   WebhookDeliveryRotationResponse,
   WebhookRuleDeliveryRecord,
@@ -25,6 +29,11 @@ import type {
   WebhookRuleRequest,
   DeleteAgentRequest,
   DeleteAgentResponse,
+  VpsRuleValueRecord,
+  VpsRulesBulkUnsetRequest,
+  VpsRulesBulkUpsertRequest,
+  VpsRulesDryRunRequest,
+  VpsRulesDryRunResponse,
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
   TelemetryTunnelRecord,
@@ -43,6 +52,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const [fleetAlertPolicies, setFleetAlertPolicies] = useState<
     FleetAlertPolicyRecord[]
   >([]);
+  const [vpsRuleValues, setVpsRuleValues] = useState<VpsRuleValueRecord[]>([]);
+  const [trafficAccounting, setTrafficAccounting] = useState<
+    TrafficAccountingRecord[]
+  >([]);
+  const [policyAlerts, setPolicyAlerts] = useState<PolicyAlertRecord[]>([]);
   const [fleetAlertNotificationChannels, setFleetAlertNotificationChannels] =
     useState<FleetAlertNotificationChannelRecord[]>([]);
   const [fleetAlertNotifications, setFleetAlertNotifications] = useState<
@@ -80,6 +94,18 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         ),
         apiGet<FleetAlertPolicyRecord[]>(
           `/api/v1/fleet-alert-policies?limit=${FLEET_DETAIL_LIMIT}`,
+          apiToken,
+        ),
+        apiGet<VpsRuleValueRecord[]>(
+          `/api/v1/vps-rules?limit=${FLEET_NETWORK_RATE_LIMIT}`,
+          apiToken,
+        ),
+        apiGet<TrafficAccountingRecord[]>(
+          `/api/v1/traffic-accounting?limit=${FLEET_DETAIL_LIMIT}`,
+          apiToken,
+        ),
+        apiGet<PolicyAlertRecord[]>(
+          `/api/v1/policy-alerts?limit=${FLEET_DETAIL_LIMIT}`,
           apiToken,
         ),
         apiGet<FleetAlertNotificationChannelRecord[]>(
@@ -132,17 +158,20 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       setFleetAlerts(valueAt<FleetAlertRecord[]>(0, []));
       setFleetAlertStates(valueAt<FleetAlertStateRecord[]>(1, []));
       setFleetAlertPolicies(valueAt<FleetAlertPolicyRecord[]>(2, []));
+      setVpsRuleValues(valueAt<VpsRuleValueRecord[]>(3, []));
+      setTrafficAccounting(valueAt<TrafficAccountingRecord[]>(4, []));
+      setPolicyAlerts(valueAt<PolicyAlertRecord[]>(5, []));
       setFleetAlertNotificationChannels(
-        valueAt<FleetAlertNotificationChannelRecord[]>(3, []),
+        valueAt<FleetAlertNotificationChannelRecord[]>(6, []),
       );
       setFleetAlertNotifications(
-        valueAt<FleetAlertNotificationDeliveryRecord[]>(4, []),
+        valueAt<FleetAlertNotificationDeliveryRecord[]>(7, []),
       );
-      setWebhookRules(valueAt<WebhookRuleRecord[]>(5, []));
-      setWebhookRuleDeliveries(valueAt<WebhookRuleDeliveryRecord[]>(6, []));
-      setTelemetryRollups(valueAt<TelemetryRollupRecord[]>(7, []));
-      setTelemetryNetworkRates(valueAt<TelemetryNetworkRateRecord[]>(8, []));
-      setTelemetryTunnels(valueAt<TelemetryTunnelRecord[]>(9, []));
+      setWebhookRules(valueAt<WebhookRuleRecord[]>(8, []));
+      setWebhookRuleDeliveries(valueAt<WebhookRuleDeliveryRecord[]>(9, []));
+      setTelemetryRollups(valueAt<TelemetryRollupRecord[]>(10, []));
+      setTelemetryNetworkRates(valueAt<TelemetryNetworkRateRecord[]>(11, []));
+      setTelemetryTunnels(valueAt<TelemetryTunnelRecord[]>(12, []));
       setApiError(
         optionalFailure?.status === "rejected"
           ? optionalFailure.reason instanceof Error
@@ -158,6 +187,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         setFleetAlerts([]);
         setFleetAlertStates([]);
         setFleetAlertPolicies([]);
+        setVpsRuleValues([]);
+        setTrafficAccounting([]);
+        setPolicyAlerts([]);
         setFleetAlertNotificationChannels([]);
         setFleetAlertNotifications([]);
         setWebhookRules([]);
@@ -229,12 +261,58 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         );
         return [policy, ...withoutPolicy].sort(
           (left, right) =>
-            right.priority - left.priority ||
+            Number(right.enabled) - Number(left.enabled) ||
             left.name.localeCompare(right.name),
         );
       });
       await loadFleet();
       return policy;
+    },
+    [apiToken, loadFleet],
+  );
+
+  const dryRunFleetAlertPolicy = useCallback(
+    async (request: PolicyDryRunRequest) =>
+      apiPost<PolicyDryRunResponse>(
+        "/api/v1/fleet-alert-policies/dry-run",
+        apiToken,
+        request,
+      ),
+    [apiToken],
+  );
+
+  const dryRunVpsRules = useCallback(
+    async (request: VpsRulesDryRunRequest) =>
+      apiPost<VpsRulesDryRunResponse>(
+        "/api/v1/vps-rules/dry-run",
+        apiToken,
+        request,
+      ),
+    [apiToken],
+  );
+
+  const bulkUpsertVpsRules = useCallback(
+    async (request: VpsRulesBulkUpsertRequest) => {
+      const preview = await apiPost<VpsRulesDryRunResponse>(
+        "/api/v1/vps-rules/bulk-upsert",
+        apiToken,
+        request,
+      );
+      await loadFleet();
+      return preview;
+    },
+    [apiToken, loadFleet],
+  );
+
+  const bulkUnsetVpsRules = useCallback(
+    async (request: VpsRulesBulkUnsetRequest) => {
+      const preview = await apiPost<VpsRulesDryRunResponse>(
+        "/api/v1/vps-rules/bulk-unset",
+        apiToken,
+        request,
+      );
+      await loadFleet();
+      return preview;
     },
     [apiToken, loadFleet],
   );
@@ -481,6 +559,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     setFleetAlerts([]);
     setFleetAlertStates([]);
     setFleetAlertPolicies([]);
+    setVpsRuleValues([]);
+    setTrafficAccounting([]);
+    setPolicyAlerts([]);
     setFleetAlertNotificationChannels([]);
     setFleetAlertNotifications([]);
     setWebhookRules([]);
@@ -497,6 +578,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     fleetAlerts,
     fleetAlertStates,
     fleetAlertPolicies,
+    vpsRuleValues,
+    trafficAccounting,
+    policyAlerts,
     fleetAlertNotificationChannels,
     fleetAlertNotifications,
     webhookRules,
@@ -510,7 +594,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     telemetryRollups,
     telemetryTunnels,
     upsertFleetAlertPolicy,
+    dryRunFleetAlertPolicy,
     deleteFleetAlertPolicy,
+    dryRunVpsRules,
+    bulkUpsertVpsRules,
+    bulkUnsetVpsRules,
     upsertFleetAlertNotificationChannel,
     deleteFleetAlertNotificationChannel,
     dispatchFleetAlertNotifications,

@@ -416,28 +416,19 @@ api_get "/api/v1/dashboard/overview?window=1h&scope_kind=country&scope_value=US&
     any(.label_clusters[]; .label == "provider:alpha" and .total == $alpha_us_count)
   ' >/dev/null
 
-alert_policy_json="$(vpsctl_json fleet-alert-policy-upsert \
+alert_policy_json="$(vpsctl_json alert-policy upsert \
   --name docker-edge-resource-alerts \
-  --scope-kind tag \
-  --scope-value role:edge \
-  --memory-available-warning-ratio 0.99 \
-  --memory-available-critical-ratio 0.98 \
-  --disk-available-warning-ratio 0.99 \
-  --disk-available-critical-ratio 0.98 \
-  --cpu-load-warning 0.5 \
-  --cpu-load-critical 0.9 \
-  --priority 25 \
+  --selector 'tag:role:edge' \
+  --rule 'cpu.load_1 >= 0.5' \
+  --severity warning \
   --notes docker-fleet-live-review \
   --confirmed)"
 jq -e '
   .name == "docker-edge-resource-alerts" and
-  .scope_kind == "tag" and
-  .scope_value == "role:edge" and
-  .memory_available_warning_ratio == 0.99 and
-  .disk_available_warning_ratio == 0.99 and
-  .cpu_load_warning == 0.5 and
-  .priority == 25 and
-  .enabled == true
+  .selector_expression == "tag:role:edge" and
+  .enabled == true and
+  (.rules | length) == 1 and
+  .rules[0].condition_expression == "cpu.load_1 >= 0.5"
 ' <<<"$alert_policy_json" >/dev/null
 
 alert_notification_channel_json="$(vpsctl_json fleet-alert-notification-channel-upsert \
