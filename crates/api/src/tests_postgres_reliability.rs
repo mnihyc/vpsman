@@ -456,6 +456,21 @@ async fn webhook_event_exists(pool: &PgPool, kind: &str, event_id: &str) -> bool
     .unwrap()
 }
 
+async fn webhook_event_count(pool: &PgPool, kind: &str, event_id: &str) -> i64 {
+    sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM webhook_events
+        WHERE kind = $1 AND event_id = $2
+        "#,
+    )
+    .bind(kind)
+    .bind(event_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 async fn processed_terminal_event_count(pool: &PgPool, job_id: Uuid) -> i64 {
     sqlx::query_scalar(
         r#"
@@ -983,6 +998,18 @@ async fn postgres_command_output_ingest_rejects_late_new_output_after_terminal_t
         TARGET_STATUS_COMPLETED
     );
     assert_eq!(job_status(&db.pool, job_id).await, JOB_STATUS_COMPLETED);
+    let target_event_id =
+        format!("job:{job_id}:target:{client_id}:status:{TARGET_STATUS_COMPLETED}");
+    let job_event_id = format!("job:{job_id}:status:{JOB_STATUS_COMPLETED}");
+    assert_eq!(
+        webhook_event_count(&db.pool, "job.target.status", &target_event_id).await,
+        1
+    );
+    assert_eq!(
+        webhook_event_count(&db.pool, "job.status", &job_event_id).await,
+        1
+    );
+    assert_eq!(processed_terminal_event_count(&db.pool, job_id).await, 2);
 
     let _ = crate::routes_ingest::ingest_command_output(
         axum::extract::State(state.clone()),
@@ -991,6 +1018,15 @@ async fn postgres_command_output_ingest_rejects_late_new_output_after_terminal_t
     )
     .await
     .unwrap();
+    assert_eq!(
+        webhook_event_count(&db.pool, "job.target.status", &target_event_id).await,
+        1
+    );
+    assert_eq!(
+        webhook_event_count(&db.pool, "job.status", &job_event_id).await,
+        1
+    );
+    assert_eq!(processed_terminal_event_count(&db.pool, job_id).await, 2);
 
     let late_output = CommandOutput {
         job_id,
@@ -1245,6 +1281,122 @@ async fn postgres_control_timeout_terminal_event_updates_schedule_and_webhooks()
             &format!("schedule:{}:job:{job_id}:failed", schedule.id)
         )
         .await
+    );
+    assert_eq!(processed_terminal_event_count(&db.pool, job_id).await, 2);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_terminal_event_retry_keeps_schedule_and_webhooks_idempotent() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "pg-client-terminal-event-retry";
+    let job_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let schedule = db
+        .repo
+        .create_schedule(
+            postgres_shell_schedule_request("pg-terminal-event-retry", client_id),
+            &operator,
+        )
+        .await
+        .unwrap();
+    insert_job_target_with_operation(
+        &db.pool,
+        job_id,
+        client_id,
+        JobCommand::Shell {
+            argv: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "sleep 99".to_string(),
+            ],
+            pty: false,
+        },
+        "shell",
+        Some(schedule.id),
+        "running",
+        true,
+        Some(Uuid::new_v4()),
+        1,
+        true,
+    )
+    .await;
+
+    let expired = db.repo.expire_control_timeout_targets(10, 0).await.unwrap();
+    assert_eq!(expired.len(), 1);
+    let state = postgres_app_state(&db);
+    state.process_job_terminal_events(500).await.unwrap();
+
+    let job_event_id = format!("job:{job_id}:status:{JOB_STATUS_CONTROL_TIMEOUT}");
+    let schedule_finished_event_id = format!("schedule:{}:job:{job_id}:finished", schedule.id);
+    let schedule_failed_event_id = format!("schedule:{}:job:{job_id}:failed", schedule.id);
+    let (failure_count, last_job_status, last_job_id) =
+        schedule_outcome_row(&db.pool, schedule.id).await;
+    assert_eq!(failure_count, 1);
+    assert_eq!(last_job_status, JOB_STATUS_CONTROL_TIMEOUT);
+    assert_eq!(last_job_id, Some(job_id));
+    assert_eq!(
+        webhook_event_count(&db.pool, "job.status", &job_event_id).await,
+        1
+    );
+    assert_eq!(
+        webhook_event_count(
+            &db.pool,
+            "schedule.job_finished",
+            &schedule_finished_event_id
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        webhook_event_count(&db.pool, "schedule.failed", &schedule_failed_event_id).await,
+        1
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE job_terminal_events
+        SET
+            processing_status = 'failed',
+            processed_at = NULL,
+            next_attempt_at = NULL,
+            lease_id = NULL,
+            lease_until = NULL,
+            last_error = NULL
+        WHERE job_id = $1
+          AND event_kind = 'job_terminalized'
+        "#,
+    )
+    .bind(job_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    state.process_job_terminal_events(500).await.unwrap();
+
+    let (failure_count, last_job_status, last_job_id) =
+        schedule_outcome_row(&db.pool, schedule.id).await;
+    assert_eq!(failure_count, 1);
+    assert_eq!(last_job_status, JOB_STATUS_CONTROL_TIMEOUT);
+    assert_eq!(last_job_id, Some(job_id));
+    assert_eq!(
+        webhook_event_count(&db.pool, "job.status", &job_event_id).await,
+        1
+    );
+    assert_eq!(
+        webhook_event_count(
+            &db.pool,
+            "schedule.job_finished",
+            &schedule_finished_event_id
+        )
+        .await,
+        1
+    );
+    assert_eq!(
+        webhook_event_count(&db.pool, "schedule.failed", &schedule_failed_event_id).await,
+        1
     );
     assert_eq!(processed_terminal_event_count(&db.pool, job_id).await, 2);
     db.cleanup().await;

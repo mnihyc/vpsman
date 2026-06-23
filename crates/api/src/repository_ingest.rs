@@ -21,7 +21,8 @@ use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
 use crate::repository_jobs::{
     append_synthetic_agent_lost_output_in_tx, append_synthetic_status_output_in_tx,
-    enqueue_target_terminal_event_in_tx, finish_job_in_tx_if_all_targets_terminal,
+    enqueue_target_terminal_event_in_tx,
+    finish_job_in_tx_if_all_targets_terminal_and_enqueue_event,
 };
 use crate::security::constant_time_eq;
 
@@ -187,7 +188,8 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                         terminal_outcome(TARGET_STATUS_FAILED, message.clone(), Some(1), false);
                     enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome)
                         .await?;
-                    let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
+                    let _ = finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(tx, job_id)
+                        .await?;
                     affected_job_ids.push(job_id);
                     continue;
                 }
@@ -288,7 +290,8 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                 let outcome = terminal_outcome(TARGET_STATUS_COMPLETED, message, Some(0), true);
                 enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome)
                     .await?;
-                let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
+                let _ =
+                    finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(tx, job_id).await?;
                 affected_job_ids.push(job_id);
                 continue;
             }
@@ -355,7 +358,7 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
         .await?;
         let outcome = terminal_outcome(TARGET_STATUS_AGENT_LOST, message.clone(), None, false);
         enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome).await?;
-        let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
+        let _ = finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(tx, job_id).await?;
         affected_job_ids.push(job_id);
     }
     affected_job_ids.sort();

@@ -467,7 +467,7 @@ fn capability_split_allows_runtime_config_sync_for_unprivileged_targets() {
     let command = JobCommand::RuntimeConfigSync {
         desired_version: 1,
         reason: "test-runtime-config-sync".to_string(),
-        config: Box::new(Default::default()),
+        config: Box::default(),
     };
     let targets = vec!["user-b".to_string()];
     let agents = vec![test_agent(

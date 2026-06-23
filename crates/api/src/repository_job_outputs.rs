@@ -17,7 +17,7 @@ use crate::model::{
 use crate::object_store::BackupObjectStore;
 use crate::repository::{MemoryState, Repository};
 use crate::repository_jobs::{
-    enqueue_target_terminal_event_in_tx, finish_job_in_tx_if_all_targets_terminal,
+    enqueue_target_terminal_event_in_tx, finish_job_in_tx_if_all_targets_terminal_and_enqueue_event,
 };
 use crate::repository_terminal_sessions::finalize_active_terminal_input_request_for_terminal_target_in_tx;
 use crate::{output_stream_name, unix_now, TargetDispatchOutcome};
@@ -816,7 +816,8 @@ impl Repository {
                     enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, outcome)
                         .await?;
                     terminal_status =
-                        finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
+                        finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
+                            .await?;
                 }
                 tx.commit().await?;
                 Ok(FinalJobOutputRecordResult {
