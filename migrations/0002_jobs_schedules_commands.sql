@@ -144,6 +144,49 @@ CREATE INDEX job_targets_recent_terminal_idx
     ON job_targets (status, completed_at DESC, job_id, client_id)
     WHERE completed_at IS NOT NULL;
 
+CREATE TABLE job_terminal_events (
+    id UUID PRIMARY KEY,
+    event_kind TEXT NOT NULL,
+    job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    client_id TEXT,
+    status TEXT NOT NULL,
+    outcome JSONB,
+    processing_status TEXT NOT NULL DEFAULT 'queued',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    lease_id UUID,
+    lease_until TIMESTAMPTZ,
+    next_attempt_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processed_at TIMESTAMPTZ,
+    CONSTRAINT job_terminal_events_kind_check
+        CHECK (event_kind IN ('target_terminalized', 'job_terminalized')),
+    CONSTRAINT job_terminal_events_processing_status_check
+        CHECK (processing_status IN ('queued', 'processing', 'processed', 'failed')),
+    CONSTRAINT job_terminal_events_target_shape_check
+        CHECK (
+            (event_kind = 'target_terminalized' AND client_id IS NOT NULL AND jsonb_typeof(outcome) = 'object')
+            OR
+            (event_kind = 'job_terminalized' AND client_id IS NULL AND outcome IS NULL)
+        ),
+    CONSTRAINT job_terminal_events_attempt_count_check
+        CHECK (attempt_count >= 0),
+    CONSTRAINT job_terminal_events_status_not_empty
+        CHECK (length(trim(status)) > 0)
+);
+
+CREATE UNIQUE INDEX job_terminal_events_target_unique_idx
+    ON job_terminal_events (job_id, client_id)
+    WHERE event_kind = 'target_terminalized';
+
+CREATE UNIQUE INDEX job_terminal_events_job_unique_idx
+    ON job_terminal_events (job_id)
+    WHERE event_kind = 'job_terminalized';
+
+CREATE INDEX job_terminal_events_processing_idx
+    ON job_terminal_events (processing_status, next_attempt_at, created_at, id)
+    WHERE processing_status IN ('queued', 'failed', 'processing');
+
 CREATE TABLE job_outputs (
     job_id UUID NOT NULL,
     client_id TEXT NOT NULL,

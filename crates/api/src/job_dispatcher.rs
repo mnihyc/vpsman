@@ -13,14 +13,14 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 use vpsman_common::{CommandOutput, JobCommand, JobRequest, OutputStream};
 use vpsman_server_core::{
-    operator_is_active_authorized, JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_CANCELED,
-    TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_FAILED,
-    TARGET_STATUS_REJECTED,
+    operator_is_active_authorized, TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED,
+    TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED,
 };
 
 use crate::{
     backup_auto_artifacts::try_auto_record_backup_artifact,
     model::{AuthContext, BackupRequestStatus, CreateBackupRequest, WsEvent},
+    repository::Repository,
     repository_backups::BackupRequestSourceLink,
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
     repository_jobs::ClaimedJobTarget,
@@ -175,6 +175,7 @@ async fn run_dispatcher_sweep(state: &AppState) -> Result<usize> {
 
 pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> {
     expire_control_timeout_targets(state).await?;
+    state.process_job_terminal_events(500).await?;
     let dispatcher_config = state.dispatcher_runtime_config();
     let claimed = state
         .repo
@@ -202,6 +203,7 @@ pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> 
             }
         })
         .await;
+    state.process_job_terminal_events(500).await?;
     Ok(claimed_count)
 }
 
@@ -279,14 +281,9 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
                         parse_agent_incarnation_mismatch_actual(&message),
                     )
                     .await?;
-                if let Some(status) = refreshed {
-                    if !matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING) {
-                        state.publish(WsEvent::JobFinished {
-                            job_id: claimed.job_id,
-                            status,
-                        });
-                    }
-                }
+                state
+                    .process_job_terminal_events_or_publish_refresh(500, claimed.job_id, refreshed)
+                    .await?;
             } else {
                 state
                     .repo
@@ -326,22 +323,24 @@ async fn expire_control_timeout_targets(state: &AppState) -> Result<()> {
         )
         .await?;
     for target in expired {
-        if let Err(error) = state
-            .repo
-            .record_backup_request_terminal_for_target_status(
-                target.job_id,
-                &target.client_id,
-                &target.status,
-                None,
-            )
-            .await
-        {
-            warn!(
-                %error,
-                job_id = %target.job_id,
-                client_id = %target.client_id,
-                "backup request terminal status update failed after deadline expiry"
-            );
+        if matches!(&state.repo, Repository::Memory(_)) {
+            if let Err(error) = state
+                .repo
+                .record_backup_request_terminal_for_target_status(
+                    target.job_id,
+                    &target.client_id,
+                    &target.status,
+                    None,
+                )
+                .await
+            {
+                warn!(
+                    %error,
+                    job_id = %target.job_id,
+                    client_id = %target.client_id,
+                    "backup request terminal status update failed after deadline expiry"
+                );
+            }
         }
         if target.status == TARGET_STATUS_CONTROL_TIMEOUT {
             state
@@ -399,7 +398,7 @@ async fn expire_control_timeout_targets(state: &AppState) -> Result<()> {
             .refresh_job_status_from_targets(target.job_id)
             .await?;
         state
-            .publish_job_finished_after_refresh(target.job_id, refreshed)
+            .process_job_terminal_events_or_publish_refresh(500, target.job_id, refreshed)
             .await?;
     }
     Ok(())
@@ -470,6 +469,7 @@ async fn finish_claimed_target(
     if target_terminalized
         && matches!(&claimed.operation, JobCommand::Backup { .. })
         && outcome.status != TARGET_STATUS_COMPLETED
+        && matches!(&state.repo, Repository::Memory(_))
     {
         let status = if outcome.status == TARGET_STATUS_CANCELED {
             BackupRequestStatus::ExecutionCanceled
@@ -496,7 +496,7 @@ async fn finish_claimed_target(
             .refresh_job_status_from_targets(claimed.job_id)
             .await?;
         state
-            .publish_job_finished_after_refresh(claimed.job_id, refreshed)
+            .process_job_terminal_events_or_publish_refresh(500, claimed.job_id, refreshed)
             .await?;
     }
     Ok(())

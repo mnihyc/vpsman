@@ -4,8 +4,9 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{bail, Result};
 use base64::Engine as _;
 use chrono::{Duration, Utc};
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::{Postgres, Row, Transaction};
+use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     job_command_safety, job_command_safety_by_operation_type, payload_hash, CommandOutput,
@@ -37,6 +38,52 @@ use crate::{unix_now, TargetDispatchOutcome};
 pub(crate) struct PrecompletedJobTarget {
     pub(crate) client_id: String,
     pub(crate) outcome: TargetDispatchOutcome,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalizedTarget {
+    pub(crate) job_id: Uuid,
+    pub(crate) client_id: String,
+    pub(crate) outcome: TargetDispatchOutcome,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TerminalizedJob {
+    pub(crate) job_id: Uuid,
+    pub(crate) status: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TerminalizationBatch {
+    pub(crate) targets: Vec<TerminalizedTarget>,
+    pub(crate) jobs: Vec<TerminalizedJob>,
+}
+
+impl TerminalizationBatch {
+    pub(crate) fn push_target(
+        &mut self,
+        job_id: Uuid,
+        client_id: impl Into<String>,
+        outcome: TargetDispatchOutcome,
+    ) {
+        self.targets.push(TerminalizedTarget {
+            job_id,
+            client_id: client_id.into(),
+            outcome,
+        });
+    }
+
+    pub(crate) fn push_job(&mut self, job_id: Uuid, status: impl Into<String>) {
+        self.jobs.push(TerminalizedJob {
+            job_id,
+            status: status.into(),
+        });
+    }
+
+    pub(crate) fn extend(&mut self, other: TerminalizationBatch) {
+        self.targets.extend(other.targets);
+        self.jobs.extend(other.jobs);
+    }
 }
 
 fn precompleted_targets_by_client<'a>(
@@ -124,6 +171,136 @@ async fn insert_precompleted_output_in_tx(
     .bind(output.data.len() as i64)
     .bind(output.exit_code)
     .bind(output.done)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn target_outcome_event_payload(outcome: &TargetDispatchOutcome) -> Value {
+    json!({
+        "status": &outcome.status,
+        "exit_code": outcome.exit_code,
+        "accepted": outcome.accepted,
+        "message": &outcome.message,
+        "received_at": &outcome.received_at,
+    })
+}
+
+fn target_outcome_from_event_payload(
+    status: &str,
+    payload: Option<Value>,
+) -> TargetDispatchOutcome {
+    let payload = payload.unwrap_or_else(|| json!({}));
+    let message = payload
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or(status)
+        .to_string();
+    let exit_code = payload
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok());
+    let accepted = payload
+        .get("accepted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let received_at = payload
+        .get("received_at")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    TargetDispatchOutcome {
+        status: status.to_string(),
+        exit_code,
+        #[cfg(test)]
+        command_version: None,
+        accepted,
+        message,
+        received_at,
+        outputs: Vec::new(),
+    }
+}
+
+fn synthetic_terminal_outcome(
+    status: &str,
+    message: impl Into<String>,
+    exit_code: Option<i32>,
+    accepted: bool,
+) -> TargetDispatchOutcome {
+    TargetDispatchOutcome {
+        status: status.to_string(),
+        exit_code,
+        #[cfg(test)]
+        command_version: None,
+        accepted,
+        message: message.into(),
+        received_at: None,
+        outputs: Vec::new(),
+    }
+}
+
+pub(crate) async fn enqueue_target_terminal_event_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    client_id: &str,
+    outcome: &TargetDispatchOutcome,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO job_terminal_events (
+            id,
+            event_kind,
+            job_id,
+            client_id,
+            status,
+            outcome
+        )
+        SELECT $1, 'target_terminalized', $2, $3, $4, $5
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM job_terminal_events
+            WHERE event_kind = 'target_terminalized'
+              AND job_id = $2
+              AND client_id = $3
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(job_id)
+    .bind(client_id)
+    .bind(&outcome.status)
+    .bind(sqlx::types::Json(target_outcome_event_payload(outcome)))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn enqueue_job_terminal_event_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    status: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO job_terminal_events (
+            id,
+            event_kind,
+            job_id,
+            client_id,
+            status,
+            outcome
+        )
+        SELECT $1, 'job_terminalized', $2, NULL, $3, NULL
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM job_terminal_events
+            WHERE event_kind = 'job_terminalized'
+              AND job_id = $2
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(job_id)
+    .bind(status)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -436,6 +613,7 @@ pub(crate) async fn finish_job_in_tx_if_all_targets_terminal(
     .execute(&mut **tx)
     .await?;
     if updated.rows_affected() > 0 {
+        enqueue_job_terminal_event_in_tx(tx, job_id, &status).await?;
         Ok(Some(status))
     } else {
         Ok(None)
@@ -507,6 +685,9 @@ pub(crate) async fn skip_unstarted_queued_targets_for_client_in_tx(
                 &target_client_id,
             )
             .await?;
+            let outcome =
+                synthetic_terminal_outcome(TARGET_STATUS_SKIPPED, message, Some(0), false);
+            enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome).await?;
             let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
             job_ids.push(job_id);
         }
@@ -587,6 +768,8 @@ pub(crate) async fn mark_active_targets_agent_lost_for_client_in_tx(
             &target_client_id,
         )
         .await?;
+        let outcome = synthetic_terminal_outcome(TARGET_STATUS_AGENT_LOST, message, None, false);
+        enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome).await?;
         let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
         sqlx::query(
             r#"
@@ -843,6 +1026,16 @@ pub(crate) struct JobCompletionContext {
     pub(crate) actor_id: Option<Uuid>,
     pub(crate) payload_hash: String,
     pub(crate) operation: JobCommand,
+}
+
+#[derive(Clone, Debug)]
+struct ClaimedJobTerminalEvent {
+    id: Uuid,
+    event_kind: String,
+    job_id: Uuid,
+    client_id: Option<String>,
+    status: String,
+    outcome: Option<Value>,
 }
 
 fn job_webhook_predicates(command_type: &str, status: &str, include_created: bool) -> Vec<String> {
@@ -1860,6 +2053,8 @@ impl Repository {
                             &mut tx, job_id, client_id,
                         )
                         .await?;
+                        enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, outcome)
+                            .await?;
                         insert_target_result_audit_in_tx(&mut tx, job_id, client_id, outcome)
                             .await?;
                     } else {
@@ -1910,13 +2105,15 @@ impl Repository {
             operation: Some(&operation),
         })
         .await?;
-        for target in precompleted_targets {
-            self.record_job_target_webhook_event(job_id, &target.client_id, &target.outcome)
-                .await?;
-        }
-        if let Some(status) = finished_status {
-            self.record_job_terminal_side_effects(job_id, &status)
-                .await?;
+        if matches!(self, Self::Memory(_)) {
+            for target in precompleted_targets {
+                self.record_job_target_webhook_event(job_id, &target.client_id, &target.outcome)
+                    .await?;
+            }
+            if let Some(status) = finished_status {
+                self.record_job_terminal_side_effects(job_id, &status)
+                    .await?;
+            }
         }
         Ok(job_id)
     }
@@ -2413,7 +2610,7 @@ impl Repository {
             self.record_backup_request_terminal_for_target_status(
                 *job_id,
                 client_id,
-                TARGET_STATUS_AGENT_LOST,
+                TARGET_STATUS_SKIPPED,
                 None,
             )
             .await?;
@@ -2643,6 +2840,7 @@ impl Repository {
             received_at: None,
             outputs: Vec::new(),
         };
+        let mut postgres_finished_status = None::<String>;
         match self {
             Self::Memory(memory) => {
                 let completed_at = unix_now().to_string();
@@ -2807,21 +3005,28 @@ impl Repository {
                 }))
                 .execute(&mut *tx)
                 .await?;
-                let _ = finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
+                enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, &outcome).await?;
+                postgres_finished_status =
+                    finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
                 tx.commit().await?;
             }
         }
-        let status = self.refresh_job_status_from_targets(job_id).await?;
-        self.record_backup_request_terminal_for_target_status(
-            job_id,
-            client_id,
-            TARGET_STATUS_AGENT_LOST,
-            None,
-        )
-        .await?;
-        self.record_job_target_webhook_event(job_id, client_id, &outcome)
-            .await?;
-        Ok(status)
+        match self {
+            Self::Memory(_) => {
+                let status = self.refresh_job_status_from_targets(job_id).await?;
+                self.record_backup_request_terminal_for_target_status(
+                    job_id,
+                    client_id,
+                    TARGET_STATUS_AGENT_LOST,
+                    None,
+                )
+                .await?;
+                self.record_job_target_webhook_event(job_id, client_id, &outcome)
+                    .await?;
+                Ok(status)
+            }
+            Self::Postgres(_) => Ok(postgres_finished_status),
+        }
     }
 
     pub(crate) async fn expire_control_timeout_targets(
@@ -3113,6 +3318,9 @@ impl Repository {
                     }))
                     .execute(&mut *tx)
                     .await?;
+                    let outcome = synthetic_terminal_outcome(status, &message, None, false);
+                    enqueue_target_terminal_event_in_tx(&mut tx, job_id, &client_id, &outcome)
+                        .await?;
                     let _ = finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
                     expired.push(DeadlineExpiredJobTarget {
                         job_id,
@@ -3308,16 +3516,16 @@ impl Repository {
                 .fetch_all(&mut *tx)
                 .await?;
                 let pending_canceled = pending_rows.len();
-                let pending_client_ids = pending_rows
-                    .iter()
-                    .map(|row| row.try_get("client_id").map_err(Into::into))
-                    .collect::<Result<Vec<String>>>()?;
                 for row in &pending_rows {
                     let client_id: String = row.try_get("client_id")?;
                     finalize_active_terminal_input_request_for_terminal_target_in_tx(
                         &mut tx, job_id, &client_id,
                     )
                     .await?;
+                    let outcome =
+                        synthetic_terminal_outcome(TARGET_STATUS_CANCELED, message, None, false);
+                    enqueue_target_terminal_event_in_tx(&mut tx, job_id, &client_id, &outcome)
+                        .await?;
                 }
                 let cancel_targets = active_rows
                     .into_iter()
@@ -3346,15 +3554,6 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                for client_id in &pending_client_ids {
-                    self.record_backup_request_terminal_for_target_status(
-                        job_id,
-                        client_id,
-                        TARGET_STATUS_CANCELED,
-                        None,
-                    )
-                    .await?;
-                }
                 Ok(JobCancelPlan {
                     cancel_targets,
                     pending_canceled,
@@ -3367,7 +3566,7 @@ impl Repository {
         &self,
         job_id: Uuid,
         client_id: &str,
-        _accepted: bool,
+        accepted: bool,
         acked: bool,
         applied: bool,
         message: &str,
@@ -3416,7 +3615,10 @@ impl Repository {
                       AND client_id = $2
                       AND (
                         completed_at IS NULL
-                        OR status IN ('control_timeout', 'canceled')
+                        OR (
+                          NOT $4
+                          AND status IN ('control_timeout', 'canceled')
+                        )
                       )
                     "#,
                 )
@@ -3433,12 +3635,16 @@ impl Repository {
                         &mut tx, job_id, client_id,
                     )
                     .await?;
+                    let outcome =
+                        synthetic_terminal_outcome(TARGET_STATUS_CANCELED, message, None, accepted);
+                    enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, &outcome)
+                        .await?;
                     let _ = finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
                 }
                 tx.commit().await?;
             }
         }
-        if terminalized {
+        if terminalized && matches!(self, Self::Memory(_)) {
             self.record_backup_request_terminal_for_target_status(
                 job_id,
                 client_id,
@@ -3655,8 +3861,8 @@ impl Repository {
                     .execute(&mut *tx)
                     .await?;
                 }
-                let finished_status =
-                    finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
+                enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, outcome).await?;
+                let _ = finish_job_in_tx_if_all_targets_terminal(&mut tx, job_id).await?;
                 tx.commit().await?;
                 let update_lifecycle_operation = if outcome.status == TARGET_STATUS_COMPLETED
                     || agent_update_activation_failure_status(&outcome.status)
@@ -3720,12 +3926,6 @@ impl Repository {
                     }
                     _ => {}
                 }
-                if let Some(status) = finished_status {
-                    self.record_job_terminal_side_effects(job_id, &status)
-                        .await?;
-                }
-                self.record_job_target_webhook_event(job_id, client_id, outcome)
-                    .await?;
                 Ok(true)
             }
         }
@@ -3747,6 +3947,7 @@ impl Repository {
                 true
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
                 let row = sqlx::query(
                     r#"
                     UPDATE jobs
@@ -3758,16 +3959,244 @@ impl Repository {
                 )
                 .bind(job_id)
                 .bind(status)
-                .fetch_optional(pool)
+                .fetch_optional(&mut *tx)
                 .await?;
-                row.is_some()
+                let finished = row.is_some();
+                if finished {
+                    enqueue_job_terminal_event_in_tx(&mut tx, job_id, status).await?;
+                }
+                tx.commit().await?;
+                finished
             }
         };
-        if finished {
+        if finished && matches!(self, Self::Memory(_)) {
             self.record_job_terminal_side_effects(job_id, status)
                 .await?;
         }
         Ok(finished)
+    }
+
+    pub(crate) async fn process_pending_job_terminal_events(
+        &self,
+        limit: i64,
+        lease_secs: i64,
+    ) -> Result<TerminalizationBatch> {
+        let mut remaining = limit.clamp(1, 1000);
+        let mut batch = TerminalizationBatch::default();
+        loop {
+            let events = match self {
+                Self::Memory(_) => Vec::new(),
+                Self::Postgres(pool) => {
+                    let lease_id = Uuid::new_v4();
+                    let rows = sqlx::query(
+                        r#"
+                    WITH claim AS (
+                        SELECT event.id
+                        FROM job_terminal_events event
+                        WHERE (
+                            (
+                                event.processing_status IN ('queued', 'failed')
+                                AND (
+                                    event.next_attempt_at IS NULL
+                                    OR event.next_attempt_at <= now()
+                                )
+                            )
+                            OR (
+                                event.processing_status = 'processing'
+                                AND event.lease_until IS NOT NULL
+                                AND event.lease_until <= now()
+                            )
+                        )
+                        AND (
+                            event.event_kind <> 'job_terminalized'
+                            OR NOT EXISTS (
+                                SELECT 1
+                                FROM job_terminal_events target_event
+                                WHERE target_event.job_id = event.job_id
+                                  AND target_event.event_kind = 'target_terminalized'
+                                  AND target_event.processing_status <> 'processed'
+                            )
+                        )
+                        ORDER BY
+                            event.created_at ASC,
+                            CASE event.event_kind
+                                WHEN 'target_terminalized' THEN 0
+                                ELSE 1
+                            END ASC,
+                            event.id ASC
+                        LIMIT $1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE job_terminal_events event
+                    SET
+                        processing_status = 'processing',
+                        lease_id = $2,
+                        lease_until = now() + ($3::bigint * interval '1 second'),
+                        attempt_count = attempt_count + 1,
+                        last_error = NULL
+                    FROM claim
+                    WHERE event.id = claim.id
+                    RETURNING
+                        event.id,
+                        event.event_kind,
+                        event.job_id,
+                        event.client_id,
+                        event.status,
+                        event.outcome
+                    "#,
+                    )
+                    .bind(remaining)
+                    .bind(lease_id)
+                    .bind(lease_secs.clamp(1, 3600))
+                    .fetch_all(pool)
+                    .await?;
+                    rows.into_iter()
+                        .map(|row| {
+                            let outcome: Option<sqlx::types::Json<Value>> =
+                                row.try_get("outcome")?;
+                            Ok::<_, anyhow::Error>(ClaimedJobTerminalEvent {
+                                id: row.try_get("id")?,
+                                event_kind: row.try_get("event_kind")?,
+                                job_id: row.try_get("job_id")?,
+                                client_id: row.try_get("client_id")?,
+                                status: row.try_get("status")?,
+                                outcome: outcome.map(|value| value.0),
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?
+                }
+            };
+            if events.is_empty() {
+                break;
+            }
+            remaining = remaining.saturating_sub(events.len() as i64);
+            let processed = self.process_claimed_job_terminal_events(events).await?;
+            batch.extend(processed);
+            if remaining <= 0 {
+                break;
+            }
+        }
+        Ok(batch)
+    }
+
+    async fn process_claimed_job_terminal_events(
+        &self,
+        events: Vec<ClaimedJobTerminalEvent>,
+    ) -> Result<TerminalizationBatch> {
+        let mut batch = TerminalizationBatch::default();
+        for event in events {
+            let result = self.process_claimed_job_terminal_event(&event).await;
+            match result {
+                Ok(Some(processed)) => {
+                    self.mark_job_terminal_event_processed(event.id).await?;
+                    batch.extend(processed);
+                }
+                Ok(None) => {
+                    self.mark_job_terminal_event_processed(event.id).await?;
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    warn!(
+                        %message,
+                        event_id = %event.id,
+                        job_id = %event.job_id,
+                        event_kind = %event.event_kind,
+                        "job terminal event processing failed"
+                    );
+                    self.mark_job_terminal_event_failed(event.id, &message)
+                        .await?;
+                }
+            }
+        }
+        Ok(batch)
+    }
+
+    async fn process_claimed_job_terminal_event(
+        &self,
+        event: &ClaimedJobTerminalEvent,
+    ) -> Result<Option<TerminalizationBatch>> {
+        let mut batch = TerminalizationBatch::default();
+        match event.event_kind.as_str() {
+            "target_terminalized" => {
+                let Some(client_id) = event.client_id.as_deref() else {
+                    bail!("target terminal event missing client_id");
+                };
+                let outcome =
+                    target_outcome_from_event_payload(&event.status, event.outcome.clone());
+                self.record_backup_request_terminal_for_target_status(
+                    event.job_id,
+                    client_id,
+                    &event.status,
+                    None,
+                )
+                .await?;
+                self.record_job_target_webhook_event(event.job_id, client_id, &outcome)
+                    .await?;
+                batch.push_target(event.job_id, client_id, outcome);
+                Ok(Some(batch))
+            }
+            "job_terminalized" => {
+                self.record_job_terminal_side_effects(event.job_id, &event.status)
+                    .await?;
+                batch.push_job(event.job_id, event.status.clone());
+                Ok(Some(batch))
+            }
+            _ => bail!("unknown job terminal event kind: {}", event.event_kind),
+        }
+    }
+
+    async fn mark_job_terminal_event_processed(&self, event_id: Uuid) -> Result<()> {
+        match self {
+            Self::Memory(_) => {}
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE job_terminal_events
+                    SET
+                        processing_status = 'processed',
+                        processed_at = COALESCE(processed_at, now()),
+                        lease_id = NULL,
+                        lease_until = NULL,
+                        next_attempt_at = NULL,
+                        last_error = NULL
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(event_id)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn mark_job_terminal_event_failed(&self, event_id: Uuid, error: &str) -> Result<()> {
+        let error = error.chars().take(4096).collect::<String>();
+        match self {
+            Self::Memory(_) => {}
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE job_terminal_events
+                    SET
+                        processing_status = 'failed',
+                        lease_id = NULL,
+                        lease_until = NULL,
+                        next_attempt_at = now() + (
+                            LEAST(3600, GREATEST(5, attempt_count * attempt_count * 5))
+                            * interval '1 second'
+                        ),
+                        last_error = $2
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(event_id)
+                .bind(error)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn record_job_terminal_side_effects(

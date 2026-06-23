@@ -64,6 +64,7 @@ pub(crate) async fn upsert_agent_identity(
         client_id: view.client_id.clone(),
         gateway_id: "identity".to_string(),
     });
+    state.process_job_terminal_events(500).await?;
     Ok((StatusCode::CREATED, Json(view)))
 }
 
@@ -121,6 +122,7 @@ pub(crate) async fn revoke_current_client_key(
         client_id,
         gateway_id: "key_lifecycle".to_string(),
     });
+    state.process_job_terminal_events(500).await?;
     Ok((StatusCode::CREATED, Json(record)))
 }
 

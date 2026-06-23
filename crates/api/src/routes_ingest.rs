@@ -126,6 +126,7 @@ pub(crate) async fn ingest_agent_hello(
         client_id: event.hello.client_id,
         gateway_id: event.gateway_id,
     });
+    state.process_job_terminal_events(500).await?;
     Ok(Json(IngestResponse {
         accepted: true,
         message: "agent hello recorded".to_string(),
@@ -344,7 +345,7 @@ pub(crate) async fn ingest_command_output(
                 .refresh_job_status_from_targets(event.job_id)
                 .await?;
             state
-                .publish_job_finished_after_refresh(event.job_id, refreshed)
+                .process_job_terminal_events_or_publish_refresh(500, event.job_id, refreshed)
                 .await?;
             if let Err(error) = try_record_agent_update_lifecycle_for_job_target(
                 &state,
@@ -481,7 +482,7 @@ async fn finalize_contiguous_final_job_output_if_ready(
     if record_result.target_terminalized {
         let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
         state
-            .publish_job_finished_after_refresh(job_id, refreshed)
+            .process_job_terminal_events_or_publish_refresh(500, job_id, refreshed)
             .await?;
         if let Err(error) =
             try_record_agent_update_lifecycle_for_job_target(state, job_id, client_id, &outcome)

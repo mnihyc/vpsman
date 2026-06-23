@@ -121,7 +121,7 @@ pub(crate) async fn cancel_job(
     }
     let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
     state
-        .publish_job_finished_after_refresh(job_id, refreshed.clone())
+        .process_job_terminal_events_or_publish_refresh(500, job_id, refreshed.clone())
         .await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -469,6 +469,7 @@ async fn create_job_inner(
         .terminal_job_status_after_refresh(job_id, refreshed)
         .await?
         .unwrap_or_else(|| JOB_STATUS_RUNNING.to_string());
+    state.process_job_terminal_events(500).await?;
     crate::job_dispatcher::wake_job_dispatcher(state.clone());
     let target_counts = create_job_target_counts(state, job_id).await?;
     let control_deadline_extra_secs = state
@@ -1283,7 +1284,7 @@ fn bounded_cancel_reason(reason: Option<&str>) -> Option<String> {
         .map(|value| value.chars().take(512).collect())
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct TargetDispatchOutcome {
     pub(crate) status: String,
     pub(crate) exit_code: Option<i32>,

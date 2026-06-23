@@ -21,11 +21,29 @@ use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
 use crate::repository_jobs::{
     append_synthetic_agent_lost_output_in_tx, append_synthetic_status_output_in_tx,
-    finish_job_in_tx_if_all_targets_terminal,
+    enqueue_target_terminal_event_in_tx, finish_job_in_tx_if_all_targets_terminal,
 };
 use crate::security::constant_time_eq;
 
 const TELEMETRY_BUCKET_SECS: i32 = 60;
+
+fn terminal_outcome(
+    status: &str,
+    message: impl Into<String>,
+    exit_code: Option<i32>,
+    accepted: bool,
+) -> crate::TargetDispatchOutcome {
+    crate::TargetDispatchOutcome {
+        status: status.to_string(),
+        exit_code,
+        #[cfg(test)]
+        command_version: None,
+        accepted,
+        message: message.into(),
+        received_at: None,
+        outputs: Vec::new(),
+    }
+}
 
 async fn mark_old_incarnation_targets_agent_lost_in_tx(
     tx: &mut Transaction<'_, Postgres>,
@@ -165,6 +183,10 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                     }))
                     .execute(&mut **tx)
                     .await?;
+                    let outcome =
+                        terminal_outcome(TARGET_STATUS_FAILED, message.clone(), Some(1), false);
+                    enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome)
+                        .await?;
                     let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
                     affected_job_ids.push(job_id);
                     continue;
@@ -263,6 +285,9 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
                 }))
                 .execute(&mut **tx)
                 .await?;
+                let outcome = terminal_outcome(TARGET_STATUS_COMPLETED, message, Some(0), true);
+                enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome)
+                    .await?;
                 let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
                 affected_job_ids.push(job_id);
                 continue;
@@ -328,6 +353,8 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
         }))
         .execute(&mut **tx)
         .await?;
+        let outcome = terminal_outcome(TARGET_STATUS_AGENT_LOST, message.clone(), None, false);
+        enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome).await?;
         let _ = finish_job_in_tx_if_all_targets_terminal(tx, job_id).await?;
         affected_job_ids.push(job_id);
     }

@@ -119,6 +119,7 @@ pub(crate) async fn delete_agent(
         client_id,
         gateway_id: "inventory_delete".to_string(),
     });
+    state.process_job_terminal_events(500).await?;
     Ok(Json(response))
 }
 

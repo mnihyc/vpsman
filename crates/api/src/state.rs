@@ -21,6 +21,7 @@ use crate::{
     model_source_templates::SourceStatusView,
     object_store::BackupObjectStore,
     repository::Repository,
+    repository_jobs::TerminalizationBatch,
     security::{bearer_token, constant_time_eq, operator_has_scope, role_allows},
 };
 
@@ -589,6 +590,47 @@ impl AppState {
             .await?
         {
             self.publish(WsEvent::JobFinished { job_id, status });
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn process_job_terminal_events(
+        &self,
+        limit: i64,
+    ) -> Result<TerminalizationBatch> {
+        let batch = self
+            .repo
+            .process_pending_job_terminal_events(limit, 60)
+            .await?;
+        for event in &batch.targets {
+            debug_assert_ne!(event.job_id, uuid::Uuid::nil());
+            debug_assert!(!event.client_id.is_empty());
+            debug_assert!(!event.outcome.status.is_empty());
+        }
+        for event in &batch.jobs {
+            if !matches!(
+                event.status.as_str(),
+                JOB_STATUS_QUEUED | JOB_STATUS_RUNNING
+            ) {
+                self.publish(WsEvent::JobFinished {
+                    job_id: event.job_id,
+                    status: event.status.clone(),
+                });
+            }
+        }
+        Ok(batch)
+    }
+
+    pub(crate) async fn process_job_terminal_events_or_publish_refresh(
+        &self,
+        limit: i64,
+        job_id: uuid::Uuid,
+        refreshed: Option<String>,
+    ) -> Result<()> {
+        let batch = self.process_job_terminal_events(limit).await?;
+        if !batch.jobs.iter().any(|event| event.job_id == job_id) {
+            self.publish_job_finished_after_refresh(job_id, refreshed)
+                .await?;
         }
         Ok(())
     }
