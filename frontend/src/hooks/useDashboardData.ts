@@ -150,6 +150,7 @@ export function useDashboardData(activeView: ActiveView) {
       void jobs.loadJobs();
       void inventory.loadTagInventory();
     } else if (activeView === "Topology") {
+      void inventory.loadRuntimeConfigApplyStates();
       void topology.loadTunnelPlans();
       void topology.loadNetworkObservations();
       void topology.loadNetworkTrends();
@@ -180,6 +181,7 @@ export function useDashboardData(activeView: ActiveView) {
     audit.loadAudits,
     backups.loadBackups,
     inventory.loadTagInventory,
+    inventory.loadRuntimeConfigApplyStates,
     jobs.loadJobs,
     schedules.loadSchedules,
     system.loadSuiteConfig,
@@ -538,6 +540,7 @@ export function useDashboardData(activeView: ActiveView) {
     tags: inventory.tags,
     tagsError: inventory.tagsError,
     tagsLoading: inventory.tagsLoading,
+    runtimeConfigApplyStates: inventory.runtimeConfigApplyStates,
     runtimeConfigPatchGenerators: inventory.runtimeConfigPatchGenerators,
     telemetryRollups: fleet.telemetryRollups,
     topologyError: topology.topologyError,

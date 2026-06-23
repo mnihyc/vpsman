@@ -3,7 +3,9 @@
 # The API owns runtime config. Do not put backup, update, execution,
 # telemetry, tunnel, routing, traffic, template, or policy sections in this
 # file. Agents load this file only to connect and authenticate to the gateway;
-# server-managed runtime config is pushed as exclusive runtime_config_sync jobs.
+# after hello they request the server-applied runtime config state, which is
+# pushed as exclusive runtime_config_sync jobs. A failed sync does not advance
+# the server's per-VPS applied runtime config record.
 
 client_id = "agent-nrt-04"
 

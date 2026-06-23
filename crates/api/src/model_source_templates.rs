@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vpsman_common::PrivilegeAssertion;
+use vpsman_common::{AgentRuntimeConfig, PrivilegeAssertion};
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct SourceTemplateView {
@@ -168,6 +168,62 @@ pub(crate) struct RuntimeConfigOverrideView {
     pub(crate) reason: String,
     pub(crate) updated_at: String,
     pub(crate) updated_by: Option<Uuid>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigApplyStateView {
+    pub(crate) client_id: String,
+    pub(crate) applied_version: Option<u64>,
+    pub(crate) applied_content_hash: Option<String>,
+    pub(crate) applied_job_id: Option<Uuid>,
+    pub(crate) applied_at: Option<String>,
+    pub(crate) pending_version: Option<u64>,
+    pub(crate) pending_content_hash: Option<String>,
+    pub(crate) pending_job_id: Option<Uuid>,
+    pub(crate) pending_reason: Option<String>,
+    pub(crate) pending_status: Option<String>,
+    pub(crate) pending_error: Option<String>,
+    pub(crate) pending_updated_at: Option<String>,
+    pub(crate) updated_at: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeConfigApplyStateRecord {
+    pub(crate) client_id: String,
+    pub(crate) applied_version: Option<u64>,
+    pub(crate) applied_content_hash: Option<String>,
+    pub(crate) applied_config: Option<AgentRuntimeConfig>,
+    pub(crate) applied_job_id: Option<Uuid>,
+    pub(crate) applied_at: Option<String>,
+    pub(crate) pending_version: Option<u64>,
+    pub(crate) pending_content_hash: Option<String>,
+    pub(crate) pending_config: Option<AgentRuntimeConfig>,
+    pub(crate) pending_job_id: Option<Uuid>,
+    pub(crate) pending_reason: Option<String>,
+    pub(crate) pending_status: Option<String>,
+    pub(crate) pending_error: Option<String>,
+    pub(crate) pending_updated_at: Option<String>,
+    pub(crate) updated_at: String,
+}
+
+impl RuntimeConfigApplyStateRecord {
+    pub(crate) fn view(&self) -> RuntimeConfigApplyStateView {
+        RuntimeConfigApplyStateView {
+            client_id: self.client_id.clone(),
+            applied_version: self.applied_version,
+            applied_content_hash: self.applied_content_hash.clone(),
+            applied_job_id: self.applied_job_id,
+            applied_at: self.applied_at.clone(),
+            pending_version: self.pending_version,
+            pending_content_hash: self.pending_content_hash.clone(),
+            pending_job_id: self.pending_job_id,
+            pending_reason: self.pending_reason.clone(),
+            pending_status: self.pending_status.clone(),
+            pending_error: self.pending_error.clone(),
+            pending_updated_at: self.pending_updated_at.clone(),
+            updated_at: self.updated_at.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

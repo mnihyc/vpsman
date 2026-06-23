@@ -38,8 +38,9 @@ use crate::{
     executor::execute_job_command_with_config_cancel_and_output_sink,
     network_probe::{execute_network_probe_command, NetworkProbeInput},
     network_runtime::{
-        execute_runtime_tunnel_reconcile_report, execute_runtime_tunnel_remove_report,
-        NetworkRuntimeReconcileInput, NetworkRuntimeRemoveInput,
+        execute_runtime_tunnel_reconcile_report_cancelable,
+        execute_runtime_tunnel_remove_report_cancelable, NetworkRuntimeReconcileInput,
+        NetworkRuntimeRemoveInput,
     },
     network_speed::{execute_network_speed_test_command, NetworkSpeedTestInput},
     network_status::{execute_network_status_command, NetworkStatusInput},
@@ -76,9 +77,6 @@ pub(crate) async fn run_agent(
         Ok(report) => log_supervisor_startup_reconcile(&report),
         Err(error) => warn!(%error, "process supervisor startup reconcile failed"),
     }
-    let startup_reconcile = reconcile_configured_runtime_tunnels(&config, "agent_start").await;
-    log_configured_runtime_tunnel_reconcile(&startup_reconcile);
-
     loop {
         let endpoints = override_endpoint
             .as_ref()
@@ -271,14 +269,21 @@ async fn connect_and_stream(
                             )
                             .await?;
                         }
-                        CommandExecutionEvent::Finished(result) => {
+                        CommandExecutionEvent::Finished(mut result) => {
+                            let config_update = result.config_update.take();
                             finish_active_command(
                                 &mut stream,
                                 &mut seq,
                                 &mut *command_runtime,
-                                result,
+                                *result,
                             )
                             .await?;
+                            if let Some(next_config) = config_update {
+                                *config = next_config;
+                                ticker = time::interval(Duration::from_secs(config.telemetry_light_secs.max(5)));
+                                unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
+                                unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
+                            }
                         }
                     }
                 }
@@ -426,9 +431,19 @@ async fn run_unmanaged_update_check(config: &AgentConfig) {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 async fn reconcile_configured_runtime_tunnels(
     config: &AgentConfig,
     trigger: &'static str,
+) -> serde_json::Value {
+    reconcile_configured_runtime_tunnels_cancelable(config, trigger, CommandCancelToken::default())
+        .await
+}
+
+async fn reconcile_configured_runtime_tunnels_cancelable(
+    config: &AgentConfig,
+    trigger: &'static str,
+    cancel_token: CommandCancelToken,
 ) -> serde_json::Value {
     let total = config.network.runtime_status_telemetry_plans.len();
     let mut summaries = Vec::with_capacity(total);
@@ -439,15 +454,35 @@ async fn reconcile_configured_runtime_tunnels(
     let mut failed = 0_u64;
 
     for telemetry_plan in &config.network.runtime_status_telemetry_plans {
+        if let Err(error) = cancel_token.check("runtime_config_sync") {
+            failed += 1;
+            summaries.push(runtime_reconcile_summary(
+                trigger,
+                telemetry_plan.plan_id.as_deref(),
+                serde_json::json!({
+                    "type": "runtime_tunnel_reconcile",
+                    "status": "failed",
+                    "plan": telemetry_plan.plan.name,
+                    "interface": telemetry_plan.plan.interface_name,
+                    "side": endpoint_side_name(telemetry_plan.endpoint_side),
+                    "manager": telemetry_plan.plan.runtime_control.manager,
+                }),
+                Some(error.to_string()),
+            ));
+            break;
+        }
         let plan = &telemetry_plan.plan;
-        match execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
-            config,
-            plan,
-            side: telemetry_plan.endpoint_side,
-            max_timeout_secs: config.network.runtime_command_timeout_secs.max(1),
-            #[cfg(test)]
-            effective_uid_override: None,
-        })
+        match execute_runtime_tunnel_reconcile_report_cancelable(
+            NetworkRuntimeReconcileInput {
+                config,
+                plan,
+                side: telemetry_plan.endpoint_side,
+                max_timeout_secs: config.network.runtime_command_timeout_secs.max(1),
+                #[cfg(test)]
+                effective_uid_override: None,
+            },
+            cancel_token.clone(),
+        )
         .await
         {
             Ok(report) => {
@@ -516,13 +551,20 @@ async fn reconcile_configured_runtime_tunnels(
     })
 }
 
+#[derive(Debug)]
+struct RuntimeConfigSyncResult {
+    outputs: Vec<CommandOutput>,
+    applied_config: Option<AgentConfig>,
+}
+
 async fn apply_runtime_config_sync(
     job_id: uuid::Uuid,
-    config: &mut AgentConfig,
+    config: &AgentConfig,
     runtime_config: &AgentRuntimeConfig,
     desired_version: u64,
     reason: &str,
-) -> Result<Vec<CommandOutput>> {
+    cancel_token: CommandCancelToken,
+) -> Result<RuntimeConfigSyncResult> {
     anyhow::ensure!(
         runtime_config.version == desired_version,
         "runtime config version mismatch"
@@ -544,14 +586,18 @@ async fn apply_runtime_config_sync(
 
     let mut removals = Vec::with_capacity(stale_tunnels.len());
     for stale in &stale_tunnels {
-        match execute_runtime_tunnel_remove_report(NetworkRuntimeRemoveInput {
-            config,
-            plan: &stale.plan,
-            side: stale.endpoint_side,
-            max_timeout_secs: config.network.runtime_command_timeout_secs.max(1),
-            #[cfg(test)]
-            effective_uid_override: None,
-        })
+        cancel_token.check("runtime_config_sync")?;
+        match execute_runtime_tunnel_remove_report_cancelable(
+            NetworkRuntimeRemoveInput {
+                config,
+                plan: &stale.plan,
+                side: stale.endpoint_side,
+                max_timeout_secs: config.network.runtime_command_timeout_secs.max(1),
+                #[cfg(test)]
+                effective_uid_override: None,
+            },
+            cancel_token.clone(),
+        )
         .await
         {
             Ok(report) => removals.push(runtime_reconcile_summary(
@@ -576,8 +622,15 @@ async fn apply_runtime_config_sync(
         }
     }
 
-    runtime_config.apply_to_agent_config(config);
-    let reconcile = reconcile_configured_runtime_tunnels(config, "runtime_config_sync").await;
+    let mut candidate_config = config.clone();
+    runtime_config.apply_to_agent_config(&mut candidate_config);
+    cancel_token.check("runtime_config_sync")?;
+    let reconcile = reconcile_configured_runtime_tunnels_cancelable(
+        &candidate_config,
+        "runtime_config_sync",
+        cancel_token,
+    )
+    .await;
     let removal_failed = removals
         .iter()
         .any(|removal| removal.get("status").and_then(serde_json::Value::as_str) == Some("failed"));
@@ -594,19 +647,23 @@ async fn apply_runtime_config_sync(
         "job_id": job_id,
         "desired_version": desired_version,
         "reason": reason,
-        "client_id": &config.client_id,
+        "client_id": &candidate_config.client_id,
         "removed_tunnel_count": removals.len(),
         "removals": removals,
         "reconcile": reconcile,
         "bootstrap_config_persisted": false,
     });
-    Ok(vec![CommandOutput {
+    let output = CommandOutput {
         job_id,
         stream: OutputStream::Status,
         data: serde_json::to_vec(&body)?,
         exit_code: Some(if status == "applied" { 0 } else { 1 }),
         done: true,
-    }])
+    };
+    Ok(RuntimeConfigSyncResult {
+        outputs: vec![output],
+        applied_config: (status == "applied").then_some(candidate_config),
+    })
 }
 
 fn runtime_tunnel_identity_matches(
@@ -644,42 +701,6 @@ fn runtime_reconcile_summary(
             .unwrap_or(serde_json::Value::Null),
         "error": error,
     })
-}
-
-fn log_configured_runtime_tunnel_reconcile(report: &serde_json::Value) {
-    let trigger = report["trigger"].as_str().unwrap_or("unknown");
-    let status = report["status"].as_str().unwrap_or("unknown");
-    let total = report["total"].as_u64().unwrap_or_default();
-    let converged = report["converged"].as_u64().unwrap_or_default();
-    let observed = report["observed"].as_u64().unwrap_or_default();
-    let skipped = report["skipped"].as_u64().unwrap_or_default();
-    let degraded = report["degraded"].as_u64().unwrap_or_default();
-    let failed = report["failed"].as_u64().unwrap_or_default();
-    if failed > 0 || degraded > 0 {
-        warn!(
-            %trigger,
-            %status,
-            total,
-            converged,
-            observed,
-            skipped,
-            degraded,
-            failed,
-            "configured runtime tunnel reconcile completed with issues"
-        );
-    } else if total > 0 {
-        info!(
-            %trigger,
-            %status,
-            total,
-            converged,
-            observed,
-            skipped,
-            "configured runtime tunnel reconcile completed"
-        );
-    } else {
-        debug!(%trigger, %status, "no configured runtime tunnels to reconcile");
-    }
 }
 
 fn log_supervisor_startup_reconcile(report: &serde_json::Value) {
@@ -818,11 +839,12 @@ struct CommandExecutionResult {
     operation_type: &'static str,
     max_timeout_secs: u64,
     result: Result<Vec<CommandOutput>>,
+    config_update: Option<AgentConfig>,
 }
 
 enum CommandExecutionEvent {
     Output(CommandOutput),
-    Finished(CommandExecutionResult),
+    Finished(Box<CommandExecutionResult>),
 }
 
 struct CommandFrameContext<'a> {
@@ -1371,39 +1393,16 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
         return Ok(true);
     }
-    if let JobCommand::RuntimeConfigSync {
+    let runtime_sync = if let JobCommand::RuntimeConfigSync {
         desired_version,
         reason,
         config: runtime_config,
     } = &request.command
     {
-        let outputs = match apply_runtime_config_sync(
-            request.job_id,
-            config,
-            runtime_config,
-            *desired_version,
-            reason,
-        )
-        .await
-        {
-            Ok(outputs) => outputs,
-            Err(error) => command_result_outputs(
-                request.job_id,
-                "runtime_config_sync",
-                max_timeout_secs,
-                Err(error),
-            ),
-        };
-        remember_completed_command_outputs(
-            command_runtime,
-            request.job_id,
-            request_payload_hash,
-            &outputs,
-        )
-        .await?;
-        send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
-        return Ok(true);
-    }
+        Some((*desired_version, reason.clone(), (**runtime_config).clone()))
+    } else {
+        None
+    };
     let job_id = request.job_id;
     let command_version = request.command_version;
     let operation_type = job_command_type_label(&request.command);
@@ -1412,43 +1411,89 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
     let task_config_path = config_path.to_path_buf();
     let event_tx = command_runtime.command_event_tx.clone();
     let update_verification_tx = command_runtime.update_verification_tx.clone();
-    let terminal_stream_tx = command_runtime.terminal_stream_tx.clone();
     let task_cancel_token = cancel_token.clone();
-    let task = tokio::spawn(async move {
-        let (output_tx, mut output_rx) = mpsc::channel::<CommandOutput>(16);
-        let output_event_tx = event_tx.clone();
-        let output_forwarder = tokio::spawn(async move {
-            while let Some(output) = output_rx.recv().await {
-                if output_event_tx
-                    .send(CommandExecutionEvent::Output(output))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-        let result = execute_authorized_command(
-            request,
-            task_config,
-            task_config_path,
-            max_timeout_secs,
-            output_tx,
-            update_verification_tx,
-            terminal_stream_tx,
-            task_cancel_token,
-        )
-        .await;
-        let _ = output_forwarder.await;
-        let _ = event_tx
-            .send(CommandExecutionEvent::Finished(CommandExecutionResult {
-                job_id,
-                operation_type,
-                max_timeout_secs,
-                result,
-            }))
+    let task = if let Some((desired_version, reason, runtime_config)) = runtime_sync {
+        tokio::spawn(async move {
+            let result = time::timeout(
+                Duration::from_secs(max_timeout_secs.max(1)),
+                run_cancelable(
+                    operation_type,
+                    task_cancel_token.clone(),
+                    apply_runtime_config_sync(
+                        job_id,
+                        &task_config,
+                        &runtime_config,
+                        desired_version,
+                        &reason,
+                        task_cancel_token.clone(),
+                    ),
+                ),
+            )
             .await;
-    });
+            let (result, config_update) = match result {
+                Ok(Ok(sync)) => (Ok(sync.outputs), sync.applied_config),
+                Ok(Err(error)) => (Err(error), None),
+                Err(error) => {
+                    task_cancel_token.cancel("runtime_config_sync_timeout".to_string());
+                    (
+                        Err(anyhow::anyhow!("runtime config sync timed out: {error}")),
+                        None,
+                    )
+                }
+            };
+            let _ = event_tx
+                .send(CommandExecutionEvent::Finished(Box::new(
+                    CommandExecutionResult {
+                        job_id,
+                        operation_type,
+                        max_timeout_secs,
+                        result,
+                        config_update,
+                    },
+                )))
+                .await;
+        })
+    } else {
+        let terminal_stream_tx = command_runtime.terminal_stream_tx.clone();
+        tokio::spawn(async move {
+            let (output_tx, mut output_rx) = mpsc::channel::<CommandOutput>(16);
+            let output_event_tx = event_tx.clone();
+            let output_forwarder = tokio::spawn(async move {
+                while let Some(output) = output_rx.recv().await {
+                    if output_event_tx
+                        .send(CommandExecutionEvent::Output(output))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            let result = execute_authorized_command(
+                request,
+                task_config,
+                task_config_path,
+                max_timeout_secs,
+                output_tx,
+                update_verification_tx,
+                terminal_stream_tx,
+                task_cancel_token,
+            )
+            .await;
+            let _ = output_forwarder.await;
+            let _ = event_tx
+                .send(CommandExecutionEvent::Finished(Box::new(
+                    CommandExecutionResult {
+                        job_id,
+                        operation_type,
+                        max_timeout_secs,
+                        result,
+                        config_update: None,
+                    },
+                )))
+                .await;
+        })
+    };
     command_runtime.active_commands.insert(
         job_id,
         ActiveCommand {
@@ -2266,6 +2311,172 @@ mod tests {
         assert_eq!(report["converged"], 1);
         assert_eq!(report["tunnels"][0]["plan_id"], "plan-a");
         assert_eq!(report["tunnels"][0]["interface"], "tunlr");
+    }
+
+    #[tokio::test]
+    async fn runtime_config_sync_returns_applied_candidate_without_mutating_source() {
+        let base = AgentConfig {
+            client_id: "client-a".to_string(),
+            display_name: "old-name".to_string(),
+            telemetry_light_secs: 15,
+            ..AgentConfig::default()
+        };
+        let desired = AgentRuntimeConfig {
+            version: 9,
+            display_name: "new-name".to_string(),
+            telemetry_light_secs: 30,
+            ..AgentRuntimeConfig::default()
+        };
+
+        let result = apply_runtime_config_sync(
+            uuid::Uuid::new_v4(),
+            &base,
+            &desired,
+            9,
+            "test-success",
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(base.display_name, "old-name");
+        assert_eq!(result.outputs[0].exit_code, Some(0));
+        let applied = result.applied_config.expect("sync should apply");
+        assert_eq!(applied.display_name, "new-name");
+        assert_eq!(applied.telemetry_light_secs, 30);
+    }
+
+    #[tokio::test]
+    async fn runtime_config_sync_failure_does_not_return_config_update() {
+        let root =
+            std::env::temp_dir().join(format!("vpsman-runtime-sync-fail-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let plan = vpsman_common::plan_tunnel(&vpsman_common::TunnelPlanInput {
+            name: "left-right".to_string(),
+            interface_name: "tunlr".to_string(),
+            kind: vpsman_common::TunnelKind::Gre,
+            runtime_control: Default::default(),
+            runtime_topology: Default::default(),
+            left_client_id: "client-a".to_string(),
+            right_client_id: "client-b".to_string(),
+            left_underlay: "198.51.100.10".to_string(),
+            right_underlay: "203.0.113.20".to_string(),
+            address_pool_cidr: "10.255.0.0/30".to_string(),
+            reserved_addresses: Vec::new(),
+            ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+                left: "10.255.0.0".to_string(),
+                right: "10.255.0.1".to_string(),
+                prefix_len: 31,
+            }),
+            ipv6_address_pool_cidr: None,
+            ipv6_tunnel: None,
+            latency_primary_family: Default::default(),
+            bandwidth: vpsman_common::BandwidthTier::M100,
+            latency_ms: 15.0,
+            packet_loss_ratio: 0.0,
+            preference: 1.0,
+            ospf_policy: vpsman_common::OspfCostPolicy::default(),
+        })
+        .unwrap();
+        let base = AgentConfig {
+            client_id: "client-a".to_string(),
+            display_name: "old-name".to_string(),
+            network: vpsman_common::AgentNetworkConfig {
+                root_dir: root.to_string_lossy().to_string(),
+                runtime_ip_argv: vec!["/bin/false".to_string()],
+                runtime_tc_argv: vec!["/bin/false".to_string()],
+                runtime_command_timeout_secs: 1,
+                runtime_unprivileged_mutation_policy:
+                    vpsman_common::AgentRuntimeUnprivilegedMutationPolicy::TryAll,
+                ..Default::default()
+            },
+            ..AgentConfig::default()
+        };
+        let mut desired = AgentRuntimeConfig {
+            version: 10,
+            display_name: "new-name".to_string(),
+            ..AgentRuntimeConfig::from_agent_config(10, &base)
+        };
+        desired.network.apply_enabled = true;
+        desired.network.runtime_reconcile_enabled = true;
+        desired.network.runtime_status_telemetry_plans.push(
+            vpsman_common::AgentRuntimeStatusTelemetryPlan {
+                plan_id: Some("plan-a".to_string()),
+                endpoint_side: vpsman_common::TunnelEndpointSide::Left,
+                plan,
+                traffic_source: Default::default(),
+                traffic_command: None,
+                latency_monitoring_enabled: true,
+                auto_ospf_enabled: false,
+                auto_ospf_updater: None,
+            },
+        );
+
+        let result = apply_runtime_config_sync(
+            uuid::Uuid::new_v4(),
+            &base,
+            &desired,
+            10,
+            "test-failure",
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(base.display_name, "old-name");
+        assert_eq!(result.outputs[0].exit_code, Some(1));
+        assert!(result.applied_config.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_config_sync_cancel_returns_no_config_update() {
+        let token = CommandCancelToken::default();
+        token.cancel("operator requested cancellation".to_string());
+        let base = AgentConfig {
+            client_id: "client-a".to_string(),
+            ..AgentConfig::default()
+        };
+        let desired = AgentRuntimeConfig {
+            version: 11,
+            ..AgentRuntimeConfig::default()
+        };
+
+        let error = apply_runtime_config_sync(
+            uuid::Uuid::new_v4(),
+            &base,
+            &desired,
+            11,
+            "test-cancel",
+            token,
+        )
+        .await
+        .unwrap_err();
+
+        let canceled = error
+            .downcast_ref::<CommandCanceled>()
+            .expect("runtime sync should surface cancellation");
+        assert_eq!(canceled.reason(), "operator requested cancellation");
+    }
+
+    #[test]
+    fn runtime_config_sync_timeout_maps_to_command_timeout_output() {
+        let job_id = uuid::Uuid::new_v4();
+        let outputs = command_result_outputs(
+            job_id,
+            "runtime_config_sync",
+            17,
+            Err(anyhow::anyhow!(
+                "runtime config sync timed out: deadline elapsed"
+            )),
+        );
+
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].exit_code, Some(124));
+        assert!(outputs[0].done);
+        let status: serde_json::Value = serde_json::from_slice(&outputs[0].data).unwrap();
+        assert_eq!(status["type"], "command_timeout");
+        assert_eq!(status["operation_type"], "runtime_config_sync");
+        assert_eq!(status["max_timeout_secs"], 17);
     }
 
     #[test]

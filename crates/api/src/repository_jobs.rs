@@ -2109,6 +2109,13 @@ impl Repository {
         .await?;
         if matches!(self, Self::Memory(_)) {
             for target in precompleted_targets {
+                self.record_runtime_config_apply_terminal_for_target_status(
+                    job_id,
+                    &target.client_id,
+                    &target.outcome.status,
+                    Some(target.outcome.message.as_str()),
+                )
+                .await?;
                 self.record_job_target_webhook_event(job_id, &target.client_id, &target.outcome)
                     .await?;
             }
@@ -2616,6 +2623,13 @@ impl Repository {
                 None,
             )
             .await?;
+            self.record_runtime_config_apply_terminal_for_target_status(
+                *job_id,
+                client_id,
+                TARGET_STATUS_SKIPPED,
+                Some(message),
+            )
+            .await?;
         }
         Ok(unique_job_ids)
     }
@@ -3022,6 +3036,13 @@ impl Repository {
                     client_id,
                     TARGET_STATUS_AGENT_LOST,
                     None,
+                )
+                .await?;
+                self.record_runtime_config_apply_terminal_for_target_status(
+                    job_id,
+                    client_id,
+                    TARGET_STATUS_AGENT_LOST,
+                    Some(outcome.message.as_str()),
                 )
                 .await?;
                 self.record_job_target_webhook_event(job_id, client_id, &outcome)
@@ -3448,6 +3469,13 @@ impl Repository {
                         None,
                     )
                     .await?;
+                    self.record_runtime_config_apply_terminal_for_target_status(
+                        job_id,
+                        client_id,
+                        TARGET_STATUS_CANCELED,
+                        Some(message),
+                    )
+                    .await?;
                 }
                 Ok(JobCancelPlan {
                     cancel_targets,
@@ -3659,6 +3687,13 @@ impl Repository {
                 client_id,
                 TARGET_STATUS_CANCELED,
                 None,
+            )
+            .await?;
+            self.record_runtime_config_apply_terminal_for_target_status(
+                job_id,
+                client_id,
+                TARGET_STATUS_CANCELED,
+                Some(message),
             )
             .await?;
         }
@@ -4140,6 +4175,13 @@ impl Repository {
                     None,
                 )
                 .await?;
+                self.record_runtime_config_apply_terminal_for_target_status(
+                    event.job_id,
+                    client_id,
+                    &event.status,
+                    Some(outcome.message.as_str()),
+                )
+                .await?;
                 self.record_job_target_webhook_event(event.job_id, client_id, &outcome)
                     .await?;
                 batch.push_target(event.job_id, client_id, outcome);
@@ -4245,7 +4287,7 @@ impl Repository {
         Ok(())
     }
 
-    async fn job_operation(&self, job_id: Uuid) -> Result<Option<JobCommand>> {
+    pub(crate) async fn job_operation(&self, job_id: Uuid) -> Result<Option<JobCommand>> {
         match self {
             Self::Memory(memory) => Ok(memory.job_operations.read().await.get(&job_id).cloned()),
             Self::Postgres(pool) => {

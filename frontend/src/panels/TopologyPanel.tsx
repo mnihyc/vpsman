@@ -45,6 +45,7 @@ import type {
   OperatorPreferences,
   PromoteTelemetryTunnelRequest,
   RuntimeTunnelManager,
+  RuntimeConfigApplyStateRecord,
   RuntimeConfigPatchRequest,
   RuntimeConfigPatchResponse,
   TelemetryTunnelRecord,
@@ -99,6 +100,7 @@ export function TopologyPanel({
   networkTrends,
   ospfRecommendations,
   ospfUpdatePlans,
+  runtimeConfigApplyStates,
   onCreateJob,
   onAllocateTunnelEndpoints,
   onCreateTunnelPlan,
@@ -133,6 +135,7 @@ export function TopologyPanel({
   networkTrends: NetworkObservationTrendRecord[];
   ospfRecommendations: NetworkOspfRecommendationRecord[];
   ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
+  runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   topologyGraph: TopologyGraph;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onAllocateTunnelEndpoints: (request: AllocateTunnelEndpointsRequest) => Promise<AllocateTunnelEndpointsResponse>;
@@ -662,6 +665,7 @@ export function TopologyPanel({
         graph={topologyGraph}
         loading={loading}
         onRefresh={onLoadTopologyGraph}
+        runtimeConfigApplyStates={runtimeConfigApplyStates}
       />
       )}
 

@@ -1282,6 +1282,58 @@ const sourceStatus = [
   },
 ];
 
+const runtimeConfigApplyStates = [
+  {
+    client_id: "agent-sfo-01",
+    applied_version: 1780423200,
+    applied_content_hash:
+      "9f0d2c5fbbf493d83e4e944d7f7d0bb4a6acb54a5a4248b4f66f2d2b98a4a100",
+    applied_job_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+    applied_at: "2026-06-02T10:02:00Z",
+    pending_version: null,
+    pending_content_hash: null,
+    pending_job_id: null,
+    pending_reason: null,
+    pending_status: null,
+    pending_error: null,
+    pending_updated_at: null,
+    updated_at: "2026-06-02T10:02:00Z",
+  },
+  {
+    client_id: "agent-fra-02",
+    applied_version: 1780423000,
+    applied_content_hash:
+      "22b2df7fd6f49bb6d518866d77a6f22b6f8e61d2db3e2b2c6f7a12e4d20a0200",
+    applied_job_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+    applied_at: "2026-06-02T09:58:00Z",
+    pending_version: 1780423260,
+    pending_content_hash:
+      "f0d3b8b3c0e9017c0d5ed95a3a9f83a03b2d48f606b78ab836d6ed0f2ff1f201",
+    pending_job_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+    pending_reason: "Enable tunnel monitoring defaults",
+    pending_status: "queued",
+    pending_error: null,
+    pending_updated_at: "2026-06-02T10:01:00Z",
+    updated_at: "2026-06-02T10:01:00Z",
+  },
+  {
+    client_id: "agent-tyo-03",
+    applied_version: null,
+    applied_content_hash: null,
+    applied_job_id: null,
+    applied_at: null,
+    pending_version: 1780423265,
+    pending_content_hash:
+      "f83e776f558e99a2a21c872fb85ebf2b7498055acbc57986602b8a87bdeff303",
+    pending_job_id: "cccccccc-cccc-4ccc-8ccc-ccccccccccc3",
+    pending_reason: "Enable tunnel monitoring defaults",
+    pending_status: "failed",
+    pending_error: "target agent lacks root runtime network capability",
+    pending_updated_at: "2026-06-02T10:02:30Z",
+    updated_at: "2026-06-02T10:02:30Z",
+  },
+];
+
 const runtimeConfigPatchGenerators = [
   {
     actor_id: null,
@@ -2108,6 +2160,7 @@ export async function installConsoleApiMock(
       sourceTemplateAssignmentsFixture,
       sourceTemplatesFixture,
       sourceStatusFixture,
+      runtimeConfigApplyStatesFixture,
       runtimeConfigPatchGeneratorsFixture,
       jobCommandTypeByOperationTypeFixture,
       commandTemplatesFixture,
@@ -3694,6 +3747,12 @@ export async function installConsoleApiMock(
           return jsonResponse(sourceStatusFixture);
         }
         if (
+          pathname === "/api/v1/runtime-config/apply-state" &&
+          method === "GET"
+        ) {
+          return jsonResponse(runtimeConfigApplyStatesFixture);
+        }
+        if (
           pathname === "/api/v1/runtime-config/patch-generators" &&
           method === "GET"
         ) {
@@ -4908,6 +4967,7 @@ export async function installConsoleApiMock(
       sourceTemplateAssignmentsFixture: sourceTemplateAssignments,
       sourceTemplatesFixture: sourceTemplates,
       sourceStatusFixture: sourceStatus,
+      runtimeConfigApplyStatesFixture: runtimeConfigApplyStates,
       runtimeConfigPatchGeneratorsFixture: runtimeConfigPatchGenerators,
       jobCommandTypeByOperationTypeFixture: JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
       commandTemplatesFixture: commandTemplates,

@@ -64,6 +64,7 @@ pub(crate) struct MemoryState {
     pub(crate) source_templates: Arc<RwLock<Vec<SourceTemplateView>>>,
     pub(crate) source_template_assignments: Arc<RwLock<Vec<SourceTemplateAssignmentView>>>,
     pub(crate) runtime_config_overrides: Arc<RwLock<Vec<RuntimeConfigOverrideView>>>,
+    pub(crate) runtime_config_apply_states: Arc<RwLock<Vec<RuntimeConfigApplyStateRecord>>>,
     pub(crate) runtime_config_patch_generators: Arc<RwLock<Vec<RuntimeConfigPatchGeneratorView>>>,
     pub(crate) runtime_config_patch_generators_seeded: Arc<RwLock<bool>>,
     pub(crate) operators: Arc<RwLock<Vec<OperatorRecord>>>,

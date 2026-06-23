@@ -2417,6 +2417,22 @@ export type RuntimeConfigPatchResponse = {
   sync_job_ids: string[];
 };
 
+export type RuntimeConfigApplyStateRecord = {
+  client_id: string;
+  applied_version?: number | null;
+  applied_content_hash?: string | null;
+  applied_job_id?: string | null;
+  applied_at?: string | null;
+  pending_version?: number | null;
+  pending_content_hash?: string | null;
+  pending_job_id?: string | null;
+  pending_reason?: string | null;
+  pending_status?: "queued" | "failed" | string | null;
+  pending_error?: string | null;
+  pending_updated_at?: string | null;
+  updated_at: string;
+};
+
 export type RuntimeConfigPatchGeneratorRecord = {
   id: string;
   name: string;

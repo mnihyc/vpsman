@@ -158,7 +158,7 @@ async fn iproute2_reconciler_rejects_conflicting_existing_tunnel_address() {
 }
 
 #[tokio::test]
-async fn unprivileged_agent_reports_degraded_without_mutating() {
+async fn unprivileged_agent_fails_required_mutation_without_mutating() {
     let job_id = uuid::Uuid::new_v4();
     let root = test_root("unprivileged", job_id);
     tokio::fs::create_dir_all(&root).await.unwrap();
@@ -175,7 +175,7 @@ async fn unprivileged_agent_reports_degraded_without_mutating() {
     .await
     .unwrap();
 
-    assert_eq!(report["status"], "degraded_unprivileged");
+    assert_eq!(report["status"], "failed");
     let commands = report["commands"].as_array().unwrap();
     assert_eq!(commands[0]["label"], "runtime_link_show");
     assert_eq!(commands[0]["skipped"], false);

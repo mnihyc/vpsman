@@ -56,6 +56,48 @@ CREATE TABLE client_runtime_config_overrides (
         CHECK (octet_length(reason) <= 4096)
 );
 
+CREATE TABLE client_runtime_config_apply_state (
+    client_id TEXT PRIMARY KEY REFERENCES clients(id) ON DELETE CASCADE,
+    applied_version BIGINT,
+    applied_content_hash TEXT,
+    applied_config JSONB,
+    applied_job_id UUID REFERENCES jobs(id) ON DELETE SET NULL,
+    applied_at TIMESTAMPTZ,
+    pending_version BIGINT,
+    pending_content_hash TEXT,
+    pending_config JSONB,
+    pending_job_id UUID REFERENCES jobs(id) ON DELETE SET NULL,
+    pending_reason TEXT,
+    pending_status TEXT,
+    pending_error TEXT,
+    pending_updated_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT client_runtime_config_apply_state_pending_status_check
+        CHECK (pending_status IS NULL OR pending_status IN ('queued', 'failed')),
+    CONSTRAINT client_runtime_config_apply_state_applied_config_check
+        CHECK (applied_config IS NULL OR jsonb_typeof(applied_config) = 'object'),
+    CONSTRAINT client_runtime_config_apply_state_pending_config_check
+        CHECK (pending_config IS NULL OR jsonb_typeof(pending_config) = 'object'),
+    CONSTRAINT client_runtime_config_apply_state_hash_check
+        CHECK (
+            (applied_content_hash IS NULL OR octet_length(applied_content_hash) <= 128)
+            AND (pending_content_hash IS NULL OR octet_length(pending_content_hash) <= 128)
+        ),
+    CONSTRAINT client_runtime_config_apply_state_reason_check
+        CHECK (pending_reason IS NULL OR octet_length(pending_reason) <= 4096),
+    CONSTRAINT client_runtime_config_apply_state_error_check
+        CHECK (pending_error IS NULL OR octet_length(pending_error) <= 4096)
+);
+
+CREATE INDEX client_runtime_config_apply_state_pending_job_idx
+    ON client_runtime_config_apply_state (pending_job_id)
+    WHERE pending_job_id IS NOT NULL;
+
+CREATE INDEX client_runtime_config_apply_state_applied_hash_idx
+    ON client_runtime_config_apply_state (client_id, applied_content_hash)
+    WHERE applied_content_hash IS NOT NULL;
+
 CREATE TABLE file_transfer_sessions (
     session_id UUID NOT NULL,
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,

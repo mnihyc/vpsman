@@ -1188,6 +1188,33 @@
   margin: 0;
 }
 
+.configTargetCombobox:focus-within {
+  margin-bottom: 58px;
+}
+
+.configTargetMeta {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid #eef1f6;
+  border-radius: 8px;
+  background: #f8fafd;
+  color: #5f6368;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.configTargetMeta span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.configTargetName {
+  color: #202124;
+  font-weight: 700;
+}
+
 .tagScheduleImpactTable {
   display: grid;
   gap: 6px;

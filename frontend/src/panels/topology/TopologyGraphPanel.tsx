@@ -3,8 +3,8 @@ import { GitGraph, RefreshCcw, Search } from "lucide-react";
 import { topologyEdgeHealthStatusBadgeClass } from "../../jobStatusPresentation";
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import { readableTelemetryToken } from "../../topologyRuntime";
-import type { TopologyGraph, TopologyGraphEdge, TopologyGraphNode } from "../../types";
-import { formatTime, formatVpsName, type VpsNameDisplayMode } from "../../utils";
+import type { RuntimeConfigApplyStateRecord, TopologyGraph, TopologyGraphEdge, TopologyGraphNode } from "../../types";
+import { formatTime, formatVpsName, shortId, type VpsNameDisplayMode } from "../../utils";
 
 type PositionedNode = TopologyGraphNode & {
   x: number;
@@ -29,10 +29,12 @@ export function TopologyGraphPanel({
   graph,
   loading,
   onRefresh,
+  runtimeConfigApplyStates,
 }: {
   graph: TopologyGraph;
   loading: boolean;
   onRefresh: () => Promise<void>;
+  runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [query, setQuery] = useState("");
@@ -54,6 +56,13 @@ export function TopologyGraphPanel({
           edge.right_client_id === selectedNode.client_id,
       )
     : [];
+  const runtimeStateByClientId = useMemo(
+    () => new Map(runtimeConfigApplyStates.map((state) => [state.client_id, state])),
+    [runtimeConfigApplyStates],
+  );
+  const selectedRuntimeState = selectedNode
+    ? runtimeStateByClientId.get(selectedNode.client_id) ?? null
+    : null;
   const showEdgeLabels = filtered.edges.length <= 14 && nodes.length <= 12;
   const status =
     graph.edges.length === 0
@@ -190,6 +199,10 @@ export function TopologyGraphPanel({
                 <strong>{selectedNode.degraded_tunnel_count}</strong>
                 <small>degraded tunnels</small>
               </span>
+              <span className="topologyMetric">
+                <strong>{runtimeConfigApplyStateLabel(selectedRuntimeState)}</strong>
+                <small>{runtimeConfigApplyStateDetail(selectedRuntimeState)}</small>
+              </span>
             </div>
           )}
           <div className="topologyGraphSummary">
@@ -232,6 +245,36 @@ export function TopologyGraphPanel({
       )}
     </section>
   );
+}
+
+function runtimeConfigApplyStateLabel(state: RuntimeConfigApplyStateRecord | null): string {
+  if (state?.pending_status === "failed") {
+    return "sync failed";
+  }
+  if (state?.pending_status === "queued") {
+    return "sync pending";
+  }
+  if (state?.applied_content_hash) {
+    return "sync applied";
+  }
+  return "not applied";
+}
+
+function runtimeConfigApplyStateDetail(state: RuntimeConfigApplyStateRecord | null): string {
+  if (!state) {
+    return "no server state";
+  }
+  if (state.pending_status === "failed") {
+    return state.pending_error || (state.pending_job_id ? `job ${shortId(state.pending_job_id)}` : "manual review");
+  }
+  if (state.pending_status === "queued") {
+    return state.pending_job_id ? `job ${shortId(state.pending_job_id)}` : "waiting";
+  }
+  if (state.applied_content_hash) {
+    const version = state.applied_version ? `v${state.applied_version}` : shortId(state.applied_content_hash);
+    return state.applied_at ? `${version} ${formatTime(state.applied_at)}` : version;
+  }
+  return "no successful sync";
 }
 
 function filterGraph(graph: TopologyGraph, query: string, healthFilter: HealthFilter) {

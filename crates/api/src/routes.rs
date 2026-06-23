@@ -52,12 +52,13 @@ use crate::{
         assign_agent_tag, assign_source_template, bulk_mutate_tags, clone_source_template,
         create_server_runtime_config_patch_request, create_source_template, create_tag,
         delete_agent, delete_runtime_config_patch_generator, delete_tag, diff_source_template,
-        fleet_summary, list_agents, list_gateway_sessions, list_runtime_config_patch_generators,
-        list_source_status, list_source_template_assignments, list_source_templates, list_tags,
-        list_telemetry_network_rates, list_telemetry_rollups, list_telemetry_tunnels,
-        render_runtime_config_patch_generator, render_template_runtime_config,
-        resolve_bulk_targets, test_source_template, update_agent_alias, update_source_template,
-        update_tag_order, upsert_runtime_config_patch_generator,
+        fleet_summary, list_agents, list_gateway_sessions, list_runtime_config_apply_states,
+        list_runtime_config_patch_generators, list_source_status, list_source_template_assignments,
+        list_source_templates, list_tags, list_telemetry_network_rates, list_telemetry_rollups,
+        list_telemetry_tunnels, render_runtime_config_patch_generator,
+        render_template_runtime_config, resolve_bulk_targets, test_source_template,
+        update_agent_alias, update_source_template, update_tag_order,
+        upsert_runtime_config_patch_generator,
     },
     routes_job_history::{
         compare_job_outputs, download_file_download_bundle, download_file_download_for_client,
@@ -300,6 +301,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
             "/api/v1/runtime-config/patch",
             post(create_server_runtime_config_patch_request)
                 .layer(DefaultBodyLimit::max(MAX_RUNTIME_CONFIG_PATCH_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/runtime-config/apply-state",
+            get(list_runtime_config_apply_states),
         )
         .route(
             "/api/v1/runtime-config/patch-generators",

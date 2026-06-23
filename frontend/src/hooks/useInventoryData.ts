@@ -18,6 +18,7 @@ import type {
   SourceTemplateTestResponse,
   SourceStatusRecord,
   DeleteRuntimeConfigPatchGeneratorRequest,
+  RuntimeConfigApplyStateRecord,
   RuntimeConfigPatchGeneratorRecord,
   RuntimeConfigPatchGeneratorRenderRequest,
   RuntimeConfigPatchGeneratorRenderResponse,
@@ -35,6 +36,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   const [sourceTemplates, setSourceTemplates] = useState<SourceTemplateRecord[]>([]);
   const [sourceTemplateAssignments, setSourceTemplateAssignments] = useState<SourceTemplateAssignmentRecord[]>([]);
   const [sourceStatus, setSourceStatus] = useState<SourceStatusRecord[]>([]);
+  const [runtimeConfigApplyStates, setRuntimeConfigApplyStates] = useState<RuntimeConfigApplyStateRecord[]>([]);
   const [runtimeConfigPatchGenerators, setRuntimeConfigPatchGenerators] = useState<RuntimeConfigPatchGeneratorRecord[]>([]);
   const [tagsError, setTagsError] = useState<string | null>(null);
   const [tagsLoading, setTagsLoading] = useState(false);
@@ -48,18 +50,21 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         nextSourceTemplates,
         nextSourceTemplateAssignments,
         nextSourceStatus,
+        nextRuntimeConfigApplyStates,
         nextPatchGenerators,
       ] = await Promise.all([
         apiGet<TagView[]>("/api/v1/tags", apiToken),
         apiGet<SourceTemplateRecord[]>("/api/v1/source-templates", apiToken),
         apiGet<SourceTemplateAssignmentRecord[]>("/api/v1/source-template-assignments", apiToken),
         apiGet<SourceStatusRecord[]>("/api/v1/source-status", apiToken),
+        apiGet<RuntimeConfigApplyStateRecord[]>("/api/v1/runtime-config/apply-state", apiToken),
         apiGet<RuntimeConfigPatchGeneratorRecord[]>("/api/v1/runtime-config/patch-generators", apiToken),
       ]);
       setTags(nextTags);
       setSourceTemplates(nextSourceTemplates);
       setSourceTemplateAssignments(nextSourceTemplateAssignments);
       setSourceStatus(nextSourceStatus);
+      setRuntimeConfigApplyStates(nextRuntimeConfigApplyStates);
       setRuntimeConfigPatchGenerators(nextPatchGenerators);
     } catch (error) {
       if (isApiUnauthorized(error)) {
@@ -68,6 +73,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
         setSourceTemplates([]);
         setSourceTemplateAssignments([]);
         setSourceStatus([]);
+        setRuntimeConfigApplyStates([]);
         setRuntimeConfigPatchGenerators([]);
         setTagsError("Operator login required");
         return;
@@ -75,6 +81,19 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
       setTagsError(error instanceof Error ? error.message : "Tag inventory unavailable");
     } finally {
       setTagsLoading(false);
+    }
+  }, [apiToken, onUnauthorized]);
+
+  const loadRuntimeConfigApplyStates = useCallback(async () => {
+    try {
+      setRuntimeConfigApplyStates(
+        await apiGet<RuntimeConfigApplyStateRecord[]>("/api/v1/runtime-config/apply-state", apiToken),
+      );
+    } catch (error) {
+      if (isApiUnauthorized(error)) {
+        onUnauthorized();
+        setRuntimeConfigApplyStates([]);
+      }
     }
   }, [apiToken, onUnauthorized]);
 
@@ -230,13 +249,16 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   );
 
   const submitRuntimeConfigPatch = useCallback(
-    async (request: RuntimeConfigPatchRequest) =>
-      apiPost<RuntimeConfigPatchResponse>(
+    async (request: RuntimeConfigPatchRequest) => {
+      const response = await apiPost<RuntimeConfigPatchResponse>(
         "/api/v1/runtime-config/patch",
         apiToken,
         request,
-      ),
-    [apiToken],
+      );
+      await loadRuntimeConfigApplyStates();
+      return response;
+    },
+    [apiToken, loadRuntimeConfigApplyStates],
   );
 
   const deleteRuntimeConfigPatchGenerator = useCallback(
@@ -276,6 +298,8 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     deleteTag,
     diffSourceTemplate,
     loadTagInventory,
+    loadRuntimeConfigApplyStates,
+    runtimeConfigApplyStates,
     runtimeConfigPatchGenerators,
     renderTemplateRuntimeConfig,
     renderRuntimeConfigPatchGenerator,

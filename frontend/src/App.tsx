@@ -330,6 +330,7 @@ export function App() {
                 sourceTemplates={dashboard.sourceTemplates}
                 sourceStatus={dashboard.sourceStatus}
                 error={dashboard.tagsError}
+                runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
                 runtimeConfigPatchGenerators={dashboard.runtimeConfigPatchGenerators}
                 jobs={dashboard.jobs}
                 loading={dashboard.tagsLoading}
@@ -477,6 +478,7 @@ export function App() {
                 networkTrends={dashboard.networkTrends}
                 ospfRecommendations={dashboard.ospfRecommendations}
                 ospfUpdatePlans={dashboard.ospfUpdatePlans}
+                runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
                 onAllocateTunnelEndpoints={dashboard.allocateTunnelEndpoints}
                 onCreateJob={dashboard.createJob}
                 onCreateTunnelPlan={dashboard.createTunnelPlan}

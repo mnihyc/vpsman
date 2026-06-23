@@ -374,6 +374,16 @@ jobs_json="$(api_get "/api/v1/jobs?limit=50")"
 jq -e '
   [ .[] | select(.command_type == "runtime_config_sync") ] | length >= 4
 ' <<<"$jobs_json" >/dev/null
+apply_state_json="$(api_get "/api/v1/runtime-config/apply-state")"
+jq -e --arg client "$client_id" --arg peer "$peer_client_id" '
+  [ .[]
+    | select(.client_id == $client or .client_id == $peer)
+    | select((.applied_content_hash | type == "string")
+        and (.applied_job_id | type == "string")
+        and .pending_status == null
+        and .pending_job_id == null)
+  ] | length == 2
+' <<<"$apply_state_json" >/dev/null
 
 config_read_job_id="$(cat "$SMOKE_TMPDIR/config-read-left.job")"
 peer_config_read_job_id="$(cat "$SMOKE_TMPDIR/config-read-right.job")"

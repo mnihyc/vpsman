@@ -52,6 +52,7 @@ import type {
   SourceTemplateTestResponse,
   SourceStatusRecord,
   DeleteRuntimeConfigPatchGeneratorRequest,
+  RuntimeConfigApplyStateRecord,
   RuntimeConfigPatchGeneratorRecord,
   RuntimeConfigPatchGeneratorRenderResponse,
   JobOperation,
@@ -91,6 +92,7 @@ export function ConfigPanel({
   sourceTemplates,
   sourceStatus,
   error,
+  runtimeConfigApplyStates,
   runtimeConfigPatchGenerators,
   jobs,
   loading,
@@ -122,6 +124,7 @@ export function ConfigPanel({
   sourceTemplates: SourceTemplateRecord[];
   sourceStatus: SourceStatusRecord[];
   error: string | null;
+  runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
   jobs: Array<{ id: string; command_type: string; status: string; created_at: string }>;
   loading: boolean;
@@ -194,6 +197,7 @@ export function ConfigPanel({
             sourceTemplateAssignments={sourceTemplateAssignments}
             sourceTemplates={sourceTemplates}
             sourceStatus={sourceStatus}
+            runtimeConfigApplyStates={runtimeConfigApplyStates}
             runtimeConfigPatchGenerators={runtimeConfigPatchGenerators}
             jobs={jobs}
             onSelectSubpage={onSelectSubpage}
@@ -222,6 +226,7 @@ export function ConfigPanel({
         {subpage === "single" && (
           <SingleVpsConfig
             agents={agents}
+            runtimeConfigApplyStates={runtimeConfigApplyStates}
             onCreateJob={onCreateJob}
             onLoadJobOutputs={onLoadJobOutputs}
             onLoadJobTargets={onLoadJobTargets}
@@ -242,6 +247,7 @@ function ConfigOverview({
   sourceTemplateAssignments,
   sourceTemplates,
   sourceStatus,
+  runtimeConfigApplyStates,
   runtimeConfigPatchGenerators,
   jobs,
   onSelectSubpage,
@@ -249,6 +255,7 @@ function ConfigOverview({
   sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
   sourceTemplates: SourceTemplateRecord[];
   sourceStatus: SourceStatusRecord[];
+  runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
   jobs: Array<{ id: string; command_type: string; status: string; created_at: string }>;
   onSelectSubpage: (subpage: string) => void;
@@ -257,6 +264,9 @@ function ConfigOverview({
     .filter((job) => ["config_read", "runtime_config_sync"].includes(job.command_type))
     .slice(0, 5);
   const sourceIssues = sourceStatus.filter((row) => row.status !== "ok").length;
+  const pendingSyncs = runtimeConfigApplyStates.filter((state) => state.pending_status === "queued").length;
+  const failedSyncs = runtimeConfigApplyStates.filter((state) => state.pending_status === "failed").length;
+  const appliedSyncs = runtimeConfigApplyStates.filter((state) => state.applied_content_hash).length;
   const workflowCards = [
     {
       action: "Read VPS config",
@@ -338,6 +348,18 @@ function ConfigOverview({
         <div className="metricCard">
           <strong>{sourceIssues}</strong>
           <span>template checks needing review</span>
+        </div>
+        <div className="metricCard">
+          <strong>{pendingSyncs}</strong>
+          <span>runtime syncs pending apply</span>
+        </div>
+        <div className="metricCard">
+          <strong>{failedSyncs}</strong>
+          <span>runtime syncs failed apply</span>
+        </div>
+        <div className="metricCard">
+          <strong>{appliedSyncs}</strong>
+          <span>VPSs with applied runtime state</span>
         </div>
       </div>
       <div className="configWorkflowGrid">
@@ -985,6 +1007,7 @@ function BulkConfigApply({
 
 function SingleVpsConfig({
   agents,
+  runtimeConfigApplyStates,
   onCreateJob,
   onLoadJobOutputs,
   onLoadJobTargets,
@@ -996,6 +1019,7 @@ function SingleVpsConfig({
   setPrivilegeMaterial,
 }: {
   agents: AgentView[];
+  runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
@@ -1019,6 +1043,10 @@ function SingleVpsConfig({
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
   const singleTarget = useMemo(() => agents.find((agent) => agent.id === clientId) ?? null, [agents, clientId]);
+  const runtimeApplyState = useMemo(
+    () => runtimeConfigApplyStates.find((state) => state.client_id === clientId) ?? null,
+    [clientId, runtimeConfigApplyStates],
+  );
 
   useEffect(() => writeLocalString(CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY, clientId), [clientId]);
 
@@ -1108,11 +1136,17 @@ function SingleVpsConfig({
         <VpsCombobox
           agents={agents}
           ariaLabel="VPS config target"
+          className="configTargetCombobox"
           onChange={selectClientId}
           placeholder="Search VPS config"
           value={clientId}
         />
-        <span>{singleTarget ? formatVpsName(singleTarget, vpsNameDisplayMode) : clientId ? "Select a listed VPS" : "no target selected"}</span>
+        <div className="configTargetMeta">
+          <span className="configTargetName">
+            {singleTarget ? formatVpsName(singleTarget, vpsNameDisplayMode) : clientId ? "Select a listed VPS" : "no target selected"}
+          </span>
+          <span>{runtimeConfigApplyStateSummary(runtimeApplyState)}</span>
+        </div>
         <div className="inlinePrivilege">
           <label>
             <span>Max timeout seconds</span>
@@ -1286,6 +1320,29 @@ function extractConfigRead(outputs: JobOutputRecord[]): { toml: string; baseHash
     }
   }
   throw new Error("Config read output was not available yet");
+}
+
+function runtimeConfigApplyStateSummary(state: RuntimeConfigApplyStateRecord | null): string {
+  if (!state) {
+    return "No server-applied runtime sync recorded";
+  }
+  if (state.pending_status === "failed") {
+    const job = state.pending_job_id ? ` job ${shortId(state.pending_job_id)}` : "";
+    const error = state.pending_error ? `: ${state.pending_error}` : "";
+    return `Runtime sync failed${job}${error}`;
+  }
+  if (state.pending_status === "queued") {
+    const job = state.pending_job_id ? ` job ${shortId(state.pending_job_id)}` : "";
+    const version = state.pending_version ? ` v${state.pending_version}` : "";
+    return `Runtime sync pending${version}${job}`;
+  }
+  if (state.applied_content_hash) {
+    const version = state.applied_version ? ` v${state.applied_version}` : "";
+    const job = state.applied_job_id ? ` job ${shortId(state.applied_job_id)}` : "";
+    const when = state.applied_at ? ` ${formatTime(state.applied_at)}` : "";
+    return `Runtime config applied${version}${job}${when}; hash ${shortId(state.applied_content_hash)}`;
+  }
+  return "No server-applied runtime sync recorded";
 }
 
 function base64ToText(value: string): string {

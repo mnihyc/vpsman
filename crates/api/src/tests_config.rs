@@ -12,7 +12,10 @@ use crate::{
     repository::{MemoryState, Repository},
     repository_ingest::upsert_memory_agent,
     routes_jobs::create_job,
-    runtime_config::{compose_runtime_config, request_runtime_config_reload_for_agent},
+    runtime_config::{
+        compose_runtime_config, push_runtime_config_for_clients,
+        request_runtime_config_reload_for_agent,
+    },
     state::AppState,
 };
 use uuid::Uuid;
@@ -131,6 +134,325 @@ async fn agent_requested_runtime_config_reload_compares_hash_before_queuing() {
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].actor_id, None);
     assert_eq!(jobs[0].target_count, 1);
+}
+
+#[tokio::test]
+async fn runtime_config_apply_state_promotes_only_completed_sync_target() {
+    let repo = Repository::Memory(MemoryState::default());
+    let job_id = Uuid::new_v4();
+    let config = AgentRuntimeConfig {
+        version: 12,
+        display_name: "server-managed".to_string(),
+        ..AgentRuntimeConfig::default()
+    };
+    let hash = runtime_config_content_hash(&config).unwrap();
+    repo.queue_runtime_config_apply(
+        "client-a",
+        config.version,
+        &hash,
+        &config,
+        job_id,
+        "test-apply",
+    )
+    .await
+    .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory.job_operations.write().await.insert(
+            job_id,
+            JobCommand::RuntimeConfigSync {
+                desired_version: config.version,
+                reason: "test-apply".to_string(),
+                config: Box::new(config.clone()),
+            },
+        );
+    }
+
+    repo.record_runtime_config_apply_terminal_for_target_status(
+        job_id,
+        "client-a",
+        vpsman_server_core::TARGET_STATUS_COMPLETED,
+        Some("applied"),
+    )
+    .await
+    .unwrap();
+
+    let states = repo
+        .list_runtime_config_apply_states(Some("client-a"))
+        .await
+        .unwrap();
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].applied_version, Some(12));
+    assert_eq!(
+        states[0].applied_content_hash.as_deref(),
+        Some(hash.as_str())
+    );
+    assert_eq!(states[0].applied_job_id, Some(job_id));
+    assert_eq!(states[0].pending_status, None);
+    assert_eq!(states[0].pending_job_id, None);
+    let applied = repo
+        .runtime_config_applied_state_for_client("client-a")
+        .await
+        .unwrap()
+        .expect("applied config should be readable");
+    assert_eq!(applied.0, 12);
+    assert_eq!(applied.1, hash);
+    assert_eq!(applied.2.display_name, "server-managed");
+}
+
+#[tokio::test]
+async fn runtime_config_apply_state_keeps_failed_sync_pending_failed() {
+    let repo = Repository::Memory(MemoryState::default());
+    let job_id = Uuid::new_v4();
+    let config = AgentRuntimeConfig {
+        version: 13,
+        display_name: "not-applied".to_string(),
+        ..AgentRuntimeConfig::default()
+    };
+    let hash = runtime_config_content_hash(&config).unwrap();
+    repo.queue_runtime_config_apply(
+        "client-a",
+        config.version,
+        &hash,
+        &config,
+        job_id,
+        "test-fail",
+    )
+    .await
+    .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory.job_operations.write().await.insert(
+            job_id,
+            JobCommand::RuntimeConfigSync {
+                desired_version: config.version,
+                reason: "test-fail".to_string(),
+                config: Box::new(config),
+            },
+        );
+    }
+
+    repo.record_runtime_config_apply_terminal_for_target_status(
+        job_id,
+        "client-a",
+        vpsman_server_core::TARGET_STATUS_FAILED,
+        Some("runtime tunnel mutation failed"),
+    )
+    .await
+    .unwrap();
+
+    let states = repo
+        .list_runtime_config_apply_states(Some("client-a"))
+        .await
+        .unwrap();
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].applied_version, None);
+    assert_eq!(states[0].pending_version, Some(13));
+    assert_eq!(states[0].pending_status.as_deref(), Some("failed"));
+    assert_eq!(
+        states[0].pending_error.as_deref(),
+        Some("runtime tunnel mutation failed")
+    );
+    assert!(repo
+        .runtime_config_applied_state_for_client("client-a")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn runtime_config_push_creates_pending_apply_state() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "client-a".to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        )
+        .await;
+    }
+    let state = test_state(repo.clone());
+
+    let responses = push_runtime_config_for_clients(
+        &state,
+        &memory_admin(),
+        ["client-a".to_string()],
+        "operator runtime config update",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(responses.len(), 1);
+    let states = repo
+        .list_runtime_config_apply_states(Some("client-a"))
+        .await
+        .unwrap();
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].applied_version, None);
+    assert!(states[0].pending_version.is_some());
+    assert!(states[0].pending_content_hash.is_some());
+    assert_eq!(states[0].pending_job_id, Some(responses[0].job_id));
+    assert_eq!(states[0].pending_status.as_deref(), Some("queued"));
+    assert_eq!(
+        states[0].pending_reason.as_deref(),
+        Some("operator runtime config update")
+    );
+    assert!(repo
+        .runtime_config_applied_state_for_client("client-a")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn runtime_config_apply_state_is_per_client_for_partial_and_skipped_syncs() {
+    let repo = Repository::Memory(MemoryState::default());
+    let previous_job_id = Uuid::new_v4();
+    let previous_config = AgentRuntimeConfig {
+        version: 19,
+        display_name: "previously-applied".to_string(),
+        ..AgentRuntimeConfig::default()
+    };
+    let previous_hash = runtime_config_content_hash(&previous_config).unwrap();
+    repo.queue_runtime_config_apply(
+        "client-b",
+        previous_config.version,
+        &previous_hash,
+        &previous_config,
+        previous_job_id,
+        "previous successful rollout",
+    )
+    .await
+    .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory.job_operations.write().await.insert(
+            previous_job_id,
+            JobCommand::RuntimeConfigSync {
+                desired_version: previous_config.version,
+                reason: "previous successful rollout".to_string(),
+                config: Box::new(previous_config.clone()),
+            },
+        );
+    }
+    repo.record_runtime_config_apply_terminal_for_target_status(
+        previous_job_id,
+        "client-b",
+        vpsman_server_core::TARGET_STATUS_COMPLETED,
+        Some("applied"),
+    )
+    .await
+    .unwrap();
+
+    let rollout_job_id = Uuid::new_v4();
+    let config_a = AgentRuntimeConfig {
+        version: 20,
+        display_name: "applied-a".to_string(),
+        ..AgentRuntimeConfig::default()
+    };
+    let config_b = AgentRuntimeConfig {
+        version: 20,
+        display_name: "pending-b".to_string(),
+        ..AgentRuntimeConfig::default()
+    };
+    let hash_a = runtime_config_content_hash(&config_a).unwrap();
+    let hash_b = runtime_config_content_hash(&config_b).unwrap();
+    repo.queue_runtime_config_apply(
+        "client-a",
+        config_a.version,
+        &hash_a,
+        &config_a,
+        rollout_job_id,
+        "partial fleet rollout",
+    )
+    .await
+    .unwrap();
+    repo.queue_runtime_config_apply(
+        "client-b",
+        config_b.version,
+        &hash_b,
+        &config_b,
+        rollout_job_id,
+        "partial fleet rollout",
+    )
+    .await
+    .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory.job_operations.write().await.insert(
+            rollout_job_id,
+            JobCommand::RuntimeConfigSync {
+                desired_version: 20,
+                reason: "partial fleet rollout".to_string(),
+                config: Box::new(config_a.clone()),
+            },
+        );
+    }
+
+    repo.record_runtime_config_apply_terminal_for_target_status(
+        rollout_job_id,
+        "client-a",
+        vpsman_server_core::TARGET_STATUS_COMPLETED,
+        Some("applied"),
+    )
+    .await
+    .unwrap();
+    repo.record_runtime_config_apply_terminal_for_target_status(
+        rollout_job_id,
+        "client-b",
+        vpsman_server_core::TARGET_STATUS_SKIPPED,
+        Some("target_agent_lacks_root_runtime_network_capability"),
+    )
+    .await
+    .unwrap();
+
+    let state_a = repo
+        .list_runtime_config_apply_states(Some("client-a"))
+        .await
+        .unwrap()
+        .pop()
+        .expect("client-a state");
+    assert_eq!(state_a.applied_version, Some(20));
+    assert_eq!(
+        state_a.applied_content_hash.as_deref(),
+        Some(hash_a.as_str())
+    );
+    assert_eq!(state_a.pending_status, None);
+
+    let state_b = repo
+        .list_runtime_config_apply_states(Some("client-b"))
+        .await
+        .unwrap()
+        .pop()
+        .expect("client-b state");
+    assert_eq!(state_b.applied_version, Some(19));
+    assert_eq!(
+        state_b.applied_content_hash.as_deref(),
+        Some(previous_hash.as_str())
+    );
+    assert_eq!(state_b.pending_version, Some(20));
+    assert_eq!(
+        state_b.pending_content_hash.as_deref(),
+        Some(hash_b.as_str())
+    );
+    assert_eq!(state_b.pending_status.as_deref(), Some("failed"));
+    assert_eq!(
+        state_b.pending_error.as_deref(),
+        Some("target_agent_lacks_root_runtime_network_capability")
+    );
+
+    let applied_b = repo
+        .runtime_config_applied_state_for_client("client-b")
+        .await
+        .unwrap()
+        .expect("client-b applied state should remain");
+    assert_eq!(applied_b.0, 19);
+    assert_eq!(applied_b.1, previous_hash);
+    assert_eq!(applied_b.2.display_name, "previously-applied");
 }
 
 #[test]

@@ -80,7 +80,8 @@ key material, server trust, and gateway retry/connect timing. Display names,
 tags, update policy, execution policy, telemetry, backup limits, and tunnel
 settings are server runtime config. Configure them through the API/frontend/CLI
 after registering the identity; runtime changes are pushed as visible
-`runtime_config_sync` jobs after the agent connects.
+`runtime_config_sync` jobs after the agent connects, and the server marks the
+per-agent applied runtime config only after that agent's sync target succeeds.
 
 Runtime command traffic is protected by the gateway Noise session. No extra
 server-side command-authentication key is provisioned. Operator authentication

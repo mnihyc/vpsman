@@ -40,6 +40,7 @@ struct RuntimeCommandSpec {
     required: bool,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn execute_runtime_tunnel_reconcile_report(
     input: NetworkRuntimeReconcileInput<'_>,
 ) -> Result<serde_json::Value> {
@@ -203,10 +204,10 @@ async fn reconcile_runtime_tunnel(
 
     let status = if input.plan.runtime_control.manager == RuntimeTunnelManager::ExternalObserved {
         "observed_only"
-    } else if degraded {
-        "degraded_unprivileged"
     } else if failed {
         "failed"
+    } else if degraded {
+        "degraded_unprivileged"
     } else {
         "converged"
     };
@@ -324,10 +325,10 @@ async fn remove_runtime_tunnel(
 
     let status = if input.plan.runtime_control.manager == RuntimeTunnelManager::ExternalObserved {
         "observed_only"
-    } else if degraded {
-        "degraded_unprivileged"
     } else if failed {
         "failed"
+    } else if degraded {
+        "degraded_unprivileged"
     } else if !adapter_remove_available {
         "remove_unavailable"
     } else {

@@ -80,6 +80,13 @@ Target statuses are:
   move reports canceled; once a chunk write or final move has succeeded, the
   completed transfer status wins. Resumable download chunks do not mutate host
   state and can cancel before stdout/status is emitted.
+- Runtime config sync uses per-client pending/apply state. Operator mutations
+  and template changes stage pending config and queue normal
+  `runtime_config_sync` jobs. A target that completes promotes only that
+  client's matching pending config to applied; skipped, failed, canceled, or
+  timed-out targets mark pending state failed and leave the previous applied
+  config unchanged. Agent reconnect reload checks compare against applied
+  config, not failed pending desired state.
 - Final output must be durably recorded before a target is marked terminal.
   Job-finished side effects are published only after both output and terminal
   target state are durable. Backup artifact auto-recording from async gateway

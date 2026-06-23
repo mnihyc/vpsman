@@ -47,27 +47,10 @@ pub(crate) async fn push_runtime_config_for_clients(
         }
         let version = runtime_config_version();
         let config = compose_runtime_config(state, &client_id, version).await?;
-        let request = CreateJobRequest {
-            job_id: Some(Uuid::new_v4()),
-            selector_expression: String::new(),
-            target_client_ids: vec![client_id],
-            destructive: false,
-            confirmed: true,
-            command: "runtime_config_sync".to_string(),
-            argv: Vec::new(),
-            operation: Some(JobCommand::RuntimeConfigSync {
-                desired_version: version,
-                reason: reason.to_string(),
-                config: Box::new(config),
-            }),
-            max_timeout_secs: Some(300),
-            force_unprivileged: false,
-            privileged: true,
-            privilege_assertion: None,
-        };
-        let (_, response) =
-            create_job_from_internal_operator_mutation(state, operator, request).await?;
-        responses.push(response.0);
+        responses.push(
+            push_runtime_config_job(state, operator, client_id, reason, version, config, true)
+                .await?,
+        );
     }
     Ok(responses)
 }
@@ -78,6 +61,36 @@ pub(crate) async fn request_runtime_config_reload_for_agent(
     current_content_hash: &str,
     reason: &str,
 ) -> Result<Vec<CreateJobResponse>, ApiError> {
+    if let Some((version, applied_content_hash, applied_config)) = state
+        .repo
+        .runtime_config_applied_state_for_client(client_id)
+        .await?
+    {
+        if applied_content_hash.eq_ignore_ascii_case(current_content_hash.trim()) {
+            return Ok(Vec::new());
+        }
+        let operator = runtime_config_system_operator();
+        return push_runtime_config_job(
+            state,
+            &operator,
+            client_id.to_string(),
+            reason,
+            version,
+            applied_config,
+            false,
+        )
+        .await
+        .map(|response| vec![response]);
+    }
+    if let Some(pending) = state
+        .repo
+        .runtime_config_pending_state_for_client(client_id)
+        .await?
+    {
+        if matches!(pending.pending_status.as_deref(), Some("queued" | "failed")) {
+            return Ok(Vec::new());
+        }
+    }
     let version = runtime_config_version();
     let config = compose_runtime_config(state, client_id, version).await?;
     let desired_content_hash = runtime_config_content_hash(&config)
@@ -93,6 +106,7 @@ pub(crate) async fn request_runtime_config_reload_for_agent(
         reason,
         version,
         config,
+        true,
     )
     .await
     .map(|response| vec![response])
@@ -151,11 +165,22 @@ async fn push_runtime_config_job(
     reason: &str,
     version: u64,
     config: AgentRuntimeConfig,
+    queue_pending_apply: bool,
 ) -> Result<CreateJobResponse, ApiError> {
+    let job_id = Uuid::new_v4();
+    if queue_pending_apply {
+        let content_hash = runtime_config_content_hash(&config).map_err(|error| {
+            ApiError::from(anyhow::anyhow!("runtime config hash failed: {error}"))
+        })?;
+        state
+            .repo
+            .queue_runtime_config_apply(&client_id, version, &content_hash, &config, job_id, reason)
+            .await?;
+    }
     let request = CreateJobRequest {
-        job_id: Some(Uuid::new_v4()),
+        job_id: Some(job_id),
         selector_expression: String::new(),
-        target_client_ids: vec![client_id],
+        target_client_ids: vec![client_id.clone()],
         destructive: false,
         confirmed: true,
         command: "runtime_config_sync".to_string(),
@@ -170,9 +195,19 @@ async fn push_runtime_config_job(
         privileged: true,
         privilege_assertion: None,
     };
-    let (_, response) =
-        create_job_from_internal_operator_mutation(state, operator, request).await?;
-    Ok(response.0)
+    match create_job_from_internal_operator_mutation(state, operator, request).await {
+        Ok((_, response)) => Ok(response.0),
+        Err(error) => {
+            if queue_pending_apply {
+                let error_message = format!("{}: {}", error.code, error.error);
+                let _ = state
+                    .repo
+                    .mark_runtime_config_apply_job_create_failed(&client_id, job_id, &error_message)
+                    .await;
+            }
+            Err(error)
+        }
+    }
 }
 
 fn runtime_config_system_operator() -> AuthContext {

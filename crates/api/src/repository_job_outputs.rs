@@ -871,6 +871,13 @@ impl Repository {
                 None,
             )
             .await?;
+            self.record_runtime_config_apply_terminal_for_target_status(
+                job_id,
+                client_id,
+                &outcome.status,
+                Some(outcome.message.as_str()),
+            )
+            .await?;
             self.record_job_target_webhook_event(job_id, client_id, outcome)
                 .await?;
             if let Some(status) = terminal_status {

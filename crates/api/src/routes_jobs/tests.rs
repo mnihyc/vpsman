@@ -1,6 +1,8 @@
 use uuid::Uuid;
 use vpsman_common::{
-    AgentCapabilitySnapshot, AgentPrivilegeMode, ProcessResourceLimits, ProcessRunPolicy,
+    plan_tunnel, AgentCapabilitySnapshot, AgentPrivilegeMode, AgentRuntimeConfig,
+    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, BandwidthTier, OspfCostPolicy,
+    ProcessResourceLimits, ProcessRunPolicy, TunnelAddressPair, TunnelKind, TunnelPlanInput,
 };
 
 use super::*;
@@ -487,6 +489,57 @@ fn capability_split_allows_runtime_config_sync_for_unprivileged_targets() {
 }
 
 #[test]
+fn capability_split_skips_mutating_runtime_config_sync_for_unprivileged_targets() {
+    let command = mutating_runtime_config_sync_command();
+    let targets = vec!["left-a".to_string()];
+    let agents = vec![test_agent(
+        "left-a",
+        AgentCapabilitySnapshot {
+            privilege_mode: AgentPrivilegeMode::Unprivileged,
+            effective_uid: Some(1000),
+            can_attempt_privileged_ops: false,
+            can_manage_runtime_tunnels: false,
+            ..Default::default()
+        },
+    )];
+
+    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, false);
+
+    assert!(dispatch.is_empty());
+    assert_eq!(skipped_client_ids(&skipped), vec!["left-a"]);
+    assert_eq!(
+        skipped[0].failure.reason,
+        "target_agent_lacks_root_runtime_network_capability"
+    );
+
+    let (forced_dispatch, forced_skipped) =
+        split_targets_by_capability(&command, &targets, &agents, true);
+    assert_eq!(forced_dispatch, targets);
+    assert!(forced_skipped.is_empty());
+}
+
+#[test]
+fn capability_split_dispatches_mutating_runtime_config_sync_for_root_capable_targets() {
+    let command = mutating_runtime_config_sync_command();
+    let targets = vec!["left-a".to_string()];
+    let agents = vec![test_agent(
+        "left-a",
+        AgentCapabilitySnapshot {
+            privilege_mode: AgentPrivilegeMode::Root,
+            effective_uid: Some(0),
+            can_attempt_privileged_ops: true,
+            can_manage_runtime_tunnels: true,
+            ..Default::default()
+        },
+    )];
+
+    let (dispatch, skipped) = split_targets_by_capability(&command, &targets, &agents, false);
+
+    assert_eq!(dispatch, targets);
+    assert!(skipped.is_empty());
+}
+
+#[test]
 fn capability_split_skips_restore_for_unprivileged_targets() {
     let command = restore_rollback_command();
     let targets = vec!["user-b".to_string()];
@@ -580,6 +633,60 @@ fn job_selector_expression_is_audit_text_not_target_parser_input() {
             .code,
         "invalid_selector_expression"
     );
+}
+
+fn mutating_runtime_config_sync_command() -> JobCommand {
+    let plan = plan_tunnel(&TunnelPlanInput {
+        name: "left-a-right-b".to_string(),
+        interface_name: "tunab".to_string(),
+        kind: TunnelKind::Gre,
+        runtime_control: Default::default(),
+        runtime_topology: Default::default(),
+        left_client_id: "left-a".to_string(),
+        right_client_id: "right-b".to_string(),
+        left_underlay: "198.51.100.10".to_string(),
+        right_underlay: "203.0.113.20".to_string(),
+        address_pool_cidr: "10.255.0.0/30".to_string(),
+        reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(TunnelAddressPair {
+            left: "10.255.0.1".to_string(),
+            right: "10.255.0.2".to_string(),
+            prefix_len: 30,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
+        bandwidth: BandwidthTier::M100,
+        latency_ms: 18.0,
+        packet_loss_ratio: 0.0,
+        preference: 1.0,
+        ospf_policy: OspfCostPolicy::default(),
+    })
+    .unwrap();
+    let mut config = AgentRuntimeConfig {
+        version: 1,
+        ..AgentRuntimeConfig::default()
+    };
+    config.network.apply_enabled = true;
+    config.network.runtime_reconcile_enabled = true;
+    config
+        .network
+        .runtime_status_telemetry_plans
+        .push(AgentRuntimeStatusTelemetryPlan {
+            plan_id: Some("plan-left-right".to_string()),
+            endpoint_side: vpsman_common::TunnelEndpointSide::Left,
+            plan,
+            traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
+            traffic_command: None,
+            latency_monitoring_enabled: true,
+            auto_ospf_enabled: false,
+            auto_ospf_updater: None,
+        });
+    JobCommand::RuntimeConfigSync {
+        desired_version: 1,
+        reason: "test-mutating-runtime-config-sync".to_string(),
+        config: Box::new(config),
+    }
 }
 
 fn skipped_client_ids(skipped: &[CapabilitySkip]) -> Vec<&str> {

@@ -1,5 +1,6 @@
 use vpsman_common::{
-    AgentCapabilitySnapshot, AgentPrivilegeMode, JobCommand, JobTargetStatus, TunnelEndpointSide,
+    AgentCapabilitySnapshot, AgentPrivilegeMode, AgentRuntimeUnprivilegedMutationPolicy,
+    JobCommand, JobTargetStatus, RuntimeTunnelManager, TunnelEndpointSide,
     MAX_DIRECT_FILE_DOWNLOAD_BYTES,
 };
 
@@ -244,8 +245,32 @@ pub fn target_lacks_root_network_capability(
     command: &JobCommand,
     capabilities: &AgentCapabilitySnapshot,
 ) -> bool {
-    let _ = (command, capabilities);
-    false
+    if !runtime_config_requires_root_network_capability(command) {
+        return false;
+    }
+    match capabilities.privilege_mode {
+        AgentPrivilegeMode::Unprivileged => !capabilities.can_manage_runtime_tunnels,
+        AgentPrivilegeMode::Root => !capabilities.can_manage_runtime_tunnels,
+        AgentPrivilegeMode::Unknown => false,
+    }
+}
+
+pub fn runtime_config_requires_root_network_capability(command: &JobCommand) -> bool {
+    let JobCommand::RuntimeConfigSync { config, .. } = command else {
+        return false;
+    };
+    if !config.network.apply_enabled || !config.network.runtime_reconcile_enabled {
+        return false;
+    }
+    let policy = config.network.runtime_unprivileged_mutation_policy;
+    if policy == AgentRuntimeUnprivilegedMutationPolicy::TryAll {
+        return false;
+    }
+    config
+        .network
+        .runtime_status_telemetry_plans
+        .iter()
+        .any(|plan| plan.plan.runtime_control.manager == RuntimeTunnelManager::AgentIproute2Managed)
 }
 
 pub fn target_lacks_process_limit_capability(

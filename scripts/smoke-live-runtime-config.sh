@@ -135,11 +135,12 @@ wait_agent_online() {
 }
 
 assert_runtime_config_sync_persisted() {
-  local job_json targets_json outputs_json audits_json decoded_outputs
+  local job_json targets_json outputs_json audits_json apply_state_json decoded_outputs
   job_json="$(api_get "/api/v1/jobs/$job_id")"
   targets_json="$(api_get "/api/v1/jobs/$job_id/targets")"
   outputs_json="$(api_get "/api/v1/jobs/$job_id/outputs")"
   audits_json="$(api_get "/api/v1/audit?limit=20")"
+  apply_state_json="$(api_get "/api/v1/runtime-config/apply-state")"
 
   jq -e '.status == "completed" and .command_type == "runtime_config_sync" and .target_count == 1' \
     <<<"$job_json" >/dev/null
@@ -156,6 +157,13 @@ assert_runtime_config_sync_persisted() {
   ' <<<"$outputs_json" >/dev/null
   jq -e '[.[].action] | index("job.dispatch_requested") and index("job.target_result")' \
     <<<"$audits_json" >/dev/null
+  jq -e --arg client "$client_id" --arg job "$job_id" '
+    any(.[]; .client_id == $client
+      and .applied_job_id == $job
+      and (.applied_content_hash | type == "string")
+      and .pending_status == null
+      and .pending_job_id == null)
+  ' <<<"$apply_state_json" >/dev/null
 
   decoded_outputs="$(
     jq -r '.items[].data_base64' <<<"$outputs_json" | while IFS= read -r item; do

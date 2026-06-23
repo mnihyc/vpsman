@@ -15,15 +15,16 @@ use crate::{
         CreateSourceTemplateRequest, CreateTagRequest, DeleteAgentRequest, DeleteAgentResponse,
         DeleteRuntimeConfigPatchGeneratorRequest, DeleteTagRequest, FleetSummary,
         GatewaySessionView, HistoryQuery, RenderRuntimeConfigPatchGeneratorRequest,
-        RuntimeConfigPatchGeneratorRenderView, RuntimeConfigPatchGeneratorView,
-        RuntimeConfigPatchRequest, RuntimeConfigPatchResponse, SourceStatusQuery, SourceStatusView,
-        SourceTemplateAssignmentQuery, SourceTemplateAssignmentView, SourceTemplateDiffRequest,
-        SourceTemplateDiffView, SourceTemplateQuery, SourceTemplateTestView, SourceTemplateView,
-        TagMutationResponse, TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView,
-        TelemetryRollupQuery, TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView,
-        TemplateRuntimeConfigQuery, TemplateRuntimeConfigView, TestSourceTemplateRequest,
-        UpdateAgentAliasRequest, UpdateSourceTemplateRequest, UpdateSourceTemplateResponse,
-        UpdateTagOrderRequest, UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
+        RuntimeConfigApplyStateView, RuntimeConfigPatchGeneratorRenderView,
+        RuntimeConfigPatchGeneratorView, RuntimeConfigPatchRequest, RuntimeConfigPatchResponse,
+        SourceStatusQuery, SourceStatusView, SourceTemplateAssignmentQuery,
+        SourceTemplateAssignmentView, SourceTemplateDiffRequest, SourceTemplateDiffView,
+        SourceTemplateQuery, SourceTemplateTestView, SourceTemplateView, TagMutationResponse,
+        TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
+        TelemetryRollupView, TelemetryTunnelQuery, TelemetryTunnelView, TemplateRuntimeConfigQuery,
+        TemplateRuntimeConfigView, TestSourceTemplateRequest, UpdateAgentAliasRequest,
+        UpdateSourceTemplateRequest, UpdateSourceTemplateResponse, UpdateTagOrderRequest,
+        UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     runtime_config::{push_runtime_config_for_clients, validate_runtime_config_patch_toml},
@@ -503,6 +504,18 @@ pub(crate) async fn render_template_runtime_config(
             .repo
             .render_template_runtime_config(&query.client_id)
             .await?,
+    ))
+}
+
+pub(crate) async fn list_runtime_config_apply_states(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RuntimeConfigApplyStateView>>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_CONFIG_READ)
+        .await?;
+    Ok(Json(
+        state.repo.list_runtime_config_apply_states(None).await?,
     ))
 }
 
