@@ -25,18 +25,18 @@
   flex-wrap: wrap;
   gap: 8px;
   min-height: 40px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafd;
-  color: #3c4043;
+  background: var(--canvas);
+  color: var(--text-secondary);
   padding: 8px 10px;
 }
 
 .backupScopeList span {
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: #fff;
-  color: #3c4043;
+  background: var(--surface);
+  color: var(--text-secondary);
   font-size: 12px;
   padding: 3px 8px;
 }
@@ -50,14 +50,14 @@
   display: grid;
   gap: 5px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
   padding: 9px 10px;
 }
 
 .restoreReadOnlyField span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
@@ -73,9 +73,9 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
   padding: 10px;
 }
 
@@ -85,7 +85,7 @@
 }
 
 .restoreArchiveSummary span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -118,9 +118,9 @@
 
 .migrationPlanSummary {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
   padding: 10px;
 }
 
@@ -132,7 +132,7 @@
 
 .migrationPlanSummary span,
 .migrationCheckItem small {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -145,7 +145,7 @@
 }
 
 .migrationChecklist {
-  border-top: 1px solid #dfe3eb;
+  border-top: 1px solid var(--border);
   padding-top: 10px;
 }
 
@@ -154,19 +154,19 @@
   grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
-  color: #3c4043;
+  color: var(--text-secondary);
 }
 
 .migrationCheckItem.ready svg {
-  color: #137333;
+  color: var(--success-text);
 }
 
 .migrationCheckItem.blocked svg {
-  color: #b06000;
+  color: var(--warning-text);
 }
 
 .migrationCheckItem.optional svg {
-  color: #5f6368;
+  color: var(--muted);
 }
 
 .backupSingleWorkspace {
@@ -190,17 +190,17 @@
 }
 
 .pathPresetStrip span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
 }
 
 .pathPresetStrip button {
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: #fff;
-  color: #3c4043;
+  background: var(--surface);
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
   font-weight: 700;
@@ -209,6 +209,6 @@
 }
 
 .pathPresetStrip button:hover {
-  border-color: #1a73e8;
-  color: #174ea6;
+  border-color: var(--primary);
+  color: var(--primary-text);
 }

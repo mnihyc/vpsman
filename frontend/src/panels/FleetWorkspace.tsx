@@ -61,6 +61,7 @@ import {
   TimeSeriesChart,
   type TimeSeriesChartLine,
 } from "../components/TimeSeriesChart";
+import { fleetChartColors } from "../colorPalette";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
   addressFamilyLabel,
@@ -236,8 +237,6 @@ const CONFIG_SINGLE_SELECTOR_STORAGE_KEY =
 const CONFIG_BULK_SELECTOR_STORAGE_KEY =
   "vpsman.config.bulk.selectorExpression";
 const FILE_BROWSER_STATE_STORAGE_KEY = "vpsman.fileBrowser.state";
-const CHART_COLORS = ["#1a73e8", "#188038", "#f29900", "#a142f4", "#d93025"];
-
 export function FleetWorkspace({
   activeSubpage,
   agents,
@@ -3037,12 +3036,12 @@ function resourcePercentChartData(rollups: TelemetryRollupRecord[]) {
     times: sorted.map((rollup) => rollup.bucket_start),
     lines: [
       {
-        color: CHART_COLORS[0],
+        color: fleetChartColors[0],
         label: "RAM used",
         values: sorted.map((rollup) => memoryUsedRatio(rollup)),
       },
       {
-        color: CHART_COLORS[1],
+        color: fleetChartColors[1],
         label: "Disk free",
         values: sorted.map((rollup) => diskFreeRatio(rollup)),
       },
@@ -3055,7 +3054,7 @@ function cpuLoadChartData(rollups: TelemetryRollupRecord[]) {
     times: sorted.map((rollup) => rollup.bucket_start),
     lines: [
       {
-        color: CHART_COLORS[2],
+        color: fleetChartColors[2],
         label: "CPU load",
         values: sorted.map((rollup) => rollup.cpu_load_1_avg),
       },
@@ -3080,12 +3079,12 @@ function networkRateChartData(rates: TelemetryNetworkRateRecord[]) {
     times,
     lines: [
       {
-        color: CHART_COLORS[0],
+        color: fleetChartColors[0],
         label: "RX",
         values: times.map((time) => rx.get(time) ?? null),
       },
       {
-        color: CHART_COLORS[3],
+        color: fleetChartColors[3],
         label: "TX",
         values: times.map((time) => tx.get(time) ?? null),
       },

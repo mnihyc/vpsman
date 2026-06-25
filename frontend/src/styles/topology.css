@@ -32,9 +32,9 @@
   width: calc(100% - 36px);
   min-height: 260px;
   margin: 0 18px 18px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
 }
 
 .topologyGraphControls {
@@ -52,10 +52,10 @@
   flex: 1 1 min(100%, 280px);
   width: min(420px, 100%);
   height: 38px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0 11px;
-  color: #5f6368;
+  color: var(--muted);
 }
 
 .compactSearch input {
@@ -63,14 +63,14 @@
   min-width: 0;
   border: 0;
   outline: 0;
-  color: #202124;
+  color: var(--text);
 }
 
 .segmentedControl {
   display: inline-flex;
   flex-wrap: wrap;
   overflow: hidden;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
 }
 
@@ -79,9 +79,9 @@
   min-width: 0;
   height: 38px;
   border: 0;
-  border-right: 1px solid #dfe3eb;
-  background: #fff;
-  color: #3c4043;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
   font-weight: 700;
   cursor: pointer;
 }
@@ -91,33 +91,33 @@
 }
 
 .segmentedControl button.active {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .topologyGraphEdge line {
-  stroke: #5f6368;
+  stroke: var(--muted);
   stroke-width: 2;
 }
 
 .topologyGraphEdge.healthy line,
 .topologyGraphEdge.applied line {
-  stroke: #1a73e8;
+  stroke: var(--primary);
 }
 
 .topologyGraphEdge.degraded line {
-  stroke: #b06000;
+  stroke: var(--warning-text);
   stroke-dasharray: 6 5;
 }
 
 .topologyGraphEdge.rolled_back line {
-  stroke: #80868b;
+  stroke: var(--placeholder);
   stroke-dasharray: 3 5;
 }
 
 .topologyGraphEdge text,
 .topologyGraphNode text {
-  fill: #202124;
+  fill: var(--text);
   font-size: 12px;
   font-weight: 700;
   text-anchor: middle;
@@ -125,14 +125,14 @@
 
 .topologyGraphEdge .topologyGraphMetric,
 .topologyGraphNode .topologyGraphMetric {
-  fill: #5f6368;
+  fill: var(--muted);
   font-size: 11px;
   font-weight: 600;
 }
 
 .topologyGraphNode circle {
-  fill: #fff;
-  stroke: #1a73e8;
+  fill: var(--surface);
+  stroke: var(--primary);
   stroke-width: 3;
 }
 
@@ -149,11 +149,11 @@
 
 .topologyGraphNode.stale circle,
 .topologyGraphNode.unknown circle {
-  stroke: #80868b;
+  stroke: var(--placeholder);
 }
 
 .topologyGraphNode.degraded circle {
-  stroke: #b06000;
+  stroke: var(--warning-text);
 }
 
 .topologyGraphSummary {
@@ -162,7 +162,7 @@
   min-width: 0;
   overflow: auto;
   overscroll-behavior-x: contain;
-  border-top: 1px solid #eef1f6;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .topologyNodeInspector {
@@ -184,10 +184,10 @@
 .topologyTagList span {
   max-width: 100%;
   overflow-wrap: anywhere;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 999px;
   padding: 3px 8px;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   text-overflow: ellipsis;
@@ -210,7 +210,7 @@
   min-width: max(100%, 1050px);
   min-height: 58px;
   padding: 0 18px;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .topologyGraphEdgeRow:last-child {
@@ -238,7 +238,7 @@
   width: 5px;
   min-height: 6px;
   border-radius: 3px 3px 0 0;
-  background: #1a73e8;
+  background: var(--primary);
 }
 
 .promotionWorkflow {
@@ -259,16 +259,16 @@
   display: grid;
   gap: 10px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   padding: 12px;
 }
 
 .promotionStageHeader small {
   display: block;
   margin-bottom: 2px;
-  color: #1a73e8;
+  color: var(--primary);
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
@@ -278,19 +278,19 @@
   display: grid;
   gap: 3px;
   min-width: 0;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
   padding: 9px 10px;
 }
 
 .promotionGroupLabel strong {
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
 }
 
 .promotionGroupLabel span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -298,9 +298,9 @@
 .promotionDisclosure {
   display: block;
   min-width: 0;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: #fbfcff;
+  background: var(--surface-subtle);
   padding: 9px 10px;
 }
 
@@ -315,7 +315,7 @@
 
 .promotionDisclosure summary {
   cursor: pointer;
-  color: #3c4043;
+  color: var(--text-secondary);
   font-size: 13px;
   font-weight: 700;
 }
@@ -379,7 +379,7 @@
 }
 
 .topologyLifecycleToggle span {
-  color: #202124;
+  color: var(--text);
   font-weight: 700;
 }
 
@@ -390,7 +390,7 @@
 }
 
 .topologyLifecycleField > span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
@@ -426,9 +426,9 @@
   display: grid;
   gap: 10px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   padding: 12px;
 }
 
@@ -439,13 +439,13 @@
   gap: 10px;
   min-width: 0;
   min-height: 28px;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--border-subtle);
   padding-bottom: 8px;
 }
 
 .topologyNetworkTestGroupHeader strong {
   min-width: 0;
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
   line-height: 1.25;
   overflow: hidden;
@@ -455,7 +455,7 @@
 
 .topologyNetworkTestGroupHeader small {
   flex: 0 0 auto;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
@@ -510,10 +510,9 @@
     min-width: 0;
     min-height: 0;
     padding: 10px 11px;
-    border: 1px solid #dfe3eb;
-    border-left: 3px solid #1a73e8;
+    border: 1px solid var(--primary);
     border-radius: 8px;
-    background: #fff;
+    background: var(--surface);
   }
 
   .topologyGraphEdgeRow > [data-label] {
@@ -526,7 +525,7 @@
 
   .topologyGraphEdgeRow > [data-label]::before {
     content: attr(data-label);
-    color: #5f6368;
+    color: var(--muted);
     font-size: 11px;
     font-weight: 800;
     text-transform: uppercase;

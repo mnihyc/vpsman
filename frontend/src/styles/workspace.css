@@ -37,9 +37,9 @@
 .dashboardToolbar,
 .dashboardSection {
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .dashboardToolbar {
@@ -61,7 +61,7 @@
 .dashboardSectionHeader span {
   display: block;
   margin-top: 3px;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 13px;
 }
 
@@ -89,7 +89,7 @@
 
 .dashboardToolbarSelect span {
   margin-top: 0;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 10px;
   font-weight: 700;
   line-height: 1;
@@ -99,16 +99,16 @@
 .dashboardToolbarSelect select {
   width: 100%;
   height: 32px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #202124;
+  background: var(--surface);
+  color: var(--text);
   outline: 0;
   padding: 0 9px;
 }
 
 .dashboardToolbarSelect select:focus {
-  border-color: #1a73e8;
+  border-color: var(--primary);
 }
 
 .dashboardControlBar {
@@ -117,9 +117,9 @@
   gap: 10px;
   align-items: end;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   padding: 12px;
 }
 
@@ -130,7 +130,7 @@
 }
 
 .dashboardControlBar label span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
@@ -141,27 +141,27 @@
   width: 100%;
   min-width: 0;
   height: 34px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #202124;
+  background: var(--surface);
+  color: var(--text);
   outline: 0;
   padding: 0 10px;
 }
 
 .dashboardControlBar input:focus,
 .dashboardControlBar select:focus {
-  border-color: #1a73e8;
+  border-color: var(--primary);
 }
 
 .dashboardScopeHint {
   display: grid;
   align-items: center;
   min-height: 34px;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: #f8fafd;
-  color: #5f6368;
+  background: var(--canvas);
+  color: var(--muted);
   font-size: 12px;
   font-weight: 600;
   padding: 0 10px;
@@ -170,18 +170,18 @@
 .timeRangeTabs {
   display: inline-flex;
   overflow: hidden;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .timeRangeTabs button {
   min-width: 52px;
   height: 32px;
   border: 0;
-  border-right: 1px solid #dfe3eb;
-  background: #fff;
-  color: #3c4043;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
   cursor: pointer;
   font-weight: 600;
 }
@@ -191,15 +191,15 @@
 }
 
 .timeRangeTabs button.active {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .panelError {
-  border: 1px solid #fad2cf;
+  border: 1px solid var(--danger-border);
   border-radius: 8px;
-  background: #fce8e6;
-  color: #b3261e;
+  background: var(--danger-soft);
+  color: var(--danger);
   font-size: 13px;
   font-weight: 600;
   padding: 10px 12px;
@@ -217,7 +217,7 @@
   flex-wrap: wrap;
   min-width: 0;
   padding: 16px;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .dashboardHeaderTools {
@@ -230,18 +230,18 @@
 .dashboardSectionTools {
   display: inline-flex;
   overflow: hidden;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .dashboardSectionTools button {
   min-width: 68px;
   height: 32px;
   border: 0;
-  border-right: 1px solid #dfe3eb;
-  background: #fff;
-  color: #3c4043;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
   cursor: pointer;
   font-weight: 700;
 }
@@ -251,8 +251,8 @@
 }
 
 .dashboardSectionTools button.active {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .dashboardCardGrid {
@@ -281,19 +281,19 @@
 .dashboardClientRow,
 .dashboardClusterCard,
 .dashboardListRow {
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #202124;
+  background: var(--surface);
+  color: var(--text);
   cursor: pointer;
   text-align: left;
 }
 
 .dashboardCurveCard {
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #202124;
+  background: var(--surface);
+  color: var(--text);
   text-align: left;
 }
 
@@ -315,29 +315,34 @@
 .dashboardClusterCard:focus-visible,
 .dashboardListRow:hover,
 .dashboardListRow:focus-visible {
-  border-color: #1a73e8;
+  border-color: var(--primary);
   box-shadow: 0 1px 3px rgba(60, 64, 67, 0.18);
   outline: 0;
 }
 
 .dashboardMetricCard.ok {
-  border-top: 3px solid #188038;
+  border-color: var(--success);
+  background: var(--success-soft);
 }
 
 .dashboardMetricCard.info {
-  border-top: 3px solid #1a73e8;
+  border-color: var(--primary);
+  background: var(--primary-soft);
 }
 
 .dashboardMetricCard.warning {
-  border-top: 3px solid #f9ab00;
+  border-color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .dashboardMetricCard.critical {
-  border-top: 3px solid #d93025;
+  border-color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .dashboardMetricCard.neutral {
-  border-top: 3px solid #80868b;
+  border-color: var(--border);
+  background: var(--surface-soft);
 }
 
 .dashboardMetricCard.staticCard,
@@ -347,7 +352,7 @@
 
 .dashboardMetricCard.staticCard:hover,
 .dashboardClientRow.staticRow:hover {
-  border-color: #dfe3eb;
+  border-color: var(--border);
   box-shadow: none;
 }
 
@@ -358,14 +363,14 @@
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  background: #f1f3f4;
-  color: #1a73e8;
+  background: var(--surface-neutral);
+  color: var(--primary);
 }
 
 .dashboardMetricCard small,
 .dashboardClusterCard small {
   display: block;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-style: normal;
   font-weight: 700;
@@ -393,7 +398,7 @@
 .dashboardClusterCard em {
   display: block;
   margin-top: 8px;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-style: normal;
   line-height: 1.35;
@@ -423,7 +428,7 @@
 .dashboardChartHeader > span {
   min-width: 0;
   overflow: hidden;
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
   font-weight: 700;
   text-overflow: ellipsis;
@@ -453,27 +458,30 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
-  border-top: 3px solid #80868b;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 11px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .systemConfigStatusItem.ok {
-  border-top-color: #188038;
+  border-color: var(--success);
+  background: var(--success-soft);
 }
 
 .systemConfigStatusItem.info {
-  border-top-color: #1a73e8;
+  border-color: var(--primary);
+  background: var(--primary-soft);
 }
 
 .systemConfigStatusItem.warning {
-  border-top-color: #f9ab00;
+  border-color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .systemConfigStatusItem.critical {
-  border-top-color: #d93025;
+  border-color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .systemConfigStatusItem > span {
@@ -484,14 +492,14 @@
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: #f1f3f4;
-  color: #1a73e8;
+  background: var(--surface-neutral);
+  color: var(--primary);
 }
 
 .systemConfigStatusItem small {
   min-width: 0;
   overflow: hidden;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 800;
   text-overflow: ellipsis;
@@ -502,7 +510,7 @@
 .systemConfigStatusItem strong {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: #202124;
+  color: var(--text);
   font-size: 17px;
   line-height: 1.1;
 }
@@ -537,10 +545,10 @@
   align-content: start;
   gap: 10px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 14px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .systemConfigGroup h3,
@@ -548,13 +556,13 @@
 .systemImpactList h3,
 .systemDiffPreview h3 {
   margin: 0;
-  color: #202124;
+  color: var(--text);
   font-size: 14px;
 }
 
 .systemConfigGroup p {
   margin: -4px 0 2px;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -563,7 +571,7 @@
   display: grid;
   gap: 5px;
   min-width: 0;
-  color: #3c4043;
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 800;
 }
@@ -573,9 +581,9 @@
   width: 100%;
   min-width: 0;
   min-height: 38px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #202124;
+  color: var(--text);
   outline: 0;
   padding: 0 10px;
 }
@@ -586,7 +594,7 @@
 
 .systemConfigGroup input:not([type="checkbox"]):focus,
 .systemConfigToml:focus {
-  border-color: #1a73e8;
+  border-color: var(--primary);
 }
 
 .systemConfigGroup label.checkLine {
@@ -611,7 +619,7 @@
 .systemTomlNotes {
   display: grid;
   gap: 6px;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -646,10 +654,10 @@
 }
 
 .systemImpactList {
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
-  background: #f8fafd;
+  background: var(--canvas);
 }
 
 .systemImpactList ul {
@@ -657,7 +665,7 @@
   gap: 6px;
   margin: 0;
   padding-left: 18px;
-  color: #3c4043;
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -689,11 +697,11 @@
 }
 
 .chipList span {
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 6px 8px;
-  background: #f8fafd;
-  color: #3c4043;
+  background: var(--canvas);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
@@ -703,11 +711,11 @@
   max-width: 100%;
   min-width: 0;
   overflow: auto;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px;
-  background: #f8fafd;
-  color: #202124;
+  background: var(--canvas);
+  color: var(--text);
   font-size: 12px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -722,20 +730,21 @@
 }
 
 .panelSuccess {
-  border: 1px solid #c4e8cc;
-  background: #e6f4ea;
-  color: #137333;
+  border: 1px solid var(--success);
+  background: var(--success-soft);
+  color: var(--success-text);
 }
 
 .panelWarning {
-  border: 1px solid #fde293;
-  background: #fef7e0;
-  color: #8a5a00;
+  border: 1px solid var(--warning);
+  background: var(--warning-soft);
+  color: var(--warning-text);
 }
 
 .timeSeriesChartShell {
   position: relative;
   min-width: 0;
+  margin: 0;
 }
 
 .timeSeriesChart {
@@ -757,7 +766,7 @@
   flex-wrap: wrap;
   gap: 8px 14px;
   margin-top: 8px;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -783,31 +792,31 @@
   display: grid;
   gap: 5px;
   max-width: min(320px, calc(100% - 24px));
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 4px 12px rgba(60, 64, 67, 0.14);
-  color: #3c4043;
+  color: var(--text-secondary);
   font-size: 12px;
   padding: 8px 10px;
   pointer-events: none;
 }
 
 .timeSeriesHover strong {
-  color: #202124;
+  color: var(--text);
   font-size: 12px;
 }
 
 .timeSeriesHover b {
   margin-left: auto;
-  color: #202124;
+  color: var(--text);
 }
 
 .dashboardEmptyChart {
   display: grid;
   min-height: 220px;
   place-items: center;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 13px;
 }
 
@@ -827,12 +836,12 @@
   justify-content: space-between;
   gap: 10px;
   min-height: 32px;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
 .dashboardSideRailHeader strong {
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
 }
 
@@ -861,7 +870,7 @@
 
 .dashboardClientRow small {
   display: block;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   overflow-wrap: anywhere;
 }
@@ -890,10 +899,10 @@
   align-items: center;
   min-width: 0;
   min-height: 46px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #202124;
+  background: var(--surface);
+  color: var(--text);
   cursor: pointer;
   padding: 9px 11px;
   text-align: left;
@@ -901,7 +910,7 @@
 
 .dashboardTrafficRow:hover,
 .dashboardTrafficRow:focus-visible {
-  border-color: #1a73e8;
+  border-color: var(--primary);
   box-shadow: 0 1px 3px rgba(60, 64, 67, 0.18);
   outline: 0;
 }
@@ -924,7 +933,7 @@
 .dashboardAlertText small {
   display: block;
   overflow: hidden;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -934,14 +943,14 @@
   display: block;
   height: 9px;
   border-radius: 999px;
-  background: #eef1f6;
+  background: var(--border-subtle);
 }
 
 .dashboardTrafficRow em i {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: #1a73e8;
+  background: var(--primary);
 }
 
 .dashboardTrafficRow b {
@@ -977,8 +986,8 @@
 }
 
 .dashboardClusterCard.aggregate {
-  border-color: #c4eed0;
-  background: #f8fffa;
+  border-color: var(--success);
+  background: var(--success-soft);
 }
 
 .dashboardClusterCard b {
@@ -991,8 +1000,8 @@
   min-width: 26px;
   height: 26px;
   border-radius: 999px;
-  background: #f1f3f4;
-  color: #3c4043;
+  background: var(--surface-neutral);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
@@ -1046,13 +1055,13 @@
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
   padding: 10px;
 }
 
 .dashboardDrawerMetric span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
 }
@@ -1078,8 +1087,8 @@
 .inspector,
 .authPanel {
   min-width: 0;
-  background: #fff;
-  border: 1px solid #dfe3eb;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 8px;
 }
 
@@ -1097,7 +1106,7 @@
 }
 
 .authPanel label span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
@@ -1106,9 +1115,9 @@
 .authPanel input {
   width: 100%;
   min-height: 40px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #202124;
+  color: var(--text);
   outline: 0;
   padding: 0 12px;
 }
@@ -1136,9 +1145,9 @@
   align-items: start;
   min-width: 0;
   padding: 14px;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .preferenceGroupHeader {
@@ -1155,8 +1164,8 @@
   width: 36px;
   height: 36px;
   border-radius: 8px;
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .preferenceGroup h3 {
@@ -1166,7 +1175,7 @@
 
 .preferenceGroup p {
   margin: 0;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 13px;
   line-height: 1.45;
 }
@@ -1190,14 +1199,14 @@
 }
 
 .preferenceControls label span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
 }
 
 .preferenceControls label.checkLine span {
-  color: #3c4043;
+  color: var(--text-secondary);
   font-size: 13px;
   font-weight: 700;
   line-height: 1.35;
@@ -1209,10 +1218,10 @@
 .preferenceControls textarea {
   width: 100%;
   min-height: 40px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #202124;
+  background: var(--surface);
+  color: var(--text);
   outline: 0;
   padding: 0 12px;
 }
@@ -1236,7 +1245,7 @@
 .preferenceControls input:focus,
 .preferenceControls select:focus,
 .preferenceControls textarea:focus {
-  border-color: #1a73e8;
+  border-color: var(--primary);
 }
 
 .preferenceInlineControls {
@@ -1253,16 +1262,16 @@
   gap: 12px;
   min-width: 0;
   min-height: 36px;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: #f8fafd;
-  color: #5f6368;
+  background: var(--canvas);
+  color: var(--muted);
   font-size: 13px;
   padding: 8px 10px;
 }
 
 .preferenceHint strong {
-  color: #202124;
+  color: var(--text);
 }
 
 .preferenceResetRow {
@@ -1285,9 +1294,9 @@
   display: grid;
   max-height: 280px;
   min-width: 0;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   overflow: auto;
 }
 
@@ -1299,7 +1308,7 @@
   min-width: 0;
   min-height: 40px;
   padding: 8px 10px;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .preferenceControls label.tagVisibilityLine:last-child {
@@ -1329,7 +1338,7 @@
 }
 
 .preferenceControls label.tagVisibilityLine small {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
@@ -1337,7 +1346,7 @@
 
 .preferencesNotice {
   margin: 0;
-  color: #174ea6;
+  color: var(--primary-text);
   font-size: 13px;
   font-weight: 600;
 }
@@ -1345,7 +1354,7 @@
 .preferencesError {
   grid-column: 1 / -1;
   margin: 0;
-  color: #b3261e;
+  color: var(--danger);
   font-size: 13px;
   font-weight: 600;
 }
@@ -1373,9 +1382,9 @@
 .privilegeManager input {
   width: 100%;
   min-height: 38px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #202124;
+  color: var(--text);
   outline: 0;
   padding: 0 10px;
 }
@@ -1392,7 +1401,7 @@
 .dispatchForm select:focus,
 .dispatchForm textarea:focus,
 .privilegeManager input:focus {
-  border-color: #1a73e8;
+  border-color: var(--primary);
 }
 
 .compactForm textarea,
@@ -1404,7 +1413,7 @@
 }
 
 .authPanel input:focus {
-  border-color: #1a73e8;
+  border-color: var(--primary);
 }
 
 .aliasEditor {
@@ -1422,7 +1431,7 @@
 }
 
 .aliasEditor label span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
@@ -1430,7 +1439,7 @@
 
 .aliasEditor .errorText {
   grid-column: 1 / -1;
-  color: #b3261e;
+  color: var(--danger);
 }
 
 .fleetInlineTagForm {
@@ -1447,7 +1456,7 @@
 }
 
 .fleetInlineTagForm label span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
@@ -1466,10 +1475,10 @@
   max-width: 100%;
   min-height: 28px;
   gap: 5px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: #fff;
-  color: #3c4043;
+  background: var(--surface);
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
   font-weight: 700;
@@ -1477,9 +1486,9 @@
 }
 
 .tagEditChip:hover:not(:disabled) {
-  border-color: #c8d7f0;
-  background: #f8fafd;
-  color: #174ea6;
+  border-color: var(--primary);
+  background: var(--canvas);
+  color: var(--primary-text);
 }
 
 .tagEditChip span {
@@ -1489,13 +1498,13 @@
 
 .tagEditChip svg {
   flex: 0 0 auto;
-  color: #5f6368;
+  color: var(--muted);
 }
 
 .authVaultUnlock {
   display: grid;
   gap: 12px;
-  border-top: 1px solid #dfe3eb;
+  border-top: 1px solid var(--border);
   padding-top: 18px;
 }
 
@@ -1504,15 +1513,15 @@
 }
 
 .secondaryWideAction {
-  background: #fff;
-  border-color: #d2e3fc;
-  color: #174ea6;
+  background: var(--surface);
+  border-color: var(--primary-border);
+  color: var(--primary-text);
 }
 
 .secondaryWideAction:disabled {
-  background: #eef1f6;
-  border-color: #dfe3eb;
-  color: #80868b;
+  background: var(--border-subtle);
+  border-color: var(--border);
+  color: var(--placeholder);
 }
 
 .sectionHeader {
@@ -1522,7 +1531,7 @@
   gap: 16px;
   min-width: 0;
   padding: 18px;
-  border-bottom: 1px solid #dfe3eb;
+  border-bottom: 1px solid var(--border);
 }
 
 .sectionHeader > div {
@@ -1537,7 +1546,7 @@
   flex: 0 1 auto;
   min-width: 0;
   max-width: 100%;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 13px;
   font-weight: 500;
   line-height: 1.35;
@@ -1548,7 +1557,7 @@
 .segmented {
   display: flex;
   flex: 0 0 auto;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
 }
@@ -1557,13 +1566,13 @@
   height: 34px;
   min-width: 74px;
   border: 0;
-  background: #fff;
+  background: var(--surface);
   cursor: pointer;
 }
 
 .segmented .selected {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
   font-weight: 600;
 }
 
@@ -1573,13 +1582,13 @@
   gap: 0;
   width: fit-content;
   overflow: hidden;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
 }
 
 .targetModeControls span {
   padding: 0 10px;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
@@ -1589,15 +1598,15 @@
   min-width: 54px;
   height: 32px;
   border: 0;
-  border-left: 1px solid #dfe3eb;
-  background: #fff;
-  color: #3c4043;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
   cursor: pointer;
 }
 
 .targetModeControls button.selected {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
   font-weight: 700;
 }
 
@@ -1614,7 +1623,7 @@
 }
 
 .fleetInstancesPanel .consoleDataGrid {
-  border-top: 1px solid #eef1f6;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .systemUsersWorkspace {
@@ -1625,13 +1634,13 @@
 .operatorEditorPanel {
   min-width: 0;
   overflow: hidden;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .systemUsersTablePanel .consoleDataGrid {
-  border-top: 1px solid #eef1f6;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .operatorRecordName {
@@ -1639,7 +1648,7 @@
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
-  color: #202124;
+  color: var(--text);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1676,7 +1685,7 @@
 
 .operatorEditorFields label > span,
 .operatorScopeEditor label > span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
@@ -1696,10 +1705,10 @@
   place-items: center;
   width: 16px;
   height: 16px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: #f8fafd;
-  color: #5f6368;
+  background: var(--canvas);
+  color: var(--muted);
   cursor: help;
   flex: 0 0 auto;
   font-size: 11px;
@@ -1709,7 +1718,7 @@
 }
 
 .fieldHelpIcon:focus-visible {
-  outline: 2px solid #1a73e8;
+  outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
 
@@ -1718,9 +1727,9 @@
 .operatorScopeEditor textarea {
   width: 100%;
   min-height: 38px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #202124;
+  color: var(--text);
   outline: 0;
   padding: 0 10px;
 }
@@ -1734,7 +1743,7 @@
 .operatorEditorFields input:focus,
 .operatorEditorFields select:focus,
 .operatorScopeEditor textarea:focus {
-  border-color: #1a73e8;
+  border-color: var(--primary);
 }
 
 .operatorScopeShortcuts {
@@ -1749,10 +1758,10 @@
   align-items: center;
   min-height: 28px;
   max-width: 100%;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: #f8fafd;
-  color: #3c4043;
+  background: var(--canvas);
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
   font-weight: 700;
@@ -1761,7 +1770,7 @@
 }
 
 .operatorScopeShortcuts .tagChip:disabled {
-  color: #80868b;
+  color: var(--placeholder);
   cursor: not-allowed;
 }
 
@@ -1805,7 +1814,7 @@
   width: 16px;
   height: 12px;
   object-fit: cover;
-  border-radius: 2px;
+  border-radius: 3px;
   box-shadow: 0 0 0 1px rgba(60, 64, 67, 0.18);
 }
 
@@ -1813,9 +1822,9 @@
   display: grid;
   gap: 14px;
   min-width: min(100%, 860px);
-  border: 1px solid #dfe3eb;
-  border-radius: 10px;
-  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
   padding: 14px;
 }
 
@@ -1845,9 +1854,9 @@
 .fleetNodeDetailControls .aliasEditor,
 .fleetNodeDetailControls .fleetInlineTagForm {
   margin: 0;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
   padding: 10px;
 }
 
@@ -1868,7 +1877,7 @@
 .fleetDetailPane {
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 0;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
   overflow: hidden;
   margin-top: 0;
@@ -1883,9 +1892,9 @@
   display: grid;
   gap: 10px;
   margin: 14px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
   padding: 12px;
 }
 
@@ -1896,7 +1905,7 @@
 
 .fleetConfigRowsHeader span {
   margin-left: auto;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -1914,11 +1923,11 @@
   align-items: center;
   gap: 8px;
   min-width: 760px;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface);
   padding: 7px 9px;
-  color: #3c4043;
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
@@ -1930,8 +1939,8 @@
 
 .fleetConfigTableRow.heading,
 .fleetSelectionStatsRow.heading {
-  background: #f1f3f4;
-  color: #5f6368;
+  background: var(--surface-neutral);
+  color: var(--muted);
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -1941,9 +1950,9 @@
   display: grid;
   gap: 12px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
-  border-radius: 10px;
-  background: #f8fafd;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
   padding: 12px;
 }
 
@@ -1958,7 +1967,7 @@
 
 .fleetCurveHeader small,
 .fleetSelectionHeader small {
-  color: #5f6368;
+  color: var(--muted);
 }
 
 .fleetCurveGrid {
@@ -1972,15 +1981,15 @@
   display: grid;
   gap: 8px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   padding: 10px;
 }
 
 .gridSelectionPanel {
-  border-top: 1px solid #dfe3eb;
-  background: #f8fafd;
+  border-top: 1px solid var(--border);
+  background: var(--canvas);
   padding: 12px;
 }
 
@@ -1990,7 +1999,7 @@
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -1999,14 +2008,14 @@
   align-items: baseline;
   gap: 4px;
   min-height: 26px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: #fff;
+  background: var(--surface);
   padding: 0 10px;
 }
 
 .gridSelectionSummary strong {
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
 }
 
@@ -2038,17 +2047,17 @@
 .fleetInlineMutationPanel input {
   flex: 1;
   min-width: 160px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0 10px;
 }
 
 .selectionStatsTabs button {
   min-height: 30px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: #fff;
-  color: #3c4043;
+  background: var(--surface);
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
   font-weight: 700;
@@ -2056,9 +2065,9 @@
 }
 
 .selectionStatsTabs button.selected {
-  border-color: #1a73e8;
-  background: #e8f0fe;
-  color: #174ea6;
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .telemetryMode .fleetSelectionStatsRow {
@@ -2130,7 +2139,7 @@
 .fleetConfigTableBlock {
   background: var(--surface-soft);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;

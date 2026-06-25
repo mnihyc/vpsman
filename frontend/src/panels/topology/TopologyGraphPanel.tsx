@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { GitGraph, RefreshCcw, Search } from "lucide-react";
 import { topologyEdgeHealthStatusBadgeClass } from "../../jobStatusPresentation";
+import { consolePalette } from "../../colorPalette";
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import { readableTelemetryToken } from "../../topologyRuntime";
 import type { RuntimeConfigApplyStateRecord, TopologyGraph, TopologyGraphEdge, TopologyGraphNode } from "../../types";
@@ -130,7 +131,7 @@ export function TopologyGraphPanel({
           >
             <defs>
               <marker id="topologyArrow" markerHeight="8" markerWidth="8" orient="auto" refX="7" refY="4">
-                <path d="M0,0 L8,4 L0,8 z" fill="#5f6368" />
+                <path d="M0,0 L8,4 L0,8 z" fill={consolePalette.neutral.muted} />
               </marker>
             </defs>
             {filtered.edges.map((edge) => {

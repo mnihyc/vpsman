@@ -49,10 +49,10 @@
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
   align-items: end;
   gap: 12px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
-  background: #f8fafd;
+  background: var(--canvas);
 }
 
 .templateToolbar input,
@@ -97,7 +97,7 @@
 .dispatchForm label span,
 .releaseRecordForm label span,
 .privilegeManager label span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
@@ -128,10 +128,10 @@
   max-width: 100%;
   min-height: 24px;
   padding: 0 8px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: #f8fafd;
-  color: #202124;
+  background: var(--canvas);
+  color: var(--text);
   font-size: 12px;
   line-height: 1.2;
   overflow-wrap: anywhere;
@@ -140,7 +140,7 @@
 
 .targetChip.mutedChip {
   min-width: auto;
-  color: #5f6368;
+  color: var(--muted);
   background: transparent;
 }
 
@@ -152,16 +152,16 @@
 }
 
 .targetChip.showMoreChip:hover {
-  border-color: #c8d7f0;
-  color: #174ea6;
+  border-color: var(--primary);
+  color: var(--primary-text);
 }
 
 .targetImpactPreview {
   display: grid;
   gap: 10px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   padding: 12px;
 }
 
@@ -175,7 +175,7 @@
 .targetImpactHeader span,
 .targetImpactHint,
 .targetImpactGroup small {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -193,42 +193,42 @@
   display: grid;
   gap: 6px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 9px;
-  background: #f8fafd;
+  background: var(--canvas);
 }
 
 .targetImpactGroup.ready {
-  border-color: #c4eed0;
-  background: #f3fbf5;
+  border-color: var(--success);
+  background: var(--success-soft);
 }
 
 .targetImpactGroup.degraded,
 .targetImpactGroup.forced,
 .targetImpactGroup.needs_review {
-  border-color: #f9d99a;
-  background: #fff8e7;
+  border-color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .targetImpactGroup.stale {
-  border-color: #f2c36b;
-  background: #fff8e8;
+  border-color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .targetImpactGroup.unavailable {
-  border-color: #d0d7de;
-  background: #f6f8fa;
+  border-color: var(--border);
+  background: var(--surface-soft);
 }
 
 .targetImpactGroup.observation_only {
-  border-color: #d0d7de;
-  background: #f6f8fa;
+  border-color: var(--border);
+  background: var(--surface-soft);
 }
 
 .targetImpactGroup.unsupported {
-  border-color: #f2b8b5;
-  background: #fceeee;
+  border-color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .targetImpactGroupHeader {
@@ -241,7 +241,7 @@
 .targetImpactGroupHeader span {
   min-width: 0;
   overflow: hidden;
-  color: #3c4043;
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
   text-overflow: ellipsis;
@@ -265,36 +265,36 @@
 }
 
 .targetImpactGroup.ready svg {
-  color: #188038;
+  color: var(--success);
 }
 
 .targetImpactGroup.degraded svg,
 .targetImpactGroup.forced svg,
 .targetImpactGroup.stale svg,
 .targetImpactGroup.needs_review svg {
-  color: #b06000;
+  color: var(--warning-text);
 }
 
 .targetImpactGroup.observation_only svg,
 .targetImpactGroup.unavailable svg {
-  color: #5f6368;
+  color: var(--muted);
 }
 
 .targetImpactGroup.unsupported svg {
-  color: #b3261e;
+  color: var(--danger);
 }
 
 .operationNote {
   display: grid;
   gap: 5px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
   padding: 12px;
 }
 
 .operationNote span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 13px;
 }
 
@@ -482,10 +482,10 @@
 .multiFilePanel textarea {
   box-sizing: border-box;
   min-height: 36px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: #fff;
-  color: #202124;
+  background: var(--surface);
+  color: var(--text);
   font: inherit;
   padding: 7px 10px;
 }
@@ -495,7 +495,7 @@
 .multiFilePanel input:not([type="checkbox"]):not([type="file"]):focus,
 .multiFilePanel select:focus,
 .multiFilePanel textarea:focus {
-  border-color: #1a73e8;
+  border-color: var(--primary);
   box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.14);
   outline: 0;
 }
@@ -506,7 +506,7 @@
   min-width: 14px;
   height: 14px;
   margin: 0;
-  accent-color: #1a73e8;
+  accent-color: var(--primary);
 }
 
 .fileBrowserPanel input[type="file"],
@@ -514,10 +514,10 @@
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  border: 1px dashed #c7d0dd;
+  border: 1px dashed var(--border);
   border-radius: 6px;
-  background: #f8fafd;
-  color: #3c4043;
+  background: var(--canvas);
+  color: var(--text-secondary);
   font: inherit;
   font-size: 12px;
   padding: 7px;
@@ -526,10 +526,10 @@
 .fileBrowserPanel input[type="file"]::file-selector-button,
 .multiFilePanel input[type="file"]::file-selector-button {
   margin-right: 8px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: #fff;
-  color: #3c4043;
+  background: var(--surface);
+  color: var(--text-secondary);
   font: inherit;
   padding: 5px 8px;
 }
@@ -551,8 +551,8 @@
   grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   padding: 14px 18px;
-  border-bottom: 1px solid #eef1f6;
-  background: #f8fafd;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--canvas);
 }
 
 .fileBrowserPrivilegeRow label,
@@ -571,7 +571,7 @@
 .fileActionStack label span,
 .fileEditorActions label span,
 .multiFileComposer label span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
@@ -583,7 +583,7 @@
   align-items: center;
   gap: 8px;
   padding: 12px 18px;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .pathRefreshAction {
@@ -617,13 +617,13 @@
 .fileTreePane,
 .fileDetailsPane {
   min-width: 0;
-  border-right: 1px solid #eef1f6;
-  background: #fff;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--surface);
 }
 
 .fileDetailsPane {
   border-right: 0;
-  border-left: 1px solid #eef1f6;
+  border-left: 1px solid var(--border-subtle);
 }
 
 .fileTreeToolbar {
@@ -631,7 +631,7 @@
   align-items: center;
   gap: 8px;
   padding: 10px;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .fileTree {
@@ -649,7 +649,7 @@
   min-height: 30px;
   border: 0;
   background: transparent;
-  color: #3c4043;
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 13px;
   text-align: left;
@@ -657,8 +657,8 @@
 
 .fileTreeRow:hover,
 .fileTreeRow.selected {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .fileTreeRow span {
@@ -669,7 +669,7 @@
 }
 
 .fileTreeRow small {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   padding-right: 8px;
 }
@@ -685,7 +685,7 @@
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
-  background: #fff;
+  background: var(--surface);
 }
 
 .fileEditorToolbar {
@@ -695,7 +695,7 @@
   gap: 12px;
   min-width: 0;
   padding: 10px 12px;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .fileEditorToolbar > div:first-child {
@@ -712,7 +712,7 @@
 }
 
 .fileEditorToolbar span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -761,7 +761,7 @@
 }
 
 .fileDetailsToolbar .dangerIconButton {
-  color: #b3261e;
+  color: var(--danger);
 }
 
 .fileCommandPopover {
@@ -770,9 +770,9 @@
   display: grid;
   gap: 9px;
   min-width: 0;
-  border: 1px solid #b9c7dc;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fbfcff;
+  background: var(--surface-subtle);
   padding: 11px;
   box-shadow: 0 10px 24px rgba(60, 64, 67, 0.16);
 }
@@ -781,12 +781,12 @@
   display: grid;
   gap: 2px;
   min-width: 0;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--border-subtle);
   padding-bottom: 8px;
 }
 
 .fileCommandHeader strong {
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
   line-height: 1.2;
 }
@@ -794,7 +794,7 @@
 .fileCommandHeader span {
   min-width: 0;
   overflow: hidden;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -808,7 +808,7 @@
 .fileActionStack > span {
   min-width: 0;
   overflow: hidden;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -826,9 +826,9 @@
   display: grid;
   gap: 9px;
   min-width: 0;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: #fbfcff;
+  background: var(--surface-subtle);
   padding: 10px;
 }
 
@@ -843,14 +843,14 @@
 }
 
 .fileActionGroupHeader strong {
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
 }
 
 .fileActionGroupHeader span {
   min-width: 0;
   overflow: hidden;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -875,7 +875,7 @@
 
 .fileCommandPopover .inlineCheck span,
 .multiFileComposer .inlineCheck span {
-  color: #3c4043;
+  color: var(--text-secondary);
   font-size: 13px;
   font-weight: 500;
   text-transform: none;
@@ -890,13 +890,13 @@
 .fileMetadataList div {
   display: grid;
   gap: 2px;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 6px;
   padding: 8px;
 }
 
 .fileMetadataList dt {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
@@ -906,23 +906,29 @@
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;
-  color: #202124;
+  color: var(--text);
   font-size: 12px;
 }
 
 .contextMenuContent {
-  z-index: 60;
+  z-index: var(--z-dropdown);
   min-width: 160px;
-  border: 1px solid #dfe3eb;
+  max-height: min(
+    460px,
+    var(--radix-context-menu-content-available-height, calc(100vh - 24px))
+  );
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 10px 28px rgba(60, 64, 67, 0.18);
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
   padding: 5px;
 }
 
 .contextMenuItem {
   border-radius: 6px;
-  color: #3c4043;
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 13px;
   outline: 0;
@@ -931,12 +937,12 @@
 
 .contextMenuItem:hover,
 .contextMenuItem[data-highlighted] {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .contextMenuItem.danger {
-  color: #b3261e;
+  color: var(--danger);
 }
 
 .multiFileLayout {
@@ -951,7 +957,7 @@
   align-self: start;
   gap: 10px;
   padding: 14px 16px;
-  border-right: 1px solid #eef1f6;
+  border-right: 1px solid var(--border-subtle);
 }
 
 .multiFilePrimaryActions {
@@ -961,9 +967,9 @@
 }
 
 .advancedFileActions {
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: #fbfcff;
+  background: var(--surface-subtle);
   padding: 9px 10px;
 }
 
@@ -978,7 +984,7 @@
 
 .advancedFileActions summary {
   cursor: pointer;
-  color: #3c4043;
+  color: var(--text-secondary);
   font-size: 13px;
   font-weight: 700;
 }
@@ -1009,7 +1015,7 @@
 
 .bulkSummaryPane > .sectionSubheader {
   padding: 13px 14px 9px;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .bulkProgressStrip {
@@ -1018,14 +1024,14 @@
   justify-content: space-between;
   gap: 12px;
   padding: 8px 14px;
-  border-bottom: 1px solid #eef1f6;
-  background: #f8fafd;
-  color: #5f6368;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--canvas);
+  color: var(--muted);
   font-size: 12px;
 }
 
 .bulkProgressStrip strong {
-  color: #174ea6;
+  color: var(--primary-text);
   font-size: 12px;
 }
 
@@ -1034,10 +1040,9 @@
   gap: 10px;
   margin: 12px 14px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
-  border-left: 4px solid #1a73e8;
+  border: 1px solid var(--primary);
   border-radius: 8px;
-  background: #fbfcff;
+  background: var(--surface-subtle);
   padding: 11px 12px;
 }
 
@@ -1069,7 +1074,7 @@
 }
 
 .executionResultHeader strong {
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
 }
 
@@ -1077,7 +1082,7 @@
 .executionResultPanel p {
   min-width: 0;
   overflow-wrap: anywhere;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -1096,11 +1101,11 @@
   display: grid;
   gap: 2px;
   min-width: 0;
-  border: 1px solid #eef1f6;
-  border-radius: 7px;
-  background: #fff;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface);
   padding: 7px 8px;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
@@ -1109,7 +1114,7 @@
 .executionResultStats strong {
   min-width: 0;
   overflow: hidden;
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
   text-overflow: ellipsis;
   text-transform: none;
@@ -1121,7 +1126,7 @@
   gap: 6px;
   margin: 0;
   padding: 0;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -1132,9 +1137,9 @@
   gap: 8px;
   align-items: start;
   min-width: 0;
-  border: 1px solid #f1d0cc;
-  border-radius: 7px;
-  background: #fff8f7;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  background: var(--danger-soft);
   padding: 7px 8px;
 }
 
@@ -1147,20 +1152,20 @@
 }
 
 .executionFailureReason strong {
-  color: #b3261e;
+  color: var(--danger);
   font-size: 11px;
   text-transform: uppercase;
   white-space: nowrap;
 }
 
 .executionFailureReason span {
-  color: #202124;
+  color: var(--text);
   font-weight: 700;
   overflow-wrap: anywhere;
 }
 
 .executionFailureReason small {
-  color: #5f6368;
+  color: var(--muted);
   overflow-wrap: anywhere;
 }
 
@@ -1168,25 +1173,25 @@
   display: grid;
   gap: 9px;
   margin: 12px 14px 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fbfcff;
+  background: var(--surface-subtle);
   padding: 10px;
 }
 
 .bulkDownloadComparison.same {
-  border-color: #cde8d5;
-  background: #f7fcf8;
+  border-color: var(--success);
+  background: var(--success-soft);
 }
 
 .bulkDownloadComparison.contentDiscrepancy {
-  border-color: #f6d7a7;
-  background: #fffbf2;
+  border-color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .bulkDownloadComparison.hierarchyDiscrepancy {
-  border-color: #f4b7b2;
-  background: #fff8f7;
+  border-color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .bulkDownloadComparisonHeader {
@@ -1196,12 +1201,12 @@
 }
 
 .bulkDownloadComparisonHeader strong {
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
 }
 
 .bulkDownloadComparisonHeader span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -1215,7 +1220,7 @@
   gap: 6px;
   min-width: 0;
   border: 1px solid rgba(223, 227, 235, 0.8);
-  border-radius: 7px;
+  border-radius: 6px;
   background: rgba(255, 255, 255, 0.72);
   padding: 8px;
 }
@@ -1236,12 +1241,12 @@
 }
 
 .bulkComparisonRowTitle strong {
-  color: #202124;
+  color: var(--text);
   font-size: 12px;
 }
 
 .bulkComparisonRowTitle span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -1261,7 +1266,7 @@
 .bulkComparisonVariantLabel {
   min-width: 0;
   overflow: hidden;
-  color: #3c4043;
+  color: var(--text-secondary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
   line-height: 1.35;
@@ -1280,9 +1285,9 @@
 }
 
 .bulkSummaryList details {
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   padding: 9px 10px;
 }
 
@@ -1312,10 +1317,10 @@
   flex: 0 1 auto;
   max-width: min(22ch, 100%);
   overflow: hidden;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 999px;
   padding: 2px 6px;
-  color: #3c4043;
+  color: var(--text-secondary);
   font-size: 11px;
   line-height: 1.25;
   text-overflow: ellipsis;
@@ -1332,7 +1337,7 @@
 .bulkSummaryDetail {
   margin: 8px 0 0;
   overflow-wrap: anywhere;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -1340,9 +1345,9 @@
   display: grid;
   gap: 8px;
   margin-top: 8px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fbfcff;
+  background: var(--surface-subtle);
   padding: 8px 10px;
 }
 
@@ -1353,7 +1358,7 @@
 }
 
 .bulkEvidenceBox span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
@@ -1361,7 +1366,7 @@
 
 .bulkEvidenceBox strong {
   overflow: hidden;
-  color: #202124;
+  color: var(--text);
   font-size: 12px;
   line-height: 1.25;
   text-overflow: ellipsis;
@@ -1372,10 +1377,10 @@
   max-height: 150px;
   overflow: auto;
   margin: 9px 0 0;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 6px;
-  background: #f8fafd;
-  color: #202124;
+  background: var(--canvas);
+  color: var(--text);
   font-size: 12px;
   line-height: 1.45;
   padding: 9px 10px;
@@ -1401,7 +1406,7 @@
   .multiFileComposer {
     border-right: 0;
     border-left: 0;
-    border-bottom: 1px solid #eef1f6;
+    border-bottom: 1px solid var(--border-subtle);
   }
 }
 
@@ -1441,7 +1446,7 @@
 
   .filePathBar .tightCheck {
     min-height: 36px;
-    border: 1px solid #dfe3eb;
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0 10px;
   }
@@ -1478,7 +1483,7 @@
 }
 
 .topologyMetric small {
-  color: #5f6368;
+  color: var(--muted);
 }
 
 .fileTransferGrid {
@@ -1499,7 +1504,7 @@
   width: 16px;
   height: 16px;
   margin: 0;
-  accent-color: #1a73e8;
+  accent-color: var(--primary);
 }
 
 .handoffBulkBar {
@@ -1508,9 +1513,9 @@
   justify-content: space-between;
   gap: 14px;
   padding: 12px 18px;
-  border-top: 1px solid #eef1f6;
-  border-bottom: 1px solid #eef1f6;
-  background: #f8fafd;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--canvas);
 }
 
 .handoffBulkActions {
@@ -1527,7 +1532,7 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
 }
@@ -1551,13 +1556,13 @@
 
 .sectionSubheader h3 {
   margin: 0;
-  color: #202124;
+  color: var(--text);
   font-size: 15px;
   line-height: 1.2;
 }
 
 .sectionSubheader span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -1575,7 +1580,7 @@
 }
 
 .sourceArtifactControls label span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
@@ -1586,25 +1591,25 @@
   align-items: center;
   max-width: 100%;
   gap: 5px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafd;
-  color: #5f6368;
+  background: var(--canvas);
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.2;
   padding: 7px 9px;
 }
 
 .policyChip strong {
-  color: #202124;
+  color: var(--text);
 }
 
 .sourceArtifactList {
   display: grid;
   overflow: hidden;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .sourceArtifactRow,
@@ -1627,12 +1632,12 @@
 }
 
 .sourceArtifactRow + .sourceArtifactRow {
-  border-top: 1px solid #eef1f6;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .sourceArtifactEmpty {
   grid-template-columns: auto 1fr;
-  color: #5f6368;
+  color: var(--muted);
 }
 
 @media (max-width: 920px) {
@@ -1666,7 +1671,7 @@
   width: 100%;
   height: 6px;
   border-radius: 999px;
-  background: #e8eaed;
+  background: var(--surface-soft);
 }
 
 .transferProgressTrack span {
@@ -1675,7 +1680,7 @@
   max-width: 100%;
   height: 100%;
   border-radius: inherit;
-  background: #1a73e8;
+  background: var(--primary);
 }
 
 .terminalSessionGrid {
@@ -1692,7 +1697,7 @@
 
 .terminalSessionsPanel .consoleDataGrid,
 .terminalSessionsPanel > .terminalReplayPreview {
-  border-top: 1px solid #eef1f6;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .terminalSummaryStrip {
@@ -1700,17 +1705,17 @@
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
   padding: 12px 18px;
-  border-bottom: 1px solid #eef1f6;
-  background: #fbfcff;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-subtle);
 }
 
 .terminalSummaryStrip span {
   display: grid;
   gap: 3px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   padding: 9px 10px;
 }
 
@@ -1723,12 +1728,12 @@
 }
 
 .terminalSummaryStrip strong {
-  color: #202124;
+  color: var(--text);
   font-size: 14px;
 }
 
 .terminalSummaryStrip small {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
@@ -1744,20 +1749,20 @@
 }
 
 .compactRowActions .activeAction {
-  border-color: #1a73e8;
-  color: #1a73e8;
+  border-color: var(--primary);
+  color: var(--primary);
 }
 
 .terminalWarning {
-  color: #b06000;
+  color: var(--warning-text);
 }
 
 .terminalWorkspace {
   display: grid;
   gap: 0;
-  border-top: 1px solid #eef1f6;
-  border-bottom: 1px solid #eef1f6;
-  background: #fff;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface);
 }
 
 .terminalActiveHeader {
@@ -1766,7 +1771,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 12px 18px;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .terminalActiveHeader > div:first-child {
@@ -1784,7 +1789,7 @@
 }
 
 .terminalActiveHeader span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -1796,10 +1801,10 @@
   margin: 0 18px 14px;
   overflow: hidden;
   resize: vertical;
-  border: 1px solid #1f2937;
+  border: 1px solid var(--text-secondary);
   border-radius: 8px;
   padding: 10px;
-  background: #111827;
+  background: var(--text);
 }
 
 .xtermReplay .xterm {
@@ -1807,7 +1812,7 @@
 }
 
 .selectedTerminalSession {
-  background: #f8fafd;
+  background: var(--canvas);
 }
 
 .linkLikeButton {
@@ -1816,7 +1821,7 @@
   overflow: hidden;
   border: 0;
   background: transparent;
-  color: #174ea6;
+  color: var(--primary-text);
   cursor: pointer;
   font: inherit;
   font-weight: 700;
@@ -1830,8 +1835,8 @@
   display: grid;
   gap: 10px;
   padding: 14px 18px;
-  border-top: 1px solid #eef1f6;
-  background: #f8fafd;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--canvas);
 }
 
 .terminalReplayPreview div {
@@ -1842,7 +1847,7 @@
 }
 
 .terminalReplayPreview span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -1852,10 +1857,10 @@
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: "Roboto Mono", "SFMono-Regular", Consolas, monospace;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 1.45;
-  color: #202124;
+  color: var(--text);
 }
 
 .latencyCurve {
@@ -1864,22 +1869,22 @@
   min-height: 58px;
   gap: 8px;
   padding: 14px 18px;
-  border-bottom: 1px solid #eef1f6;
-  background: #f8fafd;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--canvas);
 }
 
 .latencyCurve span {
   display: block;
   width: 18px;
-  border-radius: 4px 4px 0 0;
+  border-radius: 3px 3px 0 0;
 }
 
 .latencyCurve span.ok {
-  background: #1a73e8;
+  background: var(--primary);
 }
 
 .latencyCurve span.warn {
-  background: #f9ab00;
+  background: var(--warning);
 }
 
 .topologyEvidence > .latencyCurve {
@@ -1904,10 +1909,10 @@
   display: grid;
   gap: 8px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 10px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .latencyCurveTitle {
@@ -1924,12 +1929,12 @@
 }
 
 .latencyCurveTitle strong {
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
 }
 
 .latencyCurveTitle small {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -1946,10 +1951,10 @@
 }
 
 .topologyPreview pre {
-  background: #f8fafd;
-  border: 1px solid #dfe3eb;
+  background: var(--canvas);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: #202124;
+  color: var(--text);
   font-size: 12px;
   line-height: 1.5;
   margin: 0 18px 18px;
@@ -1973,19 +1978,19 @@
 .transferProgress {
   display: grid;
   gap: 4px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
   padding: 10px 12px;
 }
 
 .transferProgress span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 13px;
 }
 
 .privilegeManager {
-  border-top: 1px solid #dfe3eb;
+  border-top: 1px solid var(--border);
 }
 
 .compactPrivilegeManager {
@@ -2006,7 +2011,7 @@
 }
 
 .privilegeStatus span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   min-width: 0;
   overflow: hidden;
@@ -2035,9 +2040,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border-top: 1px solid #dfe3eb;
-  border-bottom: 1px solid #dfe3eb;
-  background: #f8fafd;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--canvas);
   padding: 12px 14px;
 }
 
@@ -2048,12 +2053,12 @@
 }
 
 .releaseWorkflowBar strong {
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
 }
 
 .releaseWorkflowBar span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -2085,9 +2090,9 @@
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   padding: 14px;
 }
 
@@ -2104,12 +2109,12 @@
 }
 
 .releaseFormSectionHeader strong {
-  color: #202124;
+  color: var(--text);
   font-size: 14px;
 }
 
 .releaseFormSectionHeader span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -2130,10 +2135,10 @@
   width: 100%;
   min-width: 0;
   min-height: 36px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #202124;
+  background: var(--surface);
+  color: var(--text);
   outline: 0;
   padding: 7px 10px;
 }
@@ -2143,7 +2148,7 @@
 .sourceArtifactControls input:not([type="checkbox"]):not([type="file"]):focus,
 .sourceArtifactControls select:focus,
 .handoffModeControl select:focus {
-  border-color: #1a73e8;
+  border-color: var(--primary);
   box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.14);
 }
 
@@ -2151,10 +2156,10 @@
 .sourceArtifactControls input[type="file"] {
   width: 100%;
   min-width: 0;
-  border: 1px dashed #c7d0dd;
+  border: 1px dashed var(--border);
   border-radius: 8px;
-  background: #f8fafd;
-  color: #3c4043;
+  background: var(--canvas);
+  color: var(--text-secondary);
   font-size: 12px;
   padding: 7px;
 }
@@ -2162,10 +2167,10 @@
 .releaseRecordForm input[type="file"]::file-selector-button,
 .sourceArtifactControls input[type="file"]::file-selector-button {
   margin-right: 8px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: #fff;
-  color: #3c4043;
+  background: var(--surface);
+  color: var(--text-secondary);
   font: inherit;
   padding: 5px 8px;
 }
@@ -2214,10 +2219,10 @@
   width: 100%;
   min-width: 0;
   min-height: 38px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #202124;
+  background: var(--surface);
+  color: var(--text);
   outline: 0;
   padding: 0 10px;
 }
@@ -2225,7 +2230,7 @@
 .approvalControls input:not([type="checkbox"]):focus,
 .approvalControls select:focus,
 .handoffModeControl select:focus {
-  border-color: #1a73e8;
+  border-color: var(--primary);
   box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.14);
 }
 
@@ -2246,16 +2251,16 @@
 }
 
 .rowActionGroup button {
-  border: 1px solid #dfe3eb;
-  background: #fff;
-  color: #3c4043;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
   cursor: pointer;
   font-weight: 700;
 }
 
 .rowActionGroup button:hover:not(:disabled) {
-  border-color: #c8d7f0;
-  color: #174ea6;
+  border-color: var(--primary);
+  color: var(--primary-text);
 }
 
 .rowActionGroup button:disabled {

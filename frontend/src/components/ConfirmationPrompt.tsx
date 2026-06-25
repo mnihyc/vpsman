@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { AlertTriangle, X } from "lucide-react";
+import { scrollIntoViewWithMotion } from "../motion";
 
 export function ConfirmationPrompt({
   cancelLabel = "Cancel",
@@ -37,8 +38,7 @@ export function ConfirmationPrompt({
     const element = promptRef.current;
     let focusTimeout: number | null = null;
     window.requestAnimationFrame(() => {
-      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      element.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
+      scrollIntoViewWithMotion(element, { block: "center" });
       element.focus({ preventScroll: true });
       focusTimeout = window.setTimeout(() => {
         if (element.isConnected) {

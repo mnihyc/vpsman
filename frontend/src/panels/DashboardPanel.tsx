@@ -12,6 +12,7 @@ import {
 import { ConsoleActionDrawer, ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { TimeSeriesChart, type TimeSeriesChartLine } from "../components/TimeSeriesChart";
 import { VpsCombobox } from "../components/VpsCombobox";
+import { consolePalette, dashboardChartColors } from "../colorPalette";
 import type {
   AgentView,
   DashboardDrilldownRecord,
@@ -57,7 +58,6 @@ type DrawerState = {
 };
 
 const fallbackDashboardWindows: DashboardWindow[] = ["15m", "1h", "6h", "24h", "7d", "14d", "30d", "all"];
-const chartColors = ["#1a73e8", "#188038", "#f29900", "#9334e6", "#d93025", "#129eaf", "#5f6368", "#b06000"];
 const resourceMetricOptions: Array<{ value: DashboardResourceMetric; label: string }> = [
   { label: "CPU", value: "cpu_load" },
   { label: "Memory", value: "memory_used" },
@@ -116,8 +116,8 @@ export function DashboardPanel({
   const networkSpeedChart = useMemo(
     () => ({
       lines: [
-        { color: "#1a73e8", label: "Inbound speed", values: (network?.points ?? []).map((point) => point.rx_bps) },
-        { color: "#188038", label: "Outbound speed", values: (network?.points ?? []).map((point) => point.tx_bps) },
+        { color: consolePalette.chart.blue, label: "Inbound speed", values: (network?.points ?? []).map((point) => point.rx_bps) },
+        { color: consolePalette.chart.green, label: "Outbound speed", values: (network?.points ?? []).map((point) => point.tx_bps) },
       ],
       times: (network?.points ?? []).map((point) => point.bucket_start),
     }),
@@ -877,7 +877,7 @@ function resourceChartData(series: DashboardResourceSeriesRecord[]): { lines: Ti
   const lines = series.map((entry, index) => {
     const points = new Map(entry.points.map((point) => [point.bucket_start, point.value]));
     return {
-      color: chartColors[index % chartColors.length],
+      color: dashboardChartColors[index % dashboardChartColors.length],
       label: entry.label,
       values: times.map((time) => points.get(time) ?? null),
     };
@@ -893,7 +893,7 @@ function trafficChartData(
   const lines = series.map((entry, index) => {
     const points = new Map(entry.points.map((point) => [point.bucket_start, trafficPointValue(point, sort)]));
     return {
-      color: chartColors[index % chartColors.length],
+      color: dashboardChartColors[index % dashboardChartColors.length],
       label: entry.label,
       values: times.map((time) => points.get(time) ?? null),
     };

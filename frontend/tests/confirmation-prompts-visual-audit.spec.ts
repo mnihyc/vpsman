@@ -188,6 +188,7 @@ async function capture(
 
 async function assertPromptReady(page: Page, prompt: Locator) {
   await expect(prompt).toBeVisible();
+  await releaseLiveToolbarFocus(page, prompt);
   await expect
     .poll(() =>
       prompt.evaluate((element) => element === document.activeElement || element.contains(document.activeElement)),
@@ -203,6 +204,17 @@ async function assertPromptReady(page: Page, prompt: Locator) {
       return box.y >= 0 && box.y + box.height <= viewport.height;
     })
     .toBe(true);
+}
+
+async function releaseLiveToolbarFocus(page: Page, prompt: Locator) {
+  const liveToolbarHasFocus = await page.evaluate(() => {
+    const active = document.activeElement;
+    const toolbar = document.getElementById("impeccable-live-global-bar");
+    return Boolean(active && toolbar?.contains(active));
+  });
+  if (liveToolbarHasFocus) {
+    await prompt.evaluate((element) => (element as HTMLElement).focus({ preventScroll: true }));
+  }
 }
 
 async function collectLayoutSignals(page: Page) {

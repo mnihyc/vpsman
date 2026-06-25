@@ -6,6 +6,7 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
+import { consolePalette } from "../../colorPalette";
 import { terminalSessionStateBadgeClass } from "../../jobStatusPresentation";
 import type { TerminalAction } from "../jobDispatchModel";
 import type { WsTerminalOutputEvent } from "../../types";
@@ -430,12 +431,12 @@ function XtermReplay({ label, text }: { label: string; text: string }) {
       convertEol: true,
       cursorBlink: false,
       disableStdin: true,
-      fontFamily: '"Roboto Mono", "SFMono-Regular", Consolas, monospace',
+      fontFamily: 'ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace',
       fontSize: 12,
       rows: 18,
       theme: {
-        background: "#111827",
-        foreground: "#e5e7eb",
+        background: consolePalette.neutral.text,
+        foreground: consolePalette.neutral.terminalForeground,
       },
     });
     const fit = new FitAddon();

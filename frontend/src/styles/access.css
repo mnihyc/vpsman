@@ -14,19 +14,19 @@
   align-items: center;
   width: fit-content;
   max-width: 100%;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   overflow: hidden;
-  background: #fff;
+  background: var(--surface);
 }
 
 .accessSubnav button {
   min-height: 38px;
   border: 0;
-  border-right: 1px solid #dfe3eb;
+  border-right: 1px solid var(--border);
   padding: 0 14px;
-  background: #fff;
-  color: #3c4043;
+  background: var(--surface);
+  color: var(--text-secondary);
   font-weight: 700;
   cursor: pointer;
 }
@@ -36,12 +36,12 @@
 }
 
 .accessSubnav button:hover {
-  background: #f8fafd;
+  background: var(--canvas);
 }
 
 .accessSubnav button.selected {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .accessWorkspace > .fleetPanel {
@@ -70,19 +70,19 @@
   gap: 4px 10px;
   align-items: center;
   min-height: 108px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
   padding: 14px;
 }
 
 .accessTile svg {
-  color: #1a73e8;
+  color: var(--primary);
 }
 
 .accessTile span,
 .accessTile small {
-  color: #5f6368;
+  color: var(--muted);
 }
 
 .accessTile strong,
@@ -107,7 +107,7 @@
 }
 
 .accessInspector .sectionHeader.compact {
-  border-top: 1px solid #eef1f6;
+  border-top: 1px solid var(--border-subtle);
   padding: 14px 18px 8px;
 }
 
@@ -137,7 +137,7 @@
   gap: 8px;
   align-items: center;
   min-height: 38px;
-  color: #202124;
+  color: var(--text);
 }
 
 .accessInspector .inlineCheck input[type="checkbox"] {
@@ -151,7 +151,7 @@
 .accessConfigHeading {
   display: grid;
   gap: 3px;
-  border-top: 1px solid #dfe3eb;
+  border-top: 1px solid var(--border);
   padding: 14px 18px 8px;
 }
 
@@ -160,13 +160,13 @@
 }
 
 .accessConfigHeading strong {
-  color: #202124;
+  color: var(--text);
   font-size: 0.86rem;
   line-height: 1.25;
 }
 
 .accessConfigHeading span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 0.76rem;
   line-height: 1.35;
 }
@@ -174,9 +174,9 @@
 .inlineSecret {
   display: grid;
   gap: 4px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
   padding: 10px;
 }
 
@@ -189,9 +189,9 @@
 .formNote {
   display: grid;
   gap: 2px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
   padding: 10px;
 }
 
@@ -206,7 +206,7 @@
 }
 
 .formNote span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 0.78rem;
   line-height: 1.35;
 }
@@ -218,7 +218,7 @@
 }
 
 .accessInspector .sideForm label:not(.inlineCheck) > span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   line-height: 1.2;
@@ -230,23 +230,23 @@
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 10px;
   padding: 14px 18px;
-  border-top: 1px solid #eef1f6;
-  border-bottom: 1px solid #eef1f6;
-  background: #fbfcff;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-subtle);
 }
 
 .accessSummaryCards .summaryCard {
   display: grid;
   gap: 3px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   padding: 10px 12px;
 }
 
 .accessSummaryCards .summaryCard span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.02em;
@@ -260,13 +260,13 @@
 }
 
 .accessSummaryCards .summaryCard strong {
-  color: #202124;
+  color: var(--text);
   font-size: 14px;
   line-height: 1.25;
 }
 
 .accessSummaryCards .summaryCard small {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
@@ -279,9 +279,9 @@
   width: auto;
   margin: 14px 18px 0;
   overflow: hidden;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .subpanelTabs.accessTabs button,
@@ -289,10 +289,10 @@
   min-width: 0;
   min-height: 38px;
   border: 0;
-  border-right: 1px solid #dfe3eb;
-  border-bottom: 1px solid #dfe3eb;
-  background: #fff;
-  color: #3c4043;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
   font-weight: 700;
@@ -301,15 +301,15 @@
 
 .subpanelTabs.accessTabs button:hover,
 .accessSubnav button:hover {
-  background: #f8fafd;
+  background: var(--canvas);
 }
 
 .subpanelTabs.accessTabs button.active,
 .subpanelTabs.accessTabs button[aria-selected="true"],
 .accessSubnav button.active,
 .accessSubnav button.selected {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .accessMain .workspaceSection {
@@ -330,13 +330,13 @@
 .accessMain .controlPanel {
   min-width: 0;
   overflow: hidden;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .accessMain .controlPanel .consoleDataGrid {
-  border-top: 1px solid #eef1f6;
+  border-top: 1px solid var(--border-subtle);
 }
 
 .accessSelectionPanel {
@@ -345,12 +345,12 @@
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
 .accessSelectionPanel strong {
-  color: #202124;
+  color: var(--text);
 }
 
 .accessSelectionPanel span {
@@ -378,9 +378,9 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   padding: 10px;
 }
 
@@ -399,17 +399,17 @@
 }
 
 .accessQueueRow strong {
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
 }
 
 .accessQueueRow span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
 .accessQueueValue {
-  color: #202124 !important;
+  color: var(--text) !important;
   font-weight: 700;
 }
 
@@ -424,7 +424,7 @@
   grid-template-columns: minmax(180px, 0.7fr) minmax(180px, 1fr);
   gap: 12px;
   min-width: 0;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--border-subtle);
   padding-bottom: 8px;
 }
 
@@ -434,13 +434,13 @@
 }
 
 .metricRow span {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
 }
 
 .metricRow strong {
   min-width: 0;
-  color: #202124;
+  color: var(--text);
   overflow-wrap: anywhere;
 }

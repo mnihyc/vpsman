@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
+import { consolePalette } from "../colorPalette";
 import "uplot/dist/uPlot.min.css";
 
 export type TimeSeriesChartLine = {
@@ -31,6 +32,7 @@ export function TimeSeriesChart({
   times,
   valueFormatter,
 }: TimeSeriesChartProps) {
+  const captionId = useId();
   const hostRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<uPlot | null>(null);
   const [hover, setHover] = useState<HoverState | null>(null);
@@ -72,15 +74,15 @@ export function TimeSeriesChart({
     const buildOptions = (width: number): uPlot.Options => ({
       axes: [
         {
-          grid: { stroke: "#eef1f6", width: 1 },
+          grid: { stroke: consolePalette.neutral.borderSubtle, width: 1 },
           size: 34,
-          stroke: "#5f6368",
+          stroke: consolePalette.neutral.muted,
           values: (_plot, ticks) => ticks.map((tick) => formatAxisTime(tick, unixTimes)),
         },
         {
-          grid: { stroke: "#eef1f6", width: 1 },
+          grid: { stroke: consolePalette.neutral.borderSubtle, width: 1 },
           size: 78,
-          stroke: "#5f6368",
+          stroke: consolePalette.neutral.muted,
           values: (_plot, ticks) => ticks.map((tick) => valueFormatter(tick)),
         },
       ],
@@ -154,9 +156,31 @@ export function TimeSeriesChart({
   }, [data, height, sanitizedLines, unixTimes, valueFormatter]);
 
   const hasData = unixTimes.length > 0 && sanitizedLines.length > 0;
+  const accessibleRows = useMemo(() => {
+    const firstIndex = Math.max(0, unixTimes.length - 12);
+    return unixTimes.slice(firstIndex).map((time, offset) => {
+      const sourceIndex = firstIndex + offset;
+      return {
+        timeLabel: formatChartTime(time),
+        values: sanitizedLines.map((line) => ({
+          label: line.label,
+          value: valueFormatter(line.values[sourceIndex] ?? null),
+        })),
+      };
+    });
+  }, [sanitizedLines, unixTimes, valueFormatter]);
+  const latestValues = accessibleRows[accessibleRows.length - 1]?.values ?? [];
 
   return (
-    <div className="timeSeriesChartShell" role="img" aria-label={ariaLabel}>
+    <figure className="timeSeriesChartShell" aria-labelledby={captionId}>
+      <figcaption className="srOnly" id={captionId}>
+        {ariaLabel}
+        {latestValues.length > 0
+          ? `. Latest values: ${latestValues
+              .map((entry) => `${entry.label} ${entry.value}`)
+              .join(", ")}.`
+          : "."}
+      </figcaption>
       {hasData ? (
         <>
           <div className="timeSeriesChart" ref={hostRef} />
@@ -180,11 +204,34 @@ export function TimeSeriesChart({
               ))}
             </div>
           )}
+          <table className="srOnly">
+            <caption>{ariaLabel} data, latest {accessibleRows.length} points</caption>
+            <thead>
+              <tr>
+                <th scope="col">Time</th>
+                {sanitizedLines.map((line) => (
+                  <th key={line.label} scope="col">
+                    {line.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {accessibleRows.map((row, index) => (
+                <tr key={`${row.timeLabel}-${index}`}>
+                  <th scope="row">{row.timeLabel}</th>
+                  {row.values.map((entry) => (
+                    <td key={`${row.timeLabel}-${entry.label}`}>{entry.value}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </>
       ) : (
         <div className="dashboardEmptyChart">{emptyLabel}</div>
       )}
-    </div>
+    </figure>
   );
 }
 

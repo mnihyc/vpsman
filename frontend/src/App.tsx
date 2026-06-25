@@ -1,17 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { ConsoleShell } from "./components/ConsoleShell";
 import { AuthPanel } from "./panels/AuthPanel";
-import { DashboardPanel } from "./panels/DashboardPanel";
-import { FleetWorkspace } from "./panels/FleetWorkspace";
-import { ConfigPanel } from "./panels/ConfigPanel";
-import { JobHistoryPanel } from "./panels/JobHistoryPanel";
-import { TagsPanel } from "./panels/TagsPanel";
-import { SchedulesPanel } from "./panels/SchedulesPanel";
-import { AccessPanel } from "./panels/AccessPanel";
-import { AuditLogPanel } from "./panels/AuditLogPanel";
-import { BackupsPanel } from "./panels/BackupsPanel";
-import { TopologyPanel } from "./panels/TopologyPanel";
-import { SystemPanel } from "./panels/SystemPanel";
 import { PanelDisplayProvider } from "./panelDisplay";
 import type { ActiveView } from "./types";
 import type { PrivilegeMaterial } from "./privilege";
@@ -29,6 +18,62 @@ import type {
   JobDispatchPreset,
   JobDispatchPresetInput,
 } from "./jobDispatchPreset";
+
+const DashboardPanel = lazy(() =>
+  import("./panels/DashboardPanel").then((module) => ({
+    default: module.DashboardPanel,
+  })),
+);
+const FleetWorkspace = lazy(() =>
+  import("./panels/FleetWorkspace").then((module) => ({
+    default: module.FleetWorkspace,
+  })),
+);
+const ConfigPanel = lazy(() =>
+  import("./panels/ConfigPanel").then((module) => ({
+    default: module.ConfigPanel,
+  })),
+);
+const JobHistoryPanel = lazy(() =>
+  import("./panels/JobHistoryPanel").then((module) => ({
+    default: module.JobHistoryPanel,
+  })),
+);
+const TagsPanel = lazy(() =>
+  import("./panels/TagsPanel").then((module) => ({
+    default: module.TagsPanel,
+  })),
+);
+const SchedulesPanel = lazy(() =>
+  import("./panels/SchedulesPanel").then((module) => ({
+    default: module.SchedulesPanel,
+  })),
+);
+const AccessPanel = lazy(() =>
+  import("./panels/AccessPanel").then((module) => ({
+    default: module.AccessPanel,
+  })),
+);
+const AuditLogPanel = lazy(() =>
+  import("./panels/AuditLogPanel").then((module) => ({
+    default: module.AuditLogPanel,
+  })),
+);
+const BackupsPanel = lazy(() =>
+  import("./panels/BackupsPanel").then((module) => ({
+    default: module.BackupsPanel,
+  })),
+);
+const TopologyPanel = lazy(() =>
+  import("./panels/TopologyPanel").then((module) => ({
+    default: module.TopologyPanel,
+  })),
+);
+const SystemPanel = lazy(() =>
+  import("./panels/SystemPanel").then((module) => ({
+    default: module.SystemPanel,
+  })),
+);
 
 function getScopedHeroTitle(view: ActiveView, subpage: string): string {
   if (view === "System") {
@@ -70,6 +115,14 @@ function getScopedHeroTitle(view: ActiveView, subpage: string): string {
     default:
       return "Job history";
   }
+}
+
+function ConsolePanelFallback({ view }: { view: ActiveView }) {
+  return (
+    <div className="emptyState compactEmpty" role="status" aria-live="polite">
+      Loading {view.toLowerCase()} workspace
+    </div>
+  );
 }
 
 export function App() {
@@ -239,7 +292,7 @@ export function App() {
             sessionVaultAvailable={dashboard.authVaultAvailable}
           />
         ) : (
-          <>
+          <Suspense fallback={<ConsolePanelFallback view={activeView} />}>
             {activeView === "Dashboard" && (
               <DashboardPanel
                 agents={dashboard.agents}
@@ -624,7 +677,7 @@ export function App() {
                 tags={dashboard.tags}
               />
             )}
-          </>
+          </Suspense>
         )}
       </ConsoleShell>
     </PanelDisplayProvider>

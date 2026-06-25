@@ -65,7 +65,13 @@ export function ConsoleActionMenu({
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
-        <DropdownMenu.Content align="end" className="consoleMenu">
+        <DropdownMenu.Content
+          align="end"
+          className="consoleMenu"
+          collisionPadding={12}
+          loop
+          sideOffset={6}
+        >
           {actions.map((action) => (
             <DropdownMenu.Item
               className={action.tone === "danger" ? "consoleMenuItem danger" : "consoleMenuItem"}

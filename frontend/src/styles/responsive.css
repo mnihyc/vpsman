@@ -509,6 +509,32 @@
   }
 }
 
+@media (pointer: coarse), (max-width: 640px) {
+  .subnavToggle,
+  .subnavItem,
+  .mobilePageSelector,
+  .savedViewControls select,
+  .savedViewControls .iconButton,
+  .gridPageSize select,
+  .gridExpandedClose,
+  .gridIconButton,
+  .compactAction {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .subnavToggle,
+  .mobilePageSelector,
+  .savedViewControls select,
+  .savedViewControls .iconButton,
+  .gridPageSize select,
+  .gridExpandedClose,
+  .gridIconButton,
+  .compactAction {
+    height: 44px;
+  }
+}
+
 @media (max-width: 980px) {
   .consoleResourceLayout {
     grid-template-columns: minmax(0, 1fr);

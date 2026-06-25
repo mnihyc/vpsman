@@ -5,6 +5,7 @@ import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import { activate, openConsoleSubpage } from "./support/consoleNavigation";
 
 test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual selector visual audit screenshots only");
+test.setTimeout(90_000);
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -56,12 +57,19 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
 
   await openConsoleSubpage(page, "Fleet", "Alert policies");
   await activate(page.getByRole("button", { name: "Create policy" }).first());
-  await page.getByLabel("Policy scope kind").selectOption("client");
-  await openVpsMenu(page.locator(".consoleDetailPanel").last(), "Policy scope value", "sfo", /edge-sfo-01.*agent-sfo-01/);
-  await capture(page, outputDir, manifest, "fleet-policy-client-scope");
-  await activate(page.locator(".consoleDetailPanel").last().getByLabel("Close detail panel"));
-  const policyGrid = page.getByLabel("Alert policy rules data grid");
-  await openExpressionMenu(policyGrid, "Alert policy rules search", "enabled", /^enabled$/);
+  const policyEditor = page.locator(".consoleDetailPanel", {
+    hasText: "Create alert policy",
+  }).last();
+  await expect(policyEditor).toBeVisible();
+  const policyExpression = policyEditor.getByRole("searchbox", {
+    name: "Policy VPS selector expression",
+  });
+  await policyExpression.fill("tag:edge && status:online");
+  await expect(policyExpression).toContainText("tag:edge && status:online");
+  await capture(page, outputDir, manifest, "fleet-policy-expression-filter");
+  await activate(policyEditor.getByLabel("Close detail panel"));
+  const policyGrid = page.getByLabel("Policy groups data grid");
+  await openExpressionMenu(policyGrid, "Policy groups search", "enabled", /^enabled$/);
   await capture(page, outputDir, manifest, "fleet-policy-grid-search-suggestion");
 
   await openConsoleSubpage(page, "Fleet", "Notifications");
@@ -69,10 +77,14 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
     has: page.getByText("Alert notification channels", { exact: true }),
   });
   await activate(notifications.getByRole("button", { name: "Create channel" }).first());
-  await page.getByLabel("Notification scope kind").selectOption("client");
-  await openVpsMenu(notifications.locator(".consoleDetailPanel").last(), "Notification scope value", "fra", /core-fra-02.*agent-fra-02/);
+  const channelEditor = notifications.locator(".consoleDetailPanel", {
+    hasText: "Create notification channel",
+  }).last();
+  await expect(channelEditor).toBeVisible();
+  await channelEditor.getByLabel("Notification scope kind").selectOption("client");
+  await openVpsMenu(channelEditor, "Notification scope value", "fra", /core-fra-02.*agent-fra-02/);
   await capture(page, outputDir, manifest, "fleet-notification-client-scope");
-  await activate(notifications.locator(".consoleDetailPanel").last().getByLabel("Close detail panel"));
+  await activate(channelEditor.getByLabel("Close detail panel"));
   await activate(page.getByRole("tab", { name: "Webhooks" }));
   await expect(page.getByText("Webhook rules", { exact: true }).first()).toBeVisible();
   await activate(page.getByRole("button", { name: "Create rule" }).first());

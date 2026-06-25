@@ -18,6 +18,7 @@ import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { clearPrivilegeVault, hasPrivilegeVault } from "../vault";
 import { generateNoiseKeypair } from "../noiseKeygen";
+import { scrollIntoViewWithMotion } from "../motion";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import type {
   GatewaySessionRecord,
@@ -1694,7 +1695,7 @@ function scrollIntoViewSoon(element: HTMLElement | null) {
     return;
   }
   window.requestAnimationFrame(() => {
-    element.scrollIntoView({ block: "start", behavior: "smooth" });
+    scrollIntoViewWithMotion(element, { block: "start" });
   });
 }
 

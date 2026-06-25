@@ -6,8 +6,8 @@
 
 .sidebar {
   align-self: stretch;
-  background: #fff;
-  border-right: 1px solid #dfe3eb;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
   box-sizing: border-box;
   min-height: 100vh;
   overflow-y: visible;
@@ -23,7 +23,7 @@
   gap: 10px;
   height: 44px;
   padding: 0 10px;
-  color: #1a73e8;
+  color: var(--primary);
   font-weight: 700;
 }
 
@@ -39,12 +39,12 @@ nav {
 }
 
 .navSection + .navSection {
-  border-top: 1px solid #eef1f6;
+  border-top: 1px solid var(--border-subtle);
   padding-top: 14px;
 }
 
 .navSectionTitle {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0;
@@ -62,7 +62,7 @@ nav {
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: #3c4043;
+  color: var(--text-secondary);
   cursor: pointer;
   padding: 0 12px;
   text-align: left;
@@ -77,13 +77,13 @@ nav {
 }
 
 .navItem:hover {
-  background: #f8fafd;
-  color: #202124;
+  background: var(--canvas);
+  color: var(--text);
 }
 
 .navItem.active {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
   font-weight: 700;
 }
 
@@ -96,18 +96,18 @@ nav {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #5f6368;
+  color: var(--muted);
   cursor: pointer;
 }
 
 .navItemRow.active .subnavToggle {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .subnavToggle:hover {
-  background: #f8fafd;
-  color: #3c4043;
+  background: var(--canvas);
+  color: var(--text-secondary);
 }
 
 .navGroup {
@@ -120,7 +120,7 @@ nav {
   gap: 1px;
   margin: 2px 0 6px 34px;
   padding-left: 10px;
-  border-left: 1px solid #dfe3eb;
+  border-left: 1px solid var(--border);
 }
 
 .subnavItem {
@@ -128,7 +128,7 @@ nav {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #5f6368;
+  color: var(--muted);
   cursor: pointer;
   font-size: 14px;
   font-weight: 500;
@@ -137,13 +137,13 @@ nav {
 }
 
 .subnavItem:hover {
-  background: #f8fafd;
-  color: #202124;
+  background: var(--canvas);
+  color: var(--text);
 }
 
 .subnavItem.active {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
   font-weight: 700;
 }
 
@@ -158,8 +158,8 @@ nav {
   gap: 12px;
   min-height: 64px;
   padding: 12px 24px;
-  background: #fff;
-  border-bottom: 1px solid #dfe3eb;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
 }
 
 .scopeSelector,
@@ -167,10 +167,10 @@ nav {
   display: inline-flex;
   align-items: center;
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #3c4043;
+  background: var(--surface);
+  color: var(--text-secondary);
 }
 
 .scopeSelector {
@@ -183,7 +183,7 @@ nav {
 }
 
 .scopeSelector svg {
-  color: #1a73e8;
+  color: var(--primary);
   flex: 0 0 auto;
 }
 
@@ -196,7 +196,7 @@ nav {
 .scopeMeta strong {
   min-width: 0;
   overflow: hidden;
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
   font-weight: 650;
   line-height: 1.2;
@@ -206,7 +206,7 @@ nav {
 
 .scopeMeta small {
   overflow: hidden;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   line-height: 1.1;
   text-overflow: ellipsis;
@@ -220,10 +220,10 @@ nav {
   flex: 1;
   max-width: 760px;
   height: 40px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0 12px;
-  color: #5f6368;
+  color: var(--muted);
 }
 
 .topbarActions {
@@ -239,10 +239,10 @@ nav {
   display: none;
   min-width: min(100%, 190px);
   height: 36px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #202124;
+  background: var(--surface);
+  color: var(--text);
   outline: 0;
   padding: 0 10px;
 }
@@ -259,17 +259,17 @@ nav {
 .savedViewControls input {
   min-width: 0;
   height: 36px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  color: #202124;
+  background: var(--surface);
+  color: var(--text);
   outline: 0;
   padding: 0 10px;
 }
 
 .savedViewControls select:focus,
 .savedViewControls input:focus {
-  border-color: #1a73e8;
+  border-color: var(--primary);
 }
 
 .savedViewControls .iconButton {
@@ -281,7 +281,7 @@ nav {
   gap: 8px;
   height: 34px;
   padding: 0 10px;
-  color: #188038;
+  color: var(--success);
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
@@ -292,7 +292,7 @@ nav {
   outline: 0;
   width: 100%;
   min-width: 0;
-  color: #202124;
+  color: var(--text);
 }
 
 .searchExpressionInput {
@@ -303,14 +303,14 @@ nav {
   gap: 6px;
   min-width: 0;
   max-width: 100%;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   box-sizing: border-box;
   height: 34px;
   min-height: 34px;
   padding: 3px 6px;
-  color: #5f6368;
+  color: var(--muted);
   overflow: visible;
 }
 
@@ -319,18 +319,18 @@ nav {
 }
 
 .searchExpressionInput.valid {
-  border-color: #34a853;
+  border-color: var(--success);
   box-shadow: inset 0 -2px 0 rgba(52, 168, 83, 0.9);
 }
 
 .searchExpressionInput.invalid {
-  border-color: #b3261e;
+  border-color: var(--danger);
   box-shadow: inset 0 -2px 0 rgba(179, 38, 30, 0.9);
 }
 
 .searchExpressionInput.checking {
-  border-color: #fbbc04;
-  box-shadow: inset 0 -2px 0 rgba(251, 188, 4, 0.9);
+  border-color: var(--warning);
+  box-shadow: inset 0 -2px 0 rgba(249, 171, 0, 0.9);
 }
 
 .searchExpressionInput.compact {
@@ -358,14 +358,14 @@ nav {
   outline: 0;
   scrollbar-width: none;
   white-space: nowrap;
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
   line-height: 22px;
 }
 
 .searchExpressionEditor:empty::before {
   content: attr(data-placeholder);
-  color: #80868b;
+  color: var(--placeholder);
 }
 
 .searchExpressionEditor::-webkit-scrollbar {
@@ -379,10 +379,10 @@ nav {
   flex: 0 0 auto;
   height: 22px;
   margin: 0 2px;
-  border: 1px solid #d2e3fc;
+  border: 1px solid var(--primary-border);
   border-radius: 999px;
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
   padding: 0 4px 0 8px;
   font-size: 12px;
   font-weight: 700;
@@ -395,8 +395,8 @@ nav {
   height: 20px;
   margin: 0 2px;
   border-radius: 999px;
-  background: #f1f3f4;
-  color: #5f6368;
+  background: var(--surface-neutral);
+  color: var(--muted);
   padding: 0 7px;
   font-size: 11px;
   font-weight: 800;
@@ -447,7 +447,7 @@ nav {
   min-width: 42px;
   height: 22px;
   overflow: hidden;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   margin-left: auto;
@@ -470,7 +470,7 @@ nav {
 
 .targetSelectorHeader span {
   overflow: hidden;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 650;
   text-overflow: ellipsis;
@@ -500,9 +500,9 @@ nav {
   display: grid;
   max-height: 178px;
   overflow-y: auto;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   box-shadow: 0 8px 20px rgba(60, 64, 67, 0.18);
   padding: 4px;
 }
@@ -514,7 +514,7 @@ nav {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #202124;
+  color: var(--text);
   cursor: pointer;
   overflow: hidden;
   padding: 7px 8px;
@@ -536,13 +536,13 @@ nav {
 }
 
 .searchExpressionAutocomplete button small {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
 }
 
 .searchExpressionAutocomplete button:hover {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .vpsCombobox {
@@ -554,21 +554,21 @@ nav {
   min-width: 0;
   height: 34px;
   min-height: 34px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   box-sizing: border-box;
-  color: #5f6368;
+  color: var(--muted);
   padding: 0 8px;
 }
 
 .vpsCombobox:focus-within {
-  border-color: #1a73e8;
+  border-color: var(--primary);
 }
 
 .vpsCombobox.disabled {
-  background: #f8fafd;
-  color: #9aa0a6;
+  background: var(--canvas);
+  color: var(--placeholder);
 }
 
 .vpsCombobox > svg {
@@ -589,14 +589,14 @@ nav {
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: #202124;
+  color: var(--text);
   outline: 0;
   padding: 0;
   font-size: 13px;
 }
 
 .vpsCombobox input::placeholder {
-  color: #80868b;
+  color: var(--placeholder);
 }
 
 .vpsComboboxMenu {
@@ -608,9 +608,9 @@ nav {
   display: grid;
   max-height: 240px;
   overflow-y: auto;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   box-shadow: 0 8px 20px rgba(60, 64, 67, 0.18);
   padding: 4px;
 }
@@ -622,7 +622,7 @@ nav {
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: #202124;
+  color: var(--text);
   cursor: pointer;
   padding: 7px 8px;
   text-align: left;
@@ -630,8 +630,8 @@ nav {
 
 .vpsComboboxMenu button:hover,
 .vpsComboboxMenu button.active {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .vpsComboboxMenu strong,
@@ -650,7 +650,7 @@ nav {
 
 .vpsComboboxMenu small,
 .vpsComboboxEmpty {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
 }
 
@@ -667,11 +667,11 @@ nav {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
   height: 40px;
-  background: #fff;
-  color: #3c4043;
+  background: var(--surface);
+  color: var(--text-secondary);
   cursor: pointer;
   padding: 0 14px;
 }
@@ -683,8 +683,8 @@ nav {
   max-height: calc(100vh - 112px);
   min-width: 0;
   overflow: hidden;
-  background: #fff;
-  border: 1px solid #dfe3eb;
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 8px 24px rgba(60, 64, 67, 0.14);
 }
@@ -694,7 +694,7 @@ nav {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  border-bottom: 1px solid #dfe3eb;
+  border-bottom: 1px solid var(--border);
   padding: 16px;
 }
 
@@ -705,7 +705,7 @@ nav {
 
 .actionDrawerHeader span,
 .actionDrawerFooter {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 13px;
 }
 
@@ -716,7 +716,7 @@ nav {
 }
 
 .actionDrawerFooter {
-  border-top: 1px solid #dfe3eb;
+  border-top: 1px solid var(--border);
   padding: 12px 16px;
 }
 
@@ -725,37 +725,37 @@ nav {
   align-items: center;
   width: fit-content;
   min-height: 22px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 999px;
-  background: #f8fafd;
-  color: #3c4043;
+  background: var(--canvas);
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
   padding: 0 8px;
 }
 
 .consoleStatusBadge.ok {
-  border-color: #ceead6;
-  background: #e6f4ea;
-  color: #137333;
+  border-color: var(--success-border);
+  background: var(--success-soft);
+  color: var(--success-text);
 }
 
 .consoleStatusBadge.warning {
-  border-color: #feefc3;
-  background: #fef7e0;
-  color: #b06000;
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning-text);
 }
 
 .consoleStatusBadge.critical {
-  border-color: #fad2cf;
-  background: #fce8e6;
-  color: #b3261e;
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .consoleStatusBadge.info {
-  border-color: #d2e3fc;
-  background: #e8f0fe;
-  color: #174ea6;
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .iconButton {
@@ -765,39 +765,39 @@ nav {
 
 .primaryAction,
 .wideAction {
-  background: #1a73e8;
-  border-color: #1a73e8;
-  color: #fff;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--surface);
   font-weight: 600;
 }
 
 .primaryAction.dangerPrimary {
-  background: #b3261e;
-  border-color: #b3261e;
+  background: var(--danger);
+  border-color: var(--danger);
 }
 
 .sessionButton {
-  background: #e8f0fe;
-  border-color: #d2e3fc;
-  color: #174ea6;
+  background: var(--primary-soft);
+  border-color: var(--primary-border);
+  color: var(--primary-text);
   font-weight: 600;
 }
 
 .primaryAction:disabled,
 .wideAction:disabled {
-  background: #eef1f6;
-  border-color: #dfe3eb;
-  color: #80868b;
+  background: var(--border-subtle);
+  border-color: var(--border);
+  color: var(--placeholder);
   cursor: not-allowed;
 }
 
 .secondaryAction:disabled {
-  color: #80868b;
+  color: var(--placeholder);
   cursor: not-allowed;
 }
 
 .dangerAction {
-  color: #b3261e;
+  color: var(--danger);
 }
 
 .confirmationPrompt {
@@ -806,16 +806,15 @@ nav {
   align-items: start;
   gap: 12px;
   min-width: 0;
-  border: 1px solid #dfe3eb;
-  border-left: 4px solid #1a73e8;
+  border: 1px solid var(--primary);
   border-radius: 8px;
-  background: #f8fafd;
+  background: var(--canvas);
   padding: 12px;
 }
 
 .confirmationPrompt.danger {
-  border-left-color: #b3261e;
-  background: #fff8f6;
+  border-color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .confirmationPromptIcon {
@@ -824,13 +823,13 @@ nav {
   width: 32px;
   height: 32px;
   border-radius: 999px;
-  background: #e8f0fe;
-  color: #1a73e8;
+  background: var(--primary-soft);
+  color: var(--primary);
 }
 
 .confirmationPrompt.danger .confirmationPromptIcon {
-  background: #fce8e6;
-  color: #b3261e;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .confirmationPromptBody {
@@ -846,7 +845,7 @@ nav {
 }
 
 .confirmationPromptBody strong {
-  color: #202124;
+  color: var(--text);
   font-size: 14px;
 }
 
@@ -854,7 +853,7 @@ nav {
 .confirmationPromptBody dd {
   min-width: 0;
   margin: 0;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -865,7 +864,7 @@ nav {
 }
 
 .confirmationPromptError {
-  color: #b3261e;
+  color: var(--danger);
   font-size: 12px;
   font-weight: 700;
   overflow-wrap: anywhere;
@@ -882,9 +881,9 @@ nav {
   display: grid;
   gap: 4px;
   min-width: 0;
-  border: 1px solid #eef1f6;
+  border: 1px solid var(--border-subtle);
   border-radius: 6px;
-  background: #fff;
+  background: var(--surface);
   padding: 10px 12px;
   overflow: hidden;
 }
@@ -898,7 +897,7 @@ nav {
 }
 
 .confirmationPromptBody dt {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
@@ -938,7 +937,7 @@ nav {
 .linkButton {
   border: 0;
   background: transparent;
-  color: #1a73e8;
+  color: var(--primary);
   cursor: pointer;
   font-weight: 700;
   padding: 0;
@@ -950,8 +949,8 @@ nav {
   align-items: start;
   gap: 20px;
   padding: 18px 24px;
-  border-bottom: 1px solid #dfe3eb;
-  background: #fff;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
 }
 
 .titleBlock {
@@ -962,7 +961,7 @@ nav {
 }
 
 .breadcrumb {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 600;
 }
@@ -988,7 +987,7 @@ h2 {
 .sectionHeader span,
 .timeline span,
 .instance small {
-  color: #5f6368;
+  color: var(--muted);
 }
 
 .quickStats,
@@ -1010,15 +1009,15 @@ h2 {
 
 .metric {
   min-width: 0;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   padding: 10px 12px;
 }
 
 .metric span {
   display: block;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -1029,39 +1028,51 @@ h2 {
 }
 
 .metric.blue {
-  border-top: 3px solid #1a73e8;
+  border-color: var(--primary);
+  background: linear-gradient(180deg, rgba(26, 115, 232, 0.08), var(--surface) 42%);
 }
 
 .metric.green {
-  border-top: 3px solid #188038;
+  border-color: var(--success);
+  background: linear-gradient(180deg, rgba(24, 128, 56, 0.08), var(--surface) 42%);
 }
 
 .metric.yellow {
-  border-top: 3px solid #f9ab00;
+  border-color: var(--warning);
+  background: linear-gradient(180deg, rgba(249, 171, 0, 0.12), var(--surface) 42%);
 }
 
 .consoleMenu {
   min-width: 190px;
-  border: 1px solid #dfe3eb;
+  max-height: min(
+    460px,
+    var(
+      --radix-dropdown-menu-content-available-height,
+      var(--radix-context-menu-content-available-height, calc(100vh - 24px))
+    )
+  );
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 12px 30px rgba(60, 64, 67, 0.18);
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
   padding: 6px;
-  z-index: 50;
+  z-index: var(--z-dropdown);
 }
 
 .consoleMenuItem,
 .consoleMenuLabel {
   min-height: 32px;
   border-radius: 6px;
-  color: #3c4043;
+  color: var(--text-secondary);
   font-size: 13px;
   outline: 0;
   padding: 7px 10px;
 }
 
 .consoleMenuLabel {
-  color: #5f6368;
+  color: var(--muted);
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -1069,7 +1080,7 @@ h2 {
 .consoleMenuSeparator {
   height: 1px;
   margin: 6px 4px;
-  background: #e8eaed;
+  background: var(--border-subtle);
 }
 
 .consoleMenuItem {
@@ -1088,8 +1099,8 @@ h2 {
 }
 
 .consoleMenuItem[data-highlighted] {
-  background: #e8f0fe;
-  color: #174ea6;
+  background: var(--primary-soft);
+  color: var(--primary-text);
 }
 
 .consoleMenuItem[data-disabled] {
@@ -1098,13 +1109,13 @@ h2 {
 }
 
 .consoleMenuItem.danger {
-  color: #b3261e;
+  color: var(--danger);
 }
 
 .consoleCollapsible {
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .consoleCollapsibleHeader {
@@ -1122,11 +1133,11 @@ h2 {
 }
 
 .consoleCollapsibleHeader span {
-  color: #5f6368;
+  color: var(--muted);
 }
 
 .consoleCollapsibleBody {
-  border-top: 1px solid #eef1f6;
+  border-top: 1px solid var(--border-subtle);
   padding: 16px 18px;
 }
 
@@ -1147,12 +1158,12 @@ h2 {
   align-items: center;
   justify-content: center;
   width: 12px;
-  color: #5f6368;
+  color: var(--muted);
   cursor: col-resize;
 }
 
 .consoleResizeHandle:hover {
-  color: #1a73e8;
+  color: var(--primary);
 }
 
 .consoleDataGrid {
@@ -1160,7 +1171,7 @@ h2 {
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
-  background: #fff;
+  background: var(--surface);
 }
 
 .gridToolbar {
@@ -1170,7 +1181,7 @@ h2 {
   gap: 12px;
   min-width: 0;
   min-height: 52px;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--border-subtle);
   padding: 10px 18px;
 }
 
@@ -1180,12 +1191,12 @@ h2 {
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
 .gridCounts strong {
-  color: #202124;
+  color: var(--text);
   font-size: 13px;
 }
 
@@ -1208,20 +1219,20 @@ h2 {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
 }
 
 .gridPageSize select {
   height: 34px;
-  border: 1px solid #dfe3eb;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: #fff;
-  color: #202124;
+  background: var(--surface);
+  color: var(--text);
 }
 
 .gridPageLabel {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   min-width: 48px;
   text-align: center;
@@ -1244,17 +1255,18 @@ h2 {
   display: flex;
   min-width: 100%;
   width: 100%;
-  border-bottom: 1px solid #eef1f6;
-  background: #fff;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface);
 }
 
 .gridRow.selected,
 .gridRow:hover {
-  background: #f8fafd;
+  background: var(--canvas);
 }
 
 .gridRow.selected {
-  box-shadow: inset 3px 0 0 #1a73e8;
+  background: var(--primary-selected);
+  box-shadow: inset 0 0 0 1px var(--primary);
 }
 
 .gridHeaderRow {
@@ -1271,7 +1283,7 @@ h2 {
 }
 
 .gridHeaderCell {
-  color: #5f6368;
+  color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
@@ -1279,13 +1291,13 @@ h2 {
 
 .gridHeaderCell.dragging {
   z-index: 2;
-  background: #e8f0fe;
+  background: var(--primary-soft);
   box-shadow: 0 8px 20px rgba(60, 64, 67, 0.18);
 }
 
 .gridCell {
   min-height: 58px;
-  color: #202124;
+  color: var(--text);
 }
 
 .gridHeaderButton {
@@ -1313,7 +1325,7 @@ h2 {
   margin-right: 4px;
   border: 0;
   background: transparent;
-  color: #80868b;
+  color: var(--placeholder);
   cursor: grab;
   padding: 0;
 }
@@ -1345,7 +1357,7 @@ h2 {
 
 .gridResizeHandle:hover,
 .gridResizeHandle.active {
-  background: #1a73e8;
+  background: var(--primary);
 }
 
 .gridExpandedRow {
@@ -1354,8 +1366,8 @@ h2 {
   gap: 10px;
   min-width: 100%;
   width: 100%;
-  border-bottom: 1px solid #eef1f6;
-  background: #f8fafd;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--canvas);
   padding: 12px 52px 12px 18px;
 }
 

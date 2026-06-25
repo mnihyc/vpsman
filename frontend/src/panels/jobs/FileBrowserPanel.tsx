@@ -1111,38 +1111,44 @@ function TreeNode({
             <small>{entry.is_dir ? "dir" : formatBytes(entry.size_bytes)}</small>
           </button>
         </ContextMenu.Trigger>
-        <ContextMenu.Content className="contextMenuContent">
-          <ContextMenu.Item className="contextMenuItem" onSelect={() => onOpenEntry(entry)}>
-            {entry.is_dir ? "Open folder" : "Open editor"}
-          </ContextMenu.Item>
-          <ContextMenu.Item className="contextMenuItem" onSelect={() => onDownload(path)}>
-            Download
-          </ContextMenu.Item>
-          <ContextMenu.Item className="contextMenuItem" onSelect={() => void navigator.clipboard?.writeText(path)}>
-            Copy path
-          </ContextMenu.Item>
-          <ContextMenu.Item className="contextMenuItem" onSelect={() => onCopyIntent(path, "copy")}>
-            Copy file/folder
-          </ContextMenu.Item>
-          <ContextMenu.Item className="contextMenuItem" onSelect={() => onCopyIntent(path, "move")}>
-            Move file/folder
-          </ContextMenu.Item>
-          <ContextMenu.Item className="contextMenuItem" onSelect={() => onPaste(path)}>
-            Review paste here
-          </ContextMenu.Item>
-          <ContextMenu.Item className="contextMenuItem" onSelect={() => onRename(path)}>
-            Rename
-          </ContextMenu.Item>
-          <ContextMenu.Item className="contextMenuItem" onSelect={() => onChmod(path)}>
-            Chmod
-          </ContextMenu.Item>
-          <ContextMenu.Item className="contextMenuItem" onSelect={() => onChown(path)}>
-            Chown
-          </ContextMenu.Item>
-          <ContextMenu.Item className="contextMenuItem danger" onSelect={() => onDelete(path)}>
-            Review delete
-          </ContextMenu.Item>
-        </ContextMenu.Content>
+        <ContextMenu.Portal>
+          <ContextMenu.Content
+            className="contextMenuContent"
+            collisionPadding={12}
+            loop
+          >
+            <ContextMenu.Item className="contextMenuItem" onSelect={() => onOpenEntry(entry)}>
+              {entry.is_dir ? "Open folder" : "Open editor"}
+            </ContextMenu.Item>
+            <ContextMenu.Item className="contextMenuItem" onSelect={() => onDownload(path)}>
+              Download
+            </ContextMenu.Item>
+            <ContextMenu.Item className="contextMenuItem" onSelect={() => void navigator.clipboard?.writeText(path)}>
+              Copy path
+            </ContextMenu.Item>
+            <ContextMenu.Item className="contextMenuItem" onSelect={() => onCopyIntent(path, "copy")}>
+              Copy file/folder
+            </ContextMenu.Item>
+            <ContextMenu.Item className="contextMenuItem" onSelect={() => onCopyIntent(path, "move")}>
+              Move file/folder
+            </ContextMenu.Item>
+            <ContextMenu.Item className="contextMenuItem" onSelect={() => onPaste(path)}>
+              Review paste here
+            </ContextMenu.Item>
+            <ContextMenu.Item className="contextMenuItem" onSelect={() => onRename(path)}>
+              Rename
+            </ContextMenu.Item>
+            <ContextMenu.Item className="contextMenuItem" onSelect={() => onChmod(path)}>
+              Chmod
+            </ContextMenu.Item>
+            <ContextMenu.Item className="contextMenuItem" onSelect={() => onChown(path)}>
+              Chown
+            </ContextMenu.Item>
+            <ContextMenu.Item className="contextMenuItem danger" onSelect={() => onDelete(path)}>
+              Review delete
+            </ContextMenu.Item>
+          </ContextMenu.Content>
+        </ContextMenu.Portal>
       </ContextMenu.Root>
       {entry.is_dir && open && (
         <div role="group">

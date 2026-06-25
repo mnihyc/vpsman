@@ -495,7 +495,13 @@ export function ConsoleDataGrid<T>({
                 </button>
               </DropdownMenu.Trigger>
               <DropdownMenu.Portal>
-                <DropdownMenu.Content align="end" className="consoleMenu">
+                <DropdownMenu.Content
+                  align="end"
+                  className="consoleMenu"
+                  collisionPadding={12}
+                  loop
+                  sideOffset={6}
+                >
                   {actions.map((action, index) => {
                     const description = actionDescription(
                       action,
@@ -545,7 +551,13 @@ export function ConsoleDataGrid<T>({
               </button>
             </DropdownMenu.Trigger>
             <DropdownMenu.Portal>
-              <DropdownMenu.Content align="end" className="consoleMenu">
+              <DropdownMenu.Content
+                align="end"
+                className="consoleMenu"
+                collisionPadding={12}
+                loop
+                sideOffset={6}
+              >
                 {table
                   .getAllLeafColumns()
                   .filter((column) => column.getCanHide())
@@ -689,7 +701,11 @@ export function ConsoleDataGrid<T>({
                 {(contextRowActions.length > 0 ||
                   showContextSelectionActions) && (
                   <ContextMenu.Portal>
-                    <ContextMenu.Content className="consoleMenu">
+                    <ContextMenu.Content
+                      className="consoleMenu"
+                      collisionPadding={12}
+                      loop
+                    >
                       {contextRowActions.length > 0 && (
                         <>
                           <ContextMenu.Label className="consoleMenuLabel">

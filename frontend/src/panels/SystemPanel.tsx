@@ -24,6 +24,7 @@ import { parse, stringify, type TomlTable } from "smol-toml";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { TimeSeriesChart, type TimeSeriesChartLine } from "../components/TimeSeriesChart";
+import { dashboardChartColors } from "../colorPalette";
 import {
   buildPrivilegeAssertion,
   canonicalDbPrivilegeIntent,
@@ -116,7 +117,6 @@ type SystemPanelProps = {
   tags: TagView[];
 };
 
-const chartColors = ["#1a73e8", "#188038", "#f29900", "#9334e6", "#d93025", "#129eaf", "#5f6368", "#b06000"];
 const dashboardWindows: Array<{ label: string; value: SystemDashboardWindow }> = [
   { label: "15m", value: "15m" },
   { label: "1h", value: "1h" },
@@ -2436,7 +2436,7 @@ function chartLines(series: SystemMetricSeriesRecord[], metrics: string[]): { li
   const lines = selected.map((entry, index) => {
     const points = new Map(entry.points.map((point) => [point.bucket_start, point.latest_value]));
     return {
-      color: chartColors[index % chartColors.length],
+      color: dashboardChartColors[index % dashboardChartColors.length],
       label: entry.label,
       values: times.map((time) => points.get(time) ?? null),
     };

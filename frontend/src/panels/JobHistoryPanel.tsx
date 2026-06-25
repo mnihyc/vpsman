@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { Download, Server, ShieldCheck, TerminalSquare } from "lucide-react";
 import {
   ConsoleDataGrid,
@@ -60,18 +60,49 @@ import {
   shortHash,
   shortId,
 } from "../utils";
-import {
-  JobDispatchPanel,
-  type TerminalComposerAction,
-} from "./JobDispatchPanel";
+import type { TerminalComposerAction } from "./JobDispatchPanel";
 import { parseLatestFileStatus } from "../fileBrowser";
-import { AgentUpdateReleasesPanel } from "./jobs/AgentUpdateReleasesPanel";
-import { FileBrowserPanel } from "./jobs/FileBrowserPanel";
-import { FileTransferSessionsPanel } from "./jobs/FileTransferSessionsPanel";
-import { MultiFileActionsPanel } from "./jobs/MultiFileActionsPanel";
-import { ProcessSupervisorInventoryPanel } from "./jobs/ProcessSupervisorInventoryPanel";
-import { ServerJobsPanel } from "./jobs/ServerJobsPanel";
-import { TerminalSessionsPanel } from "./jobs/TerminalSessionsPanel";
+
+const JobDispatchPanel = lazy(() =>
+  import("./JobDispatchPanel").then((module) => ({
+    default: module.JobDispatchPanel,
+  })),
+);
+const AgentUpdateReleasesPanel = lazy(() =>
+  import("./jobs/AgentUpdateReleasesPanel").then((module) => ({
+    default: module.AgentUpdateReleasesPanel,
+  })),
+);
+const FileBrowserPanel = lazy(() =>
+  import("./jobs/FileBrowserPanel").then((module) => ({
+    default: module.FileBrowserPanel,
+  })),
+);
+const FileTransferSessionsPanel = lazy(() =>
+  import("./jobs/FileTransferSessionsPanel").then((module) => ({
+    default: module.FileTransferSessionsPanel,
+  })),
+);
+const MultiFileActionsPanel = lazy(() =>
+  import("./jobs/MultiFileActionsPanel").then((module) => ({
+    default: module.MultiFileActionsPanel,
+  })),
+);
+const ProcessSupervisorInventoryPanel = lazy(() =>
+  import("./jobs/ProcessSupervisorInventoryPanel").then((module) => ({
+    default: module.ProcessSupervisorInventoryPanel,
+  })),
+);
+const ServerJobsPanel = lazy(() =>
+  import("./jobs/ServerJobsPanel").then((module) => ({
+    default: module.ServerJobsPanel,
+  })),
+);
+const TerminalSessionsPanel = lazy(() =>
+  import("./jobs/TerminalSessionsPanel").then((module) => ({
+    default: module.TerminalSessionsPanel,
+  })),
+);
 
 type JobOutputComparisonGroup = JobOutputComparisonRecord["groups"][number];
 type JobOutputComparisonRow = JobOutputComparisonRecord["rows"][number];
@@ -834,6 +865,13 @@ export function JobHistoryPanel({
 
   return (
     <section className="workspace singleColumn">
+      <Suspense
+        fallback={
+          <div className="emptyState compactEmpty" role="status" aria-live="polite">
+            Loading {displayToken(jobSubpage)} workspace
+          </div>
+        }
+      >
       {jobSubpage === "dispatch" && (
         <JobDispatchPanel
           agents={agents}
@@ -1469,6 +1507,7 @@ export function JobHistoryPanel({
           </div>
         </div>
       )}
+      </Suspense>
     </section>
   );
 }

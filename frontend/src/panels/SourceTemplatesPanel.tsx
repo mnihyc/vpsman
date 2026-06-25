@@ -10,6 +10,7 @@ import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useRevie
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { sourceReadinessStatusBadgeClass } from "../jobStatusPresentation";
+import { scrollIntoViewWithMotion } from "../motion";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
   agentsMatchingExpression,
@@ -1293,7 +1294,7 @@ function scrollIntoViewSoon(element: HTMLElement | null) {
     return;
   }
   window.requestAnimationFrame(() => {
-    element.scrollIntoView({ block: "start", behavior: "smooth" });
+    scrollIntoViewWithMotion(element, { block: "start" });
   });
 }
 

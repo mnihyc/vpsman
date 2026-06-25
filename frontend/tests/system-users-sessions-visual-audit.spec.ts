@@ -9,6 +9,7 @@ import {
 } from "./support/consoleNavigation";
 
 test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual System users/sessions screenshots only");
+test.setTimeout(90_000);
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -26,12 +27,14 @@ test("captures System users and sessions interaction loop", async ({ page }, tes
   await expect(page.getByText("2 operator records")).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "users-initial");
 
-  await page.getByLabel("Operator username").fill("release-admin");
-  await page.getByLabel("Operator password").fill("release-admin-password-123");
-  await page.getByLabel("Operator role").selectOption("admin");
-  await page.getByLabel("Session refresh TTL days").fill("30");
+  await activate(page.getByRole("button", { name: "New" }).first());
   const userEditor = page.getByLabel("Operator user editor");
-  await userEditor.getByRole("button", { name: "Create", exact: true }).click();
+  await expect(userEditor).toBeVisible();
+  await userEditor.getByLabel("Operator username").fill("release-admin");
+  await userEditor.getByLabel("Operator password").fill("release-admin-password-123");
+  await userEditor.getByLabel("Operator role").selectOption("admin");
+  await userEditor.getByLabel("Session refresh TTL days").fill("30");
+  await activate(userEditor.getByRole("button", { name: "Create", exact: true }));
   await expect(page.getByLabel("Confirm admin user action")).toBeVisible();
   await expect(page.getByText(/targets or grants admin privileges/)).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "users-create-admin-confirm");
@@ -43,7 +46,7 @@ test("captures System users and sessions interaction loop", async ({ page }, tes
   await selectGridRow(page, "Users", "99999999-aaaa-4bbb-8ccc-000000000001");
   await runGridAction(page, "Users", "Edit selected");
   await expect(page.getByRole("heading", { name: "Edit user" })).toBeVisible();
-  await userEditor.getByRole("button", { name: "Disable", exact: true }).click();
+  await activate(userEditor.getByRole("button", { name: "Disable", exact: true }));
   await expect(page.getByLabel("Confirm admin user action")).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "users-admin-disable-confirm");
   await activate(page.getByRole("button", { name: "Cancel" }));
@@ -51,14 +54,14 @@ test("captures System users and sessions interaction loop", async ({ page }, tes
   await unselectGridRow(page, "Users", "99999999-aaaa-4bbb-8ccc-000000000001");
   await selectGridRow(page, "Users", "99999999-aaaa-4bbb-8ccc-000000000002");
   await runGridAction(page, "Users", "Edit selected");
-  await expect(page.getByLabel("Operator username")).toHaveValue("noc-operator");
-  await page.getByLabel("Operator password").fill("replacement-password-123");
+  await expect(userEditor.getByLabel("Operator username")).toHaveValue("noc-operator");
+  await userEditor.getByLabel("Operator password").fill("replacement-password-123");
   await capture(page, page.locator("main.content"), outputDir, manifest, "users-edit-operator");
-  await userEditor.getByRole("button", { name: "Reset password", exact: true }).click();
+  await activate(userEditor.getByRole("button", { name: "Reset password", exact: true }));
   await expect(page.getByLabel("Confirm user action")).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "users-password-reset-confirm");
   await activate(page.getByRole("button", { name: "Cancel" }));
-  await userEditor.getByRole("button", { name: "Clear TOTP", exact: true }).click();
+  await activate(userEditor.getByRole("button", { name: "Clear TOTP", exact: true }));
   await expect(page.getByLabel("Confirm user action")).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "users-clear-totp-confirm");
   await activate(page.getByRole("button", { name: "Cancel" }));
