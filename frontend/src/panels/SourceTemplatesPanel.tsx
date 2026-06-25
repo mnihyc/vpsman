@@ -674,7 +674,11 @@ export function SourceTemplatePanel({
 
       {showTemplateManagement && (
       <ConfirmationPrompt
-        confirmLabel="Confirm"
+        confirmLabel={
+          pendingConfirmation === "assignment"
+            ? "Apply template assignment"
+            : "Update template"
+        }
         detail={sourceTemplateConfirmationDetail}
         items={sourceTemplateConfirmationItems}
         onCancel={() => {

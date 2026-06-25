@@ -126,7 +126,7 @@ test("multi-file review resolves targets again instead of executing cached previ
   });
   expect(resolveCountAfterReview).toBe(4);
 
-  await activate(page.getByRole("button", { name: "Run bulk action" }));
+  await activate(page.getByLabel("Confirm multi-file operation").getByRole("button", { name: "Download files" }));
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -169,7 +169,7 @@ test("multi-file async review preparation ignores stale path edits", async ({
 
   await activate(page.getByRole("button", { name: "Review download" }));
   await expect(page.getByText("Confirm multi-file operation")).toBeVisible();
-  await activate(page.getByRole("button", { name: "Run bulk action" }));
+  await activate(page.getByLabel("Confirm multi-file operation").getByRole("button", { name: "Download files" }));
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -601,7 +601,7 @@ test("template assignment async review ignores stale selector edits", async ({
   await expect(panel.locator(".confirmationPrompt").getByText("Confirm template assignment")).toBeVisible();
   await activate(
     panel.locator(".confirmationPrompt").getByRole("button", {
-      name: "Confirm",
+      name: "Apply template assignment",
       exact: true,
     }),
   );

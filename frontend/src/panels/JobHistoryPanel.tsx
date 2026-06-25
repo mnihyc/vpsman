@@ -1474,7 +1474,7 @@ export function JobHistoryPanel({
             {scheduleRunJobs.length > 0 ? (
               <div className="table historyTable">
                 <div className="historyRow scheduledRunGrid heading">
-                  <span>Run</span>
+                  <span>Run type</span>
                   <span>Status</span>
                   <span>Targets</span>
                   <span>Created</span>

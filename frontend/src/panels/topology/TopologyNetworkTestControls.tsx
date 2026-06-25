@@ -539,7 +539,7 @@ export function TopologyNetworkTestControls({
           </section>
         </div>
         <ConfirmationPrompt
-          confirmLabel={networkSnapshot ? actionConfirmLabel(networkSnapshot.action) : "Run"}
+          confirmLabel={networkSnapshot ? actionConfirmLabel(networkSnapshot.action) : "Run network test"}
           detail={networkSnapshot?.detail ?? ""}
           expiresAtUnix={networkSnapshot ? minSubmissionExpiry(networkSnapshot.submissions) : undefined}
           items={networkSnapshot?.items ?? []}

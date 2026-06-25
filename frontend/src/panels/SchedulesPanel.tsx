@@ -989,7 +989,7 @@ export function SchedulesPanel({
         )}
         <ConfirmationPrompt
           confirmLabel={
-            scheduleAction ? actionConfirmLabel(scheduleAction.type) : "Confirm"
+            scheduleAction ? actionConfirmLabel(scheduleAction.type) : "Run schedule action"
           }
           detail={scheduleAction ? actionDetail(scheduleAction) : ""}
           error={scheduleActionError}
@@ -1347,7 +1347,7 @@ function actionConfirmLabel(type: ScheduleAction["type"]): string {
     case "targetUpdate":
       return "Update targets";
     case "delete":
-      return "Delete";
+      return "Delete schedule";
   }
 }
 

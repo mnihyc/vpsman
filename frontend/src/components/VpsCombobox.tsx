@@ -194,7 +194,7 @@ export function VpsCombobox({
               </button>
             ))
           ) : (
-            <span className="vpsComboboxEmpty">No matching VPS</span>
+            <span className="vpsComboboxEmpty">No VPS matches this search.</span>
           )}
         </div>
       )}

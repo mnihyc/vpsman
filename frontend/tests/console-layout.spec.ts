@@ -1380,7 +1380,7 @@ test("manages template assignments from the config view", async ({
   await expect(
     templatePanel.getByText("Confirm template assignment"),
   ).toBeVisible();
-  await confirmVisiblePrompt(page, "Confirm");
+  await confirmVisiblePrompt(page, "Apply template assignment");
 
   const request = await page.evaluate(() => {
     const requests = (

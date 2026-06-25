@@ -54,6 +54,7 @@ import type {
   AgentView,
   CreateJobRequest,
   CreateJobResponse,
+  FileActionPolicy,
   FileExistingPolicy,
   FileOwnershipPolicy,
   JobOperation,
@@ -219,10 +220,10 @@ export function FileBrowserPanel({
 
   async function runFileJob(operation: JobOperation, options: { expectedType?: string } = {}) {
     if (!selectedAgent) {
-      throw new Error("Choose a VPS first");
+      throw new Error("Choose a target VPS before running a file operation.");
     }
     if (!privilegeMaterial) {
-      throw new Error("Privilege unlock is locked");
+      throw new Error("Unlock privilege before running a file operation.");
     }
     const maxTimeoutSecs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
     const selectorExpression = selectorExpressionForClientIds([selectedAgent.id]);
@@ -466,7 +467,7 @@ export function FileBrowserPanel({
   function chmodSelected() {
     try {
       if (!selectedPath || selectedPath === "/") {
-        setActionError("Choose a file or folder to chmod");
+        setActionError("Choose a file or folder before changing permissions.");
         return;
       }
       confirmOperation(
@@ -478,7 +479,7 @@ export function FileBrowserPanel({
           follow_symlinks: followSymlinks,
           policy: "fail",
         },
-        "Change mode",
+        "Change permissions",
         `Apply mode ${chmodMode} to ${selectedPath}${recursive ? " recursively" : ""}.`,
         parentPath(selectedPath),
       );
@@ -489,7 +490,7 @@ export function FileBrowserPanel({
 
   function chownSelected() {
     if (!selectedPath || selectedPath === "/") {
-      setActionError("Choose a file or folder to chown");
+      setActionError("Choose a file or folder before changing owner or group.");
       return;
     }
     confirmOperation(
@@ -502,7 +503,7 @@ export function FileBrowserPanel({
         ownership_policy: "fail",
         policy: "fail",
       },
-      "Change owner",
+      "Change owner/group",
       `Apply owner/group to ${selectedPath}${recursive ? " recursively" : ""}.`,
       parentPath(selectedPath),
     );
@@ -794,10 +795,10 @@ export function FileBrowserPanel({
               <button aria-label="Create file or folder" className="iconButton" disabled={locationCommandDisabled} onClick={() => setActiveCommand("create")} title="Create file or folder" type="button">
                 <FilePlus2 size={15} />
               </button>
-              <button aria-label="Chmod selected" className="iconButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chmod")} title="Chmod selected" type="button">
+              <button aria-label="Change selected permissions" className="iconButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chmod")} title="Change selected permissions" type="button">
                 <ShieldCheck size={15} />
               </button>
-              <button aria-label="Chown selected" className="iconButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chown")} title="Chown selected" type="button">
+              <button aria-label="Change selected owner or group" className="iconButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chown")} title="Change selected owner or group" type="button">
                 <UserRound size={15} />
               </button>
               <button aria-label="Review delete selected" className="iconButton dangerIconButton" disabled={selectedPathCommandDisabled} onClick={() => deleteSelected()} title="Review delete selected" type="button">
@@ -865,7 +866,7 @@ export function FileBrowserPanel({
                     <Upload size={14} />
                     <span>Review upload</span>
                   </button>
-                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Cancel</button>
+                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Close upload form</button>
                 </div>
               </section>
             )}
@@ -873,7 +874,7 @@ export function FileBrowserPanel({
             {activeCommand === "create" && (
               <section className="fileCommandPopover">
                 <div className="fileCommandHeader">
-                  <strong>Create</strong>
+                  <strong>Create file or folder</strong>
                   <span>{selectedEntry?.is_dir ? selectedPath : currentPath}</span>
                 </div>
                 <label>
@@ -920,9 +921,9 @@ export function FileBrowserPanel({
                 <div className="fileActionGrid">
                   <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={() => void submitCreate()} type="button">
                     {createType === "file" ? <FilePlus2 size={14} /> : <FolderPlus size={14} />}
-                    <span>{createType === "file" ? "Review write" : "Review create"}</span>
+                    <span>{createType === "file" ? "Review file write" : "Review folder create"}</span>
                   </button>
-                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Cancel</button>
+                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Close create form</button>
                 </div>
               </section>
             )}
@@ -946,7 +947,7 @@ export function FileBrowserPanel({
                     <Scissors size={14} />
                     <span>Review move</span>
                   </button>
-                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Cancel</button>
+                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Close move form</button>
                 </div>
               </section>
             )}
@@ -954,7 +955,7 @@ export function FileBrowserPanel({
             {activeCommand === "chmod" && (
               <section className="fileCommandPopover">
                 <div className="fileCommandHeader">
-                  <strong>Chmod</strong>
+                  <strong>Change permissions</strong>
                   <span>{selectedPath}</span>
                 </div>
                 <label>
@@ -966,8 +967,8 @@ export function FileBrowserPanel({
                   <span>Recursive</span>
                 </label>
                 <div className="fileActionGrid">
-                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chmodSelected} type="button">Review chmod</button>
-                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Cancel</button>
+                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chmodSelected} type="button">Review permission change</button>
+                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Close permission form</button>
                 </div>
               </section>
             )}
@@ -975,7 +976,7 @@ export function FileBrowserPanel({
             {activeCommand === "chown" && (
               <section className="fileCommandPopover">
                 <div className="fileCommandHeader">
-                  <strong>Chown</strong>
+                  <strong>Change owner/group</strong>
                   <span>{selectedPath}</span>
                 </div>
                 <div className="fileActionGrid">
@@ -993,8 +994,8 @@ export function FileBrowserPanel({
                   <span>Recursive</span>
                 </label>
                 <div className="fileActionGrid">
-                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chownSelected} type="button">Review chown</button>
-                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Cancel</button>
+                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chownSelected} type="button">Review owner change</button>
+                  <button className="secondaryAction" onClick={() => setActiveCommand(null)} type="button">Close owner form</button>
                 </div>
               </section>
             )}
@@ -1023,7 +1024,7 @@ export function FileBrowserPanel({
       </div>
 
       <ConfirmationPrompt
-        confirmLabel={pendingConfirmation?.operation.type === "file_delete" ? "Delete" : "Confirm"}
+        confirmLabel={pendingConfirmation ? fileConfirmationConfirmLabel(pendingConfirmation.operation) : "Run file operation"}
         detail={pendingConfirmation ? fileConfirmationDetail(pendingConfirmation) : ""}
         items={pendingConfirmation ? fileConfirmationItems(pendingConfirmation) : []}
         onCancel={() => setPendingConfirmation(null)}
@@ -1133,19 +1134,19 @@ function TreeNode({
               Move file/folder
             </ContextMenu.Item>
             <ContextMenu.Item className="contextMenuItem" onSelect={() => onPaste(path)}>
-              Review paste here
+              Review paste into this folder
             </ContextMenu.Item>
             <ContextMenu.Item className="contextMenuItem" onSelect={() => onRename(path)}>
               Rename
             </ContextMenu.Item>
             <ContextMenu.Item className="contextMenuItem" onSelect={() => onChmod(path)}>
-              Chmod
+              Change permissions
             </ContextMenu.Item>
             <ContextMenu.Item className="contextMenuItem" onSelect={() => onChown(path)}>
-              Chown
+              Change owner/group
             </ContextMenu.Item>
             <ContextMenu.Item className="contextMenuItem danger" onSelect={() => onDelete(path)}>
-              Review delete
+              Review delete path
             </ContextMenu.Item>
           </ContextMenu.Content>
         </ContextMenu.Portal>
@@ -1306,10 +1307,66 @@ function actionErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function fileConfirmationConfirmLabel(operation: JobOperation): string {
+  switch (operation.type) {
+    case "file_write_text":
+      return operation.create ? "Write file" : "Save file";
+    case "file_mkdir":
+      return "Create folder";
+    case "file_rename":
+      return "Move or rename path";
+    case "file_delete":
+      return "Delete path";
+    case "file_chmod":
+      return "Change permissions";
+    case "file_chown":
+      return "Change owner/group";
+    case "file_copy":
+      return "Copy path";
+    case "file_push":
+    case "file_push_chunked":
+      return "Upload file";
+    default:
+      return "Run file operation";
+  }
+}
+
+function fileOperationSummary(operation: JobOperation): string {
+  switch (operation.type) {
+    case "file_write_text":
+      return operation.create ? "Write text file" : "Save text file";
+    case "file_mkdir":
+      return "Create folder";
+    case "file_rename":
+      return "Move or rename";
+    case "file_delete":
+      return "Delete path";
+    case "file_chmod":
+      return "Change permissions";
+    case "file_chown":
+      return "Change owner/group";
+    case "file_copy":
+      return "Copy path";
+    case "file_push":
+    case "file_push_chunked":
+      return "Upload file";
+    case "file_download":
+      return "Download file";
+    case "file_archive_tar":
+      return "Create archive";
+    case "file_list_dir":
+      return "List directory";
+    case "file_read_text":
+      return "Open text file";
+    default:
+      return operation.type.replace(/^file_/, "").replace(/_/g, " ");
+  }
+}
+
 function fileConfirmationDetail(confirmation: PendingConfirmation): string {
   const target = confirmation.target ? targetNameId(confirmation.target) : "selected VPS";
   const policy = fileConfirmationPolicyText(confirmation.operation);
-  return `${fileBrowserOperationLabel(confirmation.operation)} on ${target}${policy ? `. ${policy}` : ""}`;
+  return `${fileOperationSummary(confirmation.operation)} on ${target}${policy ? `. ${policy}` : ""}`;
 }
 
 function fileConfirmationItems(confirmation: PendingConfirmation): Array<{ label: string; value: ReactNode }> {
@@ -1320,7 +1377,7 @@ function fileConfirmationItems(confirmation: PendingConfirmation): Array<{ label
       label: "Target VPS",
       value: confirmation.target ? <span title={confirmation.target.id}>{targetNameId(confirmation.target)}</span> : "-",
     },
-    { label: "Operation", value: operation.type },
+    { label: "Operation", value: fileOperationSummary(operation) },
   ];
   if ("path" in operation) {
     items.push({ label: "Path", value: operation.path });
@@ -1341,19 +1398,19 @@ function fileConfirmationItems(confirmation: PendingConfirmation): Array<{ label
     items.push({ label: "SHA256", value: shortId(operation.sha256_hex) });
   }
   if ("recursive" in operation) {
-    items.push({ label: "Recursive", value: operation.recursive ? "yes" : "no" });
+    items.push({ label: "Recursive", value: operation.recursive ? "Include child paths" : "This path only" });
   }
   if ("follow_symlinks" in operation) {
     items.push({ label: "Symlinks", value: operation.follow_symlinks ? "Follow targets" : "Do not follow" });
   }
   if ("overwrite" in operation) {
-    items.push({ label: "Overwrite", value: operation.overwrite ? "yes" : "no" });
+    items.push({ label: "Overwrite", value: operation.overwrite ? "May overwrite destination" : "Destination must be new" });
   }
   if ("policy" in operation && (typeof operation.policy === "string" || typeof operation.policy === "undefined")) {
-    items.push({ label: "Policy", value: operation.policy ?? "fail" });
+    items.push({ label: "Policy", value: fileActionPolicyLabel(operation.policy ?? "fail") });
   }
   if ("existing_policy" in operation) {
-    items.push({ label: "Existing file", value: operation.existing_policy ?? "skip" });
+    items.push({ label: "Existing file", value: existingFilePolicyLabel(operation.existing_policy ?? "skip") });
   }
   if ("ownership_policy" in operation) {
     items.push({ label: "Owner/group", value: ownerGroupConfirmationValue(operation) });
@@ -1366,27 +1423,58 @@ function fileConfirmationPolicyText(operation: JobOperation): string {
     return "";
   }
   if (operation.type === "file_write_text") {
-    return operation.expected_sha256_hex ? "Save rejects changed current content." : `Policy: ${operation.policy ?? "fail"}.`;
+    return operation.expected_sha256_hex
+      ? "Save rejects the write if the VPS file changed since it was opened."
+      : `${fileActionPolicyLabel(operation.policy ?? "fail")}.`;
   }
   if (operation.type === "file_push" || operation.type === "file_push_chunked") {
-    return `Upload policy: ${operation.existing_policy ?? "skip"} existing files; ownership ${operation.ownership_policy ?? "fail"}.`;
+    return `${existingFilePolicyLabel(operation.existing_policy ?? "skip")}; ${ownershipPolicyLabel(operation.ownership_policy ?? "fail")}.`;
   }
   if (operation.type === "file_rename") {
-    return `Policy: ${operation.policy ?? "fail"}; destination ${operation.overwrite ? "may be atomically replaced when compatible" : "must not already exist"}.`;
+    return `${fileActionPolicyLabel(operation.policy ?? "fail")}; destination ${operation.overwrite ? "may be atomically replaced when compatible" : "must not already exist"}.`;
   }
   if (operation.type === "file_copy") {
-    return `Policy: ${operation.policy ?? "fail"}; destination ${operation.overwrite ? "files may be overwritten; directories are merged" : "must not already exist"}.`;
+    return `${fileActionPolicyLabel(operation.policy ?? "fail")}; destination ${operation.overwrite ? "files may be overwritten; directories are merged" : "must not already exist"}.`;
   }
   if ("policy" in operation && (typeof operation.policy === "string" || typeof operation.policy === "undefined")) {
-    return `Policy: ${operation.policy ?? "fail"}.`;
+    return `${fileActionPolicyLabel(operation.policy ?? "fail")}.`;
   }
   return "";
+}
+
+function fileActionPolicyLabel(policy: FileActionPolicy): string {
+  switch (policy) {
+    case "fail":
+      return "Stop if the target state is unsafe";
+    case "ensure":
+      return "Ensure the target state";
+    case "ignore":
+      return "Continue if the target state already matches";
+  }
+}
+
+function existingFilePolicyLabel(policy: FileExistingPolicy): string {
+  switch (policy) {
+    case "skip":
+      return "Skip upload if the file already exists";
+    case "replace":
+      return "Replace the existing file";
+  }
+}
+
+function ownershipPolicyLabel(policy: FileOwnershipPolicy): string {
+  switch (policy) {
+    case "fail":
+      return "stop if owner or group cannot be applied";
+    case "ignore":
+      return "skip owner/group if unavailable";
+  }
 }
 
 function ownerGroupConfirmationValue(operation: Extract<JobOperation, { type: "file_chown" | "file_push" | "file_push_chunked" }>): string {
   const owner = operation.owner ?? operation.uid ?? "-";
   const group = operation.group ?? operation.gid ?? "-";
-  return `${owner}:${group} · ${operation.ownership_policy ?? "fail"}`;
+  return `${owner}:${group} · ${ownershipPolicyLabel(operation.ownership_policy ?? "fail")}`;
 }
 
 function targetNameId(target: Pick<AgentView, "display_name" | "id">): string {

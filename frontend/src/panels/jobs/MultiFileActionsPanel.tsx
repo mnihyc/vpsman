@@ -530,8 +530,8 @@ export function MultiFileActionsPanel({
                 <option value="copy">Copy</option>
                 <option value="rename">Move</option>
                 <option value="delete">Delete path</option>
-                <option value="chmod">Chmod</option>
-                <option value="chown">Chown</option>
+                <option value="chmod">Change permissions</option>
+                <option value="chown">Change owner/group</option>
                 <option value="mkdir">Create folder</option>
                 <option value="write_text">Write text</option>
               </select>
@@ -760,7 +760,7 @@ export function MultiFileActionsPanel({
       </div>
 
       <ConfirmationPrompt
-        confirmLabel={pendingConfirmation?.operation.type === "file_delete" ? "Delete path" : "Run bulk action"}
+        confirmLabel={pendingConfirmation ? bulkConfirmLabel(pendingConfirmation.operation) : "Run bulk file action"}
         detail={
           pendingConfirmation
             ? compactConfirmationDetail(pendingConfirmation.operation, pendingConfirmation.targets.length)
@@ -1315,9 +1315,9 @@ function runBulkActionLabel(action: MultiFileAction): string {
     case "delete":
       return "Review delete";
     case "chmod":
-      return "Review chmod";
+      return "Review permission change";
     case "chown":
-      return "Review chown";
+      return "Review owner change";
     case "mkdir":
       return "Review create";
     case "write_text":
@@ -1327,28 +1327,111 @@ function runBulkActionLabel(action: MultiFileAction): string {
   }
 }
 
+function bulkConfirmLabel(operation: JobOperation): string {
+  switch (operation.type) {
+    case "file_download":
+    case "file_archive_tar":
+      return "Download files";
+    case "file_push":
+    case "file_push_chunked":
+      return "Upload file";
+    case "file_copy":
+      return "Copy paths";
+    case "file_rename":
+      return "Move paths";
+    case "file_delete":
+      return "Delete paths";
+    case "file_chmod":
+      return "Change permissions";
+    case "file_chown":
+      return "Change owner/group";
+    case "file_mkdir":
+      return "Create folders";
+    case "file_write_text":
+      return operation.create ? "Write files" : "Save files";
+    default:
+      return "Run bulk file action";
+  }
+}
+
+function bulkOperationSummary(operation: JobOperation): string {
+  switch (operation.type) {
+    case "file_download":
+    case "file_archive_tar":
+      return "Download files";
+    case "file_push":
+    case "file_push_chunked":
+      return "Upload file";
+    case "file_copy":
+      return "Copy paths";
+    case "file_rename":
+      return "Move paths";
+    case "file_delete":
+      return "Delete paths";
+    case "file_chmod":
+      return "Change permissions";
+    case "file_chown":
+      return "Change owner/group";
+    case "file_mkdir":
+      return "Create folders";
+    case "file_write_text":
+      return operation.create ? "Write text files" : "Save text files";
+    default:
+      return fileBrowserOperationLabel(operation);
+  }
+}
+
+function fileActionPolicyLabel(policy: FileActionPolicy): string {
+  switch (policy) {
+    case "fail":
+      return "Stop if the target state is unsafe";
+    case "ensure":
+      return "Ensure the target state";
+    case "ignore":
+      return "Continue if the target state already matches";
+  }
+}
+
+function existingFilePolicyLabel(policy: FileExistingPolicy): string {
+  switch (policy) {
+    case "skip":
+      return "Skip upload if the file already exists";
+    case "replace":
+      return "Replace the existing file";
+  }
+}
+
+function ownershipPolicyLabel(policy: FileOwnershipPolicy): string {
+  switch (policy) {
+    case "fail":
+      return "stop if owner or group cannot be applied";
+    case "ignore":
+      return "skip owner/group if unavailable";
+  }
+}
+
 function confirmationPolicyText(operation: JobOperation): string {
   if (operation.type === "file_download") {
     return "";
   }
   if (operation.type === "file_push" || operation.type === "file_push_chunked") {
-    return `Upload policy: ${operation.existing_policy ?? "skip"} existing files; ownership ${operation.ownership_policy ?? "fail"}.`;
+    return `${existingFilePolicyLabel(operation.existing_policy ?? "skip")}; ${ownershipPolicyLabel(operation.ownership_policy ?? "fail")}.`;
   }
   if (operation.type === "file_rename") {
-    return `Policy: ${operation.policy}; destination ${operation.overwrite ? "may be atomically replaced when compatible" : "must not already exist"}.`;
+    return `${fileActionPolicyLabel(operation.policy ?? "fail")}; destination ${operation.overwrite ? "may be atomically replaced when compatible" : "must not already exist"}.`;
   }
   if (operation.type === "file_copy") {
-    return `Policy: ${operation.policy}; destination ${operation.overwrite ? "files may be overwritten; directories are merged" : "must not already exist"}.`;
+    return `${fileActionPolicyLabel(operation.policy ?? "fail")}; destination ${operation.overwrite ? "files may be overwritten; directories are merged" : "must not already exist"}.`;
   }
-  if ("policy" in operation) {
-    return `Policy: ${operation.policy}.`;
+  if ("policy" in operation && (typeof operation.policy === "string" || typeof operation.policy === "undefined")) {
+    return `${fileActionPolicyLabel(operation.policy ?? "fail")}.`;
   }
   return "";
 }
 
 function compactConfirmationDetail(operation: JobOperation, targetCount: number): string {
   const policy = confirmationPolicyText(operation);
-  return `${fileBrowserOperationLabel(operation)} on ${vpsCountLabel(targetCount)}${policy ? `. ${policy}` : ""}`;
+  return `${bulkOperationSummary(operation)} on ${vpsCountLabel(targetCount)}${policy ? `. ${policy}` : ""}`;
 }
 
 function confirmationItems(confirmation: PendingBulkConfirmation): Array<{ label: string; value: string | number }> {
@@ -1356,7 +1439,7 @@ function confirmationItems(confirmation: PendingBulkConfirmation): Array<{ label
   const items: Array<{ label: string; value: string | number }> = [
     { label: "Selector", value: confirmation.selectorExpression },
     { label: "Targets", value: confirmation.targets.length },
-    { label: "Operation", value: operation.type },
+    { label: "Operation", value: bulkOperationSummary(operation) },
   ];
   if ("path" in operation) {
     items.push({ label: "Path", value: operation.path });
@@ -1365,22 +1448,22 @@ function confirmationItems(confirmation: PendingBulkConfirmation): Array<{ label
     items.push({ label: "Destination", value: operation.new_path });
   }
   if ("recursive" in operation) {
-    items.push({ label: "Recursive", value: operation.recursive ? "yes" : "no" });
+    items.push({ label: "Recursive", value: operation.recursive ? "Include child paths" : "This path only" });
   }
   if ("follow_symlinks" in operation) {
     items.push({ label: "Symlinks", value: operation.follow_symlinks ? "Follow targets" : "Do not follow" });
   }
   if ("overwrite" in operation) {
-    items.push({ label: "Overwrite", value: operation.overwrite ? "yes" : "no" });
+    items.push({ label: "Overwrite", value: operation.overwrite ? "May overwrite destination" : "Destination must be new" });
   }
   if ("policy" in operation && (typeof operation.policy === "string" || typeof operation.policy === "undefined")) {
-    items.push({ label: "Policy", value: operation.policy ?? "fail" });
+    items.push({ label: "Policy", value: fileActionPolicyLabel(operation.policy ?? "fail") });
   }
   if ("existing_policy" in operation) {
-    items.push({ label: "Existing file", value: operation.existing_policy ?? "skip" });
+    items.push({ label: "Existing file", value: existingFilePolicyLabel(operation.existing_policy ?? "skip") });
   }
   if ("ownership_policy" in operation) {
-    items.push({ label: "Owner/group", value: operation.ownership_policy ?? "fail" });
+    items.push({ label: "Owner/group", value: ownershipPolicyLabel(operation.ownership_policy ?? "fail") });
   }
   return items;
 }

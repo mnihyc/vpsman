@@ -490,7 +490,7 @@ export function ConsoleDataGrid<T>({
                   }
                   type="button"
                 >
-                  <span>Action</span>
+                  <span>Actions</span>
                   <ChevronDown size={16} />
                 </button>
               </DropdownMenu.Trigger>

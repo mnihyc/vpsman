@@ -4462,7 +4462,7 @@ function FleetAlertPolicyManager({
         title="Confirm alert policy save"
       />
       <ConfirmationPrompt
-        confirmLabel="Delete"
+        confirmLabel="Delete alert policies"
         detail="Deletes selected policy groups. Issued policy alerts remain available in Fleet alerts."
         items={[
           {
@@ -5666,7 +5666,7 @@ function FleetAlertNotificationManager({
         title="Confirm notification channel save"
       />
       <ConfirmationPrompt
-        confirmLabel="Delete"
+        confirmLabel="Delete channels"
         detail="Deletes selected alert notification channel records. Retained delivery history is not removed."
         items={[
           {
@@ -6705,7 +6705,7 @@ function WebhookRuleManager({
         title="Confirm webhook rule save"
       />
       <ConfirmationPrompt
-        confirmLabel="Delete"
+        confirmLabel="Delete webhook rules"
         detail="Deletes selected webhook rule records. Retained delivery history is not removed."
         items={[
           {
