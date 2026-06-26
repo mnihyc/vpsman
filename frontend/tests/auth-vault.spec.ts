@@ -27,6 +27,12 @@ test("stores bearer session only inside encrypted WebCrypto vault", async ({
   await expect(
     page.getByRole("heading", { name: "Operator access" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Primary console navigation" }),
+  ).toHaveCount(0);
+  await expect(page.getByLabel("Operator authentication")).toBeVisible();
+  await expect(page.getByLabel("Authentication mode")).toBeVisible();
+  await expect(page.getByLabel("Username")).toBeFocused();
   await page.getByLabel("Username").fill("vault-admin");
   await page.getByLabel("Password").fill("vault-password-123");
   await page.getByLabel("Session vault key").fill("vault-key-123456");
@@ -36,7 +42,10 @@ test("stores bearer session only inside encrypted WebCrypto vault", async ({
     () => window.localStorage.getItem("vpsman.authVault") !== null,
   );
   await expect(
-    page.getByRole("heading", { name: "Dashboard", exact: true }),
+    page.getByRole("navigation", { name: "Primary console navigation" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Home", exact: true }),
   ).toBeVisible();
 
   const storage = await readSessionStorage(page);
@@ -52,10 +61,16 @@ test("stores bearer session only inside encrypted WebCrypto vault", async ({
   await expect(
     page.getByRole("heading", { name: "Operator access" }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Primary console navigation" }),
+  ).toHaveCount(0);
   await page.getByLabel("Stored session key").fill("vault-key-123456");
   await activate(page.getByRole("button", { name: "Unlock session" }));
   await expect(
-    page.getByRole("heading", { name: "Dashboard", exact: true }),
+    page.getByRole("navigation", { name: "Primary console navigation" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Home", exact: true }),
   ).toBeVisible();
 });
 

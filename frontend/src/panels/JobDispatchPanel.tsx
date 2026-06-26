@@ -10,7 +10,7 @@ import {
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
-import { readFilePushPayload, sha256Hex } from "../fileTransfer";
+import { FILE_TRANSFER_CHUNK_BYTES, readFilePushPayload, sha256Hex } from "../fileTransfer";
 import {
   JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE,
   JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE,
@@ -36,6 +36,7 @@ import { DEFAULT_JOB_BACKUP_PATHS, DEFAULT_TERMINAL_ARGV } from "../presets/jobO
 import {
   runBrowserResumableDownload,
   runBrowserResumableUpload,
+  MAX_FILE_TRANSFER_RATE_LIMIT_KBPS,
   type BrowserDownloadSinkMode,
   type BrowserTransferMultiTargetPolicy,
   type ResumableDownloadProgress,
@@ -85,8 +86,12 @@ const JOB_SELECTOR_STORAGE_KEY = "vpsman.jobDispatch.selectorExpression";
 
 export type TerminalComposerAction = {
   action: TerminalAction;
+  maxTimeoutSecs?: number;
   requestId: string;
   session: TerminalSessionRecord;
+  terminalReplayFromSeq?: string;
+  terminalUser?: string;
+  terminalUserPolicy?: "fail" | "fallback";
 };
 
 function formatArgvForInput(argv: string[]): string {
@@ -225,11 +230,15 @@ export function JobDispatchPanel({
   fileTransferSources,
   commandTemplates,
   dispatchPreset,
+  fixedMode,
+  surface = "jobs",
   terminalComposerAction,
   onDispatchPresetApplied,
   onCreateJob,
   onDownloadFileTransferSource,
   onDownloadOutputChunk,
+  onOpenJobsDispatch,
+  onOpenRemoteTerminal,
   onLoadJob,
   onLoadOutputs,
   onLoadTargets,
@@ -246,11 +255,15 @@ export function JobDispatchPanel({
   fileTransferSources: FileTransferSourceArtifactRecord[];
   commandTemplates: CommandTemplateRecord[];
   dispatchPreset?: JobDispatchPreset | null;
+  fixedMode?: DispatchMode;
+  surface?: "jobs" | "terminal";
   terminalComposerAction?: TerminalComposerAction | null;
   onDispatchPresetApplied?: () => void;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onDownloadFileTransferSource: (downloadPath: string) => Promise<Blob>;
   onDownloadOutputChunk: (jobId: string, clientId: string, seq: number) => Promise<Blob>;
+  onOpenJobsDispatch?: () => void;
+  onOpenRemoteTerminal?: () => void;
   onLoadJob: (jobId: string) => Promise<JobHistoryRecord>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
@@ -270,7 +283,7 @@ export function JobDispatchPanel({
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
-  const [mode, setMode] = useState<DispatchMode>("shell");
+  const [mode, setModeState] = useState<DispatchMode>(fixedMode ?? "shell");
   const [commandText, setCommandText] = useState("");
   const [shellPty, setShellPty] = useState(false);
   const [shellScript, setShellScript] = useState("");
@@ -357,14 +370,38 @@ export function JobDispatchPanel({
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
   const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
+  const terminalSurface = surface === "terminal";
+
+  function setMode(nextMode: DispatchMode) {
+    setModeState(fixedMode ?? nextMode);
+  }
+
+  useEffect(() => {
+    if (fixedMode) {
+      setModeState(fixedMode);
+    }
+  }, [fixedMode]);
+
+  useEffect(() => {
+    if (!terminalSurface && !fixedMode && mode === "terminal_session") {
+      setModeState("shell");
+    }
+  }, [fixedMode, mode, terminalSurface]);
 
   useEffect(() => {
     if (!dispatchPreset) {
       return;
     }
-    setMode(dispatchPreset.mode);
+    if (fixedMode && dispatchPreset.mode !== fixedMode) {
+      onDispatchPresetApplied?.();
+      return;
+    }
+    setModeState(fixedMode ?? dispatchPreset.mode);
     if (dispatchPreset.selectorExpression !== undefined) {
       setSelectorExpression(dispatchPreset.selectorExpression);
+    }
+    if (dispatchPreset.commandTemplateId) {
+      applyCommandTemplate(dispatchPreset.commandTemplateId);
     }
     if (dispatchPreset.maxTimeoutSecs !== undefined) {
       setMaxTimeoutSecs(String(clampJobMaxTimeoutSecs(dispatchPreset.maxTimeoutSecs)));
@@ -389,12 +426,53 @@ export function JobDispatchPanel({
     if (dispatchPreset.mode === "agent_update_rollback") {
       setUpdateRollbackSha256Hex(dispatchPreset.updateRollbackSha256Hex ?? "");
     }
+    if (dispatchPreset.mode === "process_supervisor") {
+      setSupervisorAction(dispatchPreset.supervisorAction ?? "status");
+      setSupervisorName(dispatchPreset.supervisorName ?? "");
+      setSupervisorArgv(dispatchPreset.supervisorArgv ?? "");
+      setSupervisorCwd(dispatchPreset.supervisorCwd ?? "");
+      setSupervisorEnv(dispatchPreset.supervisorEnv ?? "");
+      setSupervisorLogBytes(dispatchPreset.supervisorLogBytes ?? 65536);
+      if (dispatchPreset.maxTimeoutSecs === undefined) {
+        setMaxTimeoutSecs(dispatchPreset.supervisorAction === "logs" ? "30" : "60");
+      }
+    }
+    if (dispatchPreset.mode === "file_transfer_upload") {
+      setFilePushPath(dispatchPreset.filePushPath ?? "");
+      setFilePushMode(dispatchPreset.filePushMode ?? "0644");
+      setFileTransferUploadSourceKind(dispatchPreset.fileTransferUploadSourceKind ?? "local-file");
+      setFileTransferSourceArtifactId(dispatchPreset.fileTransferSourceArtifactId ?? "");
+      setFileTransferSessionId(dispatchPreset.fileTransferSessionId ?? "");
+      setFileTransferResumeToken(dispatchPreset.fileTransferResumeToken ?? "");
+      setFileTransferChunkSize(
+        clampInteger(dispatchPreset.fileTransferChunkSize ?? 65536, 1, FILE_TRANSFER_CHUNK_BYTES),
+      );
+      setFileTransferRateLimit(
+        clampInteger(dispatchPreset.fileTransferRateLimit ?? 0, 0, MAX_FILE_TRANSFER_RATE_LIMIT_KBPS),
+      );
+      setFileTransferExistingPolicy(dispatchPreset.fileTransferExistingPolicy ?? "skip");
+      setFileTransferMultiTargetPolicy(dispatchPreset.fileTransferMultiTargetPolicy ?? "same-offset");
+    }
+    if (dispatchPreset.mode === "file_transfer_download") {
+      setFilePath(dispatchPreset.filePath ?? "");
+      setFileFollowSymlinks(dispatchPreset.fileFollowSymlinks ?? false);
+      setFileTransferDownloadName(dispatchPreset.fileTransferDownloadName ?? "");
+      setFileTransferDownloadSink(dispatchPreset.fileTransferDownloadSink ?? "browser-download");
+      setFileTransferSessionId(dispatchPreset.fileTransferSessionId ?? "");
+      setFileTransferResumeToken(dispatchPreset.fileTransferResumeToken ?? "");
+      setFileTransferChunkSize(
+        clampInteger(dispatchPreset.fileTransferChunkSize ?? 65536, 1, FILE_TRANSFER_CHUNK_BYTES),
+      );
+      setFileTransferRateLimit(
+        clampInteger(dispatchPreset.fileTransferRateLimit ?? 0, 0, MAX_FILE_TRANSFER_RATE_LIMIT_KBPS),
+      );
+    }
     setPreview(null);
     clearDispatchReview();
     setActionError(null);
     clearExecutionResults();
     onDispatchPresetApplied?.();
-  }, [dispatchPreset, onDispatchPresetApplied]);
+  }, [commandTemplates, dispatchPreset, onDispatchPresetApplied]);
 
   useEffect(() => {
     if (!terminalComposerAction) {
@@ -406,17 +484,22 @@ export function JobDispatchPanel({
     setTerminalSessionId(session.session_id);
     setTerminalArgv(session.argv.length > 0 ? formatArgvForInput(session.argv) : DEFAULT_TERMINAL_ARGV);
     setTerminalCwd(session.cwd ?? "");
-    setTerminalUser("");
-    setTerminalUserPolicy("fail");
+    setTerminalUser(terminalComposerAction.terminalUser ?? "");
+    setTerminalUserPolicy(terminalComposerAction.terminalUserPolicy ?? "fail");
     setTerminalCols(session.cols ?? 120);
     setTerminalRows(session.rows ?? 40);
     setTerminalIdleTimeoutSecs(session.idle_timeout_secs ?? 3600);
     setTerminalFlowWindowBytes(session.flow_window_bytes ?? 65536);
     setTerminalReplayFromSeq(
-      terminalComposerAction.action === "open" || terminalComposerAction.action === "poll"
+      terminalComposerAction.terminalReplayFromSeq !== undefined
+        ? terminalComposerAction.terminalReplayFromSeq
+        : terminalComposerAction.action === "open" || terminalComposerAction.action === "poll"
         ? String(session.output_retained_first_seq ?? session.output_first_seq ?? 0)
         : "",
     );
+    if (terminalComposerAction.maxTimeoutSecs !== undefined) {
+      setMaxTimeoutSecs(String(clampJobMaxTimeoutSecs(terminalComposerAction.maxTimeoutSecs)));
+    }
     if (terminalComposerAction.action === "input") {
       setMaxTimeoutSecs("30");
     }
@@ -640,6 +723,9 @@ export function JobDispatchPanel({
   const visibleDispatchProgress = dispatchProgress ?? lastDispatchProgress;
   const dispatchConfirmationItems = [
     { label: "Operation", value: dispatchConfirmationOperationLabel },
+    ...processOperationReviewItems(
+      activeDispatchConfirmation?.kind === "job" ? activeDispatchConfirmation.operation : undefined,
+    ),
     ...(dispatchConfirmationFollowSymlinks === null
       ? []
       : [
@@ -934,6 +1020,11 @@ export function JobDispatchPanel({
     setSelectedTemplateId(templateId);
     const template = commandTemplates.find((candidate) => candidate.id === templateId);
     if (!template) {
+      return;
+    }
+    if (!terminalSurface && template.operation.type === "terminal_open") {
+      setSelectedTemplateId("");
+      setActionError("Open terminal sessions from Remote Operations / Terminal. Jobs / Dispatch stays focused on generic command, file, backup, update, session, and process dispatch.");
       return;
     }
     applyTemplateOperation(template.operation);
@@ -1275,10 +1366,10 @@ export function JobDispatchPanel({
   }
 
   return (
-    <section className="fleetPanel commandComposer">
+    <section className={`fleetPanel commandComposer ${terminalSurface ? "terminalCommandComposer" : ""}`.trim()}>
       <div className="sectionHeader">
         <div>
-          <h2>Dispatch command</h2>
+          <h2>{terminalSurface ? "Terminal review composer" : "Dispatch command"}</h2>
           <span>{status}</span>
         </div>
         {privilegeMaterial ? (
@@ -1292,158 +1383,185 @@ export function JobDispatchPanel({
       </div>
 
       <form className="dispatchForm" onSubmit={submitJob}>
-        <div className="templateToolbar" aria-label="Command template controls">
-          <label>
-            <span>Template</span>
-            <select
-              aria-label="Template selector"
-              onChange={(event) => applyCommandTemplate(event.target.value)}
-              value={selectedTemplateId}
-            >
-              <option value="">Select template</option>
-              {builtinTemplates.length > 0 && (
-                <optgroup label="Built-in templates">
-                  {builtinTemplates.map((template) => (
-                    <option key={template.id} value={template.id}>
-                      {template.name}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              {userTemplates.length > 0 && (
-                <>
-                  <option disabled value="__user_template_separator">
-                    ────────── User-defined templates ──────────
-                  </option>
-                  <optgroup label="User-defined templates">
-                    {userTemplates.map((template) => (
-                      <option key={template.id} value={template.id}>
-                        {template.name} · {template.scope_kind}
-                        {template.scope_value ? `:${template.scope_value}` : ""}
+        {!terminalSurface && (
+          <>
+            <div className="templateToolbar" aria-label="Command template controls">
+              <label>
+                <span>Template</span>
+                <select
+                  aria-label="Template selector"
+                  onChange={(event) => applyCommandTemplate(event.target.value)}
+                  value={selectedTemplateId}
+                >
+                  <option value="">Select template</option>
+                  {builtinTemplates.length > 0 && (
+                    <optgroup label="Built-in templates">
+                      {builtinTemplates.map((template) => (
+                        <option key={template.id} value={template.id}>
+                          {template.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {userTemplates.length > 0 && (
+                    <>
+                      <option disabled value="__user_template_separator">
+                        ────────── User-defined templates ──────────
                       </option>
-                    ))}
-                  </optgroup>
-                </>
-              )}
-            </select>
-          </label>
-          <label>
-            <span>Name</span>
-            <input
-              aria-label="Command template name"
-              onChange={(event) => setTemplateName(event.target.value)}
-              placeholder="provider-health-check"
-              value={templateName}
-            />
-          </label>
-          <label>
-            <span>Scope</span>
-            <select
-              aria-label="Command template scope"
-              onChange={(event) => setTemplateScopeKind(event.target.value as typeof templateScopeKind)}
-              value={templateScopeKind}
-            >
-              <option value="global">Global</option>
-              <option value="provider">Provider</option>
-              <option value="tag">Tag</option>
-              <option value="client">Client</option>
-            </select>
-          </label>
-          <label>
-            <span>Scope value</span>
-            <input
-              aria-label="Command template scope value"
-              disabled={templateScopeKind === "global"}
-              onChange={(event) => setTemplateScopeValue(event.target.value)}
-              placeholder={templateScopeKind}
-              value={templateScopeKind === "global" ? "" : templateScopeValue}
-            />
-          </label>
-          <div className="templateToolbarActions">
-            <button
-              className="secondaryAction"
-              disabled={templatePending}
-              onClick={() => void reviewCommandTemplateSave()}
-              type="button"
-            >
-              {selectedTemplate?.built_in ? "Review copy" : "Review save"}
-            </button>
-            <button
-              className="secondaryAction dangerAction"
-              disabled={templatePending || !selectedTemplate || selectedTemplate.built_in}
-              onClick={() => {
-                if (!selectedTemplate || selectedTemplate.built_in) {
-                  return;
-                }
-                setDeleteTemplateSnapshot(selectedTemplate);
-                setTemplateConfirmation("delete");
+                      <optgroup label="User-defined templates">
+                        {userTemplates.map((template) => (
+                          <option key={template.id} value={template.id}>
+                            {template.name} · {template.scope_kind}
+                            {template.scope_value ? `:${template.scope_value}` : ""}
+                          </option>
+                        ))}
+                      </optgroup>
+                    </>
+                  )}
+                </select>
+              </label>
+              <label>
+                <span>Name</span>
+                <input
+                  aria-label="Command template name"
+                  onChange={(event) => setTemplateName(event.target.value)}
+                  placeholder="provider-health-check"
+                  value={templateName}
+                />
+              </label>
+              <label>
+                <span>Scope</span>
+                <select
+                  aria-label="Command template scope"
+                  onChange={(event) => setTemplateScopeKind(event.target.value as typeof templateScopeKind)}
+                  value={templateScopeKind}
+                >
+                  <option value="global">Global</option>
+                  <option value="provider">Provider</option>
+                  <option value="tag">Tag</option>
+                  <option value="client">Client</option>
+                </select>
+              </label>
+              <label>
+                <span>Scope value</span>
+                <input
+                  aria-label="Command template scope value"
+                  disabled={templateScopeKind === "global"}
+                  onChange={(event) => setTemplateScopeValue(event.target.value)}
+                  placeholder={templateScopeKind}
+                  value={templateScopeKind === "global" ? "" : templateScopeValue}
+                />
+              </label>
+              <div className="templateToolbarActions">
+                <button
+                  className="secondaryAction"
+                  disabled={templatePending}
+                  onClick={() => void reviewCommandTemplateSave()}
+                  type="button"
+                >
+                  {selectedTemplate?.built_in ? "Review copy" : "Review save"}
+                </button>
+                <button
+                  className="secondaryAction dangerAction"
+                  disabled={templatePending || !selectedTemplate || selectedTemplate.built_in}
+                  onClick={() => {
+                    if (!selectedTemplate || selectedTemplate.built_in) {
+                      return;
+                    }
+                    setDeleteTemplateSnapshot(selectedTemplate);
+                    setTemplateConfirmation("delete");
+                  }}
+                  type="button"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+            <ConfirmationPrompt
+              confirmLabel={templateSaveSnapshot?.title ?? "Save template"}
+              detail={
+                templateConfirmation === "save-copy"
+                  ? "Creates a user-defined command template. The built-in template remains unchanged."
+                  : "Saves the reviewed command template request exactly as shown."
+              }
+              items={[
+                { label: "Template", value: templateSaveSnapshot?.request.name ?? "-" },
+                {
+                  label: "Scope",
+                  value: templateSaveSnapshot
+                    ? templateSaveSnapshot.request.scope_kind === "global"
+                      ? "global"
+                      : `${templateSaveSnapshot.request.scope_kind}:${templateSaveSnapshot.request.scope_value ?? "-"}`
+                    : "-",
+                },
+                {
+                  label: "Operation",
+                  value: templateSaveSnapshot?.request.operation.type ?? "-",
+                },
+              ]}
+              onCancel={() => {
+                setTemplateConfirmation(null);
+                setTemplateSaveSnapshot(null);
               }}
-              type="button"
-            >
-              Delete
-            </button>
+              onConfirm={() => void saveCommandTemplate()}
+              open={
+                (templateConfirmation === "save-copy" ||
+                  templateConfirmation === "save") &&
+                templateSaveSnapshot !== null
+              }
+              pending={templatePending}
+              title="Confirm command template save"
+            />
+            <ConfirmationPrompt
+              confirmLabel="Delete template"
+              detail="Deletes this user-defined command template. Built-in templates cannot be deleted."
+              items={[
+                { label: "Template", value: deleteTemplateSnapshot?.name ?? "-" },
+                {
+                  label: "Scope",
+                  value: deleteTemplateSnapshot
+                    ? deleteTemplateSnapshot.scope_value
+                      ? `${deleteTemplateSnapshot.scope_kind}:${deleteTemplateSnapshot.scope_value}`
+                      : deleteTemplateSnapshot.scope_kind
+                    : "-",
+                },
+              ]}
+              onCancel={() => {
+                setTemplateConfirmation(null);
+                setDeleteTemplateSnapshot(null);
+              }}
+              onConfirm={() => void deleteSelectedCommandTemplate()}
+              open={templateConfirmation === "delete" && deleteTemplateSnapshot !== null}
+              pending={templatePending}
+              title="Confirm template delete"
+              tone="danger"
+            />
+          </>
+        )}
+        {fixedMode ? (
+          <div className="dispatchModeNotice" aria-label="Dispatch mode boundary">
+            <strong>Terminal mode only</strong>
+            <span>Shell, backup, file transfer, update, and process dispatch remain in Jobs / Dispatch.</span>
+            {onOpenJobsDispatch ? (
+              <button className="secondaryAction compactAction" onClick={onOpenJobsDispatch} type="button">
+                Jobs / Dispatch
+              </button>
+            ) : null}
           </div>
-        </div>
-        <ConfirmationPrompt
-          confirmLabel={templateSaveSnapshot?.title ?? "Save template"}
-          detail={
-            templateConfirmation === "save-copy"
-              ? "Creates a user-defined command template. The built-in template remains unchanged."
-              : "Saves the reviewed command template request exactly as shown."
-          }
-          items={[
-            { label: "Template", value: templateSaveSnapshot?.request.name ?? "-" },
-            {
-              label: "Scope",
-              value: templateSaveSnapshot
-                ? templateSaveSnapshot.request.scope_kind === "global"
-                  ? "global"
-                  : `${templateSaveSnapshot.request.scope_kind}:${templateSaveSnapshot.request.scope_value ?? "-"}`
-                : "-",
-            },
-            {
-              label: "Operation",
-              value: templateSaveSnapshot?.request.operation.type ?? "-",
-            },
-          ]}
-          onCancel={() => {
-            setTemplateConfirmation(null);
-            setTemplateSaveSnapshot(null);
-          }}
-          onConfirm={() => void saveCommandTemplate()}
-          open={
-            (templateConfirmation === "save-copy" ||
-              templateConfirmation === "save") &&
-            templateSaveSnapshot !== null
-          }
-          pending={templatePending}
-          title="Confirm command template save"
-        />
-        <ConfirmationPrompt
-          confirmLabel="Delete template"
-          detail="Deletes this user-defined command template. Built-in templates cannot be deleted."
-          items={[
-            { label: "Template", value: deleteTemplateSnapshot?.name ?? "-" },
-            {
-              label: "Scope",
-              value: deleteTemplateSnapshot
-                ? deleteTemplateSnapshot.scope_value
-                  ? `${deleteTemplateSnapshot.scope_kind}:${deleteTemplateSnapshot.scope_value}`
-                  : deleteTemplateSnapshot.scope_kind
-                : "-",
-            },
-          ]}
-          onCancel={() => {
-            setTemplateConfirmation(null);
-            setDeleteTemplateSnapshot(null);
-          }}
-          onConfirm={() => void deleteSelectedCommandTemplate()}
-          open={templateConfirmation === "delete" && deleteTemplateSnapshot !== null}
-          pending={templatePending}
-          title="Confirm template delete"
-          tone="danger"
-        />
-        <OperationModeTabs mode={mode} onModeChange={setMode} />
+        ) : (
+          <>
+            <div className="dispatchModeNotice" aria-label="Dispatch mode boundary">
+              <strong>Advanced dispatch</strong>
+              <span>Terminal open and resume start in Remote Operations / Terminal.</span>
+              {onOpenRemoteTerminal ? (
+                <button className="secondaryAction compactAction" onClick={onOpenRemoteTerminal} type="button">
+                  Remote terminal
+                </button>
+              ) : null}
+            </div>
+            <OperationModeTabs includeTerminal={false} mode={mode} onModeChange={setMode} />
+          </>
+        )}
         <JobOperationEditor
           commandText={commandText}
           shellPty={shellPty}
@@ -1655,6 +1773,31 @@ export function JobDispatchPanel({
 
 function vpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
+}
+
+function processOperationReviewItems(operation: CreateJobRequest["operation"] | undefined) {
+  if (!operation || !operation.type.startsWith("process_")) {
+    return [];
+  }
+  const processName =
+    "name" in operation && typeof operation.name === "string" && operation.name.trim()
+      ? operation.name
+      : "All supervised processes";
+  const effectByType: Record<string, string> = {
+    process_logs: "Read retained stdout/stderr logs",
+    process_restart: "Restart supervised process",
+    process_start: "Start supervised process",
+    process_status: "Refresh process status",
+    process_stop: "Stop supervised process",
+  };
+  const items = [
+    { label: "Process", value: processName },
+    { label: "Effect", value: effectByType[operation.type] ?? operation.type },
+  ];
+  if (operation.type === "process_logs") {
+    items.push({ label: "Log bytes", value: String(operation.max_bytes) });
+  }
+  return items;
 }
 
 function generatedConfirmationRequiredForMode(

@@ -79,6 +79,8 @@ pub(crate) struct OperatorPreferences {
     pub(crate) fleet_tag_visibility_overrides: BTreeMap<String, bool>,
     #[serde(default = "default_sidebar_subpanel_default")]
     pub(crate) sidebar_subpanel_default: String,
+    #[serde(default = "default_review_prompt_mode")]
+    pub(crate) review_prompt_mode: String,
     #[serde(default)]
     pub(crate) dashboard_curve_exclusions: Vec<String>,
     #[serde(default = "default_dashboard_top_limit")]
@@ -106,6 +108,7 @@ impl Default for OperatorPreferences {
             show_country_flags: default_show_country_flags(),
             fleet_tag_visibility_overrides: BTreeMap::new(),
             sidebar_subpanel_default: default_sidebar_subpanel_default(),
+            review_prompt_mode: default_review_prompt_mode(),
             dashboard_curve_exclusions: Vec::new(),
             dashboard_resource_top_limit: default_dashboard_top_limit(),
             dashboard_network_top_limit: default_dashboard_top_limit(),
@@ -136,6 +139,11 @@ impl OperatorPreferences {
                 self.sidebar_subpanel_default,
                 "active",
                 &["active", "all"],
+            ),
+            review_prompt_mode: normalize_choice(
+                self.review_prompt_mode,
+                "inline",
+                &["inline", "overlay"],
             ),
             dashboard_curve_exclusions: normalize_dashboard_curve_exclusions(
                 self.dashboard_curve_exclusions,
@@ -219,6 +227,10 @@ fn default_show_country_flags() -> bool {
 
 fn default_sidebar_subpanel_default() -> String {
     "active".to_string()
+}
+
+fn default_review_prompt_mode() -> String {
+    "inline".to_string()
 }
 
 fn default_dashboard_top_limit() -> u8 {

@@ -1862,6 +1862,7 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
 
     let preferences = OperatorPreferences {
         language: "en".to_string(),
+        review_prompt_mode: "overlay".to_string(),
         sidebar_subpanel_default: "all".to_string(),
         timezone: Some("UTC".to_string()),
         vps_name_display_mode: "name".to_string(),
@@ -1877,6 +1878,7 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
     assert_eq!(updated.preferences.vps_name_display_mode, "name");
     assert_eq!(updated.preferences.timezone.as_deref(), Some("UTC"));
     assert_eq!(updated.preferences.sidebar_subpanel_default, "all");
+    assert_eq!(updated.preferences.review_prompt_mode, "overlay");
     assert_eq!(updated.preferences.bulk_output_compare_mode, "binary");
     assert_eq!(
         updated.preferences.gateway_server_public_key_hex.as_deref(),
@@ -1905,6 +1907,7 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         Some("UTC")
     );
     assert_eq!(context.operator.preferences.sidebar_subpanel_default, "all");
+    assert_eq!(context.operator.preferences.review_prompt_mode, "overlay");
     assert_eq!(
         context.operator.preferences.bulk_output_compare_mode,
         "binary"
@@ -1943,6 +1946,13 @@ async fn operator_preferences_route_rejects_invalid_values() {
                 ..OperatorPreferences::default()
             },
             "invalid_sidebar_subpanel_default",
+        ),
+        (
+            OperatorPreferences {
+                review_prompt_mode: "floating".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "invalid_review_prompt_mode",
         ),
         (
             OperatorPreferences {
@@ -2011,6 +2021,7 @@ async fn operator_preferences_route_persists_valid_payload() {
         headers,
         axum::Json(OperatorPreferences {
             language: "en".to_string(),
+            review_prompt_mode: "overlay".to_string(),
             sidebar_subpanel_default: "all".to_string(),
             timezone: Some(" America/Los_Angeles ".to_string()),
             vps_name_display_mode: "name".to_string(),
@@ -2026,6 +2037,7 @@ async fn operator_preferences_route_persists_valid_payload() {
         Some("America/Los_Angeles")
     );
     assert_eq!(response.0.preferences.sidebar_subpanel_default, "all");
+    assert_eq!(response.0.preferences.review_prompt_mode, "overlay");
 }
 
 #[tokio::test]

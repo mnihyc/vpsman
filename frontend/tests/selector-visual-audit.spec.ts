@@ -17,19 +17,19 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   const manifest: Array<Record<string, unknown>> = [];
 
   await page.goto("/");
-  await page.getByLabel("Dashboard scope kind").selectOption("client");
-  await openVpsMenu(page.locator(".dashboardControlBar"), "Dashboard scope value", "sfo", /edge-sfo-01.*agent-sfo-01/);
+  await page.getByLabel("Home scope kind").selectOption("client");
+  await openVpsMenu(page.locator(".dashboardControlBar"), "Home scope value", "sfo", /edge-sfo-01.*agent-sfo-01/);
   await capture(page, outputDir, manifest, "dashboard-client-scope");
 
-  await openConsoleSubpage(page, "Config", "VPS config");
+  await openConsoleSubpage(page, "Config", "Per-VPS");
   await openVpsMenu(page.locator(".configApplyGrid"), "VPS config target", "fra", /core-fra-02.*agent-fra-02/);
   await capture(page, outputDir, manifest, "config-single-target");
 
-  await openConsoleSubpage(page, "Jobs", "Files");
+  await openConsoleSubpage(page, "Remote Operations", "Files");
   await openVpsMenu(page.locator(".fileBrowserPanel"), "File browser target VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
   await capture(page, outputDir, manifest, "file-browser-target");
 
-  await openConsoleSubpage(page, "Topology", "Tunnel plans");
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
   const tunnelComposer = page.locator(".scheduleComposer", {
     has: page.getByRole("heading", { name: "Create tunnel plan" }),
   });

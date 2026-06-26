@@ -23,7 +23,11 @@ async function chooseVpsBySearch(
   await root.getByRole("combobox", { name: label }).fill(query);
   const option = root.getByRole("option", { name: optionName });
   await expect(option).toBeVisible();
-  await option.click();
+  await option.dispatchEvent("mousedown", {
+    bubbles: true,
+    button: 0,
+    cancelable: true,
+  });
 }
 
 async function unlockPrivilege(page: Page, subpage: string) {
@@ -82,20 +86,20 @@ test("job dispatch submits backend-resolved targets when dashboard inventory is 
   });
 });
 
-test("multi-file review resolves targets again instead of executing cached preview", async ({
+test("bulk file review resolves targets again instead of executing cached preview", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "multi-file consistency is covered in desktop workflow tests",
+    "bulk file consistency is covered in desktop workflow tests",
   );
   await installConsoleApiMock(page);
   await page.goto("/");
   await page.evaluate(() =>
     localStorage.removeItem("vpsman.multiFile.selectorExpression"),
   );
-  await openConsoleSubpage(page, "Jobs", "Multi files");
-  await unlockPrivilege(page, "Multi files");
+  await openConsoleSubpage(page, "Remote Operations", "Bulk files");
+  await unlockPrivilegeFor(page, "Remote Operations", "Bulk files");
 
   await activate(page.getByRole("button", { name: "Review targets" }));
   await expect(page.getByText("3 VPSs resolved")).toBeVisible();
@@ -109,15 +113,15 @@ test("multi-file review resolves targets again instead of executing cached previ
 
   await page.getByLabel("Bulk file path").fill("/etc/app.conf");
   await activate(page.getByRole("button", { name: "Review download" }));
-  await expect(page.getByText("Confirm multi-file operation")).toBeVisible();
+  await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
   await activate(page.getByRole("button", { name: "Close confirmation" }));
-  await expect(page.getByText("Confirm multi-file operation")).toBeHidden();
+  await expect(page.getByText("Confirm bulk file operation")).toBeHidden();
   await activate(page.getByRole("button", { name: "Review download" }));
-  await expect(page.getByText("Confirm multi-file operation")).toBeVisible();
+  await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
   await page.getByLabel("Bulk file path").fill("/etc/app.conf.d/current");
-  await expect(page.getByText("Confirm multi-file operation")).toBeHidden();
+  await expect(page.getByText("Confirm bulk file operation")).toBeHidden();
   await activate(page.getByRole("button", { name: "Review download" }));
-  await expect(page.getByText("Confirm multi-file operation")).toBeVisible();
+  await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
   const resolveCountAfterReview = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { bulkResolve: unknown[] } }
@@ -126,7 +130,7 @@ test("multi-file review resolves targets again instead of executing cached previ
   });
   expect(resolveCountAfterReview).toBe(4);
 
-  await activate(page.getByLabel("Confirm multi-file operation").getByRole("button", { name: "Download files" }));
+  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -145,31 +149,31 @@ test("multi-file review resolves targets again instead of executing cached previ
   });
 });
 
-test("multi-file async review preparation ignores stale path edits", async ({
+test("bulk file async review preparation ignores stale path edits", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "multi-file async review consistency is covered in desktop workflow tests",
+    "bulk file async review consistency is covered in desktop workflow tests",
   );
   await installConsoleApiMock(page);
   await page.goto("/");
   await page.evaluate(() =>
     localStorage.removeItem("vpsman.multiFile.selectorExpression"),
   );
-  await openConsoleSubpage(page, "Jobs", "Multi files");
-  await unlockPrivilege(page, "Multi files");
+  await openConsoleSubpage(page, "Remote Operations", "Bulk files");
+  await unlockPrivilegeFor(page, "Remote Operations", "Bulk files");
 
   await page.getByLabel("Bulk file path").fill("/etc/app.conf");
   await activate(page.getByRole("button", { name: "Review download" }));
   await expect(page.getByText("Preparing bulk file review")).toBeVisible();
   await page.getByLabel("Bulk file path").fill("/etc/app.conf.next");
   await expect(page.getByText("Preparing bulk file review")).toBeHidden();
-  await expect(page.getByText("Confirm multi-file operation")).toBeHidden();
+  await expect(page.getByText("Confirm bulk file operation")).toBeHidden();
 
   await activate(page.getByRole("button", { name: "Review download" }));
-  await expect(page.getByText("Confirm multi-file operation")).toBeVisible();
-  await activate(page.getByLabel("Confirm multi-file operation").getByRole("button", { name: "Download files" }));
+  await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
+  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -237,8 +241,8 @@ test("bulk tag mutation requires a fresh preview after selector edits", async ({
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Tags", "Bulk");
-  await unlockPrivilegeFor(page, "Tags", "Bulk");
+  await openConsoleSubpage(page, "Fleet", "Bulk groups");
+  await unlockPrivilegeFor(page, "Fleet", "Bulk groups");
 
   await page.getByLabel("Bulk tag", { exact: true }).fill("maintenance:test");
   await page
@@ -326,8 +330,8 @@ test("bulk tag async preview ignores stale selector edits", async ({
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Tags", "Bulk");
-  await unlockPrivilegeFor(page, "Tags", "Bulk");
+  await openConsoleSubpage(page, "Fleet", "Bulk groups");
+  await unlockPrivilegeFor(page, "Fleet", "Bulk groups");
 
   await page.getByLabel("Bulk tag", { exact: true }).fill("maintenance:test");
   const selector = page.getByRole("searchbox", {
@@ -371,7 +375,7 @@ test("artifact cleanup async preview ignores stale expression edits", async ({
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Jobs", "Server jobs");
+  await openConsoleSubpage(page, "System", "Maintenance");
 
   const cleanupPanel = page.locator(".fleetPanel", {
     has: page.getByRole("heading", { name: "Artifact cleanup" }),
@@ -382,14 +386,28 @@ test("artifact cleanup async preview ignores stale expression edits", async ({
   await expect(page.getByText("Preparing cleanup preview")).toBeVisible();
   await expression.fill('artifact.domain = "file_transfer_source"');
   await expect(page.getByText("Preparing cleanup preview")).toBeHidden();
-  await expect(cleanupPanel.getByLabel("Preview hash")).toHaveValue("");
+  await expect(cleanupPanel.getByLabel("Preview hash")).toHaveValue(
+    "Preview required before queueing",
+  );
+  await expect(cleanupPanel.getByLabel("Matched")).toHaveValue(
+    "Preview required before queueing",
+  );
+  await expect(
+    cleanupPanel.getByRole("button", { name: "Queue cleanup" }),
+  ).toBeDisabled();
 
   await activate(cleanupPanel.getByRole("button", { name: "Preview" }));
   await expect(cleanupPanel.getByLabel("Preview hash")).toHaveValue(
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   );
+  await expect(cleanupPanel.getByLabel("Matched")).toHaveValue("1 / 22 B");
+  await expect(cleanupPanel).toContainText("Ready after dry run");
+  await expect(cleanupPanel).toContainText(
+    "Age and retention rule not reported",
+  );
   await activate(cleanupPanel.getByRole("button", { name: "Queue cleanup" }));
-  await expect(page.getByText("Confirm artifact cleanup")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Confirm artifact cleanup" })).toBeVisible();
+  await page.getByLabel("Type DELETE to confirm artifact cleanup").fill("DELETE");
   await activate(
     page
       .locator(".confirmationPrompt")
@@ -424,7 +442,7 @@ test("backup policy review submits a frozen target list and privilege assertion"
   await openConsoleSubpage(page, "Backups", "Policies");
   await unlockPrivilegeFor(page, "Backups", "Policies");
 
-  await activate(page.getByRole("button", { name: "Open policy workflow" }));
+  await activate(page.getByRole("button", { name: "Open policy editor" }));
   const policySelector = page.getByRole("searchbox", {
     name: "Backup policy target expression",
   });
@@ -491,8 +509,8 @@ test("template render preview follows the selected VPS without submitting apply 
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "Templates");
-  await unlockPrivilegeFor(page, "Config", "Templates");
+  await openConsoleSubpage(page, "Automation", "Source templates");
+  await unlockPrivilegeFor(page, "Automation", "Source templates");
 
   const panel = page.locator(".sourceTemplatePanel");
   await chooseVpsBySearch(
@@ -579,8 +597,8 @@ test("template assignment async review ignores stale selector edits", async ({
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "Templates");
-  await unlockPrivilegeFor(page, "Config", "Templates");
+  await openConsoleSubpage(page, "Automation", "Source templates");
+  await unlockPrivilegeFor(page, "Automation", "Source templates");
 
   const panel = page.locator(".sourceTemplatePanel");
   const selector = panel.getByRole("searchbox", {
@@ -630,8 +648,8 @@ test("access key lifecycle async reviews ignore stale field edits", async ({
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Access", "VPS keys");
-  await unlockPrivilegeFor(page, "Access", "VPS keys");
+  await openConsoleSubpage(page, "Access", "VPS identities");
+  await unlockPrivilegeFor(page, "Access", "VPS identities");
 
   const inspector = page.locator(".accessInspector");
   await inspector.getByLabel("Agent identity client ID").fill("agent-tokyo-04");
@@ -679,14 +697,14 @@ test("access key lifecycle async reviews ignore stale field edits", async ({
 
   await chooseVpsBySearch(
     inspector,
-    "VPS key revoke VPS ID",
+    "VPS identity revoke VPS ID",
     "sfo",
     /edge-sfo-01.*agent-sfo-01/,
   );
-  await inspector.getByLabel("VPS key revoke reason").fill("reason-a");
+  await inspector.getByLabel("VPS identity revoke reason").fill("reason-a");
   await activate(inspector.getByRole("button", { name: "Revoke current key" }));
   await expect(inspector.getByText("Preparing review")).toBeVisible();
-  await inspector.getByLabel("VPS key revoke reason").fill("reason-b");
+  await inspector.getByLabel("VPS identity revoke reason").fill("reason-b");
   await expect(inspector.getByText("Preparing review")).toBeHidden();
   await expect(page.getByLabel("Confirm current key revocation")).toBeHidden();
 
@@ -763,8 +781,8 @@ test("topology network test confirmation closes on edit and submits a fresh snap
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Topology", "Tests");
-  await unlockPrivilegeFor(page, "Topology", "Tests");
+  await openConsoleSubpage(page, "Network", "Tests");
+  await unlockPrivilegeFor(page, "Network", "Tests");
 
   await page.getByLabel("Network test max timeout seconds").fill("90");
   await activate(page.getByRole("button", { name: "Review inspect" }));
@@ -806,8 +824,8 @@ test("topology async review preparation ignores stale edits", async ({
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Topology", "Tests");
-  await unlockPrivilegeFor(page, "Topology", "Tests");
+  await openConsoleSubpage(page, "Network", "Tests");
+  await unlockPrivilegeFor(page, "Network", "Tests");
 
   await activate(page.getByRole("button", { name: "Review inspect" }));
   await expect(page.getByText("Preparing status review")).toBeVisible();
@@ -837,7 +855,7 @@ test("topology async review preparation ignores stale edits", async ({
     },
   });
 
-  await openConsoleSubpage(page, "Topology", "OSPF");
+  await openConsoleSubpage(page, "Network", "OSPF");
   await activate(page.getByRole("button", { name: "Review cost update" }));
   await expect(page.getByText("Confirm OSPF cost update")).toBeVisible();
   await activate(
@@ -873,8 +891,8 @@ test("privileged confirmation closes when the local assertion expires", async ({
   });
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Topology", "Tests");
-  await unlockPrivilegeFor(page, "Topology", "Tests");
+  await openConsoleSubpage(page, "Network", "Tests");
+  await unlockPrivilegeFor(page, "Network", "Tests");
 
   await activate(page.getByRole("button", { name: "Review speed test" }));
   await expect(page.getByText("Confirm speed test")).toBeVisible();
@@ -882,7 +900,7 @@ test("privileged confirmation closes when the local assertion expires", async ({
   await expect(page.getByText("Confirm speed test")).toBeHidden();
 });
 
-test("OSPF cost update submits a server-side plan mutation", async ({
+test("OSPF cost update and rollback submit reviewed server-side plan mutations", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -891,13 +909,18 @@ test("OSPF cost update submits a server-side plan mutation", async ({
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Topology", "OSPF");
-  await unlockPrivilegeFor(page, "Topology", "OSPF");
+  await openConsoleSubpage(page, "Network", "OSPF");
+  await unlockPrivilegeFor(page, "Network", "OSPF");
 
   await activate(page.getByRole("button", { name: "Review cost update" }));
-  await expect(page.getByText("Confirm OSPF cost update")).toBeVisible();
+  const applyPrompt = page.locator(".confirmationPrompt").last();
+  await expect(applyPrompt).toContainText("Confirm OSPF cost update");
+  await expect(applyPrompt).toContainText("Apply recommended cost");
+  await expect(applyPrompt).toContainText("14 -> 22 (+8)");
+  await expect(applyPrompt).toContainText("network.ospf_cost.apply");
+  await expect(applyPrompt).toContainText("client:agent-sfo-01, client:agent-fra-02");
   await activate(
-    page.locator(".confirmationPrompt").getByRole("button", {
+    applyPrompt.getByRole("button", {
       name: "Update cost",
     }),
   );
@@ -919,6 +942,37 @@ test("OSPF cost update submits a server-side plan mutation", async ({
       recommended_ospf_cost: 22,
     },
   });
+
+  await activate(page.getByRole("button", { name: "Review rollback" }));
+  const rollbackPrompt = page.locator(".confirmationPrompt").last();
+  await expect(rollbackPrompt).toContainText("Confirm OSPF rollback");
+  await expect(rollbackPrompt).toContainText("Rollback to prior cost");
+  await expect(rollbackPrompt).toContainText("22 -> 14 (-8)");
+  await expect(rollbackPrompt).toContainText("network.ospf_cost.rollback");
+  await expect(rollbackPrompt).toContainText("client:agent-sfo-01, client:agent-fra-02");
+  await activate(
+    rollbackPrompt.getByRole("button", {
+      name: "Rollback cost",
+    }),
+  );
+
+  const rollbackRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          tunnelPlanOspfCostUpdates: Array<{ plan_id: string; body: unknown }>;
+        };
+      }
+    ).__vpsmanTestRequests;
+    return requests.tunnelPlanOspfCostUpdates.at(-1);
+  });
+  expect(rollbackRequest).toMatchObject({
+    body: {
+      confirmed: true,
+      current_ospf_cost: 22,
+      recommended_ospf_cost: 14,
+    },
+  });
 });
 
 test("custom adapter submits a fresh snapshot after reopening review", async ({
@@ -930,7 +984,7 @@ test("custom adapter submits a fresh snapshot after reopening review", async ({
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Topology", "Promotion");
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
 
   const promotionPanel = page.locator(".scheduleComposer", {
     has: page.getByRole("heading", { name: "Tunnel promotion" }),
@@ -938,6 +992,8 @@ test("custom adapter submits a fresh snapshot after reopening review", async ({
   const adapterForm = promotionPanel.locator("form", {
     has: page.getByRole("heading", { name: "Custom adapter" }),
   });
+  await expect(promotionPanel.getByText("Promotion diff workflow")).toBeVisible();
+  await activate(promotionPanel.getByText("Advanced: custom adapter promotion"));
   for (const argvLabel of [
     "Status argv",
     "Start argv",
@@ -1005,17 +1061,18 @@ test("custom adapter submits a fresh snapshot after reopening review", async ({
   });
 });
 
-test("single config reads one VPS without exposing an API-side override", async ({
+test("single config applies one-VPS override from a frozen exact target", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "single config read-only workflow is covered in desktop workflow tests",
+    "single config apply workflow is covered in desktop workflow tests",
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "VPS config");
-  await unlockPrivilegeFor(page, "Config", "VPS config");
+  await page.evaluate(() => localStorage.removeItem("vpsman.config.single.clientId"));
+  await openConsoleSubpage(page, "Config", "Per-VPS");
+  await unlockPrivilegeFor(page, "Config", "Per-VPS");
 
   const panel = page.locator(".configApplyGrid");
   await chooseVpsBySearch(
@@ -1028,15 +1085,42 @@ test("single config reads one VPS without exposing an API-side override", async 
   const editor = panel.getByLabel("VPS redacted runtime config TOML");
   await expect(editor).toHaveValue(/client_id = "agent-fra-02"/);
   await expect(editor).toHaveAttribute("readonly", "");
-  await expect(panel.getByRole("button", { name: "Review apply" })).toHaveCount(0);
 
-  const request = await page.evaluate(() => {
+  await panel.getByLabel("One-VPS runtime config override TOML").fill("[update]\nunmanaged_enabled = true\n");
+  await activate(panel.getByRole("button", { name: "Review one-VPS apply" }));
+  await expect(page.getByLabel("Confirm one-VPS runtime config override")).toBeVisible();
+  await chooseVpsBySearch(
+    panel,
+    "VPS config target",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+  await expect(page.getByLabel("Confirm one-VPS runtime config override")).toBeHidden();
+  await expect(panel.getByRole("button", { name: "Review one-VPS apply" })).toBeDisabled();
+
+  await chooseVpsBySearch(
+    panel,
+    "VPS config target",
+    "fra",
+    /core-fra-02.*agent-fra-02/,
+  );
+  await expect(panel.locator(".configTargetMeta")).toContainText("core-fra-02");
+  await activate(panel.getByRole("button", { name: "Read runtime config" }));
+  await expect(editor).toHaveValue(/client_id = "agent-fra-02"/);
+  await expect(panel.getByLabel("One-VPS config override guard")).toContainText("bbbbbbbb");
+  await panel.getByLabel("One-VPS runtime config override TOML").fill("[update]\nunmanaged_enabled = true\n");
+  await activate(panel.getByRole("button", { name: "Review one-VPS apply" }));
+  const confirmation = page.getByLabel("Confirm one-VPS runtime config override");
+  await expect(confirmation).toBeVisible();
+  await activate(confirmation.getByRole("button", { name: "Apply one-VPS override" }));
+
+  const readRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
     ).__vpsmanTestRequests;
-    return requests.jobs.at(-1);
+    return requests.jobs.find((request) => (request as { command?: string }).command === "config_read");
   });
-  expect(request).toMatchObject({
+  expect(readRequest).toMatchObject({
     command: "config_read",
     selector_expression: "id:agent-fra-02",
     target_client_ids: ["agent-fra-02"],
@@ -1044,6 +1128,21 @@ test("single config reads one VPS without exposing an API-side override", async 
       type: "config_read",
     },
   });
+
+  const patchRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { runtimeConfigPatches: Array<Record<string, unknown>> };
+      }
+    ).__vpsmanTestRequests;
+    return requests.runtimeConfigPatches.at(-1);
+  });
+  expect(patchRequest).toMatchObject({
+    confirmed: true,
+    selector_expression: "id:agent-fra-02",
+    target_client_ids: ["agent-fra-02"],
+  });
+  expect(patchRequest?.toml).toContain("unmanaged_enabled = true");
 });
 
 test("backup restore confirmations close on edit and submit fresh snapshots", async ({

@@ -22,7 +22,7 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
 
   await page.goto("/");
   await page.evaluate(() => localStorage.removeItem("vpsman.fileBrowser.state"));
-  await openConsoleSubpage(page, "Jobs", "Files");
+  await openConsoleSubpage(page, "Remote Operations", "Files");
   await expect(page.getByRole("heading", { name: "File browser", exact: true })).toBeVisible();
   await unlockPrivilege(page, "Files");
   const targetPicker = page.getByRole("combobox", { name: "File browser target VPS" });
@@ -128,7 +128,7 @@ test("single-file operation confirmation closes on operation edits", async ({ pa
 
   await page.goto("/");
   await page.evaluate(() => localStorage.removeItem("vpsman.fileBrowser.state"));
-  await openConsoleSubpage(page, "Jobs", "Files");
+  await openConsoleSubpage(page, "Remote Operations", "Files");
   await unlockPrivilege(page, "Files");
   await activate(page.getByRole("button", { name: "Refresh", exact: true }));
   await expect(page.getByRole("button", { name: /etc dir/ })).toBeVisible();
@@ -168,25 +168,49 @@ test("single-file operation confirmation closes on operation edits", async ({ pa
 });
 
 test("runs bulk file download and upload workflows with grouped summaries", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "multi-file workflow is covered in desktop layout");
+  test.skip(testInfo.project.name.includes("mobile"), "bulk file workflow is covered in desktop layout");
 
   await page.goto("/");
   await page.evaluate(() => localStorage.removeItem("vpsman.multiFile.selectorExpression"));
-  await openConsoleSubpage(page, "Jobs", "Multi files");
-  await expect(page.getByRole("heading", { name: "Multi files" })).toBeVisible();
-  await unlockPrivilege(page, "Multi files");
+  await openConsoleSubpage(page, "Remote Operations", "Bulk files");
+  await expect(page.getByRole("heading", { name: "Bulk files" })).toBeVisible();
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Remote Operations", "Bulk files");
+
+  const preflight = page.getByLabel("Bulk file preflight checks");
+  await expect(preflight).toContainText("Size estimate");
+  await expect(preflight).toContainText("16.0 MiB cap per target");
+  await expect(preflight).toContainText("Remote matched-file size is only known after agents read the path");
+  await expect(preflight).toContainText("Retry and retention");
+  await expect(page.getByLabel("Bulk file path")).toHaveValue("");
+  await expect(preflight).toContainText("Enter an absolute path before reviewing download.");
+  await page.getByLabel("Bulk file path").fill("/");
+  await expect(page.getByText("Filesystem root selected")).toBeVisible();
+  await activate(page.getByRole("button", { name: "Review download" }));
+  await expect(preflight).toContainText("Root path is blocked until you explicitly allow filesystem root operations.");
+  await page.getByLabel("Allow filesystem root path").check();
+  await activate(page.getByRole("button", { name: "Review download" }));
+  await expect(page.getByLabel("Confirm bulk file operation")).toContainText("Root path");
+  await expect(page.getByLabel("Confirm bulk file operation")).toContainText("Explicitly allowed before review");
+  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Cancel" }));
 
   await activate(page.getByRole("button", { name: "Review targets" }));
   await expect(page.getByText("3 VPSs resolved")).toBeVisible();
+  await expect(preflight).toContainText("Server target preview");
+  await expect(preflight).toContainText("3 resolved (2 online, 1 stale)");
+  await expect(preflight).toContainText("1 stale");
   await page.getByLabel("Bulk file path").fill("/etc/app.conf");
   await activate(page.getByRole("button", { name: "Review download" }));
-  await expect(page.getByText("Confirm multi-file operation")).toBeVisible();
-  await activate(page.getByLabel("Confirm multi-file operation").getByRole("button", { name: "Download files" }));
+  await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
+  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
 
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "2 VPSs" })).toBeVisible();
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "stale" })).toBeVisible();
   await expect(page.getByLabel("Execution result").getByText("partial success: 2 completed, 1 unsuccessful", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Download Archive" })).toHaveCount(1);
+  const postRun = page.getByLabel("Bulk file post-run handling");
+  await expect(postRun).toContainText("1 VPS retry candidates");
+  await expect(postRun).toContainText("2 downloadable");
 
   await activate(page.getByRole("button", { name: "Upload files" }));
   await page.getByLabel("Bulk file destination path").fill("/etc/app.conf");
@@ -195,10 +219,12 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
     mimeType: "text/plain",
     buffer: Buffer.from("listen=9443\n"),
   });
+  await expect(preflight).toContainText("12 B per target");
+  await expect(preflight).toContainText("36 B estimated dispatch across 3 VPSs");
   await page.getByLabel("Existing file").selectOption("skip");
   await activate(page.getByRole("button", { name: "Review upload" }));
-  await expect(page.getByText("Confirm multi-file operation")).toBeVisible();
-  await activate(page.getByLabel("Confirm multi-file operation").getByRole("button", { name: "Upload file" }));
+  await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
+  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Upload file" }));
 
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "2 VPSs" })).toBeVisible();
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "stale" })).toBeVisible();

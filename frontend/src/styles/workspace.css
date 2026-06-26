@@ -34,6 +34,315 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+.homeWorkspace {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+  padding: 24px;
+}
+
+.homeReleaseLayer {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.homeCommandBand,
+.homePostureStrip,
+.homeReviewPanel {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.homeCommandBand {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+  gap: 18px;
+  padding: 16px;
+}
+
+.homeCommandIntro {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.homeCommandIntro h2,
+.homePanelHeader h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 18px;
+}
+
+.homeCommandIntro p,
+.homePanelHeader span {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.homeInlineStatus {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.homeQuickActions {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.homeQuickActions label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.homeQuickActions label > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.homeQuickActionGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.homeQuickActionGrid button {
+  justify-content: center;
+  min-width: 0;
+}
+
+.homeQuickActionGrid button span {
+  overflow-wrap: anywhere;
+}
+
+.homePostureStrip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  overflow: hidden;
+}
+
+.homePostureMetric {
+  display: grid;
+  gap: 6px;
+  min-height: 94px;
+  min-width: 0;
+  border-right: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 13px 14px;
+}
+
+.homePostureMetric span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.homePostureMetric strong {
+  color: var(--text);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.homePostureMetric small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.homePostureMetric.ok strong {
+  color: var(--success);
+}
+
+.homePostureMetric.warning strong,
+.homePostureMetric.info strong {
+  color: var(--primary-text);
+}
+
+.homePostureMetric.critical strong {
+  color: var(--danger);
+}
+
+.homeReviewGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  min-width: 0;
+}
+
+.homeReviewPanel {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 14px;
+}
+
+.homePanelHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.homePanelHeader > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.homeActionList,
+.homeActivityList {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--border-subtle);
+}
+
+.homeActionRow,
+.homeActivityRow {
+  display: grid;
+  align-items: center;
+  min-width: 0;
+  border: 0;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.homeActionRow {
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 10px;
+  min-height: 62px;
+  padding: 10px;
+}
+
+.homeActionRow:hover,
+.homeActivityRow:hover {
+  background: var(--primary-selected);
+}
+
+.homeActionRow:focus-visible,
+.homeActivityRow:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.homeActionGlyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--primary);
+}
+
+.homeActionRow.critical .homeActionGlyph {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.homeActionRow.warning .homeActionGlyph {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.homeActionText,
+.homeActivityText {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.homeActionText strong,
+.homeActivityText strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.homeActionText small,
+.homeActivityText small {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.homeActionMeta {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.homeActivityRow {
+  grid-template-columns: 84px minmax(0, 1fr) auto;
+  gap: 10px;
+  min-height: 58px;
+  padding: 10px;
+}
+
+.homeActivityType {
+  width: fit-content;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--canvas);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+}
+
+.homeActivityRow time {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.homeQuietState {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 62px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 12px;
+}
+
+.homeQuietState svg {
+  color: var(--success);
+}
+
+.homeDashboardLayer {
+  min-width: 0;
+}
+
+.homeDashboardLayer > .workspace {
+  padding: 0;
+}
+
 .dashboardToolbar,
 .dashboardSection {
   min-width: 0;
@@ -111,6 +420,554 @@
   border-color: var(--primary);
 }
 
+.observabilityMetricsPanel {
+  overflow: hidden;
+}
+
+.observabilityMetricsControls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--canvas);
+  padding: 12px 16px;
+}
+
+.observabilityMetricsControls .dashboardToolbarSelect {
+  min-width: 140px;
+}
+
+.observabilityMetricsSummary {
+  border-bottom: 1px solid var(--border);
+}
+
+.observabilityMetricsError {
+  margin: 12px 16px 0;
+}
+
+.observabilityChartSection,
+.observabilityGroupSection {
+  margin: 16px;
+}
+
+.observabilityGroupGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.observabilityGroupTile {
+  display: grid;
+  gap: 5px;
+  flex: 0 1 auto;
+  min-width: min(100%, 190px);
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 11px 12px;
+}
+
+.observabilityGroupTile > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.observabilityGroupTile > strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.observabilityGroupTile > small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.observabilityNetworkMetricsPanel {
+  overflow: hidden;
+}
+
+.observabilityNetworkChartGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.observabilityNetworkGroupGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.observabilityNetworkGroupTile {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.observabilityNetworkGroupTile > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.observabilityNetworkGroupTile > strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.observabilityNetworkGroupTile > small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.observabilityNetworkGroupTile dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.observabilityNetworkGroupTile dl div {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 7px 8px;
+}
+
+.observabilityNetworkGroupTile dt,
+.observabilityNetworkGroupTile dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.observabilityNetworkGroupTile dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.observabilityNetworkGroupTile dd {
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.observabilityEndpointTable {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.1fr) minmax(140px, 1fr) minmax(160px, 1.1fr) minmax(130px, 0.9fr) minmax(150px, 1fr);
+  gap: 0;
+  overflow-x: auto;
+  padding: 16px;
+}
+
+.observabilityEndpointTable > span,
+.observabilityEndpointTable > strong {
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 9px 10px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.observabilityEndpointTable > span:nth-child(-n + 5) {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.observabilityEndpointTable > strong {
+  color: var(--text);
+}
+
+.observabilityOverlayList {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.observabilityOverlayRow {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.7fr) minmax(170px, 1fr) minmax(220px, 1.6fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+
+.observabilityOverlayRow.warning {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.observabilityOverlayRow.critical {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.observabilityOverlayRow.info {
+  border-color: var(--primary-border);
+  background: var(--primary-selected);
+}
+
+.observabilityOverlayRow > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.observabilityOverlayRow > strong {
+  color: var(--text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.observabilityOverlayRow > small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.observabilityDashboardsPanel {
+  overflow: hidden;
+}
+
+.savedDashboardGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.savedDashboardTile {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  padding: 12px;
+  text-align: left;
+}
+
+.savedDashboardTile:hover {
+  border-color: var(--primary-border);
+  background: var(--primary-selected);
+}
+
+.savedDashboardTile:focus-visible {
+  border-color: var(--primary);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.savedDashboardTile.active {
+  border-color: var(--primary);
+  background: var(--primary-selected);
+}
+
+.savedDashboardIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--primary);
+}
+
+.savedDashboardTile > span:not(.savedDashboardIcon) {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.savedDashboardTile strong {
+  font-size: 13px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.savedDashboardTile small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.savedDashboardTile em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.dashboardWidgetGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 10px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.dashboardWidgetGrid .wideWidget {
+  grid-column: span 2;
+}
+
+.dashboardWidgetChart,
+.dashboardWidgetTable {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.dashboardWidgetHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.dashboardWidgetHeader strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.dashboardWidgetHeader small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.dashboardWidgetRow {
+  display: grid;
+  grid-template-columns: minmax(92px, auto) minmax(140px, 1.2fr) minmax(120px, 0.9fr) minmax(110px, 0.8fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+}
+
+.dashboardWidgetRow > strong,
+.dashboardWidgetRow > span,
+.dashboardWidgetRow > small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.dashboardWidgetRow > strong {
+  color: var(--text);
+}
+
+.dashboardWidgetRow > span {
+  color: var(--text-secondary);
+}
+
+.dashboardWidgetRow > small {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.dashboardWidgetEmpty {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 12px;
+}
+
+.groupDashboardGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.groupDashboardTile {
+  position: relative;
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.groupDashboardTile > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.groupDashboardTile > strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.groupDashboardTile > small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.groupDashboardTile dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.groupDashboardTile dl div {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 7px 8px;
+}
+
+.groupDashboardTile dt,
+.groupDashboardTile dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.groupDashboardTile dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.groupDashboardTile dd {
+  margin-top: 3px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.groupDashboardTile > i {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.dashboardHandoffPanel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.dashboardHandoffPanel span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 11px 12px;
+}
+
+.dashboardHandoffPanel strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.dashboardHandoffPanel small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.dashboardManagerStatus {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 16px 16px;
+}
+
+@media (max-width: 720px) {
+  .observabilityOverlayRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .savedDashboardTile,
+  .dashboardWidgetRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dashboardWidgetGrid .wideWidget {
+    grid-column: auto;
+  }
+
+  .groupDashboardTile dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .observabilityNetworkGroupTile dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .dashboardControlBar {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
@@ -165,6 +1022,649 @@
   font-size: 12px;
   font-weight: 600;
   padding: 0 10px;
+}
+
+.releaseStatusPanel,
+.fleetMonitorToolbar,
+.vpsMonitorCard {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.releaseStatusPanel {
+  overflow: hidden;
+}
+
+.releaseStatusGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  padding: 16px;
+}
+
+.releaseStatusList {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 12px;
+}
+
+.releaseStatusListTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.releaseStatusList.ready .releaseStatusListTitle {
+  color: var(--success);
+}
+
+.releaseStatusList.pending .releaseStatusListTitle {
+  color: var(--primary);
+}
+
+.releaseStatusList.blocked .releaseStatusListTitle {
+  color: var(--warning);
+}
+
+.releaseStatusList ul {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0 0;
+  padding-left: 18px;
+}
+
+.releaseStatusList li,
+.releaseStatusList p {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.fleetMonitorWorkspace {
+  gap: 16px;
+}
+
+.fleetMonitorWorkspace.embedded {
+  display: grid;
+  min-width: 0;
+}
+
+.fleetMonitorToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+}
+
+.fleetMonitorToolbar h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.fleetMonitorToolbar span,
+.fleetMonitorSummary span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.fleetMonitorSummary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text);
+}
+
+.fleetMonitorToolbarRight {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.fleetMonitorControls {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fleetMonitorControls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.fleetMonitorControls select {
+  height: 34px;
+  min-width: 140px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.vpsMonitorDensityControl button {
+  min-width: 92px;
+}
+
+.fleetMonitorSummary strong {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.vpsMonitorGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  gap: 12px;
+}
+
+.vpsMonitorGrid.compact {
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 8px;
+}
+
+.vpsMonitorCard {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.vpsMonitorCard.compact {
+  gap: 8px;
+  padding: 10px;
+}
+
+.vpsMonitorCard.online {
+  border-color: var(--success-border);
+}
+
+.vpsMonitorCard.stale,
+.vpsMonitorCard.warning {
+  border-color: var(--warning-border);
+}
+
+.vpsMonitorCard.offline {
+  border-color: var(--danger-border);
+}
+
+.vpsMonitorCardMain {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+}
+
+.vpsMonitorCardMain:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+
+.vpsMonitorStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.vpsMonitorStatus span {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--success);
+}
+
+.vpsMonitorCard.stale .vpsMonitorStatus span,
+.vpsMonitorCard.warning .vpsMonitorStatus span {
+  background: var(--warning);
+}
+
+.vpsMonitorCard.offline .vpsMonitorStatus span {
+  background: var(--danger);
+}
+
+.vpsMonitorCardMain strong {
+  overflow-wrap: anywhere;
+  font-size: 15px;
+}
+
+.vpsMonitorCardMain small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.vpsMonitorTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.vpsMonitorTags span {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--canvas);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  padding: 3px 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsMonitorMetrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.vpsMonitorCard.compact .vpsMonitorMetrics {
+  gap: 6px;
+}
+
+.vpsMonitorMetric {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 6px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 8px;
+}
+
+.vpsMonitorCard.compact .vpsMonitorMetric {
+  padding: 6px;
+}
+
+.vpsMonitorMetric svg {
+  color: var(--primary);
+}
+
+.vpsMonitorMetric span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.vpsMonitorMetric strong {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.vpsMonitorEvidence {
+  display: grid;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.vpsMonitorEvidence span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.vpsMonitorSignals {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.vpsMonitorSignal {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 7px 8px;
+}
+
+.vpsMonitorSignal span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsMonitorSignal strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.vpsMonitorSignal.ok {
+  background: var(--success-soft);
+  border-color: var(--success-border);
+}
+
+.vpsMonitorSignal.info {
+  background: var(--primary-soft);
+  border-color: var(--primary-border);
+}
+
+.vpsMonitorSignal.warning {
+  background: var(--warning-soft);
+  border-color: var(--warning-border);
+}
+
+.vpsMonitorSignal.critical {
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+
+.vpsMonitorActions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.vpsMonitorCard.compact .vpsMonitorActions {
+  gap: 6px;
+}
+
+.vpsMonitorActions button,
+.vpsMonitorActions summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 9px;
+}
+
+.vpsMonitorActions summary {
+  list-style: none;
+}
+
+.vpsMonitorActions summary::-webkit-details-marker {
+  display: none;
+}
+
+.vpsMonitorActions button:hover,
+.vpsMonitorActions summary:hover {
+  border-color: var(--primary);
+  color: var(--primary-text);
+}
+
+.vpsMonitorMore {
+  position: relative;
+}
+
+.vpsMonitorMoreMenu {
+  display: none;
+}
+
+.vpsMonitorMore[open] .vpsMonitorMoreMenu {
+  position: absolute;
+  z-index: 20;
+  right: 0;
+  bottom: calc(100% + 6px);
+  display: grid;
+  gap: 4px;
+  min-width: 132px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+  padding: 6px;
+}
+
+.vpsMonitorMoreMenu button {
+  justify-content: flex-start;
+  width: 100%;
+  border-color: transparent;
+}
+
+.vpsDetailWorkspace {
+  align-items: start;
+}
+
+.vpsDetailPanel {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.vpsDetailHeader {
+  align-items: flex-start;
+}
+
+.vpsDetailNotice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-soft);
+  color: var(--text);
+  padding: 10px 12px;
+}
+
+.vpsDetailNotice.critical {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.vpsDetailTopGrid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.78fr) minmax(320px, 1.22fr);
+  gap: 14px;
+  min-width: 0;
+}
+
+.vpsDetailMonitorSlot {
+  min-width: 0;
+}
+
+.vpsDetailFacts,
+.vpsDetailPosture,
+.vpsDetailBlock {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.vpsDetailFacts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+}
+
+.vpsFactRow {
+  display: grid;
+  grid-template-columns: auto minmax(88px, 0.55fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border-right: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--muted);
+  font-size: 12px;
+  padding: 10px 12px;
+}
+
+.vpsFactRow svg {
+  color: var(--primary);
+}
+
+.vpsFactRow strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+  text-align: right;
+}
+
+.vpsDetailPosture {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  overflow: hidden;
+}
+
+.vpsPostureMetric {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border-right: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 12px;
+}
+
+.vpsPostureMetric span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.vpsPostureMetric strong {
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.vpsPostureMetric small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.vpsPostureMetric.ready strong {
+  color: var(--success);
+}
+
+.vpsPostureMetric.warning strong {
+  color: var(--warning-text);
+}
+
+.vpsDetailTabPanel {
+  min-width: 0;
+}
+
+.vpsDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+  min-width: 0;
+}
+
+.vpsDetailActionTab {
+  max-width: 760px;
+}
+
+.vpsDetailBlock {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 14px;
+}
+
+.vpsDetailBlockHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vpsDetailBlockHeader h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.vpsDetailBlockHeader svg {
+  color: var(--primary);
+}
+
+.vpsDetailBlock p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.vpsDetailRecord,
+.vpsDetailState {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--text);
+  padding: 9px 10px;
+  text-align: left;
+}
+
+button.vpsDetailRecord {
+  cursor: pointer;
+}
+
+button.vpsDetailRecord:hover {
+  border-color: var(--primary);
+}
+
+.vpsDetailRecord strong,
+.vpsDetailState strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.vpsDetailRecord span,
+.vpsDetailState small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.vpsDetailRecord.static {
+  cursor: default;
 }
 
 .timeRangeTabs {
@@ -441,6 +1941,259 @@
   gap: 8px;
 }
 
+.systemPostureGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(220px, 1fr));
+  gap: 12px;
+  padding: 16px 16px 0;
+}
+
+.systemPostureTile {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 12px;
+}
+
+.systemPostureTile.ok {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.systemPostureTile.info {
+  border-color: var(--primary-border);
+  background: var(--primary-selected);
+}
+
+.systemPostureTile.warning {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.systemPostureTile.critical {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.systemPostureTile small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.systemPostureTile strong {
+  display: block;
+  margin-top: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.systemPostureTile p {
+  margin: 7px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.systemCapacityStrip {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.4fr) repeat(2, minmax(170px, 1fr));
+  gap: 12px;
+  margin: 12px 16px 0;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--primary-selected);
+  padding: 12px;
+}
+
+.systemCapacityStrip div {
+  min-width: 0;
+}
+
+.systemCapacityStrip strong,
+.systemCapacityStrip span {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.systemCapacityStrip strong {
+  color: var(--primary-text);
+  font-size: 12px;
+}
+
+.systemCapacityStrip span {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.systemAttentionQueue {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+}
+
+.systemAttentionRow {
+  display: grid;
+  grid-template-columns: 124px minmax(150px, 1fr) auto;
+  gap: 5px 12px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+
+.systemAttentionRow span {
+  width: fit-content;
+  max-width: 100%;
+  border-radius: 999px;
+  background: var(--surface-neutral);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  padding: 4px 8px;
+}
+
+.systemAttentionRow strong,
+.systemAttentionRow b,
+.systemAttentionRow p {
+  min-width: 0;
+}
+
+.systemAttentionRow strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.systemAttentionRow b {
+  justify-self: end;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.systemAttentionRow p {
+  grid-column: 2 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.systemAttentionRow.info {
+  border-color: var(--primary-border);
+}
+
+.systemAttentionRow.info span {
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.systemAttentionRow.warning {
+  border-color: var(--warning-border);
+}
+
+.systemAttentionRow.warning span {
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.systemAttentionRow.critical {
+  border-color: var(--danger-border);
+}
+
+.systemAttentionRow.critical span {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.systemAttentionEmpty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 1px solid var(--success-border);
+  border-radius: 8px;
+  background: var(--success-soft);
+  color: var(--success-text);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 10px 12px;
+}
+
+.systemThresholdChips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.systemThresholdChips span {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.2;
+  padding: 3px 8px;
+}
+
+.systemThresholdChips strong {
+  margin-right: 5px;
+  color: var(--text);
+}
+
+.systemThresholdChips .ok {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+  color: var(--success-text);
+}
+
+.systemThresholdChips .info {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.systemThresholdChips .warning {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.systemThresholdChips .critical {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.systemChartInsight {
+  margin: -4px 0 0;
+  max-width: 75ch;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .systemConfigOverview .sectionHeader {
   align-items: flex-start;
 }
@@ -450,6 +2203,58 @@
   grid-template-columns: repeat(5, minmax(150px, 1fr));
   gap: 12px;
   padding: 16px;
+}
+
+.systemConfigOwnership {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.systemConfigOwnershipItem {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.systemConfigOwnershipItem > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.systemConfigOwnershipItem strong {
+  display: block;
+  margin: 0 0 4px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.systemConfigOwnershipItem p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.38;
+}
+
+.systemConfigOwnershipActions {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 2px;
 }
 
 .systemConfigStatusItem {
@@ -517,7 +2322,81 @@
 
 .systemConfigBody {
   display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  align-items: start;
   gap: 16px;
+}
+
+.systemConfigSideNav {
+  position: sticky;
+  top: 14px;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--surface);
+}
+
+.systemConfigSideNav strong {
+  padding: 0 4px 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.systemConfigSideNav button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 8px;
+  text-align: left;
+}
+
+.systemConfigSideNav button:hover,
+.systemConfigSideNav button:focus-visible {
+  border-color: var(--primary-border);
+  background: var(--primary-selected);
+  color: var(--primary-text);
+  outline: 0;
+}
+
+.systemConfigSideNav button.active {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.systemConfigSideNav button span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.systemConfigSideNav button small {
+  color: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  opacity: 0.82;
+}
+
+.systemConfigMain {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
 }
 
 .systemConfigEditor,
@@ -540,15 +2419,44 @@
   padding: 16px;
 }
 
+.systemConfigSectionStack {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
 .systemConfigGroup {
   display: grid;
   align-content: start;
-  gap: 10px;
+  gap: 0;
   min-width: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 14px;
   background: var(--surface);
+  scroll-margin-top: 16px;
+}
+
+.systemConfigGroupHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 14px;
+}
+
+.systemConfigGroupHeader > div {
+  min-width: 0;
+}
+
+.systemConfigGroupHeader > span {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--surface-neutral);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  padding: 4px 8px;
 }
 
 .systemConfigGroup h3,
@@ -567,7 +2475,99 @@
   line-height: 1.35;
 }
 
-.systemConfigGroup label {
+.systemConfigFieldList {
+  display: grid;
+}
+
+.systemConfigFieldRow {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(260px, 360px);
+  gap: 16px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 14px;
+}
+
+.systemConfigFieldRow:last-child {
+  border-bottom: 0;
+}
+
+.systemConfigFieldText {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.systemConfigFieldText label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.systemConfigFieldText label span {
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  font-size: 10px;
+  font-weight: 800;
+  padding: 2px 6px;
+  text-transform: uppercase;
+}
+
+.systemConfigFieldText p {
+  max-width: 72ch;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.systemConfigFieldText dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.systemConfigFieldText dl > div {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--canvas);
+  padding: 7px;
+}
+
+.systemConfigFieldText dt {
+  margin: 0 0 3px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.systemConfigFieldText dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.systemConfigFieldControl {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+}
+
+.systemConfigFieldControl label {
   display: grid;
   gap: 5px;
   min-width: 0;
@@ -576,7 +2576,7 @@
   font-weight: 800;
 }
 
-.systemConfigGroup input:not([type="checkbox"]),
+.systemConfigFieldControl input:not([type="checkbox"]),
 .systemConfigToml {
   width: 100%;
   min-width: 0;
@@ -588,26 +2588,62 @@
   padding: 0 10px;
 }
 
-.systemConfigGroup input:not([type="checkbox"]) {
+.systemConfigFieldControl input:not([type="checkbox"]) {
   font-weight: 600;
 }
 
-.systemConfigGroup input:not([type="checkbox"]):focus,
+.systemConfigFieldControl input:not([type="checkbox"]):focus,
 .systemConfigToml:focus {
   border-color: var(--primary);
 }
 
-.systemConfigGroup label.checkLine {
+.systemConfigFieldControl label.checkLine {
   display: flex;
   align-items: center;
   gap: 8px;
   padding-top: 6px;
 }
 
-.systemConfigGroup label.checkLine input[type="checkbox"] {
+.systemConfigFieldControl label.checkLine input[type="checkbox"] {
   flex: 0 0 auto;
   width: 16px;
   height: 16px;
+}
+
+.systemConfigPath {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.configImpactBadge {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border-radius: 999px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.configImpactBadge.hot {
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.configImpactBadge.restart {
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.configImpactBadge.unknown {
+  background: var(--surface-neutral);
+  color: var(--muted);
 }
 
 .systemTomlEditor {
@@ -641,6 +2677,106 @@
   padding: 16px;
 }
 
+.systemConfigStepper {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.systemConfigStepper li {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 8px;
+}
+
+.systemConfigStepper li > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--surface-neutral);
+  color: var(--muted);
+}
+
+.systemConfigStepper li > span > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.systemConfigStepper li strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.systemConfigStepper li.complete {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.systemConfigStepper li.complete > span {
+  color: var(--success);
+  background: var(--surface);
+}
+
+.systemConfigStepper li.active {
+  border-color: var(--primary-border);
+  background: var(--primary-selected);
+}
+
+.systemNextAction {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 12px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.systemNextAction strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.systemNextAction span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.systemNextAction button {
+  grid-row: span 2;
+}
+
+.systemNextAction.warning {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.systemNextAction.ok {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
 .systemReviewBlock,
 .systemImpactList {
   display: grid;
@@ -672,6 +2808,7 @@
 
 .systemDiffPreview {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   min-width: 0;
 }
@@ -683,6 +2820,43 @@
 
 .compactChipList {
   margin: 0;
+}
+
+.compactChipList .hot {
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.compactChipList .restart {
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.compactChipList .unknown {
+  background: var(--surface-neutral);
+  color: var(--muted);
+}
+
+.systemAdvancedDiff {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.systemAdvancedDiff summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 750;
+  padding: 12px;
+}
+
+.systemAdvancedDiff[open] summary {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.systemAdvancedDiff .systemDiffPreview {
+  padding: 12px;
 }
 
 .compactJsonPreview {
@@ -764,10 +2938,11 @@
 .timeSeriesLegend {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 14px;
+  gap: 7px;
   margin-top: 8px;
-  color: var(--muted);
+  color: var(--text-secondary);
   font-size: 12px;
+  font-weight: 700;
 }
 
 .timeSeriesLegend span,
@@ -775,6 +2950,16 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.timeSeriesLegend span {
+  max-width: 100%;
+  min-height: 24px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  overflow-wrap: anywhere;
+  padding: 3px 8px;
 }
 
 .timeSeriesLegend i,
@@ -1077,10 +3262,27 @@
   grid-column: 1 / -1;
 }
 
+.authOnlyShell {
+  min-height: 100vh;
+  background: var(--canvas);
+}
+
 .authWorkspace {
   display: grid;
+  min-height: 100vh;
+  align-items: center;
   justify-items: center;
   padding: 48px 24px;
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .fleetPanel,
@@ -1097,6 +3299,13 @@
   gap: 18px;
   width: min(100%, 520px);
   padding-bottom: 18px;
+}
+
+.authHeader h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: 24px;
+  line-height: 1.2;
 }
 
 .authPanel label {
@@ -1122,6 +3331,182 @@
   padding: 0 12px;
 }
 
+.runbooksPanel {
+  overflow: hidden;
+}
+
+.runbookSummary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 14px 16px;
+}
+
+.runbookMetric {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 10px 12px;
+}
+
+.runbookMetric small,
+.runbookMetric span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runbookMetric strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.runbookToolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(240px, auto) auto;
+  gap: 10px;
+  align-items: center;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--canvas);
+  padding: 12px 16px;
+}
+
+.runbookSearch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  padding: 0 10px;
+}
+
+.runbookSearch input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  outline: 0;
+}
+
+.runbookCatalogGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 12px;
+  padding: 16px;
+}
+
+.runbookCard {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.runbookCardHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+}
+
+.runbookCardHeader h3 {
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.runbookCardHeader span:not(.status) {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.runbookMetaGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.runbookMetaGrid div {
+  min-width: 0;
+}
+
+.runbookMetaGrid dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.runbookMetaGrid dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.runbookRequirementList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.runbookRequirementList span {
+  max-width: 100%;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--surface-neutral);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+  padding: 3px 7px;
+}
+
+.runbookCardFooter {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.runbookCardFooter > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .preferencesWorkspace {
   max-width: none;
 }
@@ -1132,10 +3517,80 @@
 
 .preferencesForm {
   display: grid;
+  gap: 16px;
+  min-width: 0;
+  padding: 14px;
+}
+
+.preferenceScopeOverview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.preferenceScopeTile {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.preferenceScopeTile small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.preferenceScopeTile strong {
+  color: var(--text);
+  font-size: 16px;
+}
+
+.preferenceScopeTile p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.preferenceSection {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 12px;
+}
+
+.preferenceSectionHeader {
+  display: grid;
+  gap: 4px;
+}
+
+.preferenceSectionHeader h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+}
+
+.preferenceSectionHeader p {
+  max-width: 86ch;
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.preferenceSectionGrid {
+  display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
   gap: 12px;
   min-width: 0;
-  padding: 14px;
 }
 
 .preferenceGroup {
@@ -1152,7 +3607,7 @@
 
 .preferenceGroupHeader {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr);
+  grid-template-columns: 36px minmax(0, 1fr) auto;
   gap: 12px;
   min-width: 0;
 }
@@ -1168,9 +3623,70 @@
   color: var(--primary-text);
 }
 
+.preferenceTitleRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  margin-bottom: 5px;
+}
+
 .preferenceGroup h3 {
   margin: 0 0 5px;
   font-size: 15px;
+}
+
+.preferenceTitleRow h3 {
+  margin: 0;
+}
+
+.preferenceScopeBadge {
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 7px;
+  text-transform: uppercase;
+}
+
+.preferenceScopeBadge.personal {
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.preferenceScopeBadge.browser {
+  background: var(--surface-neutral);
+  color: var(--text-secondary);
+}
+
+.preferenceScopeBadge.operational {
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.preferenceCardReset {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.preferenceCardReset:hover:not(:disabled),
+.preferenceCardReset:focus-visible {
+  border-color: var(--primary-border);
+  color: var(--primary-text);
+  outline: 0;
+}
+
+.preferenceCardReset:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 
 .preferenceGroup p {
@@ -1274,6 +3790,12 @@
   color: var(--text);
 }
 
+.preferenceHintStack {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 5px;
+}
+
 .preferenceResetRow {
   display: grid;
   grid-template-columns: minmax(0, 1fr) max-content;
@@ -1342,6 +3864,24 @@
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
+}
+
+.preferenceOperationalNotice {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-soft);
+  color: var(--warning-text);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 9px 10px;
+}
+
+.preferenceOperationalNotice svg {
+  margin-top: 1px;
 }
 
 .preferencesNotice {
@@ -1643,6 +4183,58 @@
   border-top: 1px solid var(--border-subtle);
 }
 
+.operatorPostureGrid {
+  padding-bottom: 16px;
+}
+
+.operatorRoleMatrix {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 10px;
+  padding: 0 16px 16px;
+}
+
+.operatorRoleMatrix > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 11px 12px;
+}
+
+.operatorRoleMatrix > div.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.operatorRoleMatrix strong,
+.operatorRoleMatrix span,
+.operatorRoleMatrix small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operatorRoleMatrix strong {
+  color: var(--text);
+  font-size: 13px;
+  text-transform: capitalize;
+}
+
+.operatorRoleMatrix span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.operatorRoleMatrix small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
 .operatorRecordName {
   display: inline-block;
   min-width: 0;
@@ -1659,6 +4251,210 @@
   gap: 16px;
   min-width: 0;
   padding: 16px 18px 18px;
+}
+
+.operatorAccessEvidencePanel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 12px;
+}
+
+.operatorEvidenceGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(135px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.operatorEvidenceTile {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 8px 10px;
+}
+
+.operatorEvidenceTile.ok {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.operatorEvidenceTile.info {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+}
+
+.operatorEvidenceTile.warning,
+.operatorEvidenceTile.critical {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.operatorEvidenceTile small,
+.operatorEvidenceTile strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.operatorEvidenceTile small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.operatorEvidenceTile strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.operatorEvidenceFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.operatorEvidenceFooter > span {
+  min-width: min(100%, 260px);
+  max-width: 72ch;
+}
+
+.operatorAdminGuardrail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-soft);
+  color: var(--warning-text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  padding: 9px 11px;
+}
+
+.operatorAdminGuardrail svg {
+  flex: 0 0 auto;
+}
+
+.sessionPostureGrid {
+  padding-bottom: 16px;
+}
+
+.sessionIdentityCell,
+.sessionDateCell,
+.sessionNetworkCell,
+.sessionDeviceCell,
+.authReasonCell {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sessionIdentityCell strong,
+.sessionDateCell strong,
+.sessionNetworkCell strong,
+.sessionDeviceCell strong,
+.authReasonCell strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionIdentityCell small,
+.sessionDateCell small,
+.sessionNetworkCell small,
+.sessionDeviceCell small,
+.authReasonCell small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionDateCell {
+  min-width: 94px;
+}
+
+.sessionInlineRevoke {
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 9px;
+}
+
+.sessionAuthHeader {
+  align-items: center;
+}
+
+.sessionAuthFilters {
+  margin-left: auto;
+}
+
+.authFailureGroups {
+  display: grid;
+  gap: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 14px 16px;
+}
+
+.authFailureGroupRow {
+  display: grid;
+  grid-template-columns: 150px minmax(150px, 1fr) auto;
+  gap: 5px 12px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-soft);
+  padding: 10px 12px;
+}
+
+.authFailureGroupRow strong,
+.authFailureGroupRow b,
+.authFailureGroupRow p {
+  min-width: 0;
+}
+
+.authFailureGroupRow strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.authFailureGroupRow b {
+  justify-self: end;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.authFailureGroupRow p {
+  grid-column: 2 / -1;
+  margin: 0;
+  color: var(--warning-text);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .operatorEditorFields {
@@ -2095,6 +4891,16 @@
 }
 
 @media (max-width: 900px) {
+  .homeCommandBand,
+  .homeReviewGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .homePanelHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .fleetNodeDetailControls,
   .fleetDetailPane {
     grid-template-columns: minmax(0, 1fr);
@@ -2103,6 +4909,38 @@
   .fleetSelectionHeader {
     align-items: stretch;
     flex-direction: column;
+  }
+}
+
+@media (max-width: 640px) {
+  .homeWorkspace {
+    gap: 16px;
+    padding: 16px;
+  }
+
+  .homeCommandBand,
+  .homeReviewPanel {
+    padding: 12px;
+  }
+
+  .homeQuickActionGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .homeActionRow,
+  .homeActivityRow {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .homeActionMeta,
+  .homeActivityRow time,
+  .homeActionRow > svg {
+    grid-column: 2;
+    white-space: normal;
+  }
+
+  .fleetMonitorToolbarRight {
+    justify-content: flex-start;
   }
 }
 

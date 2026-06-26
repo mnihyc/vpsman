@@ -30,7 +30,7 @@ test("captures network telemetry placements", async ({ page }, testInfo) => {
   await expect(coreDetail.getByText("latest interface rate bucket")).toBeVisible();
   await capture(page, coreDetail, outputDir, manifest, "fleet-network-detail");
 
-  await openConsoleSubpage(page, "Topology", "Graph");
+  await openConsoleSubpage(page, "Network", "Graph");
   await expect(page.getByRole("heading", { name: "Topology graph" })).toBeVisible();
   await expect(page.getByText("Latency and auto OSPF")).toBeVisible();
   await expect(page.getByText("down 1")).toBeVisible();

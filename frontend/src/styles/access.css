@@ -249,7 +249,7 @@
   color: var(--muted);
   font-size: 11px;
   font-weight: 800;
-  letter-spacing: 0.02em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 
@@ -269,6 +269,117 @@
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.accessPostureGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+  gap: 10px;
+  min-width: 0;
+  padding: 14px 18px;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-subtle);
+}
+
+.accessPostureCard {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 10px;
+  align-items: start;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+
+.accessPostureCard.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.accessPostureCard.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.accessPostureIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.accessPostureCard.ready .accessPostureIcon {
+  background: var(--surface);
+  color: var(--success-text);
+}
+
+.accessPostureCard.attention .accessPostureIcon {
+  background: var(--surface);
+  color: var(--warning-text);
+}
+
+.accessPostureBody {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.accessPostureBody span,
+.accessRiskNotice span,
+.accessLifecycleGuide span,
+.accessReadinessPanel span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.accessPostureBody strong,
+.accessRiskNotice strong,
+.accessLifecycleGuide strong,
+.accessReadinessPanel strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.accessPostureCard.ready .accessPostureBody strong,
+.accessRiskNotice.ready strong,
+.accessReadinessPanel .ready strong {
+  color: var(--success-text);
+}
+
+.accessPostureCard.attention .accessPostureBody strong,
+.accessRiskNotice.attention strong,
+.accessReadinessPanel .attention strong {
+  color: var(--warning-text);
+}
+
+.accessPostureBody p,
+.accessRiskNotice span,
+.accessLifecycleGuide > div > span,
+.accessReadinessPanel p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  text-transform: none;
+}
+
+.accessPostureCard > button {
+  grid-column: 2;
+  justify-self: start;
 }
 
 .subpanelTabs.accessTabs,
@@ -366,6 +477,202 @@
   gap: 14px;
 }
 
+.accessWorkflowMap {
+  grid-column: 1 / -1;
+}
+
+.accessWorkflowLinks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 10px;
+  padding: 14px 18px 18px;
+}
+
+.accessWorkflowLink {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+  min-height: 72px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.accessWorkflowLink:hover {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+}
+
+.accessWorkflowLink:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.accessWorkflowIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.accessWorkflowLink > span:last-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.accessWorkflowLink strong,
+.accessWorkflowLink small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.accessWorkflowLink strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.accessWorkflowLink small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.accessRiskNotice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  margin: 14px 18px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+
+.accessRiskNotice.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.accessRiskNotice.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.accessRiskNotice svg {
+  margin-top: 1px;
+  color: var(--primary);
+}
+
+.accessRiskNotice.ready svg {
+  color: var(--success-text);
+}
+
+.accessRiskNotice.attention svg {
+  color: var(--warning-text);
+}
+
+.accessRiskNotice > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.accessLifecycleGuide,
+.accessReadinessPanel {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.65fr) minmax(0, 1.35fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--primary-soft);
+  padding: 12px;
+}
+
+.accessLifecycleGuide > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.accessLifecycleGuide ol {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.accessLifecycleGuide li {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid var(--primary-border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--primary-text);
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.accessReadinessPanel {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  background: var(--surface-subtle);
+}
+
+.accessReadinessPanel > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+
+.accessReadinessPanel > div.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.accessReadinessPanel > div.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.accessReadinessActions {
+  align-content: center;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.identityFormGuide {
+  background: var(--primary-soft);
+  border-color: var(--primary-border);
+}
+
+.fieldHelp {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .accessQueueList {
   display: grid;
   gap: 8px;
@@ -443,4 +750,15 @@
   min-width: 0;
   color: var(--text);
   overflow-wrap: anywhere;
+}
+
+@media (max-width: 700px) {
+  .accessLifecycleGuide,
+  .accessReadinessPanel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .accessPostureCard > button {
+    grid-column: 1 / -1;
+  }
 }

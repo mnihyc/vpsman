@@ -1,5 +1,5 @@
-import { useMemo, useState, type FormEvent } from "react";
-import { Download, GitBranch, Power, PowerOff, RefreshCcw, Route, Save, Wand2 } from "lucide-react";
+import { useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { Activity, Download, FileDiff, GitBranch, Power, PowerOff, RefreshCcw, Route, Save, Wand2, X } from "lucide-react";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridAction,
@@ -89,6 +89,13 @@ type TunnelPlanToggleSnapshot = {
   planIds: string[];
   planNames: string[];
 };
+type TunnelPlanReviewItem = {
+  detail: string;
+  label: string;
+  tone?: "attention" | "ready";
+  value: string;
+};
+type TunnelPlanWorkflow = "create" | "promotion" | "config" | "automation" | null;
 
 export function TopologyPanel({
   activeSubpage,
@@ -114,6 +121,8 @@ export function TopologyPanel({
   onLoadTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
+  onOpenVpsDetail,
+  onSelectSubpage,
   onPromoteTelemetryTunnel,
   onPromoteTunnelPlanToCustomAdapter,
   onRefresh,
@@ -150,6 +159,8 @@ export function TopologyPanel({
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
+  onOpenVpsDetail?: (clientId: string) => void;
+  onSelectSubpage: (subpage: string) => void;
   onPromoteTelemetryTunnel: (request: PromoteTelemetryTunnelRequest) => Promise<void>;
   onPromoteTunnelPlanToCustomAdapter: (request: PromoteTunnelPlanToCustomAdapterRequest) => Promise<void>;
   onRefresh: () => Promise<void>;
@@ -188,6 +199,7 @@ export function TopologyPanel({
   const [tunnelPlanTogglePending, setTunnelPlanTogglePending] = useState(false);
   const [tunnelPlanSaveSnapshot, setTunnelPlanSaveSnapshot] = useState<TunnelPlanSaveSnapshot | null>(null);
   const [tunnelPlanToggleSnapshot, setTunnelPlanToggleSnapshot] = useState<TunnelPlanToggleSnapshot | null>(null);
+  const [activePlanWorkflow, setActivePlanWorkflow] = useState<TunnelPlanWorkflow>(null);
   const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
   const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
   const automationRows = useMemo(
@@ -393,7 +405,7 @@ export function TopologyPanel({
     },
   ];
   const runtimeManager = form.runtime_control?.manager ?? "agent_iproute2_managed";
-  const topologySubpage = ["graph", "plans", "apply", "promotion", "evidence", "ospf"].includes(activeSubpage)
+  const topologySubpage = ["graph", "plans", "apply", "evidence", "ospf"].includes(activeSubpage)
     ? activeSubpage
     : "graph";
   const ready =
@@ -451,6 +463,33 @@ export function TopologyPanel({
       topologyStaleRoutesText,
     ],
   );
+  const draftTunnelPlanBuild = buildTunnelPlanReviewRequest();
+  const draftTunnelPlanRequest = draftTunnelPlanBuild.request;
+  const tunnelPlanReviewItems = buildTunnelPlanReviewItems({
+    clientLabel,
+    draftError: draftTunnelPlanBuild.error,
+    form,
+    ready: Boolean(ready),
+    request: draftTunnelPlanRequest,
+    reservedAddresses: splitReserved(reservedText),
+    savedPlans: tunnelPlans,
+    trafficLimitEnabled,
+  });
+  const latestTunnelPlan = tunnelPlans[0] ?? null;
+  const latestConfigReviewItems = latestTunnelPlan
+    ? buildGeneratedConfigReviewItems(latestTunnelPlan, clientLabel)
+    : [];
+
+  function buildTunnelPlanReviewRequest(): { error: string | null; request: CreateTunnelPlanRequest | null } {
+    try {
+      return { error: null, request: buildTunnelPlanSaveRequest() };
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : "Draft contains invalid generated config values",
+        request: null,
+      };
+    }
+  }
 
   async function submitPlan(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -459,9 +498,14 @@ export function TopologyPanel({
       setActionError("Tunnel plan is incomplete");
       return;
     }
+    const draft = buildTunnelPlanReviewRequest();
+    if (!draft.request) {
+      setActionError(draft.error ?? "Tunnel plan generated config is invalid");
+      return;
+    }
     setTunnelPlanSaveSnapshot({
       draftKey: tunnelPlanDraftKey,
-      request: buildTunnelPlanSaveRequest(),
+      request: draft.request,
     });
   }
 
@@ -549,8 +593,8 @@ export function TopologyPanel({
 
   return (
     <div className="workspaceGrid">
-      {(topologySubpage === "graph" || topologySubpage === "plans") && (
-      <section className="fleetPanel">
+      {topologySubpage === "plans" && (
+      <section className="fleetPanel tunnelPlansRegistryPanel">
         <ConsoleDataGrid
           actions={tunnelPlanActions}
           columns={tunnelPlanColumns}
@@ -566,13 +610,46 @@ export function TopologyPanel({
           storageKey="vpsman.grid.topology.tunnelPlans.v2"
           title="Tunnel plans"
           toolbarActions={
-            <button className="secondaryAction compactAction" disabled={loading || pending} onClick={onRefresh} type="button">
-              <RefreshCcw size={16} />
-              <span>Refresh</span>
+            <>
+              <button className="primaryAction compactAction" onClick={() => setActivePlanWorkflow("create")} type="button">
+                <GitBranch size={16} />
+                <span>Create tunnel plan</span>
+              </button>
+              <button
+                className="secondaryAction compactAction"
+                disabled={tunnelPlans.length === 0}
+                onClick={() => onSelectSubpage("tests")}
+                title={tunnelPlans.length === 0 ? "Save a plan before running connectivity tests." : "Open network tests for saved plans."}
+                type="button"
+              >
+                <Activity size={16} />
+                <span>Test connectivity</span>
+              </button>
+              <button className="secondaryAction compactAction" onClick={() => setActivePlanWorkflow("promotion")} type="button">
+                <FileDiff size={16} />
+                <span>Promotion workflow</span>
+              </button>
+              {latestTunnelPlan ? (
+                <button className="secondaryAction compactAction" onClick={() => setActivePlanWorkflow("config")} type="button">
+                  <Route size={16} />
+                  <span>Generated config</span>
+                </button>
+              ) : null}
+              <button className="secondaryAction compactAction" disabled={loading || pending} onClick={onRefresh} type="button">
+                <RefreshCcw size={16} />
+                <span>Refresh</span>
+              </button>
+            </>
+          }
+        />
+        <OspfCostModelNote
+          action={
+            <button className="secondaryAction compactAction" onClick={() => setActivePlanWorkflow("automation")} type="button">
+              <Route size={15} />
+              <span>Latency and auto OSPF</span>
             </button>
           }
         />
-        <OspfCostModelNote />
       </section>
       )}
       <ConfirmationPrompt
@@ -639,8 +716,28 @@ export function TopologyPanel({
         title="Confirm tunnel plan lifecycle"
       />
 
-      {(topologySubpage === "graph" || topologySubpage === "plans" || topologySubpage === "ospf") && (
-        <section className="fleetPanel">
+      {((topologySubpage === "plans" && activePlanWorkflow === "automation") || topologySubpage === "ospf") && (
+        <section className="fleetPanel topologyPlanWorkflowPanel">
+          {topologySubpage === "plans" ? (
+            <div className="sectionHeader">
+              <div>
+                <h2>Latency and auto OSPF</h2>
+                <span>Runtime monitoring, recommendation, and endpoint automation state.</span>
+              </div>
+              <div className="sectionActions">
+                <Route size={20} />
+                <button
+                  aria-label="Close latency and auto OSPF workflow"
+                  className="iconButton"
+                  onClick={() => setActivePlanWorkflow(null)}
+                  title="Close latency and auto OSPF workflow"
+                  type="button"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+          ) : null}
           <ConsoleDataGrid
             actions={automationActions}
             columns={automationColumns}
@@ -652,7 +749,7 @@ export function TopologyPanel({
             rows={automationRows}
             searchPlaceholder="Search automation state"
             storageKey="vpsman.grid.topology.automation.v2"
-            title="Latency and auto OSPF"
+            title={topologySubpage === "plans" ? "Automation state" : "Latency and auto OSPF"}
             toolbarActions={
               automationBulkStatus ? <span className="mutedCell">{automationBulkStatus}</span> : <Route size={18} />
             }
@@ -664,18 +761,39 @@ export function TopologyPanel({
       <TopologyGraphPanel
         graph={topologyGraph}
         loading={loading}
+        onOpenVpsDetail={onOpenVpsDetail}
         onRefresh={onLoadTopologyGraph}
         runtimeConfigApplyStates={runtimeConfigApplyStates}
       />
       )}
 
-      {topologySubpage === "plans" && (
+      {topologySubpage === "plans" && activePlanWorkflow === "create" && (
       <section className="fleetPanel scheduleComposer topologyPlanComposer">
         <div className="sectionHeader">
           <div>
             <h2>Create tunnel plan</h2>
           </div>
-          <GitBranch size={20} />
+          <div className="sectionActions">
+            <GitBranch size={20} />
+            <button
+              aria-label="Close create tunnel plan workflow"
+              className="iconButton"
+              onClick={() => setActivePlanWorkflow(null)}
+              title="Close create tunnel plan workflow"
+              type="button"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+        <div aria-label="Tunnel plan wizard" className="tunnelPlanWizardStrip">
+          {tunnelPlanReviewItems.map((item) => (
+            <div className={item.tone ?? ""} key={item.label} title={item.detail}>
+              <span>{item.label}</span>
+              <strong>{item.value}</strong>
+              <p>{item.detail}</p>
+            </div>
+          ))}
         </div>
         <form className="dispatchForm topologyPlanForm" onSubmit={submitPlan}>
           <div
@@ -998,7 +1116,7 @@ export function TopologyPanel({
             className="operationNote formSectionNote topologyEvidenceDisclosure"
             title="Optional desired/stale interface and route evidence helps later promotion and drift review."
           >
-            <summary>Topology evidence</summary>
+            <summary>Network evidence</summary>
             <div className="dispatchControls">
               <label>
                 <span>Desired interfaces</span>
@@ -1018,7 +1136,7 @@ export function TopologyPanel({
               </label>
             </div>
           </details>
-          <button className="primaryAction" disabled={pending || !ready} type="submit">
+          <button className="primaryAction" disabled={pending || !ready || Boolean(draftTunnelPlanBuild.error)} type="submit">
             <Save size={17} />
             Save plan
           </button>
@@ -1026,9 +1144,10 @@ export function TopologyPanel({
       </section>
       )}
 
-      {topologySubpage === "promotion" && (
+      {topologySubpage === "plans" && activePlanWorkflow === "promotion" && (
       <TopologyPromotionPanel
         agents={agents}
+        onClose={() => setActivePlanWorkflow(null)}
         onAllocateTunnelEndpoints={onAllocateTunnelEndpoints}
         onPromoteTelemetryTunnel={onPromoteTelemetryTunnel}
         onPromoteTunnelPlanToCustomAdapter={onPromoteTunnelPlanToCustomAdapter}
@@ -1040,6 +1159,7 @@ export function TopologyPanel({
       {topologySubpage === "apply" && tunnelPlans.length > 0 && (
         <TopologyNetworkTestControls
           agents={agents}
+          networkTrends={networkTrends}
           onCreateJob={onCreateJob}
           onLoadTargets={onLoadTargets}
           onOpenJobDetails={onOpenJobDetails}
@@ -1073,23 +1193,59 @@ export function TopologyPanel({
         onLoadOspfRecommendations={onLoadOspfRecommendations}
         onLoadOspfUpdatePlans={onLoadOspfUpdatePlans}
         onLoadOutputs={onLoadOutputs}
+        onOpenGraph={() => onSelectSubpage("graph")}
+        onOpenJobDetails={onOpenJobDetails}
+        onOpenOspfApprovals={() => onSelectSubpage("ospf")}
+        onOpenTests={() => onSelectSubpage("tests")}
+        onOpenTunnelPlans={() => onSelectSubpage("tunnel_plans")}
         ospfRecommendations={ospfRecommendations}
         ospfUpdatePlans={ospfUpdatePlans}
         trends={networkTrends}
       />
       )}
 
-      {topologySubpage === "plans" && tunnelPlans[0] && (
+      {topologySubpage === "plans" && latestTunnelPlan && activePlanWorkflow === "config" && (
         <section className="fleetPanel topologyPreview">
           <div className="sectionHeader">
             <div>
-              <h2>Latest plan</h2>
-              <span>{runtimeManagerLabel(tunnelPlans[0].plan.runtime_control?.manager)}</span>
+              <h2>Latest generated config</h2>
+              <span>{runtimeManagerLabel(latestTunnelPlan.plan.runtime_control?.manager)}</span>
             </div>
-            <Route size={20} />
+            <div className="sectionActions">
+              <Route size={20} />
+              <button
+                aria-label="Close generated config workflow"
+                className="iconButton"
+                onClick={() => setActivePlanWorkflow(null)}
+                title="Close generated config workflow"
+                type="button"
+              >
+                <X size={18} />
+              </button>
+            </div>
           </div>
-          <pre>{tunnelPlans[0].plan.ifupdown_snippet}</pre>
-          <pre>{tunnelPlans[0].plan.bird2_interface_snippet}</pre>
+          <div aria-label="Generated runtime config review" className="tunnelPlanWizardStrip generatedConfigReviewStrip">
+            {latestConfigReviewItems.map((item) => (
+              <div className={item.tone ?? ""} key={item.label} title={item.detail}>
+                <span>{item.label}</span>
+                <strong>{item.value}</strong>
+                <p>{item.detail}</p>
+              </div>
+            ))}
+          </div>
+          <details className="operationNote formSectionNote topologyGeneratedConfigDisclosure">
+            <summary>Advanced / generated config</summary>
+            <div className="generatedConfigSnippetGrid">
+              <div>
+                <strong>{latestTunnelPlan.plan.ifupdown_file}</strong>
+                <pre>{latestTunnelPlan.plan.ifupdown_snippet}</pre>
+              </div>
+              <div>
+                <strong>{latestTunnelPlan.plan.bird2_file}</strong>
+                <pre>{latestTunnelPlan.plan.bird2_interface_snippet}</pre>
+              </div>
+            </div>
+          </details>
         </section>
       )}
     </div>
@@ -1228,6 +1384,267 @@ function currentTunnelAddresses(form: CreateTunnelPlanRequest): string[] {
   ];
 }
 
+function buildTunnelPlanReviewItems({
+  clientLabel,
+  draftError,
+  form,
+  ready,
+  request,
+  reservedAddresses,
+  savedPlans,
+  trafficLimitEnabled,
+}: {
+  clientLabel: (clientId: string) => string;
+  draftError: string | null;
+  form: CreateTunnelPlanRequest;
+  ready: boolean;
+  request: CreateTunnelPlanRequest | null;
+  reservedAddresses: string[];
+  savedPlans: TunnelPlanRecord[];
+  trafficLimitEnabled: boolean;
+}): TunnelPlanReviewItem[] {
+  const hasEndpointPair = Boolean(form.left_client_id && form.right_client_id && form.left_client_id !== form.right_client_id);
+  const hasUnderlays = Boolean(form.left_underlay.trim() && form.right_underlay.trim());
+  const addresses = currentTunnelAddresses(form);
+  const addressReview = buildAddressValidationReview(form, reservedAddresses, savedPlans);
+  const runtimeReview = buildRuntimeReview(form, request, draftError, trafficLimitEnabled);
+  return [
+    {
+      detail: hasEndpointPair
+        ? `Underlay ${form.left_underlay || "missing"} -> ${form.right_underlay || "missing"}.`
+        : "Select exactly two VPS endpoints before address allocation.",
+      label: "1 Endpoints",
+      tone: hasEndpointPair && hasUnderlays ? "ready" : "attention",
+      value: hasEndpointPair
+        ? `${clientLabel(form.left_client_id)} / ${clientLabel(form.right_client_id)}`
+        : "Pick two VPSs",
+    },
+    {
+      detail: `Interface ${form.interface_name || "missing"}; OSPF input uses ${bandwidthTierLabel(form.bandwidth)} and ${form.latency_ms} ms latency.`,
+      label: "2 Type",
+      tone: form.name.trim() && form.interface_name.trim() ? "ready" : "attention",
+      value: form.name.trim() ? `${form.kind.toUpperCase()} / ${form.name.trim()}` : `${form.kind.toUpperCase()} / name missing`,
+    },
+    {
+      detail: addresses.length > 0
+        ? `Primary latency family ${addressFamilyLabel(form.latency_primary_family)}; allocator pool ${form.address_pool_cidr || form.ipv6_address_pool_cidr || "not set"}.`
+        : "Enter endpoint CIDRs or use Allocate endpoints from the configured pool.",
+      label: "3 Addresses",
+      tone: addresses.length > 0 ? "ready" : "attention",
+      value: formatDraftAddressSummary(form),
+    },
+    addressReview,
+    {
+      detail: ready
+        ? "Save the plan, then run status, probe, and speed-test jobs from Network / Tests before promotion."
+        : "Connectivity tests are available after the draft has endpoints, underlays, and a saved plan.",
+      label: "5 Test",
+      tone: ready ? "ready" : "attention",
+      value: ready ? "Ready after save" : "Blocked",
+    },
+    runtimeReview,
+    {
+      detail: form.enabled
+        ? "Save confirmation will persist the plan as enabled so the apply lifecycle can push runtime config."
+        : "Save confirmation will keep the plan disabled until an operator explicitly enables or promotes it.",
+      label: "7 Promote/apply",
+      tone: ready && !draftError ? "ready" : "attention",
+      value: form.enabled ? "Save + sync" : "Save draft",
+    },
+  ];
+}
+
+function buildAddressValidationReview(
+  form: CreateTunnelPlanRequest,
+  reservedAddresses: string[],
+  savedPlans: TunnelPlanRecord[],
+): TunnelPlanReviewItem {
+  const addresses = currentTunnelAddresses(form);
+  if (addresses.length === 0) {
+    return {
+      detail: "No endpoint CIDRs are present yet, so overlap and saved-plan collision checks cannot run.",
+      label: "4 Validate",
+      tone: "attention",
+      value: "Needs endpoints",
+    };
+  }
+  const duplicateDrafts = duplicateValues(addresses);
+  const reservedSet = new Set(reservedAddresses.map((address) => address.trim()).filter(Boolean));
+  const reservedOverlap = addresses.filter((address) => reservedSet.has(address));
+  const savedAddressOwners = savedTunnelAddressOwners(savedPlans);
+  const savedOverlap = addresses
+    .map((address) => ({ address, owners: savedAddressOwners.get(address) ?? [] }))
+    .filter((entry) => entry.owners.length > 0);
+  const prefixWarnings = draftPrefixWarnings(form);
+  const issues = [
+    ...duplicateDrafts.map((address) => `duplicate draft address ${address}`),
+    ...reservedOverlap.map((address) => `reserved address ${address}`),
+    ...savedOverlap.map((entry) => `${entry.address} already used by ${entry.owners.slice(0, 2).join(", ")}`),
+    ...prefixWarnings,
+  ];
+  if (issues.length > 0) {
+    return {
+      detail: issues.slice(0, 3).join("; ") + (issues.length > 3 ? `; ${issues.length - 3} more` : ""),
+      label: "4 Validate",
+      tone: "attention",
+      value: `${issues.length} collision signal${issues.length === 1 ? "" : "s"}`,
+    };
+  }
+  return {
+    detail: "Draft endpoints have no exact duplicate, reserved-address, saved-plan, or point-to-point prefix collision visible in the console.",
+    label: "4 Validate",
+    tone: "ready",
+    value: "No visible overlap",
+  };
+}
+
+function buildRuntimeReview(
+  form: CreateTunnelPlanRequest,
+  request: CreateTunnelPlanRequest | null,
+  draftError: string | null,
+  trafficLimitEnabled: boolean,
+): TunnelPlanReviewItem {
+  if (draftError) {
+    return {
+      detail: draftError,
+      label: "6 Review config",
+      tone: "attention",
+      value: "Invalid draft",
+    };
+  }
+  const runtime = request?.runtime_control ?? form.runtime_control;
+  const manager = runtimeManagerLabel(runtime?.manager);
+  const topology = request?.runtime_topology ?? {};
+  const routeCount = (topology.routes?.length ?? 0) + (topology.stale_routes?.length ?? 0);
+  const adapterRequired = runtime?.manager === "external_managed_adapter";
+  const adapterHasStatus = Boolean(runtime?.status?.argv?.length);
+  return {
+    detail: [
+      trafficLimitEnabled ? "traffic shaping configured" : "traffic shaping off",
+      adapterRequired ? (adapterHasStatus ? "adapter status argv present" : "adapter status argv missing") : "agent or external lifecycle selected",
+      routeCount > 0 ? `${routeCount} route evidence entr${routeCount === 1 ? "y" : "ies"}` : "no route evidence",
+    ].join("; "),
+    label: "6 Review config",
+    tone: adapterRequired && !adapterHasStatus ? "attention" : "ready",
+    value: manager,
+  };
+}
+
+function buildGeneratedConfigReviewItems(
+  plan: TunnelPlanRecord,
+  clientLabel: (clientId: string) => string,
+): TunnelPlanReviewItem[] {
+  const generated = plan.plan;
+  const conflicts = generated.conflicts ?? [];
+  const validation = generated.validation_steps ?? [];
+  const rollback = generated.rollback_notes ?? [];
+  const touchedFiles = generated.touched_files ?? [];
+  return [
+    {
+      detail: `${clientLabel(plan.left_client_id)} -> ${clientLabel(plan.right_client_id)} on ${generated.interface_name}.`,
+      label: "Plan",
+      tone: plan.enabled ? "ready" : "attention",
+      value: `${plan.name} / ${plan.kind.toUpperCase()}`,
+    },
+    {
+      detail: touchedFiles.join("; ") || "No runtime files reported by generator.",
+      label: "Touched files",
+      tone: touchedFiles.length > 0 ? "ready" : "attention",
+      value: `${touchedFiles.length} file${touchedFiles.length === 1 ? "" : "s"}`,
+    },
+    {
+      detail: validation.slice(0, 2).join("; ") || "No validation steps were returned with this generated plan.",
+      label: "Validation",
+      tone: validation.length > 0 ? "ready" : "attention",
+      value: `${validation.length} step${validation.length === 1 ? "" : "s"}`,
+    },
+    {
+      detail: conflicts.slice(0, 2).join("; ") || "Generated plan reported no conflicts.",
+      label: "Conflicts",
+      tone: conflicts.length > 0 ? "attention" : "ready",
+      value: conflicts.length > 0 ? `${conflicts.length} conflict${conflicts.length === 1 ? "" : "s"}` : "None",
+    },
+    {
+      detail: rollback.slice(0, 2).join("; ") || "No rollback notes returned with this generated plan.",
+      label: "Rollback",
+      tone: rollback.length > 0 ? "ready" : "attention",
+      value: `${rollback.length} note${rollback.length === 1 ? "" : "s"}`,
+    },
+    {
+      detail: generated.mutates_host
+        ? "Generator says this plan mutates host runtime state when applied."
+        : "Save stores topology state; apply still requires the explicit runtime lifecycle.",
+      label: "Runtime diff",
+      tone: generated.mutates_host ? "attention" : "ready",
+      value: generated.mutates_host ? "Host-mutating" : "Review-only save",
+    },
+  ];
+}
+
+function formatDraftAddressSummary(form: CreateTunnelPlanRequest): string {
+  const ipv4 = completePairOrNull(form.ipv4_tunnel ?? null);
+  const ipv6 = completePairOrNull(form.ipv6_tunnel ?? null);
+  if (ipv4 && ipv6) {
+    return `IPv4 ${formatAddressPair(ipv4)} / IPv6 ${formatAddressPair(ipv6)}`;
+  }
+  if (ipv4) {
+    return `IPv4 ${formatAddressPair(ipv4)}`;
+  }
+  if (ipv6) {
+    return `IPv6 ${formatAddressPair(ipv6)}`;
+  }
+  return "Allocate or enter CIDRs";
+}
+
+function duplicateValues(values: string[]): string[] {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) {
+      duplicates.add(value);
+    }
+    seen.add(value);
+  }
+  return [...duplicates];
+}
+
+function savedTunnelAddressOwners(plans: TunnelPlanRecord[]): Map<string, string[]> {
+  const owners = new Map<string, string[]>();
+  for (const plan of plans) {
+    for (const address of [
+      ...addressPairValues(plan.plan.ipv4_tunnel ?? null),
+      ...addressPairValues(plan.plan.ipv6_tunnel ?? null),
+      plan.plan.left_tunnel_address,
+      plan.plan.right_tunnel_address,
+    ]) {
+      if (!address) {
+        continue;
+      }
+      const list = owners.get(address) ?? [];
+      list.push(plan.name);
+      owners.set(address, list);
+    }
+  }
+  return owners;
+}
+
+function draftPrefixWarnings(form: CreateTunnelPlanRequest): string[] {
+  const warnings: string[] = [];
+  if (form.ipv4_tunnel && (form.ipv4_tunnel.prefix_len < 0 || form.ipv4_tunnel.prefix_len > 32)) {
+    warnings.push(`IPv4 prefix /${form.ipv4_tunnel.prefix_len} is outside 0-32`);
+  }
+  if (form.ipv6_tunnel && (form.ipv6_tunnel.prefix_len < 0 || form.ipv6_tunnel.prefix_len > 128)) {
+    warnings.push(`IPv6 prefix /${form.ipv6_tunnel.prefix_len} is outside 0-128`);
+  }
+  if (form.ipv4_tunnel && form.ipv4_tunnel.left && form.ipv4_tunnel.right && form.ipv4_tunnel.prefix_len !== 31) {
+    warnings.push(`IPv4 point-to-point prefix is /${form.ipv4_tunnel.prefix_len}, expected /31`);
+  }
+  if (form.ipv6_tunnel && form.ipv6_tunnel.left && form.ipv6_tunnel.right && form.ipv6_tunnel.prefix_len !== 127) {
+    warnings.push(`IPv6 point-to-point prefix is /${form.ipv6_tunnel.prefix_len}, expected /127`);
+  }
+  return warnings;
+}
+
 function addressPairValues(pair: TunnelAddressPair | null): string[] {
   if (!pair) {
     return [];
@@ -1350,11 +1767,14 @@ function buildMonitoringConfigPatchToml(enabled: boolean): string {
   });
 }
 
-function OspfCostModelNote() {
+function OspfCostModelNote({ action }: { action?: ReactNode }) {
   return (
-    <div className="operationNote formSectionNote compactModelNote" title={OSPF_COST_MODEL_DETAIL}>
-      <strong>OSPF cost model</strong>
-      <span>{OSPF_COST_MODEL_SUMMARY}</span>
+    <div className="operationNote formSectionNote compactModelNote topologyPlanModelNote" title={OSPF_COST_MODEL_DETAIL}>
+      <div>
+        <strong>OSPF cost model</strong>
+        <span>{OSPF_COST_MODEL_SUMMARY}</span>
+      </div>
+      {action}
     </div>
   );
 }

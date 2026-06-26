@@ -22,6 +22,7 @@ export function AuthPanel({
   const [storedSessionKey, setStoredSessionKey] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(apiError);
+  const submitDisabled = pending || !username || password.length < 12;
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -65,18 +66,35 @@ export function AuthPanel({
   }
 
   return (
-    <section className="authWorkspace">
-      <form className="authPanel" onSubmit={submit}>
-        <div className="sectionHeader">
+    <section className="authWorkspace" aria-labelledby="operator-access-title">
+      <form
+        aria-describedby="operator-access-status auth-submit-requirements"
+        aria-label="Operator authentication"
+        className="authPanel"
+        onSubmit={submit}
+      >
+        <div className="sectionHeader authHeader">
           <div>
-            <h2>Operator access</h2>
-            <span>{error ?? "Bearer session required"}</span>
+            <h1 id="operator-access-title">Operator access</h1>
+            <span
+              aria-live="polite"
+              id="operator-access-status"
+              role={error ? "alert" : "status"}
+            >
+              {error ?? "Bearer session required"}
+            </span>
           </div>
-          <div className="segmented">
-            <button className={mode === "login" ? "selected" : ""} onClick={() => setMode("login")} type="button">
+          <div className="segmented" role="group" aria-label="Authentication mode">
+            <button
+              aria-pressed={mode === "login"}
+              className={mode === "login" ? "selected" : ""}
+              onClick={() => setMode("login")}
+              type="button"
+            >
               Login
             </button>
             <button
+              aria-pressed={mode === "bootstrap"}
               className={mode === "bootstrap" ? "selected" : ""}
               onClick={() => setMode("bootstrap")}
               type="button"
@@ -87,7 +105,7 @@ export function AuthPanel({
         </div>
         <label>
           <span>Username</span>
-          <input autoComplete="username" onChange={(event) => setUsername(event.target.value)} value={username} />
+          <input autoComplete="username" autoFocus onChange={(event) => setUsername(event.target.value)} value={username} />
         </label>
         {mode === "login" && (
           <label>
@@ -120,14 +138,19 @@ export function AuthPanel({
           />
         </label>
         <button
+          aria-describedby="auth-submit-requirements"
           aria-label={mode === "login" ? "Submit login" : "Submit bootstrap"}
           className="wideAction"
-          disabled={pending || !username || password.length < 12}
+          disabled={submitDisabled}
+          title={submitDisabled ? "Enter username and a password of at least 12 characters." : undefined}
           type="submit"
         >
           <KeyRound size={18} />
           <span>{pending ? "Working" : mode === "login" ? "Login" : "Bootstrap"}</span>
         </button>
+        <span className="visuallyHidden" id="auth-submit-requirements">
+          Login and bootstrap need a username and a password of at least 12 characters.
+        </span>
         {sessionVaultAvailable && (
           <div className="authVaultUnlock">
             <label>
@@ -142,6 +165,7 @@ export function AuthPanel({
             <button
               className="wideAction secondaryWideAction"
               disabled={pending || !storedSessionKey}
+              title={pending || !storedSessionKey ? "Enter the stored session key to unlock the saved session." : undefined}
               onClick={() => void unlockStoredSession()}
               type="button"
             >

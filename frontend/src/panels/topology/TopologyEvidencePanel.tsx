@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Activity, RefreshCcw } from "lucide-react";
+import { Activity, ExternalLink, GitBranch, GitCompareArrows, MapIcon, RefreshCcw, ShieldCheck } from "lucide-react";
 import {
   jobStatusBadgeClass,
   topologyObservationStateBadgeClass,
@@ -35,6 +35,11 @@ export function TopologyEvidencePanel({
   onLoadOspfUpdatePlans,
   onLoadOutputs,
   onLoadTrends,
+  onOpenGraph,
+  onOpenJobDetails,
+  onOpenOspfApprovals,
+  onOpenTests,
+  onOpenTunnelPlans,
   ospfRecommendations,
   ospfUpdatePlans,
   trends,
@@ -47,6 +52,11 @@ export function TopologyEvidencePanel({
   onLoadOspfUpdatePlans: () => Promise<void>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTrends: () => Promise<void>;
+  onOpenGraph?: () => void;
+  onOpenJobDetails?: (jobId: string) => void;
+  onOpenOspfApprovals?: () => void;
+  onOpenTests?: () => void;
+  onOpenTunnelPlans?: () => void;
   ospfRecommendations: NetworkOspfRecommendationRecord[];
   ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
   trends: NetworkObservationTrendRecord[];
@@ -58,11 +68,24 @@ export function TopologyEvidencePanel({
   const [outputsByJob, setOutputsByJob] = useState<Record<string, JobOutputRecord[]>>({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const rows = networkJobs.map((job) => buildEvidenceRow(job, outputsByJob[job.id] ?? [], clientLabel));
+  const rows = networkJobs.map((job) => {
+    const outputs = outputsByJob[job.id];
+    return buildEvidenceRow(job, outputs ?? [], clientLabel, outputs !== undefined);
+  });
   const ospfUpdateRows = ospfUpdatePlans.slice(0, 6).map(buildOspfUpdatePlanRow);
   const ospfRows = ospfRecommendations.slice(0, 6).map(buildOspfRecommendationRow);
   const observationRows = observations.slice(0, 8).map((observation) => buildObservationRow(observation, clientLabel));
   const trendRows = trends.slice(0, 6).map((trend) => buildTrendRow(trend, clientLabel));
+  const hasUnloadedOutput = rows.some((row) => row.metric === "Output pending");
+  const hasTrendComparison = trendRows.length > 0;
+  const hasPendingApproval = ospfUpdateRows.length > 0;
+  const timelineStages = buildTimelineStages({
+    commandRows: rows,
+    observationRows,
+    ospfRecommendationRows: ospfRows,
+    ospfUpdateRows,
+    trendRows,
+  });
   const probePoints = rows
     .filter((row) => row.kind === "network_probe" && typeof row.latencyAvgMs === "number")
     .map((row) => ({
@@ -113,22 +136,68 @@ export function TopologyEvidencePanel({
       setOutputsByJob(Object.fromEntries(outputEntries));
     } catch (loadError) {
       setOutputsByJob({});
-      setError(loadError instanceof Error ? loadError.message : "Topology evidence unavailable");
+      setError(loadError instanceof Error ? loadError.message : "Network evidence unavailable");
     } finally {
       setLoading(false);
     }
+  }
+
+  function scrollToTrendComparison() {
+    document.getElementById("topology-evidence-trends")?.scrollIntoView({
+      block: "start",
+      behavior: "smooth",
+    });
   }
 
   return (
     <section className="fleetPanel topologyEvidence">
       <div className="sectionHeader">
         <div>
-          <h2>Topology evidence</h2>
+          <h2>Network evidence</h2>
           <span>{status}</span>
         </div>
         <button className="secondaryAction" disabled={loading} onClick={refreshEvidence} type="button">
           <RefreshCcw size={17} />
           Refresh evidence
+        </button>
+      </div>
+      <div className="topologyEvidenceTimeline" aria-label="Network evidence timeline">
+        <div className="topologyTimelineIntro">
+          <strong>Evidence timeline</strong>
+          <span>Read left to right: observed state, measured probes, speed evidence, status checks, cost recommendation, approval path.</span>
+        </div>
+        {timelineStages.map((stage) => (
+          <div className={stage.tone ? stage.tone : undefined} key={stage.label}>
+            <span>{stage.label}</span>
+            <strong>{stage.value}</strong>
+            <p>{stage.detail}</p>
+          </div>
+        ))}
+      </div>
+      <div className="topologyEvidenceActions" aria-label="Network evidence actions">
+        <button className="secondaryAction compactAction" disabled={!onOpenGraph} onClick={onOpenGraph} title="Open the read-only network topology graph" type="button">
+          <MapIcon size={16} />
+          <span>Open graph</span>
+        </button>
+        <button className="secondaryAction compactAction" disabled={!onOpenTests} onClick={onOpenTests} title="Run reviewed status, probe, and speed diagnostics" type="button">
+          <Activity size={16} />
+          <span>Run tests</span>
+        </button>
+        <button className="secondaryAction compactAction" disabled={!onOpenTunnelPlans} onClick={onOpenTunnelPlans} title="Open tunnel plans for lifecycle, allocation, promotion, and export workflows" type="button">
+          <GitBranch size={16} />
+          <span>Tunnel plans</span>
+        </button>
+        <button className="secondaryAction compactAction" disabled={loading} onClick={refreshEvidence} title="Load retained command output and refresh network evidence" type="button">
+          <RefreshCcw size={16} />
+          <span>{hasUnloadedOutput ? "Load output" : "Reload output"}</span>
+        </button>
+        <button className="secondaryAction compactAction" disabled={!hasTrendComparison} onClick={scrollToTrendComparison} title="Jump to trend ranges that compare recent observations" type="button">
+          <GitCompareArrows size={16} />
+          <span>Compare to previous</span>
+        </button>
+        <button className="secondaryAction compactAction" disabled={!hasPendingApproval || !onOpenOspfApprovals} onClick={onOpenOspfApprovals} title="Open OSPF cost update approvals" type="button">
+          <ShieldCheck size={16} />
+          <span>Open OSPF</span>
         </button>
       </div>
       {probePoints.length > 0 && latencyGroups.length === 0 && (
@@ -228,7 +297,7 @@ export function TopologyEvidencePanel({
         </div>
       )}
       {trendRows.length > 0 && (
-        <div className="table historyTable trendTable">
+        <div className="table historyTable trendTable" id="topology-evidence-trends">
           <div className="historyRow heading topologyEvidenceGrid">
             <span>Trend</span>
             <span>Health</span>
@@ -302,6 +371,16 @@ export function TopologyEvidencePanel({
             <span className="historyPrimary">
                 <strong>{humanStatus(row.job.command_type)}</strong>
                 <small>{shortId(row.job.id)}</small>
+                {onOpenJobDetails ? (
+                  <button
+                    className="secondaryAction compactAction"
+                    onClick={() => onOpenJobDetails(row.job.id)}
+                    type="button"
+                  >
+                    <ExternalLink size={14} />
+                    <span>Open job details</span>
+                  </button>
+                ) : null}
               </span>
             <span className={`status ${evidenceStatusBadgeClass(row)}`}>{humanStatus(row.signalStatus)}</span>
             <span className="topologyMetric">
@@ -399,6 +478,88 @@ type OspfUpdatePlanRow = {
   latestObservedAt: string | null;
 };
 
+type TimelineStage = {
+  detail: string;
+  label: string;
+  tone?: "attention" | "ready";
+  value: string;
+};
+
+function buildTimelineStages({
+  commandRows,
+  observationRows,
+  ospfRecommendationRows,
+  ospfUpdateRows,
+  trendRows,
+}: {
+  commandRows: EvidenceRow[];
+  observationRows: ObservationRow[];
+  ospfRecommendationRows: OspfRecommendationRow[];
+  ospfUpdateRows: OspfUpdatePlanRow[];
+  trendRows: TrendRow[];
+}): TimelineStage[] {
+  const persistedProbeCount = observationRows.filter((row) => row.kind === "network_probe").length;
+  const persistedSpeedCount = observationRows.filter((row) => row.kind === "network_speed_test").length;
+  const statusCount = observationRows.filter((row) => row.kind === "network_status").length +
+    commandRows.filter((row) => row.kind === "network_status" || row.kind === "runtime_config_sync").length;
+  const unloadedOutputCount = commandRows.filter((row) => row.metric === "Output pending").length;
+  const probeTrend = trendRows.find((row) => row.kind === "network_probe");
+  const speedTrend = trendRows.find((row) => row.kind === "network_speed_test");
+  return [
+    {
+      detail: observationRows.length > 0
+        ? `Latest persisted observation ${formatTime(latestObservedAt(observationRows))}`
+        : "No persisted topology observations yet",
+      label: "Observation",
+      value: `${observationRows.length} records`,
+    },
+    {
+      detail: probeTrend
+        ? `${probeTrend.metric}; ${probeTrend.metricDetail}`
+        : "Run or refresh network probes to build latency evidence",
+      label: "Probe",
+      value: `${persistedProbeCount} persisted`,
+      tone: persistedProbeCount > 0 ? "ready" : undefined,
+    },
+    {
+      detail: speedTrend
+        ? `${speedTrend.metric}; ${speedTrend.metricDetail}`
+        : "Run speed tests to add measured throughput evidence",
+      label: "Speed test",
+      value: `${persistedSpeedCount} persisted`,
+      tone: persistedSpeedCount > 0 ? "ready" : undefined,
+    },
+    {
+      detail: statusCount > 0 ? "Runtime status evidence is available in observations or retained command output." : "No status check evidence loaded.",
+      label: "Status check",
+      value: `${statusCount} checks`,
+    },
+    {
+      detail: ospfRecommendationRows[0]
+        ? `${ospfRecommendationRows[0].metric}; ${ospfRecommendationRows[0].target}`
+        : "No cost recommendation generated",
+      label: "Recommended cost",
+      value: `${ospfRecommendationRows.length} plans`,
+    },
+    {
+      detail: ospfUpdateRows.length > 0
+        ? "Review cost update in Network / OSPF."
+        : "No approval-required cost update pending.",
+      label: "Approval",
+      tone: ospfUpdateRows.length > 0 ? "attention" : undefined,
+      value: `${ospfUpdateRows.length} pending`,
+    },
+    {
+      detail: unloadedOutputCount > 0
+        ? "Use Load output to fetch retained job output for visible commands."
+        : "All visible command outputs are loaded, parsed, or accounted for.",
+      label: "Command output",
+      tone: unloadedOutputCount > 0 ? "attention" : "ready",
+      value: unloadedOutputCount > 0 ? `${unloadedOutputCount} pending` : "Loaded",
+    },
+  ];
+}
+
 function buildOspfUpdatePlanRow(plan: NetworkOspfUpdatePlanRecord): OspfUpdatePlanRow {
   const signalStatus =
     plan.status === "noop"
@@ -409,7 +570,7 @@ function buildOspfUpdatePlanRow(plan: NetworkOspfUpdatePlanRecord): OspfUpdatePl
           ? "unknown"
           : "recorded";
   const delta = plan.cost_delta === 0 ? "unchanged" : plan.cost_delta > 0 ? `+${plan.cost_delta}` : String(plan.cost_delta);
-  const privilegeState = plan.privilege_required ? "privilege-unlocked" : "read-only";
+  const privilegeState = plan.privilege_required ? "privilege required" : "read-only";
   return {
     id: plan.plan_id,
     planName: plan.plan_name,
@@ -418,7 +579,9 @@ function buildOspfUpdatePlanRow(plan: NetworkOspfUpdatePlanRecord): OspfUpdatePl
     metric: `${plan.current_ospf_cost} -> ${plan.recommended_ospf_cost}`,
     metricDetail: `${delta}; ${plan.confidence}`,
     target: plan.requires_approval ? "approval required" : "no action",
-    targetDetail: `${privilegeState}; ${plan.approval_scope.join(", ")}`,
+    targetDetail: plan.requires_approval
+      ? `Review cost update in Network / OSPF; ${privilegeState}; ${plan.approval_scope.join(", ")}`
+      : `${privilegeState}; ${plan.approval_scope.join(", ")}`,
     latestObservedAt: plan.evidence.latest_observed_at,
   };
 }
@@ -593,6 +756,7 @@ function buildEvidenceRow(
   job: JobHistoryRecord,
   outputs: JobOutputRecord[],
   clientLabel: (clientId: string) => string,
+  outputsLoaded: boolean,
 ): EvidenceRow {
   const parsedStatus = parseStatusOutput(outputs);
   if (isProbeStatus(parsedStatus)) {
@@ -672,8 +836,12 @@ function buildEvidenceRow(
     kind: job.command_type,
     signalKind: "job",
     signalStatus: job.status,
-    metric: outputs.length === 0 ? "Output not loaded" : `${outputs.length} chunks`,
-    metricDetail: outputs.length === 0 ? "Refresh evidence to load retained output" : "Retained job output",
+    metric: !outputsLoaded ? "Output pending" : outputs.length === 0 ? "No retained output" : `${outputs.length} chunks`,
+    metricDetail: !outputsLoaded
+      ? "Use Load output to fetch retained output"
+      : outputs.length === 0
+        ? "Retained output unavailable for this job"
+        : "Retained job output",
     target: `${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
     targetDetail: shortId(job.payload_hash),
   };
@@ -806,4 +974,8 @@ function formatBytes(value: number): string {
 
 function formatLoss(value: number | null): string {
   return value === null ? "loss unavailable" : `${formatMetric(value * 100)}%`;
+}
+
+function latestObservedAt(rows: ObservationRow[]): string {
+  return rows.reduce((latest, row) => row.observedAt > latest ? row.observedAt : latest, rows[0]?.observedAt ?? "");
 }

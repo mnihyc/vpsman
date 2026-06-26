@@ -50,9 +50,14 @@
     width: min(100%, 386px);
   }
 
-  .scopeSelector,
   .controlPlanePill {
     display: none;
+  }
+
+  .scopeSelector {
+    display: flex;
+    width: 100%;
+    min-width: 0;
   }
 
   .workspace,
@@ -78,7 +83,11 @@
   .bulkTagApplyGrid,
   .historyRetentionGrid,
   .managementGrid,
-  .preferenceGroup {
+  .preferenceScopeOverview,
+  .preferenceSectionGrid,
+  .preferenceGroup,
+  .vpsDetailTopGrid,
+  .vpsDetailFacts {
     grid-template-columns: minmax(0, 1fr);
   }
 
@@ -101,8 +110,48 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .systemConfigOwnership {
+    grid-template-columns: 1fr;
+  }
+
   .systemConfigBody {
     grid-template-columns: 1fr;
+  }
+
+  .systemConfigSideNav {
+    position: static;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .systemConfigSideNav strong {
+    grid-column: 1 / -1;
+  }
+
+  .systemConfigSideNav button {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+
+  .systemConfigFieldRow {
+    grid-template-columns: 1fr;
+  }
+
+  .systemConfigFieldText dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .systemConfigStepper {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .systemNextAction,
+  .systemDiffPreview {
+    grid-template-columns: 1fr;
+  }
+
+  .systemNextAction button {
+    grid-row: auto;
+    justify-self: start;
   }
 
   .resourceGrid,
@@ -239,8 +288,19 @@
   }
 
   .operationalGrid,
-  .resourceGrid {
+  .resourceGrid,
+  .systemPostureGrid,
+  .systemCapacityStrip,
+  .operatorRoleMatrix {
     grid-template-columns: 1fr;
+  }
+
+  .operatorEvidenceGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .systemMetricPanel {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .dashboardMetricCard,
@@ -279,6 +339,15 @@
 
   .workspace {
     gap: 14px;
+  }
+
+  .vpsDetailPosture,
+  .vpsDetailGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vpsFactRow {
+    grid-template-columns: auto minmax(72px, 0.42fr) minmax(0, 1fr);
   }
 
   .sectionHeader {
@@ -386,6 +455,8 @@
   .templateToolbar,
   .inlineOpsForm,
   .sourceArtifactControls,
+  .preferenceScopeOverview,
+  .preferenceSectionGrid,
   .preferenceGroup,
   .preferenceInlineControls,
   .preferenceResetRow,
@@ -566,6 +637,42 @@
 
   .consoleFilterBar {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .systemAttentionRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .systemAttentionRow b {
+    justify-self: start;
+  }
+
+  .systemAttentionRow p {
+    grid-column: 1;
+  }
+
+  .systemThresholdChips {
+    justify-content: flex-start;
+  }
+
+  .operatorEvidenceGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sessionAuthFilters {
+    margin-left: 0;
+  }
+
+  .authFailureGroupRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .authFailureGroupRow b {
+    justify-self: start;
+  }
+
+  .authFailureGroupRow p {
+    grid-column: 1;
   }
 
   .consoleOperationsActions {

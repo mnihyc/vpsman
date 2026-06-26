@@ -48,9 +48,9 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Schedules", "Schedule registry");
+  await openConsoleSubpage(page, "Automation", "Schedules");
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Schedules", "Schedule registry");
+  await openConsoleSubpage(page, "Automation", "Schedules");
 
   await expect(
     page.getByRole("heading", { level: 1, name: "Schedules" }),
@@ -163,7 +163,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   await chooseScheduleSelectionAction(page, "Review deletion");
   await expect(page.getByText("Confirm schedule delete")).toBeVisible();
   await activate(
-    page.locator(".confirmationPrompt").getByRole("button", { name: "Delete" }),
+    page.locator(".confirmationPrompt").getByRole("button", { name: "Delete schedule" }),
   );
   await expect(page.getByText("edge-health-hourly")).toHaveCount(0);
 
@@ -359,10 +359,10 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     max_timeout_secs: 120,
   });
 
-  await openConsoleSubpage(page, "Access", "VPS keys");
+  await openConsoleSubpage(page, "Access", "VPS identities");
   const inspector = page.locator(".accessInspector");
   await expect(
-    page.getByRole("heading", { name: "Gateway agent identities" }),
+    page.getByRole("heading", { name: "VPS identities" }),
   ).toBeVisible();
   await inspector
     .getByLabel("Agent identity client ID")

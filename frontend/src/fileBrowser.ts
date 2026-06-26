@@ -34,6 +34,8 @@ export type FileListStatus = {
   offset: number;
   limit: number;
   metadata: FileBrowserEntry;
+  status?: string;
+  reason?: string | null;
 };
 
 export type FileReadTextStatus = {

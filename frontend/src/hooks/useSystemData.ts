@@ -35,7 +35,7 @@ export function useSystemData(apiToken: string, onUnauthorized: () => void) {
         setSystemDashboard(record);
         setSystemDashboardError(null);
       } catch (error) {
-        handleSystemError(error, onUnauthorized, setSystemDashboardError, "System dashboard unavailable");
+        handleSystemError(error, onUnauthorized, setSystemDashboardError, "System overview unavailable");
       } finally {
         setSystemDashboardLoading(false);
       }

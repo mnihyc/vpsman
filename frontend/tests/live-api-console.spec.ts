@@ -24,13 +24,13 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
   }
 
   await openConsoleSubpage(page, "Fleet", "Instances");
-  await expect(page.getByRole("heading", { name: "Fleet overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Fleet instances" })).toBeVisible();
   await expect(page.getByRole("row", { name: /edge-live-a/ })).toBeVisible();
   await expect(page.locator(".consoleHeader").getByText("2 online / 2 total")).toBeVisible();
 
-  await openConsoleSubpage(page, "Topology", "Tunnel plans");
-  await expect(page.getByRole("heading", { name: "Topology management" })).toBeVisible();
-  await expect(page.getByText("Tunnel plans").first()).toBeVisible();
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
+  await expect(page.getByRole("heading", { name: "Tunnel plans" })).toBeVisible();
+  await page.getByRole("button", { name: "Create tunnel plan" }).click();
   const composer = page.locator(".scheduleComposer", { has: page.getByRole("heading", { name: "Create tunnel plan" }) });
   await composer.getByLabel("Name", { exact: true }).fill("live-gre-a-b");
   await composer.getByLabel("Interface", { exact: true }).fill("gre42");
@@ -57,6 +57,6 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
   await expect(planRow.getByText("Planned", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Audit" }).click();
-  await expect(page.locator(".consoleHeader").getByRole("heading", { name: "Audit log" })).toBeVisible();
+  await expect(page.locator(".consoleHeader").getByRole("heading", { name: "Audit events" })).toBeVisible();
   await expect(page.getByText("network.tunnel_plan_created")).toBeVisible();
 });

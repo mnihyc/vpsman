@@ -42,18 +42,24 @@ export function toggleValue(values: string[], value: string): string[] {
     : [...values, value];
 }
 
-export function getHeroTitle(view: ActiveView): string {
+export function getPageTitle(view: ActiveView): string {
   switch (view) {
-    case "Dashboard":
-      return "Dashboard";
+    case "Home":
+      return "Home";
     case "Fleet":
       return "Fleet overview";
+    case "Remote Operations":
+      return "Remote operations";
     case "Config":
-      return "Runtime config";
+      return "Config";
     case "Jobs":
       return "Job history";
-    case "Schedules":
-      return "Schedules";
+    case "Automation":
+      return "Automation";
+    case "Network":
+      return "Network";
+    case "Observability":
+      return "Observability";
     case "Audit":
       return "Audit log";
     case "System":
@@ -63,28 +69,30 @@ export function getHeroTitle(view: ActiveView): string {
   }
 }
 
-export function getHeroCopy(view: ActiveView): string {
+export function getPageDescription(view: ActiveView): string {
   switch (view) {
-    case "Dashboard":
-      return "Operational health, resource posture, network activity, and top label clusters";
+    case "Home":
+      return "Fleet posture, needs-attention work, recent activity, and quick operator actions";
     case "Jobs":
-      return "Recent command requests and authorization outcomes";
-    case "Schedules":
-      return "Server-side schedule registry and due-run records";
+      return "Execution history, advanced dispatch, approvals, scheduled runs, and artifacts";
+    case "Remote Operations":
+      return "Browser terminal, file management, transfers, processes, and bulk file work without SSH or SCP";
+    case "Automation":
+      return "Schedules, runbooks, source templates, and agent update workflows";
+    case "Network":
+      return "Topology graph, tunnel plans, tests, OSPF, and evidence";
     case "Config":
       return "Runtime config patches, persistent templates, and guarded per-VPS reads";
+    case "Observability":
+      return "Read-only fleet, network, process, alert, webhook, and dashboard analysis";
     case "Audit":
       return "Operator and security events from the control plane";
-    case "Tags":
-      return "Tag inventory and bulk target operations";
-    case "Topology":
-      return "VPS network topology and extended operations";
     case "Backups":
       return "Backup, restore, and migration workflows";
     case "Access":
-      return "Client identity, key lifecycle, gateway sessions, and privileged unlock state";
+      return "Operator authority, VPS identities, gateway sessions, and privilege vault state";
     case "System":
-      return "Control-plane dashboard, suite configuration, and operator preferences";
+      return "Control-plane health, capacity, suite configuration, maintenance, and preferences";
     default:
       return "";
   }
@@ -108,6 +116,7 @@ export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
   gateway_server_public_key_hex: null,
   fleet_tag_visibility_overrides: {},
   language: "en",
+  review_prompt_mode: "inline",
   show_country_flags: true,
   sidebar_subpanel_default: "active",
   timezone: null,

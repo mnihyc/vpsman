@@ -1,50 +1,40 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import { Download, Server, ShieldCheck, TerminalSquare } from "lucide-react";
+import { Check, Download, ExternalLink, Server, ShieldCheck, TerminalSquare, X } from "lucide-react";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { type PrivilegeMaterial } from "../privilege";
-import type { ArtifactDownloadMode } from "../artifactDownload";
 import type {
   JobDispatchPreset,
-  JobDispatchPresetInput,
 } from "../jobDispatchPreset";
 import type {
   AgentView,
-  AgentUpdateReleaseRecord,
   BulkResolveResponse,
   CommandTemplateRecord,
+  CreateJobApprovalRequest,
   CreateJobRequest,
   CreateJobResponse,
+  DecideJobApprovalRequest,
+  JobApprovalDecisionResponse,
+  JobApprovalRecord,
   DeleteCommandTemplateRequest,
-  CreateAgentUpdateReleaseRequest,
   JobHistoryRecord,
   JobOutputCompareMode,
   JobOutputComparisonRecord,
   JobOutputRecord,
   JobTargetRecord,
   JobTargetSelection,
-  ProcessSupervisorInventoryRecord,
-  ArtifactCleanupPreviewRecord,
-  ServerJobRecord,
-  SuiteConfigResponse,
   UpsertCommandTemplateRequest,
   WsJobOutputEvent,
-  WsTerminalOutputEvent,
 } from "../types";
 import type {
-  FileTransferHandoffRecord,
-  FileTransferSessionRecord,
   FileTransferSourceArtifactRecord,
-  UploadFileTransferSourceArtifactRequest,
 } from "../typesFileTransfer";
 import type {
   TerminalInputSubmitRequest,
   TerminalInputSubmitResponse,
-  TerminalReplayRecord,
-  TerminalSessionRecord,
 } from "../typesTerminal";
 import {
   jobOutputComparisonStatusBadgeClass,
@@ -60,7 +50,6 @@ import {
   shortHash,
   shortId,
 } from "../utils";
-import type { TerminalComposerAction } from "./JobDispatchPanel";
 import { parseLatestFileStatus } from "../fileBrowser";
 
 const JobDispatchPanel = lazy(() =>
@@ -68,47 +57,31 @@ const JobDispatchPanel = lazy(() =>
     default: module.JobDispatchPanel,
   })),
 );
-const AgentUpdateReleasesPanel = lazy(() =>
-  import("./jobs/AgentUpdateReleasesPanel").then((module) => ({
-    default: module.AgentUpdateReleasesPanel,
-  })),
-);
-const FileBrowserPanel = lazy(() =>
-  import("./jobs/FileBrowserPanel").then((module) => ({
-    default: module.FileBrowserPanel,
-  })),
-);
-const FileTransferSessionsPanel = lazy(() =>
-  import("./jobs/FileTransferSessionsPanel").then((module) => ({
-    default: module.FileTransferSessionsPanel,
-  })),
-);
-const MultiFileActionsPanel = lazy(() =>
-  import("./jobs/MultiFileActionsPanel").then((module) => ({
-    default: module.MultiFileActionsPanel,
-  })),
-);
-const ProcessSupervisorInventoryPanel = lazy(() =>
-  import("./jobs/ProcessSupervisorInventoryPanel").then((module) => ({
-    default: module.ProcessSupervisorInventoryPanel,
-  })),
-);
-const ServerJobsPanel = lazy(() =>
-  import("./jobs/ServerJobsPanel").then((module) => ({
-    default: module.ServerJobsPanel,
-  })),
-);
-const TerminalSessionsPanel = lazy(() =>
-  import("./jobs/TerminalSessionsPanel").then((module) => ({
-    default: module.TerminalSessionsPanel,
-  })),
-);
-
 type JobOutputComparisonGroup = JobOutputComparisonRecord["groups"][number];
 type JobOutputComparisonRow = JobOutputComparisonRecord["rows"][number];
 
 function displayToken(value: string): string {
   return value.replace(/_/g, " ");
+}
+
+function scheduledRunCommandLabel(commandType: string): string {
+  return displayToken(commandType.replace(/^scheduled_/, ""));
+}
+
+function formatScheduleRunDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function formatScheduleRunClock(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return `${date.toISOString().slice(11, 16)} UTC`;
 }
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -135,24 +108,20 @@ type OutputStreamDownloadTarget = {
   stderr: boolean;
 };
 
-export function JobHistoryPanel({
+export function JobsPanel({
   activeSubpage,
   agents,
-  agentUpdateReleases,
   error,
-  fileTransfers,
   fileTransferSources,
+  jobApprovals,
   jobs,
   commandTemplates,
   dispatchPreset,
   lastJobOutputEvent,
-  lastTerminalOutputEvent,
   loading,
-  onCancelServerJob,
-  onCreateAgentUpdateRelease,
-  onCreateArtifactCleanupJob,
-  onCreateFileTransferHandoff,
+  onApproveJobApproval,
   onCreateJob,
+  onCreateJobApproval,
   onDownloadFileBundle,
   onDownloadOutputArchive,
   onDownloadTargetStatusArchive,
@@ -164,56 +133,41 @@ export function JobHistoryPanel({
   onLoadJob,
   onLoadOutputs,
   onLoadOutputComparison,
-  onLoadTerminalReplay,
   onLoadTargets,
   onSubmitTerminalInput,
   onOpenPrivilegeUnlock,
-  onOpenDispatchPreset,
-  onPreviewArtifactCleanup,
+  onOpenSchedules,
+  onOpenVpsDetail,
+  onOpenRemoteOperations,
   onRefresh,
+  onRejectJobApproval,
   onResolveTargets,
-  onSaveFileTransferHandoff,
   onSelectSubpage,
   onSelectedJobDetailsOpened,
-  onUploadFileTransferSource,
   onDeleteCommandTemplate,
   onUpsertCommandTemplate,
   pendingSelectedJobId,
   privilegeMaterial,
-  processSupervisorInventory,
-  serverJobs,
   setPrivilegeMaterial,
-  suiteConfig,
-  suiteConfigError,
-  suiteConfigLoading,
-  terminalSessions,
 }: {
   activeSubpage: string;
   agents: AgentView[];
-  agentUpdateReleases: AgentUpdateReleaseRecord[];
   error: string | null;
-  fileTransfers: FileTransferSessionRecord[];
   fileTransferSources: FileTransferSourceArtifactRecord[];
+  jobApprovals: JobApprovalRecord[];
   jobs: JobHistoryRecord[];
   commandTemplates: CommandTemplateRecord[];
   dispatchPreset?: JobDispatchPreset | null;
   lastJobOutputEvent: WsJobOutputEvent | null;
-  lastTerminalOutputEvent: WsTerminalOutputEvent | null;
   loading: boolean;
-  onCancelServerJob: (jobId: string) => Promise<ServerJobRecord>;
-  onCreateAgentUpdateRelease: (
-    request: CreateAgentUpdateReleaseRequest,
-  ) => Promise<AgentUpdateReleaseRecord>;
-  onCreateArtifactCleanupJob: (
-    expression: string,
-    domains: string[],
-    previewHash: string,
-  ) => Promise<ServerJobRecord>;
-  onCreateFileTransferHandoff: (
-    clientId: string,
-    sessionId: string,
-  ) => Promise<FileTransferHandoffRecord>;
+  onApproveJobApproval: (
+    approvalId: string,
+    request: DecideJobApprovalRequest,
+  ) => Promise<JobApprovalDecisionResponse>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
+  onCreateJobApproval: (
+    request: CreateJobApprovalRequest,
+  ) => Promise<JobApprovalRecord>;
   onDownloadOutputChunk: (
     jobId: string,
     clientId: string,
@@ -236,41 +190,26 @@ export function JobHistoryPanel({
     jobId: string,
     mode: JobOutputCompareMode,
   ) => Promise<JobOutputComparisonRecord>;
-  onLoadTerminalReplay: (
-    clientId: string,
-    sessionId: string,
-    fromSeq?: number,
-  ) => Promise<TerminalReplayRecord>;
   onSubmitTerminalInput: (
     clientId: string,
     sessionId: string,
     request: TerminalInputSubmitRequest,
   ) => Promise<TerminalInputSubmitResponse>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
-  onOpenDispatchPreset: (preset: JobDispatchPresetInput) => void;
   onOpenPrivilegeUnlock: () => void;
-  onPreviewArtifactCleanup: (
-    expression: string,
-    domains: string[],
-  ) => Promise<ArtifactCleanupPreviewRecord>;
+  onOpenSchedules?: () => void;
+  onOpenVpsDetail?: (clientId: string) => void;
+  onOpenRemoteOperations?: (subpage: string) => void;
   onRefresh: () => void;
+  onRejectJobApproval: (
+    approvalId: string,
+    request: DecideJobApprovalRequest,
+  ) => Promise<JobApprovalDecisionResponse>;
   onResolveTargets: (
     selection: JobTargetSelection,
   ) => Promise<BulkResolveResponse>;
   onSelectedJobDetailsOpened?: (jobId: string) => void;
-  onSaveFileTransferHandoff: (
-    downloadPath: string,
-    request: {
-      expectedSha256Hex?: string | null;
-      expectedSizeBytes?: number | null;
-      fileName: string;
-      mode: ArtifactDownloadMode;
-    },
-  ) => Promise<void>;
   onSelectSubpage?: (subpage: string) => void;
-  onUploadFileTransferSource: (
-    request: UploadFileTransferSourceArtifactRequest,
-  ) => Promise<FileTransferSourceArtifactRecord>;
   onDeleteCommandTemplate: (
     templateId: string,
     request: DeleteCommandTemplateRequest,
@@ -280,13 +219,7 @@ export function JobHistoryPanel({
   ) => Promise<CommandTemplateRecord>;
   pendingSelectedJobId?: string | null;
   privilegeMaterial: PrivilegeMaterial | null;
-  processSupervisorInventory: ProcessSupervisorInventoryRecord[];
-  serverJobs: ServerJobRecord[];
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
-  suiteConfig: SuiteConfigResponse | null;
-  suiteConfigError: string | null;
-  suiteConfigLoading: boolean;
-  terminalSessions: TerminalSessionRecord[];
 }) {
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
@@ -306,20 +239,15 @@ export function JobHistoryPanel({
   const [targetsLoading, setTargetsLoading] = useState(false);
   const [outputsLoading, setOutputsLoading] = useState(false);
   const [comparisonLoading, setComparisonLoading] = useState(false);
-  const [terminalComposerAction, setTerminalComposerAction] =
-    useState<TerminalComposerAction | null>(null);
-  const [multiFileInitialPath, setMultiFileInitialPath] = useState("/");
+  const [approvalActionPending, setApprovalActionPending] = useState(false);
+  const [approvalActionError, setApprovalActionError] = useState<string | null>(
+    null,
+  );
   const jobSubpage = [
     "history",
     "dispatch",
-    "files",
-    "multi_files",
-    "updates",
-    "transfers",
-    "terminal",
-    "processes",
-    "server_jobs",
     "approvals",
+    "scheduled_runs",
   ].includes(activeSubpage)
     ? activeSubpage
     : "history";
@@ -331,6 +259,9 @@ export function JobHistoryPanel({
     "files" | "outputs" | "status" | null
   >(null);
   const scheduleRunJobs = jobs.filter((job) => job.command_type.startsWith("scheduled_"));
+  const pendingApprovalCount = jobApprovals.filter(
+    (approval) => approval.status === "pending",
+  ).length;
   const agentNameById = useMemo(
     () => clientDisplayNameMap(agents, vpsNameDisplayMode),
     [agents, vpsNameDisplayMode],
@@ -456,6 +387,24 @@ export function JobHistoryPanel({
     void openTargets(jobId);
   }
 
+  function decideApproval(approval: JobApprovalRecord, decision: "approve" | "reject") {
+    void runPanelAction(setApprovalActionPending, setApprovalActionError, async () => {
+      const response =
+        decision === "approve"
+          ? await onApproveJobApproval(approval.id, {
+              confirmed: true,
+              reason: "Approved from Jobs / Approvals",
+            })
+          : await onRejectJobApproval(approval.id, {
+              confirmed: true,
+              reason: "Rejected from Jobs / Approvals",
+            });
+      if (response.job) {
+        openSubmittedJobDetails(response.job.job_id);
+      }
+    });
+  }
+
   useEffect(() => {
     if (!pendingSelectedJobId) {
       return;
@@ -558,6 +507,156 @@ export function JobHistoryPanel({
     ],
     [openTargets],
   );
+
+  const approvalColumns = useMemo<ConsoleDataGridColumn<JobApprovalRecord>[]>(
+    () => [
+      {
+        id: "command",
+        header: "Command",
+        size: 230,
+        minSize: 180,
+        sortValue: (approval) => approval.command_type,
+        searchValue: (approval) =>
+          `${approval.command_type} ${approval.job_id} ${approval.id}`,
+        cell: (approval) => (
+          <span className="historyPrimary">
+            <strong title={approval.command_type}>
+              {displayToken(approval.command_type)}
+            </strong>
+            <small>Job {shortId(approval.job_id)}</small>
+          </span>
+        ),
+      },
+      {
+        id: "status",
+        header: "Status",
+        size: 125,
+        minSize: 110,
+        sortValue: (approval) => approval.status,
+        searchValue: (approval) => approval.status,
+        cell: (approval) => (
+          <span className={`status ${approvalStatusBadgeClass(approval.status)}`}>
+            {approval.status}
+          </span>
+        ),
+      },
+      {
+        id: "scope",
+        header: "Scope",
+        size: 250,
+        minSize: 190,
+        sortValue: (approval) => approval.target_count,
+        searchValue: (approval) =>
+          `${approval.selector_expression} ${approval.target_client_ids.join(" ")}`,
+        cell: (approval) => (
+          <span className="historyPrimary">
+            <strong>
+              {approval.target_count} target{approval.target_count === 1 ? "" : "s"}
+            </strong>
+            <small title={approval.selector_expression}>
+              {approval.selector_expression || "fixed target set"}
+            </small>
+          </span>
+        ),
+      },
+      {
+        id: "risk",
+        header: "Risk",
+        size: 160,
+        minSize: 130,
+        sortValue: (approval) => approval.risk,
+        searchValue: (approval) =>
+          `${approval.risk} ${approval.destructive ? "destructive" : ""} ${
+            approval.force_unprivileged ? "force unprivileged" : ""
+          }`,
+        cell: (approval) => (
+          <span className="jobStatusCell">
+            <span
+              className={`status ${
+                approval.destructive ? "warn" : approval.privileged ? "info" : "neutral"
+              }`}
+            >
+              {approval.risk}
+            </span>
+            {approval.force_unprivileged ? (
+              <small>forced unprivileged</small>
+            ) : null}
+          </span>
+        ),
+      },
+      {
+        id: "requester",
+        header: "Requester",
+        size: 175,
+        minSize: 145,
+        sortValue: (approval) => approval.requester_username,
+        searchValue: (approval) =>
+          `${approval.requester_username} ${approval.requester_role}`,
+        cell: (approval) => (
+          <span className="historyPrimary">
+            <strong>{approval.requester_username}</strong>
+            <small>{approval.requester_role}</small>
+          </span>
+        ),
+      },
+      {
+        id: "requested",
+        header: "Requested",
+        size: 195,
+        minSize: 165,
+        sortValue: (approval) => approval.requested_at,
+        searchValue: (approval) => approval.requested_at,
+        cell: (approval) => formatTime(approval.requested_at),
+      },
+      {
+        id: "actions",
+        header: "Actions",
+        size: 96,
+        minSize: 90,
+        enableHiding: false,
+        cell: (approval) => (
+          <span className="inlineActions">
+            <button
+              aria-label="Approve job approval"
+              className="secondaryAction compactAction"
+              disabled={approval.status !== "pending" || approvalActionPending}
+              onClick={(event) => {
+                event.stopPropagation();
+                decideApproval(approval, "approve");
+              }}
+              title={
+                approval.status === "pending"
+                  ? "Approve and dispatch the frozen job request"
+                  : "Only pending approvals can be approved"
+              }
+              type="button"
+            >
+              <Check size={14} />
+            </button>
+            <button
+              aria-label="Reject job approval"
+              className="secondaryAction compactAction dangerAction"
+              disabled={approval.status !== "pending" || approvalActionPending}
+              onClick={(event) => {
+                event.stopPropagation();
+                decideApproval(approval, "reject");
+              }}
+              title={
+                approval.status === "pending"
+                  ? "Reject this reviewed job request"
+                  : "Only pending approvals can be rejected"
+              }
+              type="button"
+            >
+              <X size={14} />
+            </button>
+          </span>
+        ),
+      },
+    ],
+    [approvalActionPending],
+  );
+
   const targetColumns = useMemo<ConsoleDataGridColumn<JobTargetRecord>[]>(
     () => [
       {
@@ -607,6 +706,19 @@ export function JobHistoryPanel({
       {
         cell: (target) => (
           <span className="inlineActions">
+            {onOpenVpsDetail ? (
+              <button
+                className="secondaryAction compactAction"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenVpsDetail(target.client_id);
+                }}
+                type="button"
+              >
+                <Server size={14} />
+                <span>Open VPS detail</span>
+              </button>
+            ) : null}
             {fileDownloadStatusByClient.has(target.client_id) ? (
               <button
                 className="secondaryAction compactAction"
@@ -624,7 +736,7 @@ export function JobHistoryPanel({
                     : "Download file"}
                 </span>
               </button>
-            ) : (
+            ) : onOpenVpsDetail ? null : (
               "-"
             )}
           </span>
@@ -634,7 +746,7 @@ export function JobHistoryPanel({
         id: "actions",
       },
     ],
-    [agentNameById, fileDownloadPendingClientId, fileDownloadStatusByClient],
+    [agentNameById, fileDownloadPendingClientId, fileDownloadStatusByClient, onOpenVpsDetail],
   );
   const comparisonGroupColumns = useMemo<ConsoleDataGridColumn<JobOutputComparisonGroup>[]>(
     () => [
@@ -852,17 +964,6 @@ export function JobHistoryPanel({
     setArchivePendingKey(null);
   }
 
-  function prepareTerminalSessionAction(
-    session: TerminalSessionRecord,
-    action: TerminalComposerAction["action"],
-  ) {
-    setTerminalComposerAction({
-      action,
-      requestId: crypto.randomUUID(),
-      session,
-    });
-  }
-
   return (
     <section className="workspace singleColumn">
       <Suspense
@@ -878,11 +979,11 @@ export function JobHistoryPanel({
           fileTransferSources={fileTransferSources}
           commandTemplates={commandTemplates}
           dispatchPreset={dispatchPreset}
-          terminalComposerAction={terminalComposerAction}
           onDispatchPresetApplied={onDispatchPresetApplied}
           onCreateJob={onCreateJob}
           onDownloadFileTransferSource={onDownloadFileTransferSource}
           onDownloadOutputChunk={onDownloadOutputChunk}
+          onOpenRemoteTerminal={() => onOpenRemoteOperations?.("terminal")}
           onLoadJob={onLoadJob}
           onLoadOutputs={onLoadOutputs}
           onLoadTargets={onLoadTargets}
@@ -895,118 +996,6 @@ export function JobHistoryPanel({
           privilegeMaterial={privilegeMaterial}
           setPrivilegeMaterial={setPrivilegeMaterial}
         />
-      )}
-      {jobSubpage === "files" && (
-        <FileBrowserPanel
-          agents={agents}
-          loading={loading}
-          onCreateJob={onCreateJob}
-          onLoadOutputs={onLoadOutputs}
-          onLoadTargets={onLoadTargets}
-          onOpenMultiFiles={(path) => {
-            setMultiFileInitialPath(path);
-            onSelectSubpage?.("multi_files");
-          }}
-          onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-          privilegeMaterial={privilegeMaterial}
-          setPrivilegeMaterial={setPrivilegeMaterial}
-        />
-      )}
-      {jobSubpage === "multi_files" && (
-        <MultiFileActionsPanel
-          agents={agents}
-          initialPath={multiFileInitialPath}
-          loading={loading}
-          onCreateJob={onCreateJob}
-          onDownloadFileBundle={onDownloadFileBundle}
-          onLoadOutputs={onLoadOutputs}
-          onLoadTargets={onLoadTargets}
-          onOpenJobDetails={openSubmittedJobDetails}
-          onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-          onResolveTargets={onResolveTargets}
-          privilegeMaterial={privilegeMaterial}
-          setPrivilegeMaterial={setPrivilegeMaterial}
-        />
-      )}
-      {jobSubpage === "updates" && (
-        <div className="jobConsoleStack">
-          <AgentUpdateReleasesPanel
-            loading={loading}
-            onCreateAgentUpdateRelease={onCreateAgentUpdateRelease}
-            onOpenDispatchPreset={onOpenDispatchPreset}
-            onRefresh={onRefresh}
-            releases={agentUpdateReleases}
-            suiteConfig={suiteConfig}
-            suiteConfigError={suiteConfigError}
-            suiteConfigLoading={suiteConfigLoading}
-          />
-        </div>
-      )}
-      {jobSubpage === "processes" && (
-        <ProcessSupervisorInventoryPanel
-          clientLabel={clientLabel}
-          inventory={processSupervisorInventory}
-          loading={loading}
-          onRefresh={onRefresh}
-        />
-      )}
-      {jobSubpage === "server_jobs" && (
-        <ServerJobsPanel
-          jobs={serverJobs}
-          loading={loading}
-          onCancelJob={onCancelServerJob}
-          onCreateCleanupJob={onCreateArtifactCleanupJob}
-          onPreviewCleanup={onPreviewArtifactCleanup}
-          onRefresh={onRefresh}
-        />
-      )}
-      {jobSubpage === "transfers" && (
-        <FileTransferSessionsPanel
-          clientLabel={clientLabel}
-          transfers={fileTransfers}
-          sources={fileTransferSources}
-          loading={loading}
-          onCreateHandoff={onCreateFileTransferHandoff}
-          onDownloadSource={onDownloadFileTransferSource}
-          onRefresh={onRefresh}
-          onSaveHandoff={onSaveFileTransferHandoff}
-          onUploadSource={onUploadFileTransferSource}
-        />
-      )}
-      {jobSubpage === "terminal" && (
-        <div className="jobConsoleStack">
-          <TerminalSessionsPanel
-            clientLabel={clientLabel}
-            sessions={terminalSessions}
-            lastTerminalOutputEvent={lastTerminalOutputEvent}
-            loading={loading}
-            onPrepareAction={prepareTerminalSessionAction}
-            onReplay={onLoadTerminalReplay}
-            onRefresh={onRefresh}
-          />
-          <JobDispatchPanel
-            agents={agents}
-            fileTransferSources={fileTransferSources}
-            commandTemplates={commandTemplates}
-            dispatchPreset={dispatchPreset}
-            terminalComposerAction={terminalComposerAction}
-            onDispatchPresetApplied={onDispatchPresetApplied}
-            onCreateJob={onCreateJob}
-            onDownloadFileTransferSource={onDownloadFileTransferSource}
-            onDownloadOutputChunk={onDownloadOutputChunk}
-            onLoadJob={onLoadJob}
-            onLoadOutputs={onLoadOutputs}
-            onLoadTargets={onLoadTargets}
-            onSubmitTerminalInput={onSubmitTerminalInput}
-            onOpenJobDetails={openSubmittedJobDetails}
-            onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-            onResolveTargets={onResolveTargets}
-            onDeleteCommandTemplate={onDeleteCommandTemplate}
-            onUpsertCommandTemplate={onUpsertCommandTemplate}
-            privilegeMaterial={privilegeMaterial}
-            setPrivilegeMaterial={setPrivilegeMaterial}
-          />
-        </div>
       )}
       {jobSubpage === "history" && (
         <div className="jobConsoleStack">
@@ -1029,6 +1018,38 @@ export function JobHistoryPanel({
               >
                 Refresh
               </button>
+            </div>
+            <div
+              className="jobHistoryWorkflowLinks"
+              aria-label="Related Remote Operations pages"
+            >
+              <span className="jobHistoryWorkflowIntro">
+                <strong>Related workflow owners</strong>
+                <small>
+                  Use Jobs for execution evidence. Open operational workflows in
+                  Remote Operations.
+                </small>
+              </span>
+              <span className="jobHistoryWorkflowActions">
+                {[
+                  { label: "Terminal", subpage: "terminal" },
+                  { label: "Files", subpage: "files" },
+                  { label: "Transfers", subpage: "transfers" },
+                  { label: "Processes", subpage: "processes" },
+                  { label: "Bulk files", subpage: "bulk_files" },
+                ].map((link) => (
+                  <button
+                    className="secondaryAction compactAction"
+                    disabled={!onOpenRemoteOperations}
+                    key={link.subpage}
+                    onClick={() => onOpenRemoteOperations?.(link.subpage)}
+                    type="button"
+                  >
+                    <ExternalLink size={14} />
+                    <span>{link.label}</span>
+                  </button>
+                ))}
+              </span>
             </div>
             <ConsoleDataGrid
               actions={[
@@ -1461,37 +1482,165 @@ export function JobHistoryPanel({
       )}
       {jobSubpage === "approvals" && (
         <div className="jobConsoleStack">
+          <div className="fleetPanel">
+            <div className="sectionHeader compact">
+              <div>
+                <h2>Approvals</h2>
+                <span>
+                  {pendingApprovalCount} pending · {jobApprovals.length} reviewed requests
+                </span>
+              </div>
+              <div className="inlineActions">
+                <button
+                  className="secondaryAction compactAction"
+                  disabled={loading || approvalActionPending}
+                  onClick={onRefresh}
+                  type="button"
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+            {approvalActionError && (
+              <div className="panelError" role="alert">
+                {approvalActionError}
+              </div>
+            )}
+            <ConsoleDataGrid
+              columns={approvalColumns}
+              defaultColumnVisibility={{ requested: true }}
+              defaultPageSize={10}
+              empty={
+                <div className="emptyState">
+                  <ShieldCheck size={22} />
+                  <strong>No reviewed work is waiting</strong>
+                  <span>
+                    Approval requests that have passed privilege review appear here for final dispatch or rejection.
+                  </span>
+                </div>
+              }
+              expandOnRowClick
+              getRowId={(approval) => approval.id}
+              itemLabel="approvals"
+              renderExpandedRow={(approval) => (
+                <div className="consoleInlineDetailGrid">
+                  <span>Approval</span>
+                  <strong>{approval.id}</strong>
+                  <span>Job</span>
+                  <strong>{approval.job_id}</strong>
+                  <span>Targets</span>
+                  <strong>{approval.target_client_ids.map(clientLabel).join(", ")}</strong>
+                  <span>Payload</span>
+                  <strong>{approval.payload_hash}</strong>
+                  <span>Fingerprint</span>
+                  <strong>{approval.request_fingerprint}</strong>
+                  <span>Timeout</span>
+                  <strong>{approval.max_timeout_secs}s</strong>
+                  <span>Request reason</span>
+                  <strong>{approval.request_reason ?? "No request reason"}</strong>
+                  <span>Decision</span>
+                  <strong>
+                    {approval.decision_username
+                      ? `${approval.decision_username} · ${approval.decision_reason ?? "No decision note"}`
+                      : "Pending"}
+                  </strong>
+                </div>
+              )}
+              rowActions={[
+                {
+                  label: "Approve",
+                  icon: <Check size={14} />,
+                  disabled: (rows) =>
+                    rows.length !== 1 ||
+                    rows[0].status !== "pending" ||
+                    approvalActionPending,
+                  onSelect: (rows) => decideApproval(rows[0], "approve"),
+                },
+                {
+                  label: "Reject",
+                  icon: <X size={14} />,
+                  tone: "danger",
+                  disabled: (rows) =>
+                    rows.length !== 1 ||
+                    rows[0].status !== "pending" ||
+                    approvalActionPending,
+                  onSelect: (rows) => decideApproval(rows[0], "reject"),
+                },
+              ]}
+              rows={jobApprovals}
+              searchPlaceholder="Search approvals"
+              singleExpandedRow
+              storageKey="vpsman.jobs.approvals"
+              title="Job approval queue"
+            />
+          </div>
+        </div>
+      )}
+      {jobSubpage === "scheduled_runs" && (
+        <div className="jobConsoleStack">
           <div className="fleetPanel scheduleRunsPanel">
             <div className="sectionHeader compact">
               <div>
-                <h2>Schedule runs</h2>
+                <h2>Scheduled runs</h2>
                 <span>{`${scheduleRunJobs.length} worker-created due runs`}</span>
               </div>
-              <button className="secondaryAction" disabled={loading} onClick={onRefresh} type="button">
-                Refresh
-              </button>
+              <div className="inlineActions">
+                <button className="secondaryAction compactAction" onClick={onOpenSchedules} type="button">
+                  Open schedule registry
+                </button>
+                <button className="secondaryAction compactAction" disabled={loading} onClick={onRefresh} type="button">
+                  Refresh
+                </button>
+              </div>
             </div>
             {scheduleRunJobs.length > 0 ? (
               <div className="table historyTable">
                 <div className="historyRow scheduledRunGrid heading">
-                  <span>Run type</span>
-                  <span>Status</span>
-                  <span>Targets</span>
-                  <span>Created</span>
+                  <span>Schedule job</span>
+                  <span>Lifecycle</span>
+                  <span>Result</span>
+                  <span>Worker evidence</span>
                   <span>Actions</span>
                 </div>
                 {scheduleRunJobs.map((job) => (
                   <div className="historyRow scheduledRunGrid" key={job.id}>
                     <span className="historyPrimary">
-                      <strong>{job.command_type.replace(/^scheduled_/, "")}</strong>
-                      <small>{shortId(job.id)} · {shortHash(job.payload_hash)}</small>
+                      <strong>{scheduledRunCommandLabel(job.command_type)}</strong>
+                      <small>Job {shortId(job.id)} · payload {shortHash(job.payload_hash)}</small>
+                      <small>Schedule link not exposed</small>
                     </span>
-                    <span className={`status ${jobStatusBadgeClass(job.status)}`}>{job.status}</span>
-                    <span>{job.target_count}</span>
-                    <span>{formatTime(job.created_at)}</span>
+                    <span className="scheduleRunsCell">
+                      <strong title={formatTime(job.created_at)}>Dispatched {formatScheduleRunClock(job.created_at)}</strong>
+                      <small>{formatScheduleRunDate(job.created_at)} · due not exposed</small>
+                      <small title={job.completed_at ? formatTime(job.completed_at) : undefined}>
+                        {job.completed_at ? `Completed ${formatScheduleRunClock(job.completed_at)}` : `Timeout ${job.max_timeout_secs}s`}
+                      </small>
+                    </span>
+                    <span className="scheduleRunsCell">
+                      <span className={`status ${jobStatusBadgeClass(job.status)}`}>{job.status}</span>
+                      <small>{job.target_count} target{job.target_count === 1 ? "" : "s"}</small>
+                      <small>Skipped count not exposed</small>
+                    </span>
+                    <span className="scheduleRunsCell">
+                      <strong>{job.actor_id ? "Actor-triggered" : "Worker automation"}</strong>
+                      <small>{job.privileged ? "Privilege assertion required" : "Default job authority"}</small>
+                      <small>Retry/worker health not exposed</small>
+                    </span>
                     <span className="inlineActions">
-                      <button className="secondaryAction compactAction" onClick={() => void openTargets(job.id)} type="button">
-                        Open
+                      <button
+                        className="secondaryAction compactAction"
+                        onClick={() => void openTargets(job.id)}
+                        type="button"
+                      >
+                        Open targets
+                      </button>
+                      <button
+                        className="secondaryAction compactAction"
+                        disabled
+                        title="Retry requires schedule-run retry support with original due time, schedule id, and privilege revalidation."
+                        type="button"
+                      >
+                        Retry
                       </button>
                     </span>
                   </div>
@@ -1501,7 +1650,15 @@ export function JobHistoryPanel({
               <div className="emptyState">
                 <ShieldCheck size={22} />
                 <strong>No schedule runs yet</strong>
-                <span>Due schedule jobs are created and dispatched by worker automation.</span>
+                <span>Due schedule jobs are created and dispatched by worker automation. Create or inspect schedules in the registry.</span>
+                <div className="emptyStateActions">
+                  <button className="primaryAction compactAction" onClick={onOpenSchedules} type="button">
+                    Open schedule registry
+                  </button>
+                  <button className="secondaryAction compactAction" disabled={loading} onClick={onRefresh} type="button">
+                    Check worker
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -1550,6 +1707,17 @@ function outputCompareBasisLabel(value: string): string {
       return "Artifact metadata";
     default:
       return "Binary exact";
+  }
+}
+
+function approvalStatusBadgeClass(status: JobApprovalRecord["status"]): string {
+  switch (status) {
+    case "approved":
+      return "ok";
+    case "rejected":
+      return "neutral";
+    default:
+      return "warn";
   }
 }
 

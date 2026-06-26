@@ -10,6 +10,8 @@ import {
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
+import { TimeSeriesChart, type TimeSeriesChartLine } from "../../components/TimeSeriesChart";
+import { consolePalette } from "../../colorPalette";
 import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import { buildPrivilegeForJobOperation, type PrivilegeAssertion, type PrivilegeMaterial } from "../../privilege";
@@ -26,6 +28,7 @@ import type {
   CreateJobResponse,
   JobOperation,
   JobTargetRecord,
+  NetworkObservationTrendRecord,
   TunnelEndpointSide,
   TunnelPlanRecord,
 } from "../../types";
@@ -39,6 +42,7 @@ import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
 
 export function TopologyNetworkTestControls({
   agents,
+  networkTrends,
   onCreateJob,
   onLoadTargets,
   onOpenJobDetails,
@@ -48,6 +52,7 @@ export function TopologyNetworkTestControls({
   tunnelPlans,
 }: {
   agents: AgentView[];
+  networkTrends: NetworkObservationTrendRecord[];
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
@@ -90,6 +95,39 @@ export function TopologyNetworkTestControls({
   );
   const planTargets = resolveAgentsById(agents, selectedPlan ? planClientIds(selectedPlan) : []);
   const visibleJobProgress = jobProgress ?? lastJobProgress;
+  const selectedPlanTrends = useMemo(
+    () =>
+      selectedPlan
+        ? networkTrends.filter(
+            (trend) => trend.plan_id === selectedPlan.id || trend.plan_name === selectedPlan.name,
+          )
+        : [],
+    [networkTrends, selectedPlan],
+  );
+  const recentProbeTrend = useMemo(
+    () => latestTrend(selectedPlanTrends.filter((trend) => trend.kind === "network_probe")),
+    [selectedPlanTrends],
+  );
+  const recentSpeedTrend = useMemo(
+    () => latestTrend(selectedPlanTrends.filter((trend) => trend.kind === "network_speed_test")),
+    [selectedPlanTrends],
+  );
+  const evidenceSummary = formatRecentEvidence(recentProbeTrend, recentSpeedTrend);
+  const speedSafetySummary = formatSpeedSafety(
+    speedDurationSecs,
+    speedMaxBytesMiB,
+    speedRateLimitKbps,
+    speedPort,
+    speedConnectTimeoutMs,
+  );
+  const baselineSummary = selectedPlan
+    ? formatPlanBaseline(selectedPlan)
+    : "Select a tunnel plan for baseline";
+  const lastRunSummary = visibleJobProgress
+    ? `${actionLabel(lastAction)} ${shortId(visibleJobProgress.jobId)} in progress`
+    : lastJob
+      ? `${actionLabel(lastAction)} ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
+      : "No local network test run in this view";
   const status =
     actionError ??
     (reviewPending
@@ -220,8 +258,22 @@ export function TopologyNetworkTestControls({
             { label: "Targets", value: formatTargetAvailabilitySummary(snapshotTargets) },
             { label: "Plans", value: planLabel },
             { label: "Endpoint", value: submissions.length > 1 ? "Both endpoints" : side },
+            { label: "Baseline", value: formatPlanBaseline(selectedPlan) },
+            { label: "Recent evidence", value: evidenceSummary },
+            ...(mode === "probe"
+              ? [{ label: "Probe cadence", value: `${boundedProbeCount} packets, ${boundedProbeIntervalMs} ms interval` }]
+              : []),
+            ...(mode === "speed_test"
+              ? [{ label: "Safety cap", value: formatSpeedSafety(
+                  boundedSpeedDurationSecs,
+                  boundedSpeedMaxBytes / (1024 * 1024),
+                  boundedSpeedRateLimitKbps,
+                  boundedSpeedPort,
+                  boundedSpeedConnectTimeoutMs,
+                ) }]
+              : []),
             { label: "Max timeout", value: `${boundedMaxTimeoutSecs}s` },
-            { label: "Privilege unlock", value: "Unlocked locally" },
+            { label: "Required privilege", value: `${commandName(mode)} unlocked locally` },
           ],
           submissions,
           targets: snapshotTargets,
@@ -303,6 +355,38 @@ export function TopologyNetworkTestControls({
         <ShieldCheck size={20} />
       </div>
       <form className="dispatchForm topologyNetworkTestForm" onSubmit={(event) => event.preventDefault()}>
+        <div className="topologyNetworkReviewStrip" aria-label="Network test review contract">
+          <div className={privilegeMaterial ? "ready" : "attention"}>
+            <span>Required privilege</span>
+            <strong>{privilegeMaterial ? "Unlocked locally" : "Unlock required"}</strong>
+            <p>
+              {privilegeMaterial
+                ? "Local assertion will be bound to the reviewed network payload."
+                : "Unlock before reviewing status, probe, or speed-test jobs."}
+            </p>
+          </div>
+          <div>
+            <span>Expected baseline</span>
+            <strong>{baselineSummary}</strong>
+            <p>Configured plan values used to judge latency, loss, and bandwidth evidence.</p>
+          </div>
+          <div className="attention">
+            <span>Speed safety cap</span>
+            <strong>{speedSafetySummary}</strong>
+            <p>Speed tests require explicit duration, byte, rate, port, and timeout caps.</p>
+          </div>
+          <div>
+            <span>Recent evidence</span>
+            <strong>{evidenceSummary}</strong>
+            <p>From persisted topology observations for the selected plan.</p>
+          </div>
+          <div>
+            <span>Last local run</span>
+            <strong>{lastRunSummary}</strong>
+            <p>Execution result stays on this screen and links back to Job history.</p>
+          </div>
+        </div>
+        <NetworkTestTrendCharts trends={selectedPlanTrends} />
         <div className="topologyNetworkTestGroups">
           <section
             className="topologyNetworkTestGroup"
@@ -414,6 +498,11 @@ export function TopologyNetworkTestControls({
                 className="secondaryAction"
                 disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial}
                 onClick={submitStatus}
+                title={
+                  privilegeMaterial
+                    ? "Review read-only status inspection for the selected endpoint"
+                    : "Unlock privilege before reviewing endpoint inspection"
+                }
                 type="button"
               >
                 <Search size={17} />
@@ -430,6 +519,11 @@ export function TopologyNetworkTestControls({
                   !selectedPlan.enabled
                 }
                 onClick={submitProbe}
+                title={
+                  privilegeMaterial
+                    ? "Review latency probe with bounded count and interval"
+                    : "Unlock privilege before reviewing latency probe"
+                }
                 type="button"
               >
                 <Activity size={17} />
@@ -448,7 +542,7 @@ export function TopologyNetworkTestControls({
             </div>
             <div className="dispatchControls">
               <label title="Maximum speed-test duration.">
-                <span>Duration</span>
+                <span>Duration s</span>
                 <input
                   aria-label="Network speed test duration seconds"
                   max={30}
@@ -462,7 +556,7 @@ export function TopologyNetworkTestControls({
                 />
               </label>
               <label title="Required per-run byte safety cap; uncapped speed tests are not submitted.">
-                <span>Max MiB</span>
+                <span>Max data MiB</span>
                 <input
                   aria-label="Network speed test max mebibytes"
                   max={256}
@@ -476,7 +570,7 @@ export function TopologyNetworkTestControls({
                 />
               </label>
               <label title="Required bandwidth safety cap.">
-                <span>Rate Kbps</span>
+                <span>Rate limit Kbps</span>
                 <input
                   aria-label="Network speed test rate limit Kbps"
                   max={1_000_000}
@@ -504,7 +598,7 @@ export function TopologyNetworkTestControls({
                 />
               </label>
               <label title="Client connection timeout for the speed-test peer.">
-                <span>Connect ms</span>
+                <span>Timeout ms</span>
                 <input
                   aria-label="Network speed test connect timeout milliseconds"
                   max={30_000}
@@ -530,6 +624,11 @@ export function TopologyNetworkTestControls({
                   !selectedPlan.enabled
                 }
                 onClick={submitSpeedTest}
+                title={
+                  privilegeMaterial
+                    ? "Review capped speed test against both selected plan endpoints"
+                    : "Unlock privilege before reviewing capped speed test"
+                }
                 type="button"
               >
                 <Activity size={17} />
@@ -569,6 +668,100 @@ export function TopologyNetworkTestControls({
         privilegeMaterial={privilegeMaterial}
       />
     </section>
+  );
+}
+
+function NetworkTestTrendCharts({ trends }: { trends: NetworkObservationTrendRecord[] }) {
+  const probeTrends = sortedTrends(trends.filter((trend) => trend.kind === "network_probe"));
+  const speedTrends = sortedTrends(trends.filter((trend) => trend.kind === "network_speed_test"));
+  const latencyTimes = trendTimes(probeTrends);
+  const speedTimes = trendTimes(speedTrends);
+  const latencyLines: TimeSeriesChartLine[] = [
+    trendLine(probeTrends, "Average latency", consolePalette.chart.blue, (trend) => trend.latency_avg_ms),
+    trendLine(probeTrends, "Maximum latency", consolePalette.chart.orange, (trend) => trend.latency_max_ms),
+    trendLine(probeTrends, "Minimum latency", consolePalette.chart.green, (trend) => trend.latency_min_ms),
+  ];
+  const lossLines: TimeSeriesChartLine[] = [
+    trendLine(probeTrends, "Packet loss", consolePalette.chart.red, (trend) =>
+      trend.packet_loss_avg_ratio === null ? null : trend.packet_loss_avg_ratio * 100,
+    ),
+  ];
+  const speedLines: TimeSeriesChartLine[] = [
+    trendLine(speedTrends, "Average throughput", consolePalette.chart.purple, (trend) => trend.throughput_avg_mbps),
+    trendLine(speedTrends, "Maximum throughput", consolePalette.chart.cyan, (trend) => trend.throughput_max_mbps),
+  ];
+
+  return (
+    <section className="topologyNetworkTrendCharts" aria-label="Network test trend charts">
+      <div className="topologyNetworkTrendChartsHeader">
+        <div>
+          <strong>Trend evidence</strong>
+          <span>Persisted probe and speed-test ranges for the selected plan.</span>
+        </div>
+        <button
+          className="secondaryAction compactAction"
+          disabled
+          title="Attaching evidence to a topology plan needs a backend evidence-attachment endpoint."
+          type="button"
+        >
+          Attach evidence
+        </button>
+      </div>
+      <div className="topologyNetworkTrendChartGrid">
+        <NetworkTrendChartCard
+          emptyLabel="No latency trend samples"
+          lines={latencyLines}
+          times={latencyTimes}
+          title="Latency"
+          valueFormatter={(value) => (value === null ? "-" : `${formatMetric(value)} ms`)}
+        />
+        <NetworkTrendChartCard
+          emptyLabel="No loss trend samples"
+          lines={lossLines}
+          times={latencyTimes}
+          title="Packet loss"
+          valueFormatter={(value) => (value === null ? "-" : `${formatMetric(value)}%`)}
+        />
+        <NetworkTrendChartCard
+          emptyLabel="No speed trend samples"
+          lines={speedLines}
+          times={speedTimes}
+          title="Throughput"
+          valueFormatter={(value) => (value === null ? "-" : `${formatMetric(value)} Mbps`)}
+        />
+      </div>
+    </section>
+  );
+}
+
+function NetworkTrendChartCard({
+  emptyLabel,
+  lines,
+  times,
+  title,
+  valueFormatter,
+}: {
+  emptyLabel: string;
+  lines: TimeSeriesChartLine[];
+  times: string[];
+  title: string;
+  valueFormatter: (value: number | null) => string;
+}) {
+  return (
+    <article className="topologyNetworkTrendChartCard">
+      <div className="topologyNetworkTrendChartHeader">
+        <strong>{title}</strong>
+        <span>{times.length > 0 ? `${times.length} sample${times.length === 1 ? "" : "s"}` : "No samples"}</span>
+      </div>
+      <TimeSeriesChart
+        ariaLabel={`Network test ${title.toLowerCase()} trend`}
+        emptyLabel={emptyLabel}
+        height={156}
+        lines={lines}
+        times={times}
+        valueFormatter={valueFormatter}
+      />
+    </article>
   );
 }
 
@@ -659,4 +852,104 @@ function agentBackendHint(agents: AgentView[], plan: TunnelPlanRecord | null): s
   const backendForClient = (clientId: string) =>
     agents.find((candidate) => candidate.id === clientId)?.capabilities.network_backend ?? "ifupdown";
   return `backend L ${backendForClient(plan.left_client_id)} / R ${backendForClient(plan.right_client_id)}`;
+}
+
+function latestTrend(trends: NetworkObservationTrendRecord[]): NetworkObservationTrendRecord | null {
+  return trends.reduce<NetworkObservationTrendRecord | null>((latest, trend) => {
+    if (!latest) {
+      return trend;
+    }
+    return Date.parse(trend.latest_observed_at) > Date.parse(latest.latest_observed_at)
+      ? trend
+      : latest;
+  }, null);
+}
+
+function sortedTrends(trends: NetworkObservationTrendRecord[]): NetworkObservationTrendRecord[] {
+  return [...trends].sort((left, right) => Date.parse(left.latest_observed_at) - Date.parse(right.latest_observed_at));
+}
+
+function trendTimes(trends: NetworkObservationTrendRecord[]): string[] {
+  return trends.map((trend) => trend.latest_observed_at);
+}
+
+function trendLine(
+  trends: NetworkObservationTrendRecord[],
+  label: string,
+  color: string,
+  valueFor: (trend: NetworkObservationTrendRecord) => number | null,
+): TimeSeriesChartLine {
+  return {
+    color,
+    label,
+    values: trends.map(valueFor),
+  };
+}
+
+function formatPlanBaseline(plan: TunnelPlanRecord): string {
+  const bandwidth = plan.plan.bandwidth ?? plan.input.bandwidth;
+  const latencyMs = plan.plan.latency_ms ?? plan.input.latency_ms;
+  const packetLossRatio = plan.plan.packet_loss_ratio ?? plan.input.packet_loss_ratio;
+  const ospfCost = plan.plan.recommended_ospf_cost ?? plan.recommended_ospf_cost;
+  return `${formatBandwidthTier(bandwidth)}, ${formatMetric(latencyMs)} ms target, ${formatLossRatio(packetLossRatio)} loss, OSPF ${ospfCost}`;
+}
+
+function formatRecentEvidence(
+  probeTrend: NetworkObservationTrendRecord | null,
+  speedTrend: NetworkObservationTrendRecord | null,
+): string {
+  const parts: string[] = [];
+  if (probeTrend) {
+    parts.push(
+      `Probe ${formatNullableMetric(probeTrend.latency_avg_ms, "ms avg")}, ${formatLossRatio(probeTrend.packet_loss_avg_ratio)} loss`,
+    );
+  }
+  if (speedTrend) {
+    parts.push(
+      `Speed ${formatNullableMetric(speedTrend.throughput_avg_mbps, "Mbps avg")}, ${formatNullableMetric(speedTrend.throughput_max_mbps, "Mbps max")}`,
+    );
+  }
+  return parts.length > 0 ? parts.join("; ") : "No persisted evidence yet";
+}
+
+function formatSpeedSafety(
+  durationSecs: number,
+  maxBytesMiB: number,
+  rateLimitKbps: number,
+  port: number,
+  connectTimeoutMs: number,
+): string {
+  return `${durationSecs}s, ${formatMetric(maxBytesMiB)} MiB cap, ${formatRateLimit(rateLimitKbps)}, TCP ${port}, timeout ${connectTimeoutMs} ms`;
+}
+
+function formatBandwidthTier(value: string): string {
+  if (value === "1000m") {
+    return "1000 Mbps";
+  }
+  if (value === "100m") {
+    return "100 Mbps";
+  }
+  if (value === "10m") {
+    return "10 Mbps";
+  }
+  return value;
+}
+
+function formatRateLimit(kbps: number): string {
+  if (kbps >= 1000) {
+    return `${formatMetric(kbps / 1000)} Mbps cap`;
+  }
+  return `${formatMetric(kbps)} Kbps cap`;
+}
+
+function formatNullableMetric(value: number | null, unit: string): string {
+  return value === null ? `${unit} unavailable` : `${formatMetric(value)} ${unit}`;
+}
+
+function formatLossRatio(value: number | null | undefined): string {
+  return value === null || value === undefined ? "loss unavailable" : `${formatMetric(value * 100)}%`;
+}
+
+function formatMetric(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(value < 10 ? 2 : 1);
 }

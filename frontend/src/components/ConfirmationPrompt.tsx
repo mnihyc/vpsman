@@ -1,6 +1,7 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, X } from "lucide-react";
 import { scrollIntoViewWithMotion } from "../motion";
+import { usePanelDisplaySettings } from "../panelDisplay";
 
 export function ConfirmationPrompt({
   cancelLabel = "Cancel",
@@ -13,6 +14,8 @@ export function ConfirmationPrompt({
   onConfirm,
   open,
   pending = false,
+  typedConfirmationLabel,
+  typedConfirmationText,
   title,
   tone = "normal",
 }: {
@@ -26,10 +29,19 @@ export function ConfirmationPrompt({
   onConfirm: () => void;
   open: boolean;
   pending?: boolean;
+  typedConfirmationLabel?: string;
+  typedConfirmationText?: string;
   title: string;
   tone?: "danger" | "normal";
 }) {
+  const { preferences } = usePanelDisplaySettings();
   const promptRef = useRef<HTMLElement | null>(null);
+  const [typedConfirmation, setTypedConfirmation] = useState("");
+  const typedConfirmationRequired = Boolean(typedConfirmationText);
+  const typedConfirmationMatches =
+    !typedConfirmationText || typedConfirmation.trim() === typedConfirmationText;
+  const displayMode =
+    preferences.review_prompt_mode === "overlay" ? "overlay" : "inline";
 
   useEffect(() => {
     if (!open || !promptRef.current) {
@@ -54,6 +66,12 @@ export function ConfirmationPrompt({
   }, [open]);
 
   useEffect(() => {
+    if (open) {
+      setTypedConfirmation("");
+    }
+  }, [open, typedConfirmationText]);
+
+  useEffect(() => {
     if (!open || pending || expiresAtUnix === null || expiresAtUnix === undefined) {
       return undefined;
     }
@@ -69,11 +87,13 @@ export function ConfirmationPrompt({
   if (!open) {
     return null;
   }
-  return (
+  const prompt = (
     <section
       ref={promptRef}
-      className={`confirmationPrompt ${tone}`}
+      className={`confirmationPrompt ${tone} ${displayMode}Prompt`}
       aria-label={title}
+      aria-modal={displayMode === "overlay" ? true : undefined}
+      role={displayMode === "overlay" ? "dialog" : "region"}
       tabIndex={-1}
     >
       <div className="confirmationPromptIcon">
@@ -94,6 +114,17 @@ export function ConfirmationPrompt({
               );
             })}
           </dl>
+        )}
+        {typedConfirmationRequired && (
+          <label className="confirmationTypedInput">
+            <span>{typedConfirmationLabel ?? `Type ${typedConfirmationText} to confirm`}</span>
+            <input
+              aria-label={typedConfirmationLabel ?? `Type ${typedConfirmationText} to confirm`}
+              autoComplete="off"
+              onChange={(event) => setTypedConfirmation(event.target.value)}
+              value={typedConfirmation}
+            />
+          </label>
         )}
         {error && <small className="confirmationPromptError">{error}</small>}
       </div>
@@ -122,7 +153,7 @@ export function ConfirmationPrompt({
               ? "primaryAction dangerPrimary compactAction"
               : "primaryAction compactAction"
           }
-          disabled={pending}
+          disabled={pending || !typedConfirmationMatches}
           onClick={onConfirm}
           type="button"
         >
@@ -131,6 +162,10 @@ export function ConfirmationPrompt({
       </div>
     </section>
   );
+  if (displayMode === "overlay") {
+    return <div className="confirmationPromptOverlay">{prompt}</div>;
+  }
+  return prompt;
 }
 
 function confirmationItemTitle(value: ReactNode): string | undefined {

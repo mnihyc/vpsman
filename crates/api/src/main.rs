@@ -797,6 +797,8 @@ mod tests_history;
 #[cfg(test)]
 mod tests_identity;
 #[cfg(test)]
+mod tests_job_approvals;
+#[cfg(test)]
 mod tests_migrations;
 #[cfg(test)]
 mod tests_network;

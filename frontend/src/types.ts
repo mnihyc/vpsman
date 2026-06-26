@@ -134,7 +134,7 @@ export type DashboardPreferences = {
 
 export type DashboardDrilldownRecord = {
   label: string;
-  view: string;
+  view: ActiveView;
   subpage: string;
   query: string | null;
 };
@@ -919,6 +919,7 @@ export type OperatorPreferences = {
   show_country_flags: boolean;
   fleet_tag_visibility_overrides: Record<string, boolean>;
   sidebar_subpanel_default: "active" | "all";
+  review_prompt_mode: "inline" | "overlay";
   dashboard_curve_exclusions: string[];
   dashboard_resource_top_limit: number;
   dashboard_network_top_limit: number;
@@ -983,6 +984,34 @@ export type JobHistoryRecord = {
   max_timeout_secs: number;
   created_at: string;
   completed_at: string | null;
+};
+
+export type JobApprovalStatus = "pending" | "approved" | "rejected";
+
+export type JobApprovalRecord = {
+  id: string;
+  status: JobApprovalStatus;
+  job_id: string;
+  command_type: string;
+  selector_expression: string;
+  target_client_ids: string[];
+  target_count: number;
+  privileged: boolean;
+  destructive: boolean;
+  force_unprivileged: boolean;
+  max_timeout_secs: number;
+  payload_hash: string;
+  request_fingerprint: string;
+  requester_id: string | null;
+  requester_username: string;
+  requester_role: string;
+  requested_at: string;
+  request_reason: string | null;
+  risk: string;
+  decision_by: string | null;
+  decision_username: string | null;
+  decision_reason: string | null;
+  decided_at: string | null;
 };
 
 export type ServerJobRecord = {
@@ -1840,6 +1869,18 @@ export type CreateJobRequest = {
   privilege_assertion?: PrivilegeAssertion | null;
 };
 
+export type CreateJobApprovalRequest = {
+  approval_id?: string;
+  job: CreateJobRequest;
+  reason?: string | null;
+  risk?: string | null;
+};
+
+export type DecideJobApprovalRequest = {
+  confirmed: boolean;
+  reason?: string | null;
+};
+
 type _FrontendCreateJobRequestExtraKeys = AssertNever<Exclude<keyof CreateJobRequest, GeneratedCreateJobRequestField>>;
 type _GeneratedCreateJobRequestMissingKeys = AssertNever<Exclude<GeneratedCreateJobRequestField, keyof CreateJobRequest>>;
 
@@ -1864,6 +1905,11 @@ export type CreateJobResponse = {
     control_timeout: number;
     canceled: number;
   };
+};
+
+export type JobApprovalDecisionResponse = {
+  approval: JobApprovalRecord;
+  job: CreateJobResponse | null;
 };
 
 export type CreateScheduleRequest = {
@@ -2234,12 +2280,14 @@ export type BulkTagMutationRequest = {
   selector_expression: string;
   target_client_ids: string[];
   confirmed: boolean;
+  preview_hash?: string | null;
   privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type TagMutationResponse = {
   tag: string;
   action: string;
+  preview_hash: string;
   target_count: number;
   changed_count: number;
   skipped_count: number;
@@ -2519,14 +2567,15 @@ export type SuiteConfigUpdateResponse = {
 };
 
 export type ActiveView =
-  | "Dashboard"
+  | "Home"
   | "Fleet"
-  | "Config"
-  | "Tags"
+  | "Remote Operations"
   | "Jobs"
-  | "Schedules"
-  | "Audit"
-  | "Topology"
+  | "Automation"
+  | "Network"
   | "Backups"
+  | "Config"
+  | "Observability"
+  | "Audit"
   | "Access"
   | "System";

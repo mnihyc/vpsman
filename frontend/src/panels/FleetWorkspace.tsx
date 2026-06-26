@@ -18,6 +18,7 @@ import {
   Check,
   CircleCheck,
   Clock3,
+  DatabaseBackup,
   Eye,
   FileCog,
   FolderOpen,
@@ -232,8 +233,6 @@ const selectionStatsModes: Array<{
 const JOB_SELECTOR_STORAGE_KEY = "vpsman.jobDispatch.selectorExpression";
 const MULTI_FILE_SELECTOR_STORAGE_KEY = "vpsman.multiFile.selectorExpression";
 const TAG_BULK_SELECTOR_STORAGE_KEY = "vpsman.tags.bulk.selectorExpression";
-const CONFIG_SINGLE_SELECTOR_STORAGE_KEY =
-  "vpsman.config.single.selectorExpression";
 const CONFIG_BULK_SELECTOR_STORAGE_KEY =
   "vpsman.config.bulk.selectorExpression";
 const FILE_BROWSER_STATE_STORAGE_KEY = "vpsman.fileBrowser.state";
@@ -394,8 +393,6 @@ export function FleetWorkspace({
   const [deletePending, setDeletePending] = useState(false);
   const [deleteReviewPending, setDeleteReviewPending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [detailTabOverride, setDetailTabOverride] =
-    useState<FleetDetailTab | null>(null);
   const deleteReviewTargetRef = useRef<string | null>(null);
   const deleteSnapshotRef = useRef<DeleteAgentConfirmationSnapshot | null>(null);
   const deleteReviewPendingRef = useRef(false);
@@ -448,7 +445,6 @@ export function FleetWorkspace({
     : null;
   const fleetSubpage = [
     "instances",
-    "alerts",
     "policies",
     "notifications",
   ].includes(fleetSubpageBase)
@@ -760,7 +756,20 @@ export function FleetWorkspace({
       return;
     }
     seedSingleFileBrowser(rows[0]);
-    onNavigatePanel?.("Jobs", "files");
+    onNavigatePanel?.("Remote Operations", "files");
+  }
+
+  function openSingleReleaseWorkflow(
+    rows: AgentView[],
+    view: ActiveView,
+    subpage: string,
+  ) {
+    clearDeleteReview();
+    if (rows.length !== 1) {
+      return;
+    }
+    onSelectAgent(rows[0].id);
+    onNavigatePanel?.(view, subpage);
   }
 
   function openUpdateCheckWorkflow(rows: AgentView[]) {
@@ -837,6 +846,105 @@ export function FleetWorkspace({
     });
   }
 
+  const fleetInstanceActions: ConsoleDataGridAction<AgentView>[] = [
+    {
+      label: "Open detail",
+      disabled: (rows) => rows.length !== 1,
+      icon: <Eye size={15} />,
+      onSelect: (rows) => openSingleReleaseWorkflow(rows, "Fleet", "instance_detail"),
+    },
+    {
+      label: "Open terminal",
+      disabled: (rows) => rows.length !== 1,
+      icon: <TerminalSquare size={15} />,
+      separatorBefore: true,
+      onSelect: (rows) =>
+        openSingleReleaseWorkflow(rows, "Remote Operations", "terminal"),
+    },
+    {
+      label: "Open files",
+      disabled: (rows) => rows.length !== 1,
+      icon: <FolderOpen size={15} />,
+      onSelect: openFileBrowserWorkflow,
+    },
+    {
+      label: "Open processes",
+      disabled: (rows) => rows.length !== 1,
+      icon: <Activity size={15} />,
+      onSelect: (rows) =>
+        openSingleReleaseWorkflow(rows, "Remote Operations", "processes"),
+    },
+    {
+      label: "Open backups",
+      disabled: (rows) => rows.length !== 1,
+      icon: <DatabaseBackup size={15} />,
+      onSelect: (rows) => openSingleReleaseWorkflow(rows, "Backups", "requests"),
+    },
+    {
+      label: "Open network",
+      disabled: (rows) => rows.length !== 1,
+      icon: <Network size={15} />,
+      onSelect: (rows) => openSingleReleaseWorkflow(rows, "Network", "graph"),
+    },
+    {
+      label: "Open bulk files",
+      separatorBefore: true,
+      onSelect: (rows) =>
+        openSelectorWorkflow(
+          rows,
+          "Remote Operations",
+          "bulk_files",
+          MULTI_FILE_SELECTOR_STORAGE_KEY,
+        ),
+    },
+    {
+      label: "Open bulk groups",
+      onSelect: (rows) =>
+        openSelectorWorkflow(
+          rows,
+          "Fleet",
+          "group_bulk",
+          TAG_BULK_SELECTOR_STORAGE_KEY,
+        ),
+    },
+    {
+      label: "Copy client IDs",
+      separatorBefore: true,
+      onSelect: (rows) => void copyText(rows.map((agent) => agent.id).join("\n")),
+    },
+    {
+      label: "Copy selector",
+      onSelect: (rows) =>
+        void copyText(
+          selectorExpressionForClientIds(rows.map((agent) => agent.id)),
+        ),
+    },
+    {
+      label: "Copy tag query",
+      onSelect: (rows) =>
+        void copyText(
+          Array.from(new Set(rows.flatMap((agent) => agent.tags)))
+            .sort((left, right) =>
+              compareTagsByDisplayOrder(left, right, tagDisplayOrder),
+            )
+            .map((tag) => `tag:${tag}`)
+            .join(" "),
+        ),
+    },
+    {
+      label: "Review VPS deletion",
+      description: (rows) =>
+        rows.length === 1
+          ? `Delete ${formatVpsName(rows[0], vpsNameDisplayMode)}`
+          : "Select exactly one VPS to delete.",
+      disabled: (rows) => rows.length !== 1,
+      icon: <Trash2 size={15} />,
+      onSelect: requestDeleteAgent,
+      separatorBefore: true,
+      tone: "danger",
+    },
+  ];
+
   return (
     <section
       className={
@@ -846,318 +954,49 @@ export function FleetWorkspace({
       }
     >
       {fleetSubpage === "instances" && (
-        <div className="fleetPanel fleetInstancesPanel">
-          <div className="sectionHeader fleetInstancesHeader">
-            <div>
-              <h2>VPS instances</h2>
-              <span>
-                {apiError ? "API unavailable" : "Live control-plane inventory"}
-              </span>
-            </div>
-            <span className="sectionContext">
-              {summary.online} online / {summary.total} total · WebSocket{" "}
-              {wsState}
-            </span>
-          </div>
-
-          <ConsoleDataGrid
-            actions={[
-              {
-                label: "Inspect selected",
-                disabled: (rows) => rows.length !== 1,
-                expandRow: true,
-                onSelect: (rows) => onSelectAgent(rows[0].id),
-              },
-              {
-                label: "Open dispatch",
-                icon: <TerminalSquare size={15} />,
-                separatorBefore: true,
-                onSelect: (rows) =>
-                  openSelectorWorkflow(
-                    rows,
-                    "Jobs",
-                    "dispatch",
-                    JOB_SELECTOR_STORAGE_KEY,
-                  ),
-              },
-              {
-                label: "Check update",
-                icon: <ArrowUpCircle size={15} />,
-                onSelect: openUpdateCheckWorkflow,
-              },
-              {
-                label: "Open multi-file actions",
-                separatorBefore: true,
-                onSelect: (rows) =>
-                  openSelectorWorkflow(
-                    rows,
-                    "Jobs",
-                    "multi_files",
-                    MULTI_FILE_SELECTOR_STORAGE_KEY,
-                  ),
-              },
-              {
-                label: "Open file browser",
-                disabled: (rows) => rows.length !== 1,
-                onSelect: openFileBrowserWorkflow,
-              },
-              {
-                label: "Open bulk tags",
-                separatorBefore: true,
-                onSelect: (rows) =>
-                  openSelectorWorkflow(
-                    rows,
-                    "Tags",
-                    "bulk",
-                    TAG_BULK_SELECTOR_STORAGE_KEY,
-                  ),
-              },
-              {
-                label: "Open config bulk apply",
-                onSelect: (rows) =>
-                  openSelectorWorkflow(
-                    rows,
-                    "Config",
-                    "bulk",
-                    CONFIG_BULK_SELECTOR_STORAGE_KEY,
-                  ),
-              },
-              {
-                label: "Open Traffic & Rules",
-                disabled: (rows) => rows.length !== 1,
-                expandRow: true,
-                onSelect: (rows) => {
-                  onSelectAgent(rows[0].id);
-                  setDetailTabOverride("Traffic & Rules");
-                },
-              },
-              {
-                label: "Edit VPS Rules",
-                disabled: (rows) => rows.length !== 1,
-                onSelect: (rows) =>
-                  onNavigatePanel?.(
-                    "Config",
-                    `rules:id:${encodeURIComponent(rows[0].id)}`,
-                  ),
-              },
-              {
-                label: "View Matching Policies",
-                disabled: (rows) => rows.length !== 1,
-                onSelect: (rows) =>
-                  onNavigatePanel?.(
-                    "Fleet",
-                    `policies:id:${encodeURIComponent(rows[0].id)}`,
-                  ),
-              },
-              {
-                label: "Copy traffic selectors",
-                disabled: (rows) => rows.length !== 1,
-                onSelect: (rows) =>
-                  void copyText(selectorSummary(trafficByClient.get(rows[0].id))),
-              },
-              {
-                label: "Open single config",
-                disabled: (rows) => rows.length !== 1,
-                onSelect: (rows) =>
-                  openSelectorWorkflow(
-                    rows,
-                    "Config",
-                    "single",
-                    CONFIG_SINGLE_SELECTOR_STORAGE_KEY,
-                  ),
-              },
-              {
-                label: "Copy client IDs",
-                separatorBefore: true,
-                onSelect: (rows) =>
-                  void copyText(rows.map((agent) => agent.id).join("\n")),
-              },
-              {
-                label: "Copy selector",
-                onSelect: (rows) =>
-                  void copyText(
-                    selectorExpressionForClientIds(
-                      rows.map((agent) => agent.id),
-                    ),
-                  ),
-              },
-              {
-                label: "Copy tag query",
-                onSelect: (rows) =>
-                  void copyText(
-                    Array.from(new Set(rows.flatMap((agent) => agent.tags)))
-                      .sort((left, right) =>
-                        compareTagsByDisplayOrder(left, right, tagDisplayOrder),
-                      )
-                      .map((tag) => `tag:${tag}`)
-                      .join(" "),
-                  ),
-              },
-              {
-                label: "Review VPS deletion",
-                description: (rows) =>
-                  rows.length === 1
-                    ? `Delete ${formatVpsName(rows[0], vpsNameDisplayMode)}`
-                    : "Select exactly one VPS to delete.",
-                disabled: (rows) => rows.length !== 1,
-                icon: <Trash2 size={15} />,
-                onSelect: requestDeleteAgent,
-                separatorBefore: true,
-                tone: "danger",
-              },
-            ]}
-            columns={fleetColumns}
-            defaultColumnVisibility={{
-              active_policy_alerts: false,
-              cycle_usage: false,
-              last_ip: false,
-              quota: false,
-              registration_ip: false,
-              reset_day: false,
-              selectors: false,
-              traffic_now: false,
-              traffic_state: false,
-            }}
-            defaultPageSize={20}
-            empty={
-              <div className="emptyState">
-                <Server size={22} />
-                <strong>
-                  {scopeActive ? "No VPS match this view" : "No agents online"}
-                </strong>
-                <span>
-                  {apiError ??
-                    (scopeActive
-                      ? "Adjust or clear the saved fleet view."
-                      : "Waiting for VPS agents to connect through gateways and report in.")}
-                </span>
-              </div>
-            }
-            expandOnRowClick
-            getRowId={(agent) => agent.id}
-            itemLabel="instances"
-            onOpenRow={(agent) => {
-              clearDeleteReview();
-              onSelectAgent(agent.id);
-            }}
-            onSelectionChange={handleFleetSelectionChange}
-            renderExpandedRow={(agent) => (
-              <FleetInstanceDetail
-                agent={agent}
-                sourceTemplateAssignments={sourceTemplateAssignments.filter(
-                  (assignment) => assignment.client_id === agent.id,
-                )}
-                sourceStatus={sourceStatus.filter(
-                  (status) => status.client_id === agent.id,
-                )}
-                lastLiveEvent={lastLiveEvent}
-                policyAlerts={policyAlertsByClient.get(agent.id) ?? []}
-                policies={fleetAlertPolicies}
-                requestedTab={detailTabOverride}
-                onRequestedTabConsumed={() => setDetailTabOverride(null)}
-                latestNetworkRates={latestNetworkRates.get(agent.id) ?? []}
-                latestRollup={latestRollups.get(agent.id) ?? null}
-                latestTunnels={latestTunnels.get(agent.id) ?? []}
-                mutateTagsForAgents={mutateTagsForAgents}
-                onCreateJob={onCreateJob}
-                onLoadJobOutputs={onLoadJobOutputs}
-                onLoadJobTargets={onLoadJobTargets}
-                onOpenJobDetails={onOpenJobDetails}
-                onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-                onNavigatePanel={onNavigatePanel}
-                onRenderTemplateRuntimeConfig={onRenderTemplateRuntimeConfig}
-                onUpdateAgentAlias={onUpdateAgentAlias}
-                privilegeMaterial={privilegeMaterial}
-                showCountryFlags={preferences.show_country_flags}
-                summary={summary}
-                tagDisplayOrder={tagDisplayOrder}
-                tagVisibilityOverrides={
-                  preferences.fleet_tag_visibility_overrides
-                }
-                telemetryNetworkRates={telemetryNetworkRates.filter(
-                  (rate) => rate.client_id === agent.id,
-                )}
-                telemetryRollups={telemetryRollups.filter(
-                  (rollup) => rollup.client_id === agent.id,
-                )}
-                trafficAccounting={trafficByClient.get(agent.id) ?? null}
-                vpsRuleValues={vpsRulesByClient.get(agent.id) ?? []}
-                vpsNameDisplayMode={vpsNameDisplayMode}
-                wsState={wsState}
-              />
-            )}
-            renderSelectionPanel={(rows) => (
-              <FleetSelectionPanel
-                agents={rows}
-                allTags={tags}
-                latestNetworkRates={latestNetworkRates}
-                latestRollups={latestRollups}
-                mutateTagsForAgents={mutateTagsForAgents}
-                onOpenFileBrowser={openFileBrowserWorkflow}
-                onOpenUpdateCheck={openUpdateCheckWorkflow}
-                onOpenSelectorWorkflow={openSelectorWorkflow}
-                selectionStatsMode={selectionStatsMode}
-                setSelectionStatsMode={setSelectionStatsMode}
-                tagDisplayOrder={tagDisplayOrder}
-                tagVisibilityOverrides={
-                  preferences.fleet_tag_visibility_overrides
-                }
-                vpsNameDisplayMode={vpsNameDisplayMode}
-              />
-            )}
-            rows={agents}
-            singleExpandedRow
-            storageKey="vpsman.grid.fleet.instances.v2"
-            title="VPS instance records"
-          />
-          <ConfirmationPrompt
-            confirmLabel="Delete VPS"
-            detail="This deactivates VPS access immediately and permanently removes it from inventory, selectors, dashboard, tags, topology, and future bulk targeting. Historical jobs and audit records remain."
-            error={deleteError}
-            items={
-              deleteSnapshot
-                ? [
-                    {
-                      label: "VPS",
-                      value: deleteSnapshot.displayName,
-                    },
-                    { label: "Client ID", value: deleteSnapshot.clientId },
-                    { label: "Status", value: deleteSnapshot.status },
-                  ]
-                : []
-            }
-            onCancel={() => {
-              setDeleteError(null);
-              clearDeleteReview();
-            }}
-            onConfirm={() => void confirmDeleteAgent()}
-            open={Boolean(deleteSnapshot)}
-            pending={deletePending}
-            title="Delete VPS from panel"
-            tone="danger"
-          />
-        </div>
-      )}
-
-      {fleetSubpage === "alerts" && (
-        <div className="fleetPanel">
-          <div className="sectionHeader">
-            <div>
-              <h2>Fleet alerts</h2>
-              <span>{`${fleetAlerts.length} active fleet alerts`}</span>
-            </div>
-            <span className="sectionContext">
-              {fleetAlertStates.length} triaged states
-            </span>
-          </div>
-          <ConsoleFreshnessBanner error={apiError} />
-          <FleetAlertList
-            agents={agents}
-            alerts={fleetAlerts}
-            stateCount={fleetAlertStates.length}
-            onUpdate={onUpdateFleetAlertState}
-          />
-        </div>
+        <FleetInstancesPanel
+          actions={fleetInstanceActions}
+          agents={agents}
+          apiError={apiError}
+          columns={fleetColumns}
+          deleteError={deleteError}
+          deletePending={deletePending}
+          deleteSnapshot={deleteSnapshot}
+          onCancelDelete={() => {
+            setDeleteError(null);
+            clearDeleteReview();
+          }}
+          onConfirmDelete={() => void confirmDeleteAgent()}
+          onOpenMonitor={
+            onNavigatePanel
+              ? () => onNavigatePanel("Fleet", "monitor")
+              : undefined
+          }
+          onOpenRow={(agent) =>
+            openSingleReleaseWorkflow([agent], "Fleet", "instance_detail")
+          }
+          onSelectionChange={handleFleetSelectionChange}
+          renderSelectionPanel={(rows) => (
+            <FleetSelectionPanel
+              agents={rows}
+              allTags={tags}
+              latestNetworkRates={latestNetworkRates}
+              latestRollups={latestRollups}
+              mutateTagsForAgents={mutateTagsForAgents}
+              onOpenFileBrowser={openFileBrowserWorkflow}
+              onOpenUpdateCheck={openUpdateCheckWorkflow}
+              onOpenSelectorWorkflow={openSelectorWorkflow}
+              selectionStatsMode={selectionStatsMode}
+              setSelectionStatsMode={setSelectionStatsMode}
+              tagDisplayOrder={tagDisplayOrder}
+              tagVisibilityOverrides={preferences.fleet_tag_visibility_overrides}
+              vpsNameDisplayMode={vpsNameDisplayMode}
+            />
+          )}
+          scopeActive={scopeActive}
+          summary={summary}
+          wsState={wsState}
+        />
       )}
 
       {fleetSubpage === "policies" && (
@@ -1218,6 +1057,138 @@ export function FleetWorkspace({
         </div>
       )}
     </section>
+  );
+}
+
+function FleetInstancesPanel({
+  actions,
+  agents,
+  apiError,
+  columns,
+  deleteError,
+  deletePending,
+  deleteSnapshot,
+  onCancelDelete,
+  onConfirmDelete,
+  onOpenMonitor,
+  onOpenRow,
+  onSelectionChange,
+  renderSelectionPanel,
+  scopeActive,
+  summary,
+  wsState,
+}: {
+  actions: ConsoleDataGridAction<AgentView>[];
+  agents: AgentView[];
+  apiError: string | null;
+  columns: ConsoleDataGridColumn<AgentView>[];
+  deleteError: string | null;
+  deletePending: boolean;
+  deleteSnapshot: DeleteAgentConfirmationSnapshot | null;
+  onCancelDelete: () => void;
+  onConfirmDelete: () => void;
+  onOpenMonitor?: () => void;
+  onOpenRow: (agent: AgentView) => void;
+  onSelectionChange: (rows: AgentView[]) => void;
+  renderSelectionPanel: (rows: AgentView[]) => ReactNode;
+  scopeActive: boolean;
+  summary: FleetSummary;
+  wsState: string;
+}) {
+  return (
+    <div className="fleetPanel fleetInstancesPanel">
+      <div className="sectionHeader fleetInstancesHeader">
+        <div>
+          <h2>VPS instances</h2>
+          <span>
+            {apiError ? "API unavailable" : "Live control-plane inventory"}
+          </span>
+        </div>
+        <span className="sectionContext">
+          {summary.online} online / {summary.total} total · WebSocket {wsState}
+        </span>
+      </div>
+
+      <ConsoleDataGrid
+        actions={actions}
+        columns={columns}
+        defaultColumnVisibility={{
+          active_policy_alerts: false,
+          cycle_usage: false,
+          last_ip: false,
+          quota: false,
+          registration_ip: false,
+          reset_day: false,
+          selectors: false,
+          traffic_now: false,
+          traffic_state: false,
+        }}
+        defaultPageSize={20}
+        empty={
+          <div className="emptyState">
+            <Server size={22} />
+            <strong>
+              {scopeActive ? "No VPS match this view" : "No agents online"}
+            </strong>
+            <span>
+              {apiError ??
+                (scopeActive
+                  ? "Adjust or clear the saved fleet view."
+                  : "Waiting for VPS agents to connect through gateways and report in.")}
+            </span>
+          </div>
+        }
+        getRowId={(agent) => agent.id}
+        itemLabel="instances"
+        onOpenRow={onOpenRow}
+        onSelectionChange={onSelectionChange}
+        renderSelectionPanel={renderSelectionPanel}
+        rows={agents}
+        storageKey="vpsman.grid.fleet.instances.v2"
+        title="VPS instance records"
+        toolbarActions={
+          <div
+            aria-label="Fleet instance view mode"
+            className="segmented fleetViewSwitch"
+            role="group"
+          >
+            <button aria-pressed={true} className="selected" type="button">
+              Table
+            </button>
+            <button
+              disabled={!onOpenMonitor}
+              onClick={() => onOpenMonitor?.()}
+              type="button"
+            >
+              Cards
+            </button>
+          </div>
+        }
+      />
+      <ConfirmationPrompt
+        confirmLabel="Delete VPS"
+        detail="This deactivates VPS access immediately and permanently removes it from inventory, selectors, dashboard, tags, topology, and future bulk targeting. Historical jobs and audit records remain."
+        error={deleteError}
+        items={
+          deleteSnapshot
+            ? [
+                {
+                  label: "VPS",
+                  value: deleteSnapshot.displayName,
+                },
+                { label: "Client ID", value: deleteSnapshot.clientId },
+                { label: "Status", value: deleteSnapshot.status },
+              ]
+            : []
+        }
+        onCancel={onCancelDelete}
+        onConfirm={onConfirmDelete}
+        open={Boolean(deleteSnapshot)}
+        pending={deletePending}
+        title="Delete VPS from panel"
+        tone="danger"
+      />
+    </div>
   );
 }
 
@@ -2412,8 +2383,8 @@ function TrafficRulesDetail({
             onClick={() =>
               selectedPolicyId &&
               onNavigatePanel?.(
-                "Fleet",
-                `policies:policy:${encodeURIComponent(selectedPolicyId)}`,
+                "Observability",
+                "alerts",
               )
             }
           >
@@ -2696,8 +2667,8 @@ function FleetSelectionPanel({
             onClick={() =>
               onOpenSelectorWorkflow(
                 agents,
-                "Jobs",
-                "multi_files",
+                "Remote Operations",
+                "bulk_files",
                 MULTI_FILE_SELECTOR_STORAGE_KEY,
               )
             }
@@ -2719,7 +2690,7 @@ function FleetSelectionPanel({
               onOpenSelectorWorkflow(
                 agents,
                 "Config",
-                "bulk",
+                "bulk_patch",
                 CONFIG_BULK_SELECTOR_STORAGE_KEY,
               )
             }
@@ -2732,8 +2703,8 @@ function FleetSelectionPanel({
             onClick={() =>
               onOpenSelectorWorkflow(
                 agents,
-                "Tags",
-                "bulk",
+                "Fleet",
+                "group_bulk",
                 TAG_BULK_SELECTOR_STORAGE_KEY,
               )
             }
@@ -3731,7 +3702,7 @@ function policyRequestFromRecord(
   };
 }
 
-function FleetAlertPolicyManager({
+export function FleetAlertPolicyManager({
   agents,
   policies,
   policyAlerts,
@@ -4586,7 +4557,7 @@ type NotificationRegistryTab =
   | "deliveries"
   | "maintenance";
 
-function FleetNotificationsHub({
+export function FleetNotificationsHub({
   agents,
   alertChannels,
   alertDeliveries,
@@ -4758,7 +4729,7 @@ function FleetNotificationsHub({
   );
 }
 
-function DeliveryPreviewSection({
+export function DeliveryPreviewSection({
   children,
   count,
   onClear,
@@ -4792,7 +4763,7 @@ function DeliveryPreviewSection({
   );
 }
 
-function FleetAlertNotificationManager({
+export function FleetAlertNotificationManager({
   agents,
   channels,
   onDelete,
@@ -5695,7 +5666,7 @@ function FleetAlertNotificationManager({
   );
 }
 
-function NotificationDeliveryHistoryGrid({
+export function NotificationDeliveryHistoryGrid({
   deliveries,
   preview,
 }: {
@@ -5841,7 +5812,7 @@ function NotificationDeliveryHistoryGrid({
   );
 }
 
-function WebhookRuleManager({
+export function WebhookRuleManager({
   agents,
   onDelete,
   onDispatch,
@@ -6734,7 +6705,7 @@ function WebhookRuleManager({
   );
 }
 
-function WebhookDryRunNotice({
+export function WebhookDryRunNotice({
   agents: _agents,
   preview,
 }: {
@@ -6757,7 +6728,7 @@ function WebhookDryRunNotice({
   );
 }
 
-function WebhookDeliveryHistoryGrid({
+export function WebhookDeliveryHistoryGrid({
   deliveries,
   preview,
 }: {
@@ -6893,7 +6864,7 @@ function WebhookDeliveryHistoryGrid({
   );
 }
 
-function WebhookDeliveryMaintenancePanel({
+export function WebhookDeliveryMaintenancePanel({
   onRotate,
   rules,
 }: {
@@ -8001,7 +7972,7 @@ function NetworkInterfacesPanel({
               type="button"
             >
               <LockKeyhole size={15} />
-              Unlock privilege
+              Open Privilege Vault
             </button>
           )}
           {jobId && onOpenJobDetails && (

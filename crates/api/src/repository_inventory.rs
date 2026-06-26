@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
+use vpsman_common::payload_hash;
 
 use crate::model::*;
 use crate::repository::Repository;
@@ -466,6 +467,7 @@ impl Repository {
             return Ok(tag_mutation_response(
                 &request.tag,
                 tag_action_label(&request.action),
+                Some(&request.selector_expression),
                 targets,
                 preview_changed,
                 schedule_impacts,
@@ -517,6 +519,7 @@ impl Repository {
                 Ok(tag_mutation_response(
                     &request.tag,
                     tag_action_label(&request.action),
+                    Some(&request.selector_expression),
                     targets,
                     changed,
                     schedule_impacts,
@@ -587,6 +590,7 @@ impl Repository {
                 Ok(tag_mutation_response(
                     &request.tag,
                     tag_action_label(&request.action),
+                    Some(&request.selector_expression),
                     targets,
                     changed,
                     schedule_impacts,
@@ -615,6 +619,7 @@ impl Repository {
             return Ok(tag_mutation_response(
                 tag,
                 "delete",
+                None,
                 affected,
                 preview_changed,
                 schedule_impacts,
@@ -640,6 +645,7 @@ impl Repository {
                 Ok(tag_mutation_response(
                     tag,
                     "delete",
+                    None,
                     affected,
                     changed,
                     schedule_impacts,
@@ -663,6 +669,7 @@ impl Repository {
                 Ok(tag_mutation_response(
                     tag,
                     "delete",
+                    None,
                     affected,
                     changed,
                     schedule_impacts,
@@ -694,6 +701,7 @@ impl Repository {
             return Ok(tag_mutation_response(
                 tag,
                 "assign",
+                None,
                 affected,
                 preview_changed,
                 schedule_impacts,
@@ -708,6 +716,7 @@ impl Repository {
         Ok(tag_mutation_response(
             tag,
             "assign",
+            None,
             affected,
             preview_changed,
             schedule_impacts,
@@ -1408,14 +1417,24 @@ fn tag_action_label(action: &BulkTagMutationAction) -> &'static str {
 fn tag_mutation_response(
     tag: &str,
     action: &str,
+    selector_expression: Option<&str>,
     affected: Vec<AgentView>,
     changed_count: usize,
     schedule_impacts: Vec<ScheduleImpactView>,
     confirmation_required: bool,
 ) -> TagMutationResponse {
+    let preview_hash = tag_mutation_preview_hash(
+        tag,
+        action,
+        selector_expression,
+        &affected,
+        changed_count,
+        &schedule_impacts,
+    );
     TagMutationResponse {
         tag: tag.to_string(),
         action: action.to_string(),
+        preview_hash,
         target_count: affected.len(),
         changed_count,
         skipped_count: affected.len().saturating_sub(changed_count),
@@ -1423,6 +1442,58 @@ fn tag_mutation_response(
         schedule_impacts,
         confirmation_required,
     }
+}
+
+fn tag_mutation_preview_hash(
+    tag: &str,
+    action: &str,
+    selector_expression: Option<&str>,
+    affected: &[AgentView],
+    changed_count: usize,
+    schedule_impacts: &[ScheduleImpactView],
+) -> String {
+    let mut target_client_ids = affected
+        .iter()
+        .map(|agent| agent.id.as_str())
+        .collect::<Vec<_>>();
+    target_client_ids.sort_unstable();
+    let mut schedule_impacts = schedule_impacts
+        .iter()
+        .map(|impact| {
+            json!({
+                "schedule_id": impact.schedule_id,
+                "before_target_count": impact.before_target_count,
+                "after_target_count": impact.after_target_count,
+                "added_target_count": impact.added_target_count,
+                "removed_target_count": impact.removed_target_count,
+                "unchanged_target_count": impact.unchanged_target_count,
+            })
+        })
+        .collect::<Vec<_>>();
+    schedule_impacts.sort_by(|left, right| {
+        left.get("schedule_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .cmp(
+                right
+                    .get("schedule_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default(),
+            )
+    });
+    let payload = serde_json::to_vec(&json!({
+        "version": 1,
+        "action": action,
+        "tag": tag,
+        "selector_expression": selector_expression,
+        "target_client_ids": target_client_ids,
+        "target_count": affected.len(),
+        "changed_count": changed_count,
+        "skipped_count": affected.len().saturating_sub(changed_count),
+        "schedule_impacts": schedule_impacts,
+    }))
+    .unwrap_or_default();
+    payload_hash(&payload)
 }
 
 fn simulate_bulk_tag_mutation(

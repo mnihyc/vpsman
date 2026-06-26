@@ -678,6 +678,17 @@ pub(crate) async fn bulk_mutate_tags(
     )
     .await?;
     if request.confirmed {
+        let mut preview_request = request.clone();
+        preview_request.confirmed = false;
+        preview_request.preview_hash = None;
+        preview_request.privilege_assertion = None;
+        let preview = state.repo.bulk_mutate_tags(&preview_request).await?;
+        require_matching_preview_hash(
+            request.preview_hash.as_deref(),
+            &preview.preview_hash,
+            "tag_mutation_preview_hash_required",
+            "tag_mutation_preview_hash_mismatch",
+        )?;
         let action = match request.action {
             crate::model::BulkTagMutationAction::Add => "tag.bulk_add",
             crate::model::BulkTagMutationAction::Remove => "tag.bulk_remove",
@@ -706,24 +717,38 @@ pub(crate) async fn delete_tag(
         .await?;
     validate_persisted_tag_name(&tag)?;
     if request.confirmed {
-        let affected_targets = state
-            .repo
-            .list_tags()
-            .await?
-            .into_iter()
-            .find(|candidate| candidate.name == tag)
-            .map(|tag| {
-                tag.clients
-                    .into_iter()
-                    .map(|client| client.id)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let preview = state.repo.delete_tag(&tag, false).await?;
+        require_matching_preview_hash(
+            request.preview_hash.as_deref(),
+            &preview.preview_hash,
+            "tag_delete_preview_hash_required",
+            "tag_delete_preview_hash_mismatch",
+        )?;
+        let affected_targets = preview
+            .affected
+            .iter()
+            .map(|client| client.id.clone())
+            .collect::<Vec<_>>();
         let intent =
             DbPrivilegeIntent::new("tag.delete", &tag, None, &affected_targets, true, None);
         verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     }
     Ok(Json(state.repo.delete_tag(&tag, request.confirmed).await?))
+}
+
+fn require_matching_preview_hash(
+    submitted: Option<&str>,
+    expected: &str,
+    required_code: &'static str,
+    mismatch_code: &'static str,
+) -> Result<(), ApiError> {
+    let Some(submitted) = submitted.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(ApiError::conflict(required_code));
+    };
+    if submitted != expected {
+        return Err(ApiError::conflict(mismatch_code));
+    }
+    Ok(())
 }
 
 fn validate_create_source_template(request: &CreateSourceTemplateRequest) -> Result<(), ApiError> {

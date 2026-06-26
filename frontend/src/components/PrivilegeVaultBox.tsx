@@ -28,7 +28,7 @@ export function PrivilegeVaultBox({
   onPrivilegeMaterialChange,
   onVaultAvailabilityChange,
   privilegeMaterial,
-  unlockRedirectLabel = "Unlock",
+  unlockRedirectLabel = "Open Privilege Vault",
   unlockLabel = "Unlock",
   usePrivilegeLabel = "Unlock privilege",
 }: PrivilegeVaultBoxProps) {
@@ -44,6 +44,12 @@ export function PrivilegeVaultBox({
   const privilegeStatus = vaultAvailable ? "Encrypted vault locked" : "Locked";
   const label = (value: string) => {
     if (!labelPrefix) {
+      if (value === "Super password") {
+        return "Privilege secret";
+      }
+      if (value === "Super salt hex") {
+        return "Verifier salt hex";
+      }
       return value;
     }
     if (value === "Super password") {
@@ -112,7 +118,7 @@ export function PrivilegeVaultBox({
           <ShieldCheck size={18} />
           <div>
             <strong>{actionError ?? privilegeStatus}</strong>
-            <span>{lastPayloadHash ? shortHash(lastPayloadHash) : "Privilege unlock required"}</span>
+            <span>{lastPayloadHash ? shortHash(lastPayloadHash) : "Access / Privilege Vault required"}</span>
           </div>
         </div>
         <button className="secondaryAction" onClick={onOpenUnlock} type="button">
@@ -153,14 +159,14 @@ export function PrivilegeVaultBox({
           <input
             aria-label={label("Super password")}
             onChange={(event) => setSuperPassword(event.target.value)}
-            placeholder="super password"
+            placeholder="privilege secret"
             type="password"
             value={superPassword}
           />
           <input
             aria-label={label("Super salt hex")}
             onChange={(event) => setSuperSaltHex(event.target.value)}
-            placeholder="super salt hex"
+            placeholder="verifier salt hex"
             value={superSaltHex}
           />
         </div>

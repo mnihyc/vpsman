@@ -156,10 +156,10 @@ const dashboardOverview = {
       view: "Fleet",
     },
     {
-      label: "Inspect topology evidence",
+      label: "Inspect network evidence",
       query: null,
       subpage: "evidence",
-      view: "Topology",
+      view: "Network",
     },
   ],
   generated_at: "2026-06-05T20:44:58Z",
@@ -796,6 +796,7 @@ const operatorPreferences = {
   gateway_endpoints: "",
   gateway_server_public_key_hex: null,
   language: "en",
+  review_prompt_mode: "inline",
   show_country_flags: true,
   sidebar_subpanel_default: "active",
   timezone: null,
@@ -1342,6 +1343,105 @@ const historyRetentionPolicies = [
   },
 ];
 
+const auditLogs = [
+  {
+    action: "job.dispatch_requested",
+    actor_id: null,
+    command_hash: "a".repeat(64),
+    created_at: "2026-05-31T11:00:04Z",
+    id: "audit-job-dispatch-scheduled-0001",
+    metadata: {
+      command_type: "scheduled_shell_argv",
+      job_id: "77777777-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      operator_username: "system scheduler",
+      privileged: false,
+      resolved_targets: ["agent-sfo-01", "agent-fra-02"],
+      source_schedule_id: "51515151-6161-4717-8abc-defdefdefdef",
+      target_count: 2,
+    },
+    target: "api:/api/v1/jobs",
+  },
+  {
+    action: "job.dispatch_requested",
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    command_hash: "7".repeat(64),
+    created_at: "2026-05-31T10:08:55Z",
+    id: "audit-job-dispatch-network-0001",
+    metadata: {
+      command_type: "network_speed_test",
+      job_id: "77777777-aaaa-4bbb-8ccc-dddddddddddd",
+      operator_role: "admin",
+      operator_username: "console-admin",
+      privileged: true,
+      resolved_targets: ["agent-sfo-01", "agent-fra-02"],
+      session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
+      target_count: 2,
+    },
+    target: "api:/api/v1/jobs",
+  },
+  {
+    action: "terminal.open",
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    command_hash: null,
+    created_at: "2026-05-31T10:11:50Z",
+    id: "audit-terminal-open-0001",
+    metadata: {
+      client_id: "agent-sfo-01",
+      operator_session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
+      operator_username: "console-admin",
+      terminal_session_id: "61616161-2222-4333-8444-555555555555",
+    },
+    target: "terminal:agent-sfo-01/61616161-2222-4333-8444-555555555555",
+  },
+  {
+    action: "terminal.input",
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    command_hash: null,
+    created_at: "2026-05-31T10:12:00Z",
+    id: "audit-terminal-input-0001",
+    metadata: {
+      client_id: "agent-sfo-01",
+      input_seq: 2,
+      job_id: "61616161-aaaa-4bbb-8ccc-dddddddddddd",
+      operator_session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
+      operator_username: "console-admin",
+      terminal_session_id: "61616161-2222-4333-8444-555555555555",
+    },
+    target: "terminal:agent-sfo-01/61616161-2222-4333-8444-555555555555",
+  },
+  {
+    action: "terminal.close",
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    command_hash: null,
+    created_at: "2026-05-31T10:12:30Z",
+    id: "audit-terminal-close-0001",
+    metadata: {
+      client_id: "agent-fra-02",
+      close_reason: "operator",
+      job_id: "71717171-aaaa-4bbb-8ccc-dddddddddddd",
+      operator_session_id: "88888888-aaaa-4bbb-8ccc-000000000002",
+      operator_username: "console-admin",
+      terminal_session_id: "71717171-2222-4333-8444-555555555555",
+    },
+    target: "terminal:agent-fra-02/71717171-2222-4333-8444-555555555555",
+  },
+  {
+    action: "privilege_unlock",
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    command_hash: null,
+    created_at: "2026-06-02T10:12:00Z",
+    id: "audit-privilege-unlock-0001",
+    metadata: {
+      ip: "127.0.0.1",
+      result: "success",
+      session_id: "88888888-aaaa-4bbb-8ccc-000000000001",
+      username: "console-admin",
+      privilege_scope: "browser_memory",
+    },
+    target: "access/privilege-vault",
+  },
+];
+
 const tags = [
   {
     clients: [agents[0], agents[1]],
@@ -1653,6 +1753,8 @@ const backupRequests = [
     payload_hash: "a".repeat(64),
     command_scope: "client:agent-sfo-01",
     status: "artifact_metadata_recorded",
+    source_job_id: "77777777-aaaa-4bbb-8ccc-dddddddddddd",
+    source_schedule_id: null,
   },
 ];
 
@@ -1831,6 +1933,18 @@ const networkSpeedJobId = "77777777-aaaa-4bbb-8ccc-dddddddddddd";
 const networkJobs = [
   {
     actor_id: null,
+    command_type: "scheduled_shell_argv",
+    completed_at: "2026-05-31T11:00:09Z",
+    created_at: "2026-05-31T11:00:04Z",
+    id: "77777777-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    max_timeout_secs: 30,
+    payload_hash: "a".repeat(64),
+    privileged: false,
+    status: "completed",
+    target_count: 2,
+  },
+  {
+    actor_id: null,
     command_type: "agent_update",
     completed_at: "2026-05-31T10:10:00Z",
     created_at: "2026-05-31T10:09:55Z",
@@ -1872,6 +1986,34 @@ const networkJobs = [
     privileged: true,
     status: "completed",
     target_count: 1,
+  },
+];
+
+const jobApprovals = [
+  {
+    id: "abababab-1111-4222-8333-444444444444",
+    status: "pending",
+    job_id: "abababab-2222-4333-8444-555555555555",
+    command_type: "shell_argv",
+    selector_expression: "tag:provider:alpha && status:online",
+    target_client_ids: ["agent-sfo-01", "agent-nyc-03"],
+    target_count: 2,
+    privileged: true,
+    destructive: true,
+    force_unprivileged: false,
+    max_timeout_secs: 60,
+    payload_hash: "c".repeat(64),
+    request_fingerprint: "d".repeat(64),
+    requester_id: "99999999-aaaa-4bbb-8ccc-000000000002",
+    requester_username: "noc-operator",
+    requester_role: "operator",
+    requested_at: "2026-06-02T10:12:00Z",
+    request_reason: "Restart app service during maintenance window",
+    risk: "destructive",
+    decision_by: null,
+    decision_username: null,
+    decision_reason: null,
+    decided_at: null,
   },
 ];
 
@@ -2327,13 +2469,18 @@ export const ospfUpdatePlans = [
 
 export async function installConsoleApiMock(
   page: Page,
-  options: { agentListOverride?: typeof agents } = {},
+  options: {
+    agentListOverride?: typeof agents;
+    fileTransferSourceArtifactsOverride?: typeof fileTransferSourceArtifacts;
+    fileTransfersOverride?: typeof fileTransfers;
+  } = {},
 ) {
   await page.addInitScript(
     ({
       agentListOverrideFixture,
       agentsFixture,
       agentUpdateReleasesFixture,
+      auditLogsFixture,
       artifactsFixture,
       backupsFixture,
       dashboardOverviewFixture,
@@ -2357,6 +2504,7 @@ export async function installConsoleApiMock(
       fileTransferSourceArtifactsFixture,
       fileTransfersFixture,
       historyRetentionPoliciesFixture,
+      jobApprovalsFixture,
       jobOutputsFixture,
       jobsFixture,
       networkObservationsFixture,
@@ -2407,12 +2555,14 @@ export async function installConsoleApiMock(
       const currentOperatorPreferences = { ...operatorPreferencesFixture };
       let currentSuiteConfigToml = suiteConfigTomlFixture;
       const deletedAgentIds = new Set<string>();
+      const backendAgents = () =>
+        agentsFixture.filter((agent) => !deletedAgentIds.has(agent.id));
       const dashboardAgents = () =>
         (agentListOverrideFixture ?? agentsFixture).filter(
           (agent) => !deletedAgentIds.has(agent.id),
         );
       const visibleAgents = () =>
-        agentsFixture.filter((agent) => !deletedAgentIds.has(agent.id));
+        dashboardAgents();
       const visibleTunnelPlans = () =>
         tunnelPlansFixture.filter(
           (plan) =>
@@ -2422,6 +2572,7 @@ export async function installConsoleApiMock(
       const requests = {
         backupArtifactHandoffs: [] as unknown[],
         backupPolicies: [] as unknown[],
+        backupPolicyPrunes: [] as unknown[],
         agentDeletes: [] as unknown[],
         artifactCleanupJobs: [] as unknown[],
         artifactCleanupPreviews: [] as unknown[],
@@ -2445,6 +2596,7 @@ export async function installConsoleApiMock(
         historyRetentionPolicies: [] as unknown[],
         historyRetentionPrunes: [] as unknown[],
         jobs: [] as unknown[],
+        jobApprovals: [] as unknown[],
         jobOutputComparisons: [] as unknown[],
         commandTemplates: [] as unknown[],
         migrationLinks: [] as unknown[],
@@ -2542,6 +2694,9 @@ export async function installConsoleApiMock(
         }>
       >();
       const createdJobOutputs = new Map<string, FixtureJobOutput[]>();
+      const currentJobApprovals = (jobApprovalsFixture as Array<Record<string, unknown>>).map(
+        (approval) => ({ ...approval }),
+      );
       const serverJobsFixture: Array<Record<string, unknown>> = [];
       const commandTypeForOperation = (
         operation: Record<string, unknown> | undefined,
@@ -2644,6 +2799,10 @@ export async function installConsoleApiMock(
           }),
         );
       const emptyArrayResponse = () => jsonResponse([]);
+      const approvalDecisionResponse = (
+        approval: Record<string, unknown>,
+        job: Record<string, unknown> | null,
+      ) => jsonResponse({ approval, job });
       const buildWebhookDelivery = (
         request: Record<string, unknown>,
         status: string,
@@ -2990,7 +3149,7 @@ export async function installConsoleApiMock(
         if (!expression) {
           return [];
         }
-        return visibleAgents()
+        return backendAgents()
           .filter((agent) => expressionMatchesAgent(agent, expression))
           .sort((left, right) => left.id.localeCompare(right.id));
       };
@@ -3711,6 +3870,17 @@ export async function installConsoleApiMock(
             },
             {
               id: "77777777-aaaa-4bbb-8ccc-000000000002",
+              operator_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+              username: "console-admin",
+              result: "success",
+              reason: null,
+              remote_ip: "203.0.113.44",
+              user_agent: "Mozilla/5.0 Chrome/124.0",
+              session_id: "88888888-aaaa-4bbb-8ccc-000000000002",
+              created_at: "2026-01-01T01:00:00Z",
+            },
+            {
+              id: "77777777-aaaa-4bbb-8ccc-000000000003",
               operator_id: null,
               username: "unknown-user",
               result: "failure",
@@ -3719,6 +3889,17 @@ export async function installConsoleApiMock(
               user_agent: "Playwright",
               session_id: null,
               created_at: "2026-01-01T00:01:00Z",
+            },
+            {
+              id: "77777777-aaaa-4bbb-8ccc-000000000004",
+              operator_id: null,
+              username: "unknown-user",
+              result: "failure",
+              reason: "invalid_credentials",
+              remote_ip: "127.0.0.1",
+              user_agent: "Playwright",
+              session_id: null,
+              created_at: "2026-01-01T00:02:00Z",
             },
           ]);
         if (pathname === "/api/v1/client-key-revocations" && method === "GET")
@@ -4158,6 +4339,108 @@ export async function installConsoleApiMock(
             unsupported_domains: [],
           });
         }
+        if (pathname === "/api/v1/job-approvals" && method === "GET") {
+          return jsonResponse(currentJobApprovals);
+        }
+        if (pathname === "/api/v1/job-approvals" && method === "POST") {
+          const body = (await readJsonBody(input, init)) as {
+            approval_id?: string;
+            job?: Record<string, unknown>;
+            reason?: string | null;
+            risk?: string | null;
+          } | null;
+          requests.jobApprovals.push(body);
+          const job = body?.job ?? {};
+          const targetClientIds = Array.isArray(job.target_client_ids)
+            ? (job.target_client_ids as string[])
+            : [];
+          const approval = {
+            id: body?.approval_id ?? "abababab-3333-4444-8555-666666666666",
+            status: "pending",
+            job_id: job.job_id ?? "abababab-4444-4555-8666-777777777777",
+            command_type:
+              commandTypeForOperation(job.operation as Record<string, unknown> | undefined) ??
+              job.command ??
+              "shell_argv",
+            selector_expression: job.selector_expression ?? "",
+            target_client_ids: targetClientIds,
+            target_count: targetClientIds.length,
+            privileged: job.privileged ?? true,
+            destructive: job.destructive ?? false,
+            force_unprivileged: job.force_unprivileged ?? false,
+            max_timeout_secs: job.max_timeout_secs ?? 30,
+            payload_hash: "e".repeat(64),
+            request_fingerprint: "f".repeat(64),
+            requester_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+            requester_username: "console-admin",
+            requester_role: "admin",
+            requested_at: "2026-06-02T10:13:00Z",
+            request_reason: body?.reason ?? null,
+            risk: body?.risk ?? (job.destructive ? "destructive" : "privileged"),
+            decision_by: null,
+            decision_username: null,
+            decision_reason: null,
+            decided_at: null,
+          };
+          currentJobApprovals.unshift(approval);
+          return jsonResponse(approval, 201);
+        }
+        const jobApprovalDecisionMatch = pathname.match(
+          /^\/api\/v1\/job-approvals\/([^/]+)\/(approve|reject)$/,
+        );
+        if (jobApprovalDecisionMatch && method === "POST") {
+          const approvalId = decodeURIComponent(jobApprovalDecisionMatch[1]);
+          const decision = jobApprovalDecisionMatch[2];
+          const approval = currentJobApprovals.find((record) => record.id === approvalId);
+          if (!approval) {
+            return jsonResponse({ error: "job_approval_not_found" }, 404);
+          }
+          const body = (await readJsonBody(input, init)) as { reason?: string | null } | null;
+          approval.status = decision === "approve" ? "approved" : "rejected";
+          approval.decision_by = "99999999-aaaa-4bbb-8ccc-000000000001";
+          approval.decision_username = "console-admin";
+          approval.decision_reason = body?.reason ?? null;
+          approval.decided_at = "2026-06-02T10:14:00Z";
+          if (decision === "reject") {
+            return approvalDecisionResponse(approval, null);
+          }
+          const jobId = String(approval.job_id);
+          const targetClientIds = Array.isArray(approval.target_client_ids)
+            ? (approval.target_client_ids as string[])
+            : [];
+          const jobRecord = {
+            actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+            command_type: approval.command_type,
+            completed_at: null,
+            created_at: "2026-06-02T10:14:00Z",
+            id: jobId,
+            max_timeout_secs: approval.max_timeout_secs,
+            payload_hash: approval.payload_hash,
+            privileged: approval.privileged,
+            status: "running",
+            target_count: targetClientIds.length,
+          };
+          (jobsFixture as Array<Record<string, unknown>>).unshift(jobRecord);
+          createdJobTargets.set(
+            jobId,
+            targetClientIds.map((clientId) => ({
+              client_id: clientId,
+              completed_at: null,
+              exit_code: null,
+              message: "queued from approval",
+              started_at: null,
+              status: "queued",
+            })),
+          );
+          return approvalDecisionResponse(approval, {
+            job_id: jobId,
+            max_job_timeout_secs: 3600,
+            max_timeout_secs: approval.max_timeout_secs,
+            status: "running",
+            target_count: targetClientIds.length,
+            target_counts: queuedTargetCounts(targetClientIds.length),
+          });
+        }
         if (pathname === "/api/v1/jobs" && method === "GET") {
           return jsonResponse(jobsFixture);
         }
@@ -4574,6 +4857,7 @@ export async function installConsoleApiMock(
             affected,
             changed_count: changedCount,
             confirmation_required: !request.confirmed,
+            preview_hash: "7".repeat(64),
             schedule_impacts: [],
             skipped_count: affected.length - changedCount,
             tag: request.tag ?? "",
@@ -4808,6 +5092,48 @@ export async function installConsoleApiMock(
             updated_at: "2026-06-02T10:11:00Z",
           });
         }
+        if (
+          pathname === "/api/v1/backup-policies/prune" &&
+          method === "POST"
+        ) {
+          const body = await readJsonBody(input, init);
+          requests.backupPolicyPrunes.push(body);
+          const request = body as {
+            confirmed?: boolean;
+            dry_run?: boolean;
+            metadata_only?: boolean | null;
+            preview_hash?: string | null;
+            schedule_id?: string | null;
+          } | null;
+          const dryRun = Boolean(request?.dry_run);
+          const metadataOnly = request?.metadata_only ?? false;
+          return jsonResponse({
+            dry_run: dryRun,
+            metadata_only_requested: request?.metadata_only ?? null,
+            preview_hash:
+              request?.preview_hash ??
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            policies: [
+              {
+                cutoff_unix: 1780000000,
+                enabled: true,
+                keep_last: 7,
+                matched_rows: 3,
+                metadata_only: metadataOnly,
+                name: "nightly-system",
+                object_delete_attempted: !dryRun && !metadataOnly,
+                object_delete_errors: [],
+                object_keys: metadataOnly ? [] : ["backups/agent-sfo-01/a.tar"],
+                pruned_rows: dryRun ? 0 : 3,
+                retention_days: 30,
+                schedule_id:
+                  request?.schedule_id ??
+                  "62626262-6161-4717-8abc-defdefdefdef",
+                status: "ok",
+              },
+            ],
+          });
+        }
         if (pathname === "/api/v1/backup-artifacts" && method === "GET") {
           return jsonResponse(artifactsFixture);
         }
@@ -5007,7 +5333,7 @@ export async function installConsoleApiMock(
           });
         }
         if (pathname === "/api/v1/audit") {
-          return emptyArrayResponse();
+          return jsonResponse(auditLogsFixture);
         }
         if (
           pathname === "/api/v1/history/retention-policies" &&
@@ -5081,7 +5407,7 @@ export async function installConsoleApiMock(
             .filter((entry) => entry.length > 0);
           return jsonResponse({
             data: {
-              audit_logs: [],
+              audit_logs: auditLogsFixture,
               backup_artifacts: artifactsFixture,
               client_status_history: [],
               gateway_sessions: [],
@@ -5234,6 +5560,7 @@ export async function installConsoleApiMock(
       agentListOverrideFixture: options.agentListOverride ?? null,
       agentsFixture: agents,
       agentUpdateReleasesFixture: agentUpdateReleases,
+      auditLogsFixture: auditLogs,
       artifactsFixture: backupArtifacts,
       backupsFixture: backupRequests,
       dashboardOverviewFixture: dashboardOverview,
@@ -5254,9 +5581,11 @@ export async function installConsoleApiMock(
       fleetAlertsFixture: fleetAlerts,
       policyAlertsFixture: policyAlerts,
       policyDryRunFixture,
-      fileTransferSourceArtifactsFixture: fileTransferSourceArtifacts,
-      fileTransfersFixture: fileTransfers,
+      fileTransferSourceArtifactsFixture:
+        options.fileTransferSourceArtifactsOverride ?? fileTransferSourceArtifacts,
+      fileTransfersFixture: options.fileTransfersOverride ?? fileTransfers,
       historyRetentionPoliciesFixture: historyRetentionPolicies,
+      jobApprovalsFixture: jobApprovals,
       jobOutputsFixture: networkJobOutputs,
       jobsFixture: networkJobs,
       networkObservationsFixture: networkObservations,

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { FileSliders, Play, RefreshCw, ServerCog, Trash2 } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
@@ -35,22 +35,14 @@ import {
 } from "./jobDispatchModel";
 import type {
   AgentView,
-  AssignSourceTemplateRequest,
-  AssignSourceTemplateResponse,
   BulkResolveResponse,
   RuntimeConfigPatchRequest,
   RuntimeConfigPatchResponse,
-  CloneSourceTemplateRequest,
-  CreateSourceTemplateRequest,
   CreateJobRequest,
   CreateJobResponse,
-  TemplateRuntimeConfigResponse,
+  FleetAlertPolicyRecord,
   SourceTemplateAssignmentRecord,
-  SourceTemplateDiffRequest,
-  SourceTemplateDiffResponse,
   SourceTemplateRecord,
-  SourceTemplateTestRequest,
-  SourceTemplateTestResponse,
   SourceStatusRecord,
   DeleteRuntimeConfigPatchGeneratorRequest,
   RuntimeConfigApplyStateRecord,
@@ -68,17 +60,30 @@ import type {
   JobTargetRecord,
   JsonValue,
   PrivilegeAssertion,
-  UpdateSourceTemplateRequest,
-  UpdateSourceTemplateResponse,
   UpsertRuntimeConfigPatchGeneratorRequest,
 } from "../types";
 import { formatTime, formatVpsName, runPanelAction, shortId } from "../utils";
-import { SourceTemplatePanel } from "./SourceTemplatesPanel";
 
 const CONFIG_BULK_SELECTOR_STORAGE_KEY = "vpsman.config.bulk.selectorExpression";
 const CONFIG_SINGLE_SELECTOR_STORAGE_KEY = "vpsman.config.single.selectorExpression";
 const CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY = "vpsman.config.single.clientId";
 const CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY = "vpsman.config.vpsRules.selectorExpression";
+const CONFIG_HELP = {
+  incrementalPatch: "Incremental TOML patches modify only reviewed runtime keys; bootstrap and server-managed keys stay immutable.",
+  patchGenerator: "Saved generators render incremental TOML from reviewed JSON variables before any VPS target is touched.",
+  targetSelector: "Selector expressions freeze the exact VPS set for preview and review so later fleet changes cannot silently expand scope.",
+  maxTimeout: "Per-target command timeout bounded by the backend so slow agents cannot hold config work indefinitely.",
+  redactedRuntimeToml: "Runtime config returned by the agent with secret material removed; the base hash is used to detect stale overrides.",
+  guardedOverride: "One-VPS override requires a current base hash, validated TOML sections, payload hash, and privilege assertion before apply.",
+  currentBase: "Hash of the redacted config read used to prove the override was reviewed against the current runtime state.",
+  sections: "Top-level TOML sections touched by the override; validate before review so the operator sees the blast radius.",
+  payload: "Hash of the exact override payload that the confirmation prompt will bind to the privileged request.",
+  vpsRules: "Per-VPS traffic rule values feed accounting and alert policies; dry-run previews changed rows before write.",
+  ruleSelector: "Fleet selector used for the dry-run and final reviewed VPS rule mutation.",
+  ruleSetValues: "Key=value lines become typed VPS rule values after backend validation and dry-run diffing.",
+  ruleUnsetValues: "Explicit rule keys removed from every matched VPS after dry-run review.",
+  previewHash: "Backend hash of the dry-run diff that the apply request must echo to prevent stale writes.",
+} as const;
 const VPS_RULE_KEYS = [
   "traffic.reset_day",
   "traffic.quota.total",
@@ -101,6 +106,18 @@ type BulkConfigApplySnapshot = {
   payloadHashHex: string;
 };
 
+type SingleVpsConfigApplySnapshot = {
+  clientId: string;
+  selectorExpression: string;
+  target: AgentView;
+  toml: string;
+  baseHash: string;
+  patchSections: string[];
+  maxTimeoutSecs: number;
+  privilegeAssertion: PrivilegeAssertion;
+  payloadHashHex: string;
+};
+
 export function ConfigPanel({
   activeSubpage,
   agents,
@@ -112,29 +129,25 @@ export function ConfigPanel({
   error,
   runtimeConfigApplyStates,
   runtimeConfigPatchGenerators,
+  fleetAlertPolicies,
   jobs,
   loading,
-  onAssignSourceTemplate,
   onSubmitRuntimeConfigPatch,
-  onCloneSourceTemplate,
   onCreateJob,
-  onCreateSourceTemplate,
-  onDiffSourceTemplate,
   onLoadJobOutputs,
   onLoadJobTargets,
   onDeleteRuntimeConfigPatchGenerator,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
+  onOpenSourceTemplates,
+  onOpenAlerts,
   onRefresh,
   onBulkUnsetVpsRules,
   onBulkUpsertVpsRules,
   onDryRunVpsRules,
-  onRenderTemplateRuntimeConfig,
   onRenderRuntimeConfigPatchGenerator,
   onResolveBulk,
   onSelectSubpage,
-  onTestSourceTemplate,
-  onUpdateSourceTemplate,
   onUpsertRuntimeConfigPatchGenerator,
   privilegeMaterial,
   setPrivilegeMaterial,
@@ -149,14 +162,11 @@ export function ConfigPanel({
   error: string | null;
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
+  fleetAlertPolicies: FleetAlertPolicyRecord[];
   jobs: Array<{ id: string; command_type: string; status: string; created_at: string }>;
   loading: boolean;
-  onAssignSourceTemplate: (request: AssignSourceTemplateRequest) => Promise<AssignSourceTemplateResponse>;
   onSubmitRuntimeConfigPatch: (request: RuntimeConfigPatchRequest) => Promise<RuntimeConfigPatchResponse>;
-  onCloneSourceTemplate: (templateId: string, request: CloneSourceTemplateRequest) => Promise<void>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onCreateSourceTemplate: (request: CreateSourceTemplateRequest) => Promise<void>;
-  onDiffSourceTemplate: (templateId: string, request: SourceTemplateDiffRequest) => Promise<SourceTemplateDiffResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onDeleteRuntimeConfigPatchGenerator: (
@@ -165,16 +175,15 @@ export function ConfigPanel({
   ) => Promise<void>;
   onOpenJobDetails: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
+  onOpenSourceTemplates: () => void;
+  onOpenAlerts: () => void;
   onRefresh: () => void;
   onBulkUnsetVpsRules: (request: VpsRulesBulkUnsetRequest) => Promise<VpsRulesDryRunResponse>;
   onBulkUpsertVpsRules: (request: VpsRulesBulkUpsertRequest) => Promise<VpsRulesDryRunResponse>;
   onDryRunVpsRules: (request: VpsRulesDryRunRequest) => Promise<VpsRulesDryRunResponse>;
-  onRenderTemplateRuntimeConfig: (clientId: string) => Promise<TemplateRuntimeConfigResponse>;
   onRenderRuntimeConfigPatchGenerator: (generatorId: string, request: { values: JsonValue }) => Promise<RuntimeConfigPatchGeneratorRenderResponse>;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
   onSelectSubpage: (subpage: string) => void;
-  onTestSourceTemplate: (templateId: string, request: SourceTemplateTestRequest) => Promise<SourceTemplateTestResponse>;
-  onUpdateSourceTemplate: (templateId: string, request: UpdateSourceTemplateRequest) => Promise<UpdateSourceTemplateResponse>;
   onUpsertRuntimeConfigPatchGenerator: (request: UpsertRuntimeConfigPatchGeneratorRequest) => Promise<RuntimeConfigPatchGeneratorRecord>;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
@@ -185,28 +194,6 @@ export function ConfigPanel({
   const rulesSelectorPrefill = activeSubpage.startsWith("rules:id:")
     ? `id:${decodeURIComponent(activeSubpage.slice("rules:id:".length))}`
     : null;
-
-  if (subpage === "templates") {
-    return (
-      <section className="workspace singleColumn">
-        <SourceTemplatePanel
-          activeSubpage="templates"
-          agents={agents}
-          assignments={sourceTemplateAssignments}
-          sourceStatus={sourceStatus}
-          onAssignTemplate={onAssignSourceTemplate}
-          onCloneTemplate={onCloneSourceTemplate}
-          onCreateTemplate={onCreateSourceTemplate}
-          onDiffTemplate={onDiffSourceTemplate}
-          onRenderTemplateRuntimeConfig={onRenderTemplateRuntimeConfig}
-          onResolveBulk={onResolveBulk}
-          onTestTemplate={onTestSourceTemplate}
-          onUpdateTemplate={onUpdateSourceTemplate}
-          templates={sourceTemplates}
-        />
-      </section>
-    );
-  }
 
   return (
     <section className="workspace singleColumn configWorkspace">
@@ -229,11 +216,13 @@ export function ConfigPanel({
         </div>
         {subpage === "overview" && (
           <ConfigOverview
+            agents={agents}
             sourceTemplateAssignments={sourceTemplateAssignments}
             sourceTemplates={sourceTemplates}
             sourceStatus={sourceStatus}
             runtimeConfigApplyStates={runtimeConfigApplyStates}
             runtimeConfigPatchGenerators={runtimeConfigPatchGenerators}
+            vpsRuleValues={vpsRuleValues}
             jobs={jobs}
             onSelectSubpage={onSelectSubpage}
           />
@@ -267,16 +256,28 @@ export function ConfigPanel({
             onLoadJobTargets={onLoadJobTargets}
             onOpenJobDetails={onOpenJobDetails}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+            onSubmitRuntimeConfigPatch={onSubmitRuntimeConfigPatch}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
             runAction={(action) => runPanelAction(setPending, setActionError, action)}
             setPrivilegeMaterial={setPrivilegeMaterial}
           />
         )}
+        {subpage === "templates" && (
+          <ConfigTemplateSummary
+            agents={agents}
+            assignments={sourceTemplateAssignments}
+            onOpenSourceTemplates={onOpenSourceTemplates}
+            sourceStatus={sourceStatus}
+            templates={sourceTemplates}
+          />
+        )}
         {subpage === "rules" && (
           <VpsRulesPanel
             agents={agents}
             initialSelectorExpression={rulesSelectorPrefill}
+            fleetAlertPolicies={fleetAlertPolicies}
+            onOpenAlerts={onOpenAlerts}
             onBulkUnset={onBulkUnsetVpsRules}
             onBulkUpsert={onBulkUpsertVpsRules}
             onDryRun={onDryRunVpsRules}
@@ -290,170 +291,620 @@ export function ConfigPanel({
 }
 
 function ConfigOverview({
+  agents,
   sourceTemplateAssignments,
   sourceTemplates,
   sourceStatus,
   runtimeConfigApplyStates,
   runtimeConfigPatchGenerators,
+  vpsRuleValues,
   jobs,
   onSelectSubpage,
 }: {
+  agents: AgentView[];
   sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
   sourceTemplates: SourceTemplateRecord[];
   sourceStatus: SourceStatusRecord[];
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
+  vpsRuleValues: VpsRuleValueRecord[];
   jobs: Array<{ id: string; command_type: string; status: string; created_at: string }>;
   onSelectSubpage: (subpage: string) => void;
 }) {
+  const agentNameById = new Map(agents.map((agent) => [agent.id, agent.display_name]));
   const configJobs = jobs
     .filter((job) => ["config_read", "runtime_config_sync"].includes(job.command_type))
     .slice(0, 5);
-  const sourceIssues = sourceStatus.filter((row) => row.status !== "ok").length;
+  const sourceRiskRows = sourceStatus.filter((row) => !isReadySourceStatus(row.status));
+  const sourceReadyRows = sourceStatus.length - sourceRiskRows.length;
   const pendingSyncs = runtimeConfigApplyStates.filter((state) => state.pending_status === "queued").length;
   const failedSyncs = runtimeConfigApplyStates.filter((state) => state.pending_status === "failed").length;
-  const appliedSyncs = runtimeConfigApplyStates.filter((state) => state.applied_content_hash).length;
-  const workflowCards = [
+  const appliedClientIds = new Set(
+    runtimeConfigApplyStates
+      .filter((state) => Boolean(state.applied_content_hash))
+      .map((state) => state.client_id),
+  );
+  const assignedClientIds = new Set(sourceTemplateAssignments.map((assignment) => assignment.client_id));
+  const missingApplyStates = Math.max(agents.length - appliedClientIds.size, 0);
+  const missingTemplateCoverage = Math.max(agents.length - assignedClientIds.size, 0);
+  const customTemplateCount = sourceTemplates.filter((template) => !template.built_in).length;
+  const invalidRuleRows = vpsRuleValues.filter((row) => row.state !== "ok").length;
+  const configHealth = configHealthStatus({
+    failedSyncs,
+    invalidRuleRows,
+    missingApplyStates,
+    missingTemplateCoverage,
+    pendingSyncs,
+    sourceRiskCount: sourceRiskRows.length,
+  });
+  const latestApplyStates = runtimeConfigApplyStates
+    .slice()
+    .sort((left, right) => configApplyStateTime(right).localeCompare(configApplyStateTime(left)))
+    .slice(0, 4);
+  const recentChanges = [
+    ...latestApplyStates.map((state) => ({
+      detail: runtimeConfigApplyStateSummary(state),
+      id: `apply:${state.client_id}`,
+      operation: "Apply state",
+      status: runtimeConfigApplyStatusLabel(state),
+      target: agentNameById.get(state.client_id) ?? state.client_id,
+      time: configApplyStateTime(state),
+      tone: runtimeConfigApplyTone(state),
+    })),
+    ...configJobs.map((job) => ({
+      detail: `Job ${shortId(job.id)} created ${formatTime(job.created_at)}`,
+      id: `job:${job.id}`,
+      operation: job.command_type,
+      status: job.status,
+      target: "runtime config",
+      time: job.created_at,
+      tone: configJobStatusTone(job.status),
+    })),
+  ]
+    .sort((left, right) => right.time.localeCompare(left.time))
+    .slice(0, 6);
+  const workflowLinks = [
     {
-      action: "Read VPS config",
-      detail: "Bootstrap-safe runtime view",
-      subpage: "single",
-      title: "VPS config",
-      value: "Read one VPS runtime config without exposing mutable bootstrap credentials.",
+      action: "Open Per-VPS",
+      detail: "Read one VPS redacted config and inspect apply-state evidence.",
+      subpage: "per_vps",
+      title: "Per-VPS",
     },
     {
-      action: "Apply incremental patch",
-      detail: "Selector-resolved VPS targets",
-      subpage: "bulk",
+      action: "Open Bulk patch",
+      detail: "Resolve target scope, render a patch, unlock privilege, and review apply.",
+      subpage: "bulk_patch",
       title: "Bulk patch",
-      value: "Apply one temporary incremental patch to many reviewed VPSs.",
     },
     {
-      action: "Manage patch generators",
-      detail: `${runtimeConfigPatchGenerators.length} saved generators`,
-      subpage: "bulk",
-      title: "Patch generators",
-      value: "Reusable generators that render temporary incremental patches.",
-    },
-    {
-      action: "Manage templates",
-      detail: `${sourceTemplates.length} templates / ${sourceTemplateAssignments.length} assignments`,
+      action: "Open Templates",
+      detail: "Review coverage and assignments; persistent authoring belongs to Source templates.",
       subpage: "templates",
       title: "Templates",
-      value: "Persistent runtime inputs assigned to VPSs; changes push immediately after confirmation.",
     },
     {
-      action: "Edit VPS rules",
-      detail: "Traffic reset, quotas, and selectors",
+      action: "Open Rules",
+      detail: "Dry-run traffic and accounting rule values before they affect policy context.",
       subpage: "rules",
-      title: "VPS Rules",
-      value: "Server-side per-VPS traffic rule values used by accounting and alert policies.",
-    },
-    {
-      action: "Inspect template status",
-      detail: `${sourceIssues} needing review`,
-      subpage: "templates",
-      title: "Template status",
-      value: "Current template selection, source kind, readiness, and evidence per VPS.",
-    },
-  ];
-  const termMap = [
-    {
-      term: "Patch",
-      meaning: "A temporary incremental TOML change applied to reviewed VPS targets.",
-    },
-    {
-      term: "Patch generators",
-      meaning: "Reusable generators that render temporary patches; they do not bind to VPSs.",
-    },
-    {
-      term: "Templates",
-      meaning: "Persistent runtime inputs assigned to VPSs; confirmed changes push immediately.",
-    },
-    {
-      term: "Command templates",
-      meaning: "Saved job payloads managed under Jobs and Schedules.",
-    },
-    {
-      term: "Rules",
-      meaning: "VPS Rules are per-VPS traffic values; Alert policies under Fleet evaluate them.",
-    },
-    {
-      term: "Suite config",
-      meaning: "Control-plane service config managed under System.",
+      title: "Rules",
     },
   ];
   return (
-    <>
-      <div className="metricGrid">
-        <div className="metricCard">
-          <strong>{runtimeConfigPatchGenerators.length}</strong>
-          <span>patch generators</span>
-        </div>
-        <div className="metricCard">
-          <strong>{sourceTemplates.length}</strong>
-          <span>templates</span>
-        </div>
-        <div className="metricCard">
-          <strong>{sourceTemplateAssignments.length}</strong>
-          <span>template assignments</span>
-        </div>
-        <div className="metricCard">
-          <strong>{sourceIssues}</strong>
-          <span>template checks needing review</span>
-        </div>
-        <div className="metricCard">
-          <strong>{pendingSyncs}</strong>
-          <span>runtime syncs pending apply</span>
-        </div>
-        <div className="metricCard">
-          <strong>{failedSyncs}</strong>
-          <span>runtime syncs failed apply</span>
-        </div>
-        <div className="metricCard">
-          <strong>{appliedSyncs}</strong>
-          <span>VPSs with applied runtime state</span>
-        </div>
-      </div>
-      <div className="configWorkflowGrid">
-        {workflowCards.map((card) => (
-          <button className="configWorkflowCard" key={card.subpage} onClick={() => onSelectSubpage(card.subpage)} type="button">
+    <div className="configOverviewStack">
+      <section className="configHealthPanel" aria-label="Config health posture">
+        <div className="configHealthHeader">
+          <div>
+            <h3>Config health</h3>
             <span>
-              <strong>{card.title}</strong>
-              <small>{card.detail}</small>
+              Runtime apply state, template coverage, source readiness, and
+              traffic/accounting rule risk.
             </span>
-            <em>{card.value}</em>
-            <b>{card.action}</b>
+          </div>
+          <ConsoleStatusBadge tone={configHealth.tone}>{configHealth.label}</ConsoleStatusBadge>
+        </div>
+        <div className="configHealthSummary">
+          <span>
+            <strong>{failedSyncs}</strong>
+            <small>failed runtime syncs</small>
+          </span>
+          <span>
+            <strong>{pendingSyncs}</strong>
+            <small>queued runtime syncs</small>
+          </span>
+          <span>
+            <strong>{sourceRiskRows.length}</strong>
+            <small>source checks needing review</small>
+          </span>
+          <span>
+            <strong>{invalidRuleRows}</strong>
+            <small>rule rows needing review</small>
+          </span>
+        </div>
+        <p>{configHealth.detail}</p>
+      </section>
+
+      <div className="configOverviewColumns">
+        <section className="configOverviewBlock" aria-label="Config drift summary">
+          <div className="configOverviewBlockHeader">
+            <h3>Drift summary</h3>
+            <ConsoleStatusBadge tone={sourceRiskRows.length || failedSyncs ? "warning" : "ok"}>
+              {sourceRiskRows.length + failedSyncs + pendingSyncs} open signals
+            </ConsoleStatusBadge>
+          </div>
+          <div className="configRiskList">
+            <ConfigOverviewRiskRow
+              detail={`${failedSyncs} failed, ${pendingSyncs} queued, ${missingApplyStates} without applied-state evidence`}
+              label="Runtime apply drift"
+              tone={failedSyncs ? "critical" : pendingSyncs || missingApplyStates ? "warning" : "ok"}
+              value={failedSyncs + pendingSyncs + missingApplyStates}
+            />
+            <ConfigOverviewRiskRow
+              detail={
+                sourceRiskRows[0]?.status_reason ??
+                `${sourceReadyRows} source checks are ready`
+              }
+              label="Source readiness drift"
+              tone={sourceRiskRows.length ? "warning" : "ok"}
+              value={sourceRiskRows.length}
+            />
+            <ConfigOverviewRiskRow
+              detail={`${invalidRuleRows} of ${vpsRuleValues.length} traffic/accounting rule rows are not ok`}
+              label="Rule validation drift"
+              tone={invalidRuleRows ? "warning" : "ok"}
+              value={invalidRuleRows}
+            />
+          </div>
+        </section>
+
+        <section className="configOverviewBlock" aria-label="Config template coverage">
+          <div className="configOverviewBlockHeader">
+            <h3>Template coverage</h3>
+            <ConsoleStatusBadge tone={missingTemplateCoverage ? "warning" : "ok"}>
+              {assignedClientIds.size}/{agents.length || 0} VPSs
+            </ConsoleStatusBadge>
+          </div>
+          <div className="configCoverageGrid">
+            <span>
+              <strong>{sourceTemplates.length}</strong>
+              <small>templates</small>
+            </span>
+            <span>
+              <strong>{customTemplateCount}</strong>
+              <small>custom templates</small>
+            </span>
+            <span>
+              <strong>{sourceTemplateAssignments.length}</strong>
+              <small>assignments</small>
+            </span>
+            <span>
+              <strong>{missingTemplateCoverage}</strong>
+              <small>VPSs without assignment evidence</small>
+            </span>
+          </div>
+          <p>
+            Persistent source-template authoring stays in Automation / Source
+            Templates; Config uses assignments and rendered runtime state for
+            operator review.
+          </p>
+        </section>
+
+        <section className="configOverviewBlock" aria-label="Config apply-state summary">
+          <div className="configOverviewBlockHeader">
+            <h3>Apply-state summary</h3>
+            <ConsoleStatusBadge tone={failedSyncs ? "critical" : pendingSyncs ? "warning" : "ok"}>
+              {appliedClientIds.size}/{agents.length || 0} applied
+            </ConsoleStatusBadge>
+          </div>
+          <div className="configCoverageGrid">
+            <span>
+              <strong>{appliedClientIds.size}</strong>
+              <small>Applied runtime state</small>
+            </span>
+            <span>
+              <strong>{pendingSyncs}</strong>
+              <small>Queued apply</small>
+            </span>
+            <span>
+              <strong>{failedSyncs}</strong>
+              <small>Failed apply</small>
+            </span>
+            <span>
+              <strong>{runtimeConfigPatchGenerators.length}</strong>
+              <small>Patch generators available</small>
+            </span>
+          </div>
+          <p>
+            Apply evidence is per VPS. Operators should inspect one target or
+            run a reviewed bulk patch instead of editing from the overview.
+          </p>
+        </section>
+      </div>
+
+      <section className="configWorkflowLinks" aria-label="Config overview workflow links">
+        {workflowLinks.map((link) => (
+          <button
+            className="configWorkflowLink"
+            key={link.subpage}
+            onClick={() => onSelectSubpage(link.subpage)}
+            type="button"
+          >
+            <strong>{link.title}</strong>
+            <small>{link.detail}</small>
+            <span>{link.action}</span>
           </button>
         ))}
-      </div>
-      <div className="configTermMap" aria-label="Runtime config terminology">
-        {termMap.map((item) => (
-          <span key={item.term} title={item.meaning}>
-            <strong>{item.term}</strong>
-            <small>{item.meaning}</small>
-          </span>
-        ))}
-      </div>
-      <div className="table hierarchyTable">
-        <div className="historyRow heading configJobGrid">
-          <span>Job</span>
-          <span>Operation</span>
-          <span>Status</span>
-          <span>Created</span>
+      </section>
+
+      <section className="configOverviewBlock" aria-label="Recent config changes">
+        <div className="configOverviewBlockHeader">
+          <h3>Recent changes</h3>
+          <span>{recentChanges.length} runtime config records</span>
         </div>
-        {configJobs.map((job) => (
-          <div className="historyRow configJobGrid" key={job.id}>
-            <span>{shortId(job.id)}</span>
-            <span>{job.command_type}</span>
-            <span>{job.status}</span>
-            <span>{formatTime(job.created_at)}</span>
+        <div className="table hierarchyTable">
+          <div className="historyRow heading configRecentGrid">
+            <span>Target</span>
+            <span>Operation</span>
+            <span>Status</span>
+            <span>Detail</span>
+            <span>Updated</span>
           </div>
-        ))}
-        {configJobs.length === 0 && <div className="emptyState compactEmpty">No recent config jobs.</div>}
-      </div>
-    </>
+          {recentChanges.map((change) => (
+            <div className="historyRow configRecentGrid" key={change.id}>
+              <span>{change.target}</span>
+              <span>{change.operation}</span>
+              <span><ConsoleStatusBadge tone={change.tone}>{change.status}</ConsoleStatusBadge></span>
+              <span>{change.detail}</span>
+              <span>{formatTime(change.time)}</span>
+            </div>
+          ))}
+          {recentChanges.length === 0 && <div className="emptyState compactEmpty">No recent config changes.</div>}
+        </div>
+      </section>
+    </div>
   );
+}
+
+function ConfigOverviewRiskRow({
+  detail,
+  label,
+  tone,
+  value,
+}: {
+  detail: string;
+  label: string;
+  tone: "critical" | "warning" | "ok" | "info" | "neutral";
+  value: number;
+}) {
+  return (
+    <div className="configRiskRow">
+      <span>
+        <strong>{label}</strong>
+        <small>{detail}</small>
+      </span>
+      <ConsoleStatusBadge tone={tone}>{value}</ConsoleStatusBadge>
+    </div>
+  );
+}
+
+type ConfigTemplateCoverageRow = {
+  assignedClients: number;
+  assignments: number;
+  attentionChecks: number;
+  defaultTemplate: string;
+  domain: string;
+  readyChecks: number;
+  templates: number;
+  updatedAt: string;
+};
+
+function ConfigTemplateSummary({
+  agents,
+  assignments,
+  onOpenSourceTemplates,
+  sourceStatus,
+  templates,
+}: {
+  agents: AgentView[];
+  assignments: SourceTemplateAssignmentRecord[];
+  onOpenSourceTemplates: () => void;
+  sourceStatus: SourceStatusRecord[];
+  templates: SourceTemplateRecord[];
+}) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const assignedClientIds = useMemo(
+    () => new Set(assignments.map((assignment) => assignment.client_id)),
+    [assignments],
+  );
+  const readyStatusCount = sourceStatus.filter((row) => isReadySourceStatus(row.status)).length;
+  const attentionStatusRows = sourceStatus.filter((row) => !isReadySourceStatus(row.status));
+  const customTemplateCount = templates.filter((template) => !template.built_in).length;
+  const coverageRows = useMemo<ConfigTemplateCoverageRow[]>(() => {
+    const domains = Array.from(
+      new Set([
+        ...templates.map((template) => template.domain),
+        ...assignments.map((assignment) => assignment.domain),
+        ...sourceStatus.map((row) => row.domain),
+      ]),
+    ).sort((left, right) => left.localeCompare(right));
+    return domains.map((domain) => {
+      const domainTemplates = templates.filter((template) => template.domain === domain);
+      const domainAssignments = assignments.filter((assignment) => assignment.domain === domain);
+      const domainStatus = sourceStatus.filter((row) => row.domain === domain);
+      const defaultTemplate =
+        domainTemplates.find((template) => template.is_default)?.name ??
+        domainTemplates[0]?.name ??
+        "No template";
+      const updatedAt = domainTemplates
+        .map((template) => template.updated_at)
+        .filter(Boolean)
+        .sort((left, right) => right.localeCompare(left))[0] ??
+        domainAssignments
+          .map((assignment) => assignment.assigned_at)
+          .filter(Boolean)
+          .sort((left, right) => right.localeCompare(left))[0] ??
+        "";
+      return {
+        assignedClients: new Set(domainAssignments.map((assignment) => assignment.client_id)).size,
+        assignments: domainAssignments.length,
+        attentionChecks: domainStatus.filter((row) => !isReadySourceStatus(row.status)).length,
+        defaultTemplate,
+        domain,
+        readyChecks: domainStatus.filter((row) => isReadySourceStatus(row.status)).length,
+        templates: domainTemplates.length,
+        updatedAt,
+      };
+    });
+  }, [assignments, sourceStatus, templates]);
+  const coverageColumns = useMemo<ConsoleDataGridColumn<ConfigTemplateCoverageRow>[]>(
+    () => [
+      {
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{row.domain}</strong>
+            <small>{row.defaultTemplate}</small>
+          </span>
+        ),
+        header: "Domain",
+        id: "domain",
+        minSize: 220,
+        searchValue: (row) => `${row.domain} ${row.defaultTemplate}`,
+        sortValue: (row) => row.domain,
+      },
+      {
+        cell: (row) => row.templates,
+        header: "Templates",
+        id: "templates",
+        sortValue: (row) => row.templates,
+      },
+      {
+        cell: (row) => `${row.assignedClients} VPSs / ${row.assignments} rows`,
+        header: "Assignments",
+        id: "assignments",
+        searchValue: (row) => `${row.assignedClients} ${row.assignments}`,
+        sortValue: (row) => row.assignedClients,
+      },
+      {
+        cell: (row) => (
+          <ConsoleStatusBadge tone={row.attentionChecks > 0 ? "warning" : "ok"}>
+            {row.readyChecks} ready / {row.attentionChecks} review
+          </ConsoleStatusBadge>
+        ),
+        header: "Readiness",
+        id: "readiness",
+        searchValue: (row) => `${row.readyChecks} ready ${row.attentionChecks} review`,
+        sortValue: (row) => row.attentionChecks,
+      },
+      {
+        cell: (row) => (row.updatedAt ? formatTime(row.updatedAt) : "No update evidence"),
+        header: "Latest update",
+        id: "updated",
+        searchValue: (row) => row.updatedAt,
+        sortValue: (row) => row.updatedAt,
+      },
+    ],
+    [],
+  );
+  return (
+    <div className="configOverviewStack configTemplateSummary" aria-label="Config template summary">
+      <section className="configHealthPanel" aria-label="Config template coverage summary">
+        <div className="configHealthHeader">
+          <div>
+            <h3>Template coverage</h3>
+            <span>
+              Read-only runtime template posture for Config. Persistent template
+              authoring lives in Automation / Source Templates.
+            </span>
+          </div>
+          <ConsoleStatusBadge tone={attentionStatusRows.length > 0 ? "warning" : "ok"}>
+            {attentionStatusRows.length > 0 ? "Needs review" : "Ready"}
+          </ConsoleStatusBadge>
+        </div>
+        <div className="configHealthSummary">
+          <span>
+            <strong>{templates.length}</strong>
+            <small>templates</small>
+          </span>
+          <span>
+            <strong>{customTemplateCount}</strong>
+            <small>custom</small>
+          </span>
+          <span>
+            <strong>{assignments.length}</strong>
+            <small>assignments</small>
+          </span>
+          <span>
+            <strong>{assignedClientIds.size}/{agents.length}</strong>
+            <small>VPSs covered</small>
+          </span>
+          <span>
+            <strong>{readyStatusCount}</strong>
+            <small>ready checks</small>
+          </span>
+          <span>
+            <strong>{attentionStatusRows.length}</strong>
+            <small>needs review</small>
+          </span>
+        </div>
+      </section>
+
+      <section className="configOverviewBlock configTemplateCanonical" aria-label="Source template canonical home">
+        <div className="configOverviewBlockHeader">
+          <h3>Canonical authoring</h3>
+          <span>Automation / Source Templates</span>
+        </div>
+        <p>
+          Config shows coverage and source readiness only. Create, clone, diff,
+          test, update, assign, and render persistent source templates in the
+          Automation workflow so emergency patches and persistent authoring stay
+          separate.
+        </p>
+        <button className="primaryAction" onClick={onOpenSourceTemplates} type="button">
+          <FileSliders size={16} />
+          Open Source Templates
+        </button>
+      </section>
+
+      <ConsoleDataGrid
+        columns={coverageColumns}
+        defaultPageSize={8}
+        empty={
+          <div className="emptyState compactEmpty">
+            No template domains are loaded.
+          </div>
+        }
+        expandOnRowClick
+        getRowId={(row) => row.domain}
+        itemLabel="template domains"
+        renderExpandedRow={(row) => (
+          <div className="consoleInlineDetailGrid">
+            <span>Domain</span>
+            <strong>{row.domain}</strong>
+            <span>Default template</span>
+            <strong>{row.defaultTemplate}</strong>
+            <span>Template records</span>
+            <strong>{row.templates}</strong>
+            <span>Assignment records</span>
+            <strong>{row.assignments}</strong>
+            <span>Readiness checks</span>
+            <strong>{row.readyChecks + row.attentionChecks}</strong>
+          </div>
+        )}
+        rows={coverageRows}
+        searchPlaceholder="Search template domains"
+        selectable={false}
+        storageKey="vpsman.config.templateSummary.domains"
+        title="Template domain coverage"
+      />
+
+      <section className="configOverviewBlock" aria-label="Config source readiness exceptions">
+        <div className="configOverviewBlockHeader">
+          <h3>Source readiness exceptions</h3>
+          <span>{attentionStatusRows.length} records need review</span>
+        </div>
+        <div className="configRiskList">
+          {attentionStatusRows.slice(0, 6).map((row) => (
+            <div className="configRiskRow" key={`${row.client_id}:${row.domain}`}>
+              <span>
+                <strong>{formatVpsName(row, vpsNameDisplayMode)} / {row.domain}</strong>
+                <small>{row.template_name} / {row.status_reason}</small>
+              </span>
+              <ConsoleStatusBadge tone="warning">{row.status}</ConsoleStatusBadge>
+            </div>
+          ))}
+          {attentionStatusRows.length === 0 && (
+            <div className="emptyState compactEmpty">
+              All loaded source checks are ready.
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function isReadySourceStatus(status: SourceStatusRecord["status"]): boolean {
+  return ["ok", "ready", "ready_on_demand", "selected"].includes(status);
+}
+
+function configHealthStatus({
+  failedSyncs,
+  invalidRuleRows,
+  missingApplyStates,
+  missingTemplateCoverage,
+  pendingSyncs,
+  sourceRiskCount,
+}: {
+  failedSyncs: number;
+  invalidRuleRows: number;
+  missingApplyStates: number;
+  missingTemplateCoverage: number;
+  pendingSyncs: number;
+  sourceRiskCount: number;
+}): { detail: string; label: string; tone: "critical" | "warning" | "ok" } {
+  if (failedSyncs > 0) {
+    return {
+      detail: `${failedSyncs} runtime syncs failed. Review the affected VPS before relying on generated config or traffic policy state.`,
+      label: "Action required",
+      tone: "critical",
+    };
+  }
+  if (pendingSyncs > 0 || sourceRiskCount > 0 || invalidRuleRows > 0 || missingApplyStates > 0 || missingTemplateCoverage > 0) {
+    return {
+      detail: `${pendingSyncs} syncs queued, ${sourceRiskCount} source checks need review, and ${missingTemplateCoverage} VPSs lack template assignment evidence.`,
+      label: "Needs review",
+      tone: "warning",
+    };
+  }
+  return {
+    detail: "All loaded VPSs have applied runtime state, source readiness, template assignment evidence, and valid rule rows.",
+    label: "Healthy",
+    tone: "ok",
+  };
+}
+
+function configApplyStateTime(state: RuntimeConfigApplyStateRecord): string {
+  return state.pending_updated_at ?? state.applied_at ?? state.updated_at;
+}
+
+function runtimeConfigApplyStatusLabel(state: RuntimeConfigApplyStateRecord): string {
+  if (state.pending_status === "failed") {
+    return "failed";
+  }
+  if (state.pending_status === "queued") {
+    return "queued";
+  }
+  if (state.applied_content_hash) {
+    return "applied";
+  }
+  return "missing";
+}
+
+function runtimeConfigApplyTone(
+  state: RuntimeConfigApplyStateRecord,
+): "critical" | "warning" | "ok" | "info" | "neutral" {
+  if (state.pending_status === "failed") {
+    return "critical";
+  }
+  if (state.pending_status === "queued") {
+    return "warning";
+  }
+  if (state.applied_content_hash) {
+    return "ok";
+  }
+  return "neutral";
+}
+
+function configJobStatusTone(status: string): "critical" | "warning" | "ok" | "info" | "neutral" {
+  if (status === "failed") {
+    return "critical";
+  }
+  if (status === "queued") {
+    return "warning";
+  }
+  if (status === "succeeded" || status === "completed") {
+    return "ok";
+  }
+  return "info";
 }
 
 function BulkConfigApply({
@@ -848,7 +1299,7 @@ function BulkConfigApply({
   return (
     <div className="configApplyGrid">
       <div className="compactForm">
-        <strong>Incremental patch</strong>
+        <ConfigHelpLabel help={CONFIG_HELP.incrementalPatch} label="Incremental patch" strong />
         <div className="segmentedControl" aria-label="Patch source">
           <button
             className={patchMode === "generator" ? "activeAction" : ""}
@@ -874,7 +1325,11 @@ function BulkConfigApply({
         </div>
         {patchMode === "generator" ? (
           <>
+            <small className="formHint" id="bulk-patch-generator-help">
+              {CONFIG_HELP.patchGenerator}
+            </small>
             <select
+              aria-describedby="bulk-patch-generator-help"
               aria-label="Patch generator"
               onChange={(event) => {
                 setGeneratorId(event.target.value);
@@ -898,7 +1353,19 @@ function BulkConfigApply({
               rows={7}
               value={valuesText}
             />
-            <button className="secondaryAction" disabled={pending || !selectedGenerator} onClick={renderPatch} type="button">
+            <button
+              className="secondaryAction"
+              disabled={pending || !selectedGenerator}
+              onClick={renderPatch}
+              title={
+                pending
+                  ? "Wait for the current config operation to finish before rendering a patch."
+                  : !selectedGenerator
+                    ? "Select a saved generator before rendering a patch."
+                    : "Render the saved generator into incremental TOML."
+              }
+              type="button"
+            >
               Render patch
             </button>
             {rendered && <textarea aria-label="Rendered bulk runtime config patch TOML" readOnly rows={8} value={rendered.toml} />}
@@ -917,7 +1384,7 @@ function BulkConfigApply({
         )}
       </div>
       <div className="compactForm">
-        <strong>Targets</strong>
+        <ConfigHelpLabel help={CONFIG_HELP.targetSelector} label="Targets" strong />
         <SearchExpressionInput
           agents={agents}
           ariaLabel="Bulk patch target expression"
@@ -933,7 +1400,19 @@ function BulkConfigApply({
           verification={selectorParse.error ? "invalid" : selectorExpression.trim() ? "valid" : "neutral"}
           verificationMessage={selectorParse.error ?? (preview ? `${preview.target_count}/${agents.length}` : selectorExpression.trim() ? undefined : "no selector")}
         />
-        <button className="secondaryAction" disabled={pending || !selectorExpression.trim()} onClick={previewTargets} type="button">
+        <button
+          className="secondaryAction"
+          disabled={pending || !selectorExpression.trim()}
+          onClick={previewTargets}
+          title={
+            pending
+              ? "Wait for the current config operation to finish before reviewing targets."
+              : !selectorExpression.trim()
+                ? "Enter a target selector expression before previewing matched VPSs."
+                : "Preview and freeze matched VPS targets for review."
+          }
+          type="button"
+        >
           Review targets
         </button>
         <div className="targetChipList">
@@ -946,7 +1425,7 @@ function BulkConfigApply({
         </div>
         <div className="inlinePrivilege">
           <label>
-            <span>Max timeout seconds</span>
+            <ConfigHelpLabel help={CONFIG_HELP.maxTimeout} label="Max timeout seconds" />
             <input
               aria-label="Bulk patch max timeout seconds"
               max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
@@ -969,10 +1448,22 @@ function BulkConfigApply({
             clearBulkConfigReview();
           }}
           privilegeMaterial={privilegeMaterial}
-          unlockRedirectLabel="Unlock runtime config privilege"
+          unlockRedirectLabel="Open Privilege Vault for runtime config"
         />
         {reviewStatus && <span className="formHint">{reviewStatus}</span>}
-        <button className="primaryAction" disabled={pending || !ready} onClick={() => void reviewApply()} type="button">
+        <button
+          className="primaryAction"
+          disabled={pending || !ready}
+          onClick={() => void reviewApply()}
+          title={
+            pending
+              ? "Wait for the current config operation to finish before opening review."
+              : !ready
+                ? "Render or paste a patch, preview targets, and unlock privilege material before review."
+                : "Open the reviewed runtime config apply prompt."
+          }
+          type="button"
+        >
           <FileSliders size={16} />
           Review apply
         </button>
@@ -1066,6 +1557,7 @@ function SingleVpsConfig({
   onLoadJobTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
+  onSubmitRuntimeConfigPatch,
   pending,
   privilegeMaterial,
   runAction,
@@ -1078,6 +1570,7 @@ function SingleVpsConfig({
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
+  onSubmitRuntimeConfigPatch: (request: RuntimeConfigPatchRequest) => Promise<RuntimeConfigPatchResponse>;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
@@ -1085,11 +1578,19 @@ function SingleVpsConfig({
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [clientId, setClientId] = useState(() => readSingleConfigClientId());
+  const clientIdRef = useRef(clientId);
   const [redactedToml, setRedactedToml] = useState("");
   const [baseHash, setBaseHash] = useState("");
+  const [overrideToml, setOverrideToml] = useState("");
+  const [overrideValidation, setOverrideValidation] =
+    useState<{ sections: string[]; payloadHashHex: string } | null>(null);
+  const [applySnapshot, setApplySnapshot] =
+    useState<SingleVpsConfigApplySnapshot | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [lastJobId, setLastJobId] = useState<string | null>(null);
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
+  const [reviewStatus, setReviewStatus] = useState<string | null>(null);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -1100,19 +1601,160 @@ function SingleVpsConfig({
     () => runtimeConfigApplyStates.find((state) => state.client_id === clientId) ?? null,
     [clientId, runtimeConfigApplyStates],
   );
+  const overrideReady = Boolean(singleTarget && privilegeMaterial && baseHash && overrideToml.trim());
 
-  useEffect(() => writeLocalString(CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY, clientId), [clientId]);
+  useEffect(() => {
+    clientIdRef.current = clientId;
+    writeLocalString(CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY, clientId);
+  }, [clientId]);
 
   function clearSingleConfigReview() {
     invalidateReviewGeneration();
+    setApplySnapshot(null);
+    setConfirmOpen(false);
+    setOverrideValidation(null);
+    setReviewStatus(null);
   }
 
   function selectClientId(value: string) {
+    if (value === clientIdRef.current) {
+      return;
+    }
+    clientIdRef.current = value;
     clearSingleConfigReview();
     setClientId(value);
     setRedactedToml("");
     setBaseHash("");
     setProgress(null);
+  }
+
+  async function validateOverride() {
+    const reviewGeneration = captureReviewGeneration();
+    const frozenTarget = singleTarget;
+    const frozenToml = overrideToml.trim();
+    const frozenBaseHash = baseHash;
+    setApplySnapshot(null);
+    setConfirmOpen(false);
+    setReviewStatus("Validating one-VPS override");
+    await runAction(async () => {
+      await waitForReviewRender();
+      if (!frozenTarget) {
+        throw new Error("Select one VPS before validating an override");
+      }
+      if (!frozenBaseHash) {
+        throw new Error("Read the current VPS config before validating an override");
+      }
+      if (!frozenToml) {
+        throw new Error("Paste a one-VPS runtime config override");
+      }
+      const sections = inferTomlSections(frozenToml);
+      const payloadHashHex = await sha256Hex(new TextEncoder().encode(frozenToml));
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
+      setOverrideValidation({ sections, payloadHashHex });
+      setReviewStatus(`Validated ${sections.join(", ")} against base ${shortId(frozenBaseHash)}`);
+    });
+  }
+
+  async function reviewOverrideApply() {
+    const reviewGeneration = captureReviewGeneration();
+    const frozenTarget = singleTarget;
+    const frozenPrivilegeMaterial = privilegeMaterial;
+    const frozenToml = overrideToml.trim();
+    const frozenBaseHash = baseHash;
+    const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
+    setApplySnapshot(null);
+    setConfirmOpen(false);
+    setReviewStatus("Preparing one-VPS override review");
+    await runAction(async () => {
+      await waitForReviewRender();
+      if (!frozenTarget || !frozenPrivilegeMaterial) {
+        throw new Error("Select one VPS and unlock privilege");
+      }
+      if (!frozenBaseHash) {
+        throw new Error("Read the current VPS config before applying an override");
+      }
+      if (!frozenToml) {
+        throw new Error("Paste a one-VPS runtime config override");
+      }
+      const selectorExpression = selectorExpressionForClientIds([frozenTarget.id]);
+      const patchSections = inferTomlSections(frozenToml);
+      const payloadHashHex = await sha256Hex(new TextEncoder().encode(frozenToml));
+      const privilegeAssertion = await buildPrivilegeAssertion({
+        intent: canonicalDbPrivilegeIntent({
+          action: "runtime_config.patch",
+          target: "runtime_config",
+          selectorExpression,
+          resolvedTargets: [frozenTarget.id],
+          confirmed: true,
+          payloadHash: payloadHashHex,
+        }),
+        privilegeMaterial: frozenPrivilegeMaterial,
+      });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
+      setOverrideValidation({ sections: patchSections, payloadHashHex });
+      setApplySnapshot({
+        clientId: frozenTarget.id,
+        selectorExpression,
+        target: frozenTarget,
+        toml: frozenToml,
+        baseHash: frozenBaseHash,
+        patchSections,
+        maxTimeoutSecs: boundedMaxTimeoutSecs,
+        privilegeAssertion,
+        payloadHashHex,
+      });
+      setConfirmOpen(true);
+      setReviewStatus(null);
+    });
+  }
+
+  async function applyOverride() {
+    setConfirmOpen(false);
+    await runAction(async () => {
+      const snapshot = applySnapshot;
+      if (!snapshot) {
+        throw new Error("One-VPS override snapshot is missing; review the apply again");
+      }
+      const response = await onSubmitRuntimeConfigPatch({
+        confirmed: true,
+        reason: `One-VPS override for ${snapshot.target.display_name}`,
+        selector_expression: snapshot.selectorExpression,
+        target_client_ids: [snapshot.clientId],
+        toml: snapshot.toml,
+        privilege_assertion: snapshot.privilegeAssertion,
+      });
+      const firstJobId = response.sync_job_ids[0] ?? crypto.randomUUID();
+      const initial = buildBulkJobProgress({
+        targetCount: response.target_count,
+        jobId: firstJobId,
+        targetRecords: [],
+        targets: [snapshot.target],
+        maxTimeoutSecs: snapshot.maxTimeoutSecs,
+      });
+      setProgress(initial);
+      const waited = await waitForBulkJobTargets(firstJobId, onLoadJobTargets, {
+        targetCount: 1,
+        onProgress: setProgress,
+        targets: [snapshot.target],
+        maxTimeoutSecs: snapshot.maxTimeoutSecs,
+      });
+      const outputs = await onLoadJobOutputs(firstJobId).catch(() => []);
+      setProgress(
+        buildBulkJobProgress({
+          targetCount: response.target_count,
+          jobId: firstJobId,
+          outputs,
+          targetRecords: waited.targets,
+          targets: [snapshot.target],
+          maxTimeoutSecs: snapshot.maxTimeoutSecs,
+        }),
+      );
+      setApplySnapshot(null);
+    });
   }
 
   async function readConfig() {
@@ -1185,7 +1827,7 @@ function SingleVpsConfig({
   return (
     <div className="configApplyGrid">
       <div className="compactForm">
-        <strong>VPS target</strong>
+        <ConfigHelpLabel help={CONFIG_HELP.targetSelector} label="VPS target" strong />
         <VpsCombobox
           agents={agents}
           ariaLabel="VPS config target"
@@ -1202,7 +1844,7 @@ function SingleVpsConfig({
         </div>
         <div className="inlinePrivilege">
           <label>
-            <span>Max timeout seconds</span>
+            <ConfigHelpLabel help={CONFIG_HELP.maxTimeout} label="Max timeout seconds" />
             <input
               aria-label="VPS config max timeout seconds"
               max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
@@ -1225,9 +1867,23 @@ function SingleVpsConfig({
             setPrivilegeMaterial(material);
           }}
           privilegeMaterial={privilegeMaterial}
-          unlockRedirectLabel="Unlock runtime config privilege"
+          unlockRedirectLabel="Open Privilege Vault for runtime config"
         />
-        <button className="secondaryAction" disabled={pending || !singleTarget || !privilegeMaterial} onClick={readConfig} type="button">
+        <button
+          className="secondaryAction"
+          disabled={pending || !singleTarget || !privilegeMaterial}
+          onClick={readConfig}
+          title={
+            pending
+              ? "Wait for the current config operation to finish before reading runtime config."
+              : !singleTarget
+                ? "Select one VPS before reading runtime config."
+                : !privilegeMaterial
+                  ? "Unlock privilege material before reading runtime config."
+                  : "Read redacted runtime config from the selected VPS."
+          }
+          type="button"
+        >
           <ServerCog size={16} />
           Read runtime config
         </button>
@@ -1238,7 +1894,7 @@ function SingleVpsConfig({
         )}
       </div>
       <div className="compactForm configTomlEditor">
-        <strong>Redacted runtime TOML</strong>
+        <ConfigHelpLabel help={CONFIG_HELP.redactedRuntimeToml} label="Redacted runtime TOML" strong />
         <span>{baseHash ? `base ${shortId(baseHash)} / immutable bootstrap view` : "Read one VPS config before viewing"}</span>
         <textarea
           aria-label="VPS redacted runtime config TOML"
@@ -1247,8 +1903,81 @@ function SingleVpsConfig({
           value={redactedToml}
         />
         <span className="formHint">
-          Runtime changes are made through Bulk patch or template assignment and then pushed as runtime config sync jobs.
+          This is the current redacted base used to review a one-VPS override.
         </span>
+      </div>
+      <div className="compactForm configTomlEditor configOverrideEditor">
+        <ConfigHelpLabel help={CONFIG_HELP.guardedOverride} label="Guarded one-VPS override" strong />
+        <span>
+          Applies one incremental TOML patch to the selected VPS only after the
+          current config base and privilege assertion are reviewed.
+        </span>
+        <div className="configOverrideSummary" aria-label="One-VPS config override guard">
+          <span>
+            <strong>Exact target</strong>
+            <small>{singleTarget ? formatVpsName(singleTarget, vpsNameDisplayMode) : "Select one VPS"}</small>
+          </span>
+          <span>
+            <strong title={CONFIG_HELP.currentBase}>Current base</strong>
+            <small>{baseHash ? shortId(baseHash) : "Read required"}</small>
+          </span>
+          <span>
+            <strong title={CONFIG_HELP.sections}>Sections</strong>
+            <small>{overrideValidation?.sections.join(", ") || "Validate required"}</small>
+          </span>
+          <span>
+            <strong title={CONFIG_HELP.payload}>Payload</strong>
+            <small>{overrideValidation?.payloadHashHex ? shortId(overrideValidation.payloadHashHex) : "Not reviewed"}</small>
+          </span>
+        </div>
+        <textarea
+          aria-label="One-VPS runtime config override TOML"
+          onChange={(event) => {
+            clearSingleConfigReview();
+            setOverrideToml(event.target.value);
+          }}
+          placeholder="[update]\n# one incremental override for this VPS"
+          rows={12}
+          value={overrideToml}
+        />
+        {reviewStatus && <span className="formHint">{reviewStatus}</span>}
+        <div className="configOverrideActions">
+          <button
+            className="secondaryAction"
+            disabled={pending || !singleTarget || !baseHash || !overrideToml.trim()}
+            onClick={() => void validateOverride()}
+            title={
+              pending
+                ? "Wait for the current config operation to finish before validating the override."
+                : !singleTarget
+                  ? "Select one VPS before validating the override."
+                  : !baseHash
+                    ? "Read the selected VPS runtime config before validating the override."
+                    : !overrideToml.trim()
+                      ? "Enter one incremental TOML override before validation."
+                      : "Validate the override against the current base config."
+            }
+            type="button"
+          >
+            Validate override
+          </button>
+          <button
+            className="primaryAction"
+            disabled={pending || !overrideReady}
+            onClick={() => void reviewOverrideApply()}
+            title={
+              pending
+                ? "Wait for the current config operation to finish before opening review."
+                : !overrideReady
+                  ? "Validate the override and unlock privilege material before review."
+                  : "Open the reviewed one-VPS config apply prompt."
+            }
+            type="button"
+          >
+            <FileSliders size={16} />
+            Review one-VPS apply
+          </button>
+        </div>
       </div>
       {progress && (
         <ExecutionResultPanel
@@ -1258,6 +1987,27 @@ function SingleVpsConfig({
           progress={progress}
         />
       )}
+      <ConfirmationPrompt
+        confirmLabel="Apply one-VPS override"
+        detail={`Apply one reviewed runtime config override to ${applySnapshot?.target.display_name ?? "one VPS"}.`}
+        expiresAtUnix={applySnapshot?.privilegeAssertion.expires_unix}
+        items={[
+          { label: "VPS", value: applySnapshot?.target.display_name ?? "-" },
+          { label: "Selector", value: applySnapshot?.selectorExpression ?? "-" },
+          { label: "Base hash", value: applySnapshot?.baseHash ? shortId(applySnapshot.baseHash) : "-" },
+          { label: "Sections", value: applySnapshot?.patchSections.join(", ") ?? "-" },
+          { label: "Payload", value: applySnapshot?.payloadHashHex ? shortId(applySnapshot.payloadHashHex) : "-" },
+          { label: "Timeout", value: `${applySnapshot?.maxTimeoutSecs ?? maxTimeoutSecs}s` },
+        ]}
+        onCancel={() => {
+          setConfirmOpen(false);
+          setApplySnapshot(null);
+        }}
+        onConfirm={() => void applyOverride()}
+        open={confirmOpen}
+        pending={pending}
+        title="Confirm one-VPS runtime config override"
+      />
     </div>
   );
 }
@@ -1270,20 +2020,78 @@ type VpsRulesReviewSnapshot = {
   preview: VpsRulesDryRunResponse;
 };
 
+type VpsRuleAlertPolicyImpact = {
+  conditionExpression: string;
+  enabled: boolean;
+  policyId: string;
+  policyName: string;
+  ruleId: string;
+  ruleName: string;
+  severity: string;
+};
+
+function vpsRuleEditKeys(valuesText: string, unsetKeys: string[]): string[] {
+  const keys = new Set<string>();
+  for (const rawLine of valuesText.split(/\r?\n/)) {
+    const key = rawLine.split("=")[0]?.trim();
+    if (VPS_RULE_KEYS.includes(key as (typeof VPS_RULE_KEYS)[number])) {
+      keys.add(key);
+    }
+  }
+  for (const key of unsetKeys) {
+    if (VPS_RULE_KEYS.includes(key as (typeof VPS_RULE_KEYS)[number])) {
+      keys.add(key);
+    }
+  }
+  return Array.from(keys).sort((left, right) => left.localeCompare(right));
+}
+
+function affectedAlertPolicyRules(
+  policies: FleetAlertPolicyRecord[],
+  keys: string[],
+): VpsRuleAlertPolicyImpact[] {
+  const matchKeys = keys.length > 0 ? keys : [...VPS_RULE_KEYS];
+  return policies
+    .flatMap((policy) =>
+      policy.rules
+        .filter((rule) =>
+          matchKeys.some((key) => rule.condition_expression.includes(key)),
+        )
+        .map((rule) => ({
+          conditionExpression: rule.condition_expression,
+          enabled: policy.enabled && rule.enabled,
+          policyId: policy.id,
+          policyName: policy.name,
+          ruleId: rule.id,
+          ruleName: rule.name,
+          severity: rule.severity,
+        })),
+    )
+    .sort(
+      (left, right) =>
+        left.policyName.localeCompare(right.policyName) ||
+        left.ruleName.localeCompare(right.ruleName),
+    );
+}
+
 function VpsRulesPanel({
   agents,
+  fleetAlertPolicies,
   initialSelectorExpression,
   onBulkUnset,
   onBulkUpsert,
   onDryRun,
+  onOpenAlerts,
   trafficAccounting,
   vpsRuleValues,
 }: {
   agents: AgentView[];
+  fleetAlertPolicies: FleetAlertPolicyRecord[];
   initialSelectorExpression: string | null;
   onBulkUnset: (request: VpsRulesBulkUnsetRequest) => Promise<VpsRulesDryRunResponse>;
   onBulkUpsert: (request: VpsRulesBulkUpsertRequest) => Promise<VpsRulesDryRunResponse>;
   onDryRun: (request: VpsRulesDryRunRequest) => Promise<VpsRulesDryRunResponse>;
+  onOpenAlerts: () => void;
   trafficAccounting: TrafficAccountingRecord[];
   vpsRuleValues: VpsRuleValueRecord[];
 }) {
@@ -1340,6 +2148,14 @@ function VpsRulesPanel({
     trafficAccounting
       .filter((row) => row.state === "incomplete" || row.incomplete_reasons.length > 0)
       .map((row) => row.client_id),
+  );
+  const editedRuleKeys = useMemo(
+    () => vpsRuleEditKeys(valuesText, unsetKeys),
+    [unsetKeys, valuesText],
+  );
+  const affectedPolicyRules = useMemo(
+    () => affectedAlertPolicyRules(fleetAlertPolicies, editedRuleKeys),
+    [editedRuleKeys, fleetAlertPolicies],
   );
   const columns = useMemo<ConsoleDataGridColumn<VpsRuleValueRecord>[]>(
     () => [
@@ -1678,7 +2494,44 @@ function VpsRulesPanel({
           <strong>Current selector</strong>
           <span className="monoValue">{selectorExpression || "unset"}</span>
         </span>
+        <span>
+          <strong>Affected policies</strong>
+          <span>{affectedPolicyRules.length}</span>
+        </span>
       </div>
+      <section className="consoleDetailPanel vpsRulesAlertImpact" aria-label="Affected alert policy context">
+        <div className="consoleDetailPanelHeader">
+          <span>
+            <strong>Affected alert policies</strong>
+            <small>
+              Policies whose rule conditions reference the current edit keys:
+              {" "}
+              <span className="monoValue">{editedRuleKeys.join(", ") || "traffic.*"}</span>
+            </small>
+          </span>
+          <button className="secondaryAction compactAction" onClick={onOpenAlerts} type="button">
+            Open Observability alerts
+          </button>
+        </div>
+        <div className="configRiskList">
+          {affectedPolicyRules.slice(0, 6).map((impact) => (
+            <div className="configRiskRow" key={`${impact.policyId}:${impact.ruleId}`}>
+              <span>
+                <strong>{impact.policyName} / {impact.ruleName}</strong>
+                <small className="monoValue">{impact.conditionExpression}</small>
+              </span>
+              <ConsoleStatusBadge tone={impact.enabled ? "warning" : "neutral"}>
+                {impact.severity}
+              </ConsoleStatusBadge>
+            </div>
+          ))}
+          {affectedPolicyRules.length === 0 && (
+            <div className="emptyState compactEmpty">
+              No loaded alert policy conditions reference the current rule keys.
+            </div>
+          )}
+        </div>
+      </section>
       <ConsoleDataGrid
         columns={columns}
         defaultPageSize={20}
@@ -1721,7 +2574,7 @@ function VpsRulesPanel({
       <section className="consoleDetailPanel">
         <div className="consoleDetailPanelHeader">
           <span>
-            <strong>Bulk rule editor</strong>
+            <ConfigHelpLabel help={CONFIG_HELP.vpsRules} label="Bulk rule editor" strong />
             <small>Dry-run matched VPSs and changed keys before applying.</small>
           </span>
         </div>
@@ -1729,7 +2582,7 @@ function VpsRulesPanel({
           <section className="vpsRulesEditorSection">
             <div className="sectionHeader compactHeader">
               <div>
-                <h4>Target VPS selector</h4>
+                <h4 title={CONFIG_HELP.ruleSelector}>Target VPS selector</h4>
                 <span className="monoValue">{selectorExpression || "unset"}</span>
               </div>
               <div className="consoleOperationsActions">
@@ -1737,6 +2590,11 @@ function VpsRulesPanel({
                   className="secondaryAction compactAction"
                   disabled={pending}
                   onClick={() => void dryRun("upsert")}
+                  title={
+                    pending
+                      ? "Wait for the current VPS rule operation to finish before dry-run."
+                      : "Preview matched VPSs before applying rule changes."
+                  }
                   type="button"
                 >
                   Dry-run matched VPSs
@@ -1765,13 +2623,18 @@ function VpsRulesPanel({
           <section className="vpsRulesEditorSection">
             <div className="sectionHeader compactHeader">
               <div>
-                <h4>Set values</h4>
-                <span>key=value lines</span>
+                <h4 title={CONFIG_HELP.ruleSetValues}>Set values</h4>
+                <span title={CONFIG_HELP.ruleSetValues}>key=value lines</span>
               </div>
               <button
                 className="secondaryAction compactAction"
                 disabled={pending}
                 onClick={() => void dryRun("upsert")}
+                title={
+                  pending
+                    ? "Wait for the current VPS rule operation to finish before dry-run."
+                    : "Dry-run typed VPS rule values before applying them."
+                }
                 type="button"
               >
                 Dry-run set values
@@ -1786,13 +2649,18 @@ function VpsRulesPanel({
           <section className="vpsRulesEditorSection">
             <div className="sectionHeader compactHeader">
               <div>
-                <h4>Unset values</h4>
-                <span>Explicit key checklist</span>
+                <h4 title={CONFIG_HELP.ruleUnsetValues}>Unset values</h4>
+                <span title={CONFIG_HELP.ruleUnsetValues}>Explicit key checklist</span>
               </div>
               <button
                 className="secondaryAction compactAction"
                 disabled={pending}
                 onClick={() => void dryRun("unset")}
+                title={
+                  pending
+                    ? "Wait for the current VPS rule operation to finish before dry-run."
+                    : "Dry-run explicit VPS rule removals before applying them."
+                }
                 type="button"
               >
                 Dry-run unset values
@@ -1833,7 +2701,7 @@ function VpsRulesPanel({
           },
           { label: "Matched VPSs", value: reviewSnapshot?.preview.matched_vps_count ?? 0 },
           { label: "Changed rows", value: reviewSnapshot?.preview.changed_row_count ?? 0 },
-          { label: "Preview hash", value: reviewSnapshot?.preview.preview_hash ?? "-" },
+          { label: "Preview hash", value: reviewSnapshot?.preview.preview_hash ?? "-", title: CONFIG_HELP.previewHash },
         ]}
         onCancel={() => setReviewSnapshot(null)}
         onConfirm={() => void applyReview()}
@@ -1842,6 +2710,42 @@ function VpsRulesPanel({
         title="Confirm VPS rule write"
       />
     </div>
+  );
+}
+
+function ConfigHelpLabel({
+  help,
+  label,
+  strong = false,
+}: {
+  help: string;
+  label: ReactNode;
+  strong?: boolean;
+}) {
+  const accessibleLabel = typeof label === "string" ? label : "Field";
+  const content = (
+    <>
+      <span>{label}</span>
+      <span
+        aria-label={`${accessibleLabel} help`}
+        className="fieldHelpIcon"
+        role="img"
+        tabIndex={0}
+        title={help}
+      >
+        ?
+      </span>
+    </>
+  );
+
+  return strong ? (
+    <strong className="configHelpLabel" title={help}>
+      {content}
+    </strong>
+  ) : (
+    <span className="configHelpLabel" title={help}>
+      {content}
+    </span>
   );
 }
 
@@ -1868,7 +2772,7 @@ function VpsRulesPreviewTable({
           <span>{preview.invalid_row_count}</span>
         </span>
         <span>
-          <strong>Preview hash</strong>
+          <strong title={CONFIG_HELP.previewHash}>Preview hash</strong>
           <span className="monoValue">{preview.preview_hash}</span>
         </span>
       </div>
@@ -1907,7 +2811,7 @@ function configTitle(subpage: string): string {
     case "bulk":
       return "Bulk patch";
     case "single":
-      return "VPS config";
+      return "Per-VPS config";
     case "rules":
       return "VPS Rules";
     case "templates":
@@ -1934,6 +2838,12 @@ function configSubtitle(subpage: string): string {
 
 function normalizeConfigSubpage(value: string): "overview" | "bulk" | "single" | "rules" | "templates" {
   const base = value.split(":")[0];
+  if (base === "per_vps") {
+    return "single";
+  }
+  if (base === "bulk_patch") {
+    return "bulk";
+  }
   if (base === "bulk" || base === "single" || base === "rules" || base === "templates") {
     return base;
   }

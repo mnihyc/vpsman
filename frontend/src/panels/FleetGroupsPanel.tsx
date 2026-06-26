@@ -45,7 +45,7 @@ type BulkTagMutationSnapshot = {
   tag: string;
 };
 
-export function TagsPanel({
+export function FleetGroupsPanel({
   activeSubpage,
   agents,
   error,
@@ -69,7 +69,12 @@ export function TagsPanel({
   onAssignTag: (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
   onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
   onCreateTag: (name: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
-  onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => Promise<TagMutationResponse>;
+  onDeleteTag: (
+    tag: string,
+    confirmed: boolean,
+    privilegeAssertion?: PrivilegeAssertion | null,
+    previewHash?: string | null,
+  ) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
   onOpenSchedules?: () => void;
   onRefresh: () => void;
@@ -82,21 +87,22 @@ export function TagsPanel({
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [lastMutation, setLastMutation] = useState<TagMutationResponse | null>(null);
+  const groupSummary = useMemo(() => buildGroupSummary(tags, agents), [agents, tags]);
   const status =
     actionError ??
     error ??
     (lastMutation
       ? `${lastMutation.action} ${lastMutation.tag}: ${lastMutation.changed_count} changed, ${lastMutation.skipped_count} skipped`
       : loading
-        ? "Refreshing tag state"
-        : `${tags.length} tags across ${agents.length} VPSs`);
+        ? "Refreshing group state"
+        : `${tags.length} groups across ${agents.length} VPSs`);
 
   return (
     <section className="workspace singleColumn">
       <div className="fleetPanel">
         <div className="sectionHeader">
           <div>
-            <h2>{subpage === "bulk" ? "Bulk tags" : subpage === "assignments" ? "Tag assignments" : "Tags"}</h2>
+            <h2>{subpage === "bulk" ? "Bulk groups" : subpage === "assignments" ? "Group assignments" : "Fleet groups"}</h2>
             <span>{status}</span>
           </div>
           <button className="secondaryAction" disabled={loading || pending} onClick={onRefresh} type="button">
@@ -104,6 +110,7 @@ export function TagsPanel({
             <span>Refresh</span>
           </button>
         </div>
+        <GroupSummaryStrip summary={groupSummary} />
         {subpage === "registry" && (
           <TagRegistry
             onCreateTag={onCreateTag}
@@ -151,6 +158,77 @@ export function TagsPanel({
   );
 }
 
+type GroupSummary = {
+  assignedVpsCount: number;
+  countryGroupCount: number;
+  customGroupCount: number;
+  offlineCount: number;
+  onlineCount: number;
+  providerGroupCount: number;
+  staleCount: number;
+  totalAssignments: number;
+};
+
+function GroupSummaryStrip({ summary }: { summary: GroupSummary }) {
+  return (
+    <div className="groupSummaryStrip" aria-label="Fleet group counts">
+      <span>
+        <strong>{summary.providerGroupCount}</strong>
+        <small>provider groups</small>
+      </span>
+      <span>
+        <strong>{summary.countryGroupCount}</strong>
+        <small>country groups</small>
+      </span>
+      <span>
+        <strong>{summary.customGroupCount}</strong>
+        <small>custom groups</small>
+      </span>
+      <span>
+        <strong>{summary.totalAssignments}</strong>
+        <small>tag assignments</small>
+      </span>
+      <span>
+        <strong>{summary.assignedVpsCount}</strong>
+        <small>assigned VPSs</small>
+      </span>
+      <span>
+        <strong>{summary.onlineCount}/{summary.staleCount}/{summary.offlineCount}</strong>
+        <small>online/stale/offline</small>
+      </span>
+    </div>
+  );
+}
+
+function buildGroupSummary(tags: TagView[], agents: AgentView[]): GroupSummary {
+  const assignedVpsIds = new Set<string>();
+  let totalAssignments = 0;
+  for (const tag of tags) {
+    totalAssignments += tag.clients.length;
+    for (const client of tag.clients) {
+      assignedVpsIds.add(client.id);
+    }
+  }
+  return {
+    assignedVpsCount: assignedVpsIds.size,
+    countryGroupCount: tags.filter((tag) => tag.name.toLowerCase().startsWith("country:")).length,
+    customGroupCount: tags.filter((tag) => !isProviderGroup(tag.name) && !isCountryGroup(tag.name)).length,
+    offlineCount: agents.filter((agent) => agent.status === "offline").length,
+    onlineCount: agents.filter((agent) => agent.status === "online").length,
+    providerGroupCount: tags.filter((tag) => tag.name.toLowerCase().startsWith("provider:")).length,
+    staleCount: agents.filter((agent) => agent.status === "stale").length,
+    totalAssignments,
+  };
+}
+
+function isCountryGroup(tag: string) {
+  return tag.toLowerCase().startsWith("country:");
+}
+
+function isProviderGroup(tag: string) {
+  return tag.toLowerCase().startsWith("provider:");
+}
+
 function TagRegistry({
   onCreateTag,
   onDeleteTag,
@@ -164,7 +242,12 @@ function TagRegistry({
   tags,
 }: {
   onCreateTag: (name: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
-  onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => Promise<TagMutationResponse>;
+  onDeleteTag: (
+    tag: string,
+    confirmed: boolean,
+    privilegeAssertion?: PrivilegeAssertion | null,
+    previewHash?: string | null,
+  ) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
   onOpenSchedules?: () => void;
   onUpdateTagOrder: (orderedTags: string[]) => Promise<TagView[]>;
@@ -221,7 +304,14 @@ function TagRegistry({
         null,
         targetIds,
       );
-      setLastMutation(await onDeleteTag(candidate.name, true, privilegeAssertion));
+      setLastMutation(
+        await onDeleteTag(
+          candidate.name,
+          true,
+          privilegeAssertion,
+          preview?.preview_hash ?? null,
+        ),
+      );
     });
   }
 
@@ -320,6 +410,11 @@ function TagRegistry({
         items={[
           { label: "Tag", value: deleteCandidate?.name ?? "-" },
           { label: "Assignments", value: String(deletePreview?.target_count ?? deleteCandidate?.clients.length ?? 0) },
+          {
+            label: "Preview hash",
+            title: deletePreview?.preview_hash,
+            value: deletePreview?.preview_hash ?? "-",
+          },
           { label: "Schedule target notices", value: <ScheduleImpactTable impacts={deletePreview?.schedule_impacts ?? []} onOpenSchedules={onOpenSchedules} /> },
         ]}
         onCancel={() => {
@@ -670,7 +765,12 @@ function BulkTagPanel({
 }: {
   agents: AgentView[];
   onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
-  onDeleteTag: (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => Promise<TagMutationResponse>;
+  onDeleteTag: (
+    tag: string,
+    confirmed: boolean,
+    privilegeAssertion?: PrivilegeAssertion | null,
+    previewHash?: string | null,
+  ) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
   onOpenSchedules?: () => void;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
@@ -775,7 +875,7 @@ function BulkTagPanel({
           null,
           targetIds,
         );
-        setLastMutation(await onDeleteTag(snapshot.tag, true, privilegeAssertion));
+        setLastMutation(await onDeleteTag(snapshot.tag, true, privilegeAssertion, snapshot.preview.preview_hash));
         setMutationSnapshot(null);
         return;
       }
@@ -795,6 +895,7 @@ function BulkTagPanel({
         await onBulkMutateTags({
           action: snapshot.action,
           confirmed: true,
+          preview_hash: snapshot.preview.preview_hash,
           privilege_assertion: privilegeAssertion,
           selector_expression: snapshot.selectorExpression,
           target_client_ids: targetIds,
@@ -874,10 +975,10 @@ function BulkTagPanel({
         )}
         <div className="privilegeGateBox">
           <ShieldCheck size={16} />
-          <span>{privilegeMaterial ? "Privilege unlocked" : "Unlock privilege to enable bulk tag mutation"}</span>
+          <span>{privilegeMaterial ? "Privilege unlocked" : "Open Privilege Vault to enable bulk tag mutation"}</span>
           {!privilegeMaterial && (
             <button className="secondaryAction compactAction" onClick={onOpenPrivilegeUnlock} type="button">
-              Unlock
+              Open Privilege Vault
             </button>
           )}
         </div>
@@ -909,6 +1010,26 @@ function BulkTagPanel({
             <span>{previewStatus ?? (preview ? `${preview.target_count} resolved / ${preview.changed_count} changes` : "Review before mutation")}</span>
           </div>
         </div>
+        {preview && (
+          <div className="bulkTagPreviewStats" aria-label="Bulk group preview evidence">
+            <span>
+              <strong>{preview.target_count}</strong>
+              <small>selected</small>
+            </span>
+            <span>
+              <strong>{preview.changed_count}</strong>
+              <small>changed</small>
+            </span>
+            <span>
+              <strong>{preview.schedule_impacts.length}</strong>
+              <small>schedule impacts</small>
+            </span>
+            <span>
+              <strong title={preview.preview_hash}>{preview.preview_hash}</strong>
+              <small>preview hash</small>
+            </span>
+          </div>
+        )}
         {previewAgents.length > 0 ? (
           <div className="targetChipList bulkTagPreview">
             {previewAgents.map((agent) => (
@@ -939,6 +1060,11 @@ function BulkTagPanel({
           },
           { label: "Targets", value: String(confirmationPreview?.target_count ?? 0) },
           { label: "Changed", value: String(confirmationPreview?.changed_count ?? 0) },
+          {
+            label: "Preview hash",
+            title: confirmationPreview?.preview_hash,
+            value: confirmationPreview?.preview_hash ?? "-",
+          },
           { label: "Schedule target notices", value: <ScheduleImpactTable impacts={confirmationPreview?.schedule_impacts ?? []} onOpenSchedules={onOpenSchedules} /> },
         ]}
         onCancel={() => {

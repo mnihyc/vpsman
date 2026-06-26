@@ -8,22 +8,22 @@ import {
   unlockPrivilegeFromTop,
 } from "./support/consoleNavigation";
 
-test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual System users/sessions screenshots only");
+test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual Access operators and Audit sessions screenshots only");
 test.setTimeout(90_000);
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
 });
 
-test("captures System users and sessions interaction loop", async ({ page }, testInfo) => {
-  const outputDir = testInfo.outputPath("system-users-sessions-visual-audit");
+test("captures Access operators and Audit sessions interaction loop", async ({ page }, testInfo) => {
+  const outputDir = testInfo.outputPath("access-operators-audit-sessions-visual-audit");
   mkdirSync(outputDir, { recursive: true });
   const manifest: Array<Record<string, unknown>> = [];
 
   await page.goto("/");
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "System", "Users");
-  await expect(page.getByRole("heading", { name: "System users", exact: true })).toBeVisible();
+  await openConsoleSubpage(page, "Access", "Operators");
+  await expect(page.getByRole("heading", { name: "Operators", exact: true })).toBeVisible();
   await expect(page.getByText("2 operator records")).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "users-initial");
 
@@ -66,8 +66,8 @@ test("captures System users and sessions interaction loop", async ({ page }, tes
   await capture(page, page.locator("main.content"), outputDir, manifest, "users-clear-totp-confirm");
   await activate(page.getByRole("button", { name: "Cancel" }));
 
-  await openConsoleSubpage(page, "System", "Sessions");
-  await expect(page.getByRole("heading", { name: "System sessions", exact: true })).toBeVisible();
+  await openConsoleSubpage(page, "Audit", "Sessions");
+  await expect(page.getByRole("heading", { name: "Session evidence", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Authentication history", exact: true })).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "sessions-initial");
 

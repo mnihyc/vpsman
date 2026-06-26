@@ -3,6 +3,95 @@
   min-width: 0;
 }
 
+.networkOverviewPanel {
+  overflow: hidden;
+}
+
+.networkWorkflowGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+  padding: 0 18px 18px;
+}
+
+.networkWorkflowButton {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  padding: 12px;
+  text-align: left;
+}
+
+.networkWorkflowButton:hover {
+  border-color: var(--primary);
+  background: var(--surface-subtle);
+}
+
+.networkWorkflowButton:focus-visible {
+  outline: 0;
+  box-shadow: var(--focus-ring);
+}
+
+.networkWorkflowIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  color: var(--primary-text);
+  background: var(--primary-soft);
+}
+
+.networkWorkflowText {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.networkWorkflowText strong {
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.networkWorkflowText small,
+.networkWorkflowMetric,
+.networkOverviewEvidence span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.networkWorkflowMetric {
+  justify-self: end;
+  white-space: nowrap;
+}
+
+.networkOverviewEvidence {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 18px 18px;
+}
+
+.networkOverviewEvidence > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-neutral);
+  padding: 12px;
+}
+
 .compactHeader {
   padding: 0;
   border-bottom: 0;
@@ -28,13 +117,17 @@
 
 .topologyGraphCanvas {
   display: block;
-  max-width: calc(100% - 36px);
-  width: calc(100% - 36px);
+  width: 100%;
   min-height: 260px;
-  margin: 0 18px 18px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--canvas);
+}
+
+.topologyGraphViewport {
+  position: relative;
+  min-width: 0;
+  margin: 0 18px 18px;
 }
 
 .topologyGraphControls {
@@ -43,6 +136,41 @@
   flex-wrap: wrap;
   gap: 12px;
   padding: 0 18px 16px;
+}
+
+.topologyGraphViewportControls {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.topologyGraphViewportControls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.topologyGraphViewportControls button:disabled {
+  cursor: not-allowed;
+  color: var(--placeholder);
+  background: var(--surface-neutral);
+}
+
+.topologyGraphViewportControls span {
+  min-width: 42px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: right;
 }
 
 .compactSearch {
@@ -120,6 +248,10 @@
   fill: var(--text);
   font-size: 12px;
   font-weight: 700;
+  paint-order: stroke;
+  stroke: var(--canvas);
+  stroke-linejoin: round;
+  stroke-width: 3px;
   text-anchor: middle;
 }
 
@@ -128,6 +260,7 @@
   fill: var(--muted);
   font-size: 11px;
   font-weight: 600;
+  stroke-width: 2px;
 }
 
 .topologyGraphNode circle {
@@ -154,6 +287,111 @@
 
 .topologyGraphNode.degraded circle {
   stroke: var(--warning-text);
+}
+
+.topologyGraphLegend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  gap: 8px;
+  min-width: 0;
+  padding: 0 18px 10px;
+}
+
+.topologyGraphLegend > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.topologyGraphLegend > div.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.topologyGraphLegend > div.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.topologyGraphLegend span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.topologyGraphLegend strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.topologyGraphLegend p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.topologyGraphCostModel {
+  margin: 0 18px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 9px 10px;
+}
+
+.topologyGraphCostModel[open] {
+  display: grid;
+  gap: 6px;
+}
+
+.topologyGraphCostModel summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.topologyGraphCostModel p,
+.topologyGraphCostModel small {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.topologyGraphMinimap {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 118px;
+  max-width: 32%;
+  height: 72px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  opacity: 0.95;
+  pointer-events: none;
+}
+
+.topologyGraphMinimap line {
+  stroke: var(--primary-border);
+  stroke-width: 7;
+}
+
+.topologyGraphMinimap circle {
+  fill: var(--primary);
+}
+
+.topologyGraphMinimap circle.attention {
+  fill: var(--warning-text);
 }
 
 .topologyGraphSummary {
@@ -254,6 +492,23 @@
   grid-column: 1 / -1;
 }
 
+.promotionDiffHeader {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.promotionDiffHeader strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.promotionDiffHeader span {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .promotionStageCard {
   align-content: start;
   display: grid;
@@ -272,6 +527,63 @@
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
+}
+
+.promotionStageHeader span {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.promotionAdvancedDrawer {
+  display: block;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0;
+}
+
+.promotionAdvancedDrawer[open] {
+  display: grid;
+  gap: 10px;
+  padding-bottom: 12px;
+}
+
+.promotionAdvancedDrawer > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  cursor: pointer;
+  padding: 12px;
+}
+
+.promotionAdvancedDrawer > summary > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.promotionAdvancedDrawer > summary strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.promotionAdvancedDrawer > summary small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.promotionAdvancedDrawer > .promotionStageCard {
+  margin: 0 12px;
+  border: 0;
+  background: transparent;
+  padding: 0;
 }
 
 .promotionGroupLabel {
@@ -368,6 +680,70 @@
   min-width: 0;
 }
 
+.topologyPlanWorkbenchRail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding: 12px 18px 14px;
+}
+
+.topologyPlanModelNote {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-top: 1px solid var(--border-subtle);
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-radius: 0;
+  background: var(--canvas);
+  padding: 12px 18px 14px;
+}
+
+.tunnelPlansRegistryPanel {
+  overflow: hidden;
+}
+
+.tunnelPlansRegistryPanel .gridToolbar,
+.tunnelPlansRegistryPanel .gridToolbarActions {
+  flex-wrap: wrap;
+}
+
+.tunnelPlansRegistryPanel .gridToolbar {
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+.tunnelPlansRegistryPanel .gridSearch {
+  flex: 1 1 360px;
+  max-width: none;
+  min-width: min(100%, 260px);
+}
+
+.tunnelPlansRegistryPanel .gridToolbarActions {
+  flex: 1 1 100%;
+  max-width: 100%;
+}
+
+.topologyPlanModelNote > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.topologyPlanModelNote > div > span {
+  overflow-wrap: anywhere;
+}
+
+.topologyPlanWorkflowPanel {
+  overflow: hidden;
+}
+
+.topologyPlanWorkflowPanel .consoleDataGrid {
+  border-top: 1px solid var(--border-subtle);
+}
+
 .topologyPlanComposer .formSectionNote,
 .topologyPlanComposer .primaryAction {
   grid-column: 1 / -1;
@@ -419,6 +795,275 @@
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
   gap: 12px;
   min-width: 0;
+}
+
+.topologyNetworkReviewStrip,
+.ospfCostReviewStrip,
+.topologyEvidenceTimeline,
+.promotionDiffStrip,
+.tunnelPlanWizardStrip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.topologyNetworkReviewStrip > div,
+.ospfCostReviewStrip > div,
+.topologyEvidenceTimeline > div,
+.promotionDiffStrip > div,
+.tunnelPlanWizardStrip > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.topologyNetworkReviewStrip > div.ready,
+.ospfCostReviewStrip > div.ready,
+.topologyEvidenceTimeline > div.ready,
+.promotionDiffStrip > div.ready,
+.tunnelPlanWizardStrip > div.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.topologyNetworkReviewStrip > div.attention,
+.ospfCostReviewStrip > div.attention,
+.topologyEvidenceTimeline > div.attention,
+.promotionDiffStrip > div.attention,
+.tunnelPlanWizardStrip > div.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.topologyNetworkReviewStrip span,
+.ospfCostReviewStrip span,
+.topologyEvidenceTimeline span,
+.promotionDiffStrip span,
+.tunnelPlanWizardStrip span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.topologyNetworkReviewStrip strong,
+.ospfCostReviewStrip strong,
+.topologyEvidenceTimeline strong,
+.promotionDiffStrip strong,
+.tunnelPlanWizardStrip strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.topologyNetworkReviewStrip > div.ready strong,
+.ospfCostReviewStrip > div.ready strong,
+.topologyEvidenceTimeline > div.ready strong,
+.promotionDiffStrip > div.ready strong,
+.tunnelPlanWizardStrip > div.ready strong {
+  color: var(--success-text);
+}
+
+.topologyNetworkReviewStrip > div.attention strong,
+.ospfCostReviewStrip > div.attention strong,
+.topologyEvidenceTimeline > div.attention strong,
+.promotionDiffStrip > div.attention strong,
+.tunnelPlanWizardStrip > div.attention strong {
+  color: var(--warning-text);
+}
+
+.topologyNetworkReviewStrip p,
+.ospfCostReviewStrip p,
+.topologyEvidenceTimeline p,
+.promotionDiffStrip p,
+.tunnelPlanWizardStrip p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.topologyNetworkTrendCharts {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.topologyNetworkTrendChartsHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 10px;
+}
+
+.topologyNetworkTrendChartsHeader > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.topologyNetworkTrendChartsHeader strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.topologyNetworkTrendChartsHeader span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.topologyNetworkTrendChartGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.topologyNetworkTrendChartCard {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.topologyNetworkTrendChartHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.topologyNetworkTrendChartHeader strong,
+.topologyNetworkTrendChartHeader span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topologyNetworkTrendChartHeader strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.topologyNetworkTrendChartHeader span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.topologyPlanComposer > .tunnelPlanWizardStrip,
+.topologyPreview > .generatedConfigReviewStrip {
+  padding: 0 18px 12px;
+}
+
+.topologyGeneratedConfigDisclosure {
+  margin: 0 18px 16px;
+}
+
+.generatedConfigSnippetGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 10px;
+  min-width: 0;
+  margin-top: 10px;
+}
+
+.generatedConfigSnippetGrid > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.generatedConfigSnippetGrid strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.generatedConfigSnippetGrid pre {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+}
+
+.topologyEvidenceTimeline {
+  padding: 0 18px 10px;
+}
+
+.topologyEvidenceTimeline > .topologyTimelineIntro {
+  grid-column: 1 / -1;
+  border-color: var(--border-subtle);
+  background: var(--surface);
+}
+
+.topologyEvidenceTimeline > .topologyTimelineIntro span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-transform: none;
+}
+
+.topologyEvidenceActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 18px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ospfSnippetGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.ospfSnippetGrid > div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ospfSnippetGrid strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.ospfSnippetGrid pre {
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--text);
+  padding: 10px;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
 }
 
 .topologyNetworkTestGroup {
@@ -537,6 +1182,14 @@
 
   .topologyGraphEdgeRow .latencyMiniCurve {
     min-width: 0;
+  }
+
+  .topologyNetworkTrendChartGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .topologyNetworkTrendChartsHeader {
+    display: grid;
   }
 
   .promotionWorkflow {

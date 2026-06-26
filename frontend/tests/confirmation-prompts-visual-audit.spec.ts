@@ -39,7 +39,7 @@ async function captureSystemConfigSavePrompt(
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "System", "Suite config");
   await page.getByLabel("API DB pool").fill("40");
-  await page.getByRole("button", { name: "Validate" }).click();
+  await page.getByRole("button", { name: "Validate" }).first().click();
   await expect(page.getByText(/Validation passed/)).toBeVisible();
   await activate(page.getByRole("button", { name: "Review save", exact: true }).first());
   await expect(page.getByLabel("Confirm suite config save")).toBeVisible();
@@ -52,7 +52,7 @@ async function captureTopologyLifecyclePrompt(
   outputDir: string,
   manifest: Array<Record<string, unknown>>,
 ) {
-  await openConsoleSubpage(page, "Topology", "Tunnel plans");
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
   const planGrid = page.getByLabel("Tunnel plans data grid");
   const savedPlanRow = planGrid
     .locator(".gridBody [role=row]", { hasText: "sfo-fra-gre" })
@@ -71,7 +71,7 @@ async function captureTopologySpeedTestPrompt(
   manifest: Array<Record<string, unknown>>,
 ) {
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Topology", "Tests");
+  await openConsoleSubpage(page, "Network", "Tests");
   await activate(page.getByRole("button", { name: "Review speed test" }));
   const prompt = page.getByLabel("Confirm speed test");
   await expect(prompt).toBeVisible();
@@ -86,7 +86,7 @@ async function captureTopologySavePrompt(
   outputDir: string,
   manifest: Array<Record<string, unknown>>,
 ) {
-  await openConsoleSubpage(page, "Topology", "Tunnel plans");
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
   const composer = page.locator(".scheduleComposer", {
     has: page.getByRole("heading", { name: "Create tunnel plan" }),
   });
@@ -112,7 +112,7 @@ async function captureServerJobCancelPrompt(
   outputDir: string,
   manifest: Array<Record<string, unknown>>,
 ) {
-  await openConsoleSubpage(page, "Jobs", "Server jobs");
+  await openConsoleSubpage(page, "System", "Maintenance");
   const cleanupPanel = page.locator(".fleetPanel").filter({
     has: page.getByRole("heading", { name: "Artifact cleanup" }),
   });
@@ -120,16 +120,17 @@ async function captureServerJobCancelPrompt(
   await cleanupPanel.getByRole("button", { name: "Preview" }).click();
   await expect(cleanupPanel.getByLabel("Preview hash")).toHaveValue(/^[0-9a-f]{64}$/);
   await cleanupPanel.getByRole("button", { name: "Queue cleanup" }).click();
-  await expect(page.getByLabel("Confirm artifact cleanup")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Confirm artifact cleanup" })).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "artifact-cleanup-confirm");
-  await activate(page.getByLabel("Confirm artifact cleanup").getByRole("button", { name: "Queue cleanup" }));
+  await page.getByLabel("Type DELETE to confirm artifact cleanup").fill("DELETE");
+  await activate(page.getByRole("region", { name: "Confirm artifact cleanup" }).getByRole("button", { name: "Queue cleanup" }));
 
   const serverJobsPanel = page.locator(".fleetPanel").filter({
-    has: page.getByRole("heading", { name: "Server jobs" }),
+    has: page.getByRole("heading", { name: "Maintenance jobs" }),
   });
   await expect(serverJobsPanel).toContainText("queued");
   await activate(serverJobsPanel.getByRole("button", { name: "Cancel" }).first());
-  await expect(page.getByLabel("Confirm server job cancellation")).toBeVisible();
+  await expect(page.getByLabel("Confirm maintenance job cancellation")).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "server-job-cancel-confirm");
   await activate(page.getByRole("button", { name: "Close confirmation" }));
 }

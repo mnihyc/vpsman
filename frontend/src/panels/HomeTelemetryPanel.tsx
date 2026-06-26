@@ -31,7 +31,7 @@ import type {
 } from "../types";
 import { formatCompactTime } from "../utils";
 
-type DashboardPanelProps = {
+type HomeTelemetryPanelProps = {
   agents: AgentView[];
   error: string | null;
   loading: boolean;
@@ -79,7 +79,7 @@ const refreshIntervalOptions: Array<{ value: DashboardRefreshIntervalSecs; label
   { label: "1m", value: 60 },
 ];
 
-export function DashboardPanel({
+export function HomeTelemetryPanel({
   agents,
   error,
   loading,
@@ -90,7 +90,7 @@ export function DashboardPanel({
   overview,
   preferences,
   window,
-}: DashboardPanelProps) {
+}: HomeTelemetryPanelProps) {
   const [drawer, setDrawer] = useState<DrawerState | null>(null);
   const summary = overview?.summary;
   const operations = overview?.operations;
@@ -146,14 +146,14 @@ export function DashboardPanel({
             <span>
               {overview
                 ? `${selectedScopeLabel}; grouped by ${selectedGroupLabel}; ${formatCompactTime(overview.time_range.start_at)} - ${formatCompactTime(overview.time_range.end_at)}`
-                : "Loading dashboard overview"}
+                : "Loading home telemetry"}
             </span>
           </div>
           <div className="dashboardToolbarActions">
             <label className="dashboardToolbarSelect">
               <span>Refresh</span>
               <select
-                aria-label="Dashboard refresh interval"
+                aria-label="Home refresh interval"
                 onChange={(event) =>
                   onPreferencesChange({
                     refreshIntervalSecs: Number(event.target.value) as DashboardRefreshIntervalSecs,
@@ -168,7 +168,7 @@ export function DashboardPanel({
                 ))}
               </select>
             </label>
-            <div className="timeRangeTabs" aria-label="Dashboard time range">
+            <div className="timeRangeTabs" aria-label="Home time range">
               {windowOptions.map((option) => (
                 <button
                   aria-pressed={!customRangeActive && window === option}
@@ -188,11 +188,11 @@ export function DashboardPanel({
           </div>
         </div>
 
-        <div className="dashboardControlBar" aria-label="Dashboard statistic controls">
+        <div className="dashboardControlBar" aria-label="Home statistic controls">
           <label>
             <span>Group by</span>
             <select
-              aria-label="Dashboard group by"
+              aria-label="Home group by"
               onChange={(event) => onPreferencesChange({ groupBy: event.target.value as DashboardPreferences["groupBy"] })}
               value={preferences.groupBy}
             >
@@ -206,7 +206,7 @@ export function DashboardPanel({
           <label>
             <span>Points</span>
             <select
-              aria-label="Dashboard chart point density"
+              aria-label="Home chart point density"
               onChange={(event) =>
                 onPreferencesChange({
                   pointDensity: event.target.value as DashboardPointDensity,
@@ -224,7 +224,7 @@ export function DashboardPanel({
           <label>
             <span>Scope</span>
             <select
-              aria-label="Dashboard scope kind"
+              aria-label="Home scope kind"
               onChange={(event) =>
                 onPreferencesChange({
                   scopeKind: event.target.value as DashboardScopeKind,
@@ -247,7 +247,7 @@ export function DashboardPanel({
               <span>Scope value</span>
               <VpsCombobox
                 agents={agents}
-                ariaLabel="Dashboard scope value"
+                ariaLabel="Home scope value"
                 onChange={(value) => onPreferencesChange({ scopeValue: value })}
                 placeholder="Search scoped VPS"
                 value={preferences.scopeValue}
@@ -257,7 +257,7 @@ export function DashboardPanel({
             <label>
               <span>Scope value</span>
               <select
-                aria-label="Dashboard scope value"
+                aria-label="Home scope value"
                 onChange={(event) => onPreferencesChange({ scopeValue: event.target.value })}
                 value={preferences.scopeValue}
               >
@@ -273,7 +273,7 @@ export function DashboardPanel({
           <label>
             <span>Start</span>
             <input
-              aria-label="Dashboard start date"
+              aria-label="Home start date"
               onChange={(event) => onPreferencesChange({ startAt: dateTimeLocalToIso(event.target.value) })}
               type="datetime-local"
               value={isoToDateTimeLocal(preferences.startAt)}
@@ -282,7 +282,7 @@ export function DashboardPanel({
           <label>
             <span>End</span>
             <input
-              aria-label="Dashboard end date"
+              aria-label="Home end date"
               onChange={(event) => onPreferencesChange({ endAt: dateTimeLocalToIso(event.target.value) })}
               type="datetime-local"
               value={isoToDateTimeLocal(preferences.endAt)}
@@ -313,7 +313,7 @@ export function DashboardPanel({
             )}
           </div>
           <div className="dashboardCardGrid operationalGrid">
-            <DashboardMetricCard
+            <HomeMetricCard
               detail={`${summary?.online ?? 0} online, ${summary?.stale ?? 0} stale`}
               icon={<Server size={19} />}
               label="Fleet health"
@@ -333,7 +333,7 @@ export function DashboardPanel({
               tone={summary && summary.stale > 0 ? "warning" : "ok"}
               value={summary ? `${onlinePercent(summary.online, summary.total)}%` : "No data"}
             />
-            <DashboardMetricCard
+            <HomeMetricCard
               detail={`${operations?.critical_alerts ?? 0} critical, ${operations?.warning_alerts ?? 0} warning`}
               icon={<AlertTriangle size={19} />}
               label="Active alerts"
@@ -352,7 +352,7 @@ export function DashboardPanel({
               tone={operations && operations.critical_alerts > 0 ? "critical" : operations && operations.warning_alerts > 0 ? "warning" : "ok"}
               value={String(operations?.active_alerts ?? 0)}
             />
-            <DashboardMetricCard
+            <HomeMetricCard
               detail="Pending or running"
               icon={<Activity size={19} />}
               label="Running jobs"
@@ -367,7 +367,7 @@ export function DashboardPanel({
               tone={operations && operations.running_jobs > 0 ? "info" : "ok"}
               value={String(operations?.running_jobs ?? 0)}
             />
-            <DashboardMetricCard
+            <HomeMetricCard
               detail={`${operations?.backup_pending ?? 0} pending, ${operations?.backup_completed ?? 0} complete`}
               icon={<DatabaseBackup size={19} />}
               label="Backup posture"
@@ -386,14 +386,14 @@ export function DashboardPanel({
               tone={operations && operations.backup_failed > 0 ? "critical" : "ok"}
               value={`${operations?.backup_completed ?? 0}/${(operations?.backup_completed ?? 0) + (operations?.backup_pending ?? 0)}`}
             />
-            <DashboardMetricCard
+            <HomeMetricCard
               detail={`${formatBitsPerSecond(network?.rx_bps ?? 0)} in / ${formatBitsPerSecond(network?.tx_bps ?? 0)} out`}
               icon={<Network size={19} />}
               label="Network activity"
               onClick={() =>
                 openDrawer({
                   description: "Latest observed per-interface receive and transmit rate totals.",
-                  drilldown: { label: "Inspect topology evidence", query: null, subpage: "evidence", view: "Topology" },
+                  drilldown: { label: "Inspect network evidence", query: null, subpage: "evidence", view: "Network" },
                   metrics: [
                     { label: "Inbound", tone: "info", value: formatBitsPerSecond(network?.rx_bps ?? 0) },
                     { label: "Outbound", tone: "info", value: formatBitsPerSecond(network?.tx_bps ?? 0) },
@@ -439,7 +439,7 @@ export function DashboardPanel({
                   className="secondaryAction compactAction"
                   onClick={() =>
                     openDrawer({
-                      description: `Top ${resourceCurve?.top_limit ?? 0} VPS for ${resourceMetricTitle(preferences.resourceMetric)} over the selected dashboard range.`,
+                      description: `Top ${resourceCurve?.top_limit ?? 0} VPS for ${resourceMetricTitle(preferences.resourceMetric)} over the selected time range.`,
                       metrics: [
                         { label: "Sampled VPS", value: String(resourceCurve?.sampled_clients ?? 0) },
                         { label: "Excluded VPS", value: String(resourceCurve?.excluded_clients ?? 0) },
@@ -504,7 +504,7 @@ export function DashboardPanel({
             <div>
               <h2 id="dashboard-network-title">Network</h2>
               <span>
-                Speed shows telemetry rates; Traffic shows byte volume over the selected dashboard range.
+                Speed shows telemetry rates; Traffic shows byte volume over the selected time range.
               </span>
             </div>
             <div className="dashboardHeaderTools">
@@ -558,8 +558,8 @@ export function DashboardPanel({
                       className="secondaryAction compactAction"
                       onClick={() =>
                         openDrawer({
-                          description: "Aggregated receive and transmit speed history for the selected dashboard range.",
-                          drilldown: { label: "Open topology evidence", query: null, subpage: "evidence", view: "Topology" },
+                          description: "Aggregated receive and transmit speed history for the selected time range.",
+                          drilldown: { label: "Open network evidence", query: null, subpage: "evidence", view: "Network" },
                           metrics: [
                             { label: "Inbound now", tone: "info", value: formatBitsPerSecond(network?.rx_bps ?? 0) },
                             { label: "Outbound now", tone: "info", value: formatBitsPerSecond(network?.tx_bps ?? 0) },
@@ -615,8 +615,8 @@ export function DashboardPanel({
                       className="secondaryAction compactAction"
                       onClick={() =>
                         openDrawer({
-                          description: "Traffic curves plot accumulated bytes by VPS for the selected dashboard time gap.",
-                          drilldown: { label: "Open topology evidence", query: null, subpage: "evidence", view: "Topology" },
+                          description: "Traffic curves plot accumulated bytes by VPS for the selected time range.",
+                          drilldown: { label: "Open network evidence", query: null, subpage: "evidence", view: "Network" },
                           metrics: [
                             { label: "Rank metric", value: trafficSortLabel(preferences.trafficSort) },
                             { label: "Traffic VPS", value: String(trafficClients.length) },
@@ -783,7 +783,7 @@ export function DashboardPanel({
   );
 }
 
-function DashboardMetricCard({
+function HomeMetricCard({
   detail,
   icon,
   label,

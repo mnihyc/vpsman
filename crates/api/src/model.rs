@@ -812,6 +812,8 @@ pub(crate) struct BulkTagMutationRequest {
     #[serde(default)]
     pub(crate) confirmed: bool,
     #[serde(default)]
+    pub(crate) preview_hash: Option<String>,
+    #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
@@ -820,6 +822,8 @@ pub(crate) struct BulkTagMutationRequest {
 pub(crate) struct DeleteTagRequest {
     #[serde(default)]
     pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) preview_hash: Option<String>,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
@@ -834,6 +838,7 @@ pub(crate) struct UpdateTagOrderRequest {
 pub(crate) struct TagMutationResponse {
     pub(crate) tag: String,
     pub(crate) action: String,
+    pub(crate) preview_hash: String,
     pub(crate) target_count: usize,
     pub(crate) changed_count: usize,
     pub(crate) skipped_count: usize,
@@ -926,7 +931,7 @@ pub(crate) enum WsEvent {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateJobRequest {
     #[serde(default)]
@@ -977,6 +982,57 @@ pub(crate) struct CreateJobResponse {
     pub(crate) max_job_timeout_secs: u64,
     pub(crate) control_deadline_extra_secs: u64,
     pub(crate) target_counts: CreateJobTargetCounts,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct JobApprovalView {
+    pub(crate) id: Uuid,
+    pub(crate) status: String,
+    pub(crate) job_id: Uuid,
+    pub(crate) command_type: String,
+    pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
+    pub(crate) target_count: usize,
+    pub(crate) privileged: bool,
+    pub(crate) destructive: bool,
+    pub(crate) force_unprivileged: bool,
+    pub(crate) max_timeout_secs: u64,
+    pub(crate) payload_hash: String,
+    pub(crate) request_fingerprint: String,
+    pub(crate) requester_id: Option<Uuid>,
+    pub(crate) requester_username: String,
+    pub(crate) requester_role: String,
+    pub(crate) requested_at: String,
+    pub(crate) request_reason: Option<String>,
+    pub(crate) risk: String,
+    pub(crate) decision_by: Option<Uuid>,
+    pub(crate) decision_username: Option<String>,
+    pub(crate) decision_reason: Option<String>,
+    pub(crate) decided_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateJobApprovalRequest {
+    #[serde(default)]
+    pub(crate) approval_id: Option<Uuid>,
+    pub(crate) job: CreateJobRequest,
+    pub(crate) reason: Option<String>,
+    pub(crate) risk: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DecideJobApprovalRequest {
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JobApprovalDecisionResponse {
+    pub(crate) approval: JobApprovalView,
+    pub(crate) job: Option<CreateJobResponse>,
 }
 
 #[derive(Debug, Deserialize)]

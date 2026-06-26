@@ -432,23 +432,122 @@ export async function installTransferJobApiMock(page: Page) {
         symlink_target: null,
         uid: 0,
       });
-      const statusForClient = async (clientId: string) => {
-        const path = operation.path ?? "/";
-        if (operation.type === "file_list_dir") {
+      const entry = (path: string, kind: "directory" | "file", size = 0) => ({
+        ...baseMetadata(path, kind, size),
+        name: path === "/" ? "/" : path.slice(path.lastIndexOf("/") + 1),
+      });
+      const directoryListing = (path: string) => {
+        if (path === "/empty") {
+          return {
+            entries: [],
+            limit: 250,
+            metadata: baseMetadata(path, "directory"),
+            offset: 0,
+            path,
+            status: "completed",
+            total_entries: 0,
+            truncated: false,
+            type: "file_list_dir",
+          };
+        }
+        if (path === "/large") {
+          return {
+            entries: Array.from({ length: 250 }, (_, index) =>
+              entry(`/large/log-${String(index).padStart(3, "0")}.txt`, "file", 1024 + index),
+            ),
+            limit: 250,
+            metadata: baseMetadata(path, "directory"),
+            offset: 0,
+            path,
+            scan_cap_entries: 320,
+            scanned_entries: 320,
+            status: "completed",
+            total_entries: 320,
+            truncated: true,
+            truncated_by_scan_cap: true,
+            type: "file_list_dir",
+            visible_entries_scanned: 320,
+          };
+        }
+        if (path === "/root/blocked") {
+          return {
+            entries: [],
+            limit: 250,
+            metadata: { ...baseMetadata(path, "directory"), mode: 0o700 },
+            offset: 0,
+            path,
+            reason: "agent user cannot traverse this root-owned directory",
+            status: "permission_denied",
+            total_entries: 0,
+            truncated: false,
+            type: "file_list_dir",
+          };
+        }
+        if (path === "/var/log/bird") {
           return {
             entries: [
-              { ...baseMetadata("/etc", "directory"), name: "etc" },
-              { ...baseMetadata("/var", "directory"), name: "var" },
-              { ...baseMetadata("/etc/app.conf", "file", 16), name: "app.conf" },
+              entry("/var/log/bird/bird.log", "file", 1048576),
+              entry("/var/log/bird/bird.log.1", "file", 524288),
             ],
             limit: 250,
             metadata: baseMetadata(path, "directory"),
             offset: 0,
             path,
-            total_entries: 3,
+            status: "completed",
+            total_entries: 2,
             truncated: false,
             type: "file_list_dir",
           };
+        }
+        if (path === "/var/log") {
+          return {
+            entries: [entry("/var/log/bird", "directory"), entry("/var/log/nginx", "directory")],
+            limit: 250,
+            metadata: baseMetadata(path, "directory"),
+            offset: 0,
+            path,
+            status: "completed",
+            total_entries: 2,
+            truncated: false,
+            type: "file_list_dir",
+          };
+        }
+        if (path === "/var") {
+          return {
+            entries: [entry("/var/log", "directory"), entry("/var/lib", "directory")],
+            limit: 250,
+            metadata: baseMetadata(path, "directory"),
+            offset: 0,
+            path,
+            status: "completed",
+            total_entries: 2,
+            truncated: false,
+            type: "file_list_dir",
+          };
+        }
+        return {
+          entries: [
+            entry("/etc", "directory"),
+            entry("/var", "directory"),
+            entry("/empty", "directory"),
+            entry("/large", "directory"),
+            entry("/root", "directory"),
+            entry("/etc/app.conf", "file", 16),
+          ],
+          limit: 250,
+          metadata: baseMetadata(path, "directory"),
+          offset: 0,
+          path,
+          status: "completed",
+          total_entries: 6,
+          truncated: false,
+          type: "file_list_dir",
+        };
+      };
+      const statusForClient = async (clientId: string) => {
+        const path = operation.path ?? "/";
+        if (operation.type === "file_list_dir") {
+          return directoryListing(path);
         }
         if (operation.type === "file_read_text") {
           const text = "server shared\nlisten=443\n";
@@ -607,6 +706,8 @@ export async function installTransferJobApiMock(page: Page) {
           const requests = (window as unknown as { __vpsmanTestRequests?: { fileBrowserJobs?: unknown[]; jobs: unknown[] } }).__vpsmanTestRequests;
           requests?.jobs.push(body);
           requests?.fileBrowserJobs?.push({
+            confirmed: (body as { confirmed?: boolean } | null)?.confirmed,
+            destructive: (body as { destructive?: boolean } | null)?.destructive,
             operation: {
               expected_sha256_hex: (body as { operation?: { expected_sha256_hex?: string } } | null)?.operation?.expected_sha256_hex,
               create: (body as { operation?: { create?: boolean } } | null)?.operation?.create,
@@ -620,6 +721,7 @@ export async function installTransferJobApiMock(page: Page) {
               size_bytes: (body as { operation?: { size_bytes?: number } } | null)?.operation?.size_bytes,
               type: operationType,
             },
+            privileged: (body as { privileged?: boolean } | null)?.privileged,
             selector_expression: (body as { selector_expression?: string } | null)?.selector_expression,
           });
           const jobId = nextTransferJobId();

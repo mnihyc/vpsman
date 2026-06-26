@@ -104,7 +104,7 @@ export function ArtifactUploadForm({
         {!handoffConfirmationOpen && (
           <button className="secondaryAction" disabled={pending || !artifactBackupId} onClick={onHandoffSubmit} type="button">
             <Upload size={17} />
-            Review promotion
+            Review handoff
           </button>
         )}
       </div>

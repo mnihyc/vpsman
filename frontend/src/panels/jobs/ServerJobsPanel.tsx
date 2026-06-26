@@ -83,7 +83,15 @@ export function ServerJobsPanel({
     previewStatus ??
     (preview
       ? `${preview.matched_count} artifacts, ${formatBytes(preview.matched_bytes)}`
-      : `${jobs.length} server jobs`);
+      : `${jobs.length} maintenance jobs`);
+  const previewExpressionMatches = preview?.expression === expression;
+  const previewDomainsMatch = preview ? sameDomains(preview.domains, domains) : false;
+  const cleanupReady = Boolean(preview && previewExpressionMatches && previewDomainsMatch);
+  const previewReadiness = cleanupReady
+    ? "Reviewed dry-run snapshot is ready to queue."
+    : preview
+      ? "Preview is stale; rerun dry-run before queueing."
+      : "Dry-run preview required before queueing.";
   const serverJobColumns = useMemo<ConsoleDataGridColumn<ServerJobRecord>[]>(
     () => [
       {
@@ -152,7 +160,7 @@ export function ServerJobsPanel({
               event.stopPropagation();
               reviewCancelJob(job);
             }}
-            title="Cancel queued server job"
+            title="Cancel queued maintenance job"
             type="button"
           >
             <XCircle size={14} />
@@ -202,6 +210,10 @@ export function ServerJobsPanel({
 
   async function queueCleanup() {
     if (!preview) {
+      return;
+    }
+    if (!cleanupReady) {
+      setError("Run a fresh cleanup preview before queueing.");
       return;
     }
     setPending(true);
@@ -279,9 +291,19 @@ export function ServerJobsPanel({
           </button>
         </div>
         <div className="historyRetentionGrid">
+          <div className="cleanupPreviewContract">
+            <ShieldCheck size={18} />
+            <div>
+              <strong>Dry-run gate</strong>
+              <span>
+                Cleanup can only be queued from a reviewed preview hash. Editing the expression or domains invalidates the preview.
+              </span>
+            </div>
+          </div>
           <label className="artifactCleanupExpression">
-            <span>Expression</span>
+            <span>Filter expression</span>
             <textarea
+              aria-label="Expression"
               rows={3}
               title="Expression filters artifacts inside the selected domains. Domain authority is selected separately."
               value={expression}
@@ -295,7 +317,7 @@ export function ServerJobsPanel({
             />
           </label>
           <div className="artifactCleanupDomains">
-            <span>Domains</span>
+            <span>Authority domains</span>
             <div className="artifactDomainOptions">
               {artifactCleanupDomainOptions.map((option) => (
                 <label
@@ -320,8 +342,8 @@ export function ServerJobsPanel({
             <span>Preview hash</span>
             <input
               readOnly
-              title={preview?.preview_hash ?? "Preview before queueing cleanup"}
-              value={preview?.preview_hash ?? ""}
+              title={preview?.preview_hash ?? "Run Preview to create a reviewed cleanup snapshot"}
+              value={preview?.preview_hash ?? "Preview required before queueing"}
             />
           </label>
           <label>
@@ -336,10 +358,40 @@ export function ServerJobsPanel({
               value={
                 preview
                   ? `${preview.matched_count} / ${formatBytes(preview.matched_bytes)}`
-                  : ""
+                  : "Preview required before queueing"
               }
             />
           </label>
+          <div className="cleanupReadinessSummary" aria-label="Artifact cleanup readiness">
+            <div className={cleanupReady ? "ready" : "attention"}>
+              <span>Queue status</span>
+              <strong>{cleanupReady ? "Ready after dry run" : "Blocked until dry run"}</strong>
+              <p>{previewReadiness}</p>
+            </div>
+            <div>
+              <span>Scope</span>
+              <strong>{formatCleanupDomains(preview?.domains ?? domains) || "No domains selected"}</strong>
+              <p>{domains.length} selected cleanup domains. Domains define the object-store authority boundary.</p>
+            </div>
+            <div className={preview ? "attention" : undefined}>
+              <span>Deletion impact</span>
+              <strong>
+                {preview
+                  ? `${preview.matched_count} artifacts / ${formatBytes(preview.matched_bytes)}`
+                  : "Unknown until preview"}
+              </strong>
+              <p>
+                {preview
+                  ? "Queueing will request irreversible deletion for the reviewed matched set."
+                  : "Run Preview to calculate object count and total size before queueing."}
+              </p>
+            </div>
+            <div>
+              <span>Retention detail</span>
+              <strong>Age and retention rule not reported</strong>
+              <p>The current cleanup preview API returns count, size, domains, expression, and hash only.</p>
+            </div>
+          </div>
           <div className="retentionActions">
             <button
               className="secondaryAction"
@@ -352,10 +404,14 @@ export function ServerJobsPanel({
               Preview
             </button>
             <button
-              className="dangerAction"
-              disabled={pending || !preview}
+              className="secondaryAction dangerAction"
+              disabled={pending || !cleanupReady}
               onClick={() => setConfirmOpen(true)}
-              title="Queue cleanup using the reviewed expression, domains, and preview hash"
+              title={
+                cleanupReady
+                  ? "Queue cleanup using the reviewed expression, domains, and preview hash"
+                  : "Run a fresh dry-run preview before queueing cleanup"
+              }
               type="button"
             >
               <Trash2 size={16} />
@@ -365,9 +421,10 @@ export function ServerJobsPanel({
         </div>
         <ConfirmationPrompt
           confirmLabel="Queue cleanup"
-          detail="Queues a server-side cleanup job for the reviewed artifact set."
+          detail="Queues a control-plane cleanup job for the reviewed artifact set. This operation is destructive and uses the dry-run preview hash as its guardrail."
           error={error}
           items={[
+            { label: "Dry-run gate", value: cleanupReady ? "Fresh preview hash verified" : "Preview required" },
             { label: "Expression", value: preview?.expression ?? expression },
             {
               label: "Domains",
@@ -377,12 +434,20 @@ export function ServerJobsPanel({
             { label: "Artifacts", value: preview?.matched_count ?? 0 },
             {
               label: "Bytes",
-              value: preview ? formatBytes(preview.matched_bytes) : "0B",
+              value: preview ? formatBytes(preview.matched_bytes) : "0 B",
             },
             {
               label: "Preview hash",
               title: preview?.preview_hash,
               value: preview ? shortHash(preview.preview_hash) : "-",
+            },
+            {
+              label: "Retention detail",
+              value: "Age and retention rule not reported by preview API",
+            },
+            {
+              label: "Effect",
+              value: "Irreversible object deletion request",
             },
           ]}
           onCancel={() => setConfirmOpen(false)}
@@ -391,13 +456,15 @@ export function ServerJobsPanel({
           pending={pending}
           title="Confirm artifact cleanup"
           tone="danger"
+          typedConfirmationLabel="Type DELETE to confirm artifact cleanup"
+          typedConfirmationText="DELETE"
         />
       </div>
       <div className="fleetPanel">
         <div className="sectionHeader">
           <div>
-            <h2>Server jobs</h2>
-            <span>{jobs.length} retained control-plane jobs</span>
+            <h2>Maintenance jobs</h2>
+            <span>{jobs.length} retained control-plane maintenance jobs</span>
           </div>
           <button
             className="secondaryAction"
@@ -418,8 +485,8 @@ export function ServerJobsPanel({
           empty={
             <div className="emptyState">
               <Trash2 size={22} />
-              <strong>No server jobs</strong>
-              <span>Artifact cleanup jobs appear here.</span>
+              <strong>No maintenance jobs</strong>
+              <span>Artifact cleanup jobs appear here after queueing.</span>
             </div>
           }
           renderExpandedRow={(job) => (
@@ -441,14 +508,14 @@ export function ServerJobsPanel({
             </div>
           )}
           rows={jobs}
-          searchPlaceholder="Search server jobs"
+          searchPlaceholder="Search maintenance jobs"
           selectable={false}
           storageKey="vpsman.jobs.serverJobs"
-          title="Server job records"
+          title="Maintenance job records"
         />
         <ConfirmationPrompt
           confirmLabel="Cancel job"
-          detail="Cancel the reviewed queued server-side maintenance job."
+          detail="Cancel the reviewed queued control-plane maintenance job."
           error={error}
           items={[
             { label: "Job", value: cancelJobSnapshot ? shortId(cancelJobSnapshot.id) : "-" },
@@ -463,7 +530,7 @@ export function ServerJobsPanel({
           }}
           open={cancelJobSnapshot !== null}
           pending={pendingJobId !== null}
-          title="Confirm server job cancellation"
+          title="Confirm maintenance job cancellation"
           tone="danger"
         />
       </div>
@@ -482,15 +549,24 @@ function formatCleanupDomains(domains: string[]): string {
   return domains.map((domain) => labels.get(domain as ArtifactCleanupDomain) ?? domain).join(", ");
 }
 
+function sameDomains(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  const normalizedLeft = [...left].sort();
+  const normalizedRight = [...right].sort();
+  return normalizedLeft.every((value, index) => value === normalizedRight[index]);
+}
+
 function formatBytes(value: number): string {
   if (value >= 1024 * 1024 * 1024) {
-    return `${(value / (1024 * 1024 * 1024)).toFixed(1)}G`;
+    return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
   }
   if (value >= 1024 * 1024) {
-    return `${(value / (1024 * 1024)).toFixed(1)}M`;
+    return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
   }
   if (value >= 1024) {
-    return `${(value / 1024).toFixed(1)}K`;
+    return `${(value / 1024).toFixed(1)} KiB`;
   }
-  return `${value}B`;
+  return `${value} B`;
 }

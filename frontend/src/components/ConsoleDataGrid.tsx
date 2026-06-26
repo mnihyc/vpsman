@@ -600,6 +600,11 @@ export function ConsoleDataGrid<T>({
             className="iconButton"
             disabled={!table.getCanPreviousPage()}
             onClick={() => table.previousPage()}
+            title={
+              table.getCanPreviousPage()
+                ? `Go to the previous ${title} page.`
+                : `Already on the first ${title} page.`
+            }
             type="button"
           >
             <ChevronLeft size={16} />
@@ -612,6 +617,11 @@ export function ConsoleDataGrid<T>({
             className="iconButton"
             disabled={!table.getCanNextPage()}
             onClick={() => table.nextPage()}
+            title={
+              table.getCanNextPage()
+                ? `Go to the next ${title} page.`
+                : `Already on the last ${title} page.`
+            }
             type="button"
           >
             <ChevronRight size={16} />

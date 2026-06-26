@@ -12,20 +12,24 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
 
   await page.goto("/");
   await page.evaluate(() => localStorage.setItem("vpsman.multiFile.selectorExpression", "provider:alpha && country:US"));
-  await openConsoleSubpage(page, "Jobs", "Multi files");
-  await expect(page.getByRole("heading", { name: "Multi files" })).toBeVisible();
+  await openConsoleSubpage(page, "Remote Operations", "Bulk files");
+  await expect(page.getByRole("heading", { name: "Bulk files" })).toBeVisible();
   await unlockPrivilege(page);
 
   await activate(page.getByRole("button", { name: "Review targets" }));
   await expect(page.getByText("24 VPSs resolved")).toBeVisible();
+  const preflight = page.getByLabel("Bulk file preflight checks");
+  await expect(preflight).toContainText("24 resolved (22 online, 1 stale, 1 unavailable)");
+  await expect(preflight).toContainText("384.0 MiB");
+  await expect(preflight).toContainText("Stale agents may still reject with a command-version mismatch");
   await expect(page.getByText("edge-us-00", { exact: true })).toBeVisible();
   await expect(page.locator(".bulkSummaryClients span").filter({ hasText: "edge-us-00" }).first()).toHaveAttribute("title", "a0000000-target-00");
 
   await page.getByLabel("Bulk file path").fill("/var/log/nginx/");
   await activate(page.getByRole("button", { name: "Review download" }));
-  await expect(page.getByText("Confirm multi-file operation")).toBeVisible();
-  await expect(page.getByText("Download /var/log/nginx on 24 VPSs")).toBeVisible();
-  await activate(page.getByRole("button", { name: "Run bulk action" }));
+  await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
+  await expect(page.getByText("Download files on 24 VPSs")).toBeVisible();
+  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
   const resultPanel = page.getByLabel("Execution result");
   await expect(resultPanel).toBeVisible();
   await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "targets" }).filter({ hasText: "24/24" })).toBeVisible();
@@ -38,6 +42,9 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "stale" })).toBeVisible();
   await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "offline" })).toBeVisible();
   await expect(resultPanel.getByText("partial success: 22 completed, 2 unsuccessful", { exact: true })).toBeVisible();
+  const postRun = page.getByLabel("Bulk file post-run handling");
+  await expect(postRun).toContainText("2 VPSs retry candidates");
+  await expect(postRun).toContainText("22 downloadable");
   const reasons = resultPanel.getByLabel("Failed target reasons");
   await expect(reasons.getByText("stale: file download command_version mismatch", { exact: true })).toBeVisible();
   await expect(reasons.getByText("agent offline", { exact: true })).toBeVisible();
@@ -64,13 +71,13 @@ test("bulk download summary distinguishes file and hierarchy discrepancies", asy
 
   await page.goto("/");
   await page.evaluate(() => localStorage.setItem("vpsman.multiFile.selectorExpression", "provider:alpha && country:US"));
-  await openConsoleSubpage(page, "Jobs", "Multi files");
+  await openConsoleSubpage(page, "Remote Operations", "Bulk files");
   await unlockPrivilege(page);
   await activate(page.getByRole("button", { name: "Review targets" }));
 
   await page.getByLabel("Bulk file path").fill("/same-tree-diff/");
   await activate(page.getByRole("button", { name: "Review download" }));
-  await activate(page.getByRole("button", { name: "Run bulk action" }));
+  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
   await expect(page.getByText("File content differs")).toBeVisible();
   await expect(page.getByText("Hierarchy matches; differing files are listed by relative path.")).toBeVisible();
   await expect(page.getByText("sites/app.conf")).toBeVisible();
@@ -79,7 +86,7 @@ test("bulk download summary distinguishes file and hierarchy discrepancies", asy
 
   await page.getByLabel("Bulk file path").fill("/different-tree/");
   await activate(page.getByRole("button", { name: "Review download" }));
-  await activate(page.getByRole("button", { name: "Run bulk action" }));
+  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
   await expect(page.getByText("Hierarchy differs")).toBeVisible();
   await expect(page.getByText("Directory tree is not consistent across targets; compare hierarchy before trusting content hashes.")).toBeVisible();
   await expect(page.getByText("File content differs")).toHaveCount(0);
@@ -292,7 +299,7 @@ async function installTwentyFourTargetFileMock(page: Page) {
 
 async function unlockPrivilege(page: Page) {
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Jobs", "Multi files");
+  await openConsoleSubpage(page, "Remote Operations", "Bulk files");
 }
 
 async function collectLayoutSignals(page: Page, scopeSelector: string) {

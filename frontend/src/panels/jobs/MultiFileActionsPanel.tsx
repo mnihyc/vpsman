@@ -8,12 +8,15 @@ import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useRe
 import {
   buildBulkJobProgress,
   createJobTargetCount,
+  formatTargetAvailabilitySummary,
   targetPreflightUnavailable,
+  targetAvailabilityCounts,
   waitForBulkJobTargets,
   type BulkJobProgress,
 } from "../../bulkJobProgress";
 import {
   FILE_BROWSER_ARCHIVE_LIMIT_BYTES,
+  FILE_BROWSER_TEXT_LIMIT_BYTES,
   buildWriteTextOperation,
   buildUploadOperation,
   decodedText,
@@ -60,6 +63,14 @@ type PendingBulkConfirmation = {
   targets: AgentView[];
 };
 
+type BulkPreflightItem = {
+  detail: string;
+  key: string;
+  label: string;
+  tone?: "attention" | "neutral" | "ready";
+  value: string;
+};
+
 export function MultiFileActionsPanel({
   agents,
   initialPath,
@@ -93,12 +104,13 @@ export function MultiFileActionsPanel({
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
   const [selectorExpression, setSelectorExpression] = useState(() => localStorage.getItem(SELECTOR_STORAGE_KEY) ?? "id:*");
-  const [path, setPath] = useState(initialPath || "/");
+  const [path, setPath] = useState(() => initialBulkPath(initialPath));
   const [newPath, setNewPath] = useState("");
   const [mode, setMode] = useState("0644");
   const [content, setContent] = useState("");
   const [recursive, setRecursive] = useState(false);
   const [followSymlinks, setFollowSymlinks] = useState(false);
+  const [allowRootPath, setAllowRootPath] = useState(false);
   const [overwrite, setOverwrite] = useState(false);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadMode, setUploadMode] = useState("0644");
@@ -205,7 +217,7 @@ export function MultiFileActionsPanel({
   }
 
   async function buildOperation(): Promise<JobOperation> {
-    const normalizedPath = normalizeAbsolutePath(path);
+    const normalizedPath = normalizeBulkOperationPath(action, path, allowRootPath);
     if (action === "download_files") {
       return {
         type: "file_download",
@@ -363,17 +375,51 @@ export function MultiFileActionsPanel({
   }
 
   const visibleProgress = bulkProgress ?? lastRunProgress;
+  const pathValidationError = bulkPathValidationError(action, path, allowRootPath);
+  const pathReadiness = bulkPathReadiness(action, path, allowRootPath);
+  const preflightItems = buildBulkPreflightItems({
+    action,
+    agentCount: agents.length,
+    content,
+    followSymlinks,
+    localMatches,
+    overwrite,
+    pathReadiness,
+    pathValidationError,
+    policy,
+    preview,
+    privilegeMaterial,
+    recursive,
+    uploadExistingPolicy,
+    uploadFile,
+    uploadOwnershipPolicy,
+  });
+  const postRunItems = buildBulkPostRunItems({
+    lastOperation,
+    lastRunProgress,
+    lastSummary,
+  });
+  const reviewButtonTitle = bulkReviewButtonTitle({
+    action,
+    allowRootPath,
+    loading,
+    path,
+    pending,
+    privilegeMaterial,
+  });
   const executionSummary = visibleProgress
     ? `Job ${shortId(visibleProgress.jobId)}`
     : lastSummary.length > 0
       ? `${lastSummary.length} grouped outcomes`
-      : "Run a bulk action to aggregate output";
+      : preview
+        ? `${vpsCountLabel(preview.target_count)} previewed; ${pathReadiness.shortLabel}`
+        : pathReadiness.shortLabel;
 
   return (
     <div className="fleetPanel multiFilePanel">
       <div className="sectionHeader">
         <div>
-          <h2>Multi files</h2>
+          <h2>Bulk file operations</h2>
           <span>{summary}</span>
         </div>
         <button className="secondaryAction" disabled={pending || loading} onClick={() => void refreshPreview()} type="button">
@@ -399,7 +445,7 @@ export function MultiFileActionsPanel({
             <span>Targets</span>
             <SearchExpressionInput
               agents={agents}
-              ariaLabel="Multi file target selector"
+              ariaLabel="Bulk file target selector"
               onChange={(value) => {
                 setSelectorExpression(value);
                 setPreview(null);
@@ -435,12 +481,33 @@ export function MultiFileActionsPanel({
                 aria-label={action === "upload_file" ? "Bulk file destination path" : "Bulk file path"}
                 onChange={(event) => {
                   setPath(event.target.value);
+                  if (!isRootPathValue(event.target.value)) {
+                    setAllowRootPath(false);
+                  }
                   invalidateBulkReview();
                 }}
+                placeholder={action === "upload_file" ? "/etc/app.conf or /etc/app.d/" : "/etc/app.conf"}
                 value={path}
               />
             </label>
           </div>
+          {isRootPathValue(path) && (
+            <div className="operationNote compactNote rootPathApprovalNote">
+              <strong>Filesystem root selected</strong>
+              <span>Bulk operations against / are blocked until you explicitly approve the root path for this review.</span>
+              <label className="inlineCheck actionCheck">
+                <input
+                  checked={allowRootPath}
+                  onChange={(event) => {
+                    setAllowRootPath(event.target.checked);
+                    invalidateBulkReview();
+                  }}
+                  type="checkbox"
+                />
+                <span>Allow filesystem root path</span>
+              </label>
+            </div>
+          )}
           {action === "download_files" && (
             <div className="operationNote compactNote">
               <strong>Download files</strong>
@@ -674,7 +741,13 @@ export function MultiFileActionsPanel({
               )}
             </div>
           )}
-          <button className={runBulkActionClass(action)} disabled={pending || !privilegeMaterial || loading} onClick={() => void prepareBulkOperation()} type="button">
+          <button
+            className={runBulkActionClass(action)}
+            disabled={pending || !privilegeMaterial || loading}
+            onClick={() => void prepareBulkOperation()}
+            title={reviewButtonTitle}
+            type="button"
+          >
             <ShieldCheck size={14} />
             <span>{runBulkActionLabel(action)}</span>
           </button>
@@ -693,6 +766,7 @@ export function MultiFileActionsPanel({
               </button>
             )}
           </div>
+          <BulkPreflightChecklist items={preflightItems} />
           {visibleProgress && (
             <ExecutionResultPanel
               loading={bulkProgress !== null}
@@ -701,10 +775,14 @@ export function MultiFileActionsPanel({
               progress={visibleProgress}
             />
           )}
+          {postRunItems.length > 0 && <BulkPreflightChecklist items={postRunItems} label="Bulk file post-run handling" />}
           {downloadComparison && <BulkDownloadComparisonView agentById={agentById} comparison={downloadComparison} />}
           <div className="bulkSummaryList">
             {lastSummary.length === 0 ? (
-              <p className="emptyState">No bulk file results yet.</p>
+              <div className="bulkNoResultsState" aria-label="Bulk file pending output placeholder">
+                <strong>No per-target results yet</strong>
+                <p>Review and confirm a bulk action to populate output groups, failure reasons, download bundle status, and retained artifact evidence.</p>
+              </div>
             ) : (
               lastSummary.map((group) => (
                 <details key={group.key} open>
@@ -777,9 +855,29 @@ export function MultiFileActionsPanel({
         }}
         open={pendingConfirmation !== null}
         pending={pending}
-        title="Confirm multi-file operation"
+        title="Confirm bulk file operation"
         tone={pendingConfirmation?.operation.type === "file_delete" ? "danger" : "normal"}
       />
+    </div>
+  );
+}
+
+function BulkPreflightChecklist({
+  items,
+  label = "Bulk file preflight checks",
+}: {
+  items: BulkPreflightItem[];
+  label?: string;
+}) {
+  return (
+    <div className="bulkPreflightChecklist" aria-label={label}>
+      {items.map((item) => (
+        <div className={`bulkPreflightCard ${item.tone ?? "neutral"}`} key={item.key}>
+          <span>{item.label}</span>
+          <strong>{item.value}</strong>
+          <p>{item.detail}</p>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1284,6 +1382,333 @@ function uploadDestinationPath(path: string, fileName: string): string {
   return normalizeAbsolutePath(trimmed);
 }
 
+function initialBulkPath(initialPath: string): string {
+  const trimmed = initialPath.trim();
+  return trimmed && trimmed !== "/" ? trimmed : "";
+}
+
+function isRootPathValue(value: string): boolean {
+  try {
+    return normalizeAbsolutePath(value) === "/";
+  } catch {
+    return false;
+  }
+}
+
+function buildBulkPreflightItems({
+  action,
+  agentCount,
+  content,
+  followSymlinks,
+  localMatches,
+  overwrite,
+  pathReadiness,
+  pathValidationError,
+  policy,
+  preview,
+  privilegeMaterial,
+  recursive,
+  uploadExistingPolicy,
+  uploadFile,
+  uploadOwnershipPolicy,
+}: {
+  action: MultiFileAction;
+  agentCount: number;
+  content: string;
+  followSymlinks: boolean;
+  localMatches: AgentView[];
+  overwrite: boolean;
+  pathReadiness: { detail: string; label: string; shortLabel: string };
+  pathValidationError: string | null;
+  policy: FileActionPolicy;
+  preview: BulkResolveResponse | null;
+  privilegeMaterial: PrivilegeMaterial | null;
+  recursive: boolean;
+  uploadExistingPolicy: FileExistingPolicy;
+  uploadFile: File | null;
+  uploadOwnershipPolicy: FileOwnershipPolicy;
+}): BulkPreflightItem[] {
+  const targets = preview?.targets ?? localMatches;
+  const targetCount = preview?.target_count ?? localMatches.length;
+  const availability = targetAvailabilityCounts(targets);
+  const targetTone = availability.unavailable > 0 || availability.stale > 0 ? "attention" : preview ? "ready" : "neutral";
+  return [
+    {
+      detail: pathReadiness.detail,
+      key: "path",
+      label: "Path readiness",
+      tone: pathValidationError ? "attention" : "ready",
+      value: pathReadiness.label,
+    },
+    {
+      detail: preview
+        ? "Server target preview is loaded. Review resolves the selector again before confirmation so stale cached scope cannot be executed."
+        : "This is the browser-side selector match. Use Review targets to fetch the server-resolved scope before preparing the operation.",
+      key: "targets",
+      label: preview ? "Server target preview" : "Local selector estimate",
+      tone: targetTone,
+      value: preview ? formatTargetAvailabilitySummary(targets) : `${localMatches.length}/${agentCount} local matches`,
+    },
+    bulkTransferEstimateItem({
+      action,
+      content,
+      followSymlinks,
+      overwrite,
+      policy,
+      recursive,
+      targetCount,
+      uploadExistingPolicy,
+      uploadFile,
+      uploadOwnershipPolicy,
+    }),
+    {
+      detail: `${privilegeMaterial ? "Privilege material is unlocked for this browser session." : "Privilege unlock is required before review."} Stale agents may still reject with a command-version mismatch at execution; unavailable agents remain visible as failed/unavailable targets.`,
+      key: "compatibility",
+      label: "Compatibility",
+      tone: privilegeMaterial && availability.unavailable === 0 && availability.stale === 0 ? "ready" : "attention",
+      value: availability.unavailable > 0 ? `${availability.unavailable} unavailable` : availability.stale > 0 ? `${availability.stale} stale` : privilegeMaterial ? "Privilege-ready" : "Privilege locked",
+    },
+    {
+      detail: "Execution result groups failures by reason and target. Use Open job details or narrow the selector to rerun only affected VPSs; output artifacts follow the configured job-output retention policy.",
+      key: "retry-retention",
+      label: "Retry and retention",
+      tone: "neutral",
+      value: "Failure groups preserved",
+    },
+  ];
+}
+
+function bulkTransferEstimateItem({
+  action,
+  content,
+  followSymlinks,
+  overwrite,
+  policy,
+  recursive,
+  targetCount,
+  uploadExistingPolicy,
+  uploadFile,
+  uploadOwnershipPolicy,
+}: {
+  action: MultiFileAction;
+  content: string;
+  followSymlinks: boolean;
+  overwrite: boolean;
+  policy: FileActionPolicy;
+  recursive: boolean;
+  targetCount: number;
+  uploadExistingPolicy: FileExistingPolicy;
+  uploadFile: File | null;
+  uploadOwnershipPolicy: FileOwnershipPolicy;
+}): BulkPreflightItem {
+  if (action === "download_files") {
+    const worstCaseBytes = targetCount * FILE_BROWSER_ARCHIVE_LIMIT_BYTES;
+    return {
+      detail: `Remote matched-file size is only known after agents read the path. Worst-case bundle across ${vpsCountLabel(targetCount)} is ${formatBytes(worstCaseBytes)}; folders return per-target tar. Symlinks are ${followSymlinks ? "followed" : "not followed"}.`,
+      key: "transfer",
+      label: "Size estimate",
+      tone: "neutral",
+      value: `${formatBytes(FILE_BROWSER_ARCHIVE_LIMIT_BYTES)} cap per target`,
+    };
+  }
+  if (action === "upload_file") {
+    if (!uploadFile) {
+      return {
+        detail: "Select a browser file before review so the operation can calculate payload size, hash, and chunking.",
+        key: "transfer",
+        label: "Size estimate",
+        tone: "attention",
+        value: "Choose source file",
+      };
+    }
+    return {
+      detail: `${formatBytes(uploadFile.size * targetCount)} estimated dispatch across ${vpsCountLabel(targetCount)}. Existing file policy: ${existingFilePolicyLabel(uploadExistingPolicy)}; owner/group policy: ${ownershipPolicyLabel(uploadOwnershipPolicy)}.`,
+      key: "transfer",
+      label: "Size estimate",
+      tone: "ready",
+      value: `${formatBytes(uploadFile.size)} per target`,
+    };
+  }
+  if (action === "write_text") {
+    const bytes = new TextEncoder().encode(content).byteLength;
+    return {
+      detail: `${formatBytes(bytes * targetCount)} estimated dispatch across ${vpsCountLabel(targetCount)}. The review computes the final content hash and applies ${fileActionPolicyLabel(policy).toLowerCase()}.`,
+      key: "transfer",
+      label: "Size estimate",
+      tone: bytes > FILE_BROWSER_TEXT_LIMIT_BYTES ? "attention" : "neutral",
+      value: `${formatBytes(bytes)} per target`,
+    };
+  }
+  return {
+    detail: `Remote path size and conflict state are known only when agents execute. Policy: ${fileActionPolicyLabel(policy)}; recursive ${recursive ? "on" : "off"}; overwrite ${overwrite ? "allowed" : "blocked"}.`,
+    key: "transfer",
+    label: "Remote preflight",
+    tone: "neutral",
+    value: "No browser payload",
+  };
+}
+
+function buildBulkPostRunItems({
+  lastOperation,
+  lastRunProgress,
+  lastSummary,
+}: {
+  lastOperation: JobOperation | null;
+  lastRunProgress: BulkJobProgress | null;
+  lastSummary: BulkSummaryGroup[];
+}): BulkPreflightItem[] {
+  if (!lastRunProgress || !lastOperation) {
+    return [];
+  }
+  const successfulDownloads = lastOperation.type === "file_download" ? successfulDownloadClientIds(lastSummary).length : 0;
+  const retryValue =
+    lastRunProgress.unsuccessful > 0
+      ? `${vpsCountLabel(lastRunProgress.unsuccessful)} retry candidates`
+      : lastRunProgress.skipped > 0
+        ? `${vpsCountLabel(lastRunProgress.skipped)} skipped`
+        : "No retry candidates";
+  return [
+    {
+      detail: `${lastRunProgress.completed} completed, ${lastRunProgress.skipped} skipped, ${lastRunProgress.unsuccessful} unsuccessful, ${lastRunProgress.unavailable} unavailable.`,
+      key: "post-outcome",
+      label: "Run outcome",
+      tone: lastRunProgress.unsuccessful > 0 || lastRunProgress.unavailable > 0 ? "attention" : "ready",
+      value: `${lastRunProgress.terminal}/${lastRunProgress.total} terminal`,
+    },
+    {
+      detail: "Failure reasons below preserve the operator's retry scope. Open job details for exact target records, then rerun with a narrowed selector when only failed targets should be retried.",
+      key: "post-retry",
+      label: "Retry scope",
+      tone: lastRunProgress.unsuccessful > 0 ? "attention" : "ready",
+      value: retryValue,
+    },
+    {
+      detail:
+        lastOperation.type === "file_download"
+          ? "Download Archive bundles successful target outputs only. Per-target output records and artifacts remain available through job details until job-output retention cleanup."
+          : "Structured status output remains in job details until job-output retention cleanup. Mutating operations do not create a browser download bundle.",
+      key: "post-artifacts",
+      label: "Artifacts",
+      tone: "neutral",
+      value: lastOperation.type === "file_download" ? `${successfulDownloads} downloadable` : "Retained job output",
+    },
+  ];
+}
+
+function normalizeBulkOperationPath(
+  action: MultiFileAction,
+  value: string,
+  allowRootPath: boolean,
+): string {
+  const validationError = bulkPathValidationError(action, value, allowRootPath);
+  if (validationError) {
+    throw new Error(validationError);
+  }
+  return normalizeAbsolutePath(value);
+}
+
+function bulkPathValidationError(
+  action: MultiFileAction,
+  value: string,
+  allowRootPath: boolean,
+): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return `Enter an absolute path before reviewing ${bulkActionNoun(action)}.`;
+  }
+  let normalized: string;
+  try {
+    normalized = normalizeAbsolutePath(trimmed);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Path is invalid";
+    return `${message}. Use a path such as /etc/app.conf.`;
+  }
+  if (normalized === "/" && !allowRootPath) {
+    return "Root path is blocked until you explicitly allow filesystem root operations.";
+  }
+  return null;
+}
+
+function bulkActionNoun(action: MultiFileAction): string {
+  switch (action) {
+    case "download_files":
+      return "download";
+    case "upload_file":
+      return "upload";
+    case "copy":
+      return "copy";
+    case "rename":
+      return "move";
+    case "delete":
+      return "delete";
+    case "chmod":
+      return "permission change";
+    case "chown":
+      return "owner change";
+    case "mkdir":
+      return "folder creation";
+    case "write_text":
+      return "file write";
+    default:
+      return "bulk file operation";
+  }
+}
+
+function bulkPathReadiness(
+  action: MultiFileAction,
+  value: string,
+  allowRootPath: boolean,
+): { detail: string; label: string; shortLabel: string } {
+  const validationError = bulkPathValidationError(action, value, allowRootPath);
+  if (validationError) {
+    return {
+      detail: validationError,
+      label: "Needs path review",
+      shortLabel: "enter a path",
+    };
+  }
+  const normalized = normalizeAbsolutePath(value);
+  if (normalized === "/") {
+    return {
+      detail: "Filesystem root was explicitly approved for this review. Confirm target scope before executing.",
+      label: "Root path explicitly allowed",
+      shortLabel: "root path approved",
+    };
+  }
+  return {
+    detail: `${normalized} will be resolved again during review with the latest target selector.`,
+    label: normalized,
+    shortLabel: normalized,
+  };
+}
+
+function bulkReviewButtonTitle({
+  action,
+  allowRootPath,
+  loading,
+  path,
+  pending,
+  privilegeMaterial,
+}: {
+  action: MultiFileAction;
+  allowRootPath: boolean;
+  loading: boolean;
+  path: string;
+  pending: boolean;
+  privilegeMaterial: PrivilegeMaterial | null;
+}): string {
+  if (pending) {
+    return "Bulk file review is already running.";
+  }
+  if (loading) {
+    return "Fleet data is still loading.";
+  }
+  if (!privilegeMaterial) {
+    return "Unlock privilege before reviewing a bulk file operation.";
+  }
+  return bulkPathValidationError(action, path, allowRootPath) ?? "Resolve targets, preview impact, and open confirmation.";
+}
+
 function usesFileActionPolicy(action: MultiFileAction): boolean {
   return action === "write_text" || action === "mkdir" || action === "copy" || action === "rename" || action === "chmod" || action === "chown" || action === "delete";
 }
@@ -1443,6 +1868,9 @@ function confirmationItems(confirmation: PendingBulkConfirmation): Array<{ label
   ];
   if ("path" in operation) {
     items.push({ label: "Path", value: operation.path });
+    if (operation.path === "/") {
+      items.push({ label: "Root path", value: "Explicitly allowed before review" });
+    }
   }
   if ("new_path" in operation) {
     items.push({ label: "Destination", value: operation.new_path });

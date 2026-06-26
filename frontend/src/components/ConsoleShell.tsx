@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   BookmarkPlus,
   ChevronDown,
@@ -22,6 +22,24 @@ import { usePanelDisplaySettings } from "../panelDisplay";
 
 const SIDEBAR_SUBPANEL_STORAGE_KEY = "vpsman.sidebarSubpanels";
 
+export type CommandPaletteItem = {
+  id: string;
+  group:
+    | "Page"
+    | "VPS"
+    | "Job"
+    | "Terminal"
+    | "Transfer"
+    | "Backup"
+    | "Audit"
+    | "Schedule"
+    | "Saved view";
+  label: string;
+  detail: string;
+  keywords?: string;
+  onSelect: () => void;
+};
+
 type ConsoleShellProps = {
   activeSavedFleetViewId: string | null;
   activeSubpage: string;
@@ -29,12 +47,11 @@ type ConsoleShellProps = {
   agents: AgentView[];
   apiToken: string;
   children: ReactNode;
+  commandItems: CommandPaletteItem[];
   onlineRatio: string;
   draftSavedFleetViewName: string;
   filteredAgentCount: number;
   fleetQuery: string;
-  heroCopy: string;
-  heroTitle: string;
   onApplySavedFleetView: (viewId: string) => void;
   onClearSession: () => void;
   onClearFleetView: () => void;
@@ -46,6 +63,8 @@ type ConsoleShellProps = {
   onSelectView: (view: ActiveView, subpage?: string) => void;
   onSavedFleetViewNameChange: (name: string) => void;
   operatorPreferencesReady: boolean;
+  pageDescription: string;
+  pageTitle: string;
   privilegeUnlocked: boolean;
   savedFleetViews: SavedFleetView[];
   summary: FleetSummary;
@@ -58,12 +77,11 @@ export function ConsoleShell({
   agents,
   apiToken,
   children,
+  commandItems,
   onlineRatio,
   draftSavedFleetViewName,
   filteredAgentCount,
   fleetQuery,
-  heroCopy,
-  heroTitle,
   onApplySavedFleetView,
   onClearFleetView,
   onClearSession,
@@ -75,6 +93,8 @@ export function ConsoleShell({
   onSelectView,
   onSavedFleetViewNameChange,
   operatorPreferencesReady,
+  pageDescription,
+  pageTitle,
   privilegeUnlocked,
   savedFleetViews,
   summary,
@@ -85,6 +105,9 @@ export function ConsoleShell({
   const [manualSubpanelState, setManualSubpanelState] = useState<Record<string, boolean>>(
     initialSubpanelPreferences.current.state,
   );
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
+  const commandInputRef = useRef<HTMLInputElement | null>(null);
   const hasFleetScope = fleetQuery.trim().length > 0 || activeSavedFleetViewId !== null;
   const activeSavedFleetView = savedFleetViews.find((view) => view.id === activeSavedFleetViewId) ?? null;
   const scopeName = activeSavedFleetView?.name ?? (fleetQuery.trim() ? "Filtered resources" : "All VPS resources");
@@ -125,6 +148,51 @@ export function ConsoleShell({
       return next;
     });
   };
+  const filteredCommandItems = useMemo(() => {
+    const terms = commandQuery
+      .trim()
+      .toLocaleLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+    const matched =
+      terms.length === 0
+        ? commandItems
+        : commandItems.filter((item) => {
+            const haystack = [
+              item.group,
+              item.label,
+              item.detail,
+              item.keywords ?? "",
+            ]
+              .join(" ")
+              .toLocaleLowerCase();
+            return terms.every((term) => haystack.includes(term));
+          });
+    return matched.slice(0, 60);
+  }, [commandItems, commandQuery]);
+  const groupedCommandItems = useMemo(() => {
+    const groups: Array<{
+      group: CommandPaletteItem["group"];
+      items: CommandPaletteItem[];
+    }> = [];
+    for (const item of filteredCommandItems) {
+      const existing = groups.find((entry) => entry.group === item.group);
+      if (existing) {
+        existing.items.push(item);
+      } else {
+        groups.push({ group: item.group, items: [item] });
+      }
+    }
+    return groups;
+  }, [filteredCommandItems]);
+  const closeCommandPalette = () => {
+    setCommandPaletteOpen(false);
+    setCommandQuery("");
+  };
+  const selectCommandItem = (item: CommandPaletteItem) => {
+    item.onSelect();
+    closeCommandPalette();
+  };
 
   useEffect(() => {
     if (!operatorPreferencesReady) {
@@ -140,6 +208,29 @@ export function ConsoleShell({
     storedDefaultRef.current = defaultMode;
     writeSidebarSubpanelPreferences(defaultMode, manualSubpanelState);
   }, [manualSubpanelState, operatorPreferencesReady, preferences.sidebar_subpanel_default]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "k") {
+        event.preventDefault();
+        setCommandPaletteOpen(true);
+        return;
+      }
+      if (event.key === "Escape" && commandPaletteOpen) {
+        event.preventDefault();
+        closeCommandPalette();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [commandPaletteOpen]);
+
+  useEffect(() => {
+    if (!commandPaletteOpen) {
+      return;
+    }
+    window.setTimeout(() => commandInputRef.current?.focus(), 0);
+  }, [commandPaletteOpen]);
 
   return (
     <div className="shell">
@@ -312,9 +403,9 @@ export function ConsoleShell({
             </span>
             <button
               className="iconButton"
-              aria-label="Focus fleet search"
-              onClick={() => document.getElementById("fleet-search")?.focus()}
-              title="Focus fleet search"
+              aria-label="Open command palette"
+              onClick={() => setCommandPaletteOpen(true)}
+              title="Open command palette"
               type="button"
             >
               <Command size={19} />
@@ -355,10 +446,24 @@ export function ConsoleShell({
             <span className="breadcrumb">
               vpsman / {activeViewLabel} / {activeSubpageLabel}
             </span>
-            <h1>{heroTitle}</h1>
-            <p>{heroCopy || activeSubpageDescription}</p>
+            <h1>{pageTitle}</h1>
+            <p className="pageDescription">{pageDescription || activeSubpageDescription}</p>
+            <div className="pageHeaderContext" aria-label="Page operational context">
+              <span>
+                <strong>Scope</strong>
+                {scopeName}
+              </span>
+              <span>
+                <strong>Resources</strong>
+                {filteredAgentCount} / {agents.length}
+              </span>
+              <span>
+                <strong>Section</strong>
+                {activeSubpageLabel}
+              </span>
+            </div>
           </div>
-          <div className="quickStats">
+          <div className="quickStats" aria-label="Fleet status summary">
             <Metric label="Online" value={String(summary.online)} tone="green" />
             <Metric label="Offline" value={String(summary.offline)} tone="yellow" />
             <Metric label="Stale" value={String(summary.stale)} tone="yellow" />
@@ -370,6 +475,69 @@ export function ConsoleShell({
 
         {children}
       </main>
+      {commandPaletteOpen && (
+        <div
+          aria-labelledby="command-palette-title"
+          aria-modal="true"
+          className="commandPaletteBackdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeCommandPalette();
+            }
+          }}
+          role="dialog"
+        >
+          <div className="commandPalette">
+            <div className="commandPaletteHeader">
+              <Command size={18} />
+              <input
+                aria-label="Command palette search"
+                autoComplete="off"
+                onChange={(event) => setCommandQuery(event.target.value)}
+                placeholder="Search pages, VPS, jobs, sessions, transfers, backups, audit"
+                ref={commandInputRef}
+                type="search"
+                value={commandQuery}
+              />
+              <kbd>Esc</kbd>
+            </div>
+            <div className="commandPaletteMeta">
+              <h2 id="command-palette-title">Command palette</h2>
+              <span>{filteredCommandItems.length} results</span>
+            </div>
+            <div className="commandPaletteResults" role="listbox" aria-label="Command palette results">
+              {groupedCommandItems.length > 0 ? (
+                groupedCommandItems.map((group) => (
+                  <section className="commandPaletteGroup" key={group.group} aria-label={`${group.group} results`}>
+                    <span className="commandPaletteGroupTitle">{group.group}</span>
+                    {group.items.map((item) => (
+                      <button
+                        aria-label={`${item.group}: ${item.label}. ${item.detail}`}
+                        className="commandPaletteResult"
+                        data-command-group={item.group}
+                        key={item.id}
+                        onClick={() => selectCommandItem(item)}
+                        role="option"
+                        type="button"
+                      >
+                        <span className="commandPaletteResultText">
+                          <strong>{item.label}</strong>
+                          <small>{item.detail}</small>
+                        </span>
+                        <span className="commandPaletteGroupBadge">{item.group}</span>
+                      </button>
+                    ))}
+                  </section>
+                ))
+              ) : (
+                <div className="commandPaletteEmpty" role="status">
+                  No matching commands or entities
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

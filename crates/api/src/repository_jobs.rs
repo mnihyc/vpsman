@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use base64::Engine as _;
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{postgres::PgRow, Postgres, Row, Transaction};
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
@@ -879,6 +879,59 @@ fn job_matches_search(job: &JobHistoryView, needle: &str) -> bool {
         || job.payload_hash.to_ascii_lowercase().contains(needle)
 }
 
+fn compare_job_approval(
+    left: &JobApprovalView,
+    right: &JobApprovalView,
+    sort: Option<&str>,
+) -> Ordering {
+    match sort.unwrap_or("requested_at") {
+        "command_type" | "command" => left.command_type.cmp(&right.command_type),
+        "decided_at" => left.decided_at.cmp(&right.decided_at),
+        "job_id" => left.job_id.cmp(&right.job_id),
+        "payload_hash" | "hash" => left.payload_hash.cmp(&right.payload_hash),
+        "requester" | "requester_username" => {
+            left.requester_username.cmp(&right.requester_username)
+        }
+        "risk" => left.risk.cmp(&right.risk),
+        "status" => left.status.cmp(&right.status),
+        "target_count" | "targets" => left.target_count.cmp(&right.target_count),
+        _ => compare_text_or_number(&left.requested_at, &right.requested_at),
+    }
+}
+
+fn job_approval_matches_search(approval: &JobApprovalView, needle: &str) -> bool {
+    approval
+        .id
+        .to_string()
+        .to_ascii_lowercase()
+        .contains(needle)
+        || approval
+            .job_id
+            .to_string()
+            .to_ascii_lowercase()
+            .contains(needle)
+        || approval.status.to_ascii_lowercase().contains(needle)
+        || approval.command_type.to_ascii_lowercase().contains(needle)
+        || approval
+            .selector_expression
+            .to_ascii_lowercase()
+            .contains(needle)
+        || approval
+            .target_client_ids
+            .iter()
+            .any(|target| target.to_ascii_lowercase().contains(needle))
+        || approval.payload_hash.to_ascii_lowercase().contains(needle)
+        || approval
+            .request_fingerprint
+            .to_ascii_lowercase()
+            .contains(needle)
+        || approval
+            .requester_username
+            .to_ascii_lowercase()
+            .contains(needle)
+        || approval.risk.to_ascii_lowercase().contains(needle)
+}
+
 fn aggregate_job_status_from_targets(targets: &[JobTargetView]) -> &'static str {
     let statuses = targets
         .iter()
@@ -914,6 +967,29 @@ fn job_history_order_by(sort: Option<&str>, descending: bool) -> &'static str {
         ("completed_at", false) => "completed_at ASC NULLS LAST, id ASC",
         (_, true) => "created_at DESC, id DESC",
         (_, false) => "created_at ASC, id ASC",
+    }
+}
+
+fn job_approval_order_by(sort: Option<&str>, descending: bool) -> &'static str {
+    match (sort.unwrap_or("requested_at"), descending) {
+        ("command_type" | "command", true) => "command_type DESC, id DESC",
+        ("command_type" | "command", false) => "command_type ASC, id ASC",
+        ("decided_at", true) => "decided_at DESC NULLS LAST, id DESC",
+        ("decided_at", false) => "decided_at ASC NULLS LAST, id ASC",
+        ("job_id", true) => "job_id DESC, id DESC",
+        ("job_id", false) => "job_id ASC, id ASC",
+        ("payload_hash" | "hash", true) => "payload_hash DESC, id DESC",
+        ("payload_hash" | "hash", false) => "payload_hash ASC, id ASC",
+        ("requester" | "requester_username", true) => "requester_username DESC, id DESC",
+        ("requester" | "requester_username", false) => "requester_username ASC, id ASC",
+        ("risk", true) => "risk DESC, id DESC",
+        ("risk", false) => "risk ASC, id ASC",
+        ("status", true) => "status DESC, id DESC",
+        ("status", false) => "status ASC, id ASC",
+        ("target_count" | "targets", true) => "target_count DESC, id DESC",
+        ("target_count" | "targets", false) => "target_count ASC, id ASC",
+        (_, true) => "requested_at DESC, id DESC",
+        (_, false) => "requested_at ASC, id ASC",
     }
 }
 
@@ -1060,6 +1136,74 @@ fn job_actor_id(operator: &AuthContext) -> Option<Uuid> {
     }
 }
 
+fn job_approval_from_row(row: PgRow) -> Result<JobApprovalView> {
+    Ok(JobApprovalView {
+        id: row.try_get("id")?,
+        status: row.try_get("status")?,
+        job_id: row.try_get("job_id")?,
+        command_type: row.try_get("command_type")?,
+        selector_expression: row.try_get("selector_expression")?,
+        target_client_ids: row.try_get("target_client_ids")?,
+        target_count: row.try_get::<i32, _>("target_count")?.max(0) as usize,
+        privileged: row.try_get("privileged")?,
+        destructive: row.try_get("destructive")?,
+        force_unprivileged: row.try_get("force_unprivileged")?,
+        max_timeout_secs: row.try_get::<i64, _>("max_timeout_secs")?.max(1) as u64,
+        payload_hash: row.try_get("payload_hash")?,
+        request_fingerprint: row.try_get("request_fingerprint")?,
+        requester_id: row.try_get("requester_id")?,
+        requester_username: row.try_get("requester_username")?,
+        requester_role: row.try_get("requester_role")?,
+        requested_at: row.try_get("requested_at")?,
+        request_reason: row.try_get("request_reason")?,
+        risk: row.try_get("risk")?,
+        decision_by: row.try_get("decision_by")?,
+        decision_username: row.try_get("decision_username")?,
+        decision_reason: row.try_get("decision_reason")?,
+        decided_at: row.try_get("decided_at")?,
+    })
+}
+
+fn job_approval_audit(
+    approval: &JobApprovalView,
+    action: &'static str,
+    operator: &AuthContext,
+) -> AuditLogView {
+    AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: job_actor_id(operator),
+        action: action.to_string(),
+        target: format!("job_approval:{}", approval.id),
+        command_hash: Some(approval.payload_hash.clone()),
+        metadata: json!({
+            "approval_id": approval.id,
+            "status": approval.status,
+            "job_id": approval.job_id,
+            "command_type": approval.command_type,
+            "selector_expression": approval.selector_expression,
+            "target_client_ids": approval.target_client_ids,
+            "target_count": approval.target_count,
+            "destructive": approval.destructive,
+            "privileged": approval.privileged,
+            "force_unprivileged": approval.force_unprivileged,
+            "request_fingerprint": approval.request_fingerprint,
+            "requester_id": approval.requester_id,
+            "requester_username": approval.requester_username,
+            "requester_role": approval.requester_role,
+            "request_reason": approval.request_reason,
+            "risk": approval.risk,
+            "decision_by": approval.decision_by,
+            "decision_username": approval.decision_username,
+            "decision_reason": approval.decision_reason,
+            "operator_id": operator.operator.id,
+            "operator_username": operator.operator.username,
+            "operator_role": operator.operator.role,
+            "session_id": operator.session_id,
+        }),
+        created_at: unix_now().to_string(),
+    }
+}
+
 impl Repository {
     pub(crate) async fn get_job(&self, job_id: Uuid) -> Result<Option<JobHistoryView>> {
         match self {
@@ -1179,6 +1323,406 @@ impl Repository {
             .fetch_optional(pool)
             .await
             .map_err(Into::into),
+        }
+    }
+
+    pub(crate) async fn query_job_approvals(
+        &self,
+        query: &ListQuery,
+    ) -> Result<Vec<JobApprovalView>> {
+        let limit = limit_or_default(query.limit);
+        let offset = offset_or_default(query.offset);
+        let descending = sort_descending(query.dir.as_deref(), true);
+        let q = query
+            .q
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match self {
+            Self::Memory(memory) => {
+                let q = q.map(|value| value.to_ascii_lowercase());
+                let mut approvals = memory
+                    .job_approvals
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|approval| {
+                        q.as_deref()
+                            .map(|needle| job_approval_matches_search(approval, needle))
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                approvals.sort_by(|left, right| {
+                    compare_job_approval(left, right, query.sort.as_deref())
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                if descending {
+                    approvals.reverse();
+                }
+                Ok(approvals
+                    .into_iter()
+                    .skip(offset as usize)
+                    .take(limit as usize)
+                    .collect())
+            }
+            Self::Postgres(pool) => {
+                let order_by = job_approval_order_by(query.sort.as_deref(), descending);
+                let rows = sqlx::query(&format!(
+                    r#"
+                    SELECT
+                        id,
+                        status,
+                        job_id,
+                        command_type,
+                        selector_expression,
+                        target_client_ids,
+                        target_count,
+                        privileged,
+                        destructive,
+                        force_unprivileged,
+                        max_timeout_secs,
+                        payload_hash,
+                        request_fingerprint,
+                        requester_id,
+                        requester_username,
+                        requester_role,
+                        requested_at::text AS requested_at,
+                        request_reason,
+                        risk,
+                        decision_by,
+                        decision_username,
+                        decision_reason,
+                        decided_at::text AS decided_at
+                    FROM job_approvals
+                    WHERE (
+                        $3::text IS NULL
+                        OR id::text ILIKE $3 ESCAPE '\'
+                        OR job_id::text ILIKE $3 ESCAPE '\'
+                        OR status ILIKE $3 ESCAPE '\'
+                        OR command_type ILIKE $3 ESCAPE '\'
+                        OR selector_expression ILIKE $3 ESCAPE '\'
+                        OR payload_hash ILIKE $3 ESCAPE '\'
+                        OR request_fingerprint ILIKE $3 ESCAPE '\'
+                        OR requester_username ILIKE $3 ESCAPE '\'
+                        OR risk ILIKE $3 ESCAPE '\'
+                    )
+                    ORDER BY {order_by}
+                    LIMIT $1
+                    OFFSET $2
+                    "#,
+                ))
+                .bind(limit)
+                .bind(offset)
+                .bind(search_pattern(&query.q))
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(job_approval_from_row).collect()
+            }
+        }
+    }
+
+    pub(crate) async fn get_job_approval_request(
+        &self,
+        approval_id: Uuid,
+    ) -> Result<Option<(JobApprovalView, CreateJobRequest)>> {
+        match self {
+            Self::Memory(memory) => {
+                let approval = memory
+                    .job_approvals
+                    .read()
+                    .await
+                    .iter()
+                    .find(|approval| approval.id == approval_id)
+                    .cloned();
+                let Some(approval) = approval else {
+                    return Ok(None);
+                };
+                let request = memory
+                    .job_approval_requests
+                    .read()
+                    .await
+                    .get(&approval_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("job_approval_request_missing"))?;
+                Ok(Some((approval, request)))
+            }
+            Self::Postgres(pool) => {
+                let Some(row) = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        status,
+                        job_id,
+                        command_type,
+                        selector_expression,
+                        target_client_ids,
+                        target_count,
+                        privileged,
+                        destructive,
+                        force_unprivileged,
+                        max_timeout_secs,
+                        payload_hash,
+                        request_fingerprint,
+                        requester_id,
+                        requester_username,
+                        requester_role,
+                        requested_at::text AS requested_at,
+                        request_reason,
+                        risk,
+                        decision_by,
+                        decision_username,
+                        decision_reason,
+                        decided_at::text AS decided_at,
+                        job_request
+                    FROM job_approvals
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(approval_id)
+                .fetch_optional(pool)
+                .await?
+                else {
+                    return Ok(None);
+                };
+                let request: sqlx::types::Json<CreateJobRequest> = row.try_get("job_request")?;
+                Ok(Some((job_approval_from_row(row)?, request.0)))
+            }
+        }
+    }
+
+    pub(crate) async fn record_job_approval(
+        &self,
+        approval: JobApprovalView,
+        request: &CreateJobRequest,
+        operator: &AuthContext,
+    ) -> Result<JobApprovalView> {
+        match self {
+            Self::Memory(memory) => {
+                if memory
+                    .job_approvals
+                    .read()
+                    .await
+                    .iter()
+                    .any(|existing| existing.id == approval.id)
+                {
+                    bail!("job_approval_id_reused");
+                }
+                memory.job_approvals.write().await.push(approval.clone());
+                memory
+                    .job_approval_requests
+                    .write()
+                    .await
+                    .insert(approval.id, request.clone());
+                memory.audits.write().await.push(job_approval_audit(
+                    &approval,
+                    "job.approval_requested",
+                    operator,
+                ));
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let inserted = sqlx::query(
+                    r#"
+                    INSERT INTO job_approvals (
+                        id,
+                        status,
+                        job_id,
+                        command_type,
+                        selector_expression,
+                        target_client_ids,
+                        target_count,
+                        privileged,
+                        destructive,
+                        force_unprivileged,
+                        max_timeout_secs,
+                        payload_hash,
+                        request_fingerprint,
+                        requester_id,
+                        requester_username,
+                        requester_role,
+                        request_reason,
+                        risk,
+                        job_request
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14, $15, $16, $17, $18, $19
+                    )
+                    ON CONFLICT (id) DO NOTHING
+                    "#,
+                )
+                .bind(approval.id)
+                .bind(&approval.status)
+                .bind(approval.job_id)
+                .bind(&approval.command_type)
+                .bind(&approval.selector_expression)
+                .bind(&approval.target_client_ids)
+                .bind(approval.target_count as i32)
+                .bind(approval.privileged)
+                .bind(approval.destructive)
+                .bind(approval.force_unprivileged)
+                .bind(approval.max_timeout_secs as i64)
+                .bind(&approval.payload_hash)
+                .bind(&approval.request_fingerprint)
+                .bind(approval.requester_id)
+                .bind(&approval.requester_username)
+                .bind(&approval.requester_role)
+                .bind(&approval.request_reason)
+                .bind(&approval.risk)
+                .bind(sqlx::types::Json(request))
+                .execute(&mut *tx)
+                .await?;
+                if inserted.rows_affected() == 0 {
+                    bail!("job_approval_id_reused");
+                }
+                let audit = job_approval_audit(&approval, "job.approval_requested", operator);
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    "#,
+                )
+                .bind(audit.id)
+                .bind(audit.actor_id)
+                .bind(&audit.action)
+                .bind(&audit.target)
+                .bind(&audit.command_hash)
+                .bind(audit.metadata)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+            }
+        }
+        Ok(approval)
+    }
+
+    pub(crate) async fn decide_job_approval(
+        &self,
+        approval_id: Uuid,
+        status: &str,
+        operator: &AuthContext,
+        reason: Option<&str>,
+    ) -> Result<JobApprovalView> {
+        if !matches!(status, "approved" | "rejected") {
+            bail!("job_approval_decision_invalid");
+        }
+        match self {
+            Self::Memory(memory) => {
+                let mut approvals = memory.job_approvals.write().await;
+                let approval = approvals
+                    .iter_mut()
+                    .find(|approval| approval.id == approval_id)
+                    .ok_or_else(|| anyhow::anyhow!("job_approval_not_found"))?;
+                if approval.status != "pending" {
+                    bail!("job_approval_not_pending");
+                }
+                approval.status = status.to_string();
+                approval.decision_by = job_actor_id(operator);
+                approval.decision_username = Some(operator.operator.username.clone());
+                approval.decision_reason = reason.map(str::to_string);
+                approval.decided_at = Some(unix_now().to_string());
+                let updated = approval.clone();
+                drop(approvals);
+                memory.audits.write().await.push(job_approval_audit(
+                    &updated,
+                    if status == "approved" {
+                        "job.approval_approved"
+                    } else {
+                        "job.approval_rejected"
+                    },
+                    operator,
+                ));
+                Ok(updated)
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let updated = sqlx::query(
+                    r#"
+                    UPDATE job_approvals
+                    SET
+                        status = $2,
+                        decision_by = $3,
+                        decision_username = $4,
+                        decision_reason = $5,
+                        decided_at = now(),
+                        updated_at = now()
+                    WHERE id = $1 AND status = 'pending'
+                    RETURNING
+                        id,
+                        status,
+                        job_id,
+                        command_type,
+                        selector_expression,
+                        target_client_ids,
+                        target_count,
+                        privileged,
+                        destructive,
+                        force_unprivileged,
+                        max_timeout_secs,
+                        payload_hash,
+                        request_fingerprint,
+                        requester_id,
+                        requester_username,
+                        requester_role,
+                        requested_at::text AS requested_at,
+                        request_reason,
+                        risk,
+                        decision_by,
+                        decision_username,
+                        decision_reason,
+                        decided_at::text AS decided_at
+                    "#,
+                )
+                .bind(approval_id)
+                .bind(status)
+                .bind(job_actor_id(operator))
+                .bind(&operator.operator.username)
+                .bind(reason)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let Some(row) = updated else {
+                    let exists: Option<Uuid> =
+                        sqlx::query_scalar("SELECT id FROM job_approvals WHERE id = $1")
+                            .bind(approval_id)
+                            .fetch_optional(&mut *tx)
+                            .await?;
+                    if exists.is_some() {
+                        bail!("job_approval_not_pending");
+                    }
+                    bail!("job_approval_not_found");
+                };
+                let updated = job_approval_from_row(row)?;
+                let audit = job_approval_audit(
+                    &updated,
+                    if status == "approved" {
+                        "job.approval_approved"
+                    } else {
+                        "job.approval_rejected"
+                    },
+                    operator,
+                );
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (
+                        id, actor_id, action, target, command_hash, metadata
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    "#,
+                )
+                .bind(audit.id)
+                .bind(audit.actor_id)
+                .bind(&audit.action)
+                .bind(&audit.target)
+                .bind(&audit.command_hash)
+                .bind(audit.metadata)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(updated)
+            }
         }
     }
 

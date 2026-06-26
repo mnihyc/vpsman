@@ -141,9 +141,15 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   );
 
   const deleteTag = useCallback(
-    async (tag: string, confirmed: boolean, privilegeAssertion?: PrivilegeAssertion | null) => {
+    async (
+      tag: string,
+      confirmed: boolean,
+      privilegeAssertion?: PrivilegeAssertion | null,
+      previewHash?: string | null,
+    ) => {
       const response = await apiDelete<TagMutationResponse>(`/api/v1/tags/${encodeURIComponent(tag)}`, apiToken, {
         confirmed,
+        preview_hash: previewHash ?? null,
         privilege_assertion: privilegeAssertion,
       });
       if (!response.confirmation_required) {

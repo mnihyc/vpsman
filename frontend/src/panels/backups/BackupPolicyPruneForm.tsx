@@ -1,7 +1,7 @@
 import type { FormEvent } from "react";
 import { Scissors, SearchCheck } from "lucide-react";
 import type { BackupPolicyPruneResponse, BackupPolicyRecord } from "../../types";
-import { shortId } from "../../utils";
+import { shortHash, shortId } from "../../utils";
 
 type BackupPolicyPruneFormProps = {
   confirmationOpen: boolean;
@@ -69,6 +69,20 @@ export function BackupPolicyPruneForm({
           <input checked={metadataOnly} onChange={(event) => onMetadataOnlyChange(event.target.checked)} type="checkbox" />
           <span>Metadata only</span>
         </label>
+        <div className="backupPruneReviewState" aria-label="Backup policy prune review state">
+          <strong>{dryRun ? "Preview only" : "Preview required before apply"}</strong>
+          <span>
+            {dryRun
+              ? "Runs a dry-run retention preview without deleting metadata or object files."
+              : "Submits a fresh dry-run preview first, freezes its preview hash, then opens an apply confirmation."}
+          </span>
+          {result && totals && (
+            <small>
+              Last preview {shortHash(result.preview_hash)} reviewed {totals.matched} matched row{totals.matched === 1 ? "" : "s"}
+              {result.dry_run ? "" : `; ${totals.pruned} pruned`}.
+            </small>
+          )}
+        </div>
         {result && totals && (
           <div className="backupScopeList">
             <span>{result.dry_run ? "dry run" : partialError ? "partial error" : "applied"}</span>
@@ -81,7 +95,7 @@ export function BackupPolicyPruneForm({
         {!confirmationOpen && (
           <button className={dryRun ? "secondaryAction" : "dangerAction"} disabled={pending} type="submit">
             {dryRun ? <SearchCheck size={17} /> : <Scissors size={17} />}
-            {dryRun ? "Review prune" : "Review prune"}
+            {dryRun ? "Run prune preview" : "Review prune apply"}
           </button>
         )}
       </form>

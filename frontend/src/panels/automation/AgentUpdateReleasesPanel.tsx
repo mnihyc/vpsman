@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { PackageCheck } from "lucide-react";
+import { ExternalLink, PackageCheck } from "lucide-react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -11,12 +11,21 @@ import {
 } from "../../jobDispatchPreset";
 import { agentUpdateReleaseStatusBadgeClass } from "../../jobStatusPresentation";
 import type {
+  AgentView,
   AgentUpdateReleaseRecord,
   CreateAgentUpdateReleaseRequest,
   JsonValue,
+  JobHistoryRecord,
   SuiteConfigResponse,
 } from "../../types";
 import { formatTime, runPanelAction, shortHash } from "../../utils";
+
+const agentUpdateCommandTypes = new Set([
+  "agent_update",
+  "agent_update_activate",
+  "agent_update_check",
+  "agent_update_rollback",
+]);
 
 function parseOptionalPositiveInteger(value: string, label: string): number | null {
   const trimmed = value.trim();
@@ -29,18 +38,26 @@ function parseOptionalPositiveInteger(value: string, label: string): number | nu
 }
 
 export function AgentUpdateReleasesPanel({
+  agents,
+  jobs,
   loading,
   onCreateAgentUpdateRelease,
   onOpenDispatchPreset,
+  onOpenJobDetails,
+  onOpenJobHistory,
   onRefresh,
   releases,
   suiteConfig,
   suiteConfigError,
   suiteConfigLoading,
 }: {
+  agents: AgentView[];
+  jobs: JobHistoryRecord[];
   loading: boolean;
   onCreateAgentUpdateRelease: (request: CreateAgentUpdateReleaseRequest) => Promise<AgentUpdateReleaseRecord>;
   onOpenDispatchPreset: (preset: JobDispatchPresetInput) => void;
+  onOpenJobDetails?: (jobId: string) => void;
+  onOpenJobHistory: () => void;
   onRefresh: () => void;
   releases: AgentUpdateReleaseRecord[];
   suiteConfig: SuiteConfigResponse | null;
@@ -64,6 +81,59 @@ export function AgentUpdateReleasesPanel({
   const latestRelease = releases[0] ?? null;
   const latestArtifactSha256Hex = latestRelease?.artifact_sha256_hex ?? "";
   const policy = registeredUpdatePolicy(suiteConfig, suiteConfigError, suiteConfigLoading);
+  const fleetVersionPosture = useMemo(() => buildFleetVersionPosture(agents), [agents]);
+  const updateJobs = useMemo(
+    () => jobs.filter((job) => agentUpdateCommandTypes.has(job.command_type)),
+    [jobs],
+  );
+  const recentUpdateJob = updateJobs[0] ?? null;
+  const rollbackDetail = latestRelease?.rollback_artifact_sha256_hex
+    ? `Latest rollback hash ${shortHash(latestRelease.rollback_artifact_sha256_hex)} is available for dispatch review.`
+    : latestRelease
+      ? "The latest registered release has no rollback hash. Rollback dispatch can still be opened, but no registry hash will be prefilled."
+      : "Record a release before using the registry as rollback evidence.";
+  const releasePostureItems = [
+    {
+      detail: latestRelease
+        ? `Latest ${latestRelease.name} ${latestRelease.version} / ${latestRelease.channel}, ${latestRelease.status}.`
+        : "No external artifact metadata has been recorded yet.",
+      label: "Registered releases",
+      value: releases.length ? `${releases.length} registered` : "None",
+    },
+    {
+      detail: fleetVersionPosture.detail,
+      label: "Current fleet versions",
+      value: fleetVersionPosture.value,
+    },
+    {
+      detail: latestArtifactSha256Hex
+        ? "Use Check latest on a canary selector, inspect job evidence, then activate the staged hash for the reviewed rollout scope."
+        : "Record or check a release artifact before a staged rollout can be activated from this page.",
+      label: "Canary / staging",
+      value: latestArtifactSha256Hex ? "Manual scoped rollout" : "No staged hash",
+    },
+    {
+      detail: policy.detail,
+      label: "Rollout policy",
+      value: policy.value,
+    },
+    {
+      detail: recentUpdateJob
+        ? `Last ${displayCommandType(recentUpdateJob.command_type)} job targeted ${recentUpdateJob.target_count} VPS${recentUpdateJob.target_count === 1 ? "" : "s"} at ${formatTime(recentUpdateJob.created_at)}.`
+        : "Run Check latest to produce per-target update evidence before activation.",
+      label: "Health checks",
+      value: recentUpdateJob ? recentUpdateJob.status : "No update jobs",
+    },
+    {
+      detail: rollbackDetail,
+      label: "Rollback",
+      value: latestRelease?.rollback_artifact_sha256_hex
+        ? "Hash registered"
+        : latestRelease
+          ? "Dispatch available"
+          : "No release",
+    },
+  ];
   const releaseColumns = useMemo<ConsoleDataGridColumn<AgentUpdateReleaseRecord>[]>(
     () => [
       {
@@ -297,6 +367,36 @@ export function AgentUpdateReleasesPanel({
           </button>
         </div>
       </div>
+      <section className="releasePosture" aria-label="Agent update rollout posture">
+        <div className="releasePostureHeader">
+          <div>
+            <strong>Rollout posture</strong>
+            <span>Automation owns release registry, rollout planning, update evidence, and rollback readiness.</span>
+          </div>
+          <button className="secondaryAction compactAction" onClick={onOpenJobHistory} type="button">
+            Open update jobs
+          </button>
+          {recentUpdateJob && onOpenJobDetails ? (
+            <button
+              className="secondaryAction compactAction"
+              onClick={() => onOpenJobDetails(recentUpdateJob.id)}
+              type="button"
+            >
+              <ExternalLink size={14} />
+              <span>Open last update job</span>
+            </button>
+          ) : null}
+        </div>
+        <div className="releasePostureGrid">
+          {releasePostureItems.map((item) => (
+            <div className="releasePostureItem" key={item.label}>
+              <span>{item.label}</span>
+              <strong>{item.value}</strong>
+              <small>{item.detail}</small>
+            </div>
+          ))}
+        </div>
+      </section>
       <div className="releaseRecordForm">
         <div className="operationNote compactOperation">
           <PackageCheck size={18} />
@@ -450,7 +550,7 @@ export function AgentUpdateReleasesPanel({
         rows={releases}
         searchPlaceholder="Search releases"
         selectable={false}
-        storageKey="vpsman.jobs.agentUpdateReleases"
+        storageKey="vpsman.automation.agentUpdateReleases"
         title="Release records"
       />
     </div>
@@ -461,17 +561,19 @@ function registeredUpdatePolicy(
   suiteConfig: SuiteConfigResponse | null,
   suiteConfigError: string | null,
   suiteConfigLoading: boolean,
-): { detail: string; label: string } {
+): { detail: string; label: string; value: string } {
   if (suiteConfigLoading) {
     return {
       label: "Registered-update policy loading",
       detail: "Loading suite config before showing whether direct manual updates require a registry entry.",
+      value: "Loading",
     };
   }
   if (suiteConfigError) {
     return {
       label: "Registered-update policy unavailable",
       detail: suiteConfigError,
+      value: "Unavailable",
     };
   }
   const enforced = readBooleanPath(suiteConfig?.redacted ?? null, ["api", "require_registered_agent_updates"]);
@@ -479,18 +581,59 @@ function registeredUpdatePolicy(
     return {
       label: "Registered-update policy enforced",
       detail: "Manual update jobs are accepted only when the requested artifact SHA-256 exists in this registry.",
+      value: "Enforced",
     };
   }
   if (enforced === false) {
     return {
       label: "Registered-update policy not enforced",
       detail: "This registry is optional audit metadata. Manifest-based update checks and direct manual updates can still be dispatched.",
+      value: "Advisory",
     };
   }
   return {
     label: "Registered-update policy unknown",
     detail: "Open Suite config to confirm whether manual update jobs require registered artifact hashes.",
+    value: "Unknown",
   };
+}
+
+function buildFleetVersionPosture(agents: AgentView[]): { detail: string; value: string } {
+  if (!agents.length) {
+    return {
+      detail: "No VPS inventory is loaded, so current agent version posture cannot be compared.",
+      value: "No VPS loaded",
+    };
+  }
+  const buildCounts = new Map<number, number>();
+  for (const agent of agents) {
+    if (Number.isSafeInteger(agent.internal_build_number)) {
+      const build = agent.internal_build_number as number;
+      buildCounts.set(build, (buildCounts.get(build) ?? 0) + 1);
+    }
+  }
+  if (!buildCounts.size) {
+    return {
+      detail: "Loaded agents do not expose semantic agent version or internal build telemetry.",
+      value: "Version telemetry unavailable",
+    };
+  }
+  const knownCount = Array.from(buildCounts.values()).reduce((total, count) => total + count, 0);
+  const distribution = Array.from(buildCounts.entries())
+    .sort(([left], [right]) => right - left)
+    .map(([build, count]) => `build ${build}: ${count}`)
+    .join(", ");
+  const unknownCount = agents.length - knownCount;
+  return {
+    detail: unknownCount
+      ? `${distribution}; ${unknownCount} VPS${unknownCount === 1 ? "" : "s"} missing build telemetry.`
+      : distribution,
+    value: `${knownCount}/${agents.length} with build`,
+  };
+}
+
+function displayCommandType(commandType: string): string {
+  return commandType.replace(/_/g, " ");
 }
 
 function readBooleanPath(value: JsonValue | null, path: string[]): boolean | null {

@@ -1,5 +1,6 @@
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import {
+  ArrowLeftRight,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -50,6 +51,7 @@ import { base64ToBytes, parseFileMode } from "../../fileTransfer";
 import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
 import { targetRecordTerminal } from "../../bulkJobProgress";
+import type { FileTransferSessionRecord } from "../../typesFileTransfer";
 import type {
   AgentView,
   CreateJobRequest,
@@ -85,24 +87,48 @@ type PendingConfirmation = {
 
 type FileCommandPopover = "chmod" | "chown" | "create" | "rename" | "upload" | null;
 type BrowserClipboard = { intent: "copy" | "move"; path: string } | null;
+type DirectoryEvidence = {
+  limit: number;
+  offset: number;
+  path: string;
+  reason?: string | null;
+  scan_cap_entries?: number;
+  scanned_entries?: number;
+  status?: string;
+  total_entries: number | null;
+  truncated: boolean;
+  truncated_by_scan_cap?: boolean;
+  visible_entries_scanned?: number;
+};
+type TransferHandoffHint = {
+  path: string;
+  sizeBytes: number | null;
+  sourceKind: string | null;
+  targetClientId: string;
+  targetLabel: string;
+};
 
 export function FileBrowserPanel({
   agents,
   loading,
+  fileTransfers = [],
   onCreateJob,
   onLoadOutputs,
   onLoadTargets,
   onOpenMultiFiles,
+  onOpenTransfers,
   onOpenPrivilegeUnlock,
   privilegeMaterial,
   setPrivilegeMaterial,
 }: {
   agents: AgentView[];
+  fileTransfers?: FileTransferSessionRecord[];
   loading: boolean;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenMultiFiles?: (path: string) => void;
+  onOpenTransfers?: (path: string) => void;
   onOpenPrivilegeUnlock: () => void;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (value: PrivilegeMaterial | null) => void;
@@ -113,6 +139,7 @@ export function FileBrowserPanel({
   const [currentPath, setCurrentPath] = useState(safeNormalizeAbsolutePath(saved.path || "/"));
   const [showHidden, setShowHidden] = useState(saved.showHidden);
   const [entriesByPath, setEntriesByPath] = useState<Record<string, FileBrowserEntry[]>>({});
+  const [directoryEvidenceByPath, setDirectoryEvidenceByPath] = useState<Record<string, DirectoryEvidence>>({});
   const [metadataByPath, setMetadataByPath] = useState<Record<string, FileBrowserEntry>>({});
   const [expandedPaths, setExpandedPaths] = useState<Record<string, boolean>>({ "/": true });
   const [selectedPath, setSelectedPath] = useState(safeNormalizeAbsolutePath(saved.path || "/"));
@@ -146,6 +173,7 @@ export function FileBrowserPanel({
   const [uploadGroup, setUploadGroup] = useState("");
   const [uploadDestination, setUploadDestination] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [transferHandoffHint, setTransferHandoffHint] = useState<TransferHandoffHint | null>(null);
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent.id === targetClientId) ?? null,
     [agents, targetClientId],
@@ -155,7 +183,26 @@ export function FileBrowserPanel({
   const selectedPathCommandDisabled = !selectedEntry || selectedPath === "/" || pending || !privilegeMaterial;
   const editorDirty = editorContent !== editorSavedContent;
   const currentEntries = entriesByPath[currentPath] ?? [];
+  const currentDirectoryEvidence = directoryEvidenceByPath[currentPath] ?? null;
+  const transferReferencePath = transferHandoffHint?.path ?? selectedPath;
+  const relatedTransfers = useMemo(
+    () =>
+      fileTransfers.filter(
+        (transfer) =>
+          transfer.client_id === targetClientId &&
+          transfer.path === transferReferencePath,
+      ),
+    [fileTransfers, targetClientId, transferReferencePath],
+  );
+  const handoffReadyCount = relatedTransfers.filter(
+    (transfer) =>
+      transfer.direction === "download" &&
+      transfer.status === "completed" &&
+      transfer.handoff_available,
+  ).length;
   const staleMessage = staleDirectoryPath ? `Directory ${staleDirectoryPath} changed; refresh to update listing` : null;
+  const typedPathChanged = pathInput.trim() !== currentPath;
+  const pathRefreshTarget = typedPathChanged ? pathInput : staleDirectoryPath ?? pathInput;
   const targetSummary = selectedAgent ? `target ${targetNameId(selectedAgent)}` : "No target VPS";
   const summary = actionError ?? actionMessage ?? staleMessage ?? (privilegeMaterial ? `${targetSummary} · ${currentEntries.length} entries loaded` : "Locked");
   const editorStateText = editorPath ? `${editorContent.length} chars${editorDirty ? " · unsaved" : ""}` : "Select a text file to edit";
@@ -205,6 +252,7 @@ export function FileBrowserPanel({
   function selectTargetClientId(value: string) {
     setTargetClientId(value);
     setEntriesByPath({});
+    setDirectoryEvidenceByPath({});
     setMetadataByPath({});
     setExpandedPaths({ "/": true });
     setSelectedPath(currentPath);
@@ -216,6 +264,7 @@ export function FileBrowserPanel({
     setActionError(null);
     setActionMessage(null);
     setStaleDirectoryPath(null);
+    setTransferHandoffHint(null);
   }
 
   async function runFileJob(operation: JobOperation, options: { expectedType?: string } = {}) {
@@ -281,6 +330,22 @@ export function FileBrowserPanel({
     setSelectedPath(status.path);
     setExpandedPaths((current) => ({ ...current, [status.path]: true }));
     setEntriesByPath((current) => ({ ...current, [status.path]: status.entries }));
+    setDirectoryEvidenceByPath((current) => ({
+      ...current,
+      [status.path]: {
+        limit: status.limit,
+        offset: status.offset,
+        path: status.path,
+        reason: status.reason,
+        scan_cap_entries: status.scan_cap_entries,
+        scanned_entries: status.scanned_entries,
+        status: status.status,
+        total_entries: status.total_entries,
+        truncated: status.truncated,
+        truncated_by_scan_cap: status.truncated_by_scan_cap,
+        visible_entries_scanned: status.visible_entries_scanned,
+      },
+    }));
     setMetadataByPath((current) => {
       const next = { ...current, [status.path]: status.metadata };
       for (const entry of status.entries) {
@@ -289,6 +354,9 @@ export function FileBrowserPanel({
       return next;
     });
     setStaleDirectoryPath((current) => (current === status.path ? null : current));
+    if (status.status && status.status !== "completed") {
+      throw new Error(fileListStatusError(status));
+    }
     if (announce) {
       const totalText = status.truncated_by_scan_cap
         ? `${status.visible_entries_scanned ?? status.scanned_entries ?? status.entries.length}+ scanned`
@@ -593,6 +661,15 @@ export function FileBrowserPanel({
         type: status?.content_type ?? "application/octet-stream",
       });
       saveBlob(blob, status?.filename ?? fileName(path));
+      if (selectedAgent) {
+        setTransferHandoffHint({
+          path,
+          sizeBytes: status?.size_bytes ?? bytes.byteLength,
+          sourceKind: status?.source_kind ?? null,
+          targetClientId: selectedAgent.id,
+          targetLabel: targetNameId(selectedAgent),
+        });
+      }
       setActionMessage(`Downloaded ${path}`);
     });
   }
@@ -666,8 +743,14 @@ export function FileBrowserPanel({
         <button
           className="secondaryAction compactAction pathRefreshAction"
           disabled={pending || loading || !privilegeMaterial}
-          onClick={() => void loadDirectory(staleDirectoryPath ?? pathInput)}
-          title={staleDirectoryPath ? `Refresh changed directory ${staleDirectoryPath}` : "Refresh directory"}
+          onClick={() => void loadDirectory(pathRefreshTarget)}
+          title={
+            typedPathChanged
+              ? `Load typed path ${pathInput}`
+              : staleDirectoryPath
+                ? `Refresh changed directory ${staleDirectoryPath}`
+                : "Refresh directory"
+          }
           type="button"
         >
           <RefreshCw size={14} />
@@ -694,7 +777,38 @@ export function FileBrowserPanel({
         {onOpenMultiFiles && (
           <button className="secondaryAction" disabled={!selectedPath} onClick={() => onOpenMultiFiles(selectedPath)} type="button">
             <ShieldCheck size={14} />
-            <span>Multi files</span>
+            <span>Bulk files</span>
+          </button>
+        )}
+      </div>
+
+      <div className="fileBrowserStateStrip" aria-label="File browser directory state">
+        <span>
+          <strong>Target</strong>
+          <small title={selectedAgent?.id}>{selectedAgent ? targetNameId(selectedAgent) : "No VPS selected"}</small>
+        </span>
+        <span>
+          <strong>Path</strong>
+          <small title={currentPath}>{currentPath}</small>
+        </span>
+        <span>
+          <strong>Entries</strong>
+          <small>{directoryEntrySummary(currentEntries.length, currentDirectoryEvidence)}</small>
+        </span>
+        <span>
+          <strong>Scan</strong>
+          <small>{directoryScanSummary(currentDirectoryEvidence)}</small>
+        </span>
+        {onOpenTransfers && (
+          <button
+            className="secondaryAction compactAction"
+            disabled={!transferReferencePath || !targetClientId}
+            onClick={() => onOpenTransfers(transferReferencePath)}
+            title="Open Remote Operations / Transfers with the selected VPS and path scoped in the transfer table."
+            type="button"
+          >
+            <ArrowLeftRight size={14} />
+            <span>Transfers</span>
           </button>
         )}
       </div>
@@ -741,6 +855,34 @@ export function FileBrowserPanel({
               selectedPath={selectedPath}
               setExpandedPaths={setExpandedPaths}
             />
+            {currentPath !== "/" && (
+              <div className="fileCurrentDirectory" aria-label="Current directory entries">
+                <div className="fileCurrentDirectoryHeader">
+                  <strong title={currentPath}>{currentPath}</strong>
+                  <span>{directoryEntrySummary(currentEntries.length, currentDirectoryEvidence)}</span>
+                </div>
+                {currentEntries.length === 0 ? (
+                  <div className="fileTreeEmpty" role="status">
+                    No entries under {currentPath}
+                  </div>
+                ) : (
+                  currentEntries.map((entry) => (
+                    <button
+                      className={`fileTreeRow${selectedPath === entry.path ? " selected" : ""}`}
+                      key={`current-${entry.path}`}
+                      onClick={() => setSelectedPath(entry.path)}
+                      onDoubleClick={() => void handleEntryOpen(entry)}
+                      type="button"
+                    >
+                      <span className="fileTreeExpander" />
+                      {entry.is_dir ? <Folder size={15} /> : <File size={15} />}
+                      <span>{fileName(entry.path)}</span>
+                      <small>{entry.is_dir ? "dir" : formatBytes(entry.size_bytes)}</small>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
           </div>
         </aside>
 
@@ -816,6 +958,43 @@ export function FileBrowserPanel({
               />
               <span>Follow symlinks</span>
             </label>
+
+            {(transferHandoffHint || relatedTransfers.length > 0) && (
+              <section className="fileTransferHandoffPanel" aria-label="File transfer output handoff">
+                <div>
+                  <strong>Transfer output handoff</strong>
+                  <span title={transferReferencePath}>
+                    {transferHandoffText(transferHandoffHint, relatedTransfers.length, handoffReadyCount)}
+                  </span>
+                </div>
+                {transferHandoffHint && (
+                  <dl>
+                    <div>
+                      <dt>Target</dt>
+                      <dd title={transferHandoffHint.targetClientId}>{transferHandoffHint.targetLabel}</dd>
+                    </div>
+                    <div>
+                      <dt>Path</dt>
+                      <dd title={transferHandoffHint.path}>{transferHandoffHint.path}</dd>
+                    </div>
+                    <div>
+                      <dt>Output</dt>
+                      <dd>{transferHandoffOutputLabel(transferHandoffHint)}</dd>
+                    </div>
+                  </dl>
+                )}
+                {onOpenTransfers && (
+                  <button
+                    className="primaryAction compactAction"
+                    onClick={() => onOpenTransfers(transferReferencePath)}
+                    type="button"
+                  >
+                    <ArrowLeftRight size={14} />
+                    <span>Open transfer handoffs</span>
+                  </button>
+                )}
+              </section>
+            )}
 
             {activeCommand === "upload" && (
               <section className="fileCommandPopover">
@@ -1044,6 +1223,61 @@ export function FileBrowserPanel({
   );
 }
 
+function fileListStatusError(status: { path: string; reason?: string | null; status?: string }): string {
+  const statusLabel = status.status?.replace(/_/g, " ") || "blocked";
+  const reason = status.reason?.replace(/_/g, " ");
+  return `${statusLabel.charAt(0).toUpperCase()}${statusLabel.slice(1)} loading ${status.path}${reason ? `: ${reason}` : ""}`;
+}
+
+function directoryEntrySummary(loadedCount: number, evidence: DirectoryEvidence | null): string {
+  if (!evidence) {
+    return "Not loaded";
+  }
+  if (evidence.status && evidence.status !== "completed") {
+    return evidence.status.replace(/_/g, " ");
+  }
+  const total = evidence.total_entries ?? loadedCount;
+  return `${loadedCount} of ${total} entries`;
+}
+
+function directoryScanSummary(evidence: DirectoryEvidence | null): string {
+  if (!evidence) {
+    return "No scan evidence";
+  }
+  if (evidence.status && evidence.status !== "completed") {
+    return evidence.reason?.replace(/_/g, " ") ?? evidence.status.replace(/_/g, " ");
+  }
+  if (evidence.truncated_by_scan_cap) {
+    const scanned = evidence.visible_entries_scanned ?? evidence.scanned_entries ?? evidence.total_entries ?? 0;
+    const cap = evidence.scan_cap_entries ?? evidence.limit;
+    return `${scanned} scanned, capped at ${cap}`;
+  }
+  if (evidence.truncated) {
+    return `Showing first ${evidence.limit}`;
+  }
+  return "Complete";
+}
+
+function transferHandoffText(
+  hint: TransferHandoffHint | null,
+  relatedTransfers: number,
+  handoffReadyCount: number,
+): string {
+  if (relatedTransfers > 0) {
+    return `${relatedTransfers} related transfer sessions, ${handoffReadyCount} handoff ready`;
+  }
+  if (hint) {
+    return "Direct browser download completed; retained transfer handoffs and retry evidence live in Transfers";
+  }
+  return "Transfer evidence is owned by Remote Operations / Transfers";
+}
+
+function transferHandoffOutputLabel(hint: TransferHandoffHint): string {
+  const kind = hint.sourceKind ? hint.sourceKind.replace(/_/g, " ") : "download";
+  const size = typeof hint.sizeBytes === "number" ? formatBytes(hint.sizeBytes) : "size not reported";
+  return `${kind}, ${size}`;
+}
+
 function TreeNode({
   depth,
   entriesByPath,
@@ -1153,6 +1387,11 @@ function TreeNode({
       </ContextMenu.Root>
       {entry.is_dir && open && (
         <div role="group">
+          {children.length === 0 && Object.prototype.hasOwnProperty.call(entriesByPath, path) && (
+            <div className="fileTreeEmpty" role="status">
+              No entries under {path}
+            </div>
+          )}
           {children.map((child) => (
             <TreeNode
               depth={depth + 1}
@@ -1378,6 +1617,7 @@ function fileConfirmationItems(confirmation: PendingConfirmation): Array<{ label
       value: confirmation.target ? <span title={confirmation.target.id}>{targetNameId(confirmation.target)}</span> : "-",
     },
     { label: "Operation", value: fileOperationSummary(operation) },
+    { label: "Privilege", value: "Unlocked vault assertion required" },
   ];
   if ("path" in operation) {
     items.push({ label: "Path", value: operation.path });

@@ -185,6 +185,236 @@
   border-top: 1px solid var(--border-subtle);
 }
 
+.auditCoverageOverview,
+.retentionComplianceOverview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  gap: 10px;
+  min-width: 0;
+  padding: 14px 18px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-subtle);
+}
+
+.auditCoverageCard,
+.retentionComplianceCard {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 11px 12px;
+}
+
+.auditCoverageCard.ready,
+.retentionComplianceCard.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.auditCoverageCard.attention,
+.retentionComplianceCard.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.auditCoverageCard span,
+.retentionComplianceCard span,
+.retentionReviewStrip span,
+.retentionBoundaryNotice strong {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.auditCoverageCard strong,
+.retentionComplianceCard strong,
+.retentionReviewStrip strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.auditCoverageCard.ready strong,
+.retentionComplianceCard.ready strong {
+  color: var(--success-text);
+}
+
+.auditCoverageCard.attention strong,
+.retentionComplianceCard.attention strong {
+  color: var(--warning-text);
+}
+
+.auditCoverageCard p,
+.retentionComplianceCard p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.auditCoverageContract {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(210px, 0.45fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  min-width: 0;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--primary-soft);
+  padding: 12px;
+}
+
+.auditCoverageContract > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.auditCoverageContract strong {
+  color: var(--primary-text);
+  font-size: 13px;
+}
+
+.auditCoverageContract span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.auditCoverageChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.auditCoverageChips span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid var(--primary-border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--primary-text);
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: none;
+}
+
+.auditFilterBar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr));
+  gap: 10px;
+  align-items: end;
+  min-width: 0;
+  padding: 14px 18px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface);
+}
+
+.auditFilterIntro {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.auditFilterIntro svg {
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+
+.auditFilterBar label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.auditFilterBar input {
+  min-width: 0;
+  width: 100%;
+  height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 10px;
+}
+
+.auditFilterBar input::placeholder {
+  color: var(--placeholder);
+}
+
+.auditFilterBar input:focus {
+  border-color: var(--primary);
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+
+.auditFilterActions {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.retentionReviewStrip {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(160px, 0.6fr) minmax(190px, 0.8fr);
+  gap: 10px;
+  min-width: 0;
+  padding: 0 18px 14px;
+  background: var(--surface-subtle);
+}
+
+.retentionReviewStrip > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+
+.retentionBoundaryNotice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  padding: 10px 18px;
+}
+
+.retentionBoundaryNotice span {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+@media (max-width: 700px) {
+  .auditCoverageContract,
+  .retentionReviewStrip {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .historyRetentionGrid label {
   display: grid;
   gap: 6px;
@@ -218,6 +448,99 @@
 .historyRetentionGrid .artifactCleanupExpression,
 .historyRetentionGrid .artifactCleanupDomains {
   grid-column: 1 / -1;
+}
+
+.cleanupPreviewContract,
+.cleanupReadinessSummary {
+  grid-column: 1 / -1;
+}
+
+.cleanupPreviewContract {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  padding: 10px 12px;
+}
+
+.cleanupPreviewContract svg {
+  margin-top: 1px;
+}
+
+.cleanupPreviewContract div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.cleanupPreviewContract strong {
+  color: var(--primary-text);
+  font-size: 13px;
+}
+
+.cleanupPreviewContract span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.cleanupReadinessSummary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  gap: 8px;
+}
+
+.cleanupReadinessSummary > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.cleanupReadinessSummary > div.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.cleanupReadinessSummary > div.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.cleanupReadinessSummary span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.cleanupReadinessSummary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.cleanupReadinessSummary > div.ready strong {
+  color: var(--success-text);
+}
+
+.cleanupReadinessSummary > div.attention strong {
+  color: var(--warning-text);
+}
+
+.cleanupReadinessSummary p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .artifactCleanupDomains {
@@ -293,6 +616,10 @@
   gap: 8px;
   justify-content: flex-end;
   min-width: 0;
+}
+
+.retentionActions button {
+  white-space: nowrap;
 }
 
 .retentionResult {
@@ -843,6 +1170,22 @@
   font-size: 13px;
 }
 
+.configHelpLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  width: fit-content;
+  max-width: 100%;
+  color: var(--text);
+  line-height: 1.15;
+}
+
+.configHelpLabel > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .formRow {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
@@ -900,11 +1243,51 @@
 }
 
 .scheduledRunGrid {
-  grid-template-columns: minmax(180px, 1fr) minmax(120px, 0.5fr) 80px minmax(
-      160px,
-      0.8fr
-    ) minmax(150px, 0.6fr);
-  min-width: max(100%, 690px);
+  grid-template-columns:
+    minmax(210px, 1.05fr) minmax(230px, 1fr) minmax(170px, 0.75fr)
+    minmax(220px, 0.95fr) minmax(190px, 0.7fr);
+  min-width: max(100%, 1040px);
+}
+
+.scheduleCadenceCell strong {
+  white-space: normal;
+}
+
+.scheduleRunsCell {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.scheduleRunsCell strong,
+.scheduleRunsCell small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduleRunsCell strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.scheduleRunsCell small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.scheduleRunChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.scheduleRunChips .targetChip {
+  min-height: 22px;
+  padding: 0 6px;
+  font-size: 11px;
 }
 
 .gatewaySessionGrid {
@@ -1019,88 +1402,195 @@
   white-space: normal;
 }
 
-.configWorkflowGrid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  padding: 0 18px 18px;
-}
-
-.configWorkflowCard {
-  align-items: stretch;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: inherit;
-  cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-height: 136px;
-  padding: 14px;
-  text-align: left;
-}
-
-.configWorkflowCard:hover {
-  border-color: var(--primary);
-  box-shadow: 0 8px 20px rgba(60, 64, 67, 0.12);
-}
-
-.configWorkflowCard span {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.configWorkflowCard strong {
-  color: var(--text);
-  font-size: 16px;
-}
-
-.configWorkflowCard small,
-.configWorkflowCard em {
-  color: var(--muted);
-  font-style: normal;
-}
-
-.configWorkflowCard b {
-  color: var(--primary-text);
-  font-size: 13px;
-  margin-top: auto;
-}
-
-.configTermMap {
-  display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  padding: 0 18px 18px;
-}
-
-.configTermMap span {
-  align-items: start;
-  background: var(--canvas);
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-  padding: 10px 12px;
-}
-
-.configTermMap strong {
-  color: var(--text);
-  font-size: 13px;
-}
-
-.configTermMap small {
+.metricCard small {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
 
-.configJobGrid {
-  grid-template-columns: 110px minmax(170px, 1fr) 120px minmax(160px, 0.8fr);
-  min-width: max(100%, 560px);
+.configOverviewStack {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  padding: 18px;
+}
+
+.configHealthPanel,
+.configOverviewBlock {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 14px;
+}
+
+.configHealthHeader,
+.configOverviewBlockHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.configHealthHeader > div,
+.configOverviewBlockHeader {
+  min-width: 0;
+}
+
+.configHealthHeader h3,
+.configOverviewBlockHeader h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+}
+
+.configHealthHeader span,
+.configOverviewBlockHeader > span,
+.configHealthPanel p,
+.configOverviewBlock p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.configHealthSummary,
+.configCoverageGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.configHealthSummary > span,
+.configCoverageGrid > span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.configHealthSummary strong,
+.configCoverageGrid strong {
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.configHealthSummary small,
+.configCoverageGrid small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-transform: uppercase;
+}
+
+.configOverviewColumns,
+.configWorkflowLinks {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  min-width: 0;
+}
+
+.configRiskList {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.configRiskRow {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.configRiskRow > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.configRiskRow strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.configRiskRow small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.configRiskRow .consoleStatusBadge {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: center;
+  white-space: normal;
+}
+
+.configWorkflowLink {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: inherit;
+  cursor: pointer;
+  padding: 12px;
+  text-align: left;
+}
+
+.configWorkflowLink:hover {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+}
+
+.configWorkflowLink:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.configWorkflowLink strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.configWorkflowLink small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.configWorkflowLink span {
+  color: var(--primary-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.configRecentGrid {
+  grid-template-columns:
+    minmax(140px, 0.75fr)
+    minmax(150px, 0.8fr)
+    minmax(100px, 0.45fr)
+    minmax(240px, 1.2fr)
+    minmax(150px, 0.65fr);
+  min-width: max(100%, 780px);
 }
 
 .tagRegistryGrid {
@@ -1114,6 +1604,39 @@
       1.4fr
     ) minmax(280px, 1fr);
   min-width: max(100%, 920px);
+}
+
+.groupSummaryStrip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  gap: 8px;
+  min-width: 0;
+  padding: 0 18px 14px;
+}
+
+.groupSummaryStrip span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 9px 10px;
+}
+
+.groupSummaryStrip strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.groupSummaryStrip small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tagOrderPanel {
@@ -1266,6 +1789,51 @@
 .configTargetName {
   color: var(--text);
   font-weight: 700;
+}
+
+.configOverrideEditor {
+  align-content: start;
+}
+
+.configOverrideEditor > span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.configOverrideSummary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.configOverrideSummary > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 8px 10px;
+}
+
+.configOverrideSummary strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.configOverrideSummary small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.configOverrideActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .tagScheduleImpactTable {
@@ -1610,6 +2178,156 @@
   white-space: nowrap;
 }
 
+.auditEventMetadata {
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.auditJobEvidencePanel .consoleDataGrid {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.jobEvidenceDetailPanel {
+  margin: 16px 18px 18px;
+}
+
+.jobEvidenceSections {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+
+.jobEvidenceSections .wideWidget {
+  grid-column: span 2;
+}
+
+.auditEvidenceRow {
+  grid-template-columns: minmax(110px, 0.85fr) minmax(120px, 1fr) minmax(86px, 0.65fr) minmax(110px, 0.85fr);
+}
+
+.jobEvidenceOutputRow {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(150px, 1fr) minmax(190px, 1.35fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 10px;
+}
+
+.jobEvidenceOutputRow > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.jobEvidenceOutputRow strong,
+.jobEvidenceOutputRow small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jobEvidenceOutputRow strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.jobEvidenceOutputRow small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.jobEvidenceOutputRow pre {
+  max-height: 104px;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.4;
+  margin: 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.auditSessionEvidencePanel .consoleDataGrid {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.sessionEvidenceDetailPanel,
+.operatorSessionEvidenceTable {
+  margin: 16px 18px 18px;
+}
+
+.sessionEvidenceSections {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+}
+
+.sessionEvidenceReferenceGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.sessionEvidenceReferenceGrid > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+}
+
+.sessionEvidenceReferenceGrid strong {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.sessionEvidenceReferenceGrid small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.sessionEvidenceReferenceGrid .wideReference {
+  grid-column: 1 / -1;
+}
+
+.operatorSessionEvidenceRow {
+  grid-template-columns: minmax(120px, 1fr) minmax(90px, 0.7fr) minmax(90px, 0.7fr) minmax(110px, 0.9fr);
+}
+
+@media (max-width: 760px) {
+  .jobEvidenceSections .wideWidget {
+    grid-column: auto;
+  }
+
+  .auditEvidenceRow,
+  .jobEvidenceOutputRow,
+  .operatorSessionEvidenceRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .historyRow > .jobStatusCell {
   display: grid;
   align-items: center;
@@ -1679,6 +2397,14 @@
 
 .emptyState strong {
   color: var(--text);
+}
+
+.emptyStateActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
 }
 
 .tags {
@@ -2236,6 +2962,46 @@
 .bulkTagPreviewHeader span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.bulkTagPreviewStats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.bulkTagPreviewStats span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 8px;
+}
+
+.bulkTagPreviewStats strong {
+  overflow: hidden;
+  color: var(--text);
+  font-family:
+    "SFMono-Regular",
+    Consolas,
+    "Liberation Mono",
+    monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulkTagPreviewStats small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .bulkTagPreviewEmpty {

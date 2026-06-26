@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
+  ClipboardList,
   Clock3,
   Pencil,
   Play,
@@ -7,6 +8,7 @@ import {
   PowerOff,
   RefreshCcw,
   Save,
+  ShieldCheck,
   Target,
   Trash2,
 } from "lucide-react";
@@ -64,6 +66,7 @@ export function SchedulesPanel({
   onDisableSchedule,
   onEnableSchedule,
   onOpenPrivilegeUnlock,
+  onOpenScheduledRuns,
   onRefresh,
   onResolveTargets,
   onUpdateSchedule,
@@ -98,6 +101,7 @@ export function SchedulesPanel({
     request: SchedulePrivilegeMutationRequest,
   ) => Promise<void>;
   onOpenPrivilegeUnlock: () => void;
+  onOpenScheduledRuns?: () => void;
   onRefresh: () => Promise<void>;
   onResolveTargets: (
     selection: JobTargetSelection,
@@ -312,15 +316,16 @@ export function SchedulesPanel({
       },
       {
         id: "cron",
-        header: "Cron",
-        size: 90,
-        minSize: 80,
+        header: "Schedule",
+        size: 190,
+        minSize: 160,
         sortValue: (schedule) => schedule.cron_expr,
-        searchValue: (schedule) => schedule.cron_expr,
+        searchValue: (schedule) =>
+          `${schedule.cron_expr} ${describeCronExpression(schedule.cron_expr)} ${schedule.timezone}`,
         cell: (schedule) => (
-          <span className="historyPrimary">
-            <strong>{schedule.cron_expr}</strong>
-            <small>{schedule.timezone}</small>
+          <span className="historyPrimary scheduleCadenceCell" title={`${schedule.cron_expr} ${schedule.timezone}`}>
+            <strong>{describeCronExpression(schedule.cron_expr)}</strong>
+            <small>{schedule.cron_expr} · {schedule.timezone}</small>
           </span>
         ),
       },
@@ -333,24 +338,32 @@ export function SchedulesPanel({
         searchValue: (schedule) =>
           `${schedule.catch_up_policy} ${schedule.retry_delay_secs}`,
         cell: (schedule) => (
-          <span className="historyPrimary">
+          <span className="historyPrimary" title={describeSchedulePolicy(schedule)}>
             <strong>{formatCatchUpPolicy(schedule.catch_up_policy)}</strong>
-            <small>
-              {schedule.catch_up_policy === "run_all_limited"
-                ? `limit ${schedule.catch_up_limit}`
-                : `retry ${formatInterval(schedule.retry_delay_secs)}`}
-            </small>
+            <small>{describeSchedulePolicy(schedule)}</small>
           </span>
         ),
       },
       {
         id: "nextRun",
-        header: "Next run",
-        size: 160,
-        minSize: 140,
+        header: "Next runs",
+        size: 230,
+        minSize: 190,
         sortValue: (schedule) => schedule.next_run_at,
-        searchValue: (schedule) => schedule.next_run_at,
-        cell: (schedule) => formatCompactTime(schedule.next_run_at),
+        searchValue: (schedule) =>
+          `${schedule.next_run_at} ${schedule.next_runs.join(" ")} ${schedule.last_run_at ?? ""}`,
+        cell: (schedule) => (
+          <span className="scheduleRunsCell">
+            <span className="scheduleRunChips">
+              {nextRunList(schedule).slice(0, 5).map((run) => (
+                <span className="targetChip" key={run}>{formatCompactTime(run)}</span>
+              ))}
+            </span>
+            <small>
+              Last {schedule.last_run_at ? formatCompactTime(schedule.last_run_at) : "never"}
+            </small>
+          </span>
+        ),
       },
       {
         id: "state",
@@ -892,24 +905,44 @@ export function SchedulesPanel({
             <h2>Schedules</h2>
             <span>{status}</span>
           </div>
-          <button
-            className="secondaryAction"
-            disabled={loading || pending}
-            onClick={onRefresh}
-            type="button"
-          >
-            <RefreshCcw size={17} />
-            Refresh
-          </button>
+          <div className="inlineActions">
+            <button
+              className="secondaryAction compactAction"
+              disabled={!onOpenScheduledRuns}
+              onClick={onOpenScheduledRuns}
+              title="Open worker-created schedule execution history in Jobs / Scheduled runs"
+              type="button"
+            >
+              <ClipboardList size={17} />
+              Scheduled runs
+            </button>
+            <button
+              className="secondaryAction compactAction"
+              disabled={loading || pending}
+              onClick={onRefresh}
+              type="button"
+            >
+              <RefreshCcw size={17} />
+              Refresh
+            </button>
+          </div>
         </div>
         <ConsoleDataGrid
           actions={scheduleActions}
           columns={scheduleColumns}
           defaultPageSize={10}
           empty={
-            <div className="emptyState compactEmpty">
-              No schedules match the current search.
-            </div>
+            schedules.length === 0 ? (
+              <div className="emptyState compactEmpty">
+                <Clock3 size={22} />
+                <strong>No schedules yet</strong>
+                <span>Create a schedule below to run a command template on a fixed target snapshot.</span>
+              </div>
+            ) : (
+              <div className="emptyState compactEmpty">
+                No schedules match the current search.
+              </div>
+            )
           }
           getRowId={(schedule) => schedule.id}
           itemLabel="schedules"
@@ -921,11 +954,15 @@ export function SchedulesPanel({
                 audit: {schedule.selector_expression || "none"}
               </span>
               <span>
+                next {formatCompactTime(schedule.next_run_at)}
+              </span>
+              <span>
                 last{" "}
                 {schedule.last_run_at
                   ? formatTime(schedule.last_run_at)
                   : "never"}
               </span>
+              <span>{describeSchedulePolicy(schedule)}</span>
             </div>
           )}
           rowActions={scheduleActions}
@@ -933,6 +970,19 @@ export function SchedulesPanel({
           storageKey="vpsman.grid.schedules"
           title="Schedule records"
         />
+        <div className={`privilegeGateBox ${privilegeMaterial ? "ready" : ""}`} aria-label="Schedule lifecycle privilege gate">
+          <ShieldCheck size={16} />
+          <span>
+            {privilegeMaterial
+              ? "Privilege unlocked for schedule lifecycle actions"
+              : "Open Privilege Vault to enable apply now, target updates, enable, disable, and delete"}
+          </span>
+          {!privilegeMaterial && (
+            <button className="secondaryAction compactAction" onClick={onOpenPrivilegeUnlock} type="button">
+              Open Privilege Vault
+            </button>
+          )}
+        </div>
         {deferDraft && (
           <form
             className="inlineOpsForm"
@@ -1020,10 +1070,10 @@ export function SchedulesPanel({
 
       <section className="scheduleComposer">
         <ConsoleCollapsibleSection
-          defaultOpen={false}
           forceOpenKey={editingScheduleId}
+          defaultOpen={schedules.length === 0}
           storageKey="vpsman.panel.schedules.create"
-          summary={`${selectedTargetCount} matching VPSs in local preview`}
+          summary={schedules.length === 0 ? "Create the first recurring job" : `${selectedTargetCount} matching VPSs in local preview`}
           title={editingScheduleId ? "Modify schedule" : "Create schedule"}
         >
           <form className="dispatchForm" onSubmit={submitSchedule}>
@@ -1188,7 +1238,7 @@ export function SchedulesPanel({
               <strong>Next runs</strong>
               <span>
                 {nextRuns.length
-                  ? "UTC schedule, displayed in browser timezone"
+                  ? `${describeCronExpression(cronExpr)}. UTC schedule, displayed in browser timezone`
                   : "Invalid or unsupported cron expression"}
               </span>
               <div className="targetChipList">
@@ -1516,6 +1566,89 @@ function formatCatchUpPolicy(policy: string): string {
     return "one missed";
   }
   return "skip missed";
+}
+
+function describeSchedulePolicy(schedule: ScheduleRecord): string {
+  const retry = `retry after ${formatInterval(schedule.retry_delay_secs)}`;
+  if (schedule.catch_up_policy === "run_all_limited") {
+    return `Run up to ${schedule.catch_up_limit} missed runs; ${retry}`;
+  }
+  if (schedule.catch_up_policy === "run_once") {
+    return `Run only one missed run; ${retry}`;
+  }
+  return `Skip missed runs; ${retry}`;
+}
+
+function nextRunList(schedule: ScheduleRecord): string[] {
+  const runs = Array.isArray(schedule.next_runs) ? schedule.next_runs : [];
+  const unique = new Set<string>();
+  if (schedule.next_run_at) {
+    unique.add(schedule.next_run_at);
+  }
+  for (const run of runs) {
+    if (run) {
+      unique.add(run);
+    }
+  }
+  return Array.from(unique);
+}
+
+function describeCronExpression(expr: string): string {
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) {
+    return "Invalid schedule";
+  }
+  const [minute, hour, dom, month, dow] = fields;
+  if (minute.startsWith("*/") && hour === "*" && dom === "*" && month === "*" && dow === "*") {
+    const interval = Number(minute.slice(2));
+    return Number.isInteger(interval) && interval > 0
+      ? `Every ${interval} minutes`
+      : "Custom cron schedule";
+  }
+  if (hour === "*" && dom === "*" && month === "*" && dow === "*") {
+    return `Hourly at ${minuteLabel(minute)}`;
+  }
+  if (dom === "*" && month === "*" && dow === "*") {
+    return `Daily at ${timeLabel(hour, minute)} UTC`;
+  }
+  if (dom === "*" && month === "*" && dow !== "*") {
+    return `Weekly ${weekdayLabel(dow)} at ${timeLabel(hour, minute)} UTC`;
+  }
+  if (month === "*" && dow === "*") {
+    return `Monthly on day ${dom} at ${timeLabel(hour, minute)} UTC`;
+  }
+  return "Custom cron schedule";
+}
+
+function minuteLabel(value: string): string {
+  if (/^\d+$/.test(value)) {
+    return `minute ${Number(value)}`;
+  }
+  return `minutes ${value}`;
+}
+
+function timeLabel(hour: string, minute: string): string {
+  if (/^\d+$/.test(hour) && /^\d+$/.test(minute)) {
+    return `${String(Number(hour)).padStart(2, "0")}:${String(Number(minute)).padStart(2, "0")}`;
+  }
+  return `${hour}:${minute}`;
+}
+
+function weekdayLabel(value: string): string {
+  const names = new Map([
+    ["0", "Sunday"],
+    ["7", "Sunday"],
+    ["1", "Monday"],
+    ["2", "Tuesday"],
+    ["3", "Wednesday"],
+    ["4", "Thursday"],
+    ["5", "Friday"],
+    ["6", "Saturday"],
+  ]);
+  return value
+    .split(",")
+    .map((part) => names.get(part) ?? `weekday ${part}`)
+    .join(", ");
 }
 
 function operationSummary(operation: JobOperation | null): string {

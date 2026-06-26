@@ -1,7 +1,7 @@
 import path from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { activate, openConsoleSubpage } from "./support/consoleNavigation";
+import { openConsoleSubpage } from "./support/consoleNavigation";
 
 test.skip(
   !process.env.VPSMAN_DOCKER_FLEET_UI_SMOKE,
@@ -60,7 +60,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
 
   await login(page);
   await expect(
-    page.getByRole("heading", { name: "Dashboard", exact: true }),
+    page.getByRole("heading", { name: "Home", exact: true }),
   ).toBeVisible();
   await expect(
     page
@@ -87,20 +87,20 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     page,
     testInfo.project.name,
     "page-dashboard-overview",
-    "Dashboard overview page before operator filtering, with live operational health and resource telemetry.",
+    "Home overview page before operator filtering, with live operational health and resource telemetry.",
   );
 
-  await page.getByLabel("Dashboard group by").selectOption("providers");
+  await page.getByLabel("Home group by").selectOption("providers");
   await expect(page.getByText(/All VPS; grouped by Providers/)).toBeVisible();
   await expect(
     page.locator(".dashboardClusterCard", { hasText: "provider:alpha" }),
   ).toBeVisible();
-  await page.getByLabel("Dashboard scope kind").selectOption("country");
-  await page.getByLabel("Dashboard scope value").selectOption("US");
+  await page.getByLabel("Home scope kind").selectOption("country");
+  await page.getByLabel("Home scope value").selectOption("US");
   await expect(page.getByText(/country:US; grouped by Providers/)).toBeVisible({
     timeout: 15_000,
   });
-  await page.getByLabel("Dashboard group by").selectOption("date");
+  await page.getByLabel("Home group by").selectOption("date");
   await expect(
     page.getByText(/country:US; grouped by Date buckets/),
   ).toBeVisible({ timeout: 15_000 });
@@ -134,7 +134,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
 
   await openConsoleSubpage(page, "Fleet", "Instances");
   await expect(
-    page.getByRole("heading", { name: "Fleet overview" }),
+    page.getByRole("heading", { name: "Fleet instances" }),
   ).toBeVisible();
   const grid = page.getByLabel("VPS instance records data grid");
   await expect(
@@ -215,7 +215,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await maybeScreenshot(page, testInfo.project.name, "fleet");
   await expectCleanLayout(page);
 
-  await openConsoleSubpage(page, "Tags", "Bulk");
+  await openConsoleSubpage(page, "Fleet", "Bulk groups");
   await expect(page.getByRole("heading", { name: "Bulk tags" })).toBeVisible();
   await page
     .getByLabel("Bulk tag", { exact: true })
@@ -281,7 +281,7 @@ async function login(page: Page) {
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Submit login" }).click();
   await expect(
-    page.getByRole("heading", { name: "Dashboard", exact: true }),
+    page.getByRole("heading", { name: "Home", exact: true }),
   ).toBeVisible({ timeout: 30_000 });
 }
 
@@ -361,9 +361,9 @@ async function expectLiveSystemDashboardTelemetry(
   page: Page,
   projectName: string,
 ) {
-  await openConsoleSubpage(page, "System", "Dashboard");
+  await openConsoleSubpage(page, "System", "Overview");
   await expect(
-    page.getByRole("heading", { name: "System dashboard", exact: true }),
+    page.getByRole("heading", { name: "System overview", exact: true }),
   ).toBeVisible();
 
   const systemWorkspace = page.locator(".systemWorkspace");
@@ -405,7 +405,7 @@ async function expectLiveSystemDashboardTelemetry(
     page,
     projectName,
     "page-system-dashboard",
-    "System / Dashboard page with live control-plane capacity, dispatch, deadline, cancellation, and gateway event metrics.",
+    "System / Overview page with live control-plane capacity, dispatch, deadline, cancellation, and gateway event metrics.",
   );
 }
 
@@ -712,7 +712,7 @@ async function exerciseAlertNotificationChannels(
 }
 
 async function exerciseServerJobsCleanup(page: Page, projectName: string) {
-  await openConsoleSubpage(page, "Jobs", "Server jobs");
+  await openConsoleSubpage(page, "System", "Maintenance");
   const cleanupPanel = page.locator(".fleetPanel").filter({
     has: page.getByRole("heading", { name: "Artifact cleanup" }),
   });
@@ -728,8 +728,8 @@ async function exerciseServerJobsCleanup(page: Page, projectName: string) {
   await maybeExtendedScreenshot(
     page,
     projectName,
-    "server-jobs-artifact-cleanup-preview",
-    "Server jobs page after previewing a cleanup expression against a real uploaded source artifact.",
+    "system-maintenance-artifact-cleanup-preview",
+    "System maintenance page after previewing a cleanup expression against a real uploaded source artifact.",
   );
 
   await cleanupPanel.getByRole("button", { name: "Queue cleanup" }).click();
@@ -740,13 +740,13 @@ async function exerciseServerJobsCleanup(page: Page, projectName: string) {
   await maybeExtendedScreenshot(
     page,
     projectName,
-    "server-jobs-artifact-cleanup-confirm",
-    "Server jobs page showing the destructive cleanup confirmation prompt with matched artifact count and preview hash.",
+    "system-maintenance-artifact-cleanup-confirm",
+    "System maintenance page showing the destructive cleanup confirmation prompt with matched artifact count and preview hash.",
   );
   await prompt.getByRole("button", { name: "Queue cleanup" }).click();
 
   const serverJobsPanel = page.locator(".fleetPanel").filter({
-    has: page.getByRole("heading", { name: "Server jobs" }),
+    has: page.getByRole("heading", { name: "Maintenance jobs" }),
   });
   await expect(serverJobsPanel).toContainText("artifact cleanup", {
     timeout: 15_000,
@@ -755,8 +755,8 @@ async function exerciseServerJobsCleanup(page: Page, projectName: string) {
   await maybeExtendedScreenshot(
     page,
     projectName,
-    "server-jobs-artifact-cleanup-queued",
-    "Server jobs page after queueing artifact cleanup from the browser.",
+    "system-maintenance-artifact-cleanup-queued",
+    "System maintenance page after queueing artifact cleanup from the browser.",
   );
   await expectCleanLayout(page);
 }
@@ -788,33 +788,21 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     },
     {
       view: "Fleet",
-      subpage: "Alert policies",
-      marker: "Alert policies",
-      screenshot: "page-fleet-alert-policies",
+      subpage: "Groups",
+      marker: "Tags",
+      screenshot: "page-fleet-groups",
     },
     {
       view: "Fleet",
-      subpage: "Notifications",
-      marker: "Notification channels",
-      screenshot: "page-fleet-notifications",
-    },
-    {
-      view: "Tags",
-      subpage: "Registry",
-      marker: "Tags",
-      screenshot: "page-tags-registry",
-    },
-    {
-      view: "Tags",
       subpage: "Assignments",
       marker: "Tag assignments",
-      screenshot: "page-tags-assignments",
+      screenshot: "page-fleet-group-assignments",
     },
     {
-      view: "Tags",
-      subpage: "Bulk",
+      view: "Fleet",
+      subpage: "Bulk groups",
       marker: "Bulk tags",
-      screenshot: "page-tags-bulk",
+      screenshot: "page-fleet-bulk-groups",
     },
     {
       view: "Config",
@@ -830,8 +818,8 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     },
     {
       view: "Config",
-      subpage: "VPS config",
-      marker: "VPS config",
+      subpage: "Per-VPS",
+      marker: "Per-VPS config",
       screenshot: "page-config-single-vps",
     },
     {
@@ -853,94 +841,94 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
       screenshot: "page-jobs-dispatch",
     },
     {
-      view: "Jobs",
+      view: "Remote Operations",
       subpage: "Files",
       marker: "VPS file browser",
-      screenshot: "page-jobs-files",
+      screenshot: "page-remote-operations-files",
     },
     {
-      view: "Jobs",
-      subpage: "Multi files",
-      marker: "Multi-file actions",
-      screenshot: "page-jobs-multi-files",
+      view: "Remote Operations",
+      subpage: "Bulk files",
+      marker: "Bulk files",
+      screenshot: "page-remote-operations-bulk-files",
     },
     {
-      view: "Jobs",
-      subpage: "Update registry",
+      view: "Automation",
+      subpage: "Agent updates",
       marker: "Agent update registry",
-      screenshot: "page-jobs-updates",
+      screenshot: "page-automation-agent-updates",
     },
     {
-      view: "Jobs",
-      subpage: "Transfer history",
+      view: "Remote Operations",
+      subpage: "Transfers",
       marker: "File transfer sessions",
-      screenshot: "page-jobs-transfer-history",
+      screenshot: "page-remote-operations-transfers",
     },
     {
-      view: "Jobs",
-      subpage: "Terminal sessions",
+      view: "Remote Operations",
+      subpage: "Terminal",
       marker: "Terminal sessions",
-      screenshot: "page-jobs-terminal-sessions",
+      screenshot: "page-remote-operations-terminal",
     },
     {
-      view: "Jobs",
+      view: "Remote Operations",
       subpage: "Processes",
       marker: "Process supervisor inventory",
-      screenshot: "page-jobs-processes",
+      screenshot: "page-remote-operations-processes",
     },
     {
-      view: "Jobs",
-      subpage: "Server jobs",
+      view: "System",
+      subpage: "Maintenance",
       marker: "Artifact cleanup",
-      screenshot: "page-jobs-server-jobs",
+      screenshot: "page-system-maintenance",
     },
     {
       view: "Jobs",
-      subpage: "Schedule runs",
-      marker: "Schedule runs",
-      screenshot: "page-jobs-schedule-runs",
+      subpage: "Scheduled runs",
+      marker: "Scheduled runs",
+      screenshot: "page-jobs-scheduled-runs",
     },
     {
-      view: "Schedules",
-      subpage: "Schedule registry",
+      view: "Automation",
+      subpage: "Schedules",
       marker: "Schedules",
-      screenshot: "page-schedules-registry",
+      screenshot: "page-automation-schedules",
     },
     {
-      view: "Topology",
+      view: "Network",
       subpage: "Graph",
       marker: "Topology graph",
-      screenshot: "page-topology-graph",
+      screenshot: "page-network-graph",
     },
     {
-      view: "Topology",
+      view: "Network",
       subpage: "Tunnel plans",
       marker: "Tunnel plans",
-      screenshot: "page-topology-tunnel-plans",
+      screenshot: "page-network-tunnel-plans",
     },
     {
-      view: "Topology",
+      view: "Network",
       subpage: "Tests",
       marker: "Network tests",
-      screenshot: "page-topology-tests",
+      screenshot: "page-network-tests",
     },
     {
-      view: "Topology",
-      subpage: "Promotion",
-      marker: "Tunnel promotion",
-      screenshot: "page-topology-promotion",
-    },
-    {
-      view: "Topology",
+      view: "Network",
       subpage: "Evidence",
-      marker: "Topology evidence",
-      screenshot: "page-topology-evidence",
+      marker: "Network evidence",
+      screenshot: "page-network-evidence",
     },
     {
-      view: "Topology",
+      view: "Network",
       subpage: "OSPF",
-      marker: "vpsman / Topology / OSPF",
-      screenshot: "page-topology-ospf",
+      marker: "vpsman / Network / OSPF",
+      screenshot: "page-network-ospf",
+    },
+    {
+      view: "Backups",
+      subpage: "Overview",
+      marker: "Backup overview",
+      screenshot: "page-backups-overview",
     },
     {
       view: "Backups",
@@ -973,6 +961,36 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
       screenshot: "page-backups-migration",
     },
     {
+      view: "Observability",
+      subpage: "Fleet metrics",
+      marker: "Fleet metrics",
+      screenshot: "page-observability-fleet-metrics",
+    },
+    {
+      view: "Observability",
+      subpage: "Network metrics",
+      marker: "Network metrics",
+      screenshot: "page-observability-network-metrics",
+    },
+    {
+      view: "Observability",
+      subpage: "Alerts",
+      marker: "Alert policies",
+      screenshot: "page-observability-alerts",
+    },
+    {
+      view: "Observability",
+      subpage: "Webhooks",
+      marker: "Webhook rules",
+      screenshot: "page-observability-webhooks",
+    },
+    {
+      view: "Observability",
+      subpage: "Dashboards",
+      marker: "Saved dashboards",
+      screenshot: "page-observability-dashboards",
+    },
+    {
       view: "Audit",
       subpage: "Events",
       marker: "Audit log",
@@ -980,45 +998,51 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     },
     {
       view: "Audit",
-      subpage: "Retention",
+      subpage: "Job evidence",
+      marker: "Job audit evidence",
+      screenshot: "page-audit-job-evidence",
+    },
+    {
+      view: "Audit",
+      subpage: "Retention & export",
       marker: "History retention",
       screenshot: "page-audit-retention",
     },
     {
       view: "Access",
       subpage: "Overview",
-      marker: "Access control",
+      marker: "Access overview",
       screenshot: "page-access-overview",
     },
     {
       view: "Access",
-      subpage: "VPS keys",
-      marker: "Gateway agent identities",
-      screenshot: "page-access-vps-keys",
+      subpage: "VPS identities",
+      marker: "VPS identities",
+      screenshot: "page-access-vps-identities",
     },
     {
       view: "Access",
-      subpage: "Gateway",
+      subpage: "Gateway sessions",
       marker: "Gateway sessions",
       screenshot: "page-access-gateway",
     },
     {
       view: "Access",
-      subpage: "Privilege unlock",
-      marker: "Privilege unlock",
-      screenshot: "page-access-privilege-unlock",
+      subpage: "Privilege vault",
+      marker: "Privilege vault",
+      screenshot: "page-access-privilege-vault",
     },
     {
-      view: "System",
-      subpage: "Users",
-      marker: "System users",
-      screenshot: "page-system-users",
+      view: "Access",
+      subpage: "Operators",
+      marker: "Operators",
+      screenshot: "page-access-operators",
     },
     {
-      view: "System",
+      view: "Audit",
       subpage: "Sessions",
-      marker: "System sessions",
-      screenshot: "page-system-sessions",
+      marker: "Session evidence",
+      screenshot: "page-audit-sessions",
     },
     {
       view: "System",
@@ -1043,49 +1067,6 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
       projectName,
       entry.screenshot,
       `${entry.view} / ${entry.subpage} page after live navigation and fixture-backed data load.`,
-    );
-    if (entry.screenshot === "page-fleet-notifications") {
-      await captureNotificationRegistryTabs(page, projectName);
-    }
-  }
-}
-
-async function captureNotificationRegistryTabs(page: Page, projectName: string) {
-  const notifications = page.locator(".consoleCrudPanel").filter({
-    has: page.getByRole("tablist", { name: "Notification registries" }),
-  });
-  const tabs = [
-    {
-      label: "Channels",
-      marker: "Alert notification channels",
-      screenshot: "page-fleet-notifications-channels",
-    },
-    {
-      label: "Webhooks",
-      marker: "Webhook rules",
-      screenshot: "page-fleet-notifications-webhooks",
-    },
-    {
-      label: "Deliveries",
-      marker: "Notification delivery history",
-      screenshot: "page-fleet-notifications-deliveries",
-    },
-    {
-      label: "Maintenance",
-      marker: "Webhook delivery maintenance",
-      screenshot: "page-fleet-notifications-maintenance",
-    },
-  ] as const;
-
-  for (const tab of tabs) {
-    await activate(notifications.getByRole("tab", { name: tab.label }));
-    await expect(notifications.getByText(tab.marker).first()).toBeVisible();
-    await expectCleanLayout(page);
-    await maybeExtendedScreenshot(
-      page,
-      projectName,
-      tab.screenshot,
-      `Fleet / Notifications / ${tab.label} internal tab with live alert and webhook data.`,
     );
   }
 }

@@ -4,10 +4,14 @@ import { downloadVerifiedArtifact, type ArtifactDownloadMode } from "../artifact
 import type {
   AgentUpdateReleaseRecord,
   CommandTemplateRecord,
+  CreateJobApprovalRequest,
   CreateAgentUpdateReleaseRequest,
   CreateJobRequest,
   CreateJobResponse,
+  DecideJobApprovalRequest,
   JobHistoryRecord,
+  JobApprovalDecisionResponse,
+  JobApprovalRecord,
   JobOutputListPageRecord,
   JobOutputCompareMode,
   JobOutputComparisonRecord,
@@ -39,6 +43,7 @@ export function useJobsData(
   onAuditChanged: () => Promise<void>,
 ) {
   const [jobs, setJobs] = useState<JobHistoryRecord[]>([]);
+  const [jobApprovals, setJobApprovals] = useState<JobApprovalRecord[]>([]);
   const [agentUpdateReleases, setAgentUpdateReleases] = useState<AgentUpdateReleaseRecord[]>([]);
   const [processSupervisorInventory, setProcessSupervisorInventory] = useState<ProcessSupervisorInventoryRecord[]>([]);
   const [fileTransfers, setFileTransfers] = useState<FileTransferSessionRecord[]>([]);
@@ -55,6 +60,7 @@ export function useJobsData(
     try {
       const [
         jobsResult,
+        jobApprovalsResult,
         releasesResult,
         processSupervisorInventoryResult,
         fileTransfersResult,
@@ -64,6 +70,7 @@ export function useJobsData(
         commandTemplatesResult,
       ] = await Promise.allSettled([
         apiGet<JobHistoryRecord[]>(buildListPath("/api/v1/jobs", { limit: 1000, sort: "created_at", dir: "desc" }), apiToken),
+        apiGet<JobApprovalRecord[]>(buildListPath("/api/v1/job-approvals", { limit: 200, sort: "requested_at", dir: "desc" }), apiToken),
         apiGet<AgentUpdateReleaseRecord[]>("/api/v1/agent-update-releases?limit=200", apiToken),
         apiGet<ProcessSupervisorInventoryRecord[]>("/api/v1/process-supervisor/inventory?limit=200", apiToken),
         apiGet<FileTransferSessionRecord[]>("/api/v1/file-transfers?limit=200", apiToken),
@@ -74,6 +81,7 @@ export function useJobsData(
       ]);
       const settledResults = [
         jobsResult,
+        jobApprovalsResult,
         releasesResult,
         processSupervisorInventoryResult,
         fileTransfersResult,
@@ -88,6 +96,7 @@ export function useJobsData(
       if (unauthorized) {
         onUnauthorized();
         setJobs([]);
+        setJobApprovals([]);
         setAgentUpdateReleases([]);
         setProcessSupervisorInventory([]);
         setFileTransfers([]);
@@ -99,6 +108,7 @@ export function useJobsData(
         return;
       }
       if (jobsResult.status === "fulfilled") setJobs(jobsResult.value);
+      if (jobApprovalsResult.status === "fulfilled") setJobApprovals(jobApprovalsResult.value);
       if (releasesResult.status === "fulfilled") setAgentUpdateReleases(releasesResult.value);
       if (processSupervisorInventoryResult.status === "fulfilled") {
         setProcessSupervisorInventory(processSupervisorInventoryResult.value);
@@ -529,6 +539,41 @@ export function useJobsData(
     [apiToken, loadJobs, onAuditChanged, onFleetChanged],
   );
 
+  const createJobApproval = useCallback(
+    async (request: CreateJobApprovalRequest) => {
+      const response = await apiPost<JobApprovalRecord>("/api/v1/job-approvals", apiToken, request);
+      void Promise.allSettled([loadJobs(), onAuditChanged()]);
+      return response;
+    },
+    [apiToken, loadJobs, onAuditChanged],
+  );
+
+  const approveJobApproval = useCallback(
+    async (approvalId: string, request: DecideJobApprovalRequest) => {
+      const response = await apiPost<JobApprovalDecisionResponse>(
+        `/api/v1/job-approvals/${encodeURIComponent(approvalId)}/approve`,
+        apiToken,
+        request,
+      );
+      void Promise.allSettled([loadJobs(), onFleetChanged(), onAuditChanged()]);
+      return response;
+    },
+    [apiToken, loadJobs, onAuditChanged, onFleetChanged],
+  );
+
+  const rejectJobApproval = useCallback(
+    async (approvalId: string, request: DecideJobApprovalRequest) => {
+      const response = await apiPost<JobApprovalDecisionResponse>(
+        `/api/v1/job-approvals/${encodeURIComponent(approvalId)}/reject`,
+        apiToken,
+        request,
+      );
+      void Promise.allSettled([loadJobs(), onAuditChanged()]);
+      return response;
+    },
+    [apiToken, loadJobs, onAuditChanged],
+  );
+
   const previewArtifactCleanup = useCallback(
     async (expression: string, domains: string[]) => {
       try {
@@ -605,10 +650,14 @@ export function useJobsData(
   return {
     createAgentUpdateRelease,
     createJob,
+    createJobApproval,
+    approveJobApproval,
+    rejectJobApproval,
     commandTemplates,
     agentUpdateReleases,
     fileTransfers,
     fileTransferSources,
+    jobApprovals,
     jobs,
     jobsError,
     jobsLoading,

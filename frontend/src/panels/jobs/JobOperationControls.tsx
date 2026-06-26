@@ -18,9 +18,11 @@ import type { DispatchMode, SupervisorAction, TerminalAction } from "../jobDispa
 import { TerminalOperationControls } from "./TerminalOperationControls";
 
 export function OperationModeTabs({
+  includeTerminal = true,
   mode,
   onModeChange,
 }: {
+  includeTerminal?: boolean;
   mode: DispatchMode;
   onModeChange: (mode: DispatchMode) => void;
 }) {
@@ -44,7 +46,7 @@ export function OperationModeTabs({
 
   return (
     <div className="segmented">
-      {modes.map((item) => (
+      {modes.filter((item) => includeTerminal || item.mode !== "terminal_session").map((item) => (
         <button
           className={mode === item.mode ? "selected" : ""}
           key={item.mode}

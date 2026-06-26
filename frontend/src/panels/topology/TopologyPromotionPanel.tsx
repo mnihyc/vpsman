@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from "react";
-import { Network, Save, ShieldCheck, Wand2 } from "lucide-react";
+import { Network, Save, ShieldCheck, Wand2, X } from "lucide-react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import { usePanelDisplaySettings } from "../../panelDisplay";
@@ -7,7 +7,14 @@ import {
   buildRuntimeControl,
   buildRuntimeTopology,
   isDefaultRuntimeTopology,
+  latencyStatusLabel,
+  mutationPolicyLabel,
   normalizeTelemetryPromotionRequest,
+  ospfStatusLabel,
+  planCorrelationLabel,
+  readableTelemetryToken,
+  runtimeManagerLabel,
+  telemetrySourceLabel,
 } from "../../topologyRuntime";
 import type {
   AgentView,
@@ -62,10 +69,17 @@ type TelemetryPromotionSnapshot = {
   items: Array<{ label: string; value: string }>;
   request: PromoteTelemetryTunnelRequest;
 };
+type PromotionReviewItem = {
+  detail: string;
+  label: string;
+  tone?: "attention" | "ready";
+  value: string;
+};
 
 export function TopologyPromotionPanel({
   agents,
   onAllocateTunnelEndpoints,
+  onClose,
   onPromoteTelemetryTunnel,
   onPromoteTunnelPlanToCustomAdapter,
   telemetryTunnels,
@@ -73,6 +87,7 @@ export function TopologyPromotionPanel({
 }: {
   agents: AgentView[];
   onAllocateTunnelEndpoints: (request: AllocateTunnelEndpointsRequest) => Promise<AllocateTunnelEndpointsResponse>;
+  onClose?: () => void;
   onPromoteTelemetryTunnel: (request: PromoteTelemetryTunnelRequest) => Promise<void>;
   onPromoteTunnelPlanToCustomAdapter: (request: PromoteTunnelPlanToCustomAdapterRequest) => Promise<void>;
   telemetryTunnels: TelemetryTunnelRecord[];
@@ -123,7 +138,9 @@ export function TopologyPromotionPanel({
   );
   const selectedCandidateKey =
     promoteForm.client_id && promoteForm.interface ? `${promoteForm.client_id}:${promoteForm.interface}` : "";
+  const selectedCandidate = importCandidates.find((tunnel) => `${tunnel.client_id}:${tunnel.interface}` === selectedCandidateKey) ?? null;
   const selectedObservedPlan = observedPlans.find((plan) => plan.id === adapterForm.planId) ?? null;
+  const currentPromotionPlan = selectedObservedPlan ?? findCurrentPromotionPlan(selectedCandidate, promoteForm, tunnelPlans);
   const promotionReady =
     promoteForm.client_id &&
     promoteForm.interface &&
@@ -132,10 +149,21 @@ export function TopologyPromotionPanel({
     promoteForm.local_underlay.trim() &&
     promoteForm.peer_underlay.trim() &&
     hasPromotionAddressSource(promoteForm);
-  const adapterPromotionReady = selectedObservedPlan && adapterForm.statusArgv.trim();
+  const adapterPromotionReady = Boolean(selectedObservedPlan && adapterForm.statusArgv.trim());
   const status =
     actionError ??
     `${importCandidates.length} telemetry imports / ${observedPlans.length} observed plans`;
+  const promotionReviewItems = buildPromotionReviewItems({
+    adapterForm,
+    adapterPromotionReady,
+    adapterTrafficLimitEnabled,
+    clientLabel,
+    currentPlan: currentPromotionPlan,
+    promotionReady: Boolean(promotionReady),
+    promoteForm,
+    selectedCandidate,
+    selectedObservedPlan,
+  });
 
   function submitTelemetryPromotion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -149,8 +177,9 @@ export function TopologyPromotionPanel({
       confirmed: true,
     });
     setTelemetryPromotionSnapshot({
-      detail: "Confirm saving the observed telemetry candidate as a tunnel plan.",
+      detail: "Confirm saving the observed telemetry candidate as a reviewed observed topology plan.",
       items: [
+        ...promotionReviewItems.map(({ label, value }) => ({ label, value })),
         { label: "Candidate", value: `${clientLabel(request.client_id)} / ${request.interface}` },
         { label: "Peer", value: clientLabel(request.peer_client_id) },
         { label: "Name", value: request.name ?? "generated" },
@@ -206,8 +235,9 @@ export function TopologyPromotionPanel({
       confirmed: true,
     };
     setAdapterPromotionSnapshot({
-      detail: "Confirm promoting the observed tunnel plan into a custom adapter workflow.",
+      detail: "Confirm promoting the observed tunnel plan into a custom adapter workflow with reviewed runtime commands.",
       items: [
+        ...promotionReviewItems.map(({ label, value }) => ({ label, value })),
         { label: "Plan", value: selectedObservedPlan.name },
         { label: "Runtime", value: "Custom adapter" },
         { label: "Status argv", value: adapterForm.statusArgv.trim() },
@@ -254,13 +284,26 @@ export function TopologyPromotionPanel({
   }
 
   return (
-    <section className="fleetPanel scheduleComposer">
+    <section aria-label="Tunnel plan promotion workflow" className="fleetPanel scheduleComposer" id="network-tunnel-promotion">
       <div className="sectionHeader">
         <div>
           <h2>Tunnel promotion</h2>
           <span>{status}</span>
         </div>
-        <Network size={20} />
+        <div className="sectionActions">
+          <Network size={20} />
+          {onClose ? (
+            <button
+              aria-label="Close tunnel promotion workflow"
+              className="iconButton"
+              onClick={onClose}
+              title="Close tunnel promotion workflow"
+              type="button"
+            >
+              <X size={18} />
+            </button>
+          ) : null}
+        </div>
       </div>
       <div className="promotionWorkflow">
         <ConfirmationPrompt
@@ -296,13 +339,28 @@ export function TopologyPromotionPanel({
           pending={pending}
           title="Confirm custom adapter"
         />
+        <div className="promotionDiffHeader">
+          <strong>Promotion diff workflow</strong>
+          <span>Review observed topology against saved state before converting it into an observed plan or a managed adapter.</span>
+        </div>
+        <div className="promotionDiffStrip" aria-label="Topology promotion diff workflow">
+          {promotionReviewItems.map((item) => (
+            <div className={item.tone ? item.tone : undefined} key={item.label}>
+              <span>{item.label}</span>
+              <strong>{item.value}</strong>
+              <p>{item.detail}</p>
+            </div>
+          ))}
+        </div>
         <form className="dispatchForm promotionStageCard promotionImportCard" onSubmit={submitTelemetryPromotion}>
           <div
             className="sectionHeader compactHeader promotionStageHeader"
             title="Convert one telemetry candidate into a saved observed plan."
           >
             <div>
+              <small>Observed topology</small>
               <h3>External observe</h3>
+              <span>Convert a telemetry-only tunnel into a saved observed plan.</span>
             </div>
             <Save size={18} />
           </div>
@@ -319,10 +377,10 @@ export function TopologyPromotionPanel({
               </select>
             </label>
             <label>
-                <span>Peer VPS</span>
-                <VpsCombobox
-                  agents={agents}
-                  ariaLabel="External observe peer VPS"
+              <span>Peer VPS</span>
+              <VpsCombobox
+                agents={agents}
+                ariaLabel="External observe peer VPS"
                 excludeIds={promoteForm.client_id ? [promoteForm.client_id] : []}
                 onChange={(value) => setPromotionPeerClient(value)}
                 placeholder="Search peer VPS"
@@ -492,188 +550,199 @@ export function TopologyPromotionPanel({
           </button>
         </form>
 
-        <form className="dispatchForm promotionStageCard promotionAdapterCard" onSubmit={submitAdapterPromotion}>
-          <div
-            className="sectionHeader compactHeader promotionStageHeader"
-            title="Attach status, startup, shutdown, restart, cleanup, and optional traffic commands to a saved observed plan."
-          >
-            <div>
-              <h3>Custom adapter</h3>
-            </div>
+        <details className="promotionAdvancedDrawer">
+          <summary>
+            <span>
+              <strong>Advanced: custom adapter promotion</strong>
+              <small>Attach lifecycle, status, traffic, and drift evidence commands to an observed plan.</small>
+            </span>
             <ShieldCheck size={18} />
-          </div>
-          <div className="dispatchControls">
-            <label>
-              <span>Observed plan</span>
-              <select value={adapterForm.planId} onChange={(event) => selectAdapterPlan(event.target.value)}>
-                <option value="">Select</option>
-                {observedPlans.map((plan) => (
-                  <option key={plan.id} value={plan.id}>
-                    {plan.name} / {shortId(plan.id)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>Name</span>
-              <input value={adapterForm.name} onChange={(event) => setAdapterField("name", event.target.value)} />
-            </label>
-          </div>
-          <label className="adapterArgvField">
-            <span>Status argv</span>
-            <input
-              title={adapterArgvTooltip}
-              value={adapterForm.statusArgv}
-              onChange={(event) => setAdapterField("statusArgv", event.target.value)}
-            />
-          </label>
-          <details
-            className="promotionDisclosure"
-            title="Optional commands used when the agent starts, restarts, stops, or cleans up the custom adapter."
-          >
-            <summary>Lifecycle hooks</summary>
-            <div className="dispatchControls">
-              <label className="adapterArgvField">
-                <span>Start argv</span>
-                <input
-                  title={adapterArgvTooltip}
-                  value={adapterForm.startupArgv}
-                  onChange={(event) => setAdapterField("startupArgv", event.target.value)}
-                />
-              </label>
-              <label className="adapterArgvField">
-                <span>Restart argv</span>
-                <input
-                  title={adapterArgvTooltip}
-                  value={adapterForm.restartArgv}
-                  onChange={(event) => setAdapterField("restartArgv", event.target.value)}
-                />
-              </label>
+          </summary>
+          <form className="dispatchForm promotionStageCard promotionAdapterCard" onSubmit={submitAdapterPromotion}>
+            <div
+              className="sectionHeader compactHeader promotionStageHeader"
+              title="Attach status, startup, shutdown, restart, cleanup, and optional traffic commands to a saved observed plan."
+            >
+              <div>
+                <small>Proposed adapter</small>
+                <h3>Custom adapter</h3>
+                <span>Promote a saved observed plan into an externally managed adapter contract.</span>
+              </div>
+              <ShieldCheck size={18} />
             </div>
             <div className="dispatchControls">
-              <label className="adapterArgvField">
-                <span>Stop argv</span>
-                <input
-                  title={adapterArgvTooltip}
-                  value={adapterForm.stopArgv}
-                  onChange={(event) => setAdapterField("stopArgv", event.target.value)}
-                />
+              <label>
+                <span>Observed plan</span>
+                <select value={adapterForm.planId} onChange={(event) => selectAdapterPlan(event.target.value)}>
+                  <option value="">Select</option>
+                  {observedPlans.map((plan) => (
+                    <option key={plan.id} value={plan.id}>
+                      {plan.name} / {shortId(plan.id)}
+                    </option>
+                  ))}
+                </select>
               </label>
-              <label className="adapterArgvField">
-                <span>Cleanup argv</span>
-                <input
-                  title={adapterArgvTooltip}
-                  value={adapterForm.cleanupArgv}
-                  onChange={(event) => setAdapterField("cleanupArgv", event.target.value)}
-                />
+              <label>
+                <span>Name</span>
+                <input value={adapterForm.name} onChange={(event) => setAdapterField("name", event.target.value)} />
               </label>
             </div>
-          </details>
-          <details
-            className="promotionDisclosure"
-            title="Optional adapter traffic command and speed limits."
-          >
-            <summary>Traffic shaping</summary>
             <label className="adapterArgvField">
-              <span>Traffic argv</span>
+              <span>Status argv</span>
               <input
                 title={adapterArgvTooltip}
-                value={adapterForm.trafficArgv}
-                onChange={(event) => setAdapterField("trafficArgv", event.target.value)}
+                value={adapterForm.statusArgv}
+                onChange={(event) => setAdapterField("statusArgv", event.target.value)}
               />
             </label>
-            <label className="checkLine">
-              <input
-                checked={adapterTrafficLimitEnabled}
-                onChange={(event) => {
-                  setAdapterPromotionSnapshot(null);
-                  setAdapterTrafficLimitEnabled(event.target.checked);
-                }}
-                type="checkbox"
-              />
-              <span>Enable shaping</span>
-            </label>
-            <div className="dispatchControls">
-              <label>
-                <span>Egress Kbps</span>
+            <details
+              className="promotionDisclosure"
+              title="Optional commands used when the agent starts, restarts, stops, or cleans up the custom adapter."
+            >
+              <summary>Lifecycle hooks</summary>
+              <div className="dispatchControls">
+                <label className="adapterArgvField">
+                  <span>Start argv</span>
+                  <input
+                    title={adapterArgvTooltip}
+                    value={adapterForm.startupArgv}
+                    onChange={(event) => setAdapterField("startupArgv", event.target.value)}
+                  />
+                </label>
+                <label className="adapterArgvField">
+                  <span>Restart argv</span>
+                  <input
+                    title={adapterArgvTooltip}
+                    value={adapterForm.restartArgv}
+                    onChange={(event) => setAdapterField("restartArgv", event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="dispatchControls">
+                <label className="adapterArgvField">
+                  <span>Stop argv</span>
+                  <input
+                    title={adapterArgvTooltip}
+                    value={adapterForm.stopArgv}
+                    onChange={(event) => setAdapterField("stopArgv", event.target.value)}
+                  />
+                </label>
+                <label className="adapterArgvField">
+                  <span>Cleanup argv</span>
+                  <input
+                    title={adapterArgvTooltip}
+                    value={adapterForm.cleanupArgv}
+                    onChange={(event) => setAdapterField("cleanupArgv", event.target.value)}
+                  />
+                </label>
+              </div>
+            </details>
+            <details
+              className="promotionDisclosure"
+              title="Optional adapter traffic command and speed limits."
+            >
+              <summary>Traffic shaping</summary>
+              <label className="adapterArgvField">
+                <span>Traffic argv</span>
                 <input
-                  disabled={!adapterTrafficLimitEnabled}
-                  min={64}
-                  onChange={(event) => setAdapterField("trafficEgressKbps", event.target.value)}
-                  placeholder="disabled"
-                  type="number"
-                  value={adapterForm.trafficEgressKbps}
+                  title={adapterArgvTooltip}
+                  value={adapterForm.trafficArgv}
+                  onChange={(event) => setAdapterField("trafficArgv", event.target.value)}
                 />
               </label>
-              <label>
-                <span>Ingress Kbps</span>
+              <label className="checkLine">
                 <input
-                  disabled={!adapterTrafficLimitEnabled}
-                  min={64}
-                  onChange={(event) => setAdapterField("trafficIngressKbps", event.target.value)}
-                  placeholder="disabled"
-                  type="number"
-                  value={adapterForm.trafficIngressKbps}
+                  checked={adapterTrafficLimitEnabled}
+                  onChange={(event) => {
+                    setAdapterPromotionSnapshot(null);
+                    setAdapterTrafficLimitEnabled(event.target.checked);
+                  }}
+                  type="checkbox"
                 />
+                <span>Enable shaping</span>
               </label>
-              <label>
-                <span>Burst KB</span>
-                <input
-                  disabled={!adapterTrafficLimitEnabled}
-                  min={1}
-                  onChange={(event) => setAdapterField("trafficBurstKb", event.target.value)}
-                  placeholder="disabled"
-                  type="number"
-                  value={adapterForm.trafficBurstKb}
-                />
-              </label>
-            </div>
-          </details>
-          <details
-            className="promotionDisclosure"
-            title="Optional desired/stale interface and route evidence used for drift checks."
-          >
-            <summary>Topology evidence</summary>
-            <div className="dispatchControls">
-              <label>
-                <span>Desired interfaces</span>
-                <input
-                  value={adapterForm.topologyDesiredText}
-                  onChange={(event) => setAdapterField("topologyDesiredText", event.target.value)}
-                />
-              </label>
-              <label>
-                <span>Stale interfaces</span>
-                <input
-                  value={adapterForm.topologyStaleText}
-                  onChange={(event) => setAdapterField("topologyStaleText", event.target.value)}
-                />
-              </label>
-            </div>
-            <div className="dispatchControls">
-              <label>
-                <span>Routes</span>
-                <textarea
-                  value={adapterForm.topologyRoutesText}
-                  onChange={(event) => setAdapterField("topologyRoutesText", event.target.value)}
-                />
-              </label>
-              <label>
-                <span>Stale routes</span>
-                <textarea
-                  value={adapterForm.topologyStaleRoutesText}
-                  onChange={(event) => setAdapterField("topologyStaleRoutesText", event.target.value)}
-                />
-              </label>
-            </div>
-          </details>
-          {!adapterPromotionSnapshot && (
-            <button className="primaryAction" disabled={pending || !adapterPromotionReady} type="submit">
-              <ShieldCheck size={17} />
-              Review custom adapter
-            </button>
-          )}
-        </form>
+              <div className="dispatchControls">
+                <label>
+                  <span>Egress Kbps</span>
+                  <input
+                    disabled={!adapterTrafficLimitEnabled}
+                    min={64}
+                    onChange={(event) => setAdapterField("trafficEgressKbps", event.target.value)}
+                    placeholder="disabled"
+                    type="number"
+                    value={adapterForm.trafficEgressKbps}
+                  />
+                </label>
+                <label>
+                  <span>Ingress Kbps</span>
+                  <input
+                    disabled={!adapterTrafficLimitEnabled}
+                    min={64}
+                    onChange={(event) => setAdapterField("trafficIngressKbps", event.target.value)}
+                    placeholder="disabled"
+                    type="number"
+                    value={adapterForm.trafficIngressKbps}
+                  />
+                </label>
+                <label>
+                  <span>Burst KB</span>
+                  <input
+                    disabled={!adapterTrafficLimitEnabled}
+                    min={1}
+                    onChange={(event) => setAdapterField("trafficBurstKb", event.target.value)}
+                    placeholder="disabled"
+                    type="number"
+                    value={adapterForm.trafficBurstKb}
+                  />
+                </label>
+              </div>
+            </details>
+            <details
+              className="promotionDisclosure"
+              title="Optional desired/stale interface and route evidence used for drift checks."
+            >
+              <summary>Network evidence</summary>
+              <div className="dispatchControls">
+                <label>
+                  <span>Desired interfaces</span>
+                  <input
+                    value={adapterForm.topologyDesiredText}
+                    onChange={(event) => setAdapterField("topologyDesiredText", event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>Stale interfaces</span>
+                  <input
+                    value={adapterForm.topologyStaleText}
+                    onChange={(event) => setAdapterField("topologyStaleText", event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="dispatchControls">
+                <label>
+                  <span>Routes</span>
+                  <textarea
+                    value={adapterForm.topologyRoutesText}
+                    onChange={(event) => setAdapterField("topologyRoutesText", event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>Stale routes</span>
+                  <textarea
+                    value={adapterForm.topologyStaleRoutesText}
+                    onChange={(event) => setAdapterField("topologyStaleRoutesText", event.target.value)}
+                  />
+                </label>
+              </div>
+            </details>
+            {!adapterPromotionSnapshot && (
+              <button className="primaryAction" disabled={pending || !adapterPromotionReady} type="submit">
+                <ShieldCheck size={17} />
+                Review custom adapter
+              </button>
+            )}
+          </form>
+        </details>
       </div>
     </section>
   );
@@ -776,6 +845,278 @@ function bandwidthTierLabel(tier: BandwidthTier): string {
     return "100m (100 Mbps)";
   }
   return "10m (10 Mbps)";
+}
+
+function findCurrentPromotionPlan(
+  candidate: TelemetryTunnelRecord | null,
+  form: PromoteTelemetryTunnelRequest,
+  tunnelPlans: TunnelPlanRecord[],
+): TunnelPlanRecord | null {
+  if (candidate?.plan_id) {
+    return tunnelPlans.find((plan) => plan.id === candidate.plan_id) ?? null;
+  }
+  const clientId = candidate?.client_id || form.client_id;
+  const interfaceName = candidate?.interface || form.interface;
+  if (!clientId || !interfaceName) {
+    return null;
+  }
+  return tunnelPlans.find((plan) => {
+    const planClientIds = [plan.left_client_id, plan.right_client_id];
+    const peerMatches = !form.peer_client_id || planClientIds.includes(form.peer_client_id);
+    return plan.plan.interface_name === interfaceName && planClientIds.includes(clientId) && peerMatches;
+  }) ?? null;
+}
+
+function buildPromotionReviewItems({
+  adapterForm,
+  adapterPromotionReady,
+  adapterTrafficLimitEnabled,
+  clientLabel,
+  currentPlan,
+  promotionReady,
+  promoteForm,
+  selectedCandidate,
+  selectedObservedPlan,
+}: {
+  adapterForm: AdapterPromotionForm;
+  adapterPromotionReady: boolean;
+  adapterTrafficLimitEnabled: boolean;
+  clientLabel: (clientId: string) => string;
+  currentPlan: TunnelPlanRecord | null;
+  promotionReady: boolean;
+  promoteForm: PromoteTelemetryTunnelRequest;
+  selectedCandidate: TelemetryTunnelRecord | null;
+  selectedObservedPlan: TunnelPlanRecord | null;
+}): PromotionReviewItem[] {
+  const adapterMode = selectedObservedPlan !== null;
+  return [
+    buildObservedReviewItem(adapterMode, selectedCandidate, selectedObservedPlan, clientLabel),
+    buildCurrentReviewItem(selectedCandidate, currentPlan, clientLabel),
+    buildProposedReviewItem(adapterMode, adapterForm, adapterPromotionReady, promoteForm, selectedCandidate, selectedObservedPlan),
+    buildConflictReviewItem(adapterMode, adapterPromotionReady, currentPlan, promotionReady, promoteForm, selectedCandidate),
+    buildRiskReviewItem(adapterMode, adapterTrafficLimitEnabled, promoteForm, selectedCandidate, selectedObservedPlan),
+    buildReviewActionItem(adapterMode, adapterPromotionReady, promotionReady),
+  ];
+}
+
+function buildObservedReviewItem(
+  adapterMode: boolean,
+  selectedCandidate: TelemetryTunnelRecord | null,
+  selectedObservedPlan: TunnelPlanRecord | null,
+  clientLabel: (clientId: string) => string,
+): PromotionReviewItem {
+  if (adapterMode && selectedObservedPlan) {
+    return {
+      detail: `${formatPlanEndpoints(selectedObservedPlan, clientLabel)}; ${runtimeManagerLabel(selectedObservedPlan.plan.runtime_control?.manager)}`,
+      label: "Observed topology",
+      tone: "ready",
+      value: `${selectedObservedPlan.name} / ${selectedObservedPlan.plan.interface_name}`,
+    };
+  }
+  if (selectedCandidate) {
+    return {
+      detail: `${readableTelemetryToken(selectedCandidate.kind)}; ${mutationPolicyLabel(selectedCandidate.mutation_policy)}; ${telemetrySourceLabel(selectedCandidate.source)}`,
+      label: "Observed topology",
+      tone: "ready",
+      value: `${clientLabel(selectedCandidate.client_id)} / ${selectedCandidate.interface}`,
+    };
+  }
+  return {
+    detail: "Select an unmatched telemetry interface or an observed plan to start promotion review.",
+    label: "Observed topology",
+    value: "Waiting for selection",
+  };
+}
+
+function buildCurrentReviewItem(
+  selectedCandidate: TelemetryTunnelRecord | null,
+  currentPlan: TunnelPlanRecord | null,
+  clientLabel: (clientId: string) => string,
+): PromotionReviewItem {
+  if (currentPlan) {
+    return {
+      detail: `${readableTelemetryToken(currentPlan.status)}; ${formatPlanEndpoints(currentPlan, clientLabel)}; OSPF cost ${currentPlan.recommended_ospf_cost}`,
+      label: "Current applied topology",
+      tone: currentPlan.enabled ? "ready" : undefined,
+      value: `${currentPlan.name} / ${runtimeManagerLabel(currentPlan.plan.runtime_control?.manager)}`,
+    };
+  }
+  if (selectedCandidate) {
+    return {
+      detail: `${planCorrelationLabel(selectedCandidate.plan_correlation)}; ${selectedCandidate.plan_name ?? "no saved plan match"}`,
+      label: "Current applied topology",
+      tone: selectedCandidate.plan_id ? "ready" : undefined,
+      value: selectedCandidate.plan_id ? "Saved plan found" : "No saved plan match",
+    };
+  }
+  return {
+    detail: "Saved-plan comparison appears after a candidate or observed plan is selected.",
+    label: "Current applied topology",
+    value: "Not selected",
+  };
+}
+
+function buildProposedReviewItem(
+  adapterMode: boolean,
+  adapterForm: AdapterPromotionForm,
+  adapterPromotionReady: boolean,
+  promoteForm: PromoteTelemetryTunnelRequest,
+  selectedCandidate: TelemetryTunnelRecord | null,
+  selectedObservedPlan: TunnelPlanRecord | null,
+): PromotionReviewItem {
+  if (adapterMode && selectedObservedPlan) {
+    return {
+      detail: adapterPromotionReady
+        ? "Status command will be saved as the required adapter health contract."
+        : "Status argv is required before custom adapter review.",
+      label: "Proposed plan",
+      tone: adapterPromotionReady ? "ready" : "attention",
+      value: `${adapterForm.name.trim() || `${selectedObservedPlan.name}-adapter`} / Custom adapter`,
+    };
+  }
+  if (selectedCandidate) {
+    return {
+      detail: `${bandwidthTierLabel(promoteForm.bandwidth ?? "100m")}; ${promoteForm.latency_ms ?? 20} ms baseline; ${formatPromotionAddresses(promoteForm)}`,
+      label: "Proposed plan",
+      tone: hasPromotionAddressSource(promoteForm) ? "ready" : "attention",
+      value: `${promoteForm.name || `${selectedCandidate.interface}-observed`} / ${promoteForm.enabled ? "enabled" : "deferred"}`,
+    };
+  }
+  return {
+    detail: "The proposed observed plan appears after selecting telemetry and completing peer/endpoints.",
+    label: "Proposed plan",
+    value: "Not drafted",
+  };
+}
+
+function buildConflictReviewItem(
+  adapterMode: boolean,
+  adapterPromotionReady: boolean,
+  currentPlan: TunnelPlanRecord | null,
+  promotionReady: boolean,
+  promoteForm: PromoteTelemetryTunnelRequest,
+  selectedCandidate: TelemetryTunnelRecord | null,
+): PromotionReviewItem {
+  const conflicts = currentPlan?.plan.conflicts ?? [];
+  if (conflicts.length > 0) {
+    return {
+      detail: conflicts.slice(0, 2).join("; "),
+      label: "Conflicts",
+      tone: "attention",
+      value: `${conflicts.length} generated conflict${conflicts.length === 1 ? "" : "s"}`,
+    };
+  }
+  if (adapterMode) {
+    return {
+      detail: adapterPromotionReady
+        ? "Selected observed plan and status command are ready for adapter review."
+        : "Select an observed plan and provide a status argv before review.",
+      label: "Conflicts",
+      tone: adapterPromotionReady ? "ready" : "attention",
+      value: adapterPromotionReady ? "No visible blockers" : "Adapter review blocked",
+    };
+  }
+  const missing = promotionMissingParts(promoteForm, selectedCandidate);
+  return {
+    detail: missing.length > 0 ? `Complete ${missing.join(", ")} before review.` : "Peer, underlay, and endpoint pair are complete.",
+    label: "Conflicts",
+    tone: missing.length > 0 ? "attention" : "ready",
+    value: missing.length > 0 ? "Promotion blocked" : "No visible blockers",
+  };
+}
+
+function buildRiskReviewItem(
+  adapterMode: boolean,
+  adapterTrafficLimitEnabled: boolean,
+  promoteForm: PromoteTelemetryTunnelRequest,
+  selectedCandidate: TelemetryTunnelRecord | null,
+  selectedObservedPlan: TunnelPlanRecord | null,
+): PromotionReviewItem {
+  if (adapterMode && selectedObservedPlan) {
+    return {
+      detail: `${runtimeManagerLabel(selectedObservedPlan.plan.runtime_control?.manager)} -> Custom adapter; ${selectedObservedPlan.enabled ? "plan currently enabled" : "plan disabled"}.`,
+      label: "Risk",
+      tone: adapterTrafficLimitEnabled ? "attention" : undefined,
+      value: adapterTrafficLimitEnabled ? "Traffic mutation enabled" : "Adapter health contract",
+    };
+  }
+  if (selectedCandidate) {
+    const latency = latencyStatusLabel(selectedCandidate.latency_status);
+    const ospf = ospfStatusLabel(selectedCandidate.auto_ospf_status, selectedCandidate.auto_ospf_enabled);
+    return {
+      detail: `${latency}; OSPF ${ospf}; ${mutationPolicyLabel(selectedCandidate.mutation_policy)}.`,
+      label: "Risk",
+      tone: promoteForm.enabled ? "attention" : undefined,
+      value: promoteForm.enabled ? "Enabled on save" : "Deferred save",
+    };
+  }
+  return {
+    detail: "Risk summary appears after selecting a promotion source.",
+    label: "Risk",
+    value: "Not assessed",
+  };
+}
+
+function buildReviewActionItem(
+  adapterMode: boolean,
+  adapterPromotionReady: boolean,
+  promotionReady: boolean,
+): PromotionReviewItem {
+  if (adapterMode) {
+    return {
+      detail: adapterPromotionReady ? "Use Review custom adapter for the final confirmation." : "Complete the adapter contract before confirmation.",
+      label: "Review / approve",
+      tone: adapterPromotionReady ? "ready" : "attention",
+      value: adapterPromotionReady ? "Ready to review" : "Blocked",
+    };
+  }
+  return {
+    detail: promotionReady ? "Use Save observed plan for the final confirmation." : "Complete peer, underlay, and endpoint CIDR before saving.",
+    label: "Review / approve",
+    tone: promotionReady ? "ready" : "attention",
+    value: promotionReady ? "Ready to review" : "Blocked",
+  };
+}
+
+function promotionMissingParts(
+  form: PromoteTelemetryTunnelRequest,
+  selectedCandidate: TelemetryTunnelRecord | null,
+): string[] {
+  const missing: string[] = [];
+  if (!selectedCandidate) {
+    missing.push("observed interface");
+  }
+  if (!form.peer_client_id) {
+    missing.push("peer VPS");
+  } else if (form.client_id === form.peer_client_id) {
+    missing.push("distinct peer VPS");
+  }
+  if (!form.local_underlay.trim()) {
+    missing.push("local underlay");
+  }
+  if (!form.peer_underlay.trim()) {
+    missing.push("peer underlay");
+  }
+  if (!hasPromotionAddressSource(form)) {
+    missing.push("endpoint CIDRs");
+  }
+  return missing;
+}
+
+function formatPlanEndpoints(plan: TunnelPlanRecord, clientLabel: (clientId: string) => string): string {
+  return `${clientLabel(plan.left_client_id)} -> ${clientLabel(plan.right_client_id)}`;
+}
+
+function formatPromotionAddresses(form: PromoteTelemetryTunnelRequest): string {
+  const ipv4 = completePairOrNull(form.ipv4_tunnel ?? null);
+  if (ipv4) {
+    return `IPv4 ${ipv4.left}/${ipv4.prefix_len} -> ${ipv4.right}/${ipv4.prefix_len}`;
+  }
+  const ipv6 = completePairOrNull(form.ipv6_tunnel ?? null);
+  if (ipv6) {
+    return `IPv6 ${ipv6.left}/${ipv6.prefix_len} -> ${ipv6.right}/${ipv6.prefix_len}`;
+  }
+  return "endpoint CIDRs required";
 }
 
 function initialTelemetryPromotionForm(preferences: OperatorPreferences): PromoteTelemetryTunnelRequest {

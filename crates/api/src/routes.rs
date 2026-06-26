@@ -69,7 +69,10 @@ use crate::{
         list_jobs, list_network_observation_trends, list_network_observations,
         list_process_supervisor_inventory,
     },
-    routes_jobs::{cancel_job, create_job},
+    routes_jobs::{
+        approve_job_approval, cancel_job, create_job, create_job_approval, list_job_approvals,
+        reject_job_approval,
+    },
     routes_key_lifecycle::{
         key_lifecycle_report, list_client_key_revocations, revoke_current_client_key,
         upsert_agent_identity,
@@ -352,6 +355,20 @@ pub(crate) fn build_router(state: AppState) -> Router {
             get(list_jobs)
                 .post(create_job)
                 .layer(DefaultBodyLimit::max(MAX_JOB_CREATE_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/job-approvals",
+            get(list_job_approvals)
+                .post(create_job_approval)
+                .layer(DefaultBodyLimit::max(MAX_JOB_CREATE_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/job-approvals/{approval_id}/approve",
+            post(approve_job_approval),
+        )
+        .route(
+            "/api/v1/job-approvals/{approval_id}/reject",
+            post(reject_job_approval),
         )
         .route("/api/v1/server-jobs", get(list_server_jobs))
         .route(

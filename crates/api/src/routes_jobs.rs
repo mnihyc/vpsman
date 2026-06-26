@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use anyhow::anyhow;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
@@ -25,11 +25,14 @@ use crate::{
     error::ApiError,
     model::{
         AgentView, AuthContext, CancelJobRequest, CancelJobResponse, CancelJobTargetResult,
-        CreateJobRequest, CreateJobResponse, CreateJobTargetCounts, WsEvent,
+        CreateJobApprovalRequest, CreateJobRequest, CreateJobResponse, CreateJobTargetCounts,
+        DecideJobApprovalRequest, JobApprovalDecisionResponse, JobApprovalView, ListQuery, WsEvent,
     },
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
     repository_jobs::PrecompletedJobTarget,
+    security::SCOPE_JOBS_READ,
     state::AppState,
+    unix_now,
 };
 
 pub(crate) async fn create_job(
@@ -135,6 +138,104 @@ pub(crate) async fn cancel_job(
     ))
 }
 
+pub(crate) async fn list_job_approvals(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Vec<JobApprovalView>>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_JOBS_READ)
+        .await?;
+    Ok(Json(state.repo.query_job_approvals(&query).await?))
+}
+
+pub(crate) async fn create_job_approval(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateJobApprovalRequest>,
+) -> Result<(StatusCode, Json<JobApprovalView>), ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "jobs:write")
+        .await?;
+    let (approval, request) = prepare_job_approval(&state, &operator, request).await?;
+    let approval = state
+        .repo
+        .record_job_approval(approval, &request, &operator)
+        .await
+        .map_err(map_job_approval_repo_error)?;
+    Ok((StatusCode::CREATED, Json(approval)))
+}
+
+pub(crate) async fn approve_job_approval(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(approval_id): Path<Uuid>,
+    Json(request): Json<DecideJobApprovalRequest>,
+) -> Result<Json<JobApprovalDecisionResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "jobs:write")
+        .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict(
+            "job_approval_decision_requires_confirmation",
+        ));
+    }
+    let (approval, frozen_request) = state
+        .repo
+        .get_job_approval_request(approval_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("job_approval_not_found"))?;
+    if approval.status != "pending" {
+        return Err(ApiError::conflict("job_approval_not_pending"));
+    }
+    let (_, Json(job)) =
+        create_job_from_internal_operator_mutation(&state, &operator, frozen_request).await?;
+    let approval = state
+        .repo
+        .decide_job_approval(
+            approval_id,
+            "approved",
+            &operator,
+            bounded_review_reason(request.reason.as_deref()).as_deref(),
+        )
+        .await
+        .map_err(map_job_approval_repo_error)?;
+    Ok(Json(JobApprovalDecisionResponse {
+        approval,
+        job: Some(job),
+    }))
+}
+
+pub(crate) async fn reject_job_approval(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(approval_id): Path<Uuid>,
+    Json(request): Json<DecideJobApprovalRequest>,
+) -> Result<Json<JobApprovalDecisionResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "jobs:write")
+        .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict(
+            "job_approval_decision_requires_confirmation",
+        ));
+    }
+    let approval = state
+        .repo
+        .decide_job_approval(
+            approval_id,
+            "rejected",
+            &operator,
+            bounded_review_reason(request.reason.as_deref()).as_deref(),
+        )
+        .await
+        .map_err(map_job_approval_repo_error)?;
+    Ok(Json(JobApprovalDecisionResponse {
+        approval,
+        job: None,
+    }))
+}
+
 pub(crate) async fn create_job_with_operator(
     state: &AppState,
     operator: &AuthContext,
@@ -197,6 +298,117 @@ enum JobPrivilegeSource {
     SavedSchedule(Uuid),
     TerminalInputRoute,
     InternalOperatorMutation,
+}
+
+async fn prepare_job_approval(
+    state: &AppState,
+    operator: &AuthContext,
+    request: CreateJobApprovalRequest,
+) -> Result<(JobApprovalView, CreateJobRequest), ApiError> {
+    let mut job = request.job;
+    validate_job_audit_selector(&job.selector_expression)?;
+    if job.job_id.is_none() {
+        job.job_id = Some(Uuid::new_v4());
+    }
+    let job_id = job
+        .job_id
+        .ok_or_else(|| ApiError::conflict("job_id_required"))?;
+    if job_id == Uuid::nil() {
+        return Err(ApiError::bad_request("job_id_invalid"));
+    }
+    if !job.confirmed {
+        return Err(ApiError::conflict("job_approval_requires_confirmed_job"));
+    }
+    if !job.privileged {
+        return Err(ApiError::forbidden("job_approval_requires_privileged_job"));
+    }
+    if state.repo.get_job(job_id).await?.is_some() {
+        return Err(ApiError::conflict("job_approval_job_id_already_exists"));
+    }
+    let job_command = job.job_command()?;
+    validate_job_command_source(&job_command, &JobPrivilegeSource::RequestAssertion)?;
+    if matches!(job_command, JobCommand::TerminalInput { .. }) {
+        return Err(ApiError::bad_request("terminal_input_route_required"));
+    }
+    let command_payload = encode_json(&job_command).map_err(|error| {
+        ApiError::from(anyhow!(
+            "failed to encode job command for approval authorization: {error}"
+        ))
+    })?;
+    let command_hash = payload_hash(&command_payload);
+    let fixed_target_ids = job.fixed_target_ids()?;
+    let target_selection = job.target_selection()?;
+    let resolved_agents = state
+        .repo
+        .resolve_bulk_targets(&target_selection)
+        .await?
+        .targets;
+    let missing_fixed_targets = fixed_target_ids
+        .iter()
+        .filter(|client_id| {
+            !resolved_agents
+                .iter()
+                .any(|agent| agent.id == client_id.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_fixed_targets.is_empty() {
+        return Err(ApiError::conflict("fixed_target_not_found"));
+    }
+    if matches!(job_command, JobCommand::ConfigRead) && fixed_target_ids.len() != 1 {
+        return Err(ApiError::conflict("config_read_requires_single_target"));
+    }
+    vpsman_server_core::validate_network_command_targets(&job_command, &fixed_target_ids)
+        .map_err(|error| ApiError::bad_request(error.code()))?;
+    validate_restore_archive_binding(state, &job_command, &fixed_target_ids).await?;
+    let effective_max_timeout_secs =
+        effective_job_max_timeout_secs(job.max_timeout_secs, state.max_job_timeout_secs())?;
+    job.max_timeout_secs = Some(effective_max_timeout_secs);
+    let request_fingerprint =
+        request_fingerprint_for_job(&job, &command_hash, &fixed_target_ids, None)?;
+    let privilege_intent = JobPrivilegeIntent::new(JobPrivilegeIntentInput {
+        selector_expression: &job.selector_expression,
+        command_type: job.command_type_label(),
+        operation_payload_hash: &command_hash,
+        resolved_targets: &fixed_target_ids,
+        max_timeout_secs: job.max_timeout_secs.unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS),
+        force_unprivileged: job.force_unprivileged,
+        privileged: job.privileged,
+    });
+    verify_privilege_intent(state, &privilege_intent, job.privilege_assertion.clone()).await?;
+    job.privilege_assertion = None;
+    job.target_client_ids = fixed_target_ids.clone();
+    let risk = normalized_job_approval_risk(request.risk.as_deref(), &job)?;
+    let reason = bounded_review_reason(request.reason.as_deref());
+    let requested_at = unix_now().to_string();
+    Ok((
+        JobApprovalView {
+            id: request.approval_id.unwrap_or_else(Uuid::new_v4),
+            status: "pending".to_string(),
+            job_id,
+            command_type: job.command_type_label().to_string(),
+            selector_expression: job.selector_expression.trim().to_string(),
+            target_client_ids: fixed_target_ids,
+            target_count: job.target_client_ids.len(),
+            privileged: job.privileged,
+            destructive: job.destructive,
+            force_unprivileged: job.force_unprivileged,
+            max_timeout_secs: effective_max_timeout_secs,
+            payload_hash: command_hash,
+            request_fingerprint,
+            requester_id: Some(operator.operator.id),
+            requester_username: operator.operator.username.clone(),
+            requester_role: operator.operator.role.clone(),
+            requested_at,
+            request_reason: reason,
+            risk,
+            decision_by: None,
+            decision_username: None,
+            decision_reason: None,
+            decided_at: None,
+        },
+        job,
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -1282,6 +1494,46 @@ fn bounded_cancel_reason(reason: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(512).collect())
+}
+
+fn bounded_review_reason(reason: Option<&str>) -> Option<String> {
+    reason
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(1024).collect())
+}
+
+fn normalized_job_approval_risk(
+    risk: Option<&str>,
+    request: &CreateJobRequest,
+) -> Result<String, ApiError> {
+    let default_risk = if request.destructive {
+        "destructive"
+    } else if request.privileged {
+        "privileged"
+    } else {
+        "standard"
+    };
+    let risk = risk.unwrap_or(default_risk).trim().to_ascii_lowercase();
+    if risk.is_empty() || risk.len() > 64 || risk.chars().any(char::is_control) {
+        return Err(ApiError::bad_request("job_approval_risk_invalid"));
+    }
+    Ok(risk)
+}
+
+fn map_job_approval_repo_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.starts_with("job_approval_not_found") {
+        ApiError::not_found("job_approval_not_found")
+    } else if message.starts_with("job_approval_not_pending") {
+        ApiError::conflict("job_approval_not_pending")
+    } else if message.starts_with("job_approval_id_reused") {
+        ApiError::conflict("job_approval_id_reused")
+    } else if message.starts_with("job_approval_decision_invalid") {
+        ApiError::bad_request("job_approval_decision_invalid")
+    } else {
+        ApiError::from(error)
+    }
 }
 
 #[derive(Clone, Debug)]

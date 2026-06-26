@@ -7,6 +7,25 @@
   overflow: hidden;
 }
 
+.backupContextActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 10px 12px;
+}
+
+.backupContextActions span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .restoreHistorySection,
 .restoreFormHeader {
   margin-top: 18px;
@@ -39,6 +58,28 @@
   color: var(--text-secondary);
   font-size: 12px;
   padding: 3px 8px;
+}
+
+.backupPruneReviewState {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--text-secondary);
+  padding: 10px;
+}
+
+.backupPruneReviewState strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.backupPruneReviewState span,
+.backupPruneReviewState small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .restoreArchiveSelect {
@@ -173,6 +214,419 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+.backupPostureOverview {
+  display: grid;
+  gap: 12px;
+  border-top: 1px solid var(--border-subtle);
+  padding: 0 18px 18px;
+}
+
+.backupOverviewSurface {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  padding-bottom: 18px;
+}
+
+.backupOverviewSurface .backupPostureOverview {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.backupRecoveryDecision {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(320px, 1.1fr);
+  gap: 14px;
+  align-items: stretch;
+  margin: 14px 18px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 14px;
+}
+
+.backupRecoveryDecision.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.backupRecoveryDecision.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.backupRecoveryDecision > div:first-child {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.backupRecoveryDecision span,
+.backupRecoveryMetrics span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.backupRecoveryDecision strong {
+  color: var(--text);
+  font-size: 18px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.backupRecoveryDecision.ready > div:first-child strong {
+  color: var(--success-text);
+}
+
+.backupRecoveryDecision.attention > div:first-child strong {
+  color: var(--warning-text);
+}
+
+.backupRecoveryDecision p {
+  max-width: 72ch;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.backupRecoveryMetrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.backupRecoveryMetrics div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.backupRecoveryMetrics strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.backupWorkflowMap,
+.backupEvidenceSummary {
+  display: grid;
+  gap: 12px;
+  margin: 0 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 14px;
+}
+
+.backupWorkflowLinks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.backupWorkflowLink {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+  min-height: 98px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--text);
+  padding: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.backupWorkflowLink:hover {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+}
+
+.backupWorkflowLink:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.backupWorkflowIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.backupWorkflowLink > span:last-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.backupWorkflowLink strong,
+.backupWorkflowLink small,
+.backupWorkflowLink p {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.backupWorkflowLink strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.backupWorkflowLink small {
+  color: var(--primary-text);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.backupWorkflowLink p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.backupWorkflowGuide {
+  display: grid;
+  gap: 12px;
+  margin: 0 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 14px;
+}
+
+.backupWorkflowSteps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.backupWorkflowSteps > div {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.backupWorkflowSteps > div.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.backupWorkflowSteps > div.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.backupWorkflowSteps span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.backupWorkflowSteps strong {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.backupWorkflowSteps > div.ready strong {
+  color: var(--success-text);
+}
+
+.backupWorkflowSteps > div.attention strong {
+  color: var(--warning-text);
+}
+
+.backupWorkflowSteps p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.backupEvidenceActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.backupEvidenceRows {
+  display: grid;
+  gap: 8px;
+}
+
+.backupEvidenceRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, auto);
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.backupEvidenceRow > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.backupEvidenceRow strong,
+.backupEvidenceRow span,
+.backupEvidenceRow small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backupEvidenceRow strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.backupEvidenceRow span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.backupEvidenceRow small {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: right;
+}
+
+.backupPostureHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding-top: 14px;
+}
+
+.backupPostureHeader h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.3;
+}
+
+.backupPostureHeader span {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.backupPostureHeader svg {
+  flex: 0 0 auto;
+  color: var(--primary-text);
+}
+
+.backupLifecycleStrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.backupLifecycleStrip span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  border: 1px solid var(--primary-border);
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 10px;
+}
+
+.backupPostureGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.backupPostureGrid > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.backupPostureGrid > div.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.backupPostureGrid > div.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.backupPostureGrid span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.backupPostureGrid strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.backupPostureGrid > div.ready strong {
+  color: var(--success-text);
+}
+
+.backupPostureGrid > div.attention strong {
+  color: var(--warning-text);
+}
+
+.backupPostureGrid p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .backupWorkflowBody {
   display: grid;
   gap: 16px;
@@ -211,4 +665,15 @@
 .pathPresetStrip button:hover {
   border-color: var(--primary);
   color: var(--primary-text);
+}
+
+@media (max-width: 900px) {
+  .backupRecoveryDecision,
+  .backupEvidenceRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .backupEvidenceRow small {
+    text-align: left;
+  }
 }

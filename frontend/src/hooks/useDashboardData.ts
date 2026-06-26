@@ -96,7 +96,10 @@ export function useDashboardData(activeView: ActiveView) {
   }, [fleet.loadFleet]);
 
   useEffect(() => {
-    if ((authRequired && !apiToken) || activeView !== "Dashboard") {
+    if (
+      (authRequired && !apiToken) ||
+      (activeView !== "Home" && activeView !== "Observability")
+    ) {
       return;
     }
     let disposed = false;
@@ -134,22 +137,29 @@ export function useDashboardData(activeView: ActiveView) {
     if (authRequired && !apiToken) {
       return;
     }
-    if (activeView === "Fleet") {
+    if (activeView === "Home") {
+      void jobs.loadJobs();
+      void backups.loadBackups();
+      void audit.loadAudits();
+      void schedules.loadSchedules();
+      void system.loadSystemDashboard();
+    } else if (activeView === "Fleet") {
       void inventory.loadTagInventory();
     } else if (activeView === "Config") {
       void inventory.loadTagInventory();
       void jobs.loadJobs();
-    } else if (activeView === "Tags") {
+    } else if (activeView === "Remote Operations") {
+      void jobs.loadJobs();
       void inventory.loadTagInventory();
     } else if (activeView === "Jobs") {
       void jobs.loadJobs();
       void inventory.loadTagInventory();
       void system.loadSuiteConfig();
-    } else if (activeView === "Schedules") {
+    } else if (activeView === "Automation") {
       void schedules.loadSchedules();
       void jobs.loadJobs();
       void inventory.loadTagInventory();
-    } else if (activeView === "Topology") {
+    } else if (activeView === "Network") {
       void inventory.loadRuntimeConfigApplyStates();
       void topology.loadTunnelPlans();
       void topology.loadNetworkObservations();
@@ -161,8 +171,18 @@ export function useDashboardData(activeView: ActiveView) {
     } else if (activeView === "Backups") {
       void backups.loadBackups();
       void jobs.loadJobs();
+    } else if (activeView === "Observability") {
+      void inventory.loadTagInventory();
+      void topology.loadNetworkObservations();
+      void topology.loadNetworkTrends();
+      void topology.loadOspfRecommendations();
+      void jobs.loadJobs();
+      void backups.loadBackups();
     } else if (activeView === "Audit") {
       void audit.loadAudits();
+      void jobs.loadJobs();
+      void jobs.loadTerminalSessions();
+      void access.loadCurrentOperator();
     } else if (activeView === "Access") {
       void access.loadCurrentOperator();
       void inventory.loadTagInventory();
@@ -183,6 +203,7 @@ export function useDashboardData(activeView: ActiveView) {
     inventory.loadTagInventory,
     inventory.loadRuntimeConfigApplyStates,
     jobs.loadJobs,
+    jobs.loadTerminalSessions,
     schedules.loadSchedules,
     system.loadSuiteConfig,
     system.loadSystemDashboard,
@@ -233,7 +254,7 @@ export function useDashboardData(activeView: ActiveView) {
         void fleet.loadFleet();
       }
       if (
-        activeView === "Dashboard" &&
+        activeView === "Home" &&
         (event.type === "agent_updated" ||
           event.type === "telemetry_updated" ||
           event.type === "job_rejected")
@@ -252,7 +273,7 @@ export function useDashboardData(activeView: ActiveView) {
       }
       if (event.type === "job_output_recorded") {
         setLastJobOutputEvent(event);
-        if (activeView === "Jobs") {
+        if (activeView === "Jobs" || activeView === "Remote Operations") {
           void jobs.loadJobs();
         }
       }
@@ -264,14 +285,14 @@ export function useDashboardData(activeView: ActiveView) {
         void fleet.loadFleet();
         void jobs.loadJobs();
         void audit.loadAudits();
-        if (activeView === "Dashboard") {
+        if (activeView === "Home" || activeView === "Observability") {
           scheduleDashboardOverviewReload();
         }
       }
       if (event.type === "backup_artifact_recorded") {
         void backups.loadBackups();
         void audit.loadAudits();
-        if (activeView === "Dashboard") {
+        if (activeView === "Home" || activeView === "Observability") {
           scheduleDashboardOverviewReload();
         }
       }
@@ -388,6 +409,9 @@ export function useDashboardData(activeView: ActiveView) {
     uploadBackupArtifact: backups.uploadBackupArtifact,
     uploadBackupArtifactChunked: backups.uploadBackupArtifactChunked,
     createJob: jobs.createJob,
+    createJobApproval: jobs.createJobApproval,
+    approveJobApproval: jobs.approveJobApproval,
+    rejectJobApproval: jobs.rejectJobApproval,
     createArtifactCleanupJob: jobs.createArtifactCleanupJob,
     createAgentUpdateRelease: jobs.createAgentUpdateRelease,
     createSourceTemplate: inventory.createSourceTemplate,
@@ -410,6 +434,7 @@ export function useDashboardData(activeView: ActiveView) {
     handleAuth,
     handleAuthVaultUnlock,
     jobs: jobs.jobs,
+    jobApprovals: jobs.jobApprovals,
     commandTemplates: jobs.commandTemplates,
     deleteCommandTemplate: jobs.deleteCommandTemplate,
     agentUpdateReleases: jobs.agentUpdateReleases,
@@ -454,6 +479,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadJobOutputComparison: jobs.loadJobOutputComparison,
     loadJobs: jobs.loadJobs,
     loadServerJobs: jobs.loadServerJobs,
+    loadTerminalSessions: jobs.loadTerminalSessions,
     loadTerminalReplay: jobs.loadTerminalReplay,
     submitTerminalInput: jobs.submitTerminalInput,
     loadAgentUpdateReleases: jobs.loadAgentUpdateReleases,

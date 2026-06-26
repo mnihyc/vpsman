@@ -261,6 +261,9 @@ fn validate_operator_preferences(preferences: &OperatorPreferences) -> Result<()
     ) {
         return Err(ApiError::bad_request("invalid_sidebar_subpanel_default"));
     }
+    if !matches!(preferences.review_prompt_mode.trim(), "inline" | "overlay") {
+        return Err(ApiError::bad_request("invalid_review_prompt_mode"));
+    }
     if let Some(timezone) = preferences.timezone.as_deref() {
         let timezone = timezone.trim();
         if !timezone.is_empty() && !is_valid_operator_timezone(timezone) {

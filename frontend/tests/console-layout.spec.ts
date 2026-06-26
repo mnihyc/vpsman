@@ -56,6 +56,16 @@ async function runGridAction(
   await page.getByRole("menuitem", { name: action }).click();
 }
 
+async function openDeleteVpsReview(page: import("@playwright/test").Page) {
+  const fleetGrid = page.getByLabel("VPS instance records data grid");
+  const backupRow = fleetGrid
+    .locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })
+    .first();
+  await backupRow.getByLabel("Select VPS instance records row").check();
+  await fleetGrid.getByRole("button", { name: "Action" }).click();
+  await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
+}
+
 async function chooseVpsBySearch(
   root: Locator,
   label: string,
@@ -128,7 +138,7 @@ async function openFleetFromDashboard(page: import("@playwright/test").Page) {
   await activate(page.getByRole("button", { name: /Fleet health/ }));
   await activate(page.getByRole("button", { name: "Open fleet instances" }));
   await expect(
-    page.getByRole("heading", { name: "Fleet overview" }),
+    page.getByRole("heading", { name: "Fleet instances" }),
   ).toBeVisible();
 }
 
@@ -138,7 +148,7 @@ test("renders an operational cloud-console fleet workspace", async ({
   await page.goto("/");
 
   await expect(
-    page.getByRole("heading", { name: "Dashboard", exact: true }),
+    page.getByRole("heading", { name: "Home", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Operational Health" }),
@@ -168,17 +178,17 @@ test("renders an operational cloud-console fleet workspace", async ({
   ).toBeVisible();
   await activate(page.getByRole("button", { name: "All", exact: true }));
   await expect(page.getByText(/All VPS; grouped by Labels/)).toBeVisible();
-  await expect(page.getByLabel("Dashboard group by")).toBeVisible();
-  await expect(page.getByLabel("Dashboard refresh interval")).toBeVisible();
-  await expect(page.getByLabel("Dashboard chart point density")).toBeVisible();
-  await expect(page.getByLabel("Dashboard scope kind")).toBeVisible();
-  await page.getByLabel("Dashboard refresh interval").selectOption("5");
-  await page.getByLabel("Dashboard chart point density").selectOption("dense");
-  await page.getByLabel("Dashboard group by").selectOption("countries");
-  await page.getByLabel("Dashboard scope kind").selectOption("client");
+  await expect(page.getByLabel("Home group by")).toBeVisible();
+  await expect(page.getByLabel("Home refresh interval")).toBeVisible();
+  await expect(page.getByLabel("Home chart point density")).toBeVisible();
+  await expect(page.getByLabel("Home scope kind")).toBeVisible();
+  await page.getByLabel("Home refresh interval").selectOption("5");
+  await page.getByLabel("Home chart point density").selectOption("dense");
+  await page.getByLabel("Home group by").selectOption("countries");
+  await page.getByLabel("Home scope kind").selectOption("client");
   await chooseVpsBySearch(
     page.locator(".dashboardControlBar"),
-    "Dashboard scope value",
+    "Home scope value",
     "sfo",
     /edge-sfo-01.*agent-sfo-01/,
   );
@@ -186,13 +196,13 @@ test("renders an operational cloud-console fleet workspace", async ({
     page.getByText(/agent-sfo-01; grouped by Countries/),
   ).toBeVisible();
   const dashboardVpsScope = page.getByRole("combobox", {
-    name: "Dashboard scope value",
+    name: "Home scope value",
   });
   await dashboardVpsScope.fill("not-a-real-vps");
   await page.keyboard.press("Tab");
   await expect(dashboardVpsScope).toHaveValue("edge-sfo-01 (fo01)");
-  await page.getByLabel("Dashboard scope kind").selectOption("provider");
-  await page.getByLabel("Dashboard scope value").selectOption("alpha");
+  await page.getByLabel("Home scope kind").selectOption("provider");
+  await page.getByLabel("Home scope value").selectOption("alpha");
   await expect(
     page.getByText(/provider:alpha; grouped by Countries/),
   ).toBeVisible();
@@ -225,16 +235,16 @@ test("renders an operational cloud-console fleet workspace", async ({
       page.getByRole("heading", { name: "Network activity" }),
     ).toBeVisible();
     await activate(
-      page.getByRole("button", { name: "Inspect topology evidence" }),
+      page.getByRole("button", { name: "Inspect network evidence" }),
     );
     await expect(
-      page.getByRole("heading", { name: "Topology evidence" }),
+      page.getByRole("heading", { level: 1, name: "Network evidence" }),
     ).toBeVisible();
     await openConsoleSubpage(page, "Fleet", "Instances");
   }
 
   await expect(
-    page.getByRole("heading", { name: "Fleet overview" }),
+    page.getByRole("heading", { name: "Fleet instances" }),
   ).toBeVisible();
   if (testInfo.project.name.includes("desktop")) {
     await expect(
@@ -259,6 +269,26 @@ test("renders an operational cloud-console fleet workspace", async ({
     await expect(
       page.getByRole("heading", { name: "System preferences", exact: true }),
     ).toBeVisible();
+    const preferencesScope = page.getByLabel("Preferences scope overview");
+    await expect(preferencesScope).toContainText("Personal display");
+    await expect(preferencesScope).toContainText("Browser state");
+    await expect(preferencesScope).toContainText("Fleet/system defaults");
+    await expect(page.getByLabel("Personal display preferences")).toContainText(
+      "Bulk execution summaries",
+    );
+    await expect(page.getByLabel("Personal display preferences")).toContainText(
+      "Binary exact compares bytes",
+    );
+    await expect(page.getByLabel("Local browser state")).toContainText(
+      "Local console selections",
+    );
+    await expect(page.getByLabel("Fleet and system defaults")).toContainText(
+      "Gateway install defaults",
+    );
+    await expect(page.getByLabel("Fleet and system defaults")).toContainText(
+      "Shared gateway endpoints",
+    );
+    await expect(page.getByLabel("Reset VPS name format to default")).toBeVisible();
     await page.getByLabel("Name display").selectOption("name");
     await page
       .getByLabel("Bulk output comparison default")
@@ -303,63 +333,21 @@ test("renders an operational cloud-console fleet workspace", async ({
   const coreRow = fleetGrid
     .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
     .first();
-  await activate(coreRow.getByLabel("Expand VPS instance records row"));
-  const coreDetail = fleetGrid
-    .locator(".gridExpandedRow", { hasText: "core-fra-02" })
-    .first();
-  await expect(
-    coreDetail.getByRole("heading", { name: "core-fra-02 (ra02)" }),
-  ).toBeVisible();
-  await expect(
-    coreDetail.getByRole("tabpanel").getByText("agent-fra-02"),
-  ).toBeVisible();
-  await coreDetail.getByLabel("VPS display name").fill("core-fra-renamed");
-  await activate(coreDetail.getByRole("button", { name: "Rename" }));
-  const aliasPrompt = coreDetail.locator(".confirmationPrompt", {
-    hasText: "Confirm VPS rename",
-  });
-  await expect(aliasPrompt).toBeVisible();
-  await expect(aliasPrompt).toContainText("Current name");
-  await expect(aliasPrompt).toContainText("core-fra-02");
-  await expect(aliasPrompt).toContainText("New name");
-  await expect(aliasPrompt).toContainText("core-fra-renamed");
-  await expect(
-    aliasPrompt.locator("dd", { hasText: "core-fra-renamed" }),
-  ).toHaveAttribute("title", "core-fra-renamed");
-  await page.screenshot({
-    fullPage: true,
-    path: testInfo.outputPath("fleet-alias-confirmation.png"),
-  });
-  await activate(aliasPrompt.getByRole("button", { name: "Cancel" }));
-  await expect(aliasPrompt).toHaveCount(0);
+  await activate(coreRow);
+  await expect(page.getByRole("heading", { level: 1, name: "Instance detail" })).toBeVisible();
+  const coreDetail = page.getByLabel("Canonical VPS detail");
+  await expect(coreDetail).toContainText("core-fra-02");
+  await expect(coreDetail).toContainText("agent-fra-02");
 
   await activate(coreDetail.getByRole("tab", { name: "Network" }));
-  await expect(coreDetail.getByText("BGP/OSPF")).toBeVisible();
-  await expect(
-    coreDetail.getByText("Server-managed runtime tunnels enabled"),
-  ).toBeVisible();
-  await expect(coreDetail.getByText("bgp, bird2")).toBeVisible();
-  await expect(coreDetail.getByText(/tunab/).first()).toBeVisible();
-  await expect(coreDetail.getByText(/Latency Down \/ 100\.0% loss/)).toBeVisible();
-  await expect(coreDetail.getByText(/OSPF Report only 14->80/)).toBeVisible();
-  await expect(coreDetail.getByText("eth0").first()).toBeVisible();
-  await expect(coreDetail.getByText(/RX 8.7 Kbps \/ TX 17 Kbps/)).toBeVisible();
+  await expect(coreDetail.getByRole("tabpanel", { name: "Network tab" })).toBeVisible();
+  await expect(coreDetail).toContainText("Network workflow");
+  await expect(coreDetail.getByRole("button", { name: "Open network graph" })).toBeVisible();
+  await expect(coreDetail.getByRole("button", { name: "Open network evidence" })).toBeVisible();
+  await expect(coreDetail).toContainText("Latest observations");
 
-  const backupNetworkRow = fleetGrid
-    .locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })
-    .first();
-  await activate(
-    backupNetworkRow.getByLabel("Expand VPS instance records row"),
-  );
-  const backupNetworkDetail = fleetGrid
-    .locator(".gridExpandedRow", { hasText: "backup-nyc-03" })
-    .first();
-  await activate(backupNetworkDetail.getByRole("tab", { name: "Network" }));
-  await expect(
-    backupNetworkDetail.getByText(
-      "Unprivileged best-effort, root operations may be ineffective",
-    ),
-  ).toBeVisible();
+  await openConsoleSubpage(page, "Fleet", "Instances");
+  await expect(page.getByRole("heading", { level: 1, name: "Fleet instances" })).toBeVisible();
 });
 
 test("deletes a VPS through grid actions and explicit confirmation", async ({
@@ -423,6 +411,64 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
     reason: "Deleted from fleet inventory selection action",
   });
   expectPrivilegeAssertion(deleteRequest);
+});
+
+test("review prompt display mode follows operator preference", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "grid action prompt display mode is covered in desktop layout",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "System", "Preferences");
+  await expect(page.getByLabel("Personal display preferences")).toContainText(
+    "Review prompts",
+  );
+  await page.getByLabel("Review prompt display mode").selectOption("overlay");
+  await page.getByRole("button", { name: "Save preferences" }).click();
+  let savedPreferences = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { operatorPreferences: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.operatorPreferences.at(-1);
+  });
+  expect(savedPreferences).toMatchObject({ review_prompt_mode: "overlay" });
+
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Fleet", "Instances");
+  await openDeleteVpsReview(page);
+  await expect(
+    page.getByRole("dialog", { name: "Delete VPS from panel" }),
+  ).toBeVisible();
+  await expect(page.locator(".confirmationPromptOverlay")).toBeVisible();
+  await expect(
+    page.locator(".fleetInstancesPanel > .confirmationPrompt"),
+  ).toHaveCount(0);
+  await activate(page.getByRole("button", { name: "Cancel" }));
+
+  await openConsoleSubpage(page, "System", "Preferences");
+  await page.getByLabel("Review prompt display mode").selectOption("inline");
+  await page.getByRole("button", { name: "Save preferences" }).click();
+  savedPreferences = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { operatorPreferences: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.operatorPreferences.at(-1);
+  });
+  expect(savedPreferences).toMatchObject({ review_prompt_mode: "inline" });
+
+  await openConsoleSubpage(page, "Fleet", "Instances");
+  await openDeleteVpsReview(page);
+  await expect(
+    page.getByRole("region", { name: "Delete VPS from panel" }),
+  ).toBeVisible();
+  await expect(page.locator(".confirmationPromptOverlay")).toHaveCount(0);
 });
 
 test("reviews notification and webhook queue mutations before commit", async ({
@@ -561,9 +607,9 @@ test("clears browser-local console selections without deleting vault records", a
   );
 
   await page.goto("/");
-  await page.getByLabel("Dashboard group by").selectOption("countries");
-  await page.getByLabel("Dashboard refresh interval").selectOption("5");
-  await page.getByLabel("Dashboard chart point density").selectOption("dense");
+  await page.getByLabel("Home group by").selectOption("countries");
+  await page.getByLabel("Home refresh interval").selectOption("5");
+  await page.getByLabel("Home chart point density").selectOption("dense");
   await page.evaluate(() => {
     window.localStorage.setItem("vpsman.authVault", "preserved-auth");
     window.localStorage.setItem("vpsman.privilegeVault", "preserved-privilege");
@@ -585,7 +631,7 @@ test("clears browser-local console selections without deleting vault records", a
   await page.getByRole("button", { name: "Clear local selections" }).click();
   await reloaded;
   await expect(
-    page.getByRole("heading", { name: "Dashboard", exact: true }),
+    page.getByRole("heading", { name: "Home", exact: true }),
   ).toBeVisible();
   await expect(page.getByText(/All VPS; grouped by Labels/)).toBeVisible();
 
@@ -789,6 +835,11 @@ test("supports Config VPS Rules dry-run, confirm, and explicit unset", async ({
   await expect(grid.getByText("3 of 3 rules")).toBeVisible();
   await expect(grid).toContainText("traffic.reset_day");
   await expect(grid).toContainText("traffic.selectors");
+  const alertContext = page.getByLabel("Affected alert policy context");
+  await expect(alertContext).toContainText("edge-resource-policy");
+  await expect(alertContext).toContainText("80% total quota");
+  await expect(alertContext).toContainText("traffic.cycle.total >= traffic.quota.total * 0.8");
+  await expect(alertContext.getByRole("button", { name: "Open Observability alerts" })).toBeVisible();
 
   await page.getByLabel("VPS rule set values").fill(
     "traffic.reset_day=14\ntraffic.quota.total=3TB\ntraffic.selectors=eth0+tx,ens3",
@@ -990,7 +1041,7 @@ test("keeps console layout usable on desktop and mobile widths", async ({
   expect(overflow).toBeLessThanOrEqual(1);
 
   await expect(
-    page.getByRole("heading", { name: "Dashboard", exact: true }),
+    page.getByRole("heading", { name: "Home", exact: true }),
   ).toBeVisible();
   await expect(page.locator(".topbar")).toBeVisible();
   await expect(page.locator(".quickStats")).toBeVisible();
@@ -1003,16 +1054,13 @@ test("keeps console layout usable on desktop and mobile widths", async ({
     expect(sidebarBox?.x).toBe(0);
     expect(sidebarBox?.y).toBe(0);
     await expect(
-      page.locator(".navSectionTitle", { hasText: "Operations" }),
+      page.locator(".navSectionTitle", { hasText: "Operate" }),
     ).toBeVisible();
     await expect(
-      page.locator(".navSectionTitle", { hasText: "Network" }),
+      page.locator(".navSectionTitle", { hasText: "Infrastructure" }),
     ).toBeVisible();
     await expect(
-      page.locator(".navSectionTitle", { hasText: "Data & access" }),
-    ).toBeVisible();
-    await expect(
-      page.locator(".navSectionTitle", { hasText: "System" }),
+      page.locator(".navSectionTitle", { hasText: "Governance" }),
     ).toBeVisible();
     await expect(
       page.getByRole("button", { name: /All VPS resources/ }),
@@ -1025,7 +1073,7 @@ test("keeps console layout usable on desktop and mobile widths", async ({
     await expect(page.locator(".scopeSelector")).toBeHidden();
     await page.getByRole("combobox", { name: "Console page" }).selectOption("Config::templates");
     await expect(
-      page.getByRole("heading", { name: "Runtime config", exact: true }),
+      page.getByRole("heading", { name: "Config", exact: true }),
     ).toBeVisible();
     await expect(page.getByText("Active source status").first()).toBeVisible();
   }
@@ -1036,7 +1084,10 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
 
   const dashboard = page.locator(".dashboardWorkspace");
   await expect(
-    page.getByRole("heading", { name: "Dashboard", exact: true }),
+    page.getByRole("heading", { name: "Home", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Fleet command home", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Operational Health" }),
@@ -1046,21 +1097,41 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
     dashboard.getByText("Gateway events", { exact: true }),
   ).toHaveCount(0);
 
-  await openConsoleSubpage(page, "System", "Dashboard");
+  await openConsoleSubpage(page, "System", "Overview");
   await expect(
-    page.getByRole("heading", { name: "System dashboard", exact: true }),
+    page.getByRole("heading", { name: "System overview", exact: true }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Capacity", exact: true }),
-  ).toBeVisible();
+  const systemOverview = page.getByLabel("System overview operations overview");
+  await expect(systemOverview).toContainText("Control-plane posture");
+  await expect(systemOverview).toContainText("DB capacity");
+  await expect(systemOverview).toContainText("What needs attention");
+  await expect(systemOverview).toContainText("Capacity forecast");
+  await expect(systemOverview).toContainText("50 VPS expected max");
+  await expect(systemOverview).toContainText("Drilldown coverage");
   await expect(
     page.getByRole("heading", { name: "Dispatch Lifecycle", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Gateway Events", exact: true }),
   ).toBeVisible();
+  await expect(page.getByLabel("Gateway Events thresholds")).toContainText("any retry or drop");
+  await expect(page.getByText("Delivered totals stay in the current table")).toBeVisible();
+
+  await openConsoleSubpage(page, "System", "Capacity");
+  await expect(
+    page.getByRole("heading", { name: "System capacity", exact: true }),
+  ).toBeVisible();
+  const systemCapacity = page.getByLabel("System capacity posture overview");
+  await expect(systemCapacity).toContainText("Dispatch capacity");
+  await expect(systemCapacity).toContainText("Artifact storage");
+  await expect(systemCapacity).toContainText("Retention pressure");
+  await expect(systemCapacity).toContainText("Worker lag");
+  await expect(page.getByLabel("Capacity thresholds", { exact: true })).toContainText("70% pool pressure");
+  await expect(page.getByRole("heading", { name: "Dispatch capacity", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Gateway queue", exact: true })).toBeVisible();
   await expect(page.getByText("Dispatcher in-flight")).toBeVisible();
   await expect(page.getByText("API DB pool")).toBeVisible();
+  await expect(page.getByLabel("System capacity unavailable telemetry")).toContainText("Worker lag seconds");
 
   await openConsoleSubpage(page, "System", "Suite config");
   await expect(
@@ -1069,9 +1140,33 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   await expect(
     page.locator(".systemConfigOverview").getByRole("heading", { name: "Suite config", exact: true }),
   ).toBeVisible();
+  const configSections = page.getByLabel("Suite config sections");
+  await expect(configSections).toContainText("API");
+  await expect(configSections).toContainText("Gateway");
+  await expect(configSections).toContainText("Worker");
+  await expect(configSections).toContainText("Capacity");
+  await expect(configSections).toContainText("Storage");
+  await expect(configSections).toContainText("Secrets");
+  await expect(configSections).toContainText("Timeouts");
+  await expect(configSections).toContainText("Review");
+  const suiteConfigBoundary = page.getByLabel("Suite config ownership boundary");
+  await expect(suiteConfigBoundary).toContainText("System scope");
+  await expect(suiteConfigBoundary).toContainText("Runtime config scope");
+  await expect(suiteConfigBoundary).toContainText("Save contract");
+  await expect(suiteConfigBoundary.getByRole("button", { name: "Open Config / Per-VPS" })).toBeVisible();
+  await expect(suiteConfigBoundary.getByRole("button", { name: "Open Config / Bulk patch" })).toBeVisible();
+  await expect(page.getByLabel("API suite config fields")).toContainText("Private HTTP API bind address");
+  await expect(page.getByLabel("Capacity suite config fields")).toContainText("Current");
+  await expect(page.getByLabel("Capacity suite config fields")).toContainText("Default");
+  await expect(page.getByLabel("Capacity suite config fields")).toContainText("Validation");
+  await expect(page.getByLabel("Capacity suite config fields")).toContainText("Restart required");
+  await expect(page.getByLabel("Timeouts suite config fields")).toContainText("Dispatch ack seconds");
+  await expect(page.getByLabel("Suite config save flow")).toContainText("Edit");
+  await expect(page.getByText("Advanced redacted JSON diff")).toBeVisible();
+  await expect(page.getByText("Current redacted")).toBeHidden();
   await expect(page.getByLabel("Private API bind")).toBeVisible();
   await page.getByLabel("API DB pool").fill("40");
-  await page.getByRole("button", { name: "Validate" }).click();
+  await page.locator(".systemConfigOverview").getByRole("button", { name: "Validate" }).click();
   await expect(page.getByText(/Validation passed/)).toBeVisible();
   await expect(
     page
@@ -1079,16 +1174,31 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
       .getByText("capacity.api_db_pool")
       .first(),
   ).toBeVisible();
+  await expect(page.getByLabel("Suite config reload and restart plan")).toContainText("Restart required after save");
+  const suiteConfigReview = page.getByLabel("Suite config validation and save review");
+  await expect(suiteConfigReview.getByText("Next: unlock privilege")).toBeVisible();
   await expect(page.getByLabel("Suite config validation and save review")).toBeVisible();
-  await expect(page.getByText("Unlock in Access")).toBeVisible();
+  await expect(suiteConfigReview.getByText("Open Privilege Vault").first()).toBeVisible();
   await expect(page.getByLabel(/super password/i)).toHaveCount(0);
   await expect(page.getByLabel(/super salt/i)).toHaveCount(0);
+  await expect(page.getByLabel("VPS config target")).toHaveCount(0);
+  await expect(page.getByLabel("VPS redacted runtime config TOML")).toHaveCount(0);
+  await expect(page.getByLabel("One-VPS runtime config override TOML")).toHaveCount(0);
+  await expect(page.getByLabel("Bulk patch target expression")).toHaveCount(0);
+  await expect(page.getByLabel("Rendered bulk runtime config patch TOML")).toHaveCount(0);
+  await expect(page.getByLabel("Temporary bulk runtime config patch TOML")).toHaveCount(0);
 
-  await unlockPrivilegeFromTop(page);
+  await activate(suiteConfigReview.getByRole("button", { name: "Open Privilege Vault" }).first());
+  await expect(page.getByRole("heading", { level: 1, name: "Privilege vault" })).toBeVisible();
+  await page.getByLabel(/privilege secret/i).fill("local-super-password");
+  await page.getByLabel(/(privilege salt|verifier salt hex)/i).fill("00112233445566778899aabbccddeeff");
+  await activate(page.getByRole("button", { name: "Unlock privilege" }));
+  await expect(page.locator(".topbar").getByRole("button", { name: "Lock privilege" })).toBeVisible();
   await openConsoleSubpage(page, "System", "Suite config");
   await page.getByLabel("API DB pool").fill("40");
-  await page.getByRole("button", { name: "Validate" }).click();
+  await page.locator(".systemConfigOverview").getByRole("button", { name: "Validate" }).click();
   await expect(page.getByText(/Validation passed/)).toBeVisible();
+  await expect(page.getByLabel("Suite config validation and save review").getByText("Next: review save")).toBeVisible();
   await activate(page.getByRole("button", { name: "Review save", exact: true }).first());
   await expect(page.getByText("Confirm suite config save")).toBeVisible();
   await confirmVisiblePrompt(page, "Save suite config");
@@ -1107,21 +1217,45 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   expect((suiteConfigRequest as { toml: string }).toml).toContain("api_db_pool = 40");
 });
 
-test("surfaces operator users and sessions under System", async ({ page }) => {
+test("surfaces operator users under Access and session evidence under Audit", async ({ page }) => {
   await page.goto("/");
 
-  await unlockPrivilegeFor(page, "System", "Users");
+  await unlockPrivilegeFor(page, "Access", "Operators");
   await expect(
-    page.getByRole("heading", { name: "System users", exact: true }),
+    page.getByRole("heading", { name: "Operators", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Users", exact: true }),
   ).toBeVisible();
   await expect(page.getByText("2 operator records")).toBeVisible();
-  await expect(page.getByText("365d")).toBeVisible();
+  const governance = page.getByLabel("Operator governance overview");
+  await expect(governance).toContainText("MFA required policy");
+  await expect(governance).toContainText("1 admin off");
+  await expect(governance).toContainText("Admin session TTL");
+  await expect(governance).toContainText("1 over 30d");
+  await expect(governance).toContainText("Role model");
+  await expect(governance).toContainText("2 roles / 2 scoped");
+  await expect(governance).toContainText("Bearer sessions");
+  await expect(governance).toContainText("2 active");
+  await expect(governance).toContainText("Auth failures");
+  await expect(governance).toContainText("2 failures");
+  await expect(governance).toContainText("Evidence gaps");
+  await expect(governance).toContainText("Password age");
+  await expect(page.getByText("Last login").first()).toBeVisible();
+  await expect(page.getByText("Failures").first()).toBeVisible();
+  await expect(page.getByText("365d", { exact: true })).toBeVisible();
   await selectGridRow(page, "Users", "99999999-aaaa-4bbb-8ccc-000000000001");
   await runGridAction(page, "Users", "Edit selected");
   await expect(page.getByLabel("Operator username")).toHaveValue("console-admin");
+  const adminEvidence = page.getByLabel("Operator access evidence");
+  await expect(adminEvidence).toContainText("Admin MFA is off");
+  await expect(adminEvidence).toContainText("365d admin risk");
+  await expect(adminEvidence).toContainText("API tokens");
+  await activate(adminEvidence.getByRole("button", { name: "Revoke sessions" }));
+  const userSessionRevokePrompt = page.getByLabel("Confirm admin user action");
+  await expect(userSessionRevokePrompt).toBeVisible();
+  await expect(userSessionRevokePrompt).toContainText("Revoke 1 non-current active sessions");
+  await activate(userSessionRevokePrompt.getByRole("button", { name: "Cancel" }));
   await activate(page.getByRole("button", { name: "Disable" }));
   await expect(page.getByText("Preparing review")).toBeVisible();
   await expect(
@@ -1154,6 +1288,14 @@ test("surfaces operator users and sessions under System", async ({ page }) => {
     "title",
     /never changes the password/,
   );
+  await page.getByLabel("Operator role").selectOption("admin");
+  await expect(page.getByText(/Admin role grant requires/)).toBeVisible();
+  await activate(page.getByRole("button", { name: "Save", exact: true }));
+  const adminGrantPrompt = page.getByLabel("Confirm admin user action");
+  await expect(adminGrantPrompt).toBeVisible();
+  await expect(adminGrantPrompt).toContainText("targets or grants admin privileges");
+  await activate(adminGrantPrompt.getByRole("button", { name: "Cancel" }));
+  await page.getByLabel("Operator role").selectOption("operator");
   await page.getByLabel("Operator password").fill("replacement-password-123");
   await activate(page.getByRole("button", { name: "Save", exact: true }));
   await expect(page.getByText("Preparing review")).toBeVisible();
@@ -1175,19 +1317,43 @@ test("surfaces operator users and sessions under System", async ({ page }) => {
   });
   expectPrivilegeAssertion((operatorUpdate as { body?: unknown }).body);
 
-  await openConsoleSubpage(page, "System", "Sessions");
+  await openConsoleSubpage(page, "Audit", "Sessions");
   await expect(
-    page.getByRole("heading", { name: "System sessions", exact: true }),
+    page.getByRole("heading", { name: "Session evidence", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Sessions", exact: true }),
   ).toBeVisible();
+  const sessionOverview = page.getByLabel("Session evidence security overview");
+  await expect(sessionOverview).toContainText("Session security posture");
+  await expect(sessionOverview).toContainText("2 active");
+  await expect(sessionOverview).toContainText("2 admin");
+  await expect(sessionOverview).toContainText("2/2 enriched");
+  await expect(sessionOverview).toContainText("Geo not exposed");
+  await expect(sessionOverview).toContainText("2 failures");
+  await expect(sessionOverview).toContainText("1 revokable");
   await expect(
     page.getByRole("heading", { name: "Authentication history", exact: true }),
   ).toBeVisible();
+  await expect(page.getByText("IP / location").first()).toBeVisible();
+  await expect(page.getByText("Browser / device").first()).toBeVisible();
+  await expect(page.getByText("Risk").first()).toBeVisible();
+  await expect(page.getByText("Revoke").first()).toBeVisible();
+  await expect(page.getByLabel("Sessions data grid").getByText("203.0.113.44")).toBeVisible();
+  await expect(page.getByText("Chrome").first()).toBeVisible();
+  await expect(page.getByText("Desktop browser").first()).toBeVisible();
+  await expect(page.getByText("Admin review").first()).toBeVisible();
+  const authHistory = page.locator(".controlPanel").filter({
+    has: page.getByRole("heading", { name: "Authentication history", exact: true }),
+  });
+  await expect(authHistory.getByLabel("Authentication history filters")).toContainText("Failures");
+  await expect(page.getByLabel("Authentication failure groups")).toContainText("Repeated unknown user");
+  await expect(page.getByLabel("Authentication failure groups")).toContainText("2 attempts");
+  await activate(authHistory.getByRole("button", { name: "Failures" }));
+  await expect(authHistory).toContainText("2 of 4 login results");
   await expect(page.getByText("console-admin").first()).toBeVisible();
-  await expect(page.getByText("unknown-user")).toBeVisible();
-  await expect(page.getByText("invalid_credentials")).toBeVisible();
+  await expect(authHistory).toContainText("unknown-user");
+  await expect(authHistory).toContainText("invalid_credentials");
   await selectGridRow(page, "Sessions", "88888888-aaaa-4bbb-8ccc-000000000002");
   await runGridAction(page, "Sessions", "Revoke selected");
   await expect(page.getByText("Preparing review")).toBeVisible();
@@ -1262,7 +1428,7 @@ test("packs dashboard top VPS cards by label length", async ({
   expect(shortest / longest).toBeLessThan(0.6);
 });
 
-test("manages template assignments from the config view", async ({
+test("manages template assignments from automation source templates", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -1271,7 +1437,7 @@ test("manages template assignments from the config view", async ({
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "Templates");
+  await openConsoleSubpage(page, "Automation", "Source templates");
 
   const panel = page.locator(".sourceTemplatePanel");
   const activeSourcesSearch = panel.getByRole("searchbox", {
@@ -1404,15 +1570,22 @@ test("prefills registered agent update shortcuts into dispatch", async ({
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "update registry shortcuts are covered in the desktop console layout",
+    "agent update shortcuts are covered in the desktop console layout",
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Jobs", "Update registry");
+  await openConsoleSubpage(page, "Automation", "Agent updates");
 
   await expect(
     page.getByRole("heading", { name: "Agent update registry" }),
   ).toBeVisible();
+  const posture = page.getByLabel("Agent update rollout posture");
+  await expect(posture).toContainText("Registered releases");
+  await expect(posture).toContainText("Current fleet versions");
+  await expect(posture).toContainText("Canary / staging");
+  await expect(posture).toContainText("Rollout policy");
+  await expect(posture).toContainText("Health checks");
+  await expect(posture).toContainText("Rollback");
   const activateShortcut = page.getByRole("button", {
     name: "Activate staged",
   });
@@ -1506,9 +1679,9 @@ test("uses an exact VPS combobox for single config jobs", async ({
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "VPS config");
+  await openConsoleSubpage(page, "Config", "Per-VPS");
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Config", "VPS config");
+  await openConsoleSubpage(page, "Config", "Per-VPS");
 
   const targetPicker = page.getByRole("combobox", {
     name: "VPS config target",
@@ -1555,10 +1728,14 @@ test("uses an exact VPS combobox for single config jobs", async ({
   );
   await expect(
     page.getByText(
-      "Runtime changes are made through Bulk patch or template assignment and then pushed as runtime config sync jobs.",
+      "This is the current redacted base used to review a one-VPS override.",
     ),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Review apply" })).toHaveCount(0);
+  await expect(page.getByLabel("One-VPS config override guard")).toContainText("Current base");
+  await page.getByLabel("One-VPS runtime config override TOML").fill("[update]\nunmanaged_enabled = true\n");
+  await activate(page.getByRole("button", { name: "Validate override" }));
+  await expect(page.getByLabel("One-VPS config override guard")).toContainText("update");
+  await expect(page.getByRole("button", { name: "Review one-VPS apply" })).toBeEnabled();
 });
 
 test("creates a cron schedule from a command template with target preview", async ({
@@ -1570,8 +1747,20 @@ test("creates a cron schedule from a command template with target preview", asyn
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Schedules", "Schedule registry");
-  await unlockPrivilegeFor(page, "Schedules", "Schedule registry");
+  await openConsoleSubpage(page, "Jobs", "Scheduled runs");
+  await expect(page.getByText("1 worker-created due runs")).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: "Scheduled runs" })).toBeVisible();
+  await expect(page.getByText("shell argv")).toBeVisible();
+  await expect(page.getByText("2026-05-31 · due not exposed")).toBeVisible();
+  await expect(page.getByText("Skipped count not exposed")).toBeVisible();
+  await expect(page.getByText("Worker automation")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry" })).toBeDisabled();
+  await activate(page.getByRole("button", { name: "Open schedule registry" }));
+  await expect(page.getByRole("heading", { level: 1, name: "Schedules" })).toBeVisible();
+  await unlockPrivilegeFor(page, "Automation", "Schedules");
+  await expect(page.getByText("Hourly at minute 0")).toBeVisible();
+  await expect(page.getByText("0 * * * * · UTC")).toBeVisible();
+  await expect(page.getByText("Run only one missed run; retry after 5m")).toBeVisible();
 
   await activate(page.getByRole("button", { name: "Expand Create schedule" }));
   await page
@@ -1583,6 +1772,7 @@ test("creates a cron schedule from a command template with target preview", asyn
   await expect(
     page.getByText(/UTC schedule, displayed in browser timezone/),
   ).toBeVisible();
+  await expect(page.getByText("Every 15 minutes")).toBeVisible();
   await expect(
     page.getByText(/2 matching VPSs in local preview; edge-health-check/),
   ).toBeVisible();
@@ -1620,15 +1810,15 @@ test("imports direct gateway identities and revokes current keys from the access
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Access", "VPS keys");
+  await openConsoleSubpage(page, "Access", "VPS identities");
   const accessTabs = page.locator(".accessTabs");
-  await activate(accessTabs.getByRole("button", { name: "VPS keys" }));
+  await activate(accessTabs.getByRole("button", { name: "VPS identities" }));
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Access", "VPS keys");
-  await activate(accessTabs.getByRole("button", { name: "VPS keys" }));
+  await openConsoleSubpage(page, "Access", "VPS identities");
+  await activate(accessTabs.getByRole("button", { name: "VPS identities" }));
 
   await expect(
-    page.getByRole("heading", { name: "Gateway agent identities" }),
+    page.getByRole("heading", { level: 2, name: "VPS identities" }),
   ).toBeVisible();
   const revocationGrid = page.getByLabel("Client key revocations data grid");
   await expect(revocationGrid.locator(".gridCounts")).not.toContainText(
@@ -1681,11 +1871,11 @@ test("imports direct gateway identities and revokes current keys from the access
 
   await chooseVpsBySearch(
     inspector,
-    "VPS key revoke VPS ID",
+    "VPS identity revoke VPS ID",
     "sfo",
     /edge-sfo-01.*agent-sfo-01/,
   );
-  await inspector.getByLabel("VPS key revoke reason").fill("lost host rebuild");
+  await inspector.getByLabel("VPS identity revoke reason").fill("lost host rebuild");
   await activate(inspector.getByRole("button", { name: "Revoke current key" }));
   await expect(page.getByLabel("Confirm current key revocation")).toBeVisible();
   await activate(
@@ -1708,6 +1898,77 @@ test("imports direct gateway identities and revokes current keys from the access
   expectPrivilegeAssertion(revokeRequest);
 });
 
+test("shows access posture, MFA risk, identity lifecycle, and gateway readiness", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "access posture is covered in the desktop console layout",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Access", "Overview");
+
+  const posture = page.getByLabel("Access posture overview");
+  await expect(posture).toContainText("Operator authentication");
+  await expect(posture).toContainText("Admin MFA required");
+  await expect(posture).toContainText("RBAC roles/scopes");
+  await expect(posture).toContainText("2 roles visible");
+  await expect(posture).toContainText("Bearer session");
+  await expect(posture).toContainText("Admin refresh TTL 365d");
+  await expect(posture).toContainText("Privilege vault");
+  await expect(posture).toContainText("request-bound assertions");
+  await expect(posture).toContainText("VPS identities");
+  await expect(posture).toContainText("register -> pending install -> connected -> rotate -> revoke -> blocked");
+  await expect(posture).toContainText("Gateway sessions");
+  await expect(posture).toContainText("Install defaults missing");
+
+  await activate(posture.getByRole("button", { name: "Set up MFA" }));
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Privilege vault" }),
+  ).toBeVisible();
+  await expect(page.getByText("Admin MFA is off")).toBeVisible();
+  await expect(page.getByLabel(/super password/i)).toHaveCount(0);
+  await expect(page.getByLabel(/super salt/i)).toHaveCount(0);
+  await expect(page.getByLabel(/access privilege secret/i)).toBeVisible();
+  await expect(page.getByLabel(/access privilege salt/i)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Clear local session" })).toBeDisabled();
+  await activate(posture.getByRole("button", { name: "Manage sessions" }));
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Sessions" }),
+  ).toBeVisible();
+
+  await openConsoleSubpage(page, "Access", "VPS identities");
+  const lifecycle = page.getByLabel("Agent identity lifecycle");
+  await expect(lifecycle).toContainText("Register");
+  await expect(lifecycle).toContainText("Pending install");
+  await expect(lifecycle).toContainText("Connected");
+  await expect(lifecycle).toContainText("Rotate");
+  await expect(lifecycle).toContainText("Revoke");
+  await expect(lifecycle).toContainText("Blocked");
+  const inspector = page.locator(".accessInspector");
+  await expect(inspector).toContainText("Registration starts an install-ready VPS identity");
+  await expect(inspector).toContainText("VPS client ID");
+  await expect(inspector).toContainText("Noise public key");
+
+  await openConsoleSubpage(page, "Access", "Gateway sessions");
+  const readiness = page.getByLabel("Gateway readiness");
+  await expect(readiness).toContainText("Install defaults");
+  await expect(readiness).toContainText("Missing endpoints or server key");
+  await expect(readiness).toContainText("Live sessions");
+  await expect(readiness).toContainText("0 active / 0 recent");
+  await expect(readiness).toContainText("No panel-side endpoint lookup");
+  await expect(readiness.getByRole("button", { name: "Preferences" })).toBeVisible();
+  await expect(readiness.getByRole("button", { name: "Suite config" })).toBeVisible();
+  await activate(readiness.getByRole("button", { name: "Preferences" }));
+  await expect(
+    page.getByRole("heading", { level: 1, name: "System" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Operator preferences" }),
+  ).toBeVisible();
+});
+
 test("rotates an existing agent key through the access panel", async ({
   page,
 }, testInfo) => {
@@ -1718,9 +1979,9 @@ test("rotates an existing agent key through the access panel", async ({
 
   await page.goto("/");
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Access", "VPS keys");
+  await openConsoleSubpage(page, "Access", "VPS identities");
   const accessTabs = page.locator(".accessTabs");
-  await activate(accessTabs.getByRole("button", { name: "VPS keys" }));
+  await activate(accessTabs.getByRole("button", { name: "VPS identities" }));
 
   const accessSubnav = page.locator(".accessSubnav");
   await activate(accessSubnav.getByRole("button", { name: "Key rotation" }));
@@ -1775,25 +2036,37 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   );
 
   await page.goto("/");
-  await activate(page.getByRole("button", { name: "Topology" }));
+  await openConsoleSubpage(page, "Network", "Graph");
 
   await expect(
     page.getByRole("heading", { name: "Topology graph" }),
   ).toBeVisible();
   await expect(page.getByRole("img", { name: "Topology graph" })).toBeVisible();
+  const graphPanel = page.locator(".topologyGraphPanel");
   await expect(
     page.getByText("2 shown / 2 nodes; 1 shown / 1 tunnels"),
   ).toBeVisible();
+  await expect(graphPanel.getByLabel("Topology graph legend")).toContainText("Layers");
+  await expect(graphPanel.getByLabel("Topology graph legend")).toContainText("OSPF 22 (+8)");
+  await expect(graphPanel.getByLabel("Topology graph legend")).toContainText("12.4 ms");
+  await expect(graphPanel.getByLabel("Topology graph legend")).toContainText("0.25% loss");
+  await expect(graphPanel.getByLabel("Topology graph legend")).toContainText("10.1 Mbps avg");
+  await expect(graphPanel.getByLabel("Topology graph legend")).toContainText("DE: 1, US: 1");
+  await expect(graphPanel.getByText("Why OSPF cost changed")).toBeVisible();
+  await expect(graphPanel.getByLabel("Topology minimap")).toBeVisible();
+  await expect(graphPanel.getByRole("button", { name: "Zoom in topology graph" })).toBeVisible();
+  await activate(graphPanel.getByRole("button", { name: "Zoom in topology graph" }));
+  await expect(graphPanel.getByText("120%")).toBeVisible();
+  await activate(graphPanel.getByRole("button", { name: "Reset topology graph view" }));
+  await expect(graphPanel.getByText("100%")).toBeVisible();
   await expect(
-    page
-      .locator(".topologyGraphPanel")
+    graphPanel
       .getByText("Healthy", { exact: true })
       .first(),
   ).toBeVisible();
   await page.getByLabel("Filter topology graph").fill("fra");
   await expect(
-    page
-      .locator(".topologyGraphPanel")
+    graphPanel
       .getByRole("button", { name: /Select core-fra-02/ }),
   ).toBeVisible();
   const graphFilter = page.getByRole("group", {
@@ -1801,25 +2074,37 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   });
   await activate(graphFilter.getByRole("button", { name: "Attention" }));
   await expect(
-    page.locator(".topologyGraphPanel").getByText("0 visible tunnels"),
+    graphPanel.getByText("0 visible tunnels", { exact: true }),
   ).toBeVisible();
   await activate(graphFilter.getByRole("button", { name: "All", exact: true }));
   await page.getByLabel("Filter topology graph").fill("");
-  await openConsoleSubpage(page, "Topology", "Evidence");
+  await openConsoleSubpage(page, "Network", "Evidence");
   await expect(
-    page.getByRole("heading", { name: "Topology evidence" }),
+    page.getByRole("heading", { level: 1, name: "Network evidence" }),
   ).toBeVisible();
-  await activate(page.getByRole("button", { name: "Refresh evidence" }));
   const evidence = page.locator(".topologyEvidence");
+  const timeline = evidence.getByLabel("Network evidence timeline");
+  await expect(timeline.getByText("Evidence timeline")).toBeVisible();
+  await expect(timeline.getByText("Observation", { exact: true })).toBeVisible();
+  await expect(timeline.getByText("Probe", { exact: true })).toBeVisible();
+  await expect(timeline.getByText("Speed test", { exact: true })).toBeVisible();
+  await expect(timeline.getByText("Status check", { exact: true })).toBeVisible();
+  await expect(timeline.getByText("Recommended cost", { exact: true })).toBeVisible();
+  await expect(timeline.getByText("Approval", { exact: true })).toBeVisible();
+  await expect(evidence.getByRole("button", { name: "Load output" })).toBeVisible();
+  await activate(evidence.getByRole("button", { name: "Load output" }));
+  await expect(evidence.getByRole("button", { name: "Compare to previous" })).toBeVisible();
+  await expect(evidence.getByRole("button", { name: "Open OSPF" })).toBeVisible();
   await expect(evidence.getByText("Network probe").first()).toBeVisible();
   await expect(evidence.getByText("1 OSPF update plans")).toBeVisible();
   await expect(evidence.getByText("approval required")).toBeVisible();
+  await expect(evidence.getByText("Review cost update in Network / OSPF").first()).toBeVisible();
   await expect(evidence.getByText("14 -> 22").first()).toBeVisible();
   await expect(evidence.getByText("3 samples")).toBeVisible();
   await expect(
     evidence.getByText("10.1 Mbps avg", { exact: true }),
   ).toBeVisible();
-  await expect(evidence.getByText("10.9-14.8 ms; 0.25% loss")).toBeVisible();
+  await expect(evidence.getByText("10.9-14.8 ms; 0.25% loss", { exact: true })).toBeVisible();
   const observationTable = evidence.locator(".observationTable");
   await expect(observationTable.getByText("Network speed test")).toBeVisible();
   await expect(observationTable.getByText("10.1 Mbps")).toBeVisible();
@@ -1835,6 +2120,9 @@ test("shows topology network evidence, speed metrics, and probe latency history"
     observationTable.getByText("Adapter status failed"),
   ).toBeVisible();
   await expect(evidence.getByText("Managed blocks match")).toBeVisible();
+  await activate(evidence.getByRole("button", { name: "Open OSPF" }));
+  await expect(page.getByRole("heading", { level: 1, name: "Network OSPF" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review cost update" })).toBeVisible();
 });
 
 test("authors custom adapter tunnel plans from the topology panel", async ({
@@ -1847,9 +2135,20 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
 
   await page.goto("/");
   await page.getByLabel("Search fleet").fill("sfo");
-  await openConsoleSubpage(page, "Topology", "Tunnel plans");
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
   await expect(page.getByText("OSPF cost model")).toBeVisible();
   await expect(page.getByText(/Latency\/loss plus bandwidth tier/)).toBeVisible();
+  const generatedConfigReview = page.locator('[aria-label="Generated runtime config review"]');
+  await expect(generatedConfigReview).toContainText("Touched files");
+  await expect(generatedConfigReview).toContainText("2 files");
+  await expect(generatedConfigReview).toContainText("Conflicts");
+  await expect(generatedConfigReview).toContainText("None");
+  await expect(generatedConfigReview).toContainText("Runtime diff");
+  await expect(generatedConfigReview).toContainText("Review-only save");
+  const advancedConfig = page.locator(".topologyGeneratedConfigDisclosure");
+  await advancedConfig.getByText("Advanced / generated config").click();
+  await expect(advancedConfig).toContainText("/etc/network/interfaces.d/vpsman-tunnels");
+  await expect(advancedConfig).toContainText("/etc/bird/vpsman-ospf.conf");
 
   const planGrid = page.getByLabel("Tunnel plans data grid");
   const savedPlanRow = planGrid
@@ -1883,6 +2182,13 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
     has: page.getByRole("heading", { name: "Create tunnel plan" }),
   });
   await composer.scrollIntoViewIfNeeded();
+  const tunnelWizard = composer.locator('[aria-label="Tunnel plan wizard"]');
+  await expect(tunnelWizard).toContainText("1 Endpoints");
+  await expect(tunnelWizard).toContainText("Pick two VPSs");
+  await expect(tunnelWizard).toContainText("4 Validate");
+  await expect(tunnelWizard).toContainText("Needs endpoints");
+  await expect(composer.getByRole("button", { name: "Test connectivity" })).toBeEnabled();
+  await expect(composer.getByRole("button", { name: "Promote / apply" })).toBeEnabled();
   await composer.getByLabel("Name", { exact: true }).fill("external-openvpn");
   await composer.getByLabel("Interface", { exact: true }).fill("ovpn42");
   await composer.getByLabel("Kind").selectOption("openvpn");
@@ -1902,9 +2208,12 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
   await expect(composer.getByLabel("Right IPv4 CIDR", { exact: true })).toHaveValue(
     "10.255.50.1/31",
   );
+  await expect(tunnelWizard).toContainText("No visible overlap");
+  await expect(tunnelWizard).toContainText("Ready after save");
   await composer
     .getByLabel("Runtime owner")
     .selectOption("external_managed_adapter");
+  await expect(tunnelWizard).toContainText("adapter status argv missing");
   await checkControl(composer.getByLabel("Traffic shaping"));
   await composer.getByLabel("Egress Kbps", { exact: true }).fill("100000");
   await composer.getByLabel("Burst KB", { exact: true }).fill("4096");
@@ -1917,10 +2226,11 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
   await composer
     .getByLabel("Status argv", { exact: true })
     .fill("/usr/local/libexec/vpsman-openvpn-adapter\nstatus\n{interface}");
+  await expect(tunnelWizard).toContainText("adapter status argv present");
   await composer
     .getByLabel("Traffic argv", { exact: true })
     .fill("/usr/local/libexec/vpsman-openvpn-adapter\nshape\n{interface}");
-  await composer.getByText("Topology evidence").click();
+  await composer.getByText("Network evidence").click();
   await composer
     .getByLabel("Desired interfaces", { exact: true })
     .fill("ovpn42");
@@ -2012,11 +2322,11 @@ test("promotes saved observed tunnel plans into custom adapters", async ({
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "dense topology promotion is covered in the desktop console layout",
+    "dense tunnel-plan promotion is covered in the desktop console layout",
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Topology", "Promotion");
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
 
   const promotionPanel = page.locator(".scheduleComposer", {
     has: page.getByRole("heading", { name: "Tunnel promotion" }),
@@ -2025,6 +2335,9 @@ test("promotes saved observed tunnel plans into custom adapters", async ({
     has: page.getByRole("heading", { name: "Custom adapter" }),
   });
   await promotionPanel.scrollIntoViewIfNeeded();
+  await expect(promotionPanel.getByText("Promotion diff workflow")).toBeVisible();
+  await expect(promotionPanel.getByLabel("Topology promotion diff workflow")).toContainText("Observed topology");
+  await activate(promotionPanel.getByText("Advanced: custom adapter promotion"));
   await adapterForm
     .getByLabel("Observed plan")
     .selectOption("eeeeeeee-ffff-4000-8111-222222222222");
@@ -2051,7 +2364,7 @@ test("promotes saved observed tunnel plans into custom adapters", async ({
   await checkControl(adapterForm.getByLabel("Enable shaping"));
   await adapterForm.getByLabel("Egress Kbps", { exact: true }).fill("100000");
   await adapterForm.getByLabel("Burst KB", { exact: true }).fill("4096");
-  await adapterForm.getByText("Topology evidence").click();
+  await adapterForm.getByText("Network evidence").click();
   await adapterForm
     .getByLabel("Desired interfaces", { exact: true })
     .fill("ovpn42");
@@ -2126,11 +2439,11 @@ test("promotes telemetry candidates with explicit activation toggle", async ({
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "dense telemetry promotion is covered in the desktop console layout",
+    "dense telemetry promotion is covered inside Network / Tunnel plans",
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Topology", "Promotion");
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
 
   const promotionPanel = page.locator(".scheduleComposer", {
     has: page.getByRole("heading", { name: "Tunnel promotion" }),
@@ -2139,6 +2452,14 @@ test("promotes telemetry candidates with explicit activation toggle", async ({
     has: page.getByRole("heading", { name: "External observe" }),
   });
   await promotionPanel.scrollIntoViewIfNeeded();
+  const promotionDiff = promotionPanel.getByLabel("Topology promotion diff workflow");
+  await expect(promotionPanel.getByText("Promotion diff workflow")).toBeVisible();
+  await expect(promotionDiff.getByText("Observed topology", { exact: true })).toBeVisible();
+  await expect(promotionDiff.getByText("Current applied topology", { exact: true })).toBeVisible();
+  await expect(promotionDiff.getByText("Proposed plan", { exact: true })).toBeVisible();
+  await expect(promotionDiff.getByText("Conflicts", { exact: true })).toBeVisible();
+  await expect(promotionDiff.getByText("Risk", { exact: true })).toBeVisible();
+  await expect(promotionDiff.getByText("Review / approve", { exact: true })).toBeVisible();
   await externalForm
     .getByLabel("Observed interface")
     .selectOption("agent-sfo-01:wg-import");
@@ -2151,11 +2472,13 @@ test("promotes telemetry candidates with explicit activation toggle", async ({
   await expect(externalForm.getByLabel("Plan enabled")).not.toBeChecked();
   await externalForm.getByLabel("Self IPv4 CIDR").fill("10.255.60.0/31");
   await externalForm.getByLabel("Peer IPv4 CIDR").fill("10.255.60.1/31");
+  await expect(promotionDiff.getByText("No saved plan match", { exact: true })).toBeVisible();
+  await expect(promotionDiff.getByText("Ready to review", { exact: true })).toBeVisible();
 
   await activate(externalForm.getByRole("button", { name: "Save observed plan" }));
   const prompt = promotionPanel.locator(".confirmationPrompt").last();
   await expect(prompt.getByText("Confirm external observe")).toBeVisible();
-  await expect(prompt.getByText("Deferred")).toBeVisible();
+  await expect(prompt.getByText("Deferred", { exact: true })).toBeVisible();
   await confirmVisiblePrompt(page, "Promote observed plan");
   await expect(prompt).toBeHidden();
 
@@ -2566,6 +2889,83 @@ test("previews degraded update targets and sends explicit force override", async
   });
 });
 
+test("shows audit filters and retention compliance posture", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "audit compliance posture is covered in the desktop console layout",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Audit", "Events");
+
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Audit log" }),
+  ).toBeVisible();
+  const coverage = page.getByLabel("Audit coverage overview");
+  await expect(coverage).toContainText("Audit records");
+  await expect(coverage).toContainText("1 visible / 1 total");
+  await expect(coverage).toContainText("Events present");
+  await expect(coverage).toContainText("Coverage contract");
+  await expect(coverage).toContainText("login");
+  await expect(coverage).toContainText("privilege unlock");
+  await expect(coverage).toContainText("backup/restore");
+
+  const filters = page.getByLabel("Audit event filters");
+  await expect(filters.getByLabel("Audit actor filter")).toBeVisible();
+  await expect(filters.getByLabel("Audit action filter")).toBeVisible();
+  await expect(filters.getByLabel("Audit resource filter")).toBeVisible();
+  await expect(filters.getByLabel("Audit result filter")).toBeVisible();
+  await expect(filters.getByLabel("Audit IP filter")).toBeVisible();
+  await expect(filters.getByLabel("Audit session filter")).toBeVisible();
+  await expect(filters.getByLabel("Audit privilege scope filter")).toBeVisible();
+  await expect(filters.getByLabel("Audit from date")).toBeVisible();
+  await expect(filters.getByLabel("Audit to date")).toBeVisible();
+  await filters.getByLabel("Audit actor filter").fill("operator-admin");
+  await expect(coverage).toContainText("operator-admin");
+  await activate(filters.getByRole("button", { name: "Clear" }));
+  await expect(filters.getByLabel("Audit actor filter")).toHaveValue("");
+
+  await openConsoleSubpage(page, "Audit", "Retention & export");
+  await expect(
+    page.getByRole("heading", { level: 2, name: "History retention" }),
+  ).toBeVisible();
+  const compliance = page.getByLabel("History retention compliance overview");
+  await expect(compliance).toContainText("Policy domains");
+  await expect(compliance).toContainText("10 enabled / 10 total");
+  await expect(compliance).toContainText("Current records");
+  await expect(compliance).toContainText("1 audit records");
+  await expect(compliance).toContainText("Storage size");
+  await expect(compliance).toContainText("Not reported");
+  await expect(compliance).toContainText("Last export");
+  await expect(compliance).toContainText("Not exported");
+  await expect(compliance).toContainText("Metadata only");
+  await expect(compliance).toContainText("Rows only");
+  await expect(compliance).toContainText("Audit logs metadata only");
+  await expect(compliance).toContainText("Compliance warning");
+  await expect(compliance).toContainText("Record totals and storage size need backend evidence");
+
+  const exportScope = page.getByLabel("History retention export scope");
+  await expect(exportScope).toContainText("Export scope");
+  await expect(exportScope).toContainText("audit_logs");
+  await expect(exportScope).toContainText("JSON history bundle");
+  await expect(exportScope).toContainText("Preview required");
+
+  await activate(page.getByRole("button", { name: "Preview prune" }));
+  await expect(compliance).toContainText("Dry run 0 rows");
+  await expect(exportScope).toContainText("0 matched rows / 0 objects");
+
+  await activate(page.getByRole("button", { name: "Review cleanup" }));
+  const prunePrompt = page.getByLabel("Confirm history prune");
+  await expect(prunePrompt).toBeVisible();
+  await expect(prunePrompt).toContainText("Reviewed rows");
+  await expect(prunePrompt).toContainText("Objects");
+  await expect(prunePrompt).toContainText("Effect");
+  await expect(prunePrompt).toContainText("Would delete 0 metadata rows");
+  await activate(prunePrompt.getByRole("button", { name: "Cancel" }));
+});
+
 test("dispatches executable restores with agent-local archive metadata only", async ({
   page,
 }, testInfo) => {
@@ -2585,6 +2985,17 @@ test("dispatches executable restores with agent-local archive metadata only", as
   await expect(
     page.getByRole("heading", { name: "Restore operations" }),
   ).toBeVisible();
+  const posture = page.getByLabel("Backup posture overview");
+  await expect(posture).toContainText("Protected VPSs");
+  await expect(posture).toContainText("1/3");
+  await expect(posture).toContainText("Unprotected");
+  await expect(posture).toContainText("2");
+  await expect(posture).toContainText("Artifact storage");
+  await expect(posture).toContainText("512 B / 1");
+  await expect(posture).toContainText("Restore test");
+  await expect(posture).toContainText("Not tested");
+  await expect(posture).toContainText("Retention/security");
+  await expect(posture).toContainText("API gap");
   await unlockPrivilegeFor(page, "Backups", "Restore");
   await expect(
     page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
@@ -2766,7 +3177,7 @@ test("dispatches executable restores with agent-local archive metadata only", as
   });
 });
 
-test("promotes retained backup output into a stored artifact", async ({
+test("creates backup artifact handoff from retained output", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -2788,15 +3199,15 @@ test("promotes retained backup output into a stored artifact", async ({
     .getByLabel("Backup artifact handoff source job ID")
     .fill(sourceJobId);
   await activate(
-    artifactWorkflow.getByRole("button", { name: "Review promotion" }),
+    artifactWorkflow.getByRole("button", { name: "Review handoff" }),
   );
   await expect(
-    artifactWorkflow.getByLabel("Confirm retained output promotion"),
+    artifactWorkflow.getByLabel("Confirm backup artifact handoff"),
   ).toBeVisible();
   await activate(
     artifactWorkflow
-      .getByLabel("Confirm retained output promotion")
-      .getByRole("button", { name: "Promote retained output" }),
+      .getByLabel("Confirm backup artifact handoff")
+      .getByRole("button", { name: "Create handoff" }),
   );
 
   await expect(page.getByText(/Artifact dddddddd uploaded/)).toBeVisible();
@@ -2823,15 +3234,31 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Topology", "Tests");
+  await openConsoleSubpage(page, "Network", "Tests");
 
   await expect(
     page.getByRole("heading", { name: "Network tests" }),
   ).toBeVisible();
-  await unlockPrivilegeFor(page, "Topology", "Tests");
+  const networkTestsPanel = page.locator(".fleetPanel", {
+    has: page.getByRole("heading", { name: "Network tests" }),
+  });
+  await expect(networkTestsPanel).toContainText("Required privilege");
+  await expect(networkTestsPanel).toContainText("Unlock required");
+  await expect(networkTestsPanel).toContainText("100 Mbps, 14 ms target, 0% loss, OSPF 14");
+  await expect(networkTestsPanel).toContainText("3s, 16 MiB cap, 100 Mbps cap, TCP 5201, timeout 5000 ms");
+  await expect(networkTestsPanel).toContainText("Probe 12.4 ms avg, 0.25% loss");
+  await expect(networkTestsPanel).toContainText("Speed 10.1 Mbps avg, 11.8 Mbps max");
+  const trendCharts = page.getByLabel("Network test trend charts");
+  await expect(trendCharts).toContainText("Trend evidence");
+  await expect(trendCharts).toContainText("Latency");
+  await expect(trendCharts).toContainText("Packet loss");
+  await expect(trendCharts).toContainText("Throughput");
+  await expect(trendCharts.getByRole("button", { name: "Attach evidence" })).toBeDisabled();
+  await unlockPrivilegeFor(page, "Network", "Tests");
   await expect(
     page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
   ).toBeVisible();
+  await expect(networkTestsPanel).toContainText("Unlocked locally");
 
   await page.getByLabel("Network test plan").selectOption(tunnelPlans[0].id);
   await page.getByLabel("Network test endpoint side").selectOption("left");
@@ -2912,8 +3339,15 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await page
     .getByLabel("Network speed test connect timeout milliseconds")
     .fill("2500");
+  await expect(networkTestsPanel).toContainText("5s, 8 MiB cap, 25 Mbps cap, TCP 55201, timeout 2500 ms");
   await activate(page.getByRole("button", { name: "Review speed test" }));
-  await confirmVisiblePrompt(page, "Run speed test");
+  const speedPrompt = page.locator(".confirmationPrompt").last();
+  await expect(speedPrompt).toBeVisible();
+  await expect(speedPrompt).toContainText("Baseline");
+  await expect(speedPrompt).toContainText("Safety cap");
+  await expect(speedPrompt).toContainText("5s, 8 MiB cap, 25 Mbps cap, TCP 55201, timeout 2500 ms");
+  await expect(speedPrompt).toContainText("network_speed_test unlocked locally");
+  await activate(speedPrompt.getByRole("button", { name: "Run speed test" }));
   await expect(
     page
       .getByLabel("Execution result")
@@ -2948,23 +3382,35 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   });
   expectPrivilegeAssertion(speedRequest);
   await expect(page.getByLabel("Execution result").last()).toBeVisible();
-  await activate(page.getByRole("button", { name: "Open job details" }).last());
-  await expect(
-    page.getByRole("heading", { level: 1, name: "Job history" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Target results" }),
-  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open job details" }).last()).toBeVisible();
 
-  await openConsoleSubpage(page, "Topology", "OSPF");
+  await openConsoleSubpage(page, "Network", "OSPF");
   await expect(
     page.getByRole("heading", { name: "OSPF cost" }),
   ).toBeVisible();
+  const ospfPanel = page.locator(".fleetPanel", {
+    has: page.getByRole("heading", { name: "OSPF cost" }),
+  });
+  await expect(ospfPanel).toContainText("14 -> 22 (+8)");
+  await expect(ospfPanel).toContainText("derived from persisted probe/speed-test trends");
+  await expect(ospfPanel).toContainText("12.4 ms avg; 0.25% loss; 10.1 Mbps avg; 11.8 Mbps max");
+  await expect(ospfPanel).toContainText("Less preferred by 8");
+  await expect(ospfPanel).toContainText("Restore cost 14 on tunab");
+  await expect(ospfPanel).toContainText("After apply, rerun probe/speed tests and verify tunab in Evidence.");
   await page
     .getByLabel("OSPF update plan")
     .selectOption(ospfUpdatePlans[0].plan_id);
   await activate(page.getByRole("button", { name: "Review cost update" }));
-  await confirmVisiblePrompt(page, "Update cost");
+  const ospfPrompt = page.locator(".confirmationPrompt").last();
+  await expect(ospfPrompt).toBeVisible();
+  await expect(ospfPrompt).toContainText("Cost change");
+  await expect(ospfPrompt).toContainText("Measurements");
+  await expect(ospfPrompt).toContainText("Traffic impact");
+  await expect(ospfPrompt).toContainText("Rollback plan");
+  await expect(ospfPrompt).toContainText("Monitor after apply");
+  await expect(ospfPrompt).toContainText("approval required; privilege required; reviewed plan only");
+  await expect(ospfPrompt).toContainText("network.ospf_cost.apply");
+  await activate(ospfPrompt.getByRole("button", { name: "Update cost" }));
   const ospfRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as {
@@ -2983,4 +3429,11 @@ test("dispatches topology network tests and OSPF plan updates with local privile
       recommended_ospf_cost: ospfUpdatePlans[0].recommended_ospf_cost,
     },
   });
+
+  await activate(page.getByRole("button", { name: "Review rollback" }));
+  const rollbackPrompt = page.locator(".confirmationPrompt").last();
+  await expect(rollbackPrompt).toContainText("Confirm OSPF rollback");
+  await expect(rollbackPrompt).toContainText("Rollback to prior cost");
+  await expect(rollbackPrompt).toContainText("22 -> 14 (-8)");
+  await expect(rollbackPrompt).toContainText("network.ospf_cost.rollback");
 });
