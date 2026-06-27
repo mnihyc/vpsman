@@ -1120,14 +1120,21 @@ test("keeps console layout usable on desktop and mobile widths", async ({
     ).toBeVisible();
   } else {
     await expect(page.locator(".sidebar")).toBeHidden();
-    await expect(page.locator(".scopeSelector")).toBeHidden();
+    await expect(
+      page.getByRole("button", { name: /Edit fleet scope: All VPS resources/ }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Clear fleet scope" }),
+    ).toBeDisabled();
     await page
       .getByRole("combobox", { name: "Console page" })
       .selectOption("Config::templates");
     await expect(
       page.getByRole("heading", { name: "Config", exact: true }),
     ).toBeVisible();
-    await expect(page.getByText("Active source status").first()).toBeVisible();
+    await expect(page.getByLabel("Config template coverage")).toContainText(
+      "Template coverage",
+    );
   }
 });
 

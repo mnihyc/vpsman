@@ -378,7 +378,7 @@ export function SourceTemplatePanel({
   >(
     () => [
       {
-        label: "Open template",
+        label: "Open",
         description: (rows) =>
           rows.length === 1
             ? `Open ${rows[0].name} template detail.`
@@ -388,7 +388,7 @@ export function SourceTemplatePanel({
         onSelect: (rows) => openTemplateDetail(rows[0], "assign"),
       },
       {
-        label: "Assign template",
+        label: "Assign",
         description: (rows) =>
           rows.length === 1
             ? `Load ${rows[0].name} into the assignment form.`
@@ -398,7 +398,7 @@ export function SourceTemplatePanel({
         onSelect: (rows) => prepareTemplateAssignment(rows[0]),
       },
       {
-        label: "Edit / test template",
+        label: "Edit/test",
         description: (rows) =>
           rows.length === 1
             ? `Load ${rows[0].name} into the lifecycle form.`
@@ -881,6 +881,9 @@ export function SourceTemplatePanel({
           )}
           rowActions={templateActions}
           onOpenRow={(template) => openTemplateDetail(template, "assign")}
+          openRowLabel="Assign"
+          openRowTitle={(template) => `Open assignment details for template ${template.name}.`}
+          showMobileOpenRowAction={false}
           rows={templates}
           searchPlaceholder="Search templates"
           storageKey="vpsman.sourceTemplates.registry"
@@ -889,6 +892,7 @@ export function SourceTemplatePanel({
             <button
               className="primaryAction compactAction"
               onClick={prepareNewTemplate}
+              title="Create a new source template for runtime config, telemetry, or workflow policy."
               type="button"
             >
               <Plus size={15} />

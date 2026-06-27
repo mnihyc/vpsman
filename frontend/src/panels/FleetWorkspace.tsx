@@ -1094,6 +1094,8 @@ export function FleetWorkspace({
           onOpenRow={(agent) =>
             openSingleReleaseWorkflow([agent], "Fleet", "instance_detail")
           }
+          openRowLabel="Open VPS"
+          openRowTitle={(agent) => `Open VPS detail for ${formatVpsName(agent, vpsNameDisplayMode)}.`}
           onSelectionChange={handleFleetSelectionChange}
           renderSelectionPanel={(rows) => (
             <FleetSelectionPanel
@@ -1194,6 +1196,8 @@ function FleetInstancesPanel({
   onConfirmDelete,
   onOpenMonitor,
   onOpenRow,
+  openRowLabel,
+  openRowTitle,
   onSelectionChange,
   renderSelectionPanel,
   scopeActive,
@@ -1211,6 +1215,8 @@ function FleetInstancesPanel({
   onConfirmDelete: () => void;
   onOpenMonitor?: () => void;
   onOpenRow: (agent: AgentView) => void;
+  openRowLabel?: string;
+  openRowTitle?: (agent: AgentView) => string;
   onSelectionChange: (rows: AgentView[]) => void;
   renderSelectionPanel: (rows: AgentView[]) => ReactNode;
   scopeActive: boolean;
@@ -1265,6 +1271,8 @@ function FleetInstancesPanel({
         getRowId={(agent) => agent.id}
         itemLabel="instances"
         onOpenRow={onOpenRow}
+        openRowLabel={openRowLabel}
+        openRowTitle={openRowTitle}
         onSelectionChange={onSelectionChange}
         renderSelectionPanel={renderSelectionPanel}
         rows={agents}
@@ -3345,6 +3353,7 @@ function ConsoleDetailPanel({
             aria-label="Close detail panel"
             className="iconButton"
             onClick={onClose}
+            title="Close detail panel"
             type="button"
           >
             <X size={16} />

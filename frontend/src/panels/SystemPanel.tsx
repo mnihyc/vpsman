@@ -1678,6 +1678,8 @@ function SystemUsersPanel({
           itemLabel="operators"
           mobileLayout="table"
           onOpenRow={(row) => setSelectedOperatorId(row.id)}
+          openRowLabel="Open operator"
+          openRowTitle={(row) => `Show operator details for ${row.username}.`}
           renderExpandedRow={(row) => (
             <OperatorDetailGrid
               operator={row}

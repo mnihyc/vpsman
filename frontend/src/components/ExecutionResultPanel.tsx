@@ -30,13 +30,24 @@ export function ExecutionResultPanel({
         {(onOpenJobDetails || onClearResults) && (
           <div className="executionResultActions">
             {onOpenJobDetails && (
-              <button className="secondaryAction compactAction" onClick={() => onOpenJobDetails(progress.jobId)} type="button">
+              <button
+                className="secondaryAction compactAction"
+                onClick={() => onOpenJobDetails(progress.jobId)}
+                title="Open this job in Jobs / History."
+                type="button"
+              >
                 <ExternalLink size={15} />
                 <span>Open job details</span>
               </button>
             )}
             {onClearResults && (
-              <button className="secondaryAction compactAction" disabled={loading} onClick={onClearResults} type="button">
+              <button
+                className="secondaryAction compactAction"
+                disabled={loading}
+                onClick={onClearResults}
+                title="Clear these bulk operation results from the panel."
+                type="button"
+              >
                 <X size={15} />
                 <span>Clear results</span>
               </button>

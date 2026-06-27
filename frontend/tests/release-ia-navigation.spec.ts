@@ -55,6 +55,18 @@ test.beforeEach(async ({ page }, testInfo) => {
   await installConsoleApiMock(page);
 });
 
+async function selectEvidenceGridRecord(grid: Locator, label: string) {
+  const mobileCardAction = grid
+    .locator(".gridMobileCard", { hasText: label })
+    .getByRole("button", { name: "Select proof" })
+    .first();
+  if ((await mobileCardAction.count()) > 0) {
+    await mobileCardAction.click();
+    return;
+  }
+  await grid.getByText(label).first().click();
+}
+
 async function expectReachableByTab(
   page: Page,
   locator: Locator,
@@ -758,7 +770,7 @@ test("terminal open and resume stay in Remote Operations without Jobs", async ({
   ).toBeVisible();
   await expect(launcher.getByLabel("New terminal target")).toBeVisible();
   await expect(
-    launcher.getByRole("button", { name: "Open terminal" }),
+    launcher.getByRole("button", { name: "Unlock privilege" }),
   ).toBeVisible();
   await expect(page.locator(".terminalCommandComposer")).toBeHidden();
   await expect(
@@ -833,7 +845,7 @@ test("terminal open and resume stay in Remote Operations without Jobs", async ({
   await expect(
     terminalPanel.getByRole("button", { name: "Download transcript" }),
   ).toBeEnabled();
-  await activate(terminalPanel.getByRole("button", { name: "Audit evidence" }));
+  await activate(terminalPanel.getByRole("button", { name: "Evidence" }));
   await expect(
     page.getByRole("heading", { level: 1, name: "Session evidence" }),
   ).toBeVisible();
@@ -882,7 +894,7 @@ test("jobs dispatch keeps terminal creation in remote operations", async ({
     page.getByRole("heading", { name: "New terminal" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Open terminal" }),
+    page.getByRole("button", { name: "Unlock privilege" }),
   ).toBeVisible();
   await openConsoleSubpage(page, "Jobs", "Dispatch");
   await expect(
@@ -3525,7 +3537,7 @@ test("audit job evidence proves who ran what without leaving Audit", async ({
   await expect(grid).toContainText("Not loaded");
   await expect(grid).toContainText("network speed test");
 
-  await grid.getByText("agent update").first().click();
+  await selectEvidenceGridRecord(grid, "agent update");
   let detail = panel.getByLabel("Selected job evidence detail");
   await expect(detail).toContainText("Audit event missing");
   await expect(detail).toContainText("Output unavailable");
@@ -3536,7 +3548,7 @@ test("audit job evidence proves who ran what without leaving Audit", async ({
     "No output artifact or inline output row was returned",
   );
 
-  await grid.getByText("network speed test").first().click();
+  await selectEvidenceGridRecord(grid, "network speed test");
 
   detail = panel.getByLabel("Selected job evidence detail");
   await expect(detail).toContainText("console-admin");
@@ -3671,7 +3683,10 @@ test("audit sessions correlates terminal and auth evidence without emulator cont
   }
 
   await openConsoleSubpage(page, "Remote Operations", "Terminal");
-  await page.getByRole("button", { name: "Audit evidence" }).click();
+  await page
+    .locator(".terminalSessionsPanel")
+    .getByRole("button", { name: "Evidence" })
+    .click();
   await expect(
     page.getByRole("heading", { level: 1, name: "Session evidence" }),
   ).toBeVisible();

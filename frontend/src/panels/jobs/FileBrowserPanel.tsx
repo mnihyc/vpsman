@@ -925,6 +925,7 @@ export function FileBrowserPanel({
                   <button
                     className="secondaryAction compactAction fileEditorCloseMobile"
                     onClick={() => setEditorPath(null)}
+                    title="Close the editor and return to file browsing."
                     type="button"
                   >
                     <X size={14} />

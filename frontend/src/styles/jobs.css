@@ -1453,6 +1453,10 @@
   gap: 8px;
 }
 
+.multiFileModeSuffix {
+  display: inline;
+}
+
 .advancedFileActions {
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
@@ -2142,6 +2146,10 @@
 }
 
 @media (max-width: 640px) {
+  .multiFileModeSuffix {
+    display: none;
+  }
+
   .fileBrowserHeaderActions {
     justify-content: stretch;
     width: 100%;
@@ -2189,6 +2197,10 @@
 
   .fileBrowserWorkspace.emptyWorkspace {
     min-height: 0;
+  }
+
+  .fileDetailsPane {
+    padding: 0 12px 12px;
   }
 
   .fileBrowserWorkspace.editorOpen {
@@ -2875,6 +2887,16 @@
   min-width: 0;
 }
 
+.terminalLaunchBadges {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
 .terminalLaunchIntro h3 {
   margin: 0;
   color: var(--text);
@@ -2882,8 +2904,8 @@
   line-height: 1.25;
 }
 
-.terminalLaunchIntro span,
-.terminalLaunchFooter span {
+.terminalLaunchIntro > div > span,
+.terminalLaunchFooter > span {
   color: var(--muted);
   font-size: 12px;
 }
@@ -2899,6 +2921,23 @@
   font-size: 11px;
   font-weight: 800;
   padding: 0 9px;
+}
+
+.terminalLaunchBadges .consoleStatusBadge {
+  gap: 5px;
+  min-height: 24px;
+  font-size: 11px;
+  padding: 0 9px;
+}
+
+.terminalLaunchBadges .consoleStatusBadge span,
+.terminalLaunchFooter .compactAction span {
+  color: inherit;
+  font-size: inherit;
+}
+
+.terminalLaunchBadges svg {
+  flex: 0 0 auto;
 }
 
 .terminalLaunchGrid {
@@ -3352,17 +3391,27 @@
   min-width: 0;
 }
 
-.terminalActiveHeader strong,
-.terminalActiveHeader span {
+.terminalActiveHeader > div:first-child strong,
+.terminalActiveHeader > div:first-child > span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.terminalActiveHeader span {
+.terminalActiveHeader > div:first-child > span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.terminalActiveHeader .compactRowActions {
+  flex: 1 1 420px;
+  justify-content: flex-end;
+  min-width: min(100%, 320px);
+}
+
+.terminalActiveHeader .compactRowActions .compactAction {
+  flex: 0 0 auto;
 }
 
 .terminalTranscriptState {
@@ -3492,6 +3541,15 @@
   .terminalActiveHeader {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .terminalActiveHeader .compactRowActions {
+    justify-content: flex-start;
+    min-width: 0;
+  }
+
+  .terminalActiveHeader .compactRowActions .compactAction {
+    flex: 1 1 150px;
   }
 
   .terminalSessionContext {

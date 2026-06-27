@@ -30,7 +30,13 @@ export function ConsoleActionDrawer({
           <h2>{title}</h2>
           {description && <span>{description}</span>}
         </div>
-        <button aria-label={`Close ${title}`} className="iconButton" onClick={onClose} type="button">
+        <button
+          aria-label={`Close ${title}`}
+          className="iconButton"
+          onClick={onClose}
+          title={`Close ${title}`}
+          type="button"
+        >
           <X size={18} />
         </button>
       </div>

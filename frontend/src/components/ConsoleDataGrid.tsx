@@ -100,10 +100,14 @@ export function ConsoleDataGrid<T>({
   empty,
   getRowId,
   itemLabel = "rows",
+  mobileFieldLayout = "auto",
   expandOnRowClick = false,
   mobileLayout = "cards",
   onExpandedRowChange,
   onOpenRow,
+  openRowLabel = "Open",
+  openRowTitle,
+  showMobileOpenRowAction = true,
   onSelectionChange,
   renderExpandedRow,
   renderSelectionPanel,
@@ -124,9 +128,13 @@ export function ConsoleDataGrid<T>({
   expandOnRowClick?: boolean;
   getRowId: (row: T) => string;
   itemLabel?: string;
+  mobileFieldLayout?: "auto" | "stacked";
   mobileLayout?: "cards" | "table";
   onExpandedRowChange?: (row: T | null) => void;
   onOpenRow?: (row: T) => void;
+  openRowLabel?: string;
+  openRowTitle?: (row: T) => string;
+  showMobileOpenRowAction?: boolean;
   onSelectionChange?: (rows: T[]) => void;
   renderExpandedRow?: (row: T) => ReactNode;
   renderSelectionPanel?: (rows: T[]) => ReactNode;
@@ -247,6 +255,11 @@ export function ConsoleDataGrid<T>({
                       event.stopPropagation();
                       toggleExpandedRow(row.id, row.original);
                     }}
+                    title={
+                      open
+                        ? `Collapse ${title} row details.`
+                        : `Expand ${title} row details.`
+                    }
                     type="button"
                   >
                     {open ? (
@@ -444,8 +457,11 @@ export function ConsoleDataGrid<T>({
     const primaryRowActions = rowActions
       .filter((action) => !action.hidden?.([row.original]))
       .slice(0, 3);
+    const showOpenRowAction = Boolean(onOpenRow && showMobileOpenRowAction);
     const hasCardActions =
-      primaryRowActions.length > 0 || Boolean(onOpenRow) || Boolean(renderExpandedRow);
+      primaryRowActions.length > 0 ||
+      showOpenRowAction ||
+      Boolean(renderExpandedRow);
     const detailCells = dataCells.filter((cell) => {
       if (cell.id === primaryCell?.id || cell.id === stateCell?.id) {
         return false;
@@ -457,6 +473,7 @@ export function ConsoleDataGrid<T>({
     });
     const cardClassName = [
       "gridMobileCard",
+      mobileFieldLayout === "stacked" ? "stackedFields" : "",
       row.getIsSelected() ? "selected" : "",
     ]
       .filter(Boolean)
@@ -511,7 +528,7 @@ export function ConsoleDataGrid<T>({
           </div>
         ) : null}
 
-        {(primaryRowActions.length > 0 || onOpenRow || renderExpandedRow) && (
+        {(primaryRowActions.length > 0 || showOpenRowAction || renderExpandedRow) && (
           <div className="gridMobileActions">
             {primaryRowActions.map((action) => {
               const sourceRows = [row.original];
@@ -536,16 +553,18 @@ export function ConsoleDataGrid<T>({
                 </button>
               );
             })}
-            {onOpenRow ? (
+            {showOpenRowAction && onOpenRow ? (
               <button
+                aria-label={`${openRowLabel} ${title} row ${rowId}`}
                 className="secondaryAction compactAction"
                 onClick={(event) => {
                   event.stopPropagation();
                   onOpenRow(row.original);
                 }}
+                title={openRowTitle?.(row.original) ?? openRowLabel}
                 type="button"
               >
-                Open
+                {openRowLabel}
               </button>
             ) : null}
             {renderExpandedRow ? (
@@ -556,6 +575,11 @@ export function ConsoleDataGrid<T>({
                   event.stopPropagation();
                   toggleExpandedRow(row.id, row.original);
                 }}
+                title={
+                  expandedRows[row.id]
+                    ? `Hide ${title} row details.`
+                    : `Show ${title} row details.`
+                }
                 type="button"
               >
                 {expandedRows[row.id] ? "Hide details" : "Details"}
@@ -686,6 +710,7 @@ export function ConsoleDataGrid<T>({
               <button
                 aria-label={`${title} columns`}
                 className="secondaryAction compactAction columnChooserButton"
+                title={`Choose visible fields for ${title}.`}
                 type="button"
               >
                 <Columns3 size={17} />
@@ -847,6 +872,7 @@ export function ConsoleDataGrid<T>({
                             event.stopPropagation();
                             toggleExpandedRow(row.id, row.original);
                           }}
+                          title={`Close ${title} row details`}
                           type="button"
                         >
                           <X size={15} />

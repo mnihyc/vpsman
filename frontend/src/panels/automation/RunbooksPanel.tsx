@@ -157,6 +157,7 @@ export function RunbooksPanel({
             <button
               className="secondaryAction compactAction"
               onClick={onOpenSchedules}
+              title="Open scheduled runbook and command executions."
               type="button"
             >
               <ClipboardList size={16} />
@@ -166,6 +167,7 @@ export function RunbooksPanel({
               className="secondaryAction compactAction"
               disabled={loading}
               onClick={onRefresh}
+              title="Refresh the reviewed operation catalog and latest job evidence."
               type="button"
             >
               <RefreshCcw size={16} />
@@ -191,7 +193,7 @@ export function RunbooksPanel({
             detail="operator-defined templates"
           />
           <RunbookMetric
-            label="Latest loaded job"
+            label="Latest job"
             value={latestRun ? jobResultLabel(latestRun.status) : "none"}
             detail={
               latestRun
@@ -204,27 +206,31 @@ export function RunbooksPanel({
         </div>
 
         <div className="runbookToolbar" aria-label="Runbook filters">
-          <label className="runbookSearch">
+          <label
+            className="runbookSearch"
+            title="Search runbooks by name, scope, operation, display group, or required review input."
+          >
             <Search size={16} />
             <input
               aria-label="Search runbooks"
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search name, scope, operation, or required review"
+              placeholder="Search runbooks"
               type="search"
               value={query}
             />
           </label>
           <div className="segmented" role="group" aria-label="Runbook kind">
             {[
-              ["all", "All"],
-              ["built_in", "Built-in"],
-              ["custom", "Custom"],
-            ].map(([value, label]) => (
+              ["all", "All", "Show built-in and custom runbooks."],
+              ["built_in", "Built-in", "Show shipped runbooks."],
+              ["custom", "Custom", "Show operator-defined runbooks."],
+            ].map(([value, label, title]) => (
               <button
                 aria-pressed={filter === value}
                 className={filter === value ? "selected" : ""}
                 key={value}
                 onClick={() => setFilter(value as RunbookFilter)}
+                title={title}
                 type="button"
               >
                 {label}
@@ -234,6 +240,7 @@ export function RunbooksPanel({
           <button
             className="secondaryAction compactAction"
             onClick={onOpenJobsDispatch}
+            title="Open Jobs / Dispatch to create, edit, or run command templates."
             type="button"
           >
             <ExternalLink size={15} />
@@ -307,6 +314,7 @@ export function RunbooksPanel({
                       <button
                         className="primaryAction compactAction"
                         onClick={() => reviewRunbook(runbook)}
+                        title={`Open Dispatch with ${runbook.template.name} prefilled.`}
                         type="button"
                       >
                         <Play size={15} />
@@ -319,6 +327,11 @@ export function RunbooksPanel({
                           runbook.capability.route === "terminal"
                             ? onOpenRemoteTerminal
                             : onOpenJobsDispatch
+                        }
+                        title={
+                          runbook.capability.route === "terminal"
+                            ? "Open Remote Operations / Terminal for terminal lifecycle actions."
+                            : "Open the owner workflow for this operation type."
                         }
                         type="button"
                       >
@@ -377,6 +390,7 @@ function RunbookManageMenu({
         <button
           aria-label={`Manage ${templateName}`}
           className="secondaryAction compactAction"
+          title={`Manage custom runbook ${templateName}.`}
           type="button"
         >
           Manage
@@ -419,7 +433,7 @@ function RunbookMetric({
   value: string;
 }) {
   return (
-    <div className="runbookMetric">
+    <div className="runbookMetric" title={`${label}: ${value}. ${detail}`}>
       <small>{label}</small>
       <strong>{value}</strong>
       <span>{detail}</span>

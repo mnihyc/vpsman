@@ -3,11 +3,13 @@ import {
   Download,
   History,
   Keyboard,
+  LockKeyhole,
   LogIn,
   Maximize2,
   Play,
   Radio,
   RefreshCw,
+  ShieldCheck,
   TerminalSquare,
   XCircle,
 } from "lucide-react";
@@ -113,6 +115,17 @@ export function TerminalSessionsPanel({
   const launchTarget = agents.find((agent) => agent.id === launchTargetId) ?? agents[0] ?? null;
   const launchProfileRecord =
     TERMINAL_LAUNCH_PROFILES.find((profile) => profile.value === launchProfile) ?? TERMINAL_LAUNCH_PROFILES[0];
+  const privilegeReady = Boolean(privilegeMaterial);
+  const launchPrivilegeTitle = privilegeReady
+    ? "Local privilege is unlocked in this browser. Open submits one audited terminal_open job for the selected VPS."
+    : "Terminal open requires local privilege material. Unlock once, then open the terminal from this launcher.";
+  const launchPrimaryTitle = !launchTarget
+    ? "Select an online VPS target before opening a terminal."
+    : launchPending
+      ? "Terminal open request is being submitted."
+      : privilegeReady
+        ? `Open ${launchProfileRecord.label} on ${clientLabel(launchTarget.id)} with an audited terminal_open job.`
+        : "Open Privilege Vault; after unlock, this same launcher opens the terminal directly.";
   const activeSession = useMemo(
     () =>
       sessions.find((session) => `${session.client_id}:${session.session_id}` === activeKey) ??
@@ -495,12 +508,23 @@ export function TerminalSessionsPanel({
         </div>
         <div className="rowActions compactRowActions">
           {onOpenSessionEvidence && (
-            <button className="secondaryAction compactAction" onClick={onOpenSessionEvidence} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={onOpenSessionEvidence}
+              title="Open Audit / Sessions evidence for terminal ownership, replay state, and retained proof."
+              type="button"
+            >
               <History size={14} />
-              <span>Audit evidence</span>
+              <span>Evidence</span>
             </button>
           )}
-          <button className="secondaryAction compactAction" disabled={loading} onClick={onRefresh} type="button">
+          <button
+            className="secondaryAction compactAction"
+            disabled={loading}
+            onClick={onRefresh}
+            title={loading ? "Terminal session inventory is refreshing." : "Refresh terminal session inventory and retained state."}
+            type="button"
+          >
             <RefreshCw size={14} />
             <span>Refresh</span>
           </button>
@@ -512,10 +536,28 @@ export function TerminalSessionsPanel({
             <h3>New terminal</h3>
             <span>Open one browser terminal without leaving Remote Operations.</span>
           </div>
-          <strong>Audited terminal_open</strong>
+          <div className="terminalLaunchBadges">
+            <strong title="Submitted as an audited terminal_open job with durable job and terminal evidence.">
+              Audited terminal_open
+            </strong>
+            <span
+              className={`consoleStatusBadge ${privilegeReady ? "ok" : "warning"}`}
+              title={launchPrivilegeTitle}
+            >
+              {privilegeReady ? (
+                <ShieldCheck size={13} />
+              ) : (
+                <LockKeyhole size={13} />
+              )}
+              <span>{privilegeReady ? "Privilege ready" : "Privilege locked"}</span>
+            </span>
+          </div>
         </div>
         <div className="terminalLaunchGrid">
-          <label className="wideField">
+          <label
+            className="wideField"
+            title="The terminal opens on exactly one selected VPS; use Fleet scope or search to narrow the target list."
+          >
             <span>Target</span>
             <VpsCombobox
               agents={agents}
@@ -526,7 +568,7 @@ export function TerminalSessionsPanel({
               value={launchTarget?.id ?? ""}
             />
           </label>
-          <label>
+          <label title="POSIX login is portable; Bash login is richer when bash exists; plain sh avoids login profile side effects.">
             <span>Shell profile</span>
             <select
               aria-label="Terminal shell profile"
@@ -540,7 +582,7 @@ export function TerminalSessionsPanel({
               ))}
             </select>
           </label>
-          <label>
+          <label title="Blank uses the agent default working directory reported by the backend.">
             <span>Working directory</span>
             <input
               aria-label="New terminal working directory"
@@ -549,7 +591,7 @@ export function TerminalSessionsPanel({
               value={launchCwd}
             />
           </label>
-          <label>
+          <label title="Agent user is least surprising; root modes are useful for production repair when agent capability permits it.">
             <span>Run as</span>
             <select
               aria-label="New terminal user policy"
@@ -561,7 +603,7 @@ export function TerminalSessionsPanel({
               <option value="root-fallback">root, fallback to agent user</option>
             </select>
           </label>
-          <label>
+          <label title="Server-side idle timeout for the terminal session, clamped between 10 seconds and 24 hours.">
             <span>Idle timeout</span>
             <input
               aria-label="New terminal idle timeout seconds"
@@ -572,7 +614,7 @@ export function TerminalSessionsPanel({
               value={launchIdleTimeoutSecs}
             />
           </label>
-          <label>
+          <label title="Initial terminal width in columns, clamped between 20 and 240. Resize later from session controls.">
             <span>Columns</span>
             <input
               aria-label="New terminal columns"
@@ -583,7 +625,7 @@ export function TerminalSessionsPanel({
               value={launchCols}
             />
           </label>
-          <label>
+          <label title="Initial terminal height in rows, clamped between 5 and 120. Resize later from session controls.">
             <span>Rows</span>
             <input
               aria-label="New terminal rows"
@@ -598,16 +640,19 @@ export function TerminalSessionsPanel({
         <div className="terminalLaunchFooter">
           <span>
             {launchStatus ??
-              "Open submits a privileged terminal_open job for the selected VPS; protocol controls stay under Advanced session controls."}
+              (privilegeReady
+                ? "Open submits a privileged terminal_open job for the selected VPS; protocol controls stay under Advanced session controls."
+                : "Unlock privilege once to enable terminal_open; replay, copy, and audit evidence stay available while locked.")}
           </span>
           <button
             className="primaryAction compactAction"
             disabled={!launchTarget || launchPending}
             onClick={() => void openNewTerminal()}
+            title={launchPrimaryTitle}
             type="button"
           >
-            <Play size={15} />
-            <span>Open terminal</span>
+            {privilegeReady ? <Play size={15} /> : <ShieldCheck size={15} />}
+            <span>{privilegeReady ? "Open terminal" : "Unlock privilege"}</span>
           </button>
         </div>
       </div>
@@ -644,6 +689,7 @@ export function TerminalSessionsPanel({
               className="secondaryAction compactAction"
               disabled={!activeSession}
               onClick={() => activeSession && void loadDurableReplay(activeSession)}
+              title="Load retained replay for the active terminal session."
               type="button"
             >
               <History size={13} />
@@ -673,6 +719,11 @@ export function TerminalSessionsPanel({
               className="secondaryAction compactAction"
               disabled={!activeSession || Boolean(activeSession.session_exited) || activeSession.state === "closed"}
               onClick={() => activeSession && onPrepareAction(activeSession, "input")}
+              title={
+                activeSession && !activeSession.session_exited && activeSession.state !== "closed"
+                  ? "Send input bytes through the advanced audited terminal input control."
+                  : "Select an open terminal session before sending input."
+              }
               type="button"
             >
               <Keyboard size={13} />
@@ -682,6 +733,7 @@ export function TerminalSessionsPanel({
               className="secondaryAction compactAction"
               disabled={!activeSession}
               onClick={() => setTerminalFocusOpen(true)}
+              title="Open the active terminal replay in a full-screen focused workspace."
               type="button"
             >
               <Maximize2 size={13} />
@@ -739,6 +791,7 @@ export function TerminalSessionsPanel({
               <button
                 className="secondaryAction compactAction"
                 onClick={() => void loadDurableReplay(activeSession)}
+                title="Reload retained replay for the focused terminal session."
                 type="button"
               >
                 <History size={13} />
@@ -748,6 +801,11 @@ export function TerminalSessionsPanel({
                 className="secondaryAction compactAction"
                 disabled={Boolean(activeSession.session_exited) || activeSession.state === "closed"}
                 onClick={() => onPrepareAction(activeSession, "input")}
+                title={
+                  !activeSession.session_exited && activeSession.state !== "closed"
+                    ? "Send input bytes through the advanced audited terminal input control."
+                    : "Closed terminal sessions cannot receive input."
+                }
                 type="button"
               >
                 <Keyboard size={13} />
@@ -757,6 +815,7 @@ export function TerminalSessionsPanel({
                 aria-label="Close focused terminal"
                 className="secondaryAction compactAction"
                 onClick={() => setTerminalFocusOpen(false)}
+                title="Close focused terminal view and return to the session workspace."
                 type="button"
               >
                 <XCircle size={13} />

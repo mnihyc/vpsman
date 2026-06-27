@@ -146,7 +146,8 @@ const allViews: ScreenshotEntry[] = [
     id: "09-remote-operations-terminal",
     requiredText: [
       "Terminal sessions",
-      "Open terminal",
+      "Privilege locked",
+      "Unlock privilege",
       "Focus terminal",
       "Advanced session controls",
     ],
@@ -754,7 +755,12 @@ async function navigateAndScreenshot(
         .locator(".gridMobileCard", { hasText: entry.expandVpsRow })
         .first();
       await expect(card).toBeVisible({ timeout: 5_000 });
-      await card.getByRole("button", { name: "Open", exact: true }).click();
+      const explicitOpen = card.getByRole("button", { name: /Open VPS/ });
+      if ((await explicitOpen.count()) > 0) {
+        await explicitOpen.click();
+      } else {
+        await card.getByRole("button", { name: "Open", exact: true }).click();
+      }
     }
     await expect(
       page

@@ -519,8 +519,11 @@ export function ConsoleShell({
             </div>
           ) : (
             <div className="fleetStatusStrip" aria-label="Fleet status summary">
-              <strong>
+              <strong className="fleetStatusFull">
                 {summaryScopeLabel}: {summary.total} VPS · {summary.online} online · {summary.stale} stale · {summary.running_jobs} running jobs
+              </strong>
+              <strong className="fleetStatusCompact">
+                {summary.total} VPS · {summary.online} online · {summary.running_jobs} jobs
               </strong>
               <span className={summary.warnings > 0 ? "warn" : "ok"}>
                 {summary.warnings > 0

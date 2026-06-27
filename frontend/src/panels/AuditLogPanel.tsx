@@ -623,6 +623,8 @@ export function AuditLogPanel({
             getRowId={(audit) => audit.id}
             itemLabel="records"
             onOpenRow={(audit) => setSelectedAuditId(audit.id)}
+            openRowLabel="View audit"
+            openRowTitle={(audit) => `Show details for audit record ${audit.id}.`}
             rows={filteredAudits}
             storageKey="vpsman.grid.audit.events"
             title="Audit records"

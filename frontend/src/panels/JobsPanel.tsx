@@ -1469,6 +1469,8 @@ export function JobsPanel({
                 getRowId={(job) => job.id}
                 itemLabel="jobs"
                 onOpenRow={(job) => void openTargets(job.id)}
+                openRowLabel="Open targets"
+                openRowTitle={(job) => `Load target results for job ${job.id}.`}
                 renderExpandedRow={(job) => (
                   <div className="consoleInlineDetailGrid">
                     <span>Job ID</span>
@@ -1724,6 +1726,8 @@ export function JobsPanel({
                         onOpenRow={(group) =>
                           setSelectedComparisonGroupId(group.group_id)
                         }
+                        openRowLabel="Select group"
+                        openRowTitle={(group) => `Select comparison group ${group.group_id}.`}
                         renderExpandedRow={(group) => (
                           <div className="consoleInlineDetailGrid">
                             <span>Group</span>
@@ -2208,6 +2212,8 @@ export function JobsPanel({
                   getRowId={(job) => job.id}
                   itemLabel="runs"
                   onOpenRow={(job) => void openTargets(job.id)}
+                  openRowLabel="Open targets"
+                  openRowTitle={(job) => `Load target results for scheduled run ${job.id}.`}
                   renderExpandedRow={(job) => {
                     const schedule = job.source_schedule_id
                       ? scheduleById.get(job.source_schedule_id)

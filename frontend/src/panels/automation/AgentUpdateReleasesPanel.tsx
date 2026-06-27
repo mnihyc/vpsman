@@ -504,6 +504,7 @@ export function AgentUpdateReleasesPanel({
                 setReleaseSnapshot(null);
                 setReleaseError(null);
               }}
+              title="Close release registration"
               type="button"
             >
               <X size={16} />

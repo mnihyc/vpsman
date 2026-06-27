@@ -386,6 +386,8 @@ export function SessionEvidencePanel({
         getRowId={(row) => terminalKey(row.session)}
         itemLabel="terminal sessions"
         onOpenRow={(row) => setSelectedKey(terminalKey(row.session))}
+        openRowLabel="Select proof"
+        openRowTitle={(row) => `Show terminal proof for session ${row.session.session_id}.`}
         rows={evidenceRows}
         searchPlaceholder="Search terminal session, actor, target, transcript, status, or audit event"
         selectable={false}

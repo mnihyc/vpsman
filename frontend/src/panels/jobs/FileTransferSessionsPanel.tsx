@@ -261,7 +261,13 @@ export function FileTransferSessionsPanel({
       cell: (transfer) => {
         return (
           <span className="transferProgressCell">
-            <span>{formatTransferProgress(transfer)}</span>
+            <span
+              title={`${formatTransferProgress(transfer)}; ${formatTransferRateLimit(
+                transfer.rate_limit_kbps,
+              )}`}
+            >
+              {formatTransferProgress(transfer)}
+            </span>
             <span className="transferProgressTrack">
               <span style={{ width: `${Math.round((transfer.progress_ratio ?? 0) * 100)}%` }} />
             </span>
@@ -902,6 +908,7 @@ export function FileTransferSessionsPanel({
         rows={transfers}
         searchPlaceholder="Search transfers"
         selectable={false}
+        mobileFieldLayout="stacked"
         storageKey="vpsman.jobs.fileTransferSessions"
         title="Transfer sessions"
       />

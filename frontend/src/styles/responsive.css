@@ -219,6 +219,34 @@
     flex-direction: column;
   }
 
+  .gridMobileState .historyPrimary strong,
+  .gridMobileState .historyPrimary small,
+  .gridMobileFieldValue .historyPrimary strong,
+  .gridMobileFieldValue .historyPrimary small {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+    word-break: normal;
+  }
+
+  .gridMobileCard.stackedFields .gridMobileFields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gridMobileCard.stackedFields .telemetryStack,
+  .gridMobileCard.stackedFields .telemetryStatus,
+  .gridMobileCard.stackedFields .telemetryStack small {
+    display: block;
+    max-width: 100%;
+    min-width: 0;
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+    word-break: normal;
+  }
+
   .systemConfigReview .privilegeGateBox button {
     width: 100%;
   }
@@ -353,6 +381,40 @@
     padding: 14px;
   }
 
+  .consoleHeader {
+    gap: 10px;
+  }
+
+  .titleBlock {
+    max-width: none;
+  }
+
+  .pageHeaderContext {
+    display: none;
+  }
+
+  .breadcrumb {
+    overflow: hidden;
+    max-width: 100%;
+    color: var(--text-secondary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .consoleHeader h1 {
+    font-size: 20px;
+  }
+
+  .consoleHeader .pageDescription {
+    display: -webkit-box;
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.35;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
   .dashboardToolbar,
   .dashboardSectionHeader {
     align-items: flex-start;
@@ -377,6 +439,38 @@
 
   .dashboardControlBar {
     gap: 8px;
+  }
+
+  .quickStats {
+    gap: 8px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .summaryScopeLabel {
+    font-size: 11px;
+  }
+
+  .fleetStatusStrip {
+    align-items: center;
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .fleetStatusFull {
+    display: none;
+  }
+
+  .fleetStatusCompact {
+    display: inline;
+    flex: 1 1 140px;
+    min-width: 0;
+  }
+
+  .fleetStatusStrip span,
+  .fleetStatusStrip small {
+    min-height: 20px;
+    font-size: 11px;
+    padding: 0 7px;
   }
 
   .operationalGrid,
@@ -569,7 +663,43 @@
   }
 
   .preferenceStickySaveBar {
-    position: static;
+    position: sticky;
+    top: auto;
+    bottom: 0;
+    z-index: var(--z-sticky);
+    margin-right: -14px;
+    margin-bottom: -14px;
+    margin-left: -14px;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 0 0 8px 8px;
+    background: color-mix(in srgb, var(--surface) 96%, transparent);
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+    box-shadow: 0 -4px 8px rgba(60, 64, 67, 0.12);
+    backdrop-filter: blur(8px);
+  }
+
+  .systemConfigStickyBar {
+    position: sticky;
+    top: auto;
+    bottom: 0;
+    z-index: var(--z-sticky);
+    margin-right: -14px;
+    margin-bottom: -14px;
+    margin-left: -14px;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 0 0 8px 8px;
+    background: color-mix(in srgb, var(--surface) 96%, transparent);
+    padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+    box-shadow: 0 -4px 8px rgba(60, 64, 67, 0.12);
+    backdrop-filter: blur(8px);
+  }
+
+  .systemConfigStickyBar.dirty {
+    background: color-mix(in srgb, var(--warning-soft) 94%, var(--surface));
   }
 
   .commandComposer .segmented {
@@ -869,5 +999,37 @@
 
   .consoleOperationsActions {
     justify-content: flex-start;
+  }
+
+  .vpsRulesBulkEditor,
+  .vpsRulesModeLegend,
+  .vpsRuleTypedGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vpsRulesModeLegend,
+  .vpsRulesTypedEditor {
+    grid-column: 1 / -1;
+  }
+
+  .vpsRulesWorkspace .consoleOperationsActions,
+  .vpsRulesModeSwitch {
+    width: 100%;
+  }
+
+  .vpsRulesWorkspace .consoleOperationsActions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vpsRulesModeSwitch {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .vpsRulesModeSwitch button,
+  .vpsRulesWorkspace .consoleOperationsActions .primaryAction {
+    min-width: 0;
+    width: 100%;
   }
 }

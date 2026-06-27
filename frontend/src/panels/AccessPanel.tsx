@@ -1471,6 +1471,7 @@ export function AccessPanel({
               aria-label="Close VPS identity workflow"
               className="secondaryAction compact"
               onClick={closeIdentityWorkflow}
+              title="Close VPS identity workflow"
               type="button"
             >
               <X size={15} />

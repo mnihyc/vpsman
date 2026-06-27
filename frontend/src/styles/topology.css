@@ -1452,8 +1452,25 @@
   }
 
   .tunnelPlansRegistryPanel .gridToolbarActions .compactAction {
-    flex: 1 1 min(100%, 150px);
+    flex: 1 1 calc(50% - 3px);
+    gap: 4px;
     justify-content: center;
+    min-width: 0;
+    padding-inline: 6px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+
+  .tunnelPlansRegistryPanel .gridToolbarActions .compactAction svg {
+    flex: 0 0 14px;
+    width: 14px;
+    height: 14px;
+  }
+
+  .tunnelPlansRegistryPanel .gridToolbarActions .compactAction span {
+    min-width: 0;
+    overflow: visible;
+    text-overflow: clip;
   }
 
   .tunnelPlansRegistryPanel .topologyPlanActionHint {
@@ -1488,6 +1505,25 @@
     min-height: 320px;
   }
 
+  .topologyNodeInspector {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .topologyNodeInspector .historyPrimary,
+  .topologyNodeInspector .topologyTagList {
+    grid-column: 1 / -1;
+  }
+
+  .topologyNodeInspector .historyPrimary strong,
+  .topologyNodeInspector .historyPrimary small,
+  .topologyNodeInspector .topologyMetric strong,
+  .topologyNodeInspector .topologyMetric small {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
   .topologyGraphSummary {
     gap: 8px;
     max-height: none;
@@ -1512,6 +1548,16 @@
     align-items: start;
     gap: 8px;
     min-width: 0;
+  }
+
+  .topologyGraphEdgeRow .historyPrimary strong,
+  .topologyGraphEdgeRow .historyPrimary small,
+  .topologyGraphEdgeRow .topologyMetric strong,
+  .topologyGraphEdgeRow .topologyMetric small {
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    white-space: normal;
   }
 
   .topologyGraphEdgeRow > [data-label]::before {

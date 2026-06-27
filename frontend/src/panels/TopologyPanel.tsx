@@ -554,14 +554,14 @@ export function TopologyPanel({
         header: "Updater report",
         size: 230,
         minSize: 180,
-        sortValue: (row) => row.lastReport,
+        sortValue: (row) => row.lastReportTitle,
         searchValue: (row) =>
-          `${row.cost} ${row.costDetail} ${row.lastReport} ${row.reportDetail}`,
+          `${row.cost} ${row.costDetail} ${row.lastReport} ${row.lastReportTitle} ${row.reportDetail}`,
         cell: (row) => (
           <TelemetryCell
             detail={`${row.costDetail}; ${row.reportDetail}`}
             main={`${row.cost} / ${row.lastReport}`}
-            title={`${row.costDetail}; ${row.reportDetail}`}
+            title={`${row.cost} / ${row.lastReportTitle}; ${row.costDetail}; ${row.reportDetail}`}
           />
         ),
       },
@@ -852,6 +852,7 @@ export function TopologyPanel({
                 <button
                   className="primaryAction compactAction"
                   onClick={() => setActivePlanWorkflow("create")}
+                  title="Create a saved tunnel plan with endpoints, routing, runtime ownership, and OSPF cost preview."
                   type="button"
                 >
                   <GitBranch size={16} />
@@ -874,6 +875,7 @@ export function TopologyPanel({
                 <button
                   className="secondaryAction compactAction"
                   onClick={() => setActivePlanWorkflow("promotion")}
+                  title="Promote observed tunnel telemetry into a reviewed saved plan or adapter workflow."
                   type="button"
                 >
                   <FileDiff size={16} />
@@ -883,6 +885,7 @@ export function TopologyPanel({
                   <button
                     className="secondaryAction compactAction"
                     onClick={() => setActivePlanWorkflow("config")}
+                    title="Generate and review runtime tunnel configuration for the latest saved plan."
                     type="button"
                   >
                     <Route size={16} />
@@ -1030,6 +1033,7 @@ export function TopologyPanel({
             empty={<div className="emptyState compactEmpty">No agents</div>}
             getRowId={(row) => row.clientId}
             itemLabel="VPSs"
+            mobileFieldLayout="stacked"
             renderExpandedRow={(row) => <AutomationGridDetail row={row} />}
             rows={automationRows}
             searchPlaceholder="Search automation state"
@@ -2583,7 +2587,8 @@ function buildAutomationRows(
           : "observed runtime report; OSPF review owns the proposal",
       tunnels: prioritized,
       urgency: prioritized[0] ? tunnelUrgency(prioritized[0]) : 0,
-      lastReport: latestObserved ? formatTime(latestObserved) : "No report",
+      lastReport: latestObserved ? formatCompactTime(latestObserved) : "No report",
+      lastReportTitle: latestObserved ? formatTime(latestObserved) : "No report",
       reportDetail:
         unreportedCount > 0
           ? `${unreportedCount} saved endpoint${unreportedCount === 1 ? "" : "s"} without telemetry`

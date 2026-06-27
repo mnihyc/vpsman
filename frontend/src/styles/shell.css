@@ -1387,6 +1387,10 @@ h2 {
   line-height: 1.3;
 }
 
+.fleetStatusCompact {
+  display: none;
+}
+
 .fleetStatusStrip span,
 .fleetStatusStrip small {
   display: inline-flex;

@@ -4556,7 +4556,7 @@ button.vpsDetailRecord:hover {
 
 .runbookSummary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
   gap: 10px;
   border-bottom: 1px solid var(--border-subtle);
   padding: 14px 16px;
@@ -4575,21 +4575,22 @@ button.vpsDetailRecord:hover {
 .runbookMetric small,
 .runbookMetric span {
   min-width: 0;
-  overflow: hidden;
   color: var(--muted);
   font-size: 11px;
   font-weight: 750;
   line-height: 1.3;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .runbookMetric strong {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
   color: var(--text);
   font-size: 18px;
   line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .runbookToolbar {
@@ -4792,6 +4793,31 @@ button.vpsDetailRecord:hover {
 }
 
 @media (max-width: 720px) {
+  .runbookSummary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 12px;
+  }
+
+  .runbookToolbar {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 12px;
+  }
+
+  .runbookToolbar .segmented {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .runbookToolbar .segmented button {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .runbookToolbar > .compactAction {
+    justify-content: center;
+    width: 100%;
+  }
+
   .runbookCardFooter {
     grid-template-columns: minmax(0, 1fr);
   }

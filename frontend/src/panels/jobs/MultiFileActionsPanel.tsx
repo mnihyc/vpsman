@@ -466,19 +466,39 @@ export function MultiFileActionsPanel({
             />
           </label>
           <div className="multiFilePrimaryActions">
-            <button className={action === "download_files" ? "primaryAction" : "secondaryAction"} onClick={() => {
-              setAction("download_files");
-              invalidateBulkReview();
-            }} type="button">
+            <button
+              aria-pressed={action === "download_files"}
+              className={
+                action === "download_files" ? "primaryAction" : "secondaryAction"
+              }
+              onClick={() => {
+                setAction("download_files");
+                invalidateBulkReview();
+              }}
+              title="Download files from all matched VPSs."
+              type="button"
+            >
               <Download size={14} />
-              <span>Download files</span>
+              <span>
+                Download <span className="multiFileModeSuffix">files</span>
+              </span>
             </button>
-            <button className={action === "upload_file" ? "primaryAction" : "secondaryAction"} onClick={() => {
-              setAction("upload_file");
-              invalidateBulkReview();
-            }} type="button">
+            <button
+              aria-pressed={action === "upload_file"}
+              className={
+                action === "upload_file" ? "primaryAction" : "secondaryAction"
+              }
+              onClick={() => {
+                setAction("upload_file");
+                invalidateBulkReview();
+              }}
+              title="Upload one file to all matched VPSs."
+              type="button"
+            >
               <Upload size={14} />
-              <span>Upload files</span>
+              <span>
+                Upload <span className="multiFileModeSuffix">files</span>
+              </span>
             </button>
           </div>
           <div className="multiFileGrid">

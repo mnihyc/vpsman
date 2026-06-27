@@ -73,80 +73,84 @@ export function TimeSeriesChart({
       return;
     }
 
-    const buildOptions = (width: number): uPlot.Options => ({
-      axes: [
-        {
-          grid: { stroke: consolePalette.neutral.borderSubtle, width: 1 },
-          size: 34,
-          stroke: consolePalette.neutral.muted,
-          values: (_plot, ticks) =>
-            formatAxisTicks(ticks, width, unixTimes),
-        },
-        {
-          grid: { stroke: consolePalette.neutral.borderSubtle, width: 1 },
-          size: 78,
-          stroke: consolePalette.neutral.muted,
-          values: (_plot, ticks) => ticks.map((tick) => valueFormatter(tick)),
-        },
-      ],
-      cursor: {
-        drag: { x: false, y: false },
-        focus: { prox: 24 },
-        points: { show: true, size: 6 },
-      },
-      height,
-      hooks: {
-        setCursor: [
-          (plot) => {
-            const index = plot.cursor.idx;
-            if (index === null || index === undefined || index < 0 || index >= unixTimes.length) {
-              setHover(null);
-              return;
-            }
-            setHover({
-              index,
-              timeLabel: formatChartTime(unixTimes[index]),
-              values: sanitizedLines.map((line) => ({
-                color: line.color,
-                label: line.label,
-                value: line.values[index] ?? null,
-              })),
-            });
+    const buildOptions = (width: number): uPlot.Options => {
+      const narrow = width < 340;
+
+      return {
+        axes: [
+          {
+            grid: { stroke: consolePalette.neutral.borderSubtle, width: 1 },
+            size: narrow ? 30 : 34,
+            stroke: consolePalette.neutral.muted,
+            values: (_plot, ticks) =>
+              formatAxisTicks(ticks, width, unixTimes),
+          },
+          {
+            grid: { stroke: consolePalette.neutral.borderSubtle, width: 1 },
+            size: narrow ? 62 : 78,
+            stroke: consolePalette.neutral.muted,
+            values: (_plot, ticks) => ticks.map((tick) => valueFormatter(tick)),
           },
         ],
-      },
-      legend: { show: false },
-      padding: [8, 10, 0, 0],
-      scales: {
-        x: {
-          range: (_plot, min, max) => {
-            if (unixTimes.length === 1) {
-              return [unixTimes[0] - 30 * 60, unixTimes[0] + 30 * 60];
-            }
-            return [min, max];
-          },
-          time: true,
+        cursor: {
+          drag: { x: false, y: false },
+          focus: { prox: 24 },
+          points: { show: true, size: 6 },
         },
-        y: { range: (_plot, min, max) => [Math.min(0, min), Math.max(1, max * 1.08)] },
-      },
-      series: [
-        {},
-        ...sanitizedLines.map((line) => ({
-          label: line.label,
-          points: { show: true, size: pointsOnly ? 6 : 4, width: 1 },
-          spanGaps: false,
-          stroke: line.color,
-          width: pointsOnly ? 0 : 2,
-        })),
-      ],
-      width,
-    });
+        height,
+        hooks: {
+          setCursor: [
+            (plot) => {
+              const index = plot.cursor.idx;
+              if (index === null || index === undefined || index < 0 || index >= unixTimes.length) {
+                setHover(null);
+                return;
+              }
+              setHover({
+                index,
+                timeLabel: formatChartTime(unixTimes[index]),
+                values: sanitizedLines.map((line) => ({
+                  color: line.color,
+                  label: line.label,
+                  value: line.values[index] ?? null,
+                })),
+              });
+            },
+          ],
+        },
+        legend: { show: false },
+        padding: [8, 10, 0, 0],
+        scales: {
+          x: {
+            range: (_plot, min, max) => {
+              if (unixTimes.length === 1) {
+                return [unixTimes[0] - 30 * 60, unixTimes[0] + 30 * 60];
+              }
+              return [min, max];
+            },
+            time: true,
+          },
+          y: { range: (_plot, min, max) => [Math.min(0, min), Math.max(1, max * 1.08)] },
+        },
+        series: [
+          {},
+          ...sanitizedLines.map((line) => ({
+            label: line.label,
+            points: { show: true, size: pointsOnly ? 6 : 4, width: 1 },
+            spanGaps: false,
+            stroke: line.color,
+            width: pointsOnly ? 0 : 2,
+          })),
+        ],
+        width,
+      };
+    };
 
-    const width = Math.max(320, host.clientWidth);
+    const width = Math.max(260, host.clientWidth);
     const plot = new uPlot(buildOptions(width), data, host);
     plotRef.current = plot;
     const resizeObserver = new ResizeObserver((entries) => {
-      const width = Math.max(320, Math.floor(entries[0]?.contentRect.width ?? host.clientWidth));
+      const width = Math.max(260, Math.floor(entries[0]?.contentRect.width ?? host.clientWidth));
       plot.setSize({ height, width });
     });
     resizeObserver.observe(host);
@@ -195,7 +199,7 @@ export function TimeSeriesChart({
       </figcaption>
       {hasData ? (
         <>
-          <div className="timeSeriesChart" ref={hostRef} />
+          <div className="timeSeriesChart" ref={hostRef} style={{ minHeight: height }} />
           <div className="timeSeriesLegend">
             {sanitizedLines.map((line) => (
               <span key={line.label}>

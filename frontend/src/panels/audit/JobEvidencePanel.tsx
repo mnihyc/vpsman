@@ -317,6 +317,8 @@ export function JobEvidencePanel({
         getRowId={(row) => row.job.id}
         itemLabel="jobs"
         onOpenRow={(row) => setSelectedJobId(row.job.id)}
+        openRowLabel="Select proof"
+        openRowTitle={(row) => `Show evidence proof for job ${row.job.id}.`}
         rows={evidenceRows}
         searchPlaceholder="Search job ID, actor, status, hash, command, or audit action"
         selectable={false}

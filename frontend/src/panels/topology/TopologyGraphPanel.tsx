@@ -279,6 +279,11 @@ export function TopologyGraphPanel({
             <button
               className="secondaryAction compactAction"
               onClick={() => setMobileGraphOpen((current) => !current)}
+              title={
+                mobileGraphOpen
+                  ? "Return to the mobile tunnel list first."
+                  : "Open the topology graph canvas on mobile."
+              }
               type="button"
             >
               {mobileGraphOpen ? "Show list first" : "Open graph view"}
@@ -463,10 +468,11 @@ export function TopologyGraphPanel({
                 <button
                   className="secondaryAction compactAction"
                   onClick={() => onOpenVpsDetail(selectedNode.client_id)}
+                  title={`Open VPS detail for ${nodeLabel(selectedNode, vpsNameDisplayMode)}.`}
                   type="button"
                 >
                   <Server size={14} />
-                  <span>Open VPS detail</span>
+                  <span>Open VPS</span>
                 </button>
               ) : null}
             </div>

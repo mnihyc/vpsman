@@ -55,6 +55,7 @@ export function FleetAlertsPanel({
             <button
               className="secondaryAction compactAction"
               onClick={onOpenAlertPolicies}
+              title="Open alert policy configuration for fleet alert triage."
               type="button"
             >
               <Bell size={14} />
@@ -451,6 +452,7 @@ function FleetAlertList({
               <button
                 className="secondaryAction compactAction"
                 onClick={onOpenAlertPolicies}
+                title="Open alert policy configuration for this fleet alert."
                 type="button"
               >
                 <Bell size={14} />
@@ -546,7 +548,7 @@ function FleetAlertList({
             onSelect: (rows) => reviewAlertUpdate(rows, "escalate"),
           },
           {
-            label: "Alert policies",
+            label: "Policies",
             description: (rows) =>
               actionTargetDescription(
                 "Open",
@@ -567,7 +569,7 @@ function FleetAlertList({
           );
         }}
         rows={alerts}
-        searchPlaceholder="Search alerts by VPS, category, state, or detail"
+        searchPlaceholder="Search alerts"
         storageKey="vpsman.grid.fleet.alerts.v1"
         title="Fleet alerts"
       />
