@@ -224,8 +224,8 @@ test("uploads a confirmed reusable source for transfer reuse", async ({ page }, 
   await openConsoleSubpage(page, "Remote Operations", "Transfers");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
-  await panel.getByText("Advanced: reusable upload sources").click();
-  await expect(panel.getByRole("heading", { name: "Reusable upload sources" })).toBeVisible();
+  await panel.getByText("Advanced: source artifacts").click();
+  await expect(panel.getByRole("heading", { name: "Source artifacts" })).toBeVisible();
   await expect(panel.getByText("payload.bin")).toBeVisible();
 
   const payload = Buffer.from("reusable source payload");
@@ -234,17 +234,17 @@ test("uploads a confirmed reusable source for transfer reuse", async ({ page }, 
     mimeType: "application/octet-stream",
     buffer: payload,
   });
-  await panel.getByLabel("Reusable source name").fill("source.bin");
-  await activate(panel.getByRole("button", { name: "Review reusable source" }));
-  await expect(panel.getByLabel("Confirm reusable source upload")).toBeVisible();
+  await panel.getByLabel("Source artifact name").fill("source.bin");
+  await activate(panel.getByRole("button", { name: "Review source artifact" }));
+  await expect(panel.getByLabel("Confirm source artifact upload")).toBeVisible();
   await page.screenshot({
     fullPage: true,
     path: testInfo.outputPath("remote-operations-transfers-reusable-source-upload.png"),
   });
   await activate(
     panel
-      .getByLabel("Confirm reusable source upload")
-      .getByRole("button", { name: "Upload reusable source" }),
+      .getByLabel("Confirm source artifact upload")
+      .getByRole("button", { name: "Upload source artifact" }),
   );
 
   const requests = await page.evaluate(() => (window as any).__vpsmanTestRequests.fileTransferSourceUploads);

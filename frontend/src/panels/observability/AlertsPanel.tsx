@@ -44,6 +44,7 @@ type AlertsPanelProps = {
     request: FleetAlertNotificationChannelRequest,
   ) => Promise<FleetAlertNotificationChannelRecord>;
   onUpsertFleetAlertPolicy: (request: FleetAlertPolicyRequest) => Promise<FleetAlertPolicyRecord>;
+  policyFocusId: string | null;
   policyAlerts: PolicyAlertRecord[];
 };
 
@@ -62,6 +63,7 @@ export function AlertsPanel({
   onProcessFleetAlertNotifications,
   onUpsertFleetAlertNotificationChannel,
   onUpsertFleetAlertPolicy,
+  policyFocusId,
   policyAlerts,
 }: AlertsPanelProps) {
   const [activeTab, setActiveTab] = useState<AlertConfigTab>("policies");
@@ -159,7 +161,7 @@ export function AlertsPanel({
               policies={fleetAlertPolicies}
               policyAlerts={policyAlerts}
               policyFilterClientId={null}
-              policyFocusId={null}
+              policyFocusId={policyFocusId}
             />
           </section>
         ) : null}

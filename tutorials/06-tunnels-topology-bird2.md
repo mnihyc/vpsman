@@ -57,7 +57,7 @@ cargo run -p vpsctl -- tunnel-plan \
   --right-tunnel-ipv4-cidr 10.255.0.1/31 \
   --left-tunnel-ipv6-cidr fd80::/127 \
   --right-tunnel-ipv6-cidr fd80::1/127 \
-  --bandwidth 100m \
+  --bandwidth-mbps 100 \
   --latency-ms 20 \
   > ./plan.json
 ```
@@ -76,7 +76,7 @@ cargo run -p vpsctl -- tunnel-plan \
   --address-pool-cidr 10.255.0.0/16 \
   --left-tunnel-ipv4-cidr 10.255.0.0/31 \
   --right-tunnel-ipv4-cidr 10.255.0.1/31 \
-  --bandwidth 100m \
+  --bandwidth-mbps 100 \
   --latency-ms 20 \
   --save \
   --enabled \
@@ -127,7 +127,7 @@ cargo run -p vpsctl -- tunnel-promote-external-observe \
   --left-tunnel-ipv4-cidr 10.255.0.2/31 \
   --right-tunnel-ipv4-cidr 10.255.0.3/31 \
   --side left \
-  --bandwidth 1000m \
+  --bandwidth-mbps 1000 \
   --latency-ms 8 \
   --enabled \
   --confirmed

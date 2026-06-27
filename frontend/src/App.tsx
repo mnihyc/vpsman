@@ -283,6 +283,9 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
     }
   }
   if (view === "Observability") {
+    if (subpage.startsWith("alerts:policy:")) {
+      return "Alerts";
+    }
     switch (subpage) {
       case "network_metrics":
         return "Network metrics";
@@ -360,6 +363,9 @@ function getScopedPageDescription(view: ActiveView, subpage: string): string {
     }
   }
   if (view === "Observability") {
+    if (subpage.startsWith("alerts:policy:")) {
+      return "Alert policies, active alert context, notification channels, and delivery evidence";
+    }
     switch (subpage) {
       case "network_metrics":
         return "Latency, loss, speed, tunnel grouping, endpoint comparison, and alert overlays";
@@ -888,6 +894,7 @@ export function App() {
         backups={dashboard.backups}
         fileTransfers={dashboard.fileTransfers}
         fleetAlerts={dashboard.fleetAlerts}
+        fleetAlertPolicies={dashboard.fleetAlertPolicies}
         jobs={dashboard.jobs}
         loading={
           dashboard.jobsLoading ||
@@ -899,6 +906,12 @@ export function App() {
         networkObservations={dashboard.networkObservations}
         networkTrends={dashboard.networkTrends}
         onOpenAudit={() => selectView("Audit", "events")}
+        onOpenAlertPolicies={(policyId) =>
+          selectView(
+            "Observability",
+            policyId ? `alerts:policy:${policyId}` : "alerts",
+          )
+        }
         onOpenBackup={openBackupWorkflow}
         onOpenConfig={openConfigWorkflow}
         onOpenFiles={releaseRoutes.openFiles}
@@ -910,6 +923,7 @@ export function App() {
         onOpenNetworkEvidence={releaseRoutes.openNetworkEvidence}
         onOpenProcesses={releaseRoutes.openProcess}
         onOpenTerminal={releaseRoutes.openTerminal}
+        policyAlerts={dashboard.policyAlerts}
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
         sourceStatus={dashboard.sourceStatus}
         sourceTemplateAssignments={dashboard.sourceTemplateAssignments}
@@ -972,6 +986,9 @@ export function App() {
   }
 
   function renderAlertsPanel() {
+    const policyFocusId = activeSubpage.startsWith("alerts:policy:")
+      ? activeSubpage.replace("alerts:policy:", "")
+      : null;
     return (
       <AlertsPanel
         agents={dashboard.agents}
@@ -998,6 +1015,7 @@ export function App() {
           dashboard.upsertFleetAlertNotificationChannel
         }
         onUpsertFleetAlertPolicy={dashboard.upsertFleetAlertPolicy}
+        policyFocusId={policyFocusId}
         policyAlerts={dashboard.policyAlerts}
       />
     );
@@ -1544,7 +1562,8 @@ export function App() {
       if (activeSubpage === "fleet_metrics") return renderFleetMetricsPanel();
       if (activeSubpage === "network_metrics")
         return renderNetworkMetricsPanel();
-      if (activeSubpage === "alerts") return renderAlertsPanel();
+      if (activeSubpage === "alerts" || activeSubpage.startsWith("alerts:policy:"))
+        return renderAlertsPanel();
       if (activeSubpage === "webhooks") return renderWebhooksPanel();
       if (activeSubpage === "dashboards")
         return renderObservabilityDashboardsPanel();
@@ -1782,6 +1801,9 @@ function automationReleaseSubpage(subpage: string) {
 }
 
 function observabilityReleaseSubpage(subpage: string) {
+  if (subpage.startsWith("alerts:policy:")) {
+    return subpage;
+  }
   if (
     [
       "fleet_metrics",

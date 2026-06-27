@@ -1219,7 +1219,7 @@ export function AccessPanel({
                       type="button"
                     >
                       <ShieldCheck size={17} />
-                      Generate setup
+                      Set up TOTP
                     </button>
                     {totpSetup ? (
                       <div className="totpSecretPanel">
@@ -1230,7 +1230,7 @@ export function AccessPanel({
                     ) : (
                       <div className="totpSecretPanel muted">
                         <strong>Authenticator secret</strong>
-                        <span>Generate setup after entering the password.</span>
+                        <span>Set up TOTP after entering the password.</span>
                       </div>
                     )}
                     <label>

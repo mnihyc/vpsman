@@ -508,14 +508,14 @@ export function JobOperationEditor({
             value={fileTransferUploadSourceKind}
           >
             <option value="local-file">Local file</option>
-            <option value="source-artifact">Reusable source</option>
+            <option value="source-artifact">Source artifact</option>
           </select>
         </label>
         {fileTransferUploadSourceKind === "source-artifact" ? (
           <label className="wideField">
-            <span>Reusable source</span>
+            <span>Resumable upload source artifact</span>
             <select
-              aria-label="Resumable upload reusable source"
+              aria-label="Resumable upload source artifact"
               onChange={(event) => setFileTransferSourceArtifactId(event.target.value)}
               value={fileTransferSourceArtifactId}
             >

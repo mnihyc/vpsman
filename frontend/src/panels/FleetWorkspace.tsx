@@ -5396,8 +5396,8 @@ export function FleetAlertNotificationManager({
         confirmed: !dryRun,
       });
       if (dryRun) {
-        onPreviewRows(rows);
         if (!openConfirmation) {
+          onPreviewRows(rows);
           onOpenDeliveries();
         }
         if (openConfirmation) {
@@ -5446,8 +5446,8 @@ export function FleetAlertNotificationManager({
         confirmed: !dryRun,
       });
       if (dryRun) {
-        onPreviewRows(rows);
         if (!openConfirmation) {
+          onPreviewRows(rows);
           onOpenDeliveries();
         }
         if (openConfirmation) {
@@ -5826,16 +5826,16 @@ export function FleetAlertNotificationManager({
               ? "Preview matches"
               : "Review matches"}
           </button>
+          <button
+            className="secondaryAction"
+            disabled={queuePending}
+            type="button"
+            onClick={() => void dispatch(true, true)}
+          >
+            Review queue dispatch
+          </button>
           {queueMode === "full" ? (
             <>
-              <button
-                className="secondaryAction"
-                disabled={queuePending}
-                type="button"
-                onClick={() => void dispatch(true, true)}
-              >
-                Review queue dispatch
-              </button>
               <button
                 className="secondaryAction"
                 disabled={queuePending}
@@ -5861,7 +5861,7 @@ export function FleetAlertNotificationManager({
             type="button"
             onClick={() => void process(true, true)}
           >
-            {queueMode === "configuration" ? "Send / retry" : "Review delivery"}
+            Review delivery
           </button>
         </div>
       </div>
@@ -6525,8 +6525,8 @@ export function WebhookRuleManager({
         confirmed: !dryRunMode,
       });
       if (dryRunMode) {
-        onPreviewRows(rows);
         if (!openConfirmation) {
+          onPreviewRows(rows);
           onOpenDeliveries();
         }
         if (openConfirmation) {
@@ -6587,8 +6587,8 @@ export function WebhookRuleManager({
         confirmed: !dryRunMode,
       });
       if (dryRunMode) {
-        onPreviewRows(rows);
         if (!openConfirmation) {
+          onPreviewRows(rows);
           onOpenDeliveries();
         }
         if (openConfirmation) {

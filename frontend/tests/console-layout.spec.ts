@@ -476,8 +476,9 @@ test("reviews notification and webhook queue mutations before commit", async ({
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Fleet", "Notifications");
+  await openConsoleSubpage(page, "Observability", "Alerts");
   const notifications = page.locator("main");
+  await activate(notifications.getByRole("tab", { name: /Destinations/ }));
 
   await activate(
     notifications.getByRole("button", { name: "Review queue dispatch" }),
@@ -531,14 +532,16 @@ test("reviews notification and webhook queue mutations before commit", async ({
     )
     .toMatchObject({ confirmed: true, dry_run: false });
 
-  await activate(notifications.getByRole("tab", { name: "Webhooks" }));
+  await openConsoleSubpage(page, "Observability", "Event webhooks");
+  const webhooks = page.locator("main");
   await expect(
-    notifications.getByText("Webhook rules", { exact: true }).first(),
+    webhooks.getByText("Event webhook rules", { exact: true }).first(),
   ).toBeVisible();
+  const webhookRules = webhooks.getByLabel("Event webhook rules");
   await activate(
-    notifications.getByRole("button", { name: "Create rule" }).first(),
+    webhookRules.getByRole("button", { name: "Create rule" }).first(),
   );
-  const webhookExpression = notifications.getByRole("searchbox", {
+  const webhookExpression = webhooks.getByRole("searchbox", {
     name: "Webhook expression",
   });
   await webhookExpression.click();
@@ -549,18 +552,18 @@ test("reviews notification and webhook queue mutations before commit", async ({
   ).toBeVisible();
   await page.keyboard.press("Enter");
   await expect(webhookExpression).toContainText("interval.30sec");
-  await activate(notifications.getByLabel("Close detail panel"));
+  await activate(webhooks.getByLabel("Close detail panel"));
 
   await activate(
-    notifications.getByRole("button", { name: "Review queue dispatch" }),
+    webhookRules.getByRole("button", { name: "Send test" }),
   );
   await expect(
-    notifications.getByLabel("Confirm webhook queue dispatch"),
+    webhooks.getByLabel("Confirm event webhook test"),
   ).toBeVisible();
   await activate(
-    notifications
-      .getByLabel("Confirm webhook queue dispatch")
-      .getByRole("button", { name: "Queue dispatch" }),
+    webhooks
+      .getByLabel("Confirm event webhook test")
+      .getByRole("button", { name: "Send test" }),
   );
   await expect
     .poll(() =>
@@ -578,15 +581,15 @@ test("reviews notification and webhook queue mutations before commit", async ({
     .toMatchObject({ confirmed: true, dry_run: false });
 
   await activate(
-    notifications.getByRole("button", { name: "Review delivery" }),
+    webhookRules.getByRole("button", { name: "Retry failed" }),
   );
   await expect(
-    notifications.getByLabel("Confirm webhook delivery"),
+    webhooks.getByLabel("Confirm failed webhook retry"),
   ).toBeVisible();
   await activate(
-    notifications
-      .getByLabel("Confirm webhook delivery")
-      .getByRole("button", { name: "Deliver queued" }),
+    webhooks
+      .getByLabel("Confirm failed webhook retry")
+      .getByRole("button", { name: "Retry failed" }),
   );
   await expect
     .poll(() =>
@@ -686,25 +689,25 @@ test("scopes duplicate sidebar subpage labels to their parent view", async ({
   const nav = page.getByRole("navigation", {
     name: "Primary console navigation",
   });
-  const fleetAlertPolicies = nav
+  const fleetAlerts = nav
     .getByLabel("Fleet sections")
-    .getByRole("button", { name: "Alert policies", exact: true });
-  const backupPolicies = nav
-    .getByLabel("Backups sections")
-    .getByRole("button", { name: "Policies", exact: true });
+    .getByRole("button", { name: "Alerts", exact: true });
+  const observabilityAlerts = nav
+    .getByLabel("Observability sections")
+    .getByRole("button", { name: "Alerts", exact: true });
 
-  await openConsoleSubpage(page, "Fleet", "Alert policies");
-  await expect(fleetAlertPolicies).toHaveAttribute("aria-current", "page");
-  await expect(backupPolicies).not.toHaveAttribute("aria-current", "page");
-  await expect(backupPolicies).not.toHaveClass(/active/);
+  await openConsoleSubpage(page, "Observability", "Alerts");
+  await expect(observabilityAlerts).toHaveAttribute("aria-current", "page");
+  await expect(fleetAlerts).not.toHaveAttribute("aria-current", "page");
+  await expect(fleetAlerts).not.toHaveClass(/active/);
 
-  await backupPolicies.click();
+  await fleetAlerts.click();
   await expect(
-    page.getByRole("heading", { name: "Backup policies" }),
+    page.getByRole("heading", { level: 1, name: "Fleet alerts" }),
   ).toBeVisible();
-  await expect(backupPolicies).toHaveAttribute("aria-current", "page");
-  await expect(fleetAlertPolicies).not.toHaveAttribute("aria-current", "page");
-  await expect(fleetAlertPolicies).not.toHaveClass(/active/);
+  await expect(fleetAlerts).toHaveAttribute("aria-current", "page");
+  await expect(observabilityAlerts).not.toHaveAttribute("aria-current", "page");
+  await expect(observabilityAlerts).not.toHaveClass(/active/);
 });
 
 test("supports interactive fleet data grid controls", async ({
@@ -793,11 +796,16 @@ test("exposes traffic columns and the VPS Traffic & Rules drilldown", async ({
   const edgeRow = grid
     .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
     .first();
-  await edgeRow.getByLabel("Expand VPS instance records row").click();
-  const edgeDetail = grid
-    .locator(".gridExpandedRow", { hasText: "edge-sfo-01" })
+  await edgeRow.getByRole("button", { name: "Open" }).click();
+  await expect(
+    page
+      .locator(".consoleHeader")
+      .getByText("vpsman / Fleet / Instance detail"),
+  ).toBeVisible();
+  await page.getByRole("tab", { name: "Network" }).click();
+  const edgeDetail = page
+    .locator(".vpsDetailBlock", { hasText: "Traffic & Rules" })
     .first();
-  await edgeDetail.getByRole("tab", { name: "Traffic & Rules" }).click();
   await expect(
     edgeDetail.getByRole("heading", { name: "Traffic & Rules" }),
   ).toBeVisible();
@@ -807,10 +815,15 @@ test("exposes traffic columns and the VPS Traffic & Rules drilldown", async ({
   await expect(edgeDetail).toContainText("Selected traffic");
   await expect(edgeDetail).toContainText("Latest RX");
   await expect(edgeDetail).toContainText("Cycle Total");
-  await expect(edgeDetail).toContainText("Matched policies");
-  await expect(edgeDetail).toContainText("Recent policy alerts");
-  await expect(edgeDetail).toContainText("edge-resource-policy");
-  await expect(edgeDetail).toContainText("80% total quota");
+  const policyDetail = page
+    .locator(".vpsDetailBlock", { hasText: "Matched policies" })
+    .first();
+  await expect(
+    policyDetail.getByRole("heading", { name: "Matched policies" }),
+  ).toBeVisible();
+  await expect(policyDetail).toContainText("Recent policy alerts");
+  await expect(policyDetail).toContainText("edge-resource-policy");
+  await expect(policyDetail).toContainText("80% total quota");
 
   await edgeDetail.getByRole("button", { name: "Open Alert Policy" }).click();
   await expect(
@@ -921,11 +934,10 @@ test("opens manual update check dispatch from fleet selection", async ({
     .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
     .first();
   await checkControl(coreRow.getByLabel(/Select VPS instance records row/));
-  await grid
-    .locator(".gridToolbarActions")
-    .getByRole("button", { name: "Actions", exact: true })
+  await page
+    .locator(".fleetSelectionPanel")
+    .getByRole("button", { name: "Check update" })
     .click();
-  await page.getByRole("menuitem", { name: "Check update" }).click();
 
   await expect(
     page
@@ -958,12 +970,10 @@ test("opens dispatch from fleet selection with selected VPS ids", async ({
     .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
     .first();
   await checkControl(coreRow.getByLabel(/Select VPS instance records row/));
-  await grid
-    .locator(".gridToolbarActions")
-    .getByRole("button", { name: "Actions", exact: true })
+  await page
+    .locator(".fleetSelectionPanel")
+    .getByRole("button", { name: "Open dispatch" })
     .click();
-  await expect(page.locator(".consoleMenuSeparator")).toHaveCount(5);
-  await page.getByRole("menuitem", { name: "Open dispatch" }).click();
 
   await expect(
     page
@@ -980,7 +990,7 @@ test("opens dispatch from fleet selection with selected VPS ids", async ({
 
 test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
   await page.goto("/");
-  await openConsoleSubpage(page, "Fleet", "Alert policies");
+  await openConsoleSubpage(page, "Observability", "Alerts");
 
   const grid = page.getByLabel("Policy groups data grid");
   await expect(grid.getByText("1 of 1 policies")).toBeVisible();
@@ -1037,11 +1047,11 @@ test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
   await expect(editor.getByLabel("Rule condition expression")).toHaveValue(
     "traffic.cycle.total >= traffic.quota.total * 0.8",
   );
-  await editor.getByRole("button", { name: "Dry-run" }).click();
-  await expect(editor.getByText("Dry-run preview")).toBeVisible();
+  await editor.getByRole("button", { name: "Preview matches" }).click();
+  await expect(editor.getByText("Match preview")).toBeVisible();
   await expect(editor).toContainText("80% total quota");
   await expect(editor).toContainText("edge-sfo-01");
-  await editor.getByRole("button", { name: "Review update" }).click();
+  await editor.getByRole("button", { name: "Update policy" }).click();
   await expect(page.getByText("Confirm alert policy save")).toBeVisible();
   await page.getByRole("button", { name: "Update alert policy" }).click();
   await expect(page.getByText("saved edge-resource-policy")).toBeVisible();
@@ -1070,9 +1080,10 @@ test("shows issued policy alerts in Fleet Alerts and webhook rule fixtures", asy
     "traffic",
   );
 
-  await openConsoleSubpage(page, "Fleet", "Notifications");
-  await page.getByRole("tab", { name: "Webhooks" }).click();
-  await expect(page.getByText("Webhook rules", { exact: true })).toBeVisible();
+  await openConsoleSubpage(page, "Observability", "Event webhooks");
+  await expect(
+    page.getByRole("heading", { name: "Event webhook rules" }),
+  ).toBeVisible();
   await expect(page.getByLabel("Webhook rules data grid")).toContainText(
     "edge-interval-webhook",
   );
@@ -2239,7 +2250,7 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
     "QR/secret",
   );
   await expect(
-    page.getByRole("button", { name: "Generate setup" }),
+    page.getByRole("button", { name: "Set up TOTP" }),
   ).toBeDisabled();
   await page.getByLabel(/access privilege secret/i).fill("local-super-password");
   await page
@@ -3055,7 +3066,11 @@ test("shows grouped execution summaries for job output details", async ({
 
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "History");
-  await activate(page.getByRole("button", { name: "2", exact: true }).first());
+  const scheduledJobRow = page
+    .getByLabel("Job records data grid")
+    .locator(".gridBody [role=row]", { hasText: "network speed test" })
+    .first();
+  await activate(scheduledJobRow.getByRole("button", { name: "Open" }));
 
   await expect(
     page.getByRole("heading", { name: "Execution summary" }),
@@ -3270,26 +3285,32 @@ test("dispatches terminal session control operations with local privilege unlock
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "terminal control dispatch is covered in the desktop job composer",
+    "terminal launch dispatch is covered in the desktop remote operations layout",
   );
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Jobs", "Dispatch");
+  await openConsoleSubpage(page, "Remote Operations", "Terminal");
+  await unlockPrivilegeFor(page, "Remote Operations", "Terminal");
 
-  const composer = page.locator(".commandComposer");
-  await unlockPrivilegeFor(page, "Jobs", "Dispatch");
-  await activate(composer.getByRole("button", { name: "Terminal" }));
-  await composer.getByLabel("Terminal argv").fill("/bin/sh -l");
-  await composer.getByLabel("Terminal cwd").fill("/root");
-  await composer.getByLabel("Terminal columns").fill("100");
-  await composer.getByLabel("Terminal rows").fill("30");
-  await composer
-    .getByLabel("Bulk target selector expression")
-    .fill("id:agent-sfo-01");
-  await dispatchWithPrompt(composer);
+  const terminalComposer = page.getByLabel("New terminal composer");
+  await chooseVpsBySearch(
+    terminalComposer,
+    "New terminal target",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+  await terminalComposer.getByLabel("New terminal working directory").fill("/root");
+  await terminalComposer
+    .getByLabel("New terminal user policy")
+    .selectOption("root");
+  await terminalComposer.getByLabel("New terminal columns").fill("100");
+  await terminalComposer.getByLabel("New terminal rows").fill("30");
+  await activate(
+    terminalComposer.getByRole("button", { name: "Open terminal" }),
+  );
 
   await expect(
-    page.getByLabel("Execution result").getByText(/completed on 1 VPS/),
+    terminalComposer.getByText(/terminal open job submitted/),
   ).toBeVisible();
   const request = await page.evaluate(() => {
     const requests = (
@@ -3302,6 +3323,7 @@ test("dispatches terminal session control operations with local privilege unlock
   expect(JSON.stringify(request)).not.toContain("local-super-password");
   expect(request).toMatchObject({
     selector_expression: "id:agent-sfo-01",
+    target_client_ids: ["agent-sfo-01"],
     command: "terminal_open",
     operation: {
       argv: ["/bin/sh", "-l"],
@@ -3309,6 +3331,8 @@ test("dispatches terminal session control operations with local privilege unlock
       cwd: "/root",
       rows: 30,
       type: "terminal_open",
+      user: "root",
+      user_policy: "fail",
     },
     privileged: true,
   });
@@ -3503,10 +3527,10 @@ test("dispatches executable restores with agent-local archive metadata only", as
   const destinationRoot = `/var/lib/vpsman/restores/${backupId}/agent-fra-02`;
 
   await page.goto("/");
-  await openConsoleSubpage(page, "Backups", "Restore");
+  await openConsoleSubpage(page, "Backups", "Overview");
 
   await expect(
-    page.getByRole("heading", { name: "Restore operations" }),
+    page.getByRole("heading", { level: 1, name: "Backup overview" }),
   ).toBeVisible();
   const posture = page.getByLabel("Backup posture overview");
   await expect(posture).toContainText("Recent backups");
@@ -3521,12 +3545,14 @@ test("dispatches executable restores with agent-local archive metadata only", as
   await expect(posture).toContainText("Not tested");
   await expect(posture).toContainText("Retention/security");
   await expect(posture).toContainText("API gap");
+
+  await openConsoleSubpage(page, "Backups", "Restore");
   await unlockPrivilegeFor(page, "Backups", "Restore");
   await expect(
     page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
   ).toBeVisible();
-  await activate(page.getByRole("button", { name: "Open restore workflow" }));
-  const restoreWorkflow = page.getByLabel("Open restore workflow");
+  await activate(page.getByRole("button", { name: "Choose restore artifact" }));
+  const restoreWorkflow = page.getByLabel("Choose restore artifact");
 
   await restoreWorkflow
     .getByLabel("Restore source backup request")
@@ -3538,17 +3564,19 @@ test("dispatches executable restores with agent-local archive metadata only", as
     /core-fra-02.*agent-fra-02/,
   );
   await expect(restoreWorkflow.getByText(destinationRoot)).toBeVisible();
-  await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
+  await activate(
+    restoreWorkflow.getByRole("button", { name: "Review draft restore" }),
+  );
   await expect(
-    restoreWorkflow.getByLabel("Confirm restore plan"),
+    restoreWorkflow.getByLabel("Confirm draft restore"),
   ).toBeVisible();
   await activate(
     restoreWorkflow
-      .getByLabel("Confirm restore plan")
-      .getByRole("button", { name: "Create restore plan" }),
+      .getByLabel("Confirm draft restore")
+      .getByRole("button", { name: "Save draft restore" }),
   );
   await expect(
-    page.getByText(/Restore cccccccc planned_metadata_only/),
+    page.getByText(/Draft restore cccccccc planned_metadata_only/),
   ).toBeVisible();
   const restorePlanRequest = await page.evaluate(() => {
     const requests = (
@@ -3571,12 +3599,12 @@ test("dispatches executable restores with agent-local archive metadata only", as
   await expect(stagedArchive).toHaveAttribute("title", archivePath);
   await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("120");
   await activate(
-    restoreWorkflow.getByRole("button", { name: "Review restore" }),
+    restoreWorkflow.getByRole("button", { name: "Review live restore" }),
   );
-  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
+  await expect(restoreWorkflow.getByLabel("Confirm restore")).toBeVisible();
   await activate(
     restoreWorkflow
-      .getByLabel("Confirm restore run")
+      .getByLabel("Confirm restore")
       .getByRole("button", { name: "Run restore" }),
   );
 

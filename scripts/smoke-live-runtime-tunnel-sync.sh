@@ -328,7 +328,7 @@ plan_json="$(VPSMAN_API_TOKEN="$access_token" \
     --right-underlay 198.51.100.11 \
     --left-tunnel-ipv4-cidr 10.255.70.0/31 \
     --right-tunnel-ipv4-cidr 10.255.70.1/31 \
-    --bandwidth 100m \
+    --bandwidth-mbps 100 \
     --latency-ms 3 \
     --save \
     --enabled \

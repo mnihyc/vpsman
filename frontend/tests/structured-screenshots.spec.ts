@@ -174,7 +174,7 @@ const allViews: ScreenshotEntry[] = [
       "Upload file",
       "Ready downloads",
       "Transfer sessions",
-      "Advanced: reusable upload sources",
+      "Advanced: source artifacts",
     ],
   },
   {

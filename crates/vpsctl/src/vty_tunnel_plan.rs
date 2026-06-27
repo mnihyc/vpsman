@@ -706,7 +706,7 @@ fn parse_u8(value: &str, flag: &str) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::parse_vty_tunnel_plan;
-    use vpsman_common::{BandwidthMbps, RuntimeTunnelManager, TunnelAddressFamily, TunnelKind};
+    use vpsman_common::{RuntimeTunnelManager, TunnelAddressFamily, TunnelKind};
 
     #[test]
     fn parses_vty_tunnel_plan_for_local_render() {
@@ -774,7 +774,7 @@ mod tests {
             "--left-tunnel-ipv4-cidr=10.255.10.0/31",
             "--right-tunnel-ipv4-cidr=10.255.10.1/31",
             "--reserved=10.255.10.2",
-            "--bandwidth-mbps=100m",
+            "--bandwidth-mbps=100",
             "--latency-ms=20",
             "--fou-port=6655",
             "--fou-peer-port=7755",
@@ -811,7 +811,7 @@ mod tests {
             "--left-tunnel-ipv6-cidr=fd7a:115c:a1e0::20/127",
             "--right-tunnel-ipv6-cidr=fd7a:115c:a1e0::21/127",
             "--latency-primary-family=ipv6",
-            "--bandwidth-mbps=1000m",
+            "--bandwidth-mbps=1000",
             "--latency-ms=87.5",
         ])
         .unwrap();
@@ -844,7 +844,7 @@ mod tests {
             "--pool-cidr=10.255.10.0/29",
             "--left-tunnel-ipv4-cidr=10.255.10.0/31",
             "--right-tunnel-ipv4-cidr=10.255.10.1/31",
-            "--bandwidth-mbps=100m",
+            "--bandwidth-mbps=100",
             "--latency-ms=20",
             "--runtime-manager=adapter",
             "--runtime-startup-argv=/usr/local/libexec/vpsman-openvpn-adapter,start,{interface}",
@@ -891,7 +891,7 @@ mod tests {
             "--left-underlay=198.51.100.10",
             "--right-underlay=203.0.113.20",
             "--pool-cidr=10.255.10.0/29",
-            "--bandwidth-mbps=100m",
+            "--bandwidth-mbps=100",
             "--latency-ms=20",
         ])
         .is_err());
@@ -917,7 +917,7 @@ mod tests {
             "--left-underlay=198.51.100.10",
             "--right-underlay=203.0.113.20",
             "--left-tunnel-ipv6-cidr=fd7a:115c:a1e0::20/127",
-            "--bandwidth-mbps=100m",
+            "--bandwidth-mbps=100",
             "--latency-ms=20",
         ])
         .is_err());
@@ -930,7 +930,7 @@ mod tests {
             "--left-underlay=198.51.100.10",
             "--right-underlay=203.0.113.20",
             "--pool-cidr=10.255.10.0/29",
-            "--bandwidth-mbps=100m",
+            "--bandwidth-mbps=100",
             "--latency-ms=20",
         ])
         .is_err());

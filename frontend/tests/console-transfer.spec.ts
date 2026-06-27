@@ -103,7 +103,7 @@ test("orchestrates browser resumable upload from retained reusable source", asyn
   await unlockDispatchPrivilege(page);
   await chooseFileOperation(composer, "Resumable upload");
   await composer.getByLabel("Resumable upload producer").selectOption("source-artifact");
-  await composer.getByLabel("Resumable upload reusable source").selectOption("62626262-2222-4333-8444-555555555555");
+  await composer.getByLabel("Resumable upload source artifact").selectOption("62626262-2222-4333-8444-555555555555");
   await composer.getByLabel("Resumable upload path").fill("/tmp/artifact-upload.bin");
   await composer.getByLabel("Resumable upload mode").fill("0644");
   await composer.getByLabel("Resumable upload chunk bytes").fill("8");

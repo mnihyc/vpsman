@@ -60,7 +60,7 @@ target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --reserved-addresses 127.0.0.0,127.0.0.1 \
   --left-tunnel-ipv4-cidr 127.0.0.2/31 \
   --right-tunnel-ipv4-cidr 127.0.0.3/31 \
-  --bandwidth 100m \
+  --bandwidth-mbps 100 \
   --latency-ms 5 >"$network_plan_file"
 VPSMAN_API_TOKEN="$access_token" \
 target/debug/vpsctl --api-url "$api_url" tunnel-plan \
@@ -75,7 +75,7 @@ target/debug/vpsctl --api-url "$api_url" tunnel-plan \
   --reserved-addresses 127.0.0.0,127.0.0.1 \
   --left-tunnel-ipv4-cidr 127.0.0.2/31 \
   --right-tunnel-ipv4-cidr 127.0.0.3/31 \
-  --bandwidth 100m \
+  --bandwidth-mbps 100 \
   --latency-ms 5 \
   --save \
   --enabled \

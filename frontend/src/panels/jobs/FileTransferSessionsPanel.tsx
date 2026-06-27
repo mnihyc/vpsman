@@ -523,7 +523,7 @@ export function FileTransferSessionsPanel({
 
   async function uploadSourceArtifact() {
     if (!sourceSnapshot) {
-      setSourceError("Review reusable source before upload");
+      setSourceError("Review source artifact before upload");
       return;
     }
     setSourcePending(true);
@@ -915,16 +915,16 @@ export function FileTransferSessionsPanel({
       <details className="sourceArtifactAdvanced">
         <summary>
           <span>
-            <strong>Advanced: reusable upload sources</strong>
-            <small>{sourceError ?? `${sources.length} reusable sources`}</small>
+            <strong>Advanced: source artifacts</strong>
+            <small>{sourceError ?? `${sources.length} source artifacts`}</small>
           </span>
           <Database size={16} />
         </summary>
         <div className="sourceArtifactPanel">
           <div className="sectionSubheader">
             <div>
-              <h3>Reusable upload sources</h3>
-              <span>Optional object-store sources for repeated uploads.</span>
+              <h3>Source artifacts</h3>
+              <span>Optional reusable object-store sources for repeated uploads.</span>
             </div>
           </div>
           <div className="sourceArtifactControls">
@@ -942,7 +942,7 @@ export function FileTransferSessionsPanel({
               />
             </label>
             <label>
-              <span>Reusable source name</span>
+              <span>Source artifact name</span>
               <input
                 onChange={(event) => setSourceName(event.target.value)}
                 placeholder={sourceFile?.name ?? "payload.bin"}
@@ -957,12 +957,12 @@ export function FileTransferSessionsPanel({
               type="button"
             >
               <Upload size={14} />
-              <span>{sourcePending ? "Reviewing" : "Review reusable source"}</span>
+              <span>{sourcePending ? "Reviewing" : "Review source artifact"}</span>
             </button>
           </div>
           <ConfirmationPrompt
-            confirmLabel="Upload reusable source"
-            detail="Persists the reviewed reusable upload source with computed SHA-256 and size."
+            confirmLabel="Upload source artifact"
+            detail="Persists the reviewed source artifact with computed SHA-256 and size."
             items={[
               { label: "Name", value: sourceSnapshot?.request.name ?? sourceSnapshot?.fileName ?? "-" },
               {
@@ -976,7 +976,7 @@ export function FileTransferSessionsPanel({
             onConfirm={() => void uploadSourceArtifact()}
             open={sourceSnapshot !== null}
             pending={sourcePending}
-            title="Confirm reusable source upload"
+            title="Confirm source artifact upload"
           />
           <ConsoleDataGrid
             columns={sourceColumns}
@@ -987,7 +987,7 @@ export function FileTransferSessionsPanel({
             empty={
               <div className="sourceArtifactEmpty">
                 <Database size={18} />
-                <span>No reusable upload sources</span>
+                <span>No source artifacts</span>
               </div>
             }
             renderExpandedRow={(source) => (
@@ -1015,10 +1015,10 @@ export function FileTransferSessionsPanel({
               </div>
             )}
             rows={sources}
-            searchPlaceholder="Search reusable sources"
+            searchPlaceholder="Search source artifacts"
             selectable={false}
             storageKey="vpsman.jobs.fileTransferSources"
-            title="Reusable upload sources"
+            title="Source artifacts"
           />
         </div>
       </details>

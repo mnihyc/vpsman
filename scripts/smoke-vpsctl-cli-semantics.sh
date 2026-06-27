@@ -51,7 +51,7 @@ for kind in gre ipip sit fou; do
     --address-pool-cidr 10.255.0.0/30 \
     --left-tunnel-ipv4-cidr 10.255.0.0/31 \
     --right-tunnel-ipv4-cidr 10.255.0.1/31 \
-    --bandwidth 100m \
+    --bandwidth-mbps 100 \
     --latency-ms 20)"
   require_contains "$plan" "\"kind\": \"$kind\"" "tunnel-plan $kind"
   require_contains "$plan" "\"mutates_host\": false" "tunnel-plan $kind"

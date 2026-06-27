@@ -870,7 +870,7 @@ mod tests {
         parse_vty_tunnel_promote_external_observe, parse_vty_tunnel_status,
     };
     use uuid::Uuid;
-    use vpsman_common::{BandwidthMbps, TunnelAddressFamily, TunnelEndpointSide};
+    use vpsman_common::{TunnelAddressFamily, TunnelEndpointSide};
 
     #[test]
     fn parses_vty_tunnel_promote_external_observe() {

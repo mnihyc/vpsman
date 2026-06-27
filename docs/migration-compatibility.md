@@ -33,3 +33,4 @@ Rules enforced by `scripts/audit-migrations.sh`:
 | `0006_agent_updates.sql` | Initial agent update release schema. Artifact verification remains intentionally scoped to agent update releases only. |
 | `0007_source_templates_file_transfer.sql` | Initial source template, client assignment, file-transfer session, and file-transfer source-artifact schema, including built-in templates. |
 | `0008_system_metrics.sql` | Initial durable System Dashboard metric-rollup schema. Adds 60-second control-plane metric buckets. |
+| `0009_job_approvals.sql` | Initial persisted job-approval queue schema. Approval rows preserve fixed target snapshots, payload hash, request fingerprint, requester/decision metadata, and risk/privilege state for audited operator decisions. |

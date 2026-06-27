@@ -21,10 +21,12 @@ import type {
   BackupArtifactRecord,
   BackupRequestRecord,
   FleetAlertRecord,
+  FleetAlertPolicyRecord,
   FleetSummary,
   JobHistoryRecord,
   NetworkObservationRecord,
   NetworkObservationTrendRecord,
+  PolicyAlertRecord,
   RuntimeConfigApplyStateRecord,
   SourceStatusRecord,
   SourceTemplateAssignmentRecord,
@@ -59,11 +61,13 @@ type VpsDetailPanelProps = {
   backups: BackupRequestRecord[];
   fileTransfers: FileTransferSessionRecord[];
   fleetAlerts: FleetAlertRecord[];
+  fleetAlertPolicies: FleetAlertPolicyRecord[];
   jobs: JobHistoryRecord[];
   loading: boolean;
   networkObservations: NetworkObservationRecord[];
   networkTrends: NetworkObservationTrendRecord[];
   onOpenAudit: () => void;
+  onOpenAlertPolicies: (policyId?: string) => void;
   onOpenBackup: (agent: AgentView) => void;
   onOpenConfig: (agent: AgentView) => void;
   onOpenFiles: (agent: AgentView) => void;
@@ -75,6 +79,7 @@ type VpsDetailPanelProps = {
   onOpenNetworkEvidence: (agent: AgentView) => void;
   onOpenProcesses: (agent: AgentView) => void;
   onOpenTerminal: (agent: AgentView) => void;
+  policyAlerts: PolicyAlertRecord[];
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   sourceStatus: SourceStatusRecord[];
   sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
@@ -105,11 +110,13 @@ export function VpsDetailPanel({
   backups,
   fileTransfers,
   fleetAlerts,
+  fleetAlertPolicies,
   jobs,
   loading,
   networkObservations,
   networkTrends,
   onOpenAudit,
+  onOpenAlertPolicies,
   onOpenBackup,
   onOpenConfig,
   onOpenFiles,
@@ -121,6 +128,7 @@ export function VpsDetailPanel({
   onOpenNetworkEvidence,
   onOpenProcesses,
   onOpenTerminal,
+  policyAlerts,
   runtimeConfigApplyStates,
   sourceStatus,
   sourceTemplateAssignments,
@@ -140,9 +148,11 @@ export function VpsDetailPanel({
             backups,
             fileTransfers,
             fleetAlerts,
+            fleetAlertPolicies,
             jobs,
             networkObservations,
             networkTrends,
+            policyAlerts,
             runtimeConfigApplyStates,
             sourceStatus,
             sourceTemplateAssignments,
@@ -159,9 +169,11 @@ export function VpsDetailPanel({
       backups,
       fileTransfers,
       fleetAlerts,
+      fleetAlertPolicies,
       jobs,
       networkObservations,
       networkTrends,
+      policyAlerts,
       runtimeConfigApplyStates,
       sourceStatus,
       sourceTemplateAssignments,
@@ -422,6 +434,9 @@ export function VpsDetailPanel({
             <NetworkTab
               loading={loading}
               related={related}
+              onOpenAlertPolicies={onOpenAlertPolicies}
+              onOpenConfig={() => onOpenConfig(agent)}
+              onOpenFleetAlerts={onOpenFleetAlerts}
               onOpenNetwork={() => onOpenNetwork(agent)}
               onOpenNetworkEvidence={() => onOpenNetworkEvidence(agent)}
             />
@@ -729,14 +744,31 @@ function BackupsTab({
 function NetworkTab({
   loading,
   related,
+  onOpenAlertPolicies,
+  onOpenConfig,
+  onOpenFleetAlerts,
   onOpenNetwork,
   onOpenNetworkEvidence,
 }: {
   loading: boolean;
   related: VpsDetailContext;
+  onOpenAlertPolicies: (policyId?: string) => void;
+  onOpenConfig: () => void;
+  onOpenFleetAlerts: () => void;
   onOpenNetwork: () => void;
   onOpenNetworkEvidence: () => void;
 }) {
+  const latestRate = newestNetworkRate(related.networkRates);
+  const trafficRules = related.vpsRules.filter((rule) =>
+    rule.key.startsWith("traffic."),
+  );
+  const trafficPolicyAlerts = related.policyAlerts.filter((alert) =>
+    `${alert.category} ${alert.title} ${alert.detail} ${JSON.stringify(alert.payload)}`
+      .toLowerCase()
+      .includes("traffic"),
+  );
+  const primaryPolicyId = trafficPolicyAlerts[0]?.policy_group_id;
+
   return (
     <div className="vpsDetailGrid">
       <DetailBlock title="Network workflow" icon={<Network size={18} />}>
@@ -761,6 +793,61 @@ function NetworkTab({
                 {observation.interface_name ?? "interface n/a"} ·{" "}
                 <DetailTime value={observation.observed_at} />
               </span>
+            </span>
+          ))
+        )}
+      </DetailBlock>
+      <DetailBlock title="Traffic & Rules" icon={<Gauge size={18} />}>
+        <button className="primaryAction compactAction" onClick={onOpenConfig} type="button">
+          <span>Edit VPS Rules</span>
+        </button>
+        <button
+          className="secondaryAction compactAction"
+          onClick={() => onOpenAlertPolicies(primaryPolicyId)}
+          type="button"
+        >
+          <span>Open Alert Policy</span>
+        </button>
+        <button className="secondaryAction compactAction" onClick={onOpenFleetAlerts} type="button">
+          <span>Open Fleet Alerts</span>
+        </button>
+        <VpsFact label="Selected traffic" value={trafficSelectorLabel(trafficRules)} />
+        <VpsFact
+          label="Latest RX"
+          value={latestRate ? formatBytesPerSecond(latestRate.rx_bps_avg) : "No rate"}
+        />
+        <VpsFact
+          label="Latest TX"
+          value={latestRate ? formatBytesPerSecond(latestRate.tx_bps_avg) : "No rate"}
+        />
+        <VpsFact
+          label="Cycle Total"
+          value={
+            latestRate
+              ? formatBytes(latestRate.rx_bytes_delta + latestRate.tx_bytes_delta)
+              : "No sample"
+          }
+        />
+        {trafficRules.length === 0 ? (
+          <DetailState loading={loading} title="No traffic rules" detail="No traffic-scoped VPS rules are loaded for this VPS." />
+        ) : (
+          trafficRules.slice(0, 6).map((rule) => (
+            <span className={`vpsDetailRecord static ${rule.validation_errors.length ? "warning" : ""}`} key={rule.key}>
+              <strong>{rule.key}</strong>
+              <span>{rule.parsed_display || rule.value_raw || "unset"}</span>
+            </span>
+          ))
+        )}
+      </DetailBlock>
+      <DetailBlock title="Matched policies" icon={<AlertTriangle size={18} />}>
+        <strong>Recent policy alerts</strong>
+        {trafficPolicyAlerts.length === 0 ? (
+          <DetailState loading={loading} title="No policy alerts" detail="No traffic policy alert is loaded for this VPS." />
+        ) : (
+          trafficPolicyAlerts.slice(0, 4).map((alert) => (
+            <span className="vpsDetailRecord static warning" key={alert.id}>
+              <strong>{trafficPolicyLabel(alert, related.alertPolicies)}</strong>
+              <span>{trafficPolicyRuleLabel(alert, related.alertPolicies)} · {alert.detail}</span>
             </span>
           ))
         )}
@@ -919,9 +1006,11 @@ function buildVpsDetailContext({
   backups,
   fileTransfers,
   fleetAlerts,
+  fleetAlertPolicies,
   jobs,
   networkObservations,
   networkTrends,
+  policyAlerts,
   runtimeConfigApplyStates,
   sourceStatus,
   sourceTemplateAssignments,
@@ -936,9 +1025,11 @@ function buildVpsDetailContext({
   backups: BackupRequestRecord[];
   fileTransfers: FileTransferSessionRecord[];
   fleetAlerts: FleetAlertRecord[];
+  fleetAlertPolicies: FleetAlertPolicyRecord[];
   jobs: JobHistoryRecord[];
   networkObservations: NetworkObservationRecord[];
   networkTrends: NetworkObservationTrendRecord[];
+  policyAlerts: PolicyAlertRecord[];
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   sourceStatus: SourceStatusRecord[];
   sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
@@ -956,6 +1047,9 @@ function buildVpsDetailContext({
     .sort(newestFirst((transfer) => transfer.observed_at));
   const relatedAlerts = fleetAlerts
     .filter((alert) => alert.client_id === clientId || alert.target_id === clientId)
+    .sort(newestFirst((alert) => alert.observed_at));
+  const relatedPolicyAlerts = policyAlerts
+    .filter((alert) => alert.client_id === clientId)
     .sort(newestFirst((alert) => alert.observed_at));
   const relatedAudits = audits
     .filter((audit) => audit.target.includes(clientId) || JSON.stringify(audit.metadata).includes(clientId))
@@ -1057,9 +1151,11 @@ function buildVpsDetailContext({
     backupArtifacts: relatedArtifacts,
     backups: relatedBackups,
     fileTransfers: relatedTransfers,
+    alertPolicies: fleetAlertPolicies,
     networkObservations: relatedNetworkObservations,
     networkRates,
     networkTrends: relatedNetworkTrends,
+    policyAlerts: relatedPolicyAlerts,
     relatedJobs,
     rollup,
     runtimeApplyState,
@@ -1387,6 +1483,69 @@ function networkObservationLabel(kind: string): string {
     speed_test: "Speed test",
   };
   return labels[kind] ?? readableDetailToken(kind);
+}
+
+function newestNetworkRate(rates: TelemetryNetworkRateRecord[]) {
+  return (
+    rates
+      .slice()
+      .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))[0] ??
+    null
+  );
+}
+
+function formatBytesPerSecond(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B/s";
+  }
+  if (value >= 1024 * 1024) {
+    return `${(value / 1024 / 1024).toFixed(1)} MiB/s`;
+  }
+  if (value >= 1024) {
+    return `${(value / 1024).toFixed(1)} KiB/s`;
+  }
+  return `${Math.round(value)} B/s`;
+}
+
+function trafficSelectorLabel(rules: VpsRuleValueRecord[]) {
+  const selectorRule = rules.find((rule) => rule.key === "traffic.selectors");
+  return selectorRule?.value_raw || selectorRule?.parsed_display || "No selector";
+}
+
+function trafficPolicyLabel(
+  alert: PolicyAlertRecord,
+  policies: FleetAlertPolicyRecord[],
+) {
+  return (
+    policies.find((policy) => policy.id === alert.policy_group_id)?.name ??
+    shortId(alert.policy_group_id)
+  );
+}
+
+function trafficPolicyRuleLabel(
+  alert: PolicyAlertRecord,
+  policies: FleetAlertPolicyRecord[],
+) {
+  const policy = policies.find((candidate) => candidate.id === alert.policy_group_id);
+  const rule = policy?.rules.find((candidate) => candidate.id === alert.policy_rule_id);
+  const payload = recordValue(alert.payload);
+  const payloadRule = recordValue(payload?.rule);
+  return (
+    rule?.name ??
+    stringValue(payloadRule?.name) ??
+    stringValue(payload?.rule_name) ??
+    alert.title
+  );
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 function readableDetailToken(value: string | null | undefined): string {
