@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -6,10 +6,8 @@ import {
   Clock3,
   DatabaseBackup,
   FolderOpen,
-  History,
   Network,
   Play,
-  Server,
   ShieldAlert,
   TerminalSquare,
 } from "lucide-react";
@@ -34,9 +32,7 @@ import type {
   TelemetryRollupRecord,
   TelemetryTunnelRecord,
 } from "../types";
-import { displayNameOrUnnamed, formatCompactTime, shortId } from "../utils";
-import { FleetMonitorPanel } from "./FleetMonitorPanel";
-import { HomeTelemetryPanel } from "./HomeTelemetryPanel";
+import { displayNameOrUnnamed, formatCompactTime, formatFullTime, shortId } from "../utils";
 
 type HomePanelProps = {
   agents: AgentView[];
@@ -85,6 +81,7 @@ type HomeActionItem = {
   id: string;
   label: string;
   meta: string;
+  metaTitle?: string;
   onOpen: () => void;
   tone: "critical" | "warning" | "info" | "ok";
 };
@@ -95,33 +92,22 @@ type HomeActivityItem = {
   meta: string;
   onOpen: () => void;
   time: string;
+  timeDateTime?: string;
+  timeTitle?: string;
   type: string;
 };
 
 export function HomePanel({
   agents,
-  allAgents,
   auditLogs,
   backupArtifacts,
   backups,
-  dashboardError,
-  dashboardLoading,
-  dashboardOverview,
-  dashboardPreferences,
-  dashboardWindow,
   fileTransfers,
   fleetAlerts,
   jobs,
   schedules,
   summary,
   systemDashboard,
-  telemetryNetworkRates,
-  telemetryRollups,
-  telemetryTunnels,
-  onDashboardNavigate,
-  onDashboardPreferencesChange,
-  onDashboardRefresh,
-  onDashboardWindowChange,
   onOpenAudit,
   onOpenBackup,
   onOpenBackups,
@@ -132,7 +118,6 @@ export function HomePanel({
   onOpenJobs,
   onOpenNetwork,
   onOpenNetworkEvidence,
-  onOpenProcesses,
   onOpenSchedule,
   onOpenSystemCapacity,
   onOpenTerminal,
@@ -221,6 +206,52 @@ export function HomePanel({
       schedules,
     ],
   );
+  const runningWorkItems = useMemo(
+    () =>
+      buildRunningWorkItems({
+        backups,
+        fileTransfers,
+        jobs,
+        onOpenJobs,
+        onOpenBackups,
+        onOpenJobDetails,
+        onOpenTransfers,
+        runningJobCount: runningJobs,
+      }),
+    [
+      backups,
+      fileTransfers,
+      jobs,
+      onOpenBackups,
+      onOpenJobDetails,
+      onOpenJobs,
+      onOpenTransfers,
+      runningJobs,
+    ],
+  );
+  const recentFailureItems = useMemo(
+    () =>
+      buildRecentFailureItems({
+        backups,
+        fileTransfers,
+        fleetAlerts,
+        jobs,
+        onOpenBackups,
+        onOpenFleetAlerts,
+        onOpenJobDetails,
+        onOpenTransfers,
+      }),
+    [
+      backups,
+      fileTransfers,
+      fleetAlerts,
+      jobs,
+      onOpenBackups,
+      onOpenFleetAlerts,
+      onOpenJobDetails,
+      onOpenTransfers,
+    ],
+  );
 
   return (
     <div className="homeWorkspace">
@@ -229,7 +260,7 @@ export function HomePanel({
           <div className="homeCommandIntro">
             <h2 id="home-release-title">Fleet command home</h2>
             <p>
-              Scan VPS health, pick a target, and jump into reviewed operations without leaving the release IA.
+              Scan VPS health, pick a target, and jump into reviewed operations without hunting through subsystem pages.
             </p>
             <div className="homeInlineStatus" aria-label="Home fleet posture">
               <ConsoleStatusBadge tone={visibleOnline === agents.length && criticalAlerts === 0 ? "ok" : "warning"}>
@@ -301,6 +332,12 @@ export function HomePanel({
                 <span>View network</span>
               </button>
             </div>
+            {!quickTarget && (
+              <div className="homeQuietState" aria-label="Home empty scope notice">
+                <ShieldAlert size={18} />
+                <span>No VPS in the current scope. Adjust the fleet scope or wait for agents to report telemetry.</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -343,35 +380,26 @@ export function HomePanel({
           />
         </div>
 
-        <FleetMonitorPanel
-          agents={agents}
-          ariaLabel="Home fleet scan"
-          backups={backups}
-          description="Komari-style VPS cards for health scanning before opening terminal, files, backup, process, or network workflows."
-          embedded
-          failedJobCount={failedJobs}
-          fileTransfers={fileTransfers}
-          fleetAlerts={fleetAlerts}
-          jobs={jobs}
-          maxCards={8}
-          runningJobCount={runningJobs}
-          telemetryNetworkRates={telemetryNetworkRates}
-          telemetryRollups={telemetryRollups}
-          telemetryTunnels={telemetryTunnels}
-          title="Fleet scan"
-          toolbarAction={
-            <button className="secondaryAction compactAction" onClick={onOpenJobs} type="button">
-              <History size={15} />
-              <span>Job history</span>
-            </button>
-          }
-          onOpenBackup={onOpenBackup}
-          onOpenFiles={onOpenFiles}
-          onOpenNetwork={onOpenNetwork}
-          onOpenProcesses={onOpenProcesses}
-          onOpenTerminal={onOpenTerminal}
-          onOpenVpsDetail={onOpenVpsDetail}
-        />
+        <div className="homeWorkGrid">
+          <HomeActionPanel
+            badge={`${runningWorkItems.length} active`}
+            emptyIcon={<Clock3 size={18} />}
+            emptyText="No running jobs, transfers, or backup requests in loaded records."
+            id="home-running-work-title"
+            items={runningWorkItems}
+            subtitle="Long-running jobs and transfer work that may need follow-up."
+            title="Running work"
+          />
+          <HomeActionPanel
+            badge={`${recentFailureItems.length} recent`}
+            emptyIcon={<ShieldAlert size={18} />}
+            emptyText="No recent failures or unacknowledged alerts in loaded records."
+            id="home-recent-failures-title"
+            items={recentFailureItems}
+            subtitle="Failed jobs, transfers, backups, and active alerts routed to their owner pages."
+            title="Recent failures"
+          />
+        </div>
 
         <div className="homeReviewGrid">
           <section className="homeReviewPanel" aria-labelledby="home-attention-title">
@@ -400,7 +428,9 @@ export function HomePanel({
                       <strong>{item.label}</strong>
                       <small>{item.detail}</small>
                     </span>
-                    <span className="homeActionMeta">{item.meta}</span>
+                    <span className="homeActionMeta" title={item.metaTitle}>
+                      {item.meta}
+                    </span>
                     <ArrowRight size={15} />
                   </button>
                 ))}
@@ -430,7 +460,9 @@ export function HomePanel({
                       <strong>{item.label}</strong>
                       <small>{item.meta}</small>
                     </span>
-                    <time>{item.time}</time>
+                    <time dateTime={item.timeDateTime} title={item.timeTitle}>
+                      {item.time}
+                    </time>
                   </button>
                 ))}
               </div>
@@ -439,20 +471,6 @@ export function HomePanel({
         </div>
       </section>
 
-      <section className="homeDashboardLayer" aria-label="Home telemetry widgets">
-        <HomeTelemetryPanel
-          agents={allAgents}
-          error={dashboardError}
-          loading={dashboardLoading}
-          onNavigate={onDashboardNavigate}
-          onPreferencesChange={onDashboardPreferencesChange}
-          onRefresh={onDashboardRefresh}
-          onWindowChange={onDashboardWindowChange}
-          overview={dashboardOverview}
-          preferences={dashboardPreferences}
-          window={dashboardWindow}
-        />
-      </section>
     </div>
   );
 }
@@ -474,6 +492,60 @@ function HomePostureMetric({
       <strong>{value}</strong>
       <small>{detail}</small>
     </div>
+  );
+}
+
+function HomeActionPanel({
+  badge,
+  emptyIcon,
+  emptyText,
+  id,
+  items,
+  subtitle,
+  title,
+}: {
+  badge: string;
+  emptyIcon: ReactNode;
+  emptyText: string;
+  id: string;
+  items: HomeActionItem[];
+  subtitle: string;
+  title: string;
+}) {
+  return (
+    <section className="homeReviewPanel" aria-labelledby={id}>
+      <div className="homePanelHeader">
+        <div>
+          <h2 id={id}>{title}</h2>
+          <span>{subtitle}</span>
+        </div>
+        <ConsoleStatusBadge tone={items.length ? "info" : "ok"}>{badge}</ConsoleStatusBadge>
+      </div>
+      {items.length === 0 ? (
+        <div className="homeQuietState">
+          {emptyIcon}
+          <span>{emptyText}</span>
+        </div>
+      ) : (
+        <div className="homeActionList">
+          {items.map((item) => (
+            <button className={`homeActionRow ${item.tone}`} key={item.id} onClick={item.onOpen} type="button">
+              <span className="homeActionGlyph" aria-hidden="true">
+                {item.tone === "critical" ? <AlertTriangle size={16} /> : <Activity size={16} />}
+              </span>
+              <span className="homeActionText">
+                <strong>{item.label}</strong>
+                <small>{item.detail}</small>
+              </span>
+              <span className="homeActionMeta" title={item.metaTitle}>
+                {item.meta}
+              </span>
+              <ArrowRight size={15} />
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -516,6 +588,7 @@ function buildAttentionItems({
         id: `alert:${alert.id}`,
         label: alert.title,
         meta: formatCompactTime(alert.observed_at),
+        metaTitle: formatFullTime(alert.observed_at),
         onOpen:
           alert.category === "network"
             ? () => onOpenNetworkEvidence(alertAgent)
@@ -530,6 +603,7 @@ function buildAttentionItems({
       id: `agent:${agent.id}`,
       label: `${displayNameOrUnnamed(agent.display_name)} needs review`,
       meta: agent.last_seen_at ? formatCompactTime(agent.last_seen_at) : "no heartbeat",
+      metaTitle: agent.last_seen_at ? formatFullTime(agent.last_seen_at) : undefined,
       onOpen: () => onOpenVpsDetail(agent),
       tone: agent.status === "offline" ? "critical" : "warning",
     }) satisfies HomeActionItem);
@@ -540,6 +614,7 @@ function buildAttentionItems({
       id: `job:${job.id}`,
       label: `Job ${shortId(job.id)} failed`,
       meta: formatCompactTime(job.completed_at ?? job.created_at),
+      metaTitle: formatFullTime(job.completed_at ?? job.created_at),
       onOpen: () => onOpenJobDetails(job.id),
       tone: "critical",
     }) satisfies HomeActionItem);
@@ -550,6 +625,7 @@ function buildAttentionItems({
       id: `transfer:${transfer.client_id}:${transfer.session_id}`,
       label: `Transfer ${shortId(transfer.session_id)} needs retry`,
       meta: formatCompactTime(transfer.observed_at),
+      metaTitle: formatFullTime(transfer.observed_at),
       onOpen: onOpenTransfers,
       tone: transfer.status === "unknown" ? "warning" : "critical",
     }) satisfies HomeActionItem);
@@ -562,6 +638,7 @@ function buildAttentionItems({
         id: `backup:${backup.id}`,
         label: `Backup ${shortId(backup.id)} failed`,
         meta: formatCompactTime(backup.created_at),
+        metaTitle: formatFullTime(backup.created_at),
         onOpen: () => (agent ? onOpenBackup(agent) : undefined),
         tone: "critical",
       } satisfies HomeActionItem;
@@ -608,6 +685,147 @@ function buildSystemAttentionItems(
   return items;
 }
 
+function buildRunningWorkItems({
+  backups,
+  fileTransfers,
+  jobs,
+  onOpenBackups,
+  onOpenJobDetails,
+  onOpenJobs,
+  onOpenTransfers,
+  runningJobCount,
+}: {
+  backups: BackupRequestRecord[];
+  fileTransfers: FileTransferSessionRecord[];
+  jobs: JobHistoryRecord[];
+  onOpenBackups: () => void;
+  onOpenJobDetails: (jobId: string) => void;
+  onOpenJobs: () => void;
+  onOpenTransfers: () => void;
+  runningJobCount: number;
+}): HomeActionItem[] {
+  const jobItems = jobs
+    .filter((job) => isActiveJobStatus(job.status))
+    .map((job) => ({
+      detail: `${readableJobCommand(job.command_type)} / ${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
+      id: `running-job:${job.id}`,
+      label: `Job ${shortId(job.id)} ${readableJobStatus(job.status)}`,
+      meta: formatCompactTime(job.created_at),
+      metaTitle: formatFullTime(job.created_at),
+      onOpen: () => onOpenJobDetails(job.id),
+      tone: "info",
+    }) satisfies HomeActionItem);
+  const transferItems = fileTransfers
+    .filter((transfer) => isActiveTransferStatus(transfer.status))
+    .map((transfer) => ({
+      detail: `${readableTransferDirection(transfer.direction)} ${transfer.path}`,
+      id: `running-transfer:${transfer.client_id}:${transfer.session_id}`,
+      label: `Transfer ${shortId(transfer.session_id)} ${readableTransferStatus(transfer.status)}`,
+      meta: formatCompactTime(transfer.observed_at),
+      metaTitle: formatFullTime(transfer.observed_at),
+      onOpen: onOpenTransfers,
+      tone: "info",
+    }) satisfies HomeActionItem);
+  const backupItems = backups
+    .filter((backup) => isActiveBackupStatus(backup.status))
+    .map((backup) => ({
+      detail: `${backup.client_id} / ${backup.paths.join(", ")}`,
+      id: `running-backup:${backup.id}`,
+      label: `Backup ${shortId(backup.id)} ${readableBackupStatus(backup.status)}`,
+      meta: formatCompactTime(backup.created_at),
+      metaTitle: formatFullTime(backup.created_at),
+      onOpen: onOpenBackups,
+      tone: "info",
+    }) satisfies HomeActionItem);
+  const summaryItems: HomeActionItem[] =
+    runningJobCount > jobItems.length
+      ? [
+          {
+            detail:
+              jobItems.length > 0
+                ? `${jobItems.length} active job record${jobItems.length === 1 ? "" : "s"} loaded; open Jobs for full target state.`
+                : "Open Jobs for active target state and retained output.",
+            id: "running-jobs:fleet-summary",
+            label: `${runningJobCount} fleet job${runningJobCount === 1 ? "" : "s"} running`,
+            meta: "Fleet summary",
+            onOpen: onOpenJobs,
+            tone: "info",
+          },
+        ]
+      : [];
+  return [...summaryItems, ...jobItems, ...transferItems, ...backupItems]
+    .sort((left, right) => (right.metaTitle ?? "").localeCompare(left.metaTitle ?? ""))
+    .slice(0, 6);
+}
+
+function buildRecentFailureItems({
+  backups,
+  fileTransfers,
+  fleetAlerts,
+  jobs,
+  onOpenBackups,
+  onOpenFleetAlerts,
+  onOpenJobDetails,
+  onOpenTransfers,
+}: {
+  backups: BackupRequestRecord[];
+  fileTransfers: FileTransferSessionRecord[];
+  fleetAlerts: FleetAlertRecord[];
+  jobs: JobHistoryRecord[];
+  onOpenBackups: () => void;
+  onOpenFleetAlerts: () => void;
+  onOpenJobDetails: (jobId: string) => void;
+  onOpenTransfers: () => void;
+}): HomeActionItem[] {
+  const jobItems = jobs
+    .filter((job) => isFailedJobStatus(job.status))
+    .map((job) => ({
+      detail: `${readableJobCommand(job.command_type)} / ${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
+      id: `failed-job:${job.id}`,
+      label: `Job ${shortId(job.id)} ${readableJobStatus(job.status)}`,
+      meta: formatCompactTime(job.completed_at ?? job.created_at),
+      metaTitle: formatFullTime(job.completed_at ?? job.created_at),
+      onOpen: () => onOpenJobDetails(job.id),
+      tone: "critical",
+    }) satisfies HomeActionItem);
+  const transferItems = fileTransfers
+    .filter((transfer) => transfer.status === "aborted" || transfer.status === "unknown")
+    .map((transfer) => ({
+      detail: `${readableTransferDirection(transfer.direction)} ${transfer.path}`,
+      id: `failed-transfer:${transfer.client_id}:${transfer.session_id}`,
+      label: `Transfer ${shortId(transfer.session_id)} ${readableTransferStatus(transfer.status)}`,
+      meta: formatCompactTime(transfer.observed_at),
+      metaTitle: formatFullTime(transfer.observed_at),
+      onOpen: onOpenTransfers,
+      tone: transfer.status === "unknown" ? "warning" : "critical",
+    }) satisfies HomeActionItem);
+  const backupItems = backups
+    .filter((backup) => isFailedBackupStatus(backup.status))
+    .map((backup) => ({
+      detail: `${backup.client_id} / ${backup.paths.join(", ")}`,
+      id: `failed-backup:${backup.id}`,
+      label: `Backup ${shortId(backup.id)} ${readableBackupStatus(backup.status)}`,
+      meta: formatCompactTime(backup.created_at),
+      metaTitle: formatFullTime(backup.created_at),
+      onOpen: onOpenBackups,
+      tone: "critical",
+    }) satisfies HomeActionItem);
+  const alertItems = fleetAlerts
+    .filter((alert) => alert.operator_state !== "acknowledged")
+    .map((alert) => ({
+      detail: `${readableAlertCategory(alert.category)} / ${alert.client_id ?? alert.target_id}`,
+      id: `failure-alert:${alert.id}`,
+      label: alert.title,
+      meta: formatCompactTime(alert.observed_at),
+      metaTitle: formatFullTime(alert.observed_at),
+      onOpen: onOpenFleetAlerts,
+      tone: alert.severity === "critical" ? "critical" : "warning",
+    }) satisfies HomeActionItem);
+  return [...jobItems, ...transferItems, ...backupItems, ...alertItems]
+    .sort(compareAttentionItems)
+    .slice(0, 6);
+}
+
 function buildActivityItems({
   auditLogs,
   backups,
@@ -633,7 +851,7 @@ function buildActivityItems({
 }): HomeActivityItem[] {
   const jobItems = jobs.map((job) => ({
     id: `job:${job.id}`,
-    label: `${job.command_type} job ${job.status}`,
+    label: `${readableJobCommand(job.command_type)} job ${readableJobStatus(job.status)}`,
     meta: `${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
     onOpen: () => onOpenJobDetails(job.id),
     time: job.completed_at ?? job.created_at,
@@ -641,7 +859,7 @@ function buildActivityItems({
   }));
   const backupItems = backups.map((backup) => ({
     id: `backup:${backup.id}`,
-    label: `Backup ${backup.status.replace(/_/g, " ")}`,
+    label: `Backup ${readableBackupStatus(backup.status)}`,
     meta: `${backup.client_id} / ${backup.paths.join(", ")}`,
     onOpen: onOpenBackups,
     time: backup.created_at,
@@ -649,7 +867,7 @@ function buildActivityItems({
   }));
   const transferItems = fileTransfers.map((transfer) => ({
     id: `transfer:${transfer.client_id}:${transfer.session_id}`,
-    label: `${transfer.direction} transfer ${transfer.status}`,
+    label: `${readableTransferDirection(transfer.direction)} transfer ${readableTransferStatus(transfer.status)}`,
     meta: transfer.path,
     onOpen: onOpenTransfers,
     time: transfer.observed_at,
@@ -657,7 +875,7 @@ function buildActivityItems({
   }));
   const auditItems = auditLogs.map((audit) => ({
     id: `audit:${audit.id}`,
-    label: audit.action.replace(/_/g, " "),
+    label: readableAuditAction(audit.action),
     meta: audit.target,
     onOpen: onOpenAudit,
     time: audit.created_at,
@@ -665,8 +883,8 @@ function buildActivityItems({
   }));
   const scheduleItems = schedules.map((schedule) => ({
     id: `schedule:${schedule.id}`,
-    label: `${schedule.name} ${schedule.enabled ? "enabled" : "disabled"}`,
-    meta: `${schedule.command_type} / ${schedule.selector_expression}`,
+    label: `${schedule.name} ${schedule.enabled ? "enabled" : "paused"}`,
+    meta: `${readableJobCommand(schedule.command_type)} / ${schedule.selector_expression}`,
     onOpen: onOpenSchedule,
     time: schedule.updated_at,
     type: "Schedule",
@@ -676,7 +894,9 @@ function buildActivityItems({
     .slice(0, 8)
     .map((item) => ({
       ...item,
+      timeDateTime: item.time,
       time: formatCompactTime(item.time),
+      timeTitle: formatFullTime(item.time),
     }));
 }
 
@@ -703,6 +923,93 @@ function isFailedBackupStatus(status: string) {
   return status === "execution_failed" || status === "execution_canceled";
 }
 
+function isActiveBackupStatus(status: string) {
+  return ["queued", "running", "uploading", "collecting"].includes(status);
+}
+
 function isActiveTransferStatus(status: string) {
   return status === "started" || status === "transferring";
+}
+
+function readableJobCommand(commandType: string) {
+  if (commandType === "shell_argv") {
+    return "Shell command";
+  }
+  if (commandType === "scheduled_shell_argv") {
+    return "Scheduled shell command";
+  }
+  if (commandType === "shell_pty") {
+    return "Interactive shell";
+  }
+  return commandType
+    .replace(/^scheduled_/, "scheduled ")
+    .replace(/_/g, " ")
+    .replace(/\bospf\b/gi, "OSPF")
+    .replace(/\bvps\b/gi, "VPS")
+    .replace(/\bapi\b/gi, "API")
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
+}
+
+function readableJobStatus(status: string) {
+  const labels: Record<string, string> = {
+    agent_lost: "agent lost",
+    agent_timeout: "agent timeout",
+    completed: "completed",
+    control_timeout: "control timeout",
+    deadline_expired: "deadline expired",
+    dispatching: "dispatching",
+    failed: "failed",
+    queued: "queued",
+    rejected: "rejected",
+    running: "running",
+  };
+  return labels[status] ?? status.replace(/_/g, " ");
+}
+
+function readableBackupStatus(status: string) {
+  const labels: Record<string, string> = {
+    artifact_metadata_recorded: "artifact recorded; upload not verified",
+    completed: "completed",
+    execution_canceled: "canceled",
+    execution_failed: "failed",
+    queued: "queued",
+    running: "running",
+    uploading: "uploading",
+  };
+  return labels[status] ?? status.replace(/_/g, " ");
+}
+
+function readableTransferDirection(direction: string) {
+  if (direction === "upload") {
+    return "Upload";
+  }
+  if (direction === "download") {
+    return "Download";
+  }
+  return direction.replace(/_/g, " ");
+}
+
+function readableTransferStatus(status: string) {
+  const labels: Record<string, string> = {
+    aborted: "aborted",
+    committed: "completed",
+    started: "started",
+    transferring: "transferring",
+    unknown: "status unknown",
+  };
+  return labels[status] ?? status.replace(/_/g, " ");
+}
+
+function readableAlertCategory(category: string) {
+  return category
+    .replace(/_/g, " ")
+    .replace(/\bospf\b/gi, "OSPF")
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
+}
+
+function readableAuditAction(action: string) {
+  return action
+    .replace(/[._]/g, " ")
+    .replace(/\bapi\b/gi, "API")
+    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
 }

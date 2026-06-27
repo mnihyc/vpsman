@@ -669,13 +669,14 @@ impl Repository {
                     sqlx::query(
                         r#"
                         INSERT INTO gateway_sessions (
-                            id, gateway_id, client_id, noise_public_key_hex, status
+                            id, gateway_id, client_id, noise_public_key_hex, remote_ip, status
                         )
-                        VALUES ($1, $2, $3, $4, 'active')
+                        VALUES ($1, $2, $3, $4, $5::inet, 'active')
                         ON CONFLICT (id) DO UPDATE SET
                             gateway_id = EXCLUDED.gateway_id,
                             client_id = EXCLUDED.client_id,
                             noise_public_key_hex = EXCLUDED.noise_public_key_hex,
+                            remote_ip = EXCLUDED.remote_ip,
                             status = 'active',
                             last_seen_at = now(),
                             ended_at = NULL,
@@ -686,6 +687,7 @@ impl Repository {
                     .bind(&event.gateway_id)
                     .bind(&event.hello.client_id)
                     .bind(&event.noise_public_key_hex)
+                    .bind(event.remote_ip.as_deref())
                     .execute(&mut *tx)
                     .await?;
                 }
@@ -1673,6 +1675,7 @@ fn agent_hello_session_event(event: &GatewayAgentHelloIngest) -> GatewaySessionL
         session_id: event.gateway_session_id,
         noise_public_key_hex: event.noise_public_key_hex.clone(),
         remote_ip: event.remote_ip.clone(),
+        agent_version: Some(event.hello.agent_version.clone()),
         reason: None,
     }
 }

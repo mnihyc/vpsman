@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { Archive, DatabaseBackup, ExternalLink, RefreshCw, RotateCcw, Server, ShieldCheck } from "lucide-react";
+import { Archive, ArrowRight, DatabaseBackup, ExternalLink, RefreshCw, RotateCcw, Server, ShieldCheck } from "lucide-react";
 import { buildRestoreRollbackOperation } from "../backups/restoreRollback";
 import { clampJobMaxTimeoutSecs, DEFAULT_MAX_JOB_TIMEOUT_SECS } from "../jobMaxTimeout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
@@ -65,6 +65,7 @@ import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import {
   clientDisplayNameFromMap,
   clientDisplayNameMap,
+  formatCompactTime,
   formatTime,
   formatVpsName,
   runPanelAction,
@@ -156,6 +157,27 @@ type BackupPostureItem = {
   value: string;
 };
 
+type BackupProtectionState = "recent" | "overdue" | "unprotected" | "unknown";
+
+type BackupProtectionRecord = {
+  agent: AgentView;
+  detail: string;
+  expectedMs: number;
+  latestBackup: BackupRequestRecord | null;
+  latestUsableBackup: BackupRequestRecord | null;
+  state: BackupProtectionState;
+};
+
+type BackupProtectionSummary = {
+  records: BackupProtectionRecord[];
+  recent: number;
+  overdue: number;
+  unprotected: number;
+  unknown: number;
+};
+
+const DEFAULT_BACKUP_FRESHNESS_MS = 7 * 24 * 60 * 60 * 1000;
+
 type BackupConfirmationAction =
   | "policy"
   | "policy-prune"
@@ -236,6 +258,8 @@ type BackupActionSnapshot =
       payloadHashHex: string;
       planLabel: string;
       request: CreateMigrationLinkRequest;
+      routeLabel: string;
+      scopeLabel: string;
     }
   | {
       action: "migration-run";
@@ -257,8 +281,8 @@ const backupSubpageSummaries: Record<
   requests: { loading: "Loading backup requests", title: "Backup requests" },
   policies: { loading: "Loading backup policies", title: "Backup policies" },
   artifacts: { loading: "Loading backup artifacts", title: "Backup artifacts" },
-  restore: { loading: "Loading restore plans", title: "Restore operations" },
-  migration: { loading: "Loading migration links", title: "Migration links" },
+  restore: { loading: "Loading restore sources", title: "Restore operations" },
+  migration: { loading: "Loading migration mappings", title: "Migration mappings" },
 };
 
 export function BackupsPanel({
@@ -339,6 +363,8 @@ export function BackupsPanel({
   const [lastArtifact, setLastArtifact] = useState<BackupArtifactRecord | null>(
     null,
   );
+  const [lastDownloadedArtifact, setLastDownloadedArtifact] =
+    useState<BackupArtifactRecord | null>(null);
   const [restoreSourceId, setRestoreSourceId] = useState("");
   const [restoreTargetId, setRestoreTargetId] = useState("");
   const [restoreNote, setRestoreNote] = useState("");
@@ -415,6 +441,10 @@ export function BackupsPanel({
   const selectedRestoreSourceArtifact = backupArtifactForRequest(
     selectedRestoreSourceBackup,
     artifacts,
+  );
+  const selectedRestoreArtifactWarning = restoreArtifactWarning(
+    selectedRestoreSourceBackup,
+    selectedRestoreSourceArtifact,
   );
   const restoreArchiveTransferOptions = useMemo(
     () =>
@@ -503,22 +533,24 @@ export function BackupsPanel({
       : lastPolicy
         ? `Policy ${lastPolicy.name} ${lastPolicy.enabled ? "enabled" : "disabled"}`
         : lastMigrationLink
-          ? `Migration link ${shortId(lastMigrationLink.id)} ${lastMigrationLink.status}`
+          ? `Migration mapping ${shortId(lastMigrationLink.id)} ${lastMigrationLink.status}`
           : lastRollbackJob
             ? `Restore rollback job ${shortId(lastRollbackJob.job_id)} ${lastRollbackJob.status}`
             : lastRestoreJob
               ? `Restore job ${shortId(lastRestoreJob.job_id)} ${lastRestoreJob.status}`
-              : lastArtifact
+              : lastDownloadedArtifact
+                ? `Artifact ${shortId(lastDownloadedArtifact.id)} downloaded`
+                : lastArtifact
                 ? `Artifact ${shortId(lastArtifact.id)} uploaded`
                 : lastRestorePlan
-                  ? `Restore ${shortId(lastRestorePlan.id)} ${lastRestorePlan.status}`
+                  ? `Draft restore ${shortId(lastRestorePlan.id)} ${lastRestorePlan.status}`
                   : lastRequest
                     ? `Request ${shortId(lastRequest.id)} ${lastRequest.status}`
                     : `${backupPolicies.length} polic${backupPolicies.length === 1 ? "y" : "ies"}, ${backups.length} backup request${
                         backups.length === 1 ? "" : "s"
                       }, ${artifacts.length} artifact${
                         artifacts.length === 1 ? "" : "s"
-                      }, ${restorePlans.length} restore plan${restorePlans.length === 1 ? "" : "s"}, ${migrationLinks.length} migration link${
+                      }, ${restorePlans.length} draft restore${restorePlans.length === 1 ? "" : "s"}, ${migrationLinks.length} migration mapping${
                         migrationLinks.length === 1 ? "" : "s"
                       }`));
   const backupPostureItems = buildBackupPostureItems({
@@ -910,6 +942,71 @@ export function BackupsPanel({
     });
   }
 
+  function openArtifactRestore(
+    _artifact: BackupArtifactRecord,
+    backup: BackupRequestRecord | null,
+  ) {
+    if (!backup) {
+      setActionError("Restore requires a linked backup request for this artifact");
+      return;
+    }
+    clearBackupConfirmations(["restore-plan", "restore-run", "migration-run"]);
+    setRestoreSourceId(backup.id);
+    setRestoreArchiveTransferKey("");
+    setActionError(null);
+    onSelectSubpage("restore");
+    setWorkflowOpen(true);
+  }
+
+  function openBackupRestore(backup: BackupRequestRecord) {
+    clearBackupConfirmations(["restore-plan", "restore-run", "migration-run"]);
+    setRestoreSourceId(backup.id);
+    setRestoreArchiveTransferKey("");
+    setActionError(null);
+    onSelectSubpage("restore");
+    setWorkflowOpen(true);
+  }
+
+  async function downloadArtifactPackage(
+    artifact: BackupArtifactRecord,
+    backup: BackupRequestRecord | null,
+  ) {
+    if (!backup) {
+      setActionError("Download requires a linked backup request for this artifact");
+      return;
+    }
+    await runPanelAction(setPending, setActionError, async () => {
+      const blob = await onDownloadBackupArtifact(backup.id);
+      saveBlob(blob, backupArtifactDownloadName(artifact, backup));
+      setLastDownloadedArtifact(artifact);
+    });
+  }
+
+  function openBackupRequestArtifact(backup: BackupRequestRecord) {
+    if (!backup.artifact_id) {
+      setActionError("This backup request has no artifact record yet");
+      return;
+    }
+    setActionError(null);
+    onSelectSubpage("artifacts");
+  }
+
+  function retryBackupRequest(backup: BackupRequestRecord) {
+    clearBackupConfirmations(["backup-request"]);
+    setClientId(backup.client_id);
+    setPathsText(backup.paths.join("\n"));
+    setIncludeConfig(backup.include_config);
+    setFollowSymlinks(backup.follow_symlinks);
+    setNote(
+      backup.note
+        ? `Retry ${shortId(backup.id)}: ${backup.note}`
+        : `Retry ${shortId(backup.id)}`,
+    );
+    setActionError(null);
+    onSelectSubpage("requests");
+    setWorkflowOpen(true);
+  }
+
   function selectArtifactBackupId(backupId: string) {
     clearBackupConfirmations(["artifact-upload", "artifact-handoff"]);
     setArtifactBackupId(backupId);
@@ -929,7 +1026,7 @@ export function BackupsPanel({
 
   async function submitRestorePlan(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await runBackupReview("Preparing restore plan review", async (reviewGeneration) => {
+    await runBackupReview("Preparing draft restore review", async (reviewGeneration) => {
       if (!privilegeMaterial) {
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is locked");
@@ -980,7 +1077,7 @@ export function BackupsPanel({
           note: restoreNote.trim() || null,
           privilege_assertion: built.privilegeAssertion,
         },
-        scopeLabel: `${restoreIncludeConfig ? "config, " : ""}${restorePaths.length} paths`,
+        scopeLabel: restoreDraftScopeLabel(restoreIncludeConfig, restorePaths),
         sourceLabel: shortId(restoreSourceId),
         targetLabel: restoreTarget
           ? formatVpsName(restoreTarget, vpsNameDisplayMode)
@@ -1121,7 +1218,7 @@ export function BackupsPanel({
     const target =
       agents.find((agent) => agent.id === input.targetClientId) ?? null;
     return {
-      modeLabel: input.dryRun ? "dry run" : "live restore",
+      modeLabel: input.dryRun ? "Dry run" : "Live restore",
       sourceLabel: input.sourceBackupRequestId
         ? shortId(input.sourceBackupRequestId)
         : "none",
@@ -1250,10 +1347,10 @@ export function BackupsPanel({
   }
 
   async function submitMigrationLink() {
-    await runBackupReview("Preparing migration link review", async (reviewGeneration) => {
+    await runBackupReview("Preparing migration mapping review", async (reviewGeneration) => {
       const restorePlan = selectedMigrationRestorePlan;
       if (!restorePlan) {
-        throw new Error("Select a restore plan");
+        throw new Error("Select a draft restore relationship");
       }
       const review = await buildMigrationLinkReview(restorePlan);
       if (!isReviewGenerationCurrent(reviewGeneration)) {
@@ -1265,6 +1362,8 @@ export function BackupsPanel({
         payloadHashHex: review.payloadHashHex,
         planLabel: shortId(restorePlan.id),
         request: review.request,
+        routeLabel: `${clientLabel(restorePlan.source_client_id)} to ${clientLabel(restorePlan.target_client_id)}`,
+        scopeLabel: restoreDraftScopeLabel(restorePlan.include_config, restorePlan.paths),
       });
       setPendingConfirmation("migration-link");
     });
@@ -1286,7 +1385,7 @@ export function BackupsPanel({
       }
       const restorePlan = selectedMigrationRestorePlan;
       if (!restorePlan) {
-        throw new Error("Select a restore plan");
+        throw new Error("Select a draft restore relationship");
       }
       const input: RestoreRunInput = {
         sourceBackupRequestId: restorePlan.source_backup_request_id,
@@ -1309,7 +1408,7 @@ export function BackupsPanel({
         action: "migration-run",
         linkRequest: linkReview.request,
         linkPayloadHashHex: linkReview.payloadHashHex,
-        modeLabel: input.dryRun ? "dry run" : "live restore",
+        modeLabel: input.dryRun ? "Dry run" : "Live cutover restore",
         restorePlan,
         routeLabel: `${clientLabel(restorePlan.source_client_id)} to ${clientLabel(restorePlan.target_client_id)}`,
         run,
@@ -1362,7 +1461,10 @@ export function BackupsPanel({
         title: archiveTransferSessionId ?? "missing",
       },
       { label: "Archive path", value: archivePath || "missing" },
-      { label: "Archive size", value: archiveSizeBytes || "missing" },
+      {
+        label: "Archive size",
+        value: archiveSizeBytes ? formatBytes(archiveSizeBytes) : "missing",
+      },
       {
         label: "Archive SHA-256",
         value: archiveSha256Hex ? shortHash(archiveSha256Hex) : "missing",
@@ -1526,13 +1628,13 @@ export function BackupsPanel({
             : null;
         return [
           {
-            label: "Source",
+            label: "Source artifact",
             value:
               snapshot?.sourceLabel ??
               (restoreSourceId ? shortId(restoreSourceId) : "none"),
           },
           {
-            label: "Target",
+            label: "Destination VPS",
             value:
               snapshot?.targetLabel ??
               (restoreTarget
@@ -1540,14 +1642,20 @@ export function BackupsPanel({
                 : restoreTargetId || "none"),
           },
           {
-            label: "Scope",
+            label: "Path behavior",
             value:
               snapshot?.scopeLabel ??
-              `${restoreIncludeConfig ? "config, " : ""}${restorePaths.length} paths`,
+              restoreDraftScopeLabel(restoreIncludeConfig, restorePaths),
+          },
+          {
+            label: "Restore path",
+            value:
+              (snapshot?.request.destination_root ?? restoreDestinationRoot) ||
+              "generated after source and destination",
           },
           {
             label: "Privilege",
-            value: snapshot ? "Frozen assertion" : "Review plan to freeze",
+            value: snapshot ? "Frozen assertion" : "Review draft to freeze",
           },
         ];
       }
@@ -1558,13 +1666,13 @@ export function BackupsPanel({
             : null;
         return [
           {
-            label: "Source",
+            label: "Source artifact",
             value:
               snapshot?.sourceLabel ??
               (restoreSourceId ? shortId(restoreSourceId) : "none"),
           },
           {
-            label: "Target",
+            label: "Destination VPS",
             value:
               snapshot?.targetLabel ??
               (restoreTarget
@@ -1573,7 +1681,15 @@ export function BackupsPanel({
           },
           {
             label: "Mode",
-            value: snapshot?.modeLabel ?? (restoreDryRun ? "dry run" : "live restore"),
+            value: snapshot?.modeLabel ?? (restoreDryRun ? "Dry run" : "Live restore"),
+          },
+          {
+            label: "Replaces",
+            value: restoreDraftScopeLabel(restoreIncludeConfig, restorePaths),
+          },
+          {
+            label: "Restore path",
+            value: restoreDestinationRoot || "missing",
           },
           ...restoreArchiveConfirmationItems(snapshot?.run ?? null),
           {
@@ -1617,14 +1733,31 @@ export function BackupsPanel({
             : null;
         return [
           {
-            label: "Restore plan",
+            label: "Source -> replacement",
             value:
-              snapshot?.planLabel ??
-              (migrationRestorePlanId ? shortId(migrationRestorePlanId) : "none"),
+              snapshot?.routeLabel ??
+              (selectedMigrationRestorePlan
+                ? `${clientLabel(selectedMigrationRestorePlan.source_client_id)} to ${clientLabel(selectedMigrationRestorePlan.target_client_id)}`
+                : "none"),
           },
-          { label: "Note", value: snapshot?.noteLabel ?? (migrationNote.trim() || "none") },
           {
-            label: "Link hash",
+            label: "Draft restore",
+            value: snapshot?.planLabel ?? (migrationRestorePlanId ? shortId(migrationRestorePlanId) : "none"),
+          },
+          {
+            label: "Path behavior",
+            value:
+              snapshot?.scopeLabel ??
+              (selectedMigrationRestorePlan
+                ? restoreDraftScopeLabel(
+                  selectedMigrationRestorePlan.include_config,
+                  selectedMigrationRestorePlan.paths,
+                )
+                : "none"),
+          },
+          { label: "Cutover notes", value: snapshot?.noteLabel ?? (migrationNote.trim() || "none") },
+          {
+            label: "Mapping hash",
             value: snapshot ? `${snapshot.payloadHashHex.slice(0, 12)}...` : "review required",
           },
         ];
@@ -1636,7 +1769,7 @@ export function BackupsPanel({
             : null;
         return [
           {
-            label: "Restore plan",
+            label: "Draft restore",
             value:
               (snapshot ? shortId(snapshot.restorePlan.id) : null) ??
               (selectedMigrationRestorePlan
@@ -1644,7 +1777,7 @@ export function BackupsPanel({
                 : "none"),
           },
           {
-            label: "Route",
+            label: "Source -> replacement",
             value:
               snapshot?.routeLabel ??
               (selectedMigrationRestorePlan
@@ -1653,15 +1786,24 @@ export function BackupsPanel({
           },
           {
             label: "Mode",
-            value: snapshot?.modeLabel ?? (restoreDryRun ? "dry run" : "live restore"),
+            value: snapshot?.modeLabel ?? (restoreDryRun ? "Dry run" : "Live cutover restore"),
+          },
+          {
+            label: "Path behavior",
+            value: selectedMigrationRestorePlan
+              ? restoreDraftScopeLabel(
+                selectedMigrationRestorePlan.include_config,
+                selectedMigrationRestorePlan.paths,
+              )
+              : "none",
           },
           ...restoreArchiveConfirmationItems(snapshot?.run ?? null),
           {
             label: "Privilege",
-            value: snapshot ? "Frozen assertion" : "Review migration to freeze",
+            value: snapshot ? "Frozen assertion" : "Review cutover restore to freeze",
           },
           {
-            label: "Link hash",
+            label: "Mapping hash",
             value: snapshot ? `${snapshot.linkPayloadHashHex.slice(0, 12)}...` : "review required",
           },
         ];
@@ -1686,25 +1828,25 @@ export function BackupsPanel({
       case "artifact-upload":
         return "Confirm the backup artifact upload for the selected backup request.";
       case "artifact-handoff":
-        return "Confirm creating a backup artifact handoff from retained job output.";
+        return "Confirm creating a backup artifact transfer package from retained job output.";
       case "restore-plan":
-        return "Confirm the restore intent and target before saving the plan.";
+        return "Confirm the source artifact, destination, and path behavior before saving this draft restore.";
       case "restore-run":
         return (pendingActionSnapshot?.action === "restore-run"
           ? !pendingActionSnapshot.run.request.destructive
           : restoreDryRun)
           ? "Confirm the restore rehearsal dispatch."
-          : "Confirm the live restore dispatch.";
+          : "Confirm the live restore dispatch and destination it can replace.";
       case "restore-rollback":
         return "Confirm restore rollback dispatch for the selected target.";
       case "migration-link":
-        return "Confirm writing the migration link for the selected restore plan.";
+        return "Confirm saving the source artifact to replacement VPS migration mapping.";
       case "migration-run":
         return (pendingActionSnapshot?.action === "migration-run"
           ? !pendingActionSnapshot.run.request.destructive
           : restoreDryRun)
-          ? "Confirm migration link and restore rehearsal dispatch."
-          : "Confirm migration link and live restore dispatch.";
+          ? "Confirm saving the mapping and running a dry-run cutover restore."
+          : "Confirm saving the mapping and running the live cutover restore.";
       default:
         return "";
     }
@@ -1746,7 +1888,7 @@ export function BackupsPanel({
       }
       case "artifact-handoff": {
         if (pendingActionSnapshot?.action !== "artifact-handoff") {
-          setActionError("Artifact handoff confirmation snapshot is missing; review handoff again");
+          setActionError("Artifact transfer package confirmation snapshot is missing; review transfer package again");
           return;
         }
         await executeArtifactHandoff(pendingActionSnapshot);
@@ -1754,7 +1896,7 @@ export function BackupsPanel({
       }
       case "restore-plan": {
         if (pendingActionSnapshot?.action !== "restore-plan") {
-          setActionError("Restore plan confirmation snapshot is missing; review plan again");
+          setActionError("Draft restore confirmation snapshot is missing; review the draft again");
           return;
         }
         await executeRestorePlan(pendingActionSnapshot);
@@ -1778,7 +1920,7 @@ export function BackupsPanel({
       }
       case "migration-link": {
         if (pendingActionSnapshot?.action !== "migration-link") {
-          setActionError("Migration link confirmation snapshot is missing; review link again");
+          setActionError("Migration mapping confirmation snapshot is missing; review mapping again");
           return;
         }
         await executeMigrationLink(pendingActionSnapshot);
@@ -1805,16 +1947,16 @@ export function BackupsPanel({
           : pendingConfirmation === "artifact-upload"
             ? "Confirm backup artifact upload"
             : pendingConfirmation === "artifact-handoff"
-              ? "Confirm backup artifact handoff"
+              ? "Confirm backup artifact transfer package"
               : pendingConfirmation === "restore-plan"
-                ? "Confirm restore plan"
+                ? "Confirm draft restore"
                 : pendingConfirmation === "restore-run"
-                  ? "Confirm restore run"
+                  ? "Confirm restore"
                   : pendingConfirmation === "restore-rollback"
                     ? "Confirm restore rollback"
                     : pendingConfirmation === "migration-link"
-                      ? "Confirm migration link"
-                      : "Confirm migration restore";
+                      ? "Confirm migration mapping"
+                      : "Confirm cutover restore";
   const backupConfirmationConfirmLabel =
     pendingConfirmation === "policy"
       ? "Save policy"
@@ -1825,22 +1967,33 @@ export function BackupsPanel({
           : pendingConfirmation === "artifact-upload"
             ? "Upload artifact"
             : pendingConfirmation === "artifact-handoff"
-              ? "Create handoff"
+              ? "Create transfer package"
               : pendingConfirmation === "restore-plan"
-                ? "Create restore plan"
+                ? "Save draft restore"
                 : pendingConfirmation === "restore-run"
-                  ? "Run restore"
+                  ? (pendingActionSnapshot?.action === "restore-run"
+                    ? !pendingActionSnapshot.run.request.destructive
+                    : restoreDryRun)
+                    ? "Run dry run"
+                    : "Run restore"
                   : pendingConfirmation === "restore-rollback"
                     ? "Rollback restore"
                     : pendingConfirmation === "migration-link"
-                      ? "Link migration"
-                      : "Run migration restore";
+                      ? "Save mapping"
+                      : (pendingActionSnapshot?.action === "migration-run"
+                        ? !pendingActionSnapshot.run.request.destructive
+                        : restoreDryRun)
+                        ? "Run dry run"
+                        : "Run cutover restore";
   const backupConfirmationItems = pendingConfirmation
     ? buildBackupConfirmationItems(pendingConfirmation)
     : [];
   const backupConfirmationTone =
     pendingConfirmation === "policy-prune" ||
-    pendingConfirmation === "restore-run" ||
+    (pendingConfirmation === "restore-run" &&
+      (pendingActionSnapshot?.action === "restore-run"
+        ? pendingActionSnapshot.run.request.destructive
+        : !restoreDryRun)) ||
     pendingConfirmation === "restore-rollback" ||
     pendingConfirmation === "migration-run"
       ? "danger"
@@ -1848,13 +2001,13 @@ export function BackupsPanel({
 
   const backupWorkflowLabel =
     backupSubpage === "policies"
-      ? "Open policy editor"
+      ? "Create policy"
       : backupSubpage === "artifacts"
         ? "Open artifact workflow"
         : backupSubpage === "restore"
-          ? "Open restore workflow"
+          ? "Choose restore artifact"
           : backupSubpage === "migration"
-            ? "Open migration workflow"
+            ? "Create migration mapping"
             : "Open backup request";
 
   return (
@@ -1883,7 +2036,67 @@ export function BackupsPanel({
             </button>
           </div>
         </div>
-        <BackupPostureOverview items={backupPostureItems} />
+        {backupSubpage === "requests" && (
+          <BackupRequestSummary
+            agents={agents}
+            artifacts={artifacts}
+            backupPolicies={backupPolicies}
+            backups={backups}
+          />
+        )}
+        {backupSubpage === "policies" && (
+          <BackupPolicySummary backupPolicies={backupPolicies} />
+        )}
+        {backupSubpage === "restore" && (
+          <BackupRestoreSummary
+            artifacts={artifacts}
+            backups={backups}
+            destinationRoot={restoreDestinationRoot}
+            restorePlans={restorePlans}
+            selectedSourceArtifact={selectedRestoreSourceArtifact}
+            selectedSourceBackup={selectedRestoreSourceBackup}
+            targetLabel={
+              restoreTarget
+                ? formatVpsName(restoreTarget, vpsNameDisplayMode)
+                : restoreTargetId || ""
+            }
+          />
+        )}
+        {backupSubpage === "migration" && (
+          <BackupMigrationSummary
+            artifacts={artifacts}
+            backups={backups}
+            clientLabel={clientLabel}
+            lastMigrationLink={lastMigrationLink}
+            migrationLinks={migrationLinks}
+            restorePlans={restorePlans}
+            selectedPlan={selectedMigrationRestorePlan}
+            selectedSourceArtifact={selectedMigrationSourceArtifact}
+          />
+        )}
+        {backupSubpage !== "artifacts" &&
+          backupSubpage !== "requests" &&
+          backupSubpage !== "policies" &&
+          backupSubpage !== "restore" &&
+          backupSubpage !== "migration" && (
+          <BackupPostureOverview items={backupPostureItems} />
+        )}
+        {backupSubpage === "artifacts" && (
+          <BackupHistoryTables
+            activeSubpage={backupSubpage}
+            artifacts={artifacts}
+            backupPolicies={backupPolicies}
+            backups={backups}
+            clientLabel={clientLabel}
+            error={error}
+            migrationLinks={migrationLinks}
+            onDownloadArtifact={(artifact, backup) =>
+              void downloadArtifactPackage(artifact, backup)
+            }
+            onRestoreArtifact={openArtifactRestore}
+            restorePlans={restorePlans}
+          />
+        )}
         {backupSubpage === "artifacts" && (
           <BackupArtifactOwnershipGuide
             artifacts={artifacts}
@@ -1894,35 +2107,21 @@ export function BackupsPanel({
             onSelectSubpage={onSelectSubpage}
           />
         )}
-        {backupSubpage === "restore" && (
-          <RestoreWorkflowGuide
+        {backupSubpage !== "artifacts" && (
+          <BackupHistoryTables
+            activeSubpage={backupSubpage}
             artifacts={artifacts}
-            lastRestoreJob={lastRestoreJob}
-            lastRestorePlan={lastRestorePlan}
-            lastRollbackJob={lastRollbackJob}
-            onSelectSubpage={onSelectSubpage}
-            restorePlans={restorePlans}
-          />
-        )}
-        {backupSubpage === "migration" && (
-          <MigrationWorkflowGuide
-            artifacts={artifacts}
-            lastMigrationLink={lastMigrationLink}
+            backupPolicies={backupPolicies}
+            backups={backups}
+            clientLabel={clientLabel}
+            error={error}
             migrationLinks={migrationLinks}
-            onSelectSubpage={onSelectSubpage}
+            onOpenRequestArtifact={openBackupRequestArtifact}
+            onPlanRestoreSource={openBackupRestore}
+            onRetryBackup={retryBackupRequest}
             restorePlans={restorePlans}
           />
         )}
-        <BackupHistoryTables
-          activeSubpage={backupSubpage}
-          artifacts={artifacts}
-          backupPolicies={backupPolicies}
-          backups={backups}
-          clientLabel={clientLabel}
-          error={error}
-          migrationLinks={migrationLinks}
-          restorePlans={restorePlans}
-        />
       </div>
       <ConsoleActionDrawer
         description="One-time backup, restore, artifact, and migration inputs stay out of the data table until needed."
@@ -2160,6 +2359,7 @@ export function BackupsPanel({
                 }}
                 pending={pending}
                 privilegeReady={Boolean(privilegeMaterial)}
+                restoreArtifactWarning={selectedRestoreArtifactWarning}
                 restoreDestinationRoot={restoreDestinationRoot}
                 restoreIncludeConfig={restoreIncludeConfig}
                 restoreNote={restoreNote}
@@ -2343,6 +2543,227 @@ function BackupPostureOverview({ items }: { items: BackupPostureItem[] }) {
   );
 }
 
+function BackupRequestSummary({
+  agents,
+  artifacts,
+  backupPolicies,
+  backups,
+}: {
+  agents: AgentView[];
+  artifacts: BackupArtifactRecord[];
+  backupPolicies: BackupPolicyRecord[];
+  backups: BackupRequestRecord[];
+}) {
+  const protection = backupProtectionSummary(agents, backupPolicies, backups);
+  const failedBackups = backups.filter((backup) =>
+    backupRequestNeedsAttention(backup.status),
+  );
+  const artifactBackedCount = backups.filter((backup) => backup.artifact_id).length;
+  const activeArtifacts = artifacts.filter((artifact) => artifact.status === "active");
+  const storedBytes = activeArtifacts.reduce(
+    (sum, artifact) => sum + artifact.size_bytes,
+    0,
+  );
+  return (
+    <section
+      aria-label="Backup request summary"
+      className="backupRequestSummary"
+    >
+      <strong>
+        {protection.recent} recent · {protection.unprotected} unprotected ·{" "}
+        {failedBackups.length} failed
+      </strong>
+      <span>
+        {backups.length} request{backups.length === 1 ? "" : "s"} ·{" "}
+        {artifactBackedCount} artifact-backed · {formatBytes(storedBytes)} stored
+      </span>
+    </section>
+  );
+}
+
+function BackupPolicySummary({
+  backupPolicies,
+}: {
+  backupPolicies: BackupPolicyRecord[];
+}) {
+  const enabled = backupPolicies.filter((policy) => policy.enabled);
+  const failing = backupPolicies.filter(
+    (policy) => policy.failure_count > 0 || policy.last_error,
+  );
+  const fixedTargets = new Set(
+    backupPolicies.flatMap((policy) => policy.target_client_ids),
+  );
+  const nextPolicy = backupPolicies
+    .map((policy) => ({
+      policy,
+      timestamp: Date.parse(policy.next_run_at),
+    }))
+    .filter((entry) => Number.isFinite(entry.timestamp))
+    .sort((left, right) => left.timestamp - right.timestamp)[0]?.policy;
+  const pausedCount = backupPolicies.length - enabled.length;
+  const nextRunLabel = nextPolicy
+    ? Date.parse(nextPolicy.next_run_at) < Date.now()
+      ? `next run overdue ${formatCompactTime(nextPolicy.next_run_at)}`
+      : `next run ${formatCompactTime(nextPolicy.next_run_at)}`
+    : "no next run reported";
+  return (
+    <section
+      aria-label="Backup policy summary"
+      className="backupRequestSummary backupPolicySummary"
+    >
+      <strong>
+        {enabled.length} enabled · {pausedCount} paused · {failing.length} failing
+      </strong>
+      <span>
+        {backupPolicies.length} polic{backupPolicies.length === 1 ? "y" : "ies"} ·{" "}
+        {fixedTargets.size} fixed target{fixedTargets.size === 1 ? "" : "s"} ·{" "}
+        {nextRunLabel}
+      </span>
+    </section>
+  );
+}
+
+function BackupRestoreSummary({
+  artifacts,
+  backups,
+  destinationRoot,
+  restorePlans,
+  selectedSourceArtifact,
+  selectedSourceBackup,
+  targetLabel,
+}: {
+  artifacts: BackupArtifactRecord[];
+  backups: BackupRequestRecord[];
+  destinationRoot: string;
+  restorePlans: RestorePlanRecord[];
+  selectedSourceArtifact: BackupArtifactRecord | null;
+  selectedSourceBackup: BackupRequestRecord | null;
+  targetLabel: string;
+}) {
+  const readyArtifacts = backups.filter(
+    (backup) => backupArtifactForRequest(backup, artifacts)?.status === "active",
+  );
+  const artifactBacked = backups.filter((backup) => backup.artifact_id);
+  const unavailableArtifacts = artifactBacked.length - readyArtifacts.length;
+  const selectedReady = selectedSourceArtifact?.status === "active";
+  const selectedSourceLabel = selectedSourceBackup
+    ? `source ${shortId(selectedSourceBackup.id)}`
+    : "choose artifact";
+  const selectedArtifactLabel = selectedSourceBackup
+    ? selectedReady
+      ? "available package"
+      : selectedSourceArtifact
+        ? `unverified package: ${selectedSourceArtifact.status.replace(/_/g, " ")}`
+        : selectedSourceBackup.artifact_id
+          ? "unverified package: metadata unavailable"
+          : "unverified package: no artifact"
+    : `${readyArtifacts.length} restore-ready package${readyArtifacts.length === 1 ? "" : "s"}`;
+  const scopeLabel = selectedSourceBackup
+    ? restoreDraftScopeLabel(
+        selectedSourceBackup.include_config,
+        selectedSourceBackup.paths,
+      )
+    : "destination and path behavior";
+  const destinationLabel = targetLabel || "choose destination";
+  const summaryClass = selectedSourceBackup
+    ? selectedReady
+      ? "backupRequestSummary backupRestoreSummary ready"
+      : "backupRequestSummary backupRestoreSummary attention"
+    : "backupRequestSummary backupRestoreSummary";
+  return (
+    <section aria-label="Backup restore summary" className={summaryClass}>
+      <strong>
+        {selectedSourceLabel} · {selectedArtifactLabel}
+      </strong>
+      <span>
+        {destinationLabel} · {scopeLabel}
+        {destinationRoot ? ` · restore path ${destinationRoot}` : ""}
+        {!selectedSourceBackup
+          ? ` · ${unavailableArtifacts} unverified · ${restorePlans.length} draft restore${restorePlans.length === 1 ? "" : "s"}`
+          : ""}
+      </span>
+    </section>
+  );
+}
+
+function BackupMigrationSummary({
+  artifacts,
+  backups,
+  clientLabel,
+  lastMigrationLink,
+  migrationLinks,
+  restorePlans,
+  selectedPlan,
+  selectedSourceArtifact,
+}: {
+  artifacts: BackupArtifactRecord[];
+  backups: BackupRequestRecord[];
+  clientLabel: (clientId: string) => string;
+  lastMigrationLink: MigrationLinkRecord | null;
+  migrationLinks: MigrationLinkRecord[];
+  restorePlans: RestorePlanRecord[];
+  selectedPlan: RestorePlanRecord | null;
+  selectedSourceArtifact: BackupArtifactRecord | null;
+}) {
+  const latestMapping =
+    lastMigrationLink ?? latestByIso(migrationLinks, (link) => link.created_at);
+  const relationship = selectedPlan ?? latestMapping ?? restorePlans[0] ?? null;
+  const sourceBackup =
+    backups.find(
+      (backup) => backup.id === relationship?.source_backup_request_id,
+    ) ?? null;
+  const sourceArtifact =
+    relationship === selectedPlan && selectedSourceArtifact
+      ? selectedSourceArtifact
+      : backupArtifactForRequest(sourceBackup, artifacts);
+  const activeArtifactCount = artifacts.filter(
+    (artifact) => artifact.status === "active",
+  ).length;
+  const sourceTitle = relationship
+    ? clientLabel(relationship.source_client_id)
+    : "Choose source VPS/artifact";
+  const sourceDetail = relationship
+    ? sourceArtifact?.status === "active"
+      ? `${shortId(sourceArtifact.id)} · available package`
+      : sourceBackup?.artifact_id
+        ? `${shortId(sourceBackup.artifact_id)} · verify artifact`
+        : "no artifact package yet"
+    : `${activeArtifactCount} active artifact${activeArtifactCount === 1 ? "" : "s"}`;
+  const replacementTitle = relationship
+    ? clientLabel(relationship.target_client_id)
+    : "Choose replacement VPS";
+  const replacementDetail =
+    relationship?.destination_root ?? "destination comes from a draft restore";
+  const mappingDetail = latestMapping
+    ? `mapping ${shortId(latestMapping.id)} · ${backupStatusLabel(latestMapping.status)}`
+    : `${migrationLinks.length} saved mapping${migrationLinks.length === 1 ? "" : "s"}`;
+  return (
+    <section
+      aria-label="Migration relationship summary"
+      className="backupMigrationSummary"
+    >
+      <div className="backupMigrationRoute">
+        <div>
+          <span>Source VPS/artifact</span>
+          <strong>{sourceTitle}</strong>
+          <small>{sourceDetail}</small>
+        </div>
+        <ArrowRight aria-hidden="true" size={18} />
+        <div>
+          <span>Replacement VPS</span>
+          <strong>{replacementTitle}</strong>
+          <small>{replacementDetail}</small>
+        </div>
+      </div>
+      <div className="backupMigrationMeta">
+        <span>{restorePlans.length} draft restore{restorePlans.length === 1 ? "" : "s"}</span>
+        <span>{mappingDetail}</span>
+        <span>identity, service checks, and cutover notes stay optional until cutover</span>
+      </div>
+    </section>
+  );
+}
+
 function BackupOverview({
   agents,
   artifacts,
@@ -2362,8 +2783,7 @@ function BackupOverview({
   onSelectSubpage: (subpage: string) => void;
   restorePlans: RestorePlanRecord[];
 }) {
-  const protectedClientIds = protectedBackupClientIds(backupPolicies, backups);
-  const unprotectedCount = Math.max(agents.length - protectedClientIds.size, 0);
+  const protection = backupProtectionSummary(agents, backupPolicies, backups);
   const failedBackups = backups.filter((backup) =>
     backupRequestNeedsAttention(backup.status),
   );
@@ -2383,61 +2803,86 @@ function BackupOverview({
   const restoreReadyPlans = restorePlans.filter((plan) =>
     restorePlanReady(plan.status),
   );
+  const affectedRecords = protection.records.filter(
+    (record) => record.state !== "recent",
+  );
+  const artifactStates = backupArtifactStateSummary(backups);
   const recoverabilityReady =
     agents.length > 0 &&
-    unprotectedCount === 0 &&
+    protection.recent === agents.length &&
     failedBackups.length === 0 &&
     activeArtifacts.length > 0 &&
     restoreReadyPlans.length > 0;
-  const decisionValue = recoverabilityReady
-    ? "Recovery verified"
-    : restoreReadyPlans.length === 0
-      ? "Needs restore test"
-      : unprotectedCount > 0
-        ? "Coverage gaps"
-        : failedBackups.length > 0
-          ? "Backup failures"
-          : activeArtifacts.length === 0
-            ? "No artifacts"
-            : "Review posture";
+  const decisionValue = backupRecoveryDecisionValue({
+    activeArtifactCount: activeArtifacts.length,
+    agentCount: agents.length,
+    failedBackupCount: failedBackups.length,
+    protection,
+    recoverabilityReady,
+    restoreReadyCount: restoreReadyPlans.length,
+  });
   const decisionDetail = recoverabilityReady
-    ? "Visible VPSs have coverage, artifacts, and at least one restore-ready plan."
-    : "Do not treat backup coverage as trustworthy until coverage gaps and restore-test evidence are closed.";
-  const workflowLinks = [
+    ? "Visible VPSs have recent usable backups, artifacts, and at least one restore-ready plan."
+    : "Do not treat backup coverage as trustworthy until recent usable backups and restore-test evidence are visible.";
+  const primaryActions = [
     {
-      detail: "Create one-time backups and inspect request history.",
+      detail: "Create a one-time backup request for selected VPSs.",
+      icon: <DatabaseBackup size={16} />,
+      label: "Back up now",
+      subpage: "requests",
+      tone: "primary" as const,
+      value: `${backups.length} request${backups.length === 1 ? "" : "s"}`,
+    },
+    {
+      detail: "Schedule recurring backups and retention.",
+      icon: <ShieldCheck size={16} />,
+      label: "Create policy",
+      subpage: "policies",
+      tone: "secondary" as const,
+      value: `${enabledPolicies.length}/${backupPolicies.length} enabled`,
+    },
+    {
+      detail: "Choose an artifact and plan recovery.",
+      icon: <RotateCcw size={16} />,
+      label: "Restore",
+      subpage: "restore",
+      tone: "secondary" as const,
+      value: restoreReadyPlans.length > 0 ? `${restoreReadyPlans.length} ready` : "not tested",
+    },
+  ];
+  const recordLinks = [
+    {
       icon: <DatabaseBackup size={16} />,
       label: "Requests",
       subpage: "requests",
       value: `${backups.length} request${backups.length === 1 ? "" : "s"}`,
     },
     {
-      detail: "Manage schedules, retention, and prune previews.",
       icon: <ShieldCheck size={16} />,
       label: "Policies",
       subpage: "policies",
       value: `${enabledPolicies.length}/${backupPolicies.length} enabled`,
     },
     {
-      detail: "Inspect stored artifacts, hashes, sizes, uploads, and handoffs.",
       icon: <Archive size={16} />,
       label: "Artifacts",
       subpage: "artifacts",
       value: `${formatBytes(storedBytes)} stored`,
     },
     {
-      detail: "Plan, run, verify, and roll back restore work.",
       icon: <RotateCcw size={16} />,
       label: "Restore",
       subpage: "restore",
       value: restoreReadyPlans.length > 0 ? `${restoreReadyPlans.length} ready` : "not tested",
     },
     {
-      detail: "Coordinate replacement VPS cutover from restore evidence.",
       icon: <ShieldCheck size={16} />,
       label: "Migration",
       subpage: "migration",
-      value: `${migrationLinks.length} link${migrationLinks.length === 1 ? "" : "s"}`,
+      value:
+        migrationLinks.length > 0
+          ? `${migrationLinks.length} link${migrationLinks.length === 1 ? "" : "s"}`
+          : "not used",
     },
   ];
 
@@ -2454,8 +2899,16 @@ function BackupOverview({
         </div>
         <div className="backupRecoveryMetrics" aria-label="Backup recovery evidence">
           <BackupOverviewMetric
-            label="Coverage"
-            value={`${protectedClientIds.size}/${agents.length} VPSs`}
+            label="Recent"
+            value={`${protection.recent}/${agents.length} VPSs`}
+          />
+          <BackupOverviewMetric
+            label="Overdue"
+            value={`${protection.overdue} VPS${protection.overdue === 1 ? "" : "s"}`}
+          />
+          <BackupOverviewMetric
+            label="Unknown"
+            value={`${protection.unknown} VPS${protection.unknown === 1 ? "" : "s"}`}
           />
           <BackupOverviewMetric
             label="Failures"
@@ -2472,33 +2925,81 @@ function BackupOverview({
         </div>
       </section>
 
-      <BackupPostureOverview items={items} />
-
-      <section className="backupWorkflowMap" aria-label="Backup overview workflow links">
-        <div className="backupPostureHeader">
-          <div>
-            <h3>Recovery workflow map</h3>
-            <span>Open the canonical page for each backup lifecycle responsibility.</span>
-          </div>
+      <section
+        aria-label="Backup overview primary actions"
+        className="backupQuickStart"
+      >
+        <div className="backupAffectedSummary">
+          <span>Protection decision</span>
+          <strong>
+            {affectedRecords.length > 0
+              ? `${affectedRecords.length} VPS${affectedRecords.length === 1 ? "" : "s"} need backup evidence`
+              : "All visible VPSs have recent backups"}
+          </strong>
+          <p>
+            {affectedRecords.length > 0
+              ? affectedRecords
+                .slice(0, 4)
+                .map(
+                  (record) =>
+                    `${formatVpsName(record.agent)}: ${backupProtectionStateLabel(record.state)}`,
+                )
+                .join("; ")
+              : "No visible backup coverage gaps in the current scope."}
+          </p>
         </div>
-        <div className="backupWorkflowLinks">
-          {workflowLinks.map((link) => (
+        <div className="backupQuickActions">
+          {primaryActions.map((action) => (
             <button
-              className="backupWorkflowLink"
-              key={link.subpage}
-              onClick={() => onSelectSubpage(link.subpage)}
+              className={`${action.tone === "primary" ? "primaryAction" : "secondaryAction"} backupQuickAction`}
+              key={action.label}
+              onClick={() => onSelectSubpage(action.subpage)}
+              title={action.detail}
               type="button"
             >
-              <span className="backupWorkflowIcon">{link.icon}</span>
+              {action.icon}
               <span>
-                <strong>{link.label}</strong>
-                <small>{link.value}</small>
-                <p>{link.detail}</p>
+                <strong>{action.label}</strong>
+                <small>{action.value}</small>
               </span>
             </button>
           ))}
         </div>
       </section>
+
+      <section
+        className="backupWorkflowMap compact"
+        aria-label="Backup overview supporting records"
+      >
+        <div className="backupPostureHeader">
+          <div>
+            <h3>Supporting records</h3>
+            <span>Open deeper request, policy, artifact, restore, or optional migration records.</span>
+          </div>
+        </div>
+        <div className="backupRecordLinks">
+          {recordLinks.map((link) => (
+            <button
+              className="backupRecordLink"
+              key={link.subpage}
+              onClick={() => onSelectSubpage(link.subpage)}
+              type="button"
+            >
+              <span className="backupWorkflowIcon">{link.icon}</span>
+              <strong>{link.label}</strong>
+              <small>{link.value}</small>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <details className="backupPostureDisclosure">
+        <summary>
+          <span>Detailed posture</span>
+          <small>Recent, overdue, policy, artifact, restore, migration, and retention evidence</small>
+        </summary>
+        <BackupPostureOverview items={items} />
+      </details>
 
       <section className="backupEvidenceSummary" aria-label="Backup overview evidence summary">
         <div className="backupPostureHeader">
@@ -2550,6 +3051,11 @@ function BackupOverview({
             }
           />
           <BackupEvidenceRow
+            label="Artifact states"
+            value={`${artifactStates.recorded} recorded · ${artifactStates.uploaded} uploaded · ${artifactStates.verified} verified`}
+            detail="Recorded is metadata only; uploaded or verified evidence is required before a backup can count as usable."
+          />
+          <BackupEvidenceRow
             label="Restore verification"
             value={
               latestRestorePlan
@@ -2567,9 +3073,13 @@ function BackupOverview({
             value={
               latestMigrationLink
                 ? `${shortId(latestMigrationLink.id)} · ${latestMigrationLink.status}`
-                : "No migration link"
+                : "Not used"
             }
-            detail="Migration requires restore evidence plus DNS, network, config, identity, and cutover checks."
+            detail={
+              latestMigrationLink
+                ? "Migration requires restore evidence plus DNS, network, config, identity, and cutover checks."
+                : "Migration is optional and stays neutral until the operator starts a replacement or cutover workflow."
+            }
           />
         </div>
       </section>
@@ -2589,6 +3099,37 @@ function BackupOverviewMetric({
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
+  );
+}
+
+function backupProtectionStateLabel(state: BackupProtectionState): string {
+  const labels: Record<BackupProtectionState, string> = {
+    overdue: "overdue",
+    recent: "recent",
+    unknown: "unknown",
+    unprotected: "unprotected",
+  };
+  return labels[state];
+}
+
+function backupArtifactStateSummary(backups: BackupRequestRecord[]): {
+  recorded: number;
+  uploaded: number;
+  verified: number;
+} {
+  return backups.reduce(
+    (summary, backup) => {
+      const status = backup.status.toLowerCase();
+      if (status.includes("artifact_metadata_recorded")) {
+        summary.recorded += 1;
+      } else if (status.includes("artifact_uploaded")) {
+        summary.uploaded += 1;
+      } else if (/completed|restored|verified|ready/.test(status)) {
+        summary.verified += 1;
+      }
+      return summary;
+    },
+    { recorded: 0, uploaded: 0, verified: 0 },
   );
 }
 
@@ -2621,11 +3162,11 @@ function BackupArtifactOwnershipGuide({
     0,
   );
   return (
-    <section className="backupWorkflowGuide" aria-label="Backup artifact ownership guide">
+    <section className="backupWorkflowGuide" aria-label="Backup artifact inventory summary">
       <div className="backupPostureHeader">
         <div>
-          <h3>Backup artifact ownership</h3>
-          <span>Backup artifact metadata, upload/import, and retained-output handoff stay in this page.</span>
+          <h3>Artifact inventory actions</h3>
+          <span>Restore and download packages from the inventory; source lineage stays in row details.</span>
         </div>
         <Archive size={20} />
       </div>
@@ -2647,21 +3188,21 @@ function BackupArtifactOwnershipGuide({
           tone={requestsAwaitingArtifact.length === 0 && backups.length > 0 ? "ready" : "attention"}
         />
         <BackupGuideStep
-          label="Upload/import"
+          label="Upload package"
           value={latestArtifact ? shortId(latestArtifact.id) : "Review upload required"}
           detail="Upload tar bytes or import recorded artifact metadata through a reviewed backup request action."
           tone={latestArtifact ? "ready" : "attention"}
         />
         <BackupGuideStep
-          label="Handoff source"
+          label="Transfer package"
           value="Retained job output"
-          detail="Create a backup artifact handoff from retained job output without exposing cleanup controls here."
+          detail="Create a backup artifact transfer package from retained job output without exposing cleanup controls here."
           tone="ready"
         />
         <BackupGuideStep
-          label="Restore consumers"
-          value="Restore and migration"
-          detail="Restore and migration pages consume these artifacts as staged archive evidence."
+          label="Lineage details"
+          value="Object key and SHA"
+          detail="Expanded rows keep object key, checksum, raw status, and linked request evidence."
           tone={activeArtifacts.length > 0 ? "ready" : "attention"}
         />
       </div>
@@ -2680,164 +3221,7 @@ function BackupArtifactOwnershipGuide({
           </button>
         ) : null}
         <button className="secondaryAction" onClick={() => onSelectSubpage("restore")} type="button">
-          Open restore workflow
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function RestoreWorkflowGuide({
-  artifacts,
-  lastRestoreJob,
-  lastRestorePlan,
-  lastRollbackJob,
-  onSelectSubpage,
-  restorePlans,
-}: {
-  artifacts: BackupArtifactRecord[];
-  lastRestoreJob: CreateJobResponse | null;
-  lastRestorePlan: RestorePlanRecord | null;
-  lastRollbackJob: CreateJobResponse | null;
-  onSelectSubpage: (subpage: string) => void;
-  restorePlans: RestorePlanRecord[];
-}) {
-  const latestPlan =
-    lastRestorePlan ?? latestByIso(restorePlans, (plan) => plan.created_at);
-  const restoreReadyPlans = restorePlans.filter((plan) =>
-    restorePlanReady(plan.status),
-  );
-  const activeArtifacts = artifacts.filter((artifact) => artifact.status === "active");
-  return (
-    <section className="backupWorkflowGuide" aria-label="Restore workflow guide">
-      <div className="backupPostureHeader">
-        <div>
-          <h3>Guided restore workflow</h3>
-          <span>Plan, stage, run, verify, and roll back from reviewed evidence.</span>
-        </div>
-        <RotateCcw size={20} />
-      </div>
-      <div className="backupWorkflowSteps">
-        <BackupGuideStep
-          label="Plan restore"
-          value={latestPlan ? `${shortId(latestPlan.id)} ${latestPlan.status}` : "Review plan required"}
-          detail="Freeze source backup, target VPS, destination root, scope, and privilege assertion."
-          tone={latestPlan ? "ready" : "attention"}
-        />
-        <BackupGuideStep
-          label="Stage archive"
-          value={activeArtifacts.length > 0 ? `${activeArtifacts.length} active artifact${activeArtifacts.length === 1 ? "" : "s"}` : "No active artifacts"}
-          detail="Select a completed target-side archive transfer before a live restore run."
-          tone={activeArtifacts.length > 0 ? "ready" : "attention"}
-        />
-        <BackupGuideStep
-          label="Run restore"
-          value={lastRestoreJob ? `${shortId(lastRestoreJob.job_id)} ${lastRestoreJob.status}` : "Review restore required"}
-          detail="Run a dry-run rehearsal or live restore through an explicit confirmation prompt."
-          tone={lastRestoreJob ? "ready" : "attention"}
-        />
-        <BackupGuideStep
-          label="Verify outcome"
-          value={restoreReadyPlans.length > 0 ? `${restoreReadyPlans.length} restore-ready` : "No verified restore"}
-          detail="Treat backups as untrusted until a restore-ready plan or rehearsal evidence exists."
-          tone={restoreReadyPlans.length > 0 ? "ready" : "attention"}
-        />
-        <BackupGuideStep
-          label="Rollback readiness"
-          value={
-            lastRollbackJob
-              ? `${shortId(lastRollbackJob.job_id)} ${lastRollbackJob.status}`
-              : lastRestoreJob
-                ? `source ${shortId(lastRestoreJob.job_id)}`
-                : "Run restore first"
-          }
-          detail="Rollback uses retained restore output evidence and a reviewed target impact prompt."
-          tone={lastRestoreJob || lastRollbackJob ? "ready" : "attention"}
-        />
-      </div>
-      <div className="backupEvidenceActions" aria-label="Restore related evidence links">
-        <button className="secondaryAction" onClick={() => onSelectSubpage("artifacts")} type="button">
-          Open artifact inventory
-        </button>
-        <button className="secondaryAction" onClick={() => onSelectSubpage("migration")} type="button">
-          Open migration checklist
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function MigrationWorkflowGuide({
-  artifacts,
-  lastMigrationLink,
-  migrationLinks,
-  onSelectSubpage,
-  restorePlans,
-}: {
-  artifacts: BackupArtifactRecord[];
-  lastMigrationLink: MigrationLinkRecord | null;
-  migrationLinks: MigrationLinkRecord[];
-  onSelectSubpage: (subpage: string) => void;
-  restorePlans: RestorePlanRecord[];
-}) {
-  const latestMigration =
-    lastMigrationLink ?? latestByIso(migrationLinks, (link) => link.created_at);
-  const restoreReadyPlans = restorePlans.filter((plan) =>
-    restorePlanReady(plan.status),
-  );
-  const migrationReadyLinks = migrationLinks.filter((link) =>
-    migrationLinkReady(link.status),
-  );
-  const activeArtifacts = artifacts.filter((artifact) => artifact.status === "active");
-  return (
-    <section className="backupWorkflowGuide" aria-label="Migration cutover guide">
-      <div className="backupPostureHeader">
-        <div>
-          <h3>Migration cutover checklist</h3>
-          <span>Coordinate replacement VPS cutover from restore evidence, not isolated link forms.</span>
-        </div>
-        <ShieldCheck size={20} />
-      </div>
-      <div className="backupWorkflowSteps">
-        <BackupGuideStep
-          label="Source restore plan"
-          value={restoreReadyPlans.length > 0 ? `${restoreReadyPlans.length} ready` : "No restore-ready plan"}
-          detail="Select a reviewed restore plan that maps source VPS, destination VPS, and restore scope."
-          tone={restoreReadyPlans.length > 0 ? "ready" : "attention"}
-        />
-        <BackupGuideStep
-          label="Staged archive"
-          value={activeArtifacts.length > 0 ? `${activeArtifacts.length} active artifact${activeArtifacts.length === 1 ? "" : "s"}` : "Archive required"}
-          detail="Use artifact metadata and completed target-side upload evidence before cutover restore."
-          tone={activeArtifacts.length > 0 ? "ready" : "attention"}
-        />
-        <BackupGuideStep
-          label="DNS, network, config"
-          value="Checklist required"
-          detail="Validate DNS, tunnel/network reachability, runtime config, and post-restore command output."
-        />
-        <BackupGuideStep
-          label="Identity and keys"
-          value="Mapping required"
-          detail="Confirm replacement VPS identity, privilege policy, gateway access, and key rotation plan."
-        />
-        <BackupGuideStep
-          label="Cutover evidence"
-          value={
-            latestMigration
-              ? `${shortId(latestMigration.id)} ${latestMigration.status}`
-              : `${migrationReadyLinks.length} ready link${migrationReadyLinks.length === 1 ? "" : "s"}`
-          }
-          detail="Store link, restore-run, verification, and rollback evidence with the migration record."
-          tone={latestMigration || migrationReadyLinks.length > 0 ? "ready" : "attention"}
-        />
-      </div>
-      <div className="backupEvidenceActions" aria-label="Migration related evidence links">
-        <button className="secondaryAction" onClick={() => onSelectSubpage("restore")} type="button">
-          Open restore evidence
-        </button>
-        <button className="secondaryAction" onClick={() => onSelectSubpage("artifacts")} type="button">
-          Open artifact inventory
+          Open restore sources
         </button>
       </div>
     </section>
@@ -2899,8 +3283,7 @@ function buildBackupPostureItems({
   migrationLinks: MigrationLinkRecord[];
   restorePlans: RestorePlanRecord[];
 }): BackupPostureItem[] {
-  const protectedClientIds = protectedBackupClientIds(backupPolicies, backups);
-  const unprotectedCount = Math.max(agents.length - protectedClientIds.size, 0);
+  const protection = backupProtectionSummary(agents, backupPolicies, backups);
   const enabledPolicies = backupPolicies.filter((policy) => policy.enabled);
   const latestBackup = latestByIso(backups, (backup) => backup.created_at);
   const latestArtifact = latestByIso(artifacts, (artifact) => artifact.created_at);
@@ -2915,20 +3298,53 @@ function buildBackupPostureItems({
     "asc",
   );
   const retentionDays = enabledPolicies.map((policy) => policy.retention_days).filter((value) => Number.isFinite(value));
+  const topProblem = protection.records.find((record) => record.state !== "recent");
   return [
     {
-      detail: `${protectedClientIds.size} of ${agents.length} VPSs have either enabled policy coverage or a recorded backup artifact.`,
-      label: "Protected VPSs",
-      tone: protectedClientIds.size === agents.length && agents.length > 0 ? "ready" : "attention",
-      value: `${protectedClientIds.size}/${agents.length}`,
+      detail: protection.recent === agents.length && agents.length > 0
+        ? "Every visible VPS has a recent usable backup inside its expected freshness window."
+        : topProblem
+          ? `${formatVpsName(topProblem.agent)}: ${topProblem.detail}`
+          : "No visible VPS backup records are available.",
+      label: "Recent backups",
+      tone: protection.recent === agents.length && agents.length > 0 ? "ready" : "attention",
+      value: `${protection.recent}/${agents.length}`,
     },
     {
-      detail: unprotectedCount === 0
-        ? "Every visible VPS has backup coverage evidence."
-        : `${unprotectedCount} visible VPS${unprotectedCount === 1 ? "" : "s"} lack policy coverage or a recorded artifact.`,
+      detail: protection.overdue === 0
+        ? "No visible VPS has an old usable backup outside its expected interval."
+        : protection.records
+          .filter((record) => record.state === "overdue")
+          .slice(0, 3)
+          .map((record) => `${formatVpsName(record.agent)}: ${record.detail}`)
+          .join("; "),
+      label: "Overdue",
+      tone: protection.overdue === 0 ? "ready" : "attention",
+      value: String(protection.overdue),
+    },
+    {
+      detail: protection.unprotected === 0
+        ? "Every visible VPS has at least some backup policy or request evidence."
+        : protection.records
+          .filter((record) => record.state === "unprotected")
+          .slice(0, 3)
+          .map((record) => `${formatVpsName(record.agent)}: ${record.detail}`)
+          .join("; "),
       label: "Unprotected",
-      tone: unprotectedCount === 0 ? "ready" : "attention",
-      value: String(unprotectedCount),
+      tone: protection.unprotected === 0 ? "ready" : "attention",
+      value: String(protection.unprotected),
+    },
+    {
+      detail: protection.unknown === 0
+        ? "No visible VPS is blocked by unverifiable backup evidence."
+        : protection.records
+          .filter((record) => record.state === "unknown")
+          .slice(0, 3)
+          .map((record) => `${formatVpsName(record.agent)}: ${record.detail}`)
+          .join("; "),
+      label: "Unknown",
+      tone: protection.unknown === 0 ? "ready" : "attention",
+      value: String(protection.unknown),
     },
     {
       detail: latestBackup
@@ -2972,11 +3388,11 @@ function buildBackupPostureItems({
     },
     {
       detail: migrationReadyLinks.length > 0
-        ? `${migrationReadyLinks.length} migration link${migrationReadyLinks.length === 1 ? "" : "s"} are linked to restore plans.`
-        : "Migration needs a restore plan, staged archive, identity/key mapping, and cutover checklist.",
+        ? `${migrationReadyLinks.length} migration mapping${migrationReadyLinks.length === 1 ? "" : "s"} connect source artifacts to replacement VPSs.`
+        : "No migration workflow is active; this is neutral unless a VPS replacement or cutover is planned.",
       label: "Migration",
-      tone: migrationReadyLinks.length > 0 ? "ready" : "attention",
-      value: migrationReadyLinks.length > 0 ? `${migrationReadyLinks.length} linked` : "Not planned",
+      tone: migrationReadyLinks.length > 0 ? "ready" : undefined,
+      value: migrationReadyLinks.length > 0 ? `${migrationReadyLinks.length} mapped` : "Not used",
     },
     {
       detail: retentionDays.length > 0
@@ -2989,25 +3405,193 @@ function buildBackupPostureItems({
   ];
 }
 
-function protectedBackupClientIds(
+function backupRecoveryDecisionValue({
+  activeArtifactCount,
+  agentCount,
+  failedBackupCount,
+  protection,
+  recoverabilityReady,
+  restoreReadyCount,
+}: {
+  activeArtifactCount: number;
+  agentCount: number;
+  failedBackupCount: number;
+  protection: BackupProtectionSummary;
+  recoverabilityReady: boolean;
+  restoreReadyCount: number;
+}): string {
+  if (recoverabilityReady) {
+    return "Recovery verified";
+  }
+  if (protection.recent === 0 && agentCount > 0) {
+    return "No recent backups";
+  }
+  if (protection.overdue > 0) {
+    return "Backups overdue";
+  }
+  if (protection.unknown > 0) {
+    return "Protection unknown";
+  }
+  if (protection.unprotected > 0) {
+    return "Coverage gaps";
+  }
+  if (restoreReadyCount === 0) {
+    return "Needs restore test";
+  }
+  if (failedBackupCount > 0) {
+    return "Backup failures";
+  }
+  if (activeArtifactCount === 0) {
+    return "No artifacts";
+  }
+  return "Review posture";
+}
+
+function backupProtectionSummary(
+  agents: AgentView[],
   backupPolicies: BackupPolicyRecord[],
   backups: BackupRequestRecord[],
-): Set<string> {
-  const protectedIds = new Set<string>();
-  for (const policy of backupPolicies) {
-    if (!policy.enabled) {
-      continue;
+  now = new Date(),
+): BackupProtectionSummary {
+  const records = agents.map((agent) =>
+    backupProtectionRecord(agent, backupPolicies, backups, now),
+  );
+  return {
+    records,
+    recent: records.filter((record) => record.state === "recent").length,
+    overdue: records.filter((record) => record.state === "overdue").length,
+    unprotected: records.filter((record) => record.state === "unprotected").length,
+    unknown: records.filter((record) => record.state === "unknown").length,
+  };
+}
+
+function backupProtectionRecord(
+  agent: AgentView,
+  backupPolicies: BackupPolicyRecord[],
+  backups: BackupRequestRecord[],
+  now: Date,
+): BackupProtectionRecord {
+  const policies = backupPolicies.filter(
+    (policy) => policy.enabled && policy.target_client_ids.includes(agent.id),
+  );
+  const clientBackups = backups.filter((backup) => backup.client_id === agent.id);
+  const latestBackup = latestByIso(clientBackups, (backup) => backup.created_at);
+  const latestUsableBackup = latestByIso(
+    clientBackups.filter(backupRequestHasUsableArtifact),
+    (backup) => backup.created_at,
+  );
+  const expectedMs = expectedBackupFreshnessMs(policies);
+
+  if (latestUsableBackup) {
+    const ageMs = Math.max(0, now.getTime() - new Date(latestUsableBackup.created_at).getTime());
+    if (ageMs <= expectedMs) {
+      return {
+        agent,
+        detail: `Latest usable backup ${formatCompactTime(latestUsableBackup.created_at)}; expected within ${formatDuration(expectedMs)}.`,
+        expectedMs,
+        latestBackup,
+        latestUsableBackup,
+        state: "recent",
+      };
     }
-    for (const clientId of policy.target_client_ids) {
-      protectedIds.add(clientId);
-    }
+    return {
+      agent,
+      detail: `Latest usable backup ${formatCompactTime(latestUsableBackup.created_at)}, older than the ${formatDuration(expectedMs)} expected window.`,
+      expectedMs,
+      latestBackup,
+      latestUsableBackup,
+      state: "overdue",
+    };
   }
-  for (const backup of backups) {
-    if (backup.artifact_id && !backupRequestNeedsAttention(backup.status)) {
-      protectedIds.add(backup.client_id);
-    }
+
+  if (latestBackup) {
+    return {
+      agent,
+      detail: `${backupStatusLabel(latestBackup.status)} ${formatCompactTime(latestBackup.created_at)}; no usable backup artifact is verified.`,
+      expectedMs,
+      latestBackup,
+      latestUsableBackup: null,
+      state: backupRequestNeedsAttention(latestBackup.status) ? "overdue" : "unknown",
+    };
   }
-  return protectedIds;
+
+  if (policies.length > 0) {
+    const latestPolicyRun = latestByIso(
+      policies.filter((policy) => policy.last_run_at),
+      (policy) => policy.last_run_at ?? "",
+    );
+    return {
+      agent,
+      detail: latestPolicyRun?.last_run_at
+        ? `Enabled policy last ran ${formatCompactTime(latestPolicyRun.last_run_at)}, but no usable backup artifact is recorded.`
+        : "Enabled policy exists, but no backup run has produced a usable artifact yet.",
+      expectedMs,
+      latestBackup: null,
+      latestUsableBackup: null,
+      state: latestPolicyRun?.last_run_at ? "overdue" : "unknown",
+    };
+  }
+
+  return {
+    agent,
+    detail: "No enabled backup policy or backup request is recorded.",
+    expectedMs,
+    latestBackup: null,
+    latestUsableBackup: null,
+    state: "unprotected",
+  };
+}
+
+function backupRequestHasUsableArtifact(backup: BackupRequestRecord): boolean {
+  if (!backup.artifact_id || backupRequestNeedsAttention(backup.status)) {
+    return false;
+  }
+  return /uploaded|completed|restored|verified|ready/.test(backup.status.toLowerCase());
+}
+
+function expectedBackupFreshnessMs(policies: BackupPolicyRecord[]): number {
+  const intervals = policies
+    .map(policyExpectedIntervalMs)
+    .filter((value): value is number => value !== null && Number.isFinite(value) && value > 0);
+  if (intervals.length === 0) {
+    return DEFAULT_BACKUP_FRESHNESS_MS;
+  }
+  return Math.max(Math.min(...intervals) * 2, 60 * 60 * 1000);
+}
+
+function policyExpectedIntervalMs(policy: BackupPolicyRecord): number | null {
+  const timestamps = [
+    policy.last_run_at,
+    policy.next_run_at,
+    ...policy.next_runs,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => new Date(value).getTime())
+    .filter((value) => Number.isFinite(value))
+    .sort((left, right) => left - right);
+  const deltas = timestamps
+    .slice(1)
+    .map((value, index) => value - timestamps[index])
+    .filter((value) => value > 0);
+  if (deltas.length > 0) {
+    return Math.min(...deltas);
+  }
+  if (/^0\s+\*\s+\*\s+\*\s+\*$/.test(policy.cron_expr.trim())) {
+    return 60 * 60 * 1000;
+  }
+  if (/^0\s+0\s+\*\s+\*\s+\*$/.test(policy.cron_expr.trim())) {
+    return 24 * 60 * 60 * 1000;
+  }
+  return null;
+}
+
+function formatDuration(ms: number): string {
+  const hours = Math.round(ms / (60 * 60 * 1000));
+  if (hours < 24) {
+    return `${hours}h`;
+  }
+  const days = Math.round(hours / 24);
+  return `${days}d`;
 }
 
 function backupRequestNeedsAttention(status: string): boolean {
@@ -3017,7 +3601,7 @@ function backupRequestNeedsAttention(status: string): boolean {
 function backupStatusLabel(status: string): string {
   const labels: Record<string, string> = {
     accepted: "Accepted",
-    artifact_metadata_recorded: "Artifact metadata recorded",
+    artifact_metadata_recorded: "Artifact recorded; content not verified",
     artifact_uploaded: "Artifact uploaded",
     completed: "Completed",
     failed: "Failed",
@@ -3075,6 +3659,25 @@ function backupArtifactForRequest(
     return null;
   }
   return artifacts.find((artifact) => artifact.id === backup.artifact_id) ?? null;
+}
+
+function restoreArtifactWarning(
+  backup: BackupRequestRecord | null,
+  artifact: BackupArtifactRecord | null,
+): string | null {
+  if (!backup) {
+    return null;
+  }
+  if (artifact?.status === "active") {
+    return null;
+  }
+  if (artifact) {
+    return `The selected artifact is ${artifact.status.replace(/_/g, " ")}. Run a dry restore only until the package is available and verified.`;
+  }
+  if (backup.artifact_id) {
+    return "This source references artifact metadata that is not visible in the current inventory. Verify the package before a live restore.";
+  }
+  return "This source has no artifact package yet. Save a draft if needed, but live restore requires a staged package.";
 }
 
 function migrationLinkPayloadHashHex(
@@ -3178,6 +3781,36 @@ function generatedRestoreDestinationRoot(
 
 function safeRestorePathSegment(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 120) || "unknown";
+}
+
+function restoreDraftScopeLabel(includeConfig: boolean, paths: string[]): string {
+  const parts: string[] = [];
+  if (includeConfig) {
+    parts.push("config restore");
+  }
+  if (paths.length > 0) {
+    parts.push(`${paths.length} path${paths.length === 1 ? "" : "s"}`);
+  }
+  return parts.join(" + ") || "metadata only";
+}
+
+function backupArtifactDownloadName(
+  artifact: BackupArtifactRecord,
+  backup: BackupRequestRecord,
+): string {
+  const client = safeRestorePathSegment(artifact.client_id);
+  return `${client}-${shortId(backup.id)}-${shortId(artifact.id)}.tar`;
+}
+
+function saveBlob(blob: Blob, name: string) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name || "backup-artifact.tar";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function clampInteger(value: number, min: number, max: number): number {

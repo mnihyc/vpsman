@@ -527,7 +527,7 @@ fn side_label(side: TunnelEndpointSide) -> &'static str {
 mod tests {
     use super::*;
     use vpsman_common::{
-        plan_tunnel, BandwidthTier, JobCommand, OspfCostPolicy, TunnelKind, TunnelPlanInput,
+        plan_tunnel, JobCommand, OspfCostPolicy, TunnelKind, TunnelPlanInput,
     };
 
     #[tokio::test]
@@ -811,7 +811,7 @@ mod tests {
             ipv6_address_pool_cidr: None,
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 15.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,

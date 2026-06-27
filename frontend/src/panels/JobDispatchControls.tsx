@@ -15,18 +15,23 @@ export function JobTargetSelector({
   verification: "checking" | "invalid" | "neutral" | "valid";
   verificationMessage: string | null;
 }) {
+  const scopeSummary = dispatchTargetScopeSummary(
+    selectorExpression,
+    agents.length,
+    verificationMessage,
+  );
   return (
     <div className="targetSelector">
       <div className="targetSelectorHeader">
         <strong>Targets</strong>
-        <span>{verificationMessage ?? "Select VPSs by id, tag, provider, country, or status"}</span>
+        <span>{scopeSummary}</span>
       </div>
       <SearchExpressionInput
         agents={agents}
         ariaLabel="Bulk target selector expression"
         className="targetExpressionBar"
         onChange={setSelectorExpression}
-        placeholder="id:edge-* || (provider:alpha && country:US)"
+        placeholder="All scoped VPSs, or filter by id/tag/provider/country/status"
         showMatchCount
         value={selectorExpression}
         verification={verification}
@@ -34,6 +39,23 @@ export function JobTargetSelector({
       />
     </div>
   );
+}
+
+function dispatchTargetScopeSummary(
+  selectorExpression: string,
+  agentCount: number,
+  verificationMessage: string | null,
+): string {
+  const trimmed = selectorExpression.trim();
+  if (!trimmed) {
+    return `All ${agentCount} scoped VPSs`;
+  }
+  if (trimmed === "id:*" || trimmed === "*") {
+    return `All ${agentCount} scoped VPSs`;
+  }
+  return verificationMessage
+    ? `${verificationMessage} resolved from selector`
+    : "Select VPSs by id, tag, provider, country, or status";
 }
 
 export function DispatchOptions({

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -10,6 +10,7 @@ import {
   Pencil,
   RefreshCw,
   Save,
+  Search,
   ServerCog,
   SlidersHorizontal,
   ShieldCheck,
@@ -19,11 +20,17 @@ import {
   UserX,
   X,
 } from "lucide-react";
-import { ConsoleDataGrid, type ConsoleDataGridColumn } from "../components/ConsoleDataGrid";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridColumn,
+} from "../components/ConsoleDataGrid";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
-import { TimeSeriesChart, type TimeSeriesChartLine } from "../components/TimeSeriesChart";
+import {
+  TimeSeriesChart,
+  type TimeSeriesChartLine,
+} from "../components/TimeSeriesChart";
 import { dashboardChartColors } from "../colorPalette";
 import {
   buildPrivilegeAssertion,
@@ -33,7 +40,10 @@ import {
   type PrivilegeAssertion,
   type PrivilegeMaterial,
 } from "../privilege";
-import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
+import {
+  useReviewGenerationGuard,
+  waitForReviewRender,
+} from "../hooks/useReviewGenerationGuard";
 import type {
   ActiveView,
   JsonValue,
@@ -48,9 +58,18 @@ import type {
   SystemMetricSeriesRecord,
   TagView,
 } from "../types";
-import type { SystemDashboardPointDensity, SystemDashboardWindow } from "../hooks/useSystemData";
+import type {
+  SystemDashboardPointDensity,
+  SystemDashboardWindow,
+} from "../hooks/useSystemData";
 import { PreferencesPanel } from "./PreferencesPanel";
-import { formatTime, shortId, statusClass } from "../utils";
+import {
+  formatCompactTime,
+  formatFullTime,
+  formatTime,
+  shortId,
+  statusClass,
+} from "../utils";
 
 type SystemPanelProps = {
   activeSubpage: string;
@@ -120,15 +139,19 @@ type SystemPanelProps = {
   tags: TagView[];
 };
 
-const dashboardWindows: Array<{ label: string; value: SystemDashboardWindow }> = [
-  { label: "15m", value: "15m" },
-  { label: "1h", value: "1h" },
-  { label: "6h", value: "6h" },
-  { label: "24h", value: "24h" },
-  { label: "7d", value: "7d" },
-  { label: "30d", value: "30d" },
-];
-const pointDensityOptions: Array<{ label: string; value: SystemDashboardPointDensity }> = [
+const dashboardWindows: Array<{ label: string; value: SystemDashboardWindow }> =
+  [
+    { label: "15m", value: "15m" },
+    { label: "1h", value: "1h" },
+    { label: "6h", value: "6h" },
+    { label: "24h", value: "24h" },
+    { label: "7d", value: "7d" },
+    { label: "30d", value: "30d" },
+  ];
+const pointDensityOptions: Array<{
+  label: string;
+  value: SystemDashboardPointDensity;
+}> = [
   { label: "Compact", value: "compact" },
   { label: "Balanced", value: "balanced" },
   { label: "Dense", value: "dense" },
@@ -144,6 +167,15 @@ type SystemAttentionItem = {
 };
 
 type SystemThresholdItem = {
+  label: string;
+  tone?: SystemHealthTone;
+  value: string;
+};
+
+type CapacitySubsystem = "database" | "dispatch" | "gateway" | "storage";
+
+type CapacityFactorItem = {
+  detail: string;
   label: string;
   tone?: SystemHealthTone;
   value: string;
@@ -180,30 +212,26 @@ const operatorHelpText = {
     "Initial operator password. It must be at least 12 characters and is used only when creating the user.",
   newPassword:
     "Replacement password. Save does not read or send this field; use Reset password to apply it and revoke existing sessions.",
-  role:
-    "Role controls the default permission bundle. Admin grants full operator control; operator and viewer are narrower unless scopes override them.",
+  role: "Role controls the default permission bundle. Admin grants full operator control; operator and viewer are narrower unless scopes override them.",
   sessionRefreshTtl:
     "Refresh-token/session lifetime in days for newly issued operator sessions. This is not the short access-token expiry shown in Audit / Sessions.",
   scopes:
     "Optional scope override. Leave empty for role defaults. Accepts comma or space separated scopes such as fleet:read, jobs:write, config:read, or *.",
   shortcuts:
     "Append a scope token to the override field. These shortcuts are editable text helpers, not immutable presets.",
-  save:
-    "Save role, scopes, and refresh-token session TTL only. This action never changes the password field.",
+  save: "Save role, scopes, and refresh-token session TTL only. This action never changes the password field.",
   resetPassword:
     "Apply the New password field, clear existing TOTP secret material, then revoke existing sessions for this operator.",
   clearTotp:
     "Remove stored TOTP secret material and revoke existing sessions. The user must enroll TOTP again before using it.",
-  enable:
-    "Allow this disabled operator to log in again.",
+  enable: "Allow this disabled operator to log in again.",
   disable:
     "Block login and revoke existing sessions without deleting the operator record.",
   delete:
     "Delete this operator record for login purposes, block login, and revoke existing sessions. The backend keeps the username reserved.",
   create:
     "Create the operator record. Password is required for creation and is not shown in the confirmation message.",
-  sessionAccessExpires:
-    "Short access-token expiry for this bearer session.",
+  sessionAccessExpires: "Short access-token expiry for this bearer session.",
   sessionRefreshExpires:
     "Refresh-token/session expiry. This is controlled by the user's refresh TTL setting.",
 };
@@ -231,7 +259,8 @@ type ConfigImpact = "hot" | "restart" | "unknown";
 
 const suiteConfigSections: ConfigSectionSpec[] = [
   {
-    description: "Private operator API listener, gateway control socket, and artifact thresholds.",
+    description:
+      "Private operator API listener, gateway control socket, and artifact thresholds.",
     id: "api",
     title: "API",
     fields: [
@@ -280,7 +309,8 @@ const suiteConfigSections: ConfigSectionSpec[] = [
     ],
   },
   {
-    description: "Agent listener, control socket, API forwarding URL, and gateway identity.",
+    description:
+      "Agent listener, control socket, API forwarding URL, and gateway identity.",
     id: "gateway",
     title: "Gateway",
     fields: [
@@ -331,7 +361,8 @@ const suiteConfigSections: ConfigSectionSpec[] = [
     ],
   },
   {
-    description: "Worker cadence, leases, schedule timeout, and offline reconciliation.",
+    description:
+      "Worker cadence, leases, schedule timeout, and offline reconciliation.",
     id: "worker",
     title: "Worker",
     fields: [
@@ -370,7 +401,8 @@ const suiteConfigSections: ConfigSectionSpec[] = [
     ],
   },
   {
-    description: "Control-plane pool and dispatch limits for 20-50 long-lived VPS operation.",
+    description:
+      "Control-plane pool and dispatch limits for 20-50 long-lived VPS operation.",
     id: "capacity",
     title: "Capacity",
     fields: [
@@ -409,7 +441,8 @@ const suiteConfigSections: ConfigSectionSpec[] = [
     ],
   },
   {
-    description: "Backup artifact location and optional object-store client settings.",
+    description:
+      "Backup artifact location and optional object-store client settings.",
     id: "storage",
     title: "Storage",
     fields: [
@@ -449,7 +482,8 @@ const suiteConfigSections: ConfigSectionSpec[] = [
     ],
   },
   {
-    description: "Secret-file references. Values point to mounted files; secret contents stay hidden.",
+    description:
+      "Secret-file references. Values point to mounted files; secret contents stay hidden.",
     id: "secrets",
     title: "Secrets",
     fields: [
@@ -491,7 +525,8 @@ const suiteConfigSections: ConfigSectionSpec[] = [
     ],
   },
   {
-    description: "Network and internal HTTP timing controls that shape retry and deadline behavior.",
+    description:
+      "Network and internal HTTP timing controls that shape retry and deadline behavior.",
     id: "timeouts",
     title: "Timeouts",
     fields: [
@@ -607,7 +642,13 @@ export function SystemPanel({
     );
   }
   if (activeSubpage === "operator") {
-    return <PreferencesPanel operator={operator} tags={tags} />;
+    return (
+      <PreferencesPanel
+        onSelectView={onSelectView}
+        operator={operator}
+        tags={tags}
+      />
+    );
   }
   if (activeSubpage === "capacity") {
     return (
@@ -615,6 +656,7 @@ export function SystemPanel({
         dashboard={dashboard}
         error={dashboardError}
         loading={dashboardLoading}
+        onSelectView={onSelectView}
         onPointDensityChange={onDashboardPointDensityChange}
         onRefresh={onDashboardRefresh}
         onWindowChange={onDashboardWindowChange}
@@ -807,14 +849,21 @@ function SystemUsersPanel({
   sessions: OperatorSessionRecord[];
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const selectedOperator = operators.find((item) => item.id === selectedId) ?? null;
-  const [editorMode, setEditorMode] = useState<"closed" | "create" | "edit">("closed");
+  const selectedOperator =
+    operators.find((item) => item.id === selectedId) ?? null;
+  const [editorMode, setEditorMode] = useState<"closed" | "create" | "edit">(
+    "closed",
+  );
   const [draftUsername, setDraftUsername] = useState("");
   const [draftPassword, setDraftPassword] = useState("");
   const [draftRole, setDraftRole] = useState("operator");
   const [draftScopes, setDraftScopes] = useState("");
-  const [draftSessionTtlDays, setDraftSessionTtlDays] = useState(defaultSessionTtlDays);
-  const [pendingAction, setPendingAction] = useState<PendingUserAction | null>(null);
+  const [draftSessionTtlDays, setDraftSessionTtlDays] = useState(
+    defaultSessionTtlDays,
+  );
+  const [pendingAction, setPendingAction] = useState<PendingUserAction | null>(
+    null,
+  );
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [reviewPending, setReviewPending] = useState(false);
@@ -823,23 +872,53 @@ function SystemUsersPanel({
     () => buildOperatorAccessSummaries(operators, sessions, authEvents),
     [authEvents, operators, sessions],
   );
-  const selectedAccessSummary = selectedOperator ? accessSummaries[selectedOperator.id] : null;
-  const activeOperators = operators.filter((operator) => operator.status !== "deleted");
-  const adminOperators = activeOperators.filter((operator) => operator.role === "admin");
-  const adminWithoutMfaCount = adminOperators.filter((operator) => !operator.totp_enabled).length;
+  const selectedAccessSummary = selectedOperator
+    ? accessSummaries[selectedOperator.id]
+    : null;
+  const activeOperators = operators.filter(
+    (operator) => operator.status !== "deleted",
+  );
+  const adminOperators = activeOperators.filter(
+    (operator) => operator.role === "admin",
+  );
+  const adminWithoutMfaCount = adminOperators.filter(
+    (operator) => !operator.totp_enabled,
+  ).length;
   const adminLongTtlCount = adminOperators.filter(
     (operator) => operator.session_refresh_ttl_secs > 30 * 86_400,
   ).length;
   const maxAdminTtlDays = adminOperators.reduce(
-    (max, operator) => Math.max(max, secondsToDays(operator.session_refresh_ttl_secs)),
+    (max, operator) =>
+      Math.max(max, secondsToDays(operator.session_refresh_ttl_secs)),
     0,
   );
-  const explicitScopeUsers = activeOperators.filter((operator) => operator.scopes.length > 0).length;
-  const visibleRoles = Array.from(new Set(activeOperators.map((operator) => operator.role))).sort();
-  const activeSessionCount = sessions.filter((session) => !session.revoked).length;
-  const revokableSessionCount = sessions.filter((session) => !session.current && !session.revoked).length;
-  const authFailureCount = authEvents.filter((event) => event.result !== "success").length;
-  const governanceTone = adminWithoutMfaCount > 0 || adminLongTtlCount > 0 ? "warning" : "ok";
+  const explicitScopeUsers = activeOperators.filter(
+    (operator) => operator.scopes.length > 0,
+  ).length;
+  const visibleRoles = Array.from(
+    new Set(activeOperators.map((operator) => operator.role)),
+  ).sort();
+  const customRoles = visibleRoles.filter(
+    (role) => !operatorRoleOptions.includes(role),
+  );
+  const activeSessionCount = sessions.filter(
+    (session) => !session.revoked,
+  ).length;
+  const revokableSessionCount = sessions.filter(
+    (session) => !session.current && !session.revoked,
+  ).length;
+  const authFailureEvents = authEvents.filter(
+    (event) => event.result !== "success",
+  );
+  const knownAuthFailureCount = activeOperators.reduce(
+    (count, operator) =>
+      count + (accessSummaries[operator.id]?.failedLogins ?? 0),
+    0,
+  );
+  const unknownAuthFailureCount =
+    authFailureEvents.length - knownAuthFailureCount;
+  const governanceTone =
+    adminWithoutMfaCount > 0 || adminLongTtlCount > 0 ? "warning" : "ok";
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -854,14 +933,20 @@ function SystemUsersPanel({
     setDraftPassword("");
     setDraftRole(selectedOperator.role);
     setDraftScopes(selectedOperator.scopes.join(", "));
-    setDraftSessionTtlDays(secondsToDays(selectedOperator.session_refresh_ttl_secs));
+    setDraftSessionTtlDays(
+      secondsToDays(selectedOperator.session_refresh_ttl_secs),
+    );
     setActionError(null);
     setPendingAction(null);
     invalidateReviewGeneration();
   }, [editorMode, selectedOperator, invalidateReviewGeneration]);
 
   useEffect(() => {
-    if (editorMode === "edit" && selectedId && !operators.some((operator) => operator.id === selectedId)) {
+    if (
+      editorMode === "edit" &&
+      selectedId &&
+      !operators.some((operator) => operator.id === selectedId)
+    ) {
       setSelectedId(null);
       setEditorMode("closed");
     }
@@ -873,76 +958,124 @@ function SystemUsersPanel({
     () => [
       {
         id: "username",
-        header: "Username",
-        cell: (row) => <span className="operatorRecordName">{row.username}</span>,
+        header: "User",
+        cell: (row) => (
+          <span className="operatorRecordName">
+            <strong>{row.username}</strong>
+            <small>{shortId(row.id)}</small>
+          </span>
+        ),
         searchValue: (row) => row.username,
         sortValue: (row) => row.username,
+        minSize: 190,
       },
       {
         id: "status",
         header: "Status",
-        cell: (row) => <span className={`statusPill ${statusClass(row.status)}`}>{row.status}</span>,
+        cell: (row) => (
+          <span className={`statusPill ${statusClass(row.status)}`}>
+            {operatorStatusLabel(row.status)}
+          </span>
+        ),
         searchValue: (row) => row.status,
         sortValue: (row) => row.status,
+        minSize: 96,
       },
       {
         id: "role",
         header: "Role",
-        cell: (row) => <span className={`statusPill ${statusClass(row.role)}`}>{row.role}</span>,
+        cell: (row) => (
+          <span className={`statusPill ${statusClass(row.role)}`}>
+            {operatorRoleLabel(row.role)}
+          </span>
+        ),
         searchValue: (row) => row.role,
         sortValue: (row) => row.role,
+        minSize: 105,
       },
       {
         id: "mfa",
         header: "MFA",
-        cell: (row) => (
-          <span className={`status ${row.totp_enabled ? "ok" : row.role === "admin" ? "warn" : "neutral"}`}>
-            {row.totp_enabled ? "enabled" : row.role === "admin" ? "admin off" : "off"}
-          </span>
-        ),
-        searchValue: (row) => (row.totp_enabled ? "mfa enabled totp enabled" : "mfa off totp off"),
+        cell: (row) => {
+          const mfaState = operatorMfaState(row);
+          return (
+            <span
+              className={`status operatorMfaStatus ${mfaState.statusClass}`}
+              title={mfaState.detail}
+            >
+              {mfaState.label}
+            </span>
+          );
+        },
+        searchValue: (row) => operatorMfaState(row).label,
         sortValue: (row) => (row.totp_enabled ? 1 : 0),
-      },
-      {
-        id: "ttl",
-        header: "Session TTL",
-        cell: (row) => (
-          <span
-            className={`status ${row.role === "admin" && row.session_refresh_ttl_secs > 30 * 86_400 ? "warn" : "neutral"}`}
-            title={operatorHelpText.sessionRefreshTtl}
-          >
-            {secondsToDays(row.session_refresh_ttl_secs)}d
-          </span>
-        ),
-        sortValue: (row) => row.session_refresh_ttl_secs,
+        minSize: 172,
       },
       {
         id: "sessions",
         header: "Active sessions",
         cell: (row) => `${accessSummaries[row.id]?.activeSessions ?? 0}`,
         sortValue: (row) => accessSummaries[row.id]?.activeSessions ?? 0,
+        minSize: 112,
       },
       {
         id: "lastLogin",
         header: "Last login",
-        cell: (row) => formatAuthEventTime(accessSummaries[row.id]?.lastLogin),
-        searchValue: (row) => formatAuthEventTime(accessSummaries[row.id]?.lastLogin),
-        sortValue: (row) => accessSummaries[row.id]?.lastLogin?.created_at ?? "",
+        cell: (row) => (
+          <OperatorAuthTimeValue event={accessSummaries[row.id]?.lastLogin} />
+        ),
+        searchValue: (row) =>
+          formatAuthEventTime(accessSummaries[row.id]?.lastLogin),
+        sortValue: (row) =>
+          accessSummaries[row.id]?.lastLogin?.created_at ?? "",
+        minSize: 120,
       },
       {
-        id: "failures",
-        header: "Failures",
-        cell: (row) => `${accessSummaries[row.id]?.failedLogins ?? 0}`,
-        sortValue: (row) => accessSummaries[row.id]?.failedLogins ?? 0,
-      },
-      {
-        id: "created",
-        header: "Created",
-        cell: (row) => formatTime(row.created_at),
-        sortValue: (row) => row.created_at,
+        id: "actions",
+        header: "Actions",
+        cell: (row) => (
+          <div className="operatorInlineActions">
+            <button
+              className="secondaryAction compactAction"
+              onClick={(event) => {
+                event.stopPropagation();
+                setSelectedOperatorId(row.id);
+              }}
+              title={`Manage ${row.username}.`}
+              type="button"
+            >
+              <Pencil size={14} />
+              <span>Manage</span>
+            </button>
+            <button
+              className="secondaryAction compactAction"
+              disabled={
+                reviewPending ||
+                actionPending ||
+                !canManageUsers ||
+                (accessSummaries[row.id]?.revokableSessions.length ?? 0) === 0
+              }
+              onClick={(event) => {
+                event.stopPropagation();
+                void submitOperatorSessionRevoke(row, accessSummaries[row.id]);
+              }}
+              title={
+                (accessSummaries[row.id]?.revokableSessions.length ?? 0) > 0
+                  ? `Revoke ${accessSummaries[row.id]?.revokableSessions.length ?? 0} non-current active sessions for ${row.username}.`
+                  : `No non-current active sessions are available to revoke for ${row.username}.`
+              }
+              type="button"
+            >
+              <UserX size={14} />
+              <span>Revoke sessions</span>
+            </button>
+          </div>
+        ),
+        enableHiding: false,
+        minSize: 210,
       },
     ],
-    [accessSummaries],
+    [accessSummaries, actionPending, canManageUsers, reviewPending],
   );
 
   function invalidateUserReview() {
@@ -998,7 +1131,9 @@ function SystemUsersPanel({
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
       }
-      setActionError(error instanceof Error ? error.message : "Privilege assertion failed");
+      setActionError(
+        error instanceof Error ? error.message : "Privilege assertion failed",
+      );
     } finally {
       if (isReviewGenerationCurrent(reviewGeneration)) {
         setReviewPending(false);
@@ -1105,13 +1240,25 @@ function SystemUsersPanel({
     await submitBulkStatus([selectedOperator], status);
   }
 
-  async function submitBulkStatus(rows: OperatorView[], status: "active" | "disabled" | "deleted") {
-    const operatorsToChange = rows.filter((operator) => operator.status !== "deleted");
+  async function submitBulkStatus(
+    rows: OperatorView[],
+    status: "active" | "disabled" | "deleted",
+  ) {
+    const operatorsToChange = rows.filter(
+      (operator) => operator.status !== "deleted",
+    );
     if (operatorsToChange.length === 0) {
       return;
     }
-    const adminRisk = operatorsToChange.some((operator) => operator.role === "admin");
-    const action = status === "active" ? "operator.enable" : status === "disabled" ? "operator.disable" : "operator.delete";
+    const adminRisk = operatorsToChange.some(
+      (operator) => operator.role === "admin",
+    );
+    const action =
+      status === "active"
+        ? "operator.enable"
+        : status === "disabled"
+          ? "operator.disable"
+          : "operator.delete";
     await requestPendingAction(async (material) => {
       const privileges = Object.fromEntries(
         await Promise.all(
@@ -1167,12 +1314,22 @@ function SystemUsersPanel({
     if (!selectedOperator || !selectedAccessSummary) {
       return;
     }
-    const sessionsToRevoke = selectedAccessSummary.revokableSessions;
+    await submitOperatorSessionRevoke(selectedOperator, selectedAccessSummary);
+  }
+
+  async function submitOperatorSessionRevoke(
+    operator: OperatorView,
+    summary: OperatorAccessSummary | undefined,
+  ) {
+    const sessionsToRevoke = summary?.revokableSessions ?? [];
     if (sessionsToRevoke.length === 0) {
-      setActionError("No non-current active sessions are available to revoke for this user");
+      setActionError(
+        "No non-current active sessions are available to revoke for this user",
+      );
       return;
     }
-    const adminRisk = selectedOperator.role === "admin" ||
+    const adminRisk =
+      operator.role === "admin" ||
       sessionsToRevoke.some((session) => session.operator_role === "admin");
     await requestPendingAction(async (material) => {
       const privileges = Object.fromEntries(
@@ -1199,7 +1356,7 @@ function SystemUsersPanel({
       );
       return {
         kind: "sessions",
-        operator: selectedOperator,
+        operator,
         sessions: sessionsToRevoke,
         adminRisk,
         privileges,
@@ -1208,11 +1365,15 @@ function SystemUsersPanel({
   }
 
   async function submitBulkTotpClear(rows: OperatorView[]) {
-    const operatorsToChange = rows.filter((operator) => operator.totp_enabled && operator.status !== "deleted");
+    const operatorsToChange = rows.filter(
+      (operator) => operator.totp_enabled && operator.status !== "deleted",
+    );
     if (operatorsToChange.length === 0) {
       return;
     }
-    const adminRisk = operatorsToChange.some((operator) => operator.role === "admin");
+    const adminRisk = operatorsToChange.some(
+      (operator) => operator.role === "admin",
+    );
     await requestPendingAction(async (material) => {
       const privileges = Object.fromEntries(
         await Promise.all(
@@ -1298,7 +1459,9 @@ function SystemUsersPanel({
       }
       setPendingAction(null);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "User action failed");
+      setActionError(
+        error instanceof Error ? error.message : "User action failed",
+      );
     } finally {
       setActionPending(false);
     }
@@ -1308,37 +1471,51 @@ function SystemUsersPanel({
 
   return (
     <div className="workspace singleColumn systemWorkspace systemUsersWorkspace">
-      <section className="controlPanel systemUserGovernancePanel" aria-label="Operator governance overview">
+      <section
+        className="controlPanel systemUserGovernancePanel"
+        aria-label="Operator governance overview"
+      >
         <div className="sectionHeader fleetInstancesHeader">
           <div>
-            <h2>Identity governance</h2>
-            <span>MFA policy, session TTL risk, RBAC scope posture, sessions, and authentication evidence.</span>
+            <h2>Operator access policy</h2>
+            <span>
+              Human operator accounts, MFA posture, refresh-token lifetime,
+              sessions, and loaded authentication evidence.
+            </span>
           </div>
           <ConsoleStatusBadge tone={governanceTone}>
-            {governanceTone === "ok" ? "Policy healthy" : "Needs review"}
+            {governanceTone === "ok" ? "Ready" : "Needs review"}
           </ConsoleStatusBadge>
         </div>
-        <div className="systemPostureGrid operatorPostureGrid">
+        <div className="systemPostureGrid operatorPostureGrid operatorPolicyGrid">
           <SystemPostureTile
-            detail="Policy target: admin accounts require MFA. Backend policy enforcement is not exposed yet, so this page flags current admin gaps."
+            detail="This console can see each operator's TOTP state. Server-side MFA enforcement policy is not exposed by the current API, so the page says recommended instead of enforced."
             icon={<ShieldCheck size={18} />}
-            label="MFA required policy"
+            label="MFA policy"
             tone={adminWithoutMfaCount > 0 ? "warning" : "ok"}
-            value={adminWithoutMfaCount > 0 ? `${adminWithoutMfaCount} admin off` : "admins covered"}
+            value={
+              adminWithoutMfaCount > 0
+                ? `${adminWithoutMfaCount} admin needs MFA`
+                : "MFA enabled for admins"
+            }
           />
           <SystemPostureTile
-            detail={`Admin refresh TTL should stay at or below 30d; longest visible admin TTL is ${maxAdminTtlDays || 0}d.`}
+            detail={`Refresh TTL controls long-lived browser session renewal, not the short access token. Admin target is <=30d; longest visible admin TTL is ${maxAdminTtlDays || 0}d.`}
             icon={<TimerReset size={18} />}
-            label="Admin session TTL"
+            label="Refresh TTL policy"
             tone={adminLongTtlCount > 0 ? "warning" : "ok"}
-            value={adminLongTtlCount > 0 ? `${adminLongTtlCount} over 30d` : "<=30d"}
+            value={
+              adminLongTtlCount > 0
+                ? `${adminLongTtlCount} admin over target`
+                : "Admins <=30d"
+            }
           />
           <SystemPostureTile
-            detail="Role defaults remain server-defined; explicit scope overrides are visible and admin grants require privilege review."
+            detail={`${activeOperators.length} active operators. Standard roles are Viewer, Operator, and Admin; ${explicitScopeUsers} operators have explicit scope overrides${customRoles.length > 0 ? `, and ${customRoles.length} custom roles are loaded` : ""}.`}
             icon={<LockKeyhole size={18} />}
             label="Role model"
-            tone={visibleRoles.length > 1 || explicitScopeUsers > 0 ? "info" : "warning"}
-            value={`${visibleRoles.length} roles / ${explicitScopeUsers} scoped`}
+            tone={customRoles.length > 0 ? "warning" : "info"}
+            value={`${operatorRoleOptions.length} standard roles`}
           />
           <SystemPostureTile
             detail={`${revokableSessionCount} non-current active sessions can be revoked here or reviewed in Audit / Sessions.`}
@@ -1348,28 +1525,55 @@ function SystemUsersPanel({
             value={`${activeSessionCount} active`}
           />
           <SystemPostureTile
-            detail="Counts come from loaded authentication history; use Audit / Sessions for the full auth event table."
+            detail={`${knownAuthFailureCount} failure events map to visible operators; ${Math.max(0, unknownAuthFailureCount)} loaded failures are unknown usernames. Per-user counts below use the same loaded auth history.`}
             icon={<AlertTriangle size={18} />}
-            label="Auth failures"
-            tone={authFailureCount > 0 ? "warning" : "ok"}
-            value={authFailureCount === 1 ? "1 failure" : `${authFailureCount} failures`}
+            label="Auth failures in loaded history"
+            tone={authFailureEvents.length > 0 ? "warning" : "ok"}
+            value={
+              authFailureEvents.length === 1
+                ? "1 loaded failure"
+                : `${authFailureEvents.length} loaded failures`
+            }
           />
-          <SystemPostureTile
-            detail="Password age, invite/locked state, and API-token inventory are not exposed by the current operator API."
-            icon={<KeyRound size={18} />}
-            label="Evidence gaps"
-            tone="warning"
-            value="3 backend gaps"
-          />
+        </div>
+        <div className="operatorPolicyNotice">
+          <strong>Policy evidence boundary</strong>
+          <span>
+            Password age, invite state, locked state, and API-token inventory
+            are not part of the current operator API. They are not counted as
+            healthy or unhealthy posture here.
+          </span>
         </div>
         <div className="operatorRoleMatrix" aria-label="RBAC role model">
           {operatorRoleOptions.map((role) => {
-            const roleCount = activeOperators.filter((operator) => operator.role === role).length;
+            const roleCount = activeOperators.filter(
+              (operator) => operator.role === role,
+            ).length;
             return (
-              <div className={role === "admin" ? "attention" : "neutral"} key={role}>
-                <strong>{role}</strong>
+              <div
+                className={role === "admin" ? "attention" : "neutral"}
+                key={role}
+              >
+                <strong>{operatorRoleLabel(role)}</strong>
                 <span>{roleDescription(role)}</span>
-                <small>{roleCount} users · {role === "admin" ? "extra confirmation on grants" : "scope overrides supported"}</small>
+                <small>
+                  {roleCount} users ·{" "}
+                  {role === "admin"
+                    ? "extra confirmation on grants"
+                    : "scope overrides supported"}
+                </small>
+              </div>
+            );
+          })}
+          {customRoles.map((role) => {
+            const roleCount = activeOperators.filter(
+              (operator) => operator.role === role,
+            ).length;
+            return (
+              <div className="attention" key={role}>
+                <strong>{operatorRoleLabel(role)}</strong>
+                <span>{roleDescription(role)}</span>
+                <small>{roleCount} users · custom backend role</small>
               </div>
             );
           })}
@@ -1378,7 +1582,7 @@ function SystemUsersPanel({
       <section className="controlPanel systemUsersTablePanel">
         <div className="sectionHeader fleetInstancesHeader">
           <div>
-            <h2>Users</h2>
+            <h2>Operator accounts</h2>
             <span>{operators.length} operator records</span>
           </div>
           <span className="sectionContext">
@@ -1407,7 +1611,12 @@ function SystemUsersPanel({
                 rows.length === 1
                   ? `Allow ${rows[0].username} to log in again.`
                   : `Allow ${rows.length} disabled operators to log in again.`,
-              disabled: (rows) => reviewPending || actionPending || !canManageUsers || rows.length === 0 || rows.some((row) => row.status !== "disabled"),
+              disabled: (rows) =>
+                reviewPending ||
+                actionPending ||
+                !canManageUsers ||
+                rows.length === 0 ||
+                rows.some((row) => row.status !== "disabled"),
               icon: <CheckCircle2 size={14} />,
               onSelect: (rows) => void submitBulkStatus(rows, "active"),
             },
@@ -1417,7 +1626,12 @@ function SystemUsersPanel({
                 rows.length === 1
                   ? `Block ${rows[0].username} login and revoke existing sessions.`
                   : `Block login and revoke existing sessions for ${rows.length} operators.`,
-              disabled: (rows) => reviewPending || actionPending || !canManageUsers || rows.length === 0 || rows.some((row) => row.status !== "active"),
+              disabled: (rows) =>
+                reviewPending ||
+                actionPending ||
+                !canManageUsers ||
+                rows.length === 0 ||
+                rows.some((row) => row.status !== "active"),
               icon: <UserX size={14} />,
               onSelect: (rows) => void submitBulkStatus(rows, "disabled"),
               tone: "danger",
@@ -1428,7 +1642,12 @@ function SystemUsersPanel({
                 rows.length === 1
                   ? `Delete ${rows[0].username} for login purposes and revoke existing sessions.`
                   : `Delete ${rows.length} operators for login purposes and revoke existing sessions.`,
-              disabled: (rows) => reviewPending || actionPending || !canManageUsers || rows.length === 0 || rows.some((row) => row.status === "deleted"),
+              disabled: (rows) =>
+                reviewPending ||
+                actionPending ||
+                !canManageUsers ||
+                rows.length === 0 ||
+                rows.some((row) => row.status === "deleted"),
               icon: <Trash2 size={14} />,
               onSelect: (rows) => void submitBulkStatus(rows, "deleted"),
               tone: "danger",
@@ -1439,7 +1658,14 @@ function SystemUsersPanel({
                 rows.length === 1
                   ? `Remove stored TOTP secret material for ${rows[0].username} and revoke existing sessions.`
                   : `Remove stored TOTP secret material and revoke sessions for ${rows.length} operators.`,
-              disabled: (rows) => reviewPending || actionPending || !canManageUsers || rows.length === 0 || rows.some((row) => !row.totp_enabled || row.status === "deleted"),
+              disabled: (rows) =>
+                reviewPending ||
+                actionPending ||
+                !canManageUsers ||
+                rows.length === 0 ||
+                rows.some(
+                  (row) => !row.totp_enabled || row.status === "deleted",
+                ),
               icon: <ShieldCheck size={14} />,
               onSelect: (rows) => void submitBulkTotpClear(rows),
             },
@@ -1449,17 +1675,23 @@ function SystemUsersPanel({
           empty="No operators"
           expandOnRowClick
           getRowId={(row) => row.id}
-          itemLabel="users"
+          itemLabel="operators"
+          mobileLayout="table"
           onOpenRow={(row) => setSelectedOperatorId(row.id)}
           renderExpandedRow={(row) => (
-            <OperatorDetailGrid operator={row} summary={accessSummaries[row.id]} />
+            <OperatorDetailGrid
+              operator={row}
+              summary={accessSummaries[row.id]}
+            />
           )}
-          renderSelectionPanel={(rows) => <OperatorSelectionPanel rows={rows} />}
+          renderSelectionPanel={(rows) => (
+            <OperatorSelectionPanel rows={rows} />
+          )}
           rows={operators}
-          searchPlaceholder="Search username, role, status, or TOTP"
+          searchPlaceholder="Search username, role, status, MFA, or session evidence"
           singleExpandedRow
           storageKey="vpsman.system.users"
-          title="Users"
+          title="Operator accounts"
           toolbarActions={
             <button
               className="secondaryAction compactAction"
@@ -1475,233 +1707,299 @@ function SystemUsersPanel({
       </section>
 
       {editorMode !== "closed" && (
-      <section className="controlPanel operatorEditorPanel" aria-label="Operator user editor">
-        <div className="sectionHeader fleetInstancesHeader">
-          <div>
-            <h2>{selectedOperator ? "Edit user" : "Create user"}</h2>
-            <span>{actionError ?? (reviewPending ? "Preparing review" : canManageUsers ? "Ready" : "Admin role required for changes")}</span>
-          </div>
-          <div className="sectionActions">
-            {selectedOperator && (
-            <span className="sectionContext">
-              {selectedOperator.status} · {selectedOperator.role} · {secondsToDays(selectedOperator.session_refresh_ttl_secs)}d session TTL
-            </span>
-            )}
-            <button
-              aria-label="Close operator editor"
-              className="iconButton"
-              onClick={closeEditor}
-              title="Close editor"
-              type="button"
-            >
-              <X size={16} />
-            </button>
-          </div>
-        </div>
-        <div className="operatorEditorBody">
-          {selectedOperator && selectedAccessSummary ? (
-            <OperatorAccessEvidencePanel
-              operator={selectedOperator}
-              onRevokeSessions={() => void submitSelectedSessionRevoke()}
-              pending={reviewPending || actionPending}
-              summary={selectedAccessSummary}
-              userCanManage={canManageUsers}
-            />
-          ) : null}
-          {draftRole === "admin" && (!selectedOperator || selectedOperator.role !== "admin") ? (
-            <div className="operatorAdminGuardrail" role="status">
-              <AlertTriangle size={16} />
+        <section
+          className="controlPanel operatorEditorPanel"
+          aria-label="Operator user editor"
+        >
+          <div className="sectionHeader fleetInstancesHeader">
+            <div>
+              <h2>{selectedOperator ? "Edit user" : "Create user"}</h2>
               <span>
-                Admin role grant requires local privilege unlock, danger confirmation, reviewed scopes, MFA enrollment, and a short refresh TTL.
+                {actionError ??
+                  (reviewPending
+                    ? "Preparing review"
+                    : canManageUsers
+                      ? "Ready"
+                      : "Admin role required for changes")}
               </span>
             </div>
-          ) : null}
-          <div className="operatorEditorFields">
-            <label>
-              <FieldLabel help={operatorHelpText.username} label="Username" />
-              <input
-                aria-label="Operator username"
-                disabled={Boolean(selectedOperator)}
-                onChange={(event) => {
-                  invalidateUserReview();
-                  setDraftUsername(event.target.value);
-                }}
-                title={operatorHelpText.username}
-                value={draftUsername}
-              />
-            </label>
-            <label>
-              <FieldLabel
-                help={selectedOperator ? operatorHelpText.newPassword : operatorHelpText.createPassword}
-                label={selectedOperator ? "New password" : "Password"}
-              />
-              <input
-                aria-label="Operator password"
-                disabled={!canManageUsers || editingDeleted}
-                minLength={12}
-                onChange={(event) => {
-                  invalidateUserReview();
-                  setDraftPassword(event.target.value);
-                }}
-                placeholder={selectedOperator ? "Only fill to reset" : "12+ characters"}
-                title={selectedOperator ? operatorHelpText.newPassword : operatorHelpText.createPassword}
-                type="password"
-                value={draftPassword}
-              />
-            </label>
-            <label>
-              <FieldLabel help={operatorHelpText.role} label="Role" />
-              <select
-                aria-label="Operator role"
-                disabled={!canManageUsers || editingDeleted}
-                onChange={(event) => {
-                  invalidateUserReview();
-                  setDraftRole(event.target.value);
-                }}
-                title={operatorHelpText.role}
-                value={draftRole}
-              >
-                {operatorRoleOptions.map((role) => (
-                  <option key={role} value={role}>{role}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <FieldLabel help={operatorHelpText.sessionRefreshTtl} label="Session TTL days" />
-              <input
-                aria-label="Session refresh TTL days"
-                disabled={!canManageUsers || editingDeleted}
-                max={3650}
-                min={1}
-                onChange={(event) => {
-                  invalidateUserReview();
-                  setDraftSessionTtlDays(Number(event.target.value));
-                }}
-                title={operatorHelpText.sessionRefreshTtl}
-                type="number"
-                value={draftSessionTtlDays}
-              />
-            </label>
-          </div>
-
-          <div className="operatorScopeEditor">
-            <label>
-              <FieldLabel help={operatorHelpText.scopes} label="Scopes" />
-              <textarea
-                aria-label="Operator scopes"
-                disabled={!canManageUsers || editingDeleted}
-                onChange={(event) => {
-                  invalidateUserReview();
-                  setDraftScopes(event.target.value);
-                }}
-                placeholder="Leave empty for role defaults"
-                rows={4}
-                title={operatorHelpText.scopes}
-                value={draftScopes}
-              />
-            </label>
-            <div
-              className="operatorScopeShortcuts"
-              aria-label="Scope shortcuts"
-              title={operatorHelpText.shortcuts}
-            >
-              {commonScopeOptions.map((scope) => (
-                <button
-                  className="tagChip"
-                  disabled={!canManageUsers || editingDeleted}
-                  key={scope}
-                  onClick={() => {
-                    invalidateUserReview();
-                    setDraftScopes(addScopeToken(draftScopes, scope));
-                  }}
-                  title={scope === "*" ? "Append * to grant all operator scopes." : `Append ${scope} to the scope override field.`}
-                  type="button"
-                >
-                  {scope}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="operatorEditorActions">
-            {selectedOperator ? (
-              <>
-                <button
-                  className="secondaryAction"
-                  disabled={!canManageUsers || editingDeleted || reviewPending || actionPending}
-                  onClick={() => void submitUpdate()}
-                  title={operatorHelpText.save}
-                  type="button"
-                >
-                  <Save size={17} />
-                  Save
-                </button>
-                <button
-                  className="secondaryAction"
-                  disabled={!canManageUsers || editingDeleted || draftPassword.length < 12 || reviewPending || actionPending}
-                  onClick={() => void submitPasswordReset()}
-                  title={operatorHelpText.resetPassword}
-                  type="button"
-                >
-                  <KeyRound size={17} />
-                  Reset password
-                </button>
-                <button
-                  className="secondaryAction"
-                  disabled={!canManageUsers || editingDeleted || !selectedOperator.totp_enabled || reviewPending || actionPending}
-                  onClick={() => void submitTotpClear()}
-                  title={operatorHelpText.clearTotp}
-                  type="button"
-                >
-                  <ShieldCheck size={17} />
-                  Clear TOTP
-                </button>
-                <button
-                  className="secondaryAction"
-                  disabled={!canManageUsers || selectedOperator.status !== "disabled" || reviewPending || actionPending}
-                  onClick={() => void submitStatus("active")}
-                  title={operatorHelpText.enable}
-                  type="button"
-                >
-                  <CheckCircle2 size={17} />
-                  Enable
-                </button>
-                <button
-                  className="secondaryAction dangerAction"
-                  disabled={!canManageUsers || selectedOperator.status !== "active" || reviewPending || actionPending}
-                  onClick={() => void submitStatus("disabled")}
-                  title={operatorHelpText.disable}
-                  type="button"
-                >
-                  <UserX size={17} />
-                  Disable
-                </button>
-                <button
-                  className="secondaryAction dangerAction"
-                  disabled={!canManageUsers || editingDeleted || reviewPending || actionPending}
-                  onClick={() => void submitStatus("deleted")}
-                  title={operatorHelpText.delete}
-                  type="button"
-                >
-                  <Trash2 size={17} />
-                  Delete
-                </button>
-              </>
-            ) : (
+            <div className="sectionActions">
+              {selectedOperator && (
+                <span className="sectionContext">
+                  {operatorStatusLabel(selectedOperator.status)} ·{" "}
+                  {operatorRoleLabel(selectedOperator.role)} ·{" "}
+                  {operatorRefreshTtlLabel(selectedOperator)}
+                </span>
+              )}
               <button
-                className="secondaryAction"
-                disabled={!canManageUsers || reviewPending || actionPending}
-                onClick={() => void submitCreate()}
-                title={operatorHelpText.create}
+                aria-label="Close operator editor"
+                className="iconButton"
+                onClick={closeEditor}
+                title="Close editor"
                 type="button"
               >
-                <UserPlus size={17} />
-                Create
+                <X size={16} />
               </button>
-            )}
+            </div>
           </div>
-        </div>
-      </section>
+          <div className="operatorEditorBody">
+            {selectedOperator && selectedAccessSummary ? (
+              <OperatorAccessEvidencePanel
+                operator={selectedOperator}
+                onRevokeSessions={() => void submitSelectedSessionRevoke()}
+                pending={reviewPending || actionPending}
+                summary={selectedAccessSummary}
+                userCanManage={canManageUsers}
+              />
+            ) : null}
+            {draftRole === "admin" &&
+            (!selectedOperator || selectedOperator.role !== "admin") ? (
+              <div className="operatorAdminGuardrail" role="status">
+                <AlertTriangle size={16} />
+                <span>
+                  Admin role grants require local privilege unlock, one
+                  confirmation, reviewed scopes, and a refresh TTL that matches
+                  the admin policy target.
+                </span>
+              </div>
+            ) : null}
+            <div className="operatorEditorFields">
+              <label>
+                <FieldLabel help={operatorHelpText.username} label="Username" />
+                <input
+                  aria-label="Operator username"
+                  disabled={Boolean(selectedOperator)}
+                  onChange={(event) => {
+                    invalidateUserReview();
+                    setDraftUsername(event.target.value);
+                  }}
+                  title={operatorHelpText.username}
+                  value={draftUsername}
+                />
+              </label>
+              <label>
+                <FieldLabel
+                  help={
+                    selectedOperator
+                      ? operatorHelpText.newPassword
+                      : operatorHelpText.createPassword
+                  }
+                  label={selectedOperator ? "New password" : "Password"}
+                />
+                <input
+                  aria-label="Operator password"
+                  disabled={!canManageUsers || editingDeleted}
+                  minLength={12}
+                  onChange={(event) => {
+                    invalidateUserReview();
+                    setDraftPassword(event.target.value);
+                  }}
+                  placeholder={
+                    selectedOperator ? "Only fill to reset" : "12+ characters"
+                  }
+                  title={
+                    selectedOperator
+                      ? operatorHelpText.newPassword
+                      : operatorHelpText.createPassword
+                  }
+                  type="password"
+                  value={draftPassword}
+                />
+              </label>
+              <label>
+                <FieldLabel help={operatorHelpText.role} label="Role" />
+                <select
+                  aria-label="Operator role"
+                  disabled={!canManageUsers || editingDeleted}
+                  onChange={(event) => {
+                    invalidateUserReview();
+                    setDraftRole(event.target.value);
+                  }}
+                  title={operatorHelpText.role}
+                  value={draftRole}
+                >
+                  {operatorRoleOptions.map((role) => (
+                    <option key={role} value={role}>
+                      {role}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <FieldLabel
+                  help={operatorHelpText.sessionRefreshTtl}
+                  label="Session TTL days"
+                />
+                <input
+                  aria-label="Session refresh TTL days"
+                  disabled={!canManageUsers || editingDeleted}
+                  max={3650}
+                  min={1}
+                  onChange={(event) => {
+                    invalidateUserReview();
+                    setDraftSessionTtlDays(Number(event.target.value));
+                  }}
+                  title={operatorHelpText.sessionRefreshTtl}
+                  type="number"
+                  value={draftSessionTtlDays}
+                />
+              </label>
+            </div>
+
+            <div className="operatorScopeEditor">
+              <label>
+                <FieldLabel help={operatorHelpText.scopes} label="Scopes" />
+                <textarea
+                  aria-label="Operator scopes"
+                  disabled={!canManageUsers || editingDeleted}
+                  onChange={(event) => {
+                    invalidateUserReview();
+                    setDraftScopes(event.target.value);
+                  }}
+                  placeholder="Leave empty for role defaults"
+                  rows={4}
+                  title={operatorHelpText.scopes}
+                  value={draftScopes}
+                />
+              </label>
+              <div
+                className="operatorScopeShortcuts"
+                aria-label="Scope shortcuts"
+                title={operatorHelpText.shortcuts}
+              >
+                {commonScopeOptions.map((scope) => (
+                  <button
+                    className="tagChip"
+                    disabled={!canManageUsers || editingDeleted}
+                    key={scope}
+                    onClick={() => {
+                      invalidateUserReview();
+                      setDraftScopes(addScopeToken(draftScopes, scope));
+                    }}
+                    title={
+                      scope === "*"
+                        ? "Append * to grant all operator scopes."
+                        : `Append ${scope} to the scope override field.`
+                    }
+                    type="button"
+                  >
+                    {scope}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="operatorEditorActions">
+              {selectedOperator ? (
+                <>
+                  <button
+                    className="secondaryAction"
+                    disabled={
+                      !canManageUsers ||
+                      editingDeleted ||
+                      reviewPending ||
+                      actionPending
+                    }
+                    onClick={() => void submitUpdate()}
+                    title={operatorHelpText.save}
+                    type="button"
+                  >
+                    <Save size={17} />
+                    Save
+                  </button>
+                  <button
+                    className="secondaryAction"
+                    disabled={
+                      !canManageUsers ||
+                      editingDeleted ||
+                      draftPassword.length < 12 ||
+                      reviewPending ||
+                      actionPending
+                    }
+                    onClick={() => void submitPasswordReset()}
+                    title={operatorHelpText.resetPassword}
+                    type="button"
+                  >
+                    <KeyRound size={17} />
+                    Reset password
+                  </button>
+                  <button
+                    className="secondaryAction"
+                    disabled={
+                      !canManageUsers ||
+                      editingDeleted ||
+                      !selectedOperator.totp_enabled ||
+                      reviewPending ||
+                      actionPending
+                    }
+                    onClick={() => void submitTotpClear()}
+                    title={operatorHelpText.clearTotp}
+                    type="button"
+                  >
+                    <ShieldCheck size={17} />
+                    Clear TOTP
+                  </button>
+                  <button
+                    className="secondaryAction"
+                    disabled={
+                      !canManageUsers ||
+                      selectedOperator.status !== "disabled" ||
+                      reviewPending ||
+                      actionPending
+                    }
+                    onClick={() => void submitStatus("active")}
+                    title={operatorHelpText.enable}
+                    type="button"
+                  >
+                    <CheckCircle2 size={17} />
+                    Enable
+                  </button>
+                  <button
+                    className="secondaryAction dangerAction"
+                    disabled={
+                      !canManageUsers ||
+                      selectedOperator.status !== "active" ||
+                      reviewPending ||
+                      actionPending
+                    }
+                    onClick={() => void submitStatus("disabled")}
+                    title={operatorHelpText.disable}
+                    type="button"
+                  >
+                    <UserX size={17} />
+                    Disable
+                  </button>
+                  <button
+                    className="secondaryAction dangerAction"
+                    disabled={
+                      !canManageUsers ||
+                      editingDeleted ||
+                      reviewPending ||
+                      actionPending
+                    }
+                    onClick={() => void submitStatus("deleted")}
+                    title={operatorHelpText.delete}
+                    type="button"
+                  >
+                    <Trash2 size={17} />
+                    Delete
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="secondaryAction"
+                  disabled={!canManageUsers || reviewPending || actionPending}
+                  onClick={() => void submitCreate()}
+                  title={operatorHelpText.create}
+                  type="button"
+                >
+                  <UserPlus size={17} />
+                  Create
+                </button>
+              )}
+            </div>
+          </div>
+        </section>
       )}
       <ConfirmationPrompt
         confirmLabel={pendingUserActionLabel(pendingAction)}
@@ -1711,7 +2009,11 @@ function SystemUsersPanel({
         onConfirm={() => void confirmUserAction()}
         open={pendingAction !== null}
         pending={actionPending}
-        title={pendingAction?.adminRisk ? "Confirm admin user action" : "Confirm user action"}
+        title={
+          pendingAction?.adminRisk
+            ? "Confirm admin user action"
+            : "Confirm user action"
+        }
         tone={pendingAction?.adminRisk ? "danger" : "normal"}
       />
     </div>
@@ -1735,11 +2037,14 @@ function SystemSessionsPanel({
   privilegeMaterial: PrivilegeMaterial | null;
   sessions: OperatorSessionRecord[];
 }) {
-  const [pendingRevoke, setPendingRevoke] = useState<PendingSessionRevoke | null>(null);
+  const [pendingRevoke, setPendingRevoke] =
+    useState<PendingSessionRevoke | null>(null);
   const [pending, setPending] = useState(false);
   const [reviewPending, setReviewPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [authFilter, setAuthFilter] = useState<"all" | "failures" | "success" | "suspicious">("all");
+  const [authFilter, setAuthFilter] = useState<
+    "all" | "failures" | "success" | "suspicious"
+  >("all");
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -1749,25 +2054,46 @@ function SystemSessionsPanel({
     () => buildSessionEnrichmentMap(sessions, authEvents),
     [authEvents, sessions],
   );
-  const failureGroups = useMemo(() => buildAuthFailureGroups(authEvents), [authEvents]);
+  const failureGroups = useMemo(
+    () => buildAuthFailureGroups(authEvents),
+    [authEvents],
+  );
   const filteredAuthEvents = useMemo(
-    () => authEvents.filter((event) => authEventMatchesFilter(event, authFilter, failureGroups)),
+    () =>
+      authEvents.filter((event) =>
+        authEventMatchesFilter(event, authFilter, failureGroups),
+      ),
     [authEvents, authFilter, failureGroups],
   );
   const activeSessions = sessions.filter((session) => !session.revoked);
-  const currentSessions = activeSessions.filter((session) => session.current).length;
-  const revokableSessions = activeSessions.filter((session) => !session.current).length;
-  const adminSessions = activeSessions.filter((session) => session.operator_role === "admin").length;
-  const enrichedSessions = activeSessions.filter((session) => sessionEnrichment[session.id]?.authEvent).length;
+  const currentSessions = activeSessions.filter(
+    (session) => session.current,
+  ).length;
+  const revokableSessions = activeSessions.filter(
+    (session) => !session.current,
+  ).length;
+  const adminSessions = activeSessions.filter(
+    (session) => session.operator_role === "admin",
+  ).length;
+  const enrichedSessions = activeSessions.filter(
+    (session) => sessionEnrichment[session.id]?.authEvent,
+  ).length;
   const suspiciousSessions = activeSessions.filter(
-    (session) => sessionEnrichment[session.id]?.riskTone === "warning" ||
+    (session) =>
+      sessionEnrichment[session.id]?.riskTone === "warning" ||
       sessionEnrichment[session.id]?.riskTone === "critical",
   ).length;
-  const authFailureCount = authEvents.filter((event) => event.result !== "success").length;
+  const authFailureCount = authEvents.filter(
+    (event) => event.result !== "success",
+  ).length;
   const uniqueRemoteIps = new Set(
-    authEvents.map((event) => event.remote_ip).filter((ip): ip is string => Boolean(ip)),
+    authEvents
+      .map((event) => event.remote_ip)
+      .filter((ip): ip is string => Boolean(ip)),
   ).size;
-  const sessionColumns = useMemo<ConsoleDataGridColumn<OperatorSessionRecord>[]>(
+  const sessionColumns = useMemo<
+    ConsoleDataGridColumn<OperatorSessionRecord>[]
+  >(
     () => [
       {
         id: "operator",
@@ -1784,20 +2110,32 @@ function SystemSessionsPanel({
       {
         id: "role",
         header: "Role",
-        cell: (row) => <span className={`status ${row.operator_role === "admin" ? "warn" : "neutral"}`}>{row.operator_role}</span>,
+        cell: (row) => (
+          <span
+            className={`status ${row.operator_role === "admin" ? "warn" : "neutral"}`}
+          >
+            {row.operator_role}
+          </span>
+        ),
         searchValue: (row) => row.operator_role,
       },
       {
         id: "network",
         header: "IP / location",
-        cell: (row) => <SessionNetworkCell enrichment={sessionEnrichment[row.id]} />,
-        searchValue: (row) => `${sessionEnrichment[row.id]?.remoteIp ?? ""} ${sessionEnrichment[row.id]?.location ?? ""}`,
+        cell: (row) => (
+          <SessionNetworkCell enrichment={sessionEnrichment[row.id]} />
+        ),
+        searchValue: (row) =>
+          `${sessionEnrichment[row.id]?.remoteIp ?? ""} ${sessionEnrichment[row.id]?.location ?? ""}`,
       },
       {
         id: "device",
         header: "Browser / device",
-        cell: (row) => <SessionDeviceCell enrichment={sessionEnrichment[row.id]} />,
-        searchValue: (row) => `${sessionEnrichment[row.id]?.browser ?? ""} ${sessionEnrichment[row.id]?.device ?? ""} ${sessionEnrichment[row.id]?.userAgent ?? ""}`,
+        cell: (row) => (
+          <SessionDeviceCell enrichment={sessionEnrichment[row.id]} />
+        ),
+        searchValue: (row) =>
+          `${sessionEnrichment[row.id]?.browser ?? ""} ${sessionEnrichment[row.id]?.device ?? ""} ${sessionEnrichment[row.id]?.userAgent ?? ""}`,
       },
       {
         id: "created",
@@ -1808,26 +2146,46 @@ function SystemSessionsPanel({
       {
         id: "access",
         header: "Access expires",
-        cell: (row) => <SessionDateCell help={operatorHelpText.sessionAccessExpires} value={row.expires_at} />,
+        cell: (row) => (
+          <SessionDateCell
+            help={operatorHelpText.sessionAccessExpires}
+            value={row.expires_at}
+          />
+        ),
         sortValue: (row) => row.expires_at,
       },
       {
         id: "refresh",
         header: "Refresh expires",
-        cell: (row) => <SessionDateCell help={operatorHelpText.sessionRefreshExpires} value={row.refresh_expires_at} />,
+        cell: (row) => (
+          <SessionDateCell
+            help={operatorHelpText.sessionRefreshExpires}
+            value={row.refresh_expires_at}
+          />
+        ),
         sortValue: (row) => row.refresh_expires_at,
       },
       {
         id: "state",
         header: "State",
-        cell: (row) => <span className={`status ${row.current ? "info" : row.revoked ? "warn" : "ok"}`}>{row.current ? "current" : row.revoked ? "revoked" : "active"}</span>,
-        searchValue: (row) => row.current ? "current" : row.revoked ? "revoked" : "active",
+        cell: (row) => (
+          <span
+            className={`status ${row.current ? "info" : row.revoked ? "warn" : "ok"}`}
+          >
+            {row.current ? "current" : row.revoked ? "revoked" : "active"}
+          </span>
+        ),
+        searchValue: (row) =>
+          row.current ? "current" : row.revoked ? "revoked" : "active",
       },
       {
         id: "risk",
         header: "Risk",
-        cell: (row) => <SessionRiskCell enrichment={sessionEnrichment[row.id]} />,
-        searchValue: (row) => `${sessionEnrichment[row.id]?.riskLabel ?? ""} ${sessionEnrichment[row.id]?.riskDetail ?? ""}`,
+        cell: (row) => (
+          <SessionRiskCell enrichment={sessionEnrichment[row.id]} />
+        ),
+        searchValue: (row) =>
+          `${sessionEnrichment[row.id]?.riskLabel ?? ""} ${sessionEnrichment[row.id]?.riskDetail ?? ""}`,
       },
       {
         id: "revoke",
@@ -1858,20 +2216,58 @@ function SystemSessionsPanel({
     ],
     [pending, reviewPending, sessionEnrichment],
   );
-  const eventColumns = useMemo<ConsoleDataGridColumn<OperatorAuthEventRecord>[]>(
+  const eventColumns = useMemo<
+    ConsoleDataGridColumn<OperatorAuthEventRecord>[]
+  >(
     () => [
-      { id: "time", header: "Time", cell: (row) => <SessionDateCell value={row.created_at} />, sortValue: (row) => row.created_at },
-      { id: "username", header: "Username", cell: (row) => row.username, searchValue: (row) => row.username },
+      {
+        id: "time",
+        header: "Time",
+        cell: (row) => <SessionDateCell value={row.created_at} />,
+        sortValue: (row) => row.created_at,
+      },
+      {
+        id: "username",
+        header: "Username",
+        cell: (row) => row.username,
+        searchValue: (row) => row.username,
+      },
       {
         id: "result",
         header: "Result",
-        cell: (row) => <span className={`status ${authEventRiskTone(row)}`}>{row.result}</span>,
+        cell: (row) => (
+          <span className={`status ${authEventRiskTone(row)}`}>
+            {row.result}
+          </span>
+        ),
         searchValue: (row) => row.result,
       },
-      { id: "reason", header: "Reason", cell: (row) => <AuthReasonCell event={row} failureGroups={failureGroups} />, searchValue: (row) => row.reason },
-      { id: "remote", header: "Remote IP", cell: (row) => row.remote_ip ?? "not recorded", searchValue: (row) => row.remote_ip },
-      { id: "agent", header: "Browser / device", cell: (row) => <AuthUserAgentCell event={row} />, searchValue: (row) => row.user_agent },
-      { id: "session", header: "Session", cell: (row) => shortId(row.session_id), searchValue: (row) => row.session_id },
+      {
+        id: "reason",
+        header: "Reason",
+        cell: (row) => (
+          <AuthReasonCell event={row} failureGroups={failureGroups} />
+        ),
+        searchValue: (row) => row.reason,
+      },
+      {
+        id: "remote",
+        header: "Remote IP",
+        cell: (row) => row.remote_ip ?? "not recorded",
+        searchValue: (row) => row.remote_ip,
+      },
+      {
+        id: "agent",
+        header: "Browser / device",
+        cell: (row) => <AuthUserAgentCell event={row} />,
+        searchValue: (row) => row.user_agent,
+      },
+      {
+        id: "session",
+        header: "Session",
+        cell: (row) => shortId(row.session_id),
+        searchValue: (row) => row.session_id,
+      },
     ],
     [failureGroups],
   );
@@ -1883,7 +2279,9 @@ function SystemSessionsPanel({
   }, [sessions, invalidateReviewGeneration]);
 
   async function requestSessionRevoke(rows: OperatorSessionRecord[]) {
-    const sessionsToRevoke = rows.filter((session) => !session.current && !session.revoked);
+    const sessionsToRevoke = rows.filter(
+      (session) => !session.current && !session.revoked,
+    );
     if (sessionsToRevoke.length === 0) {
       return;
     }
@@ -1893,7 +2291,9 @@ function SystemSessionsPanel({
       return;
     }
     const reviewGeneration = captureReviewGeneration();
-    const adminRisk = sessionsToRevoke.some((session) => session.operator_role === "admin");
+    const adminRisk = sessionsToRevoke.some(
+      (session) => session.operator_role === "admin",
+    );
     setReviewPending(true);
     setError(null);
     try {
@@ -1932,7 +2332,11 @@ function SystemSessionsPanel({
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
       }
-      setError(actionError instanceof Error ? actionError.message : "Privilege assertion failed");
+      setError(
+        actionError instanceof Error
+          ? actionError.message
+          : "Privilege assertion failed",
+      );
     } finally {
       if (isReviewGenerationCurrent(reviewGeneration)) {
         setReviewPending(false);
@@ -1956,7 +2360,11 @@ function SystemSessionsPanel({
       }
       setPendingRevoke(null);
     } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : "Session revoke failed");
+      setError(
+        actionError instanceof Error
+          ? actionError.message
+          : "Session revoke failed",
+      );
     } finally {
       setPending(false);
     }
@@ -1965,14 +2373,28 @@ function SystemSessionsPanel({
   return (
     <div className="workspace singleColumn systemWorkspace">
       <div className="workspaceStack">
-        <section className="controlPanel sessionSecurityOverview" aria-label="Session evidence security overview">
+        <section
+          className="controlPanel sessionSecurityOverview"
+          aria-label="Session evidence security overview"
+        >
           <div className="sectionHeader fleetInstancesHeader">
             <div>
               <h2>Session security posture</h2>
-              <span>Active bearer sessions, revocation readiness, IP/device evidence, and suspicious authentication signals.</span>
+              <span>
+                Active bearer sessions, revocation readiness, IP/device
+                evidence, and suspicious authentication signals.
+              </span>
             </div>
-            <ConsoleStatusBadge tone={suspiciousSessions > 0 || failureGroups.length > 0 ? "warning" : "ok"}>
-              {suspiciousSessions > 0 || failureGroups.length > 0 ? "Needs review" : "Healthy"}
+            <ConsoleStatusBadge
+              tone={
+                suspiciousSessions > 0 || failureGroups.length > 0
+                  ? "warning"
+                  : "ok"
+              }
+            >
+              {suspiciousSessions > 0 || failureGroups.length > 0
+                ? "Needs review"
+                : "Healthy"}
             </ConsoleStatusBadge>
           </div>
           <div className="systemPostureGrid sessionPostureGrid">
@@ -1994,7 +2416,9 @@ function SystemSessionsPanel({
               detail={`${enrichedSessions} active sessions have login-event IP and user-agent evidence; missing evidence is flagged per row.`}
               icon={<Network size={18} />}
               label="IP/device evidence"
-              tone={enrichedSessions === activeSessions.length ? "ok" : "warning"}
+              tone={
+                enrichedSessions === activeSessions.length ? "ok" : "warning"
+              }
               value={`${enrichedSessions}/${activeSessions.length} enriched`}
             />
             <SystemPostureTile
@@ -2009,7 +2433,11 @@ function SystemSessionsPanel({
               icon={<AlertTriangle size={18} />}
               label="Suspicious auth"
               tone={authFailureCount > 0 ? "warning" : "ok"}
-              value={authFailureCount === 1 ? "1 failure" : `${authFailureCount} failures`}
+              value={
+                authFailureCount === 1
+                  ? "1 failure"
+                  : `${authFailureCount} failures`
+              }
             />
             <SystemPostureTile
               detail="The table exposes row-level revoke actions and still supports bulk revoke from selected rows."
@@ -2023,7 +2451,11 @@ function SystemSessionsPanel({
         <section className="controlPanel">
           <div className="sectionHeader compact">
             <h2>Sessions</h2>
-            <span>{reviewPending ? "Preparing review" : `${sessions.length} recent sessions`}</span>
+            <span>
+              {reviewPending
+                ? "Preparing review"
+                : `${sessions.length} recent sessions`}
+            </span>
           </div>
           {error && <div className="panelError">{error}</div>}
           <ConsoleDataGrid
@@ -2036,7 +2468,11 @@ function SystemSessionsPanel({
                     : `Revoke ${rows.length} selected bearer sessions.`,
                 tone: "danger",
                 icon: <UserX size={14} />,
-                disabled: (rows) => reviewPending || pending || rows.length === 0 || rows.some((row) => row.current || row.revoked),
+                disabled: (rows) =>
+                  reviewPending ||
+                  pending ||
+                  rows.length === 0 ||
+                  rows.some((row) => row.current || row.revoked),
                 onSelect: (rows) => void requestSessionRevoke(rows),
               },
             ]}
@@ -2046,7 +2482,12 @@ function SystemSessionsPanel({
             expandOnRowClick
             getRowId={(row) => row.id}
             itemLabel="sessions"
-            renderExpandedRow={(row) => <SessionDetailGrid enrichment={sessionEnrichment[row.id]} session={row} />}
+            renderExpandedRow={(row) => (
+              <SessionDetailGrid
+                enrichment={sessionEnrichment[row.id]}
+                session={row}
+              />
+            )}
             renderSelectionPanel={(rows) => (
               <SessionSelectionPanel rows={rows} />
             )}
@@ -2076,9 +2517,15 @@ function SystemSessionsPanel({
           <div className="sectionHeader compact sessionAuthHeader">
             <div>
               <h2>Authentication history</h2>
-              <span>{filteredAuthEvents.length} of {authEvents.length} login results</span>
+              <span>
+                {filteredAuthEvents.length} of {authEvents.length} login results
+              </span>
             </div>
-            <div className="segmented sessionAuthFilters" role="group" aria-label="Authentication history filters">
+            <div
+              className="segmented sessionAuthFilters"
+              role="group"
+              aria-label="Authentication history filters"
+            >
               {[
                 { label: "All", value: "all" },
                 { label: "Failures", value: "failures" },
@@ -2089,7 +2536,9 @@ function SystemSessionsPanel({
                   aria-pressed={authFilter === option.value}
                   className={authFilter === option.value ? "active" : ""}
                   key={option.value}
-                  onClick={() => setAuthFilter(option.value as typeof authFilter)}
+                  onClick={() =>
+                    setAuthFilter(option.value as typeof authFilter)
+                  }
                   type="button"
                 >
                   {option.label}
@@ -2098,7 +2547,10 @@ function SystemSessionsPanel({
             </div>
           </div>
           {failureGroups.length > 0 ? (
-            <div className="authFailureGroups" aria-label="Authentication failure groups">
+            <div
+              className="authFailureGroups"
+              aria-label="Authentication failure groups"
+            >
               <div className="dashboardSideRailHeader">
                 <strong>Grouped failures</strong>
                 <span>{failureGroups.length} patterns</span>
@@ -2107,9 +2559,14 @@ function SystemSessionsPanel({
                 <div className="authFailureGroupRow" key={group.key}>
                   <span className="status warn">{group.riskLabel}</span>
                   <strong>{group.username}</strong>
-                  <b>{group.count === 1 ? "1 attempt" : `${group.count} attempts`}</b>
+                  <b>
+                    {group.count === 1
+                      ? "1 attempt"
+                      : `${group.count} attempts`}
+                  </b>
                   <p>
-                    {group.reason} from {group.remoteIp}; last {formatTime(group.lastAt)}. {group.riskDetail}
+                    {group.reason} from {group.remoteIp}; last{" "}
+                    {formatTime(group.lastAt)}. {group.riskDetail}
                   </p>
                 </div>
               ))}
@@ -2133,9 +2590,15 @@ function SystemSessionsPanel({
         </section>
       </div>
       <ConfirmationPrompt
-        confirmLabel={(pendingRevoke?.sessions.length ?? 0) === 1 ? "Revoke session" : "Revoke sessions"}
+        confirmLabel={
+          (pendingRevoke?.sessions.length ?? 0) === 1
+            ? "Revoke session"
+            : "Revoke sessions"
+        }
         detail={
-          pendingRevoke?.sessions.some((session) => session.operator_role === "admin")
+          pendingRevoke?.sessions.some(
+            (session) => session.operator_role === "admin",
+          )
             ? "This revokes an admin user's bearer session. Existing browser state for that session will stop working after the current access token expires or is checked again."
             : (pendingRevoke?.sessions.length ?? 0) === 1
               ? "This revokes the selected bearer session."
@@ -2143,12 +2606,27 @@ function SystemSessionsPanel({
         }
         items={[
           { label: "Sessions", value: pendingRevoke?.sessions.length ?? 0 },
-          { label: "Users", value: pendingRevoke?.sessions.map((session) => session.operator_username).join(", ") || "-" },
-          { label: "Admin sessions", value: pendingRevoke?.sessions.filter((session) => session.operator_role === "admin").length ?? 0 },
+          {
+            label: "Operators",
+            value:
+              pendingRevoke?.sessions
+                .map((session) => session.operator_username)
+                .join(", ") || "-",
+          },
+          {
+            label: "Admin sessions",
+            value:
+              pendingRevoke?.sessions.filter(
+                (session) => session.operator_role === "admin",
+              ).length ?? 0,
+          },
           {
             label: "Payload",
             value: pendingRevoke?.sessions[0]
-              ? shortId(pendingRevoke.privileges[pendingRevoke.sessions[0].id].payloadHashHex)
+              ? shortId(
+                  pendingRevoke.privileges[pendingRevoke.sessions[0].id]
+                    .payloadHashHex,
+                )
               : "-",
           },
         ]}
@@ -2156,7 +2634,13 @@ function SystemSessionsPanel({
         onConfirm={() => void confirmSessionRevoke()}
         open={Boolean(pendingRevoke)}
         pending={pending}
-        title={pendingRevoke?.sessions.some((session) => session.operator_role === "admin") ? "Confirm admin session revoke" : "Confirm session revoke"}
+        title={
+          pendingRevoke?.sessions.some(
+            (session) => session.operator_role === "admin",
+          )
+            ? "Confirm admin session revoke"
+            : "Confirm session revoke"
+        }
         tone="danger"
       />
     </div>
@@ -2178,8 +2662,12 @@ function OperatorAccessEvidencePanel({
 }) {
   const ttlDays = secondsToDays(operator.session_refresh_ttl_secs);
   const adminTtlRisk = operator.role === "admin" && ttlDays > 30;
+  const mfaState = operatorMfaState(operator);
   return (
-    <section className="operatorAccessEvidencePanel" aria-label="Operator access evidence">
+    <section
+      className="operatorAccessEvidencePanel"
+      aria-label="Operator access evidence"
+    >
       <div className="dashboardSideRailHeader">
         <strong>Access evidence</strong>
         <span>{operator.username}</span>
@@ -2187,13 +2675,15 @@ function OperatorAccessEvidencePanel({
       <div className="operatorEvidenceGrid">
         <OperatorEvidenceTile
           label="MFA"
-          tone={operator.totp_enabled ? "ok" : operator.role === "admin" ? "warning" : "neutral"}
-          value={operator.totp_enabled ? "enabled" : operator.role === "admin" ? "Admin MFA is off" : "off"}
+          detail={mfaState.detail}
+          tone={mfaState.tone}
+          value={mfaState.label}
         />
         <OperatorEvidenceTile
           label="Refresh TTL"
+          detail={operatorRefreshTtlDetail(operator)}
           tone={adminTtlRisk ? "warning" : "neutral"}
-          value={`${ttlDays}d${adminTtlRisk ? " admin risk" : ""}`}
+          value={operatorRefreshTtlLabel(operator)}
         />
         <OperatorEvidenceTile
           label="Active sessions"
@@ -2214,24 +2704,17 @@ function OperatorAccessEvidencePanel({
           tone={operator.status === "active" ? "ok" : "warning"}
           value={operatorLifecycleLabel(operator)}
         />
-        <OperatorEvidenceTile
-          label="Password age"
-          tone="warning"
-          value="not exposed"
-        />
-        <OperatorEvidenceTile
-          label="API tokens"
-          tone="warning"
-          value="not exposed"
-        />
       </div>
       <div className="operatorEvidenceFooter">
         <span>
-          Invite and locked states are not separate backend fields; the visible lifecycle is active, disabled, or deleted.
+          Password age, invite state, locked state, and API-token inventory are
+          not exposed by the current operator API.
         </span>
         <button
           className="secondaryAction compactAction"
-          disabled={!userCanManage || pending || summary.revokableSessions.length === 0}
+          disabled={
+            !userCanManage || pending || summary.revokableSessions.length === 0
+          }
           onClick={onRevokeSessions}
           title={
             summary.revokableSessions.length > 0
@@ -2249,16 +2732,18 @@ function OperatorAccessEvidencePanel({
 }
 
 function OperatorEvidenceTile({
+  detail,
   label,
   tone = "neutral",
   value,
 }: {
+  detail?: string;
   label: string;
   tone?: SystemHealthTone;
   value: string;
 }) {
   return (
-    <span className={`operatorEvidenceTile ${tone}`}>
+    <span className={`operatorEvidenceTile ${tone}`} title={detail}>
       <small>{label}</small>
       <strong>{value}</strong>
     </span>
@@ -2284,19 +2769,23 @@ function OperatorDetailGrid({
       </span>
       <span>
         <strong>Status</strong>
-        <span>{operator.status}</span>
+        <span>{operatorStatusLabel(operator.status)}</span>
       </span>
       <span>
         <strong>Role</strong>
-        <span>{operator.role}</span>
+        <span>{operatorRoleLabel(operator.role)}</span>
       </span>
       <span>
-        <strong>Session TTL</strong>
-        <span>{secondsToDays(operator.session_refresh_ttl_secs)}d</span>
+        <strong>Refresh TTL</strong>
+        <span title={operatorRefreshTtlDetail(operator)}>
+          {operatorRefreshTtlLabel(operator)}
+        </span>
       </span>
       <span>
-        <strong>TOTP</strong>
-        <span>{operator.totp_enabled ? "enabled" : "off"}</span>
+        <strong>MFA</strong>
+        <span title={operatorMfaState(operator).detail}>
+          {operatorMfaState(operator).label}
+        </span>
       </span>
       <span>
         <strong>Active sessions</strong>
@@ -2304,47 +2793,66 @@ function OperatorDetailGrid({
       </span>
       <span>
         <strong>Last login</strong>
-        <span>{formatAuthEventTime(summary?.lastLogin ?? null)}</span>
+        <span>
+          <OperatorAuthTimeValue event={summary?.lastLogin ?? null} />
+        </span>
       </span>
       <span>
-        <strong>Failed logins</strong>
+        <strong>Auth failures</strong>
         <span>{summary?.failedLogins ?? 0}</span>
       </span>
       <span>
         <strong>Scopes</strong>
-        <span>{operator.scopes.length > 0 ? operator.scopes.join(", ") : "role defaults"}</span>
+        <span>
+          {operator.scopes.length > 0
+            ? operator.scopes.join(", ")
+            : "role defaults"}
+        </span>
       </span>
       <span>
         <strong>Created</strong>
-        <span>{formatTime(operator.created_at)}</span>
+        <span>
+          <FullTimeValue value={operator.created_at} />
+        </span>
       </span>
       <span>
         <strong>Disabled</strong>
-        <span>{operator.disabled_at ? formatTime(operator.disabled_at) : "no"}</span>
+        <span>
+          {operator.disabled_at ? (
+            <FullTimeValue value={operator.disabled_at} />
+          ) : (
+            "No"
+          )}
+        </span>
       </span>
       <span>
         <strong>Deleted</strong>
-        <span>{operator.deleted_at ? formatTime(operator.deleted_at) : "no"}</span>
+        <span>
+          {operator.deleted_at ? (
+            <FullTimeValue value={operator.deleted_at} />
+          ) : (
+            "No"
+          )}
+        </span>
       </span>
       <span>
-        <strong>Password age</strong>
-        <span>not exposed</span>
-      </span>
-      <span>
-        <strong>Invite / lock</strong>
-        <span>not exposed separately</span>
-      </span>
-      <span>
-        <strong>API tokens</strong>
-        <span>not exposed</span>
+        <strong>API evidence boundary</strong>
+        <span>
+          Password age, invite state, locked state, and API tokens are not
+          exposed.
+        </span>
       </span>
     </div>
   );
 }
 
 function OperatorSelectionPanel({ rows }: { rows: OperatorView[] }) {
-  const adminCount = rows.filter((operator) => operator.role === "admin").length;
-  const activeCount = rows.filter((operator) => operator.status === "active").length;
+  const adminCount = rows.filter(
+    (operator) => operator.role === "admin",
+  ).length;
+  const activeCount = rows.filter(
+    (operator) => operator.status === "active",
+  ).length;
   const totpCount = rows.filter((operator) => operator.totp_enabled).length;
   return (
     <div className="gridSelectionSummary">
@@ -2354,15 +2862,15 @@ function OperatorSelectionPanel({ rows }: { rows: OperatorView[] }) {
       </span>
       <span>
         <strong>{adminCount}</strong>
-        admin
+        Admin role
       </span>
       <span>
         <strong>{activeCount}</strong>
-        active
+        Active
       </span>
       <span>
         <strong>{totpCount}</strong>
-        TOTP
+        MFA enabled
       </span>
     </div>
   );
@@ -2392,7 +2900,11 @@ function SessionDateCell({ help, value }: { help?: string; value: string }) {
   );
 }
 
-function SessionNetworkCell({ enrichment }: { enrichment?: SessionEnrichment }) {
+function SessionNetworkCell({
+  enrichment,
+}: {
+  enrichment?: SessionEnrichment;
+}) {
   const remoteIp = enrichment?.remoteIp ?? "IP not recorded";
   const location = enrichment?.location ?? "Geo not exposed";
   return (
@@ -2405,7 +2917,10 @@ function SessionNetworkCell({ enrichment }: { enrichment?: SessionEnrichment }) 
 
 function SessionDeviceCell({ enrichment }: { enrichment?: SessionEnrichment }) {
   return (
-    <span className="sessionDeviceCell" title={enrichment?.userAgent ?? "Login user agent not recorded"}>
+    <span
+      className="sessionDeviceCell"
+      title={enrichment?.userAgent ?? "Login user agent not recorded"}
+    >
       <strong>{enrichment?.browser ?? "Unknown browser"}</strong>
       <small>{enrichment?.device ?? "Device not recorded"}</small>
     </span>
@@ -2414,7 +2929,10 @@ function SessionDeviceCell({ enrichment }: { enrichment?: SessionEnrichment }) {
 
 function SessionRiskCell({ enrichment }: { enrichment?: SessionEnrichment }) {
   return (
-    <span className={`status ${enrichment?.riskTone ?? "neutral"}`} title={enrichment?.riskDetail}>
+    <span
+      className={`status ${enrichment?.riskTone ?? "neutral"}`}
+      title={enrichment?.riskDetail}
+    >
       {enrichment?.riskLabel ?? "No login evidence"}
     </span>
   );
@@ -2427,12 +2945,21 @@ function AuthReasonCell({
   event: OperatorAuthEventRecord;
   failureGroups: AuthFailureGroup[];
 }) {
-  const repeated = failureGroups.find((group) => authFailureGroupKey(event) === group.key && group.count > 1);
+  const repeated = failureGroups.find(
+    (group) => authFailureGroupKey(event) === group.key && group.count > 1,
+  );
   const reason = event.reason ?? "accepted";
   return (
-    <span className="authReasonCell" title={`${reason} - ${authEventRiskLabel(event)}`}>
+    <span
+      className="authReasonCell"
+      title={`${reason} - ${authEventRiskLabel(event)}`}
+    >
       <strong>{reason}</strong>
-      {repeated ? <small>{repeated.count} repeated attempts</small> : <small>{authEventRiskLabel(event)}</small>}
+      {repeated ? (
+        <small>{repeated.count} repeated attempts</small>
+      ) : (
+        <small>{authEventRiskLabel(event)}</small>
+      )}
     </span>
   );
 }
@@ -2440,7 +2967,10 @@ function AuthReasonCell({
 function AuthUserAgentCell({ event }: { event: OperatorAuthEventRecord }) {
   const parsed = parseUserAgent(event.user_agent);
   return (
-    <span className="sessionDeviceCell" title={event.user_agent ?? "User agent not recorded"}>
+    <span
+      className="sessionDeviceCell"
+      title={event.user_agent ?? "User agent not recorded"}
+    >
       <strong>{parsed.browser}</strong>
       <small>{parsed.device}</small>
     </span>
@@ -2498,7 +3028,9 @@ function SessionDetailGrid({
       </span>
       <span>
         <strong>State</strong>
-        <span>{session.current ? "current" : session.revoked ? "revoked" : "active"}</span>
+        <span>
+          {session.current ? "current" : session.revoked ? "revoked" : "active"}
+        </span>
       </span>
       <span>
         <strong>Created</strong>
@@ -2514,14 +3046,18 @@ function SessionDetailGrid({
       </span>
       <span>
         <strong>Revoked</strong>
-        <span>{session.revoked_at ? formatTime(session.revoked_at) : "no"}</span>
+        <span>
+          {session.revoked_at ? formatTime(session.revoked_at) : "no"}
+        </span>
       </span>
     </div>
   );
 }
 
 function SessionSelectionPanel({ rows }: { rows: OperatorSessionRecord[] }) {
-  const revokable = rows.filter((session) => !session.current && !session.revoked).length;
+  const revokable = rows.filter(
+    (session) => !session.current && !session.revoked,
+  ).length;
   const current = rows.filter((session) => session.current).length;
   const revoked = rows.filter((session) => session.revoked).length;
   return (
@@ -2656,7 +3192,10 @@ function buildSessionEnrichmentMap(
   const loginEventsBySession = new Map(
     authEvents
       .filter((event) => event.session_id && event.result === "success")
-      .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))
+      .sort(
+        (left, right) =>
+          Date.parse(right.created_at) - Date.parse(left.created_at),
+      )
       .map((event) => [event.session_id as string, event]),
   );
   return Object.fromEntries(
@@ -2671,7 +3210,9 @@ function buildSessionEnrichmentMap(
           authEvent,
           browser: parsed.browser,
           device: parsed.device,
-          location: authEvent?.remote_ip ? "Geo not exposed" : "Location not recorded",
+          location: authEvent?.remote_ip
+            ? "Geo not exposed"
+            : "Location not recorded",
           remoteIp,
           riskDetail: risk.detail,
           riskLabel: risk.label,
@@ -2683,7 +3224,9 @@ function buildSessionEnrichmentMap(
   );
 }
 
-function buildAuthFailureGroups(authEvents: OperatorAuthEventRecord[]): AuthFailureGroup[] {
+function buildAuthFailureGroups(
+  authEvents: OperatorAuthEventRecord[],
+): AuthFailureGroup[] {
   const groups = new Map<string, AuthFailureGroup>();
   for (const event of authEvents) {
     if (event.result === "success") {
@@ -2725,7 +3268,10 @@ function buildAuthFailureGroups(authEvents: OperatorAuthEventRecord[]): AuthFail
         remote_ip: group.remoteIp === "IP not recorded" ? null : group.remoteIp,
         result: "failure",
         session_id: null,
-        user_agent: group.userAgent === "User agent not recorded" ? null : group.userAgent,
+        user_agent:
+          group.userAgent === "User agent not recorded"
+            ? null
+            : group.userAgent,
         username: group.username,
       },
       group.count,
@@ -2733,7 +3279,9 @@ function buildAuthFailureGroups(authEvents: OperatorAuthEventRecord[]): AuthFail
     group.riskLabel = risk.label;
     group.riskDetail = risk.detail;
   }
-  return Array.from(groups.values()).sort((left, right) => Date.parse(right.lastAt) - Date.parse(left.lastAt));
+  return Array.from(groups.values()).sort(
+    (left, right) => Date.parse(right.lastAt) - Date.parse(left.lastAt),
+  );
 }
 
 function authEventMatchesFilter(
@@ -2750,7 +3298,10 @@ function authEventMatchesFilter(
   if (filter === "failures") {
     return event.result !== "success";
   }
-  return authEventRiskTone(event, failureGroups) === "warning" || authEventRiskTone(event, failureGroups) === "critical";
+  return (
+    authEventRiskTone(event, failureGroups) === "warning" ||
+    authEventRiskTone(event, failureGroups) === "critical"
+  );
 }
 
 function authFailureGroupKey(event: OperatorAuthEventRecord): string {
@@ -2768,7 +3319,9 @@ function authEventRiskTone(
   if (event.result === "success") {
     return event.remote_ip && event.user_agent ? "ok" : "warning";
   }
-  const group = failureGroups.find((item) => item.key === authFailureGroupKey(event));
+  const group = failureGroups.find(
+    (item) => item.key === authFailureGroupKey(event),
+  );
   if (event.result === "throttled" || (group?.count ?? 0) >= 5) {
     return "critical";
   }
@@ -2777,7 +3330,9 @@ function authEventRiskTone(
 
 function authEventRiskLabel(event: OperatorAuthEventRecord): string {
   if (event.result === "success") {
-    return event.remote_ip && event.user_agent ? "Accepted login" : "Accepted; evidence incomplete";
+    return event.remote_ip && event.user_agent
+      ? "Accepted login"
+      : "Accepted; evidence incomplete";
   }
   if (!event.operator_id) {
     return "Unknown user";
@@ -2789,23 +3344,30 @@ function authEventRiskLabel(event: OperatorAuthEventRecord): string {
 }
 
 function authFailureRisk(
-  event: Pick<OperatorAuthEventRecord, "operator_id" | "reason" | "result" | "username"> & Partial<OperatorAuthEventRecord>,
+  event: Pick<
+    OperatorAuthEventRecord,
+    "operator_id" | "reason" | "result" | "username"
+  > &
+    Partial<OperatorAuthEventRecord>,
   count: number,
 ): { detail: string; label: string } {
   if (event.result === "throttled" || count >= 5) {
     return {
-      detail: "High-volume or throttled authentication failures need investigation.",
+      detail:
+        "High-volume or throttled authentication failures need investigation.",
       label: "High-risk failure",
     };
   }
   if (!event.operator_id) {
     return {
-      detail: "No operator matched this username; verify whether this is mistyped access or credential probing.",
+      detail:
+        "No operator matched this username; verify whether this is mistyped access or credential probing.",
       label: count > 1 ? "Repeated unknown user" : "Unknown user",
     };
   }
   return {
-    detail: "Failure maps to a known operator; review reason, IP, and user agent.",
+    detail:
+      "Failure maps to a known operator; review reason, IP, and user agent.",
     label: count > 1 ? "Repeated failure" : "Failed login",
   };
 }
@@ -2815,7 +3377,11 @@ function sessionRisk(
   authEvent: OperatorAuthEventRecord | null,
 ): { detail: string; label: string; tone: SystemHealthTone } {
   if (session.revoked) {
-    return { detail: "This session has already been revoked.", label: "Revoked", tone: "neutral" };
+    return {
+      detail: "This session has already been revoked.",
+      label: "Revoked",
+      tone: "neutral",
+    };
   }
   if (!authEvent) {
     return {
@@ -2833,18 +3399,30 @@ function sessionRisk(
   }
   if (session.operator_role === "admin" && !session.current) {
     return {
-      detail: "Non-current admin sessions should be reviewed and revoked when no longer needed.",
+      detail:
+        "Non-current admin sessions should be reviewed and revoked when no longer needed.",
       label: "Admin review",
       tone: "warning",
     };
   }
   if (session.current) {
-    return { detail: "This is the current console session.", label: "Current", tone: "info" };
+    return {
+      detail: "This is the current console session.",
+      label: "Current",
+      tone: "info",
+    };
   }
-  return { detail: "Login event, IP, and user agent are present.", label: "Normal", tone: "ok" };
+  return {
+    detail: "Login event, IP, and user agent are present.",
+    label: "Normal",
+    tone: "ok",
+  };
 }
 
-function parseUserAgent(userAgent: string | null): { browser: string; device: string } {
+function parseUserAgent(userAgent: string | null): {
+  browser: string;
+  device: string;
+} {
   if (!userAgent) {
     return { browser: "Unknown browser", device: "Device not recorded" };
   }
@@ -2864,7 +3442,11 @@ function parseUserAgent(userAgent: string | null): { browser: string; device: st
     browser = "curl";
   }
   let device = "Desktop browser";
-  if (lower.includes("mobile") || lower.includes("android") || lower.includes("iphone")) {
+  if (
+    lower.includes("mobile") ||
+    lower.includes("android") ||
+    lower.includes("iphone")
+  ) {
     device = "Mobile browser";
   } else if (lower.includes("playwright")) {
     device = "Browser automation";
@@ -2874,18 +3456,121 @@ function parseUserAgent(userAgent: string | null): { browser: string; device: st
   return { browser, device };
 }
 
-function formatAuthEventTime(event: OperatorAuthEventRecord | null | undefined): string {
-  return event ? formatTime(event.created_at) : "not recorded";
+function operatorRoleLabel(role: string): string {
+  if (role === "admin") return "Admin";
+  if (role === "operator") return "Operator";
+  if (role === "viewer") return "Viewer";
+  return role.trim() || "Unknown role";
+}
+
+function operatorStatusLabel(status: string): string {
+  if (status === "active") return "Active";
+  if (status === "disabled") return "Disabled";
+  if (status === "deleted") return "Deleted";
+  return status.trim() || "Unknown";
+}
+
+function operatorMfaState(operator: OperatorView): {
+  detail: string;
+  label: string;
+  statusClass: "neutral" | "ok" | "warn";
+  tone: SystemHealthTone;
+} {
+  if (operator.totp_enabled) {
+    return {
+      detail: "TOTP is enrolled for this operator.",
+      label: "MFA enabled",
+      statusClass: "ok",
+      tone: "ok",
+    };
+  }
+  if (operator.role === "admin") {
+    return {
+      detail:
+        "Admin account has no TOTP enrollment. The UI can recommend MFA, but backend policy enforcement is not exposed.",
+      label: "Policy recommends MFA",
+      statusClass: "warn",
+      tone: "warning",
+    };
+  }
+  return {
+    detail: "TOTP is not enrolled for this non-admin operator.",
+    label: "MFA off",
+    statusClass: "neutral",
+    tone: "neutral",
+  };
+}
+
+function operatorRefreshTtlLabel(operator: OperatorView): string {
+  return operatorRefreshTtlLabelFor(
+    operator.role,
+    operator.session_refresh_ttl_secs,
+  );
+}
+
+function operatorRefreshTtlLabelFor(
+  role: string,
+  sessionRefreshTtlSecs: number,
+): string {
+  const ttlDays = secondsToDays(sessionRefreshTtlSecs);
+  if (role === "admin" && ttlDays > 30) {
+    return `${ttlDays}d - over admin target`;
+  }
+  if (role === "admin") {
+    return `${ttlDays}d - within admin target`;
+  }
+  return `${ttlDays}d refresh TTL`;
+}
+
+function operatorRefreshTtlDetail(operator: OperatorView): string {
+  const ttlDays = secondsToDays(operator.session_refresh_ttl_secs);
+  if (operator.role === "admin") {
+    return `Refresh-token lifetime is ${ttlDays} days. Admin policy target is <=30 days. This is separate from the short access-token expiry in Audit / Sessions.`;
+  }
+  return `Refresh-token lifetime is ${ttlDays} days. This is separate from the short access-token expiry in Audit / Sessions.`;
+}
+
+function FullTimeValue({ value }: { value: string }) {
+  return (
+    <time dateTime={value} title={formatFullTime(value)}>
+      {formatTime(value)}
+    </time>
+  );
+}
+
+function OperatorAuthTimeValue({
+  event,
+}: {
+  event: OperatorAuthEventRecord | null | undefined;
+}) {
+  if (!event) {
+    return (
+      <span title="No successful login event is loaded for this operator.">
+        Never
+      </span>
+    );
+  }
+  return (
+    <time dateTime={event.created_at} title={formatFullTime(event.created_at)}>
+      {formatCompactTime(event.created_at)}
+    </time>
+  );
+}
+
+function formatAuthEventTime(
+  event: OperatorAuthEventRecord | null | undefined,
+): string {
+  return event ? formatTime(event.created_at) : "Not recorded";
 }
 
 function operatorLifecycleLabel(operator: OperatorView): string {
   if (operator.deleted_at) {
-    return `deleted ${formatTime(operator.deleted_at)}`;
+    return `Deleted ${formatFullTime(operator.deleted_at)}`;
   }
   if (operator.disabled_at) {
-    return `disabled ${formatTime(operator.disabled_at)}`;
+    return `Disabled ${formatFullTime(operator.disabled_at)}`;
   }
-  return operator.status;
+  return operatorStatusLabel(operator.status);
 }
 
 function roleDescription(role: string): string {
@@ -2918,7 +3603,12 @@ function addScopeToken(current: string, scope: string): string {
 }
 
 function daysToSeconds(value: number): number {
-  return Math.max(1, Math.min(3650, Math.round(value || defaultSessionTtlDays))) * 24 * 60 * 60;
+  return (
+    Math.max(1, Math.min(3650, Math.round(value || defaultSessionTtlDays))) *
+    24 *
+    60 *
+    60
+  );
 }
 
 function secondsToDays(value: number): number {
@@ -2936,15 +3626,27 @@ function pendingUserActionLabel(action: PendingUserAction | null): string {
       return "Save user";
     case "status":
       if (action.operators.length === 1) {
-        return action.status === "active" ? "Enable user" : action.status === "disabled" ? "Disable user" : "Delete user";
+        return action.status === "active"
+          ? "Enable user"
+          : action.status === "disabled"
+            ? "Disable user"
+            : "Delete user";
       }
-      return action.status === "active" ? "Enable users" : action.status === "disabled" ? "Disable users" : "Delete users";
+      return action.status === "active"
+        ? "Enable users"
+        : action.status === "disabled"
+          ? "Disable users"
+          : "Delete users";
     case "password":
       return "Reset password";
     case "totp":
-      return action.operators.length === 1 ? "Clear TOTP" : "Clear TOTP secrets";
+      return action.operators.length === 1
+        ? "Clear TOTP"
+        : "Clear TOTP secrets";
     case "sessions":
-      return action.sessions.length === 1 ? "Revoke session" : "Revoke sessions";
+      return action.sessions.length === 1
+        ? "Revoke session"
+        : "Revoke sessions";
   }
 }
 
@@ -2971,43 +3673,72 @@ function pendingUserActionDetail(action: PendingUserAction | null): ReactNode {
   }
 }
 
-function pendingUserActionItems(action: PendingUserAction | null): Array<{ label: string; value: ReactNode }> {
+function pendingUserActionItems(
+  action: PendingUserAction | null,
+): Array<{ label: string; value: ReactNode }> {
   if (!action) {
     return [];
   }
   if (action.kind === "create") {
     return [
       { label: "Username", value: action.username },
-      { label: "Role", value: action.role },
-      { label: "Session TTL", value: `${secondsToDays(action.sessionRefreshTtlSecs)}d` },
-      { label: "Scopes", value: action.scopes.length ? action.scopes.join(", ") : "role defaults" },
+      { label: "Role", value: operatorRoleLabel(action.role) },
+      {
+        label: "Refresh TTL",
+        value: operatorRefreshTtlLabelFor(
+          action.role,
+          action.sessionRefreshTtlSecs,
+        ),
+      },
+      {
+        label: "Scopes",
+        value: action.scopes.length
+          ? action.scopes.join(", ")
+          : "role defaults",
+      },
       { label: "Payload", value: shortId(action.privilege.payloadHashHex) },
     ];
   }
   if (action.kind === "update") {
     return [
       { label: "Username", value: action.operator.username },
-      { label: "Role", value: action.role },
-      { label: "Session TTL", value: `${secondsToDays(action.sessionRefreshTtlSecs)}d` },
-      { label: "Scopes", value: action.scopes.length ? action.scopes.join(", ") : "role defaults" },
+      { label: "Role", value: operatorRoleLabel(action.role) },
+      {
+        label: "Refresh TTL",
+        value: operatorRefreshTtlLabelFor(
+          action.role,
+          action.sessionRefreshTtlSecs,
+        ),
+      },
+      {
+        label: "Scopes",
+        value: action.scopes.length
+          ? action.scopes.join(", ")
+          : "role defaults",
+      },
       { label: "Payload", value: shortId(action.privilege.payloadHashHex) },
     ];
   }
   if (action.kind === "password") {
     return [
       { label: "Username", value: action.operator.username },
-      { label: "Role", value: action.operator.role },
+      { label: "Role", value: operatorRoleLabel(action.operator.role) },
       { label: "Payload", value: shortId(action.privilege.payloadHashHex) },
     ];
   }
   if (action.kind === "status" || action.kind === "totp") {
     const firstOperator = action.operators[0];
     return [
-      { label: action.operators.length === 1 ? "Username" : "Users", value: formatOperatorSelection(action.operators) },
+      {
+        label: action.operators.length === 1 ? "Username" : "Operators",
+        value: formatOperatorSelection(action.operators),
+      },
       { label: "Count", value: action.operators.length },
       {
         label: "Payload",
-        value: firstOperator ? shortId(action.privileges[firstOperator.id].payloadHashHex) : "-",
+        value: firstOperator
+          ? shortId(action.privileges[firstOperator.id].payloadHashHex)
+          : "-",
       },
     ];
   }
@@ -3016,10 +3747,17 @@ function pendingUserActionItems(action: PendingUserAction | null): Array<{ label
     return [
       { label: "Username", value: action.operator.username },
       { label: "Sessions", value: action.sessions.length },
-      { label: "Admin sessions", value: action.sessions.filter((session) => session.operator_role === "admin").length },
+      {
+        label: "Admin sessions",
+        value: action.sessions.filter(
+          (session) => session.operator_role === "admin",
+        ).length,
+      },
       {
         label: "Payload",
-        value: firstSession ? shortId(action.privileges[firstSession.id].payloadHashHex) : "-",
+        value: firstSession
+          ? shortId(action.privileges[firstSession.id].payloadHashHex)
+          : "-",
       },
     ];
   }
@@ -3057,8 +3795,12 @@ function SystemDashboardPanel({
   window: SystemDashboardWindow;
 }) {
   const series = dashboard?.series ?? [];
+  const generatedLabel = dashboard
+    ? formatFullTime(dashboard.generated_at)
+    : "dashboard loading";
   const dbPressure = dashboard?.current.db_pool.max_connections
-    ? dashboard.current.db_pool.in_use_connections / dashboard.current.db_pool.max_connections
+    ? dashboard.current.db_pool.in_use_connections /
+      dashboard.current.db_pool.max_connections
     : 0;
   const lifecycleFailures =
     (dashboard?.current.targets.control_timeout_last_24h ?? 0) +
@@ -3073,11 +3815,20 @@ function SystemDashboardPanel({
   const gatewayCriticalFailures = gatewayEvents?.critical_failures ?? 0;
   const gatewayRetries = gatewayEvents?.retry_attempts ?? 0;
   const gatewayQueueDepth = gatewayEvents?.current_queue_depth ?? 0;
-  const gatewayOldestAge = gatewayEvents?.oldest_event_age_secs ?? 0;
+  const gatewayOldestAgeSeconds = gatewayEvents?.oldest_event_age_secs ?? null;
+  const gatewayOldestAgeLabel =
+    gatewayOldestAgeSeconds === null
+      ? "No queued events"
+      : `${gatewayOldestAgeSeconds}s`;
   const gatewayRejected = gatewayEvents?.rejected_agent_connections ?? 0;
   const profileLimit = extractCapacityProfileLimit(dashboard?.notes ?? []);
-  const dbTone = dbPressure >= 0.85 ? "critical" : dbPressure >= 0.7 ? "warning" : "ok";
-  const dispatchTone = dispatchHealthTone(queueDepth, dispatcherInFlight, dispatcherBatch);
+  const dbTone =
+    dbPressure >= 0.85 ? "critical" : dbPressure >= 0.7 ? "warning" : "ok";
+  const dispatchTone = dispatchHealthTone(
+    queueDepth,
+    dispatcherInFlight,
+    dispatcherBatch,
+  );
   const deadlineTone =
     (dashboard?.current.targets.deadline_expired_active ?? 0) > 0
       ? "critical"
@@ -3085,18 +3836,16 @@ function SystemDashboardPanel({
         ? "warning"
         : "ok";
   const gatewayTone = gatewayHealthTone(gatewayEvents);
-  const postureTone = mostSevereTone([dbTone, dispatchTone, deadlineTone, gatewayTone]);
-  const profileRatio =
-    profileLimit && dispatcherInFlight ? Math.round((dispatcherInFlight / profileLimit) * 100) : null;
-  const capacityForecast =
-    profileLimit && dispatcherInFlight && dispatcherBatch
-      ? `${profileLimit}-VPS profile; ${dispatcherInFlight} in-flight (${profileRatio}% of profile) and ${dispatcherBatch} batch.`
-      : profileLimit
-        ? `${profileLimit}-VPS profile detected; set dispatcher limits in Suite config to complete the plan.`
-        : "No capacity profile note in this sample; configure limits from observed fleet size.";
+  const postureTone = mostSevereTone([
+    dbTone,
+    dispatchTone,
+    deadlineTone,
+    gatewayTone,
+  ]);
   const recommendedCapacity =
     profileLimit && dispatcherInFlight && dispatcherBatch
-      ? dispatcherInFlight >= profileLimit && dispatcherBatch >= dispatcherInFlight
+      ? dispatcherInFlight >= profileLimit &&
+        dispatcherBatch >= dispatcherInFlight
         ? "Current limits cover the profile."
         : `Raise dispatcher in-flight to at least ${profileLimit} and keep batch >= in-flight.`
       : "Recommended profile unavailable until capacity limits are loaded.";
@@ -3106,7 +3855,7 @@ function SystemDashboardPanel({
     dispatchTone,
     gatewayCriticalFailures,
     gatewayDropped,
-    gatewayOldestAge,
+    gatewayOldestAgeLabel,
     gatewayQueueDepth,
     gatewayRejected,
     gatewayRetries,
@@ -3114,15 +3863,21 @@ function SystemDashboardPanel({
     lifecycleFailures,
     queueDepth,
   });
+  const dataCoverage =
+    series.length > 0
+      ? `${series.length} rollup series; latest sample ${formatCompactTime(dashboard?.generated_at ?? "")}`
+      : "No durable metric samples in this range";
+  const gatewayDeliverySignals =
+    gatewayDropped + gatewayRetries + gatewayRejected + gatewayCriticalFailures;
   return (
     <div className="workspace singleColumn systemWorkspace">
       <div className="workspaceStack">
         <div className="dashboardToolbar">
           <div>
-            <h2>Control-plane metrics</h2>
+            <h2>Control-plane overview</h2>
             <span>
               {dashboard
-                ? `${dashboard.bucket_secs}s rollups / generated ${new Date(dashboard.generated_at).toLocaleTimeString()}`
+                ? `${dashboard.bucket_secs}s rollups / ${dataCoverage} / generated ${generatedLabel}`
                 : "Control-plane metrics loading"}
             </span>
           </div>
@@ -3131,15 +3886,24 @@ function SystemDashboardPanel({
               <span>Points</span>
               <select
                 aria-label="System overview point density"
-                onChange={(event) => onPointDensityChange(event.target.value as SystemDashboardPointDensity)}
+                onChange={(event) =>
+                  onPointDensityChange(
+                    event.target.value as SystemDashboardPointDensity,
+                  )
+                }
                 value={pointDensity}
               >
                 {pointDensityOptions.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
                 ))}
               </select>
             </label>
-            <div className="timeRangeTabs" aria-label="System overview time range">
+            <div
+              className="timeRangeTabs"
+              aria-label="System overview time range"
+            >
               {dashboardWindows.map((option) => (
                 <button
                   aria-pressed={window === option.value}
@@ -3152,85 +3916,184 @@ function SystemDashboardPanel({
                 </button>
               ))}
             </div>
-            <button className="secondaryAction compactAction" disabled={loading} onClick={onRefresh} type="button">
+            <button
+              className="secondaryAction compactAction"
+              disabled={loading}
+              onClick={onRefresh}
+              type="button"
+            >
               <RefreshCw size={16} />
               <span>{loading ? "Refreshing" : "Refresh"}</span>
             </button>
           </div>
         </div>
         {error && <div className="panelError">{error}</div>}
-        {dashboard?.notes.length ? <div className="panelWarning">{dashboard.notes.join("; ")}</div> : null}
 
-        <section className="dashboardSection systemDashboardOverview" aria-label="System overview operations overview">
+        <section
+          className="dashboardSection systemDashboardOverview"
+          aria-label="System overview operations overview"
+        >
           <div className="dashboardSectionHeader">
             <div>
-              <h2>Control-plane posture</h2>
-              <span>Threshold interpretation, capacity planning, and drilldown coverage before the raw metric curves.</span>
+              <h2>Service health</h2>
+              <span>
+                Database, dispatch, gateway, and worker state for the control
+                plane.
+              </span>
             </div>
-            <ConsoleStatusBadge tone={postureTone}>{systemToneLabel(postureTone)}</ConsoleStatusBadge>
+            <ConsoleStatusBadge tone={postureTone}>
+              {systemToneLabel(postureTone)}
+            </ConsoleStatusBadge>
           </div>
           <div className="systemPostureGrid">
             <SystemPostureTile
               detail={`${dashboard?.current.db_pool.in_use_connections ?? 0} of ${dashboard?.current.db_pool.max_connections ?? 0} connections in use; warn at 70%, critical at 85%.`}
               icon={<Database size={18} />}
-              label="DB capacity"
+              label="Database"
               tone={dbTone}
               value={`${dbPressurePercent}% in use`}
             />
             <SystemPostureTile
-              detail={`${dispatcherInFlight ?? "unset"} in-flight limit / ${dispatcherBatch ?? "unset"} batch; queued work should stay below active dispatch capacity.`}
+              detail={`${valueOrNotConfigured(dispatcherInFlight)} in-flight limit / ${valueOrNotConfigured(dispatcherBatch)} batch. Detailed capacity thresholds live in System / Capacity.`}
               icon={<Activity size={18} />}
-              label="Dispatch pressure"
+              label="Control-plane queue"
               tone={dispatchTone}
               value={`${queueDepth} queued`}
             />
             <SystemPostureTile
               detail={`${dashboard?.current.targets.deadline_expired_active ?? 0} active expired; ${lifecycleFailures} timeout or loss events in the last 24h.`}
               icon={<TimerReset size={18} />}
-              label="Deadlines"
+              label="Worker"
               tone={deadlineTone}
               value={`${lifecycleFailures} failures`}
             />
             <SystemPostureTile
-              detail={`${gatewayQueueDepth} queued / ${secondsOrUnset(gatewayOldestAge)} oldest; ${gatewayDropped} dropped, ${gatewayRetries} retries, ${gatewayRejected} rejected connects.`}
+              detail={`${gatewayQueueDepth} queued / ${gatewayOldestAgeLabel}; ${gatewayDropped} dropped, ${gatewayRetries} retries, ${gatewayRejected} rejected connects.`}
               icon={<Network size={18} />}
-              label="Gateway queue"
+              label="Gateway"
               tone={gatewayTone}
-              value={gatewayEvents?.status ?? "unavailable"}
-            />
-            <SystemPostureTile
-              detail={recommendedCapacity}
-              icon={<ServerCog size={18} />}
-              label="Capacity plan"
-              tone={profileLimit ? "info" : "warning"}
-              value={profileLimit ? `${profileLimit} VPS expected max` : "Profile unset"}
-            />
-            <SystemPostureTile
-              detail="Metric rollups are available here; raw alert overlays and per-series log links need backend event/log endpoints."
-              icon={<ShieldCheck size={18} />}
-              label="Drilldown coverage"
-              tone="warning"
-              value={`${series.length} rollup series`}
+              value={gatewayEvents?.status ?? "Not configured"}
             />
           </div>
-          <div className="systemCapacityStrip" aria-label="System overview capacity forecast">
-            <div>
-              <strong>Capacity forecast</strong>
-              <span>{capacityForecast}</span>
-            </div>
-            <div>
-              <strong>Configured limit</strong>
-              <span>{`${valueOrUnset(dispatcherInFlight)} in-flight / ${valueOrUnset(dispatcherBatch)} batch`}</span>
-            </div>
-            <div>
-              <strong>Expected max</strong>
-              <span>{profileLimit ? `${profileLimit} long-lived VPSs` : "Not declared"}</span>
-            </div>
+
+          <div className="dashboardCardGrid operationalGrid systemOverviewKpis">
+            <SystemStatusTile
+              icon={<Database size={18} />}
+              label="DB pool"
+              value={`${dashboard?.current.db_pool.in_use_connections ?? 0}/${dashboard?.current.db_pool.max_connections ?? 0}`}
+            />
+            <SystemStatusTile
+              icon={<Activity size={18} />}
+              label="Dispatch queue"
+              value={`${queueDepth} queued`}
+            />
+            <SystemStatusTile
+              icon={<Network size={18} />}
+              label="Gateway delivery"
+              value={`${gatewayDeliverySignals} signals`}
+            />
+            <SystemStatusTile
+              icon={<TimerReset size={18} />}
+              label="Worker timeouts"
+              value={`${lifecycleFailures} in 24h`}
+            />
           </div>
-          <div className="systemAttentionQueue" aria-label="System overview attention queue">
+
+          <div
+            className="systemSubsystemGrid"
+            aria-label="System overview subsystem states"
+          >
+            <SystemSubsystemDetails
+              items={[
+                {
+                  label: "Connections",
+                  value: `${dashboard?.current.db_pool.in_use_connections ?? 0} in use / ${dashboard?.current.db_pool.open_connections ?? 0} open`,
+                },
+                {
+                  label: "Pool limit",
+                  value: valueOrNotConfigured(
+                    dashboard?.current.db_pool.max_connections,
+                  ),
+                },
+              ]}
+              label="Database"
+              tone={dbTone}
+              value={`${dbPressurePercent}% in use`}
+            />
+            <SystemSubsystemDetails
+              items={[
+                {
+                  label: "Active jobs",
+                  value: String(dashboard?.current.dispatch.active_jobs ?? 0),
+                },
+                {
+                  label: "Active targets",
+                  value: String(dashboard?.current.targets.active ?? 0),
+                },
+                {
+                  label: "Configured limit",
+                  value: `${valueOrNotConfigured(dispatcherInFlight)} in-flight`,
+                },
+              ]}
+              label="Dispatch"
+              tone={dispatchTone}
+              value={`${queueDepth} queued`}
+            />
+            <SystemSubsystemDetails
+              items={[
+                {
+                  label: "Queue",
+                  value: `${gatewayQueueDepth} queued / ${gatewayOldestAgeLabel}`,
+                },
+                {
+                  label: "Retries and drops",
+                  value: `${gatewayRetries} retries / ${gatewayDropped} dropped`,
+                },
+                {
+                  label: "Rejected connects",
+                  value: valueOrNotConfigured(gatewayRejected),
+                },
+              ]}
+              label="Gateway"
+              tone={gatewayTone}
+              value={gatewayEvents?.status ?? "Not configured"}
+            />
+            <SystemSubsystemDetails
+              items={[
+                {
+                  label: "Active expired",
+                  value: String(
+                    dashboard?.current.targets.deadline_expired_active ?? 0,
+                  ),
+                },
+                {
+                  label: "24h timeout/loss",
+                  value: String(lifecycleFailures),
+                },
+                {
+                  label: "Schedule job timeout",
+                  value: secondsOrNotConfigured(
+                    dashboard?.capacity.worker_schedule_job_max_timeout_secs,
+                  ),
+                },
+              ]}
+              label="Worker"
+              tone={deadlineTone}
+              value={`${lifecycleFailures} failures`}
+            />
+          </div>
+
+          <div
+            className="systemAttentionQueue"
+            aria-label="System overview attention queue"
+          >
             <div className="dashboardSideRailHeader">
               <strong>What needs attention</strong>
-              <span>{attentionItems.length ? `${attentionItems.length} signals` : "No active signals"}</span>
+              <span>
+                {attentionItems.length
+                  ? `${attentionItems.length} signals`
+                  : "No active signals"}
+              </span>
             </div>
             {attentionItems.length ? (
               attentionItems.map((item) => (
@@ -3239,28 +4102,84 @@ function SystemDashboardPanel({
             ) : (
               <div className="systemAttentionEmpty">
                 <CheckCircle2 size={16} />
-                <span>No control-plane thresholds are currently breached in this sample.</span>
+                <span>
+                  No control-plane thresholds are currently breached in this
+                  sample.
+                </span>
               </div>
             )}
           </div>
+
+          <details className="systemDiagnosticsDisclosure">
+            <summary>
+              <span>Diagnostics</span>
+              <small>Capacity and drilldown notes hidden from posture</small>
+            </summary>
+            <div className="systemDiagnosticsGrid">
+              <SystemDiagnosticsRow
+                detail={recommendedCapacity}
+                label="Capacity profile"
+                value={
+                  profileLimit
+                    ? `${profileLimit} VPS expected max`
+                    : "Not configured"
+                }
+              />
+              <SystemDiagnosticsRow
+                detail="Detailed capacity curves and threshold tuning belong in System / Capacity."
+                label="Dispatch limits"
+                value={`${valueOrNotConfigured(dispatcherInFlight)} in-flight / ${valueOrNotConfigured(dispatcherBatch)} batch`}
+              />
+              <SystemDiagnosticsRow
+                detail="Raw alert overlays and per-series log links need backend event/log endpoints."
+                label="Drilldown gaps"
+                value={`${series.length} rollup series`}
+              />
+              <SystemDiagnosticsRow
+                detail={dashboard?.notes.join("; ") || "No dashboard notes."}
+                label="Dashboard notes"
+                value={dashboard?.notes.length ? "Available" : "None"}
+              />
+            </div>
+          </details>
         </section>
 
         <SystemMetricSection
           badge={`${dashboard?.current.dispatch.queue_depth ?? 0} queued`}
           badgeTone={dispatchTone}
           icon={<Activity size={18} />}
-          insight="Dispatch queue should drain below active in-flight capacity; a growing queue while retries climb is an operator signal."
-          title="Dispatch Lifecycle"
-          subtitle="Queued, dispatching, running, retry, and active job pressure."
+          insight="Overview shows one selected chart. Capacity-only curves stay in System / Capacity."
+          title="Selected chart - Dispatch queue"
+          subtitle="Queued, dispatching, running, and retry pressure."
           metrics={[
-            { label: "Active jobs", value: String(dashboard?.current.dispatch.active_jobs ?? 0) },
-            { label: "Dispatch queue", value: String(dashboard?.current.dispatch.queue_depth ?? 0) },
-            { label: "Active targets", value: String(dashboard?.current.targets.active ?? 0) },
-            { label: "Retried targets", value: String(dashboard?.current.dispatch.retried_targets ?? 0) },
+            {
+              label: "Active jobs",
+              value: String(dashboard?.current.dispatch.active_jobs ?? 0),
+            },
+            {
+              label: "Dispatch queue",
+              value: String(dashboard?.current.dispatch.queue_depth ?? 0),
+            },
+            {
+              label: "Active targets",
+              value: String(dashboard?.current.targets.active ?? 0),
+            },
+            {
+              label: "Retried targets",
+              value: String(dashboard?.current.dispatch.retried_targets ?? 0),
+            },
           ]}
           thresholds={[
-            { label: "Capacity", tone: "info", value: `${valueOrUnset(dispatcherInFlight)} in-flight` },
-            { label: "Batch", tone: "info", value: `${valueOrUnset(dispatcherBatch)} max` },
+            {
+              label: "Capacity",
+              tone: "info",
+              value: `${valueOrUnset(dispatcherInFlight)} in-flight`,
+            },
+            {
+              label: "Batch",
+              tone: "info",
+              value: `${valueOrUnset(dispatcherBatch)} max`,
+            },
             { label: "Attention", tone: "warning", value: "queue persists" },
           ]}
           lines={chartLines(series, [
@@ -3271,117 +4190,6 @@ function SystemDashboardPanel({
           ])}
           valueFormatter={(value) => formatNumber(value)}
         />
-
-        <SystemMetricSection
-          badge={`${dashboard?.current.targets.deadline_expired_active ?? 0} expired`}
-          badgeTone={deadlineTone}
-          icon={<AlertTriangle size={18} />}
-          insight="Deadline curves separate active expiry from historical control and agent timeout causes so operators can triage control-plane versus VPS-side failure."
-          title="Deadlines"
-          subtitle="Control deadline expiry, agent timeouts, agent loss, and canceled outcomes."
-          metrics={[
-            { label: "Deadline timeouts", value: String(lifecycleFailures) },
-            { label: "Control timed out", value: String(dashboard?.current.targets.control_timeout_last_24h ?? 0) },
-            { label: "Agent timed out", value: String(dashboard?.current.targets.agent_timeout_last_24h ?? 0) },
-            { label: "Agent lost", value: String(dashboard?.current.targets.agent_lost_last_24h ?? 0) },
-            { label: "Agent offline timeout", value: secondsOrUnset(dashboard?.capacity.agent_offline_secs) },
-          ]}
-          thresholds={[
-            { label: "Warn", tone: "warning", value: "any 24h timeout" },
-            { label: "Critical", tone: "critical", value: "active deadline expiry" },
-            { label: "Agent offline", tone: "info", value: secondsOrUnset(dashboard?.capacity.agent_offline_secs) },
-          ]}
-          lines={chartLines(series, [
-            "targets.deadline_expired_active",
-            "targets.control_timeout_last_24h",
-            "targets.agent_timeout_last_24h",
-            "targets.agent_lost_last_24h",
-            "targets.canceled_last_24h",
-          ])}
-          valueFormatter={(value) => formatNumber(value)}
-        />
-
-        <SystemMetricSection
-          badge={dashboard?.current.gateway_events.status ?? "unavailable"}
-          badgeTone={gatewayTone}
-          icon={<Network size={18} />}
-          insight="Gateway charts focus on queue depth, retry, drop, and rejection signals. Delivered totals stay in the current table so they do not flatten smaller failure curves."
-          title="Gateway Events"
-          subtitle="Gateway-to-API forwarding backlog, deliveries, retries, and per-target queues."
-          metrics={[
-            { label: "Status", value: dashboard?.current.gateway_events.status ?? "unavailable" },
-            { label: "Queue depth", value: valueOrUnset(dashboard?.current.gateway_events.current_queue_depth) },
-            { label: "Oldest age", value: secondsOrUnset(dashboard?.current.gateway_events.oldest_event_age_secs) },
-            { label: "Dropped", value: valueOrUnset(dashboard?.current.gateway_events.dropped_events) },
-            { label: "Critical failures", value: valueOrUnset(dashboard?.current.gateway_events.critical_failures) },
-            { label: "Telemetry coalesced", value: valueOrUnset(dashboard?.current.gateway_events.dropped_by_reason?.coalesced) },
-            { label: "Protocol conflicts", value: valueOrUnset(dashboard?.current.gateway_events.dropped_by_reason?.protocol_conflict) },
-            { label: "Target queue full", value: valueOrUnset(dashboard?.current.gateway_events.dropped_by_reason?.target_queue_full) },
-            { label: "Retained output trunc", value: valueOrUnset(dashboard?.current.gateway_events.retained_output_truncated_events) },
-            { label: "Rejected connects", value: valueOrUnset(dashboard?.current.gateway_events.rejected_agent_connections) },
-            { label: "Delivered", value: valueOrUnset(dashboard?.current.gateway_events.delivered_events) },
-            { label: "Event retries", value: valueOrUnset(dashboard?.current.gateway_events.retry_attempts) },
-          ]}
-          thresholds={[
-            { label: "Live", tone: gatewayEvents?.status === "live" ? "ok" : "warning", value: gatewayEvents?.status ?? "unavailable" },
-            { label: "Critical", tone: "critical", value: "queue full / expired drops" },
-            { label: "Attention", tone: "warning", value: "any retry or drop" },
-          ]}
-          lines={chartLines(series, [
-            "gateway_events.current_queue_depth",
-            "gateway_events.oldest_event_age_secs",
-            "gateway_events.dropped_events",
-            "gateway_events.critical_failures",
-            "gateway_events.rejected_agent_connections",
-            "gateway_events.retry_attempts",
-          ])}
-          valueFormatter={(value) => formatNumber(value)}
-        />
-
-        <SystemMetricSection
-          badge={`${dashboard?.current.cancellations.awaiting_ack ?? 0} waiting`}
-          badgeTone={(dashboard?.current.cancellations.awaiting_ack ?? 0) > 0 ? "warning" : "ok"}
-          icon={<TimerReset size={18} />}
-          insight="Cancellation health is about acknowledgement lag: sent cancels should converge to agent acks without accumulating waiting state."
-          title="Cancellations"
-          subtitle="Operator cancel delivery and explicit agent acknowledgement state."
-          metrics={[
-            { label: "Requested", value: String(dashboard?.current.cancellations.requested ?? 0) },
-            { label: "Sent", value: String(dashboard?.current.cancellations.sent ?? 0) },
-            { label: "Cancel acks", value: String(dashboard?.current.cancellations.acked ?? 0) },
-            { label: "Awaiting ack", value: String(dashboard?.current.cancellations.awaiting_ack ?? 0) },
-          ]}
-          thresholds={[
-            { label: "Healthy", tone: "ok", value: "0 awaiting ack" },
-            { label: "Attention", tone: "warning", value: "ack backlog grows" },
-          ]}
-          lines={chartLines(series, [
-            "cancellations.requested",
-            "cancellations.sent",
-            "cancellations.acked",
-            "cancellations.awaiting_ack",
-          ])}
-          valueFormatter={(value) => formatNumber(value)}
-        />
-
-        <section className="dashboardSection">
-          <div className="dashboardSectionHeader">
-            <div>
-              <h2>Service Health</h2>
-              <span>Current timeout and internal HTTP posture from suite config.</span>
-            </div>
-            <ConsoleStatusBadge tone={dashboard?.current.gateway_events.status === "live" ? "ok" : "warning"}>
-              {dashboard?.current.gateway_events.status ?? "unavailable"}
-            </ConsoleStatusBadge>
-          </div>
-          <div className="dashboardCardGrid operationalGrid">
-            <SystemStatusTile icon={<ServerCog size={18} />} label="Dispatch ack" value={secondsOrUnset(dashboard?.capacity.dispatch_ack_secs)} />
-            <SystemStatusTile icon={<Network size={18} />} label="Event post" value={secondsOrUnset(dashboard?.capacity.event_post_secs)} />
-            <SystemStatusTile icon={<TimerReset size={18} />} label="Internal HTTP read" value={secondsOrUnset(dashboard?.capacity.internal_http_read_secs)} />
-            <SystemStatusTile icon={<TimerReset size={18} />} label="Control grace" value={secondsOrUnset(dashboard?.capacity.control_deadline_grace_secs)} />
-            <SystemStatusTile icon={<Activity size={18} />} label="Schedule job" value={secondsOrUnset(dashboard?.capacity.worker_schedule_job_max_timeout_secs)} />
-          </div>
-        </section>
       </div>
     </div>
   );
@@ -3393,6 +4201,7 @@ function SystemCapacityPanel({
   loading,
   onPointDensityChange,
   onRefresh,
+  onSelectView,
   onWindowChange,
   pointDensity,
   window,
@@ -3402,33 +4211,380 @@ function SystemCapacityPanel({
   loading: boolean;
   onPointDensityChange: (density: SystemDashboardPointDensity) => void;
   onRefresh: () => void;
+  onSelectView: (view: ActiveView, subpage?: string) => void;
   onWindowChange: (window: SystemDashboardWindow) => void;
   pointDensity: SystemDashboardPointDensity;
   window: SystemDashboardWindow;
 }) {
+  const [activeSubsystem, setActiveSubsystem] =
+    useState<CapacitySubsystem>("dispatch");
   const series = dashboard?.series ?? [];
+  const sampleCoverage = systemSeriesCoverageSummary(series);
   const dbPressure = dashboard?.current.db_pool.max_connections
-    ? dashboard.current.db_pool.in_use_connections / dashboard.current.db_pool.max_connections
+    ? dashboard.current.db_pool.in_use_connections /
+      dashboard.current.db_pool.max_connections
     : 0;
   const dbPressurePercent = Math.round(dbPressure * 100);
-  const dbTone = dbPressure >= 0.85 ? "critical" : dbPressure >= 0.7 ? "warning" : "ok";
+  const dbTone =
+    dbPressure >= 0.85 ? "critical" : dbPressure >= 0.7 ? "warning" : "ok";
   const queueDepth = dashboard?.current.dispatch.queue_depth ?? 0;
   const dispatcherInFlight = dashboard?.capacity.dispatcher_in_flight ?? null;
   const dispatcherBatch = dashboard?.capacity.dispatcher_batch ?? null;
-  const dispatchTone = dispatchHealthTone(queueDepth, dispatcherInFlight, dispatcherBatch);
+  const dispatchQueueGrowth = seriesDelta(series, "dispatch.queue_depth");
+  const dispatchModel = dispatchCapacityHealth({
+    queueDepth,
+    queueGrowth: dispatchQueueGrowth.delta,
+    dispatcherInFlight,
+    dispatcherBatch,
+    oldestAgeSecs: null,
+  });
   const gatewayEvents = dashboard?.current.gateway_events;
-  const gatewayTone = gatewayHealthTone(gatewayEvents);
+  const gatewayQueueGrowth = seriesDelta(
+    series,
+    "gateway_events.current_queue_depth",
+  );
+  const gatewayModel = gatewayCapacityHealth({
+    gatewayEvents,
+    queueGrowth: gatewayQueueGrowth.delta,
+  });
   const profileLimit = extractCapacityProfileLimit(dashboard?.notes ?? []);
   const profileRatio =
-    profileLimit && dispatcherInFlight ? Math.round((dispatcherInFlight / profileLimit) * 100) : null;
-  const capacityTone = mostSevereTone([dbTone, dispatchTone, gatewayTone]);
-  const configuredLimit = `${valueOrUnset(dispatcherInFlight)} in-flight / ${valueOrUnset(dispatcherBatch)} batch`;
+    profileLimit && dispatcherInFlight
+      ? Math.round((dispatcherInFlight / profileLimit) * 100)
+      : null;
+  const storageGapTone: SystemHealthTone = "warning";
+  const capacityTone = mostSevereTone([
+    dbTone,
+    dispatchModel.tone,
+    gatewayModel.tone,
+    storageGapTone,
+  ]);
+  const configuredLimit = `${valueOrNotConfigured(dispatcherInFlight)} in-flight / ${valueOrNotConfigured(dispatcherBatch)} batch`;
   const capacityForecast =
     profileLimit && dispatcherInFlight && dispatcherBatch
       ? `${profileLimit}-VPS profile; ${dispatcherInFlight} in-flight (${profileRatio}% of profile) and ${dispatcherBatch} batch.`
       : profileLimit
         ? `${profileLimit}-VPS profile detected; set dispatcher limits in Suite config to complete the plan.`
         : "Capacity profile is not declared in the current system dashboard notes.";
+  const activeChart =
+    activeSubsystem === "database" ? (
+      <SystemMetricSection
+        badge={`${dbPressurePercent}% in use`}
+        badgeTone={dbTone}
+        icon={<Database size={18} />}
+        insight="Database capacity compares active usage with configured pool ceilings; sustained pressure above 70% needs pool review."
+        title="Database capacity"
+        subtitle="DB pool pressure and configured API/worker limits."
+        metrics={[
+          {
+            label: "API DB pool",
+            value: valueOrNotConfigured(dashboard?.capacity.api_db_pool),
+          },
+          {
+            label: "Worker DB pool",
+            value: valueOrNotConfigured(dashboard?.capacity.worker_db_pool),
+          },
+          {
+            label: "In use",
+            value: String(dashboard?.current.db_pool.in_use_connections ?? 0),
+          },
+          {
+            label: "Open",
+            value: String(dashboard?.current.db_pool.open_connections ?? 0),
+          },
+        ]}
+        thresholds={[
+          { label: "Warn", tone: "warning", value: "70% pool pressure" },
+          { label: "Critical", tone: "critical", value: "85% pool pressure" },
+        ]}
+        lines={chartLines(series, [
+          "db_pool.in_use_connections",
+          "db_pool.open_connections",
+          "db_pool.idle_connections",
+          "db_pool.max_connections",
+        ])}
+        valueFormatter={(value) => formatNumber(value)}
+      />
+    ) : activeSubsystem === "gateway" ? (
+      <SystemMetricSection
+        badge={gatewayEvents?.status ?? "unavailable"}
+        badgeTone={gatewayModel.tone}
+        icon={<Network size={18} />}
+        insight="Gateway capacity warns only when queue age, growth, queue-full failures, or live status indicate pressure."
+        title="Gateway capacity"
+        subtitle="Gateway-to-API forwarding backlog, retries, drops, and queue saturation."
+        metrics={[
+          { label: "Status", value: gatewayEvents?.status ?? "unavailable" },
+          {
+            label: "Queue depth",
+            value: valueOrNotConfigured(gatewayEvents?.current_queue_depth),
+          },
+          {
+            label: "Oldest event",
+            value: secondsOrNotConfigured(gatewayEvents?.oldest_event_age_secs),
+          },
+          {
+            label: "Queue growth",
+            value: formatDelta(gatewayQueueGrowth.delta),
+          },
+          {
+            label: "Target queue full",
+            value: valueOrNotConfigured(
+              gatewayEvents?.dropped_by_reason?.target_queue_full,
+            ),
+          },
+          {
+            label: "Rejected connects",
+            value: valueOrNotConfigured(
+              gatewayEvents?.rejected_agent_connections,
+            ),
+          },
+        ]}
+        thresholds={[
+          {
+            label: "Live",
+            tone: gatewayEvents?.status === "live" ? "ok" : "warning",
+            value: gatewayEvents?.status ?? "unavailable",
+          },
+          {
+            label: "Critical",
+            tone: "critical",
+            value: "queue full / expired drops",
+          },
+          { label: "Warn", tone: "warning", value: "age or growth" },
+        ]}
+        lines={chartLines(series, [
+          "gateway_events.current_queue_depth",
+          "gateway_events.oldest_event_age_secs",
+          "gateway_events.dropped_events",
+          "gateway_events.retry_attempts",
+        ])}
+        valueFormatter={(value) => formatNumber(value)}
+      />
+    ) : activeSubsystem === "storage" ? null : (
+      <SystemMetricSection
+        badge={`${queueDepth} queued`}
+        badgeTone={dispatchModel.tone}
+        icon={<Activity size={18} />}
+        insight="Dispatch capacity uses queue growth, reported age, configured thresholds, and worker availability instead of warning on every nonzero queue."
+        title="Dispatch capacity"
+        subtitle="Queued, dispatching, running, retry, and active job pressure."
+        metrics={[
+          {
+            label: "Active jobs",
+            value: String(dashboard?.current.dispatch.active_jobs ?? 0),
+          },
+          { label: "Dispatch queue", value: String(queueDepth) },
+          {
+            label: "Queue growth",
+            value: formatDelta(dispatchQueueGrowth.delta),
+          },
+          {
+            label: "Warning threshold",
+            value: dispatchModel.warningThreshold,
+          },
+          {
+            label: "Active targets",
+            value: String(dashboard?.current.targets.active ?? 0),
+          },
+          {
+            label: "Retried targets",
+            value: String(dashboard?.current.dispatch.retried_targets ?? 0),
+          },
+        ]}
+        thresholds={[
+          {
+            label: "Capacity",
+            tone: "info",
+            value: `${valueOrNotConfigured(dispatcherInFlight)} in-flight`,
+          },
+          {
+            label: "Batch",
+            tone: "info",
+            value: `${valueOrNotConfigured(dispatcherBatch)} max`,
+          },
+          {
+            label: "Health",
+            tone: dispatchModel.tone,
+            value: dispatchModel.reason,
+          },
+        ]}
+        lines={chartLines(series, [
+          "dispatch.queue_depth",
+          "targets.dispatching",
+          "targets.running",
+          "dispatch.retried_targets",
+        ])}
+        valueFormatter={(value) => formatNumber(value)}
+      />
+    );
+  const capacityTabs: Array<{
+    id: CapacitySubsystem;
+    label: string;
+    tone: SystemHealthTone;
+    value: string;
+  }> = [
+    {
+      id: "database",
+      label: "Database",
+      tone: dbTone,
+      value: `${dbPressurePercent}%`,
+    },
+    {
+      id: "dispatch",
+      label: "Dispatch",
+      tone: dispatchModel.tone,
+      value: `${queueDepth} queued`,
+    },
+    {
+      id: "gateway",
+      label: "Gateway",
+      tone: gatewayModel.tone,
+      value: gatewayEvents?.status ?? "unavailable",
+    },
+    {
+      id: "storage",
+      label: "Storage",
+      tone: storageGapTone,
+      value: "Telemetry gaps",
+    },
+  ];
+  const selectedFactors: CapacityFactorItem[] =
+    activeSubsystem === "database"
+      ? [
+          {
+            detail: "Current database usage compared with the dashboard pool ceiling.",
+            label: "Pool pressure",
+            tone: dbTone,
+            value: `${dbPressurePercent}%`,
+          },
+          {
+            detail: "Warning threshold is 70% of max connections.",
+            label: "Warn threshold",
+            tone: "warning",
+            value: `${Math.ceil((dashboard?.current.db_pool.max_connections ?? 0) * 0.7)} connections`,
+          },
+          {
+            detail: "Critical threshold is 85% of max connections.",
+            label: "Critical threshold",
+            tone: "critical",
+            value: `${Math.ceil((dashboard?.current.db_pool.max_connections ?? 0) * 0.85)} connections`,
+          },
+          {
+            detail: "Suite Config owns the API and worker DB pool limits.",
+            label: "Config owner",
+            tone: "info",
+            value: "System / Suite config",
+          },
+        ]
+      : activeSubsystem === "gateway"
+        ? [
+            {
+              detail: "Current gateway forwarding queue depth.",
+              label: "Queue depth",
+              tone: gatewayModel.tone,
+              value: valueOrNotConfigured(gatewayEvents?.current_queue_depth),
+            },
+            {
+              detail: "Oldest queued event age; missing age is not treated as pressure.",
+              label: "Oldest event age",
+              tone: gatewayEvents?.oldest_event_age_secs ? "warning" : "ok",
+              value: secondsOrNotConfigured(gatewayEvents?.oldest_event_age_secs),
+            },
+            {
+              detail:
+                gatewayQueueGrowth.delta && gatewayQueueGrowth.delta > 0
+                  ? "gateway queue is growing across the available samples."
+                  : "Change in gateway queue depth across the available samples.",
+              label: "Queue growth",
+              tone: gatewayQueueGrowth.delta && gatewayQueueGrowth.delta > 0 ? "warning" : "ok",
+              value: formatDelta(gatewayQueueGrowth.delta),
+            },
+            {
+              detail: gatewayModel.reason,
+              label: "Capacity state",
+              tone: gatewayModel.tone,
+              value: systemToneLabel(gatewayModel.tone),
+            },
+          ]
+        : activeSubsystem === "storage"
+          ? [
+              {
+                detail: "Object-store bytes are not exposed by the system dashboard API yet.",
+                label: "Artifact storage",
+                tone: "warning",
+                value: "Not reported",
+              },
+              {
+                detail: "Retention prune backlog and oldest object age need backend fields.",
+                label: "Retention pressure",
+                tone: "warning",
+                value: "Not reported",
+              },
+              {
+                detail: "Worker lag seconds are not available; dispatch and timeout curves are proxies only.",
+                label: "Worker lag",
+                tone: "warning",
+                value: "Not reported",
+              },
+              {
+                detail: "Cleanup previews and retained maintenance jobs remain in System / Maintenance.",
+                label: "Action owner",
+                tone: "info",
+                value: "System / Maintenance",
+              },
+            ]
+          : [
+              {
+                detail: "Oldest queued dispatch age is not reported by the dashboard API yet.",
+                label: "Oldest item age",
+                tone: "info",
+                value: "Not reported",
+              },
+              {
+                detail:
+                  dispatchQueueGrowth.delta && dispatchQueueGrowth.delta > 0
+                    ? "queue is growing across the available samples."
+                    : "Change in dispatch queue depth across the available samples.",
+                label: "Queue growth",
+                tone: dispatchQueueGrowth.delta && dispatchQueueGrowth.delta > 0 ? "warning" : "ok",
+                value: formatDelta(dispatchQueueGrowth.delta),
+              },
+              {
+                detail: "Queue warning threshold from configured dispatcher in-flight capacity.",
+                label: "Warning threshold",
+                tone: "warning",
+                value: dispatchModel.warningThreshold,
+              },
+              {
+                detail: "Dispatcher capacity is considered available when in-flight capacity is configured.",
+                label: "Worker availability",
+                tone: dispatcherInFlight ? "ok" : "critical",
+                value: dispatcherInFlight
+                  ? `${dispatcherInFlight} in-flight configured`
+                  : "Not configured",
+              },
+            ];
+  const selectedConfigLinks =
+    activeSubsystem === "database"
+      ? [
+          ["API DB pool", "capacity.api_db_pool"],
+          ["Worker DB pool", "capacity.worker_db_pool"],
+        ]
+      : activeSubsystem === "dispatch"
+        ? [
+            ["Dispatcher in-flight", "capacity.dispatcher_in_flight"],
+            ["Dispatcher batch", "capacity.dispatcher_batch"],
+          ]
+        : activeSubsystem === "gateway"
+          ? [
+              ["Event post seconds", "timeouts.event_post_secs"],
+              ["Internal HTTP read", "timeouts.internal_http_read_secs"],
+            ]
+          : [
+              ["Artifact max bytes", "storage.artifact_max_bytes"],
+              ["Maintenance cleanup", "system.maintenance"],
+            ];
   return (
     <div className="workspace singleColumn systemWorkspace">
       <div className="workspaceStack">
@@ -3437,7 +4593,7 @@ function SystemCapacityPanel({
             <h2>Capacity telemetry</h2>
             <span>
               {dashboard
-                ? `${dashboard.bucket_secs}s rollups / generated ${new Date(dashboard.generated_at).toLocaleTimeString()}`
+                ? `${dashboard.bucket_secs}s rollups / selected ${window}; ${sampleCoverage} / generated ${formatFullTime(dashboard.generated_at)}`
                 : "Capacity telemetry loading"}
             </span>
           </div>
@@ -3446,15 +4602,24 @@ function SystemCapacityPanel({
               <span>Points</span>
               <select
                 aria-label="System capacity point density"
-                onChange={(event) => onPointDensityChange(event.target.value as SystemDashboardPointDensity)}
+                onChange={(event) =>
+                  onPointDensityChange(
+                    event.target.value as SystemDashboardPointDensity,
+                  )
+                }
                 value={pointDensity}
               >
                 {pointDensityOptions.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
                 ))}
               </select>
             </label>
-            <div className="timeRangeTabs" aria-label="System capacity time range">
+            <div
+              className="timeRangeTabs"
+              aria-label="System capacity time range"
+            >
               {dashboardWindows.map((option) => (
                 <button
                   aria-pressed={window === option.value}
@@ -3467,192 +4632,143 @@ function SystemCapacityPanel({
                 </button>
               ))}
             </div>
-            <button className="secondaryAction compactAction" disabled={loading} onClick={onRefresh} type="button">
+            <button
+              className="secondaryAction compactAction"
+              disabled={loading}
+              onClick={onRefresh}
+              type="button"
+            >
               <RefreshCw size={16} />
               <span>{loading ? "Refreshing" : "Refresh"}</span>
             </button>
           </div>
         </div>
         {error && <div className="panelError">{error}</div>}
-        {dashboard?.notes.length ? <div className="panelWarning">{dashboard.notes.join("; ")}</div> : null}
 
-        <section className="dashboardSection systemDashboardOverview" aria-label="System capacity posture overview">
+        <section
+          className="dashboardSection systemDashboardOverview"
+          aria-label="System capacity posture overview"
+        >
           <div className="dashboardSectionHeader">
             <div>
-              <h2>Capacity posture</h2>
-              <span>Control-plane limits, queue pressure, and capacity API gaps before fleet-resource metrics.</span>
+              <h2>Subsystem capacity</h2>
+              <span>
+                Database, dispatch, gateway, and storage capacity. Select one
+                subsystem to inspect its thresholds and chart.
+              </span>
             </div>
-            <ConsoleStatusBadge tone={capacityTone}>{systemToneLabel(capacityTone)}</ConsoleStatusBadge>
+            <ConsoleStatusBadge tone={capacityTone}>
+              {systemToneLabel(capacityTone)}
+            </ConsoleStatusBadge>
           </div>
-          <div className="systemPostureGrid">
-            <SystemPostureTile
-              detail={`${dashboard?.current.db_pool.in_use_connections ?? 0} of ${dashboard?.current.db_pool.max_connections ?? 0} DB connections are in use; warn at 70%, critical at 85%.`}
-              icon={<Database size={18} />}
-              label="DB pool capacity"
-              tone={dbTone}
-              value={`${dbPressurePercent}% in use`}
-            />
-            <SystemPostureTile
-              detail={`${queueDepth} queued targets against ${configuredLimit}; queue depth should drain below active in-flight capacity.`}
-              icon={<Activity size={18} />}
-              label="Dispatch capacity"
-              tone={dispatchTone}
-              value={`${queueDepth} queued`}
-            />
-            <SystemPostureTile
-              detail={`${gatewayEvents?.current_queue_depth ?? 0} gateway events queued; oldest event ${secondsOrUnset(gatewayEvents?.oldest_event_age_secs)}.`}
-              icon={<Network size={18} />}
-              label="Gateway backlog"
-              tone={gatewayTone}
-              value={gatewayEvents?.status ?? "unavailable"}
-            />
-            <SystemPostureTile
-              detail={capacityForecast}
-              icon={<ServerCog size={18} />}
-              label="Configured profile"
-              tone={profileLimit ? "info" : "warning"}
-              value={profileLimit ? `${profileLimit} VPS expected max` : "Profile unset"}
-            />
-            <SystemPostureTile
-              detail="Object-store bytes and retained artifact pressure are not exposed by the system dashboard API yet; System / Maintenance owns cleanup previews."
-              icon={<Database size={18} />}
-              label="Artifact storage"
-              tone="warning"
-              value="API gap"
-            />
-            <SystemPostureTile
-              detail="Retention pressure needs current retained bytes, oldest object age, and prune backlog from the backend before this page can show authoritative pressure."
-              icon={<TimerReset size={18} />}
-              label="Retention pressure"
-              tone="warning"
-              value="API gap"
-            />
-            <SystemPostureTile
-              detail="Worker lag is not exposed in the dashboard response yet; schedule timeout and queue signals are shown as available proxies only."
-              icon={<AlertTriangle size={18} />}
-              label="Worker lag"
-              tone="warning"
-              value="API gap"
-            />
+          <div
+            className="systemCapacityTabs"
+            role="tablist"
+            aria-label="System capacity subsystems"
+          >
+            {capacityTabs.map((tab) => (
+              <button
+                aria-selected={activeSubsystem === tab.id}
+                className={activeSubsystem === tab.id ? "active" : ""}
+                key={tab.id}
+                onClick={() => setActiveSubsystem(tab.id)}
+                role="tab"
+                type="button"
+              >
+                <span>{tab.label}</span>
+                <strong>{tab.value}</strong>
+                <ConsoleStatusBadge tone={tab.tone}>
+                  {systemToneLabel(tab.tone)}
+                </ConsoleStatusBadge>
+              </button>
+            ))}
           </div>
-          <div className="systemCapacityStrip" aria-label="System capacity configured limits">
+          <div
+            className="systemCapacityStrip"
+            aria-label="System capacity configured limits"
+          >
             <div>
-              <strong>Dispatch capacity</strong>
+              <strong>Selected range</strong>
+              <span>{`${window}; ${sampleCoverage}`}</span>
+            </div>
+            <div>
+              <strong>Capacity profile</strong>
+              <span>{capacityForecast}</span>
+            </div>
+            <div>
+              <strong>Dispatch limit</strong>
               <span>{configuredLimit}</span>
             </div>
+          </div>
+          <CapacityFactorGrid
+            ariaLabel={`${activeSubsystem} capacity health factors`}
+            items={selectedFactors}
+          />
+          <div
+            className="systemCapacityConfigLinks"
+            aria-label="Capacity Suite Config links"
+          >
+            <strong>Suite Config fields</strong>
+            <span>
+              Limits shown here are edited in System / Suite config; each
+              action keeps the field key visible.
+            </span>
             <div>
-              <strong>DB pools</strong>
-              <span>{`${valueOrUnset(dashboard?.capacity.api_db_pool)} API / ${valueOrUnset(dashboard?.capacity.worker_db_pool)} worker`}</span>
-            </div>
-            <div>
-              <strong>Expected max</strong>
-              <span>{profileLimit ? `${profileLimit} long-lived VPSs` : "Not declared"}</span>
+              {selectedConfigLinks.map(([label, key]) => (
+                <button
+                  className="secondaryAction compactAction"
+                  key={key}
+                  onClick={() => onSelectView("System", "suite_config")}
+                  title={`Open System / Suite config for ${key}`}
+                  type="button"
+                >
+                  <SlidersHorizontal size={16} />
+                  <span>{label}</span>
+                  <small>{key}</small>
+                </button>
+              ))}
             </div>
           </div>
         </section>
 
-        <SystemMetricSection
-          badge={`${dbPressurePercent}% in use`}
-          badgeTone={dbTone}
-          icon={<Database size={18} />}
-          insight="Capacity charts compare active DB usage with configured connection ceilings; sustained pressure above 70% needs pool review."
-          title="Capacity"
-          subtitle="Database pool pressure and configured control-plane limits."
-          metrics={[
-            { label: "API DB pool", value: valueOrUnset(dashboard?.capacity.api_db_pool) },
-            { label: "Worker DB pool", value: valueOrUnset(dashboard?.capacity.worker_db_pool) },
-            { label: "Dispatcher in-flight", value: valueOrUnset(dashboard?.capacity.dispatcher_in_flight) },
-            { label: "Dispatcher batch", value: valueOrUnset(dashboard?.capacity.dispatcher_batch) },
-          ]}
-          thresholds={[
-            { label: "Warn", tone: "warning", value: "70% pool pressure" },
-            { label: "Critical", tone: "critical", value: "85% pool pressure" },
-            { label: "Profile", tone: "info", value: profileLimit ? `${profileLimit} VPS expected max` : "unset" },
-          ]}
-          lines={chartLines(series, [
-            "db_pool.in_use_connections",
-            "db_pool.open_connections",
-            "db_pool.idle_connections",
-            "db_pool.max_connections",
-          ])}
-          valueFormatter={(value) => formatNumber(value)}
-        />
-
-        <SystemMetricSection
-          badge={`${queueDepth} queued`}
-          badgeTone={dispatchTone}
-          icon={<Activity size={18} />}
-          insight="Dispatch queue should drain below active in-flight capacity; a growing queue while retries climb is an operator signal."
-          title="Dispatch capacity"
-          subtitle="Queued, dispatching, running, retry, and active job pressure."
-          metrics={[
-            { label: "Active jobs", value: String(dashboard?.current.dispatch.active_jobs ?? 0) },
-            { label: "Dispatch queue", value: String(queueDepth) },
-            { label: "Active targets", value: String(dashboard?.current.targets.active ?? 0) },
-            { label: "Retried targets", value: String(dashboard?.current.dispatch.retried_targets ?? 0) },
-          ]}
-          thresholds={[
-            { label: "Capacity", tone: "info", value: `${valueOrUnset(dispatcherInFlight)} in-flight` },
-            { label: "Batch", tone: "info", value: `${valueOrUnset(dispatcherBatch)} max` },
-            { label: "Attention", tone: "warning", value: "queue persists" },
-          ]}
-          lines={chartLines(series, [
-            "dispatch.queue_depth",
-            "targets.dispatching",
-            "targets.running",
-            "dispatch.retried_targets",
-          ])}
-          valueFormatter={(value) => formatNumber(value)}
-        />
-
-        <SystemMetricSection
-          badge={gatewayEvents?.status ?? "unavailable"}
-          badgeTone={gatewayTone}
-          icon={<Network size={18} />}
-          insight="Gateway queue pressure is control-plane capacity: target queue saturation, retries, and rejected connections are shown without mixing in VPS CPU or memory."
-          title="Gateway queue"
-          subtitle="Gateway-to-API forwarding backlog, retries, drops, and per-target queue saturation."
-          metrics={[
-            { label: "Status", value: gatewayEvents?.status ?? "unavailable" },
-            { label: "Queue depth", value: valueOrUnset(gatewayEvents?.current_queue_depth) },
-            { label: "Oldest age", value: secondsOrUnset(gatewayEvents?.oldest_event_age_secs) },
-            { label: "Dropped", value: valueOrUnset(gatewayEvents?.dropped_events) },
-            { label: "Critical failures", value: valueOrUnset(gatewayEvents?.critical_failures) },
-            { label: "Target queue full", value: valueOrUnset(gatewayEvents?.dropped_by_reason?.target_queue_full) },
-            { label: "Rejected connects", value: valueOrUnset(gatewayEvents?.rejected_agent_connections) },
-            { label: "Event retries", value: valueOrUnset(gatewayEvents?.retry_attempts) },
-          ]}
-          thresholds={[
-            { label: "Live", tone: gatewayEvents?.status === "live" ? "ok" : "warning", value: gatewayEvents?.status ?? "unavailable" },
-            { label: "Critical", tone: "critical", value: "queue full / expired drops" },
-            { label: "Attention", tone: "warning", value: "any retry or drop" },
-          ]}
-          lines={chartLines(series, [
-            "gateway_events.current_queue_depth",
-            "gateway_events.oldest_event_age_secs",
-            "gateway_events.dropped_events",
-            "gateway_events.critical_failures",
-            "gateway_events.rejected_agent_connections",
-            "gateway_events.retry_attempts",
-          ])}
-          valueFormatter={(value) => formatNumber(value)}
-        />
-
-        <section className="dashboardSection" aria-label="System capacity unavailable telemetry">
-          <div className="dashboardSectionHeader">
+        <section
+          className="dashboardSection systemCapacityUnavailableBanner"
+          aria-label="System capacity unavailable telemetry"
+        >
+          <div>
+            <AlertTriangle size={17} />
             <div>
-              <h2>Unavailable capacity telemetry</h2>
-              <span>Fields the release shape needs before artifact, retention, and worker pressure can be authoritative.</span>
+              <strong>Unavailable capacity telemetry</strong>
+              <span>
+                Artifact bytes, retention prune backlog, and worker lag are
+                not reported by the current dashboard API. Cleanup previews
+                remain in System / Maintenance.
+              </span>
             </div>
-            <ConsoleStatusBadge tone="warning">API gaps</ConsoleStatusBadge>
           </div>
-          <div className="dashboardCardGrid operationalGrid">
-            <SystemStatusTile icon={<Database size={18} />} label="Artifact storage bytes" value="not exposed" />
-            <SystemStatusTile icon={<TimerReset size={18} />} label="Retention prune backlog" value="not exposed" />
-            <SystemStatusTile icon={<Activity size={18} />} label="Worker lag seconds" value="not exposed" />
-            <SystemStatusTile icon={<ServerCog size={18} />} label="Maintenance cleanup owner" value="System / Maintenance" />
-          </div>
+          <ConsoleStatusBadge tone="warning">Backend fields needed</ConsoleStatusBadge>
         </section>
+
+        {activeSubsystem === "storage" ? (
+          <section className="dashboardSection">
+            <div className="dashboardSectionHeader">
+              <div>
+                <h2>Storage capacity</h2>
+                <span>
+                  Storage posture is intentionally compact until object-store
+                  bytes, retained age, and prune backlog are exposed.
+                </span>
+              </div>
+              <ConsoleStatusBadge tone="warning">Not reported</ConsoleStatusBadge>
+            </div>
+            <CapacityFactorGrid
+              ariaLabel="storage capacity unavailable factors"
+              items={selectedFactors}
+            />
+          </section>
+        ) : (
+          activeChart
+        )}
       </div>
     </div>
   );
@@ -3693,11 +4809,20 @@ function SystemMetricSection({
       <div className="dashboardNetworkPanel systemMetricPanel">
         <div className="dashboardCurveCard">
           <div className="dashboardChartHeader">
-            <span className="systemSectionTitle">{icon}{title} curves</span>
+            <span className="systemSectionTitle">
+              {icon}
+              {title} curves
+            </span>
             {thresholds.length ? (
-              <div className="systemThresholdChips" aria-label={`${title} thresholds`}>
+              <div
+                className="systemThresholdChips"
+                aria-label={`${title} thresholds`}
+              >
                 {thresholds.map((threshold) => (
-                  <span className={threshold.tone ?? "neutral"} key={threshold.label}>
+                  <span
+                    className={threshold.tone ?? "neutral"}
+                    key={threshold.label}
+                  >
                     <strong>{threshold.label}</strong>
                     {threshold.value}
                   </span>
@@ -3730,6 +4855,81 @@ function SystemMetricSection({
         </div>
       </div>
     </section>
+  );
+}
+
+function CapacityFactorGrid({
+  ariaLabel,
+  items,
+}: {
+  ariaLabel: string;
+  items: CapacityFactorItem[];
+}) {
+  return (
+    <div className="systemCapacityFactorGrid" aria-label={ariaLabel}>
+      {items.map((item) => (
+        <div
+          className={`systemCapacityFactor ${item.tone ?? "neutral"}`}
+          key={item.label}
+        >
+          <small>{item.label}</small>
+          <strong>{item.value}</strong>
+          <p>{item.detail}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SystemSubsystemDetails({
+  items,
+  label,
+  tone,
+  value,
+}: {
+  items: Array<{ label: string; value: string }>;
+  label: string;
+  tone: SystemHealthTone;
+  value: string;
+}) {
+  return (
+    <details className={`systemSubsystemDisclosure ${tone}`}>
+      <summary>
+        <span>
+          <strong>{label}</strong>
+          <small>{value}</small>
+        </span>
+        <ConsoleStatusBadge tone={tone}>
+          {systemToneLabel(tone)}
+        </ConsoleStatusBadge>
+      </summary>
+      <div>
+        {items.map((item) => (
+          <span key={item.label}>
+            <small>{item.label}</small>
+            <strong>{item.value}</strong>
+          </span>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function SystemDiagnosticsRow({
+  detail,
+  label,
+  value,
+}: {
+  detail: string;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="systemDiagnosticsRow">
+      <strong>{label}</strong>
+      <b>{value}</b>
+      <p>{detail}</p>
+    </div>
   );
 }
 
@@ -3769,7 +4969,15 @@ function SystemAttentionRow({ item }: { item: SystemAttentionItem }) {
   );
 }
 
-function SystemStatusTile({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
+function SystemStatusTile({
+  icon,
+  label,
+  value,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+}) {
   return (
     <div className="dashboardMetricCard neutral staticCard">
       <span className="dashboardMetricIcon">{icon}</span>
@@ -3798,37 +5006,96 @@ function SystemConfigPanel({
   onLoad: () => void;
   onOpenPrivilegeUnlock: () => void;
   onSelectView: (view: ActiveView, subpage?: string) => void;
-  onUpdate: (toml: string, privilegeAssertion: unknown) => Promise<SuiteConfigUpdateResponse>;
+  onUpdate: (
+    toml: string,
+    privilegeAssertion: unknown,
+  ) => Promise<SuiteConfigUpdateResponse>;
   onValidate: (toml: string) => Promise<SuiteConfigValidateResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
 }) {
   const [draftToml, setDraftToml] = useState("");
-  const [validation, setValidation] = useState<SuiteConfigValidateResponse | null>(null);
+  const [validation, setValidation] =
+    useState<SuiteConfigValidateResponse | null>(null);
   const [configMessage, setConfigMessage] = useState<string | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
+  const [validationPending, setValidationPending] = useState(false);
+  const [savePending, setSavePending] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [editorMode, setEditorMode] = useState<"form" | "toml">("form");
-  const [activeConfigSection, setActiveConfigSection] = useState(suiteConfigSections[0].id);
+  const [configSearch, setConfigSearch] = useState("");
+  const validationRequestId = useRef(0);
+  const [activeConfigSection, setActiveConfigSection] = useState(
+    suiteConfigSections[0].id,
+  );
   const parsedDraft = useMemo(() => parseTomlDraft(draftToml), [draftToml]);
   const currentConfigDraft = useMemo(
-    () => config ? parseTomlDraft(config.toml) : null,
+    () => (config ? parseTomlDraft(config.toml) : null),
     [config],
   );
+  const normalizedConfigSearch = configSearch.trim().toLowerCase();
+  const filteredConfigSections = useMemo(
+    () =>
+      suiteConfigSections
+        .map((section) => ({
+          ...section,
+          fields: section.fields.filter((field) =>
+            configFieldMatchesSearch(section, field, normalizedConfigSearch),
+          ),
+        }))
+        .filter((section) => section.fields.length > 0),
+    [normalizedConfigSearch],
+  );
+  const visibleConfigFieldCount = filteredConfigSections.reduce(
+    (total, section) => total + section.fields.length,
+    0,
+  );
+  const displayedConfigSections = normalizedConfigSearch
+    ? filteredConfigSections
+    : filteredConfigSections.filter(
+        (section) => section.id === activeConfigSection,
+      );
   const dirty = Boolean(config && draftToml !== config.toml);
   const changedKeys = validation?.changed_keys ?? [];
   const activeValidation = validation?.validation ?? config?.validation ?? null;
   const hotReloadFields = activeValidation?.hot_reload_fields ?? [];
   const restartRequiredFields = activeValidation?.restart_required_fields ?? [];
-  const hotReloadCount = suiteConfigSections.flatMap((section) => section.fields).filter(
-    (field) => configFieldImpact(field.path, activeValidation) === "hot",
-  ).length;
-  const restartRequiredCount = suiteConfigSections.flatMap((section) => section.fields).filter(
-    (field) => configFieldImpact(field.path, activeValidation) === "restart",
-  ).length;
-  const changedHotReloadFields = changedKeys.filter((key) => configFieldImpact(key, activeValidation) === "hot");
-  const changedRestartRequiredFields = changedKeys.filter((key) => configFieldImpact(key, activeValidation) === "restart");
-  const changedUnknownImpactFields = changedKeys.filter((key) => configFieldImpact(key, activeValidation) === "unknown");
+  const hotReloadCount = suiteConfigSections
+    .flatMap((section) => section.fields)
+    .filter(
+      (field) => configFieldImpact(field.path, activeValidation) === "hot",
+    ).length;
+  const restartRequiredCount = suiteConfigSections
+    .flatMap((section) => section.fields)
+    .filter(
+      (field) => configFieldImpact(field.path, activeValidation) === "restart",
+    ).length;
+  const changedHotReloadFields = changedKeys.filter(
+    (key) => configFieldImpact(key, activeValidation) === "hot",
+  );
+  const changedRestartRequiredFields = changedKeys.filter(
+    (key) => configFieldImpact(key, activeValidation) === "restart",
+  );
+  const changedUnknownImpactFields = changedKeys.filter(
+    (key) => configFieldImpact(key, activeValidation) === "unknown",
+  );
+  const impactSummaryLabel = validation
+    ? "Draft impact"
+    : "Configuration inventory";
+  const impactSummaryDetail = validation
+    ? `${changedKeys.length} changed · ${changedHotReloadFields.length} hot reload · ${changedRestartRequiredFields.length} restart · ${changedUnknownImpactFields.length} not reported`
+    : `${hotReloadCount} hot-reload fields · ${restartRequiredCount} restart-required fields`;
+  const hotReloadSummaryLabel = validation
+    ? "Draft hot reload"
+    : "Inventory hot reload";
+  const hotReloadSummaryValue = validation
+    ? `${changedHotReloadFields.length} changed`
+    : `${hotReloadCount} fields`;
+  const restartSummaryLabel = validation
+    ? "Draft restart"
+    : "Inventory restart";
+  const restartSummaryValue = validation
+    ? `${changedRestartRequiredFields.length} changed`
+    : `${restartRequiredCount} fields`;
   const validationState = validation
     ? validation.validation.valid
       ? "validated"
@@ -3836,7 +5103,12 @@ function SystemConfigPanel({
     : config?.validation.valid
       ? "loaded"
       : "invalid";
-  const reviewDisabled = pending || !dirty || !validation || !privilegeMaterial || !validation.validation.valid;
+  const pending = validationPending || savePending;
+  const reviewDisabled =
+    pending ||
+    !dirty ||
+    !privilegeMaterial ||
+    (validation ? !validation.validation.valid : false);
   const nextAction = systemConfigNextAction({
     dirty,
     pending,
@@ -3847,27 +5119,75 @@ function SystemConfigPanel({
 
   useEffect(() => {
     if (config) {
+      validationRequestId.current += 1;
       setDraftToml(config.toml);
       setValidation(null);
+      setValidationPending(false);
+      setSavePending(false);
       setConfigMessage(null);
       setConfigError(null);
       setConfirmOpen(false);
     }
   }, [config]);
 
-  async function validateDraft() {
-    setPending(true);
-    setConfigError(null);
-    setConfigMessage(null);
+  useEffect(() => {
+    if (
+      filteredConfigSections.length > 0 &&
+      !filteredConfigSections.some((section) => section.id === activeConfigSection)
+    ) {
+      setActiveConfigSection(filteredConfigSections[0].id);
+    }
+  }, [activeConfigSection, filteredConfigSections]);
+
+  useEffect(() => {
+    if (!config || !dirty || !draftToml.trim() || !parsedDraft.ok) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      void validateDraft({ silent: true, toml: draftToml });
+    }, 450);
+    return () => window.clearTimeout(timeout);
+  }, [config, dirty, draftToml, parsedDraft.ok]);
+
+  async function validateDraft({
+    silent = false,
+    toml = draftToml,
+  }: {
+    silent?: boolean;
+    toml?: string;
+  } = {}) {
+    const requestId = ++validationRequestId.current;
+    setValidationPending(true);
+    if (!silent) {
+      setConfigError(null);
+      setConfigMessage(null);
+    }
     try {
-      const result = await onValidate(draftToml);
+      const result = await onValidate(toml);
+      if (requestId !== validationRequestId.current) {
+        return null;
+      }
       setValidation(result);
-      setConfigMessage(`Validation passed; ${result.changed_keys.length} changed key${result.changed_keys.length === 1 ? "" : "s"}.`);
+      if (!silent) {
+        setConfigMessage(
+          `Validation passed; ${result.changed_keys.length} changed key${result.changed_keys.length === 1 ? "" : "s"}.`,
+        );
+      }
+      return result;
     } catch (validateError) {
-      setValidation(null);
-      setConfigError(validateError instanceof Error ? validateError.message : "Suite config validation failed");
+      if (requestId === validationRequestId.current) {
+        setValidation(null);
+        setConfigError(
+          validateError instanceof Error
+            ? validateError.message
+            : "Suite config validation failed",
+        );
+      }
+      return null;
     } finally {
-      setPending(false);
+      if (requestId === validationRequestId.current) {
+        setValidationPending(false);
+      }
     }
   }
 
@@ -3884,7 +5204,7 @@ function SystemConfigPanel({
       setConfigError("Fix validation errors before saving");
       return;
     }
-    setPending(true);
+    setSavePending(true);
     setConfigError(null);
     setConfigMessage(null);
     try {
@@ -3900,15 +5220,48 @@ function SystemConfigPanel({
         privilegeMaterial,
       });
       const response = await onUpdate(draftToml, privilegeAssertion);
-      const auditNote = response.audit_status === "applied_recorded" ? "" : ` Audit status: ${response.audit_status}.`;
-      setConfigMessage(`Saved suite config; changed keys: ${response.changed_keys.join(", ") || "none"}.${auditNote}`);
+      const auditNote =
+        response.audit_status === "applied_recorded"
+          ? ""
+          : ` Audit status: ${response.audit_status}.`;
+      setConfigMessage(
+        `Saved suite config; changed keys: ${response.changed_keys.join(", ") || "none"}.${auditNote}`,
+      );
       setConfirmOpen(false);
       onLoad();
     } catch (saveError) {
-      setConfigError(saveError instanceof Error ? saveError.message : "Suite config save failed");
+      setConfigError(
+        saveError instanceof Error
+          ? saveError.message
+          : "Suite config save failed",
+      );
     } finally {
-      setPending(false);
+      setSavePending(false);
     }
+  }
+
+  async function reviewChanges() {
+    if (!dirty) {
+      setConfigError("Edit a field or Advanced TOML before reviewing changes");
+      return;
+    }
+    if (!privilegeMaterial) {
+      setConfigError("Open Privilege Vault before reviewing suite config save");
+      return;
+    }
+    let activeResult = validation;
+    if (!activeResult) {
+      activeResult = await validateDraft({ silent: false });
+    }
+    if (!activeResult) {
+      return;
+    }
+    if (!activeResult.validation.valid) {
+      setConfigError("Fix validation errors before reviewing suite config save");
+      return;
+    }
+    setConfigError(null);
+    setConfirmOpen(true);
   }
 
   function updateField(path: string, value: unknown) {
@@ -3916,10 +5269,12 @@ function SystemConfigPanel({
       setConfigError(parsedDraft.error);
       return;
     }
+    validationRequestId.current += 1;
     const next = cloneTable(parsedDraft.table);
     setTomlPath(next, path.split("."), value);
     setDraftToml(stringify(next));
     setValidation(null);
+    setValidationPending(false);
     setConfirmOpen(false);
   }
 
@@ -3938,26 +5293,34 @@ function SystemConfigPanel({
           <div className="sectionHeader">
             <div>
               <h2>Suite config</h2>
-              <span>{config?.path ?? "Suite TOML path"} / {config?.exists ? "file exists" : "new file"}</span>
+              <span>
+                {config?.path ?? "Suite TOML path"} /{" "}
+                {config?.exists ? "file exists" : "new file"}
+              </span>
             </div>
             <div className="buttonCluster">
-              <button className="secondaryAction compactAction" disabled={loading || pending} onClick={onLoad} type="button">
+              <button
+                className="secondaryAction compactAction"
+                disabled={loading || pending}
+                onClick={onLoad}
+                type="button"
+              >
                 <RefreshCw size={16} />
                 <span>{loading ? "Loading" : "Reload"}</span>
-              </button>
-              <button className="secondaryAction compactAction" disabled={pending || !draftToml.trim()} onClick={validateDraft} type="button">
-                <CheckCircle2 size={16} />
-                <span>Validate</span>
               </button>
               <button
                 className="primaryAction compactAction"
                 disabled={reviewDisabled}
-                onClick={() => setConfirmOpen(true)}
-                title={reviewDisabled ? nextAction.detail : "Review changed suite config keys, reload impact, and privilege state."}
+                onClick={() => void reviewChanges()}
+                title={
+                  reviewDisabled
+                    ? nextAction.detail
+                    : "Review changed suite config keys, reload impact, and privilege state."
+                }
                 type="button"
               >
                 <Save size={16} />
-                <span>Review save</span>
+                <span>Review changes</span>
               </button>
             </div>
           </div>
@@ -3966,53 +5329,181 @@ function SystemConfigPanel({
           {configMessage && <div className="panelSuccess">{configMessage}</div>}
           {config && (
             <div className="systemConfigSummary">
-              <SystemConfigStatusItem icon={<SlidersHorizontal size={17} />} label="State" value={dirty ? "draft" : validationState} tone={dirty ? "warning" : validationState === "invalid" ? "critical" : "ok"} />
-              <SystemConfigStatusItem icon={<CheckCircle2 size={17} />} label="Changed keys" value={validation ? String(changedKeys.length) : "not validated"} tone={validation ? "info" : "neutral"} />
-              <SystemConfigStatusItem icon={<RefreshCw size={17} />} label="Hot reload" value={`${hotReloadCount} fields`} tone="info" />
-              <SystemConfigStatusItem icon={<AlertTriangle size={17} />} label="Restart required" value={`${restartRequiredCount} fields`} tone={restartRequiredCount ? "warning" : "ok"} />
-              <SystemConfigStatusItem icon={<LockKeyhole size={17} />} label="Privilege" value={privilegeMaterial ? "unlocked" : "locked"} tone={privilegeMaterial ? "ok" : "warning"} />
+              <div
+                className="systemConfigImpactSummary"
+                aria-label="Suite config impact summary"
+              >
+                <strong>{impactSummaryLabel}</strong>
+                <span>{impactSummaryDetail}</span>
+              </div>
+              <SystemConfigStatusItem
+                icon={<SlidersHorizontal size={17} />}
+                label="State"
+                value={dirty ? "draft" : validationState}
+                tone={
+                  dirty
+                    ? "warning"
+                    : validationState === "invalid"
+                      ? "critical"
+                      : "ok"
+                }
+              />
+              <SystemConfigStatusItem
+                icon={<CheckCircle2 size={17} />}
+                label="Changed keys"
+                value={
+                  validation
+                    ? String(changedKeys.length)
+                    : validationPending
+                      ? "validating"
+                      : "not validated"
+                }
+                tone={validation ? "info" : validationPending ? "warning" : "neutral"}
+              />
+              <SystemConfigStatusItem
+                icon={<RefreshCw size={17} />}
+                label={hotReloadSummaryLabel}
+                value={hotReloadSummaryValue}
+                tone="info"
+              />
+              <SystemConfigStatusItem
+                icon={<AlertTriangle size={17} />}
+                label={restartSummaryLabel}
+                value={restartSummaryValue}
+                tone={
+                  validation
+                    ? changedRestartRequiredFields.length
+                      ? "warning"
+                      : "ok"
+                    : restartRequiredCount
+                      ? "warning"
+                      : "ok"
+                }
+              />
+              <SystemConfigStatusItem
+                icon={<LockKeyhole size={17} />}
+                label="Privilege"
+                value={privilegeMaterial ? "unlocked" : "locked"}
+                tone={privilegeMaterial ? "ok" : "warning"}
+              />
             </div>
           )}
         </section>
 
-        <section className="systemConfigOwnership" aria-label="Suite config ownership boundary">
+        <section
+          className="systemConfigOwnership"
+          aria-label="Suite config ownership boundary"
+        >
           <div className="systemConfigOwnershipItem">
-            <span><ServerCog size={17} /></span>
+            <span>
+              <ServerCog size={17} />
+            </span>
             <div>
               <strong>System scope</strong>
-              <p>Suite TOML controls API, gateway, worker, capacity, storage, secrets, and control-plane timeouts.</p>
+              <p>
+                Suite TOML controls API, gateway, worker, capacity, storage,
+                secrets, and control-plane timeouts.
+              </p>
             </div>
           </div>
           <div className="systemConfigOwnershipItem">
-            <span><SlidersHorizontal size={17} /></span>
+            <span>
+              <SlidersHorizontal size={17} />
+            </span>
             <div>
               <strong>Runtime config scope</strong>
-              <p>Per-VPS runtime reads, overrides, patches, templates, and rules stay in Config workflows.</p>
+              <p>
+                Per-VPS runtime reads, overrides, patches, templates, and rules
+                stay in Config workflows.
+              </p>
             </div>
             <div className="systemConfigOwnershipActions">
-              <button className="secondaryAction compactAction" onClick={() => onSelectView("Config", "per_vps")} type="button">
+              <button
+                className="secondaryAction compactAction"
+                onClick={() => onSelectView("Config", "per_vps")}
+                type="button"
+              >
                 Open Config / Per-VPS
               </button>
-              <button className="secondaryAction compactAction" onClick={() => onSelectView("Config", "bulk_patch")} type="button">
+              <button
+                className="secondaryAction compactAction"
+                onClick={() => onSelectView("Config", "bulk_patch")}
+                type="button"
+              >
                 Open Config / Bulk patch
               </button>
             </div>
           </div>
           <div className="systemConfigOwnershipItem">
-            <span><ShieldCheck size={17} /></span>
+            <span>
+              <ShieldCheck size={17} />
+            </span>
             <div>
               <strong>Save contract</strong>
-              <p>Every suite change follows structured edit, validation, redacted diff, privilege unlock, save, reload or restart, and audit evidence.</p>
+              <p>
+                Every suite change follows structured edit, automatic
+                validation, redacted diff, privilege unlock, save, reload or
+                restart, and audit evidence.
+              </p>
             </div>
           </div>
         </section>
 
-        <div className="systemConfigBody">
-          <aside className="systemConfigSideNav" aria-label="Suite config sections">
-            <strong>Sections</strong>
-            {suiteConfigSections.map((section) => (
+        <section
+          className={`systemConfigStickyBar ${dirty ? "dirty" : ""}`}
+          aria-label="Suite config sticky save bar"
+        >
+          <div>
+            <strong>
+              {validation
+                ? changedKeyCountLabel(changedKeys.length)
+                : dirty
+                  ? validationPending
+                    ? "Auto-validating draft"
+                    : "Draft changes pending"
+                  : "No draft changes"}
+            </strong>
+            <span>{nextAction.detail}</span>
+          </div>
+          <div className="buttonCluster">
+            {!privilegeMaterial ? (
               <button
-                aria-current={activeConfigSection === section.id ? "true" : undefined}
+                className="secondaryAction compactAction"
+                onClick={onOpenPrivilegeUnlock}
+                type="button"
+              >
+                <LockKeyhole size={16} />
+                <span>Unlock</span>
+              </button>
+            ) : null}
+            <button
+              className="primaryAction compactAction"
+              disabled={reviewDisabled}
+              onClick={() => void reviewChanges()}
+              title={
+                reviewDisabled
+                  ? nextAction.detail
+                  : "Review changed suite config keys, reload impact, and privilege state."
+              }
+              type="button"
+            >
+              <Save size={16} />
+              <span>Review changes</span>
+            </button>
+          </div>
+        </section>
+
+        <div className="systemConfigBody">
+          <aside
+            className="systemConfigSideNav"
+            aria-label="Suite config sections"
+          >
+            <strong>Sections</strong>
+            {filteredConfigSections.map((section) => (
+              <button
+                aria-current={
+                  activeConfigSection === section.id ? "true" : undefined
+                }
                 className={activeConfigSection === section.id ? "active" : ""}
                 key={section.id}
                 onClick={() => selectConfigSection(section.id)}
@@ -4023,7 +5514,9 @@ function SystemConfigPanel({
               </button>
             ))}
             <button
-              aria-current={activeConfigSection === "review" ? "true" : undefined}
+              aria-current={
+                activeConfigSection === "review" ? "true" : undefined
+              }
               className={activeConfigSection === "review" ? "active" : ""}
               onClick={() => selectConfigSection("review")}
               type="button"
@@ -4038,17 +5531,50 @@ function SystemConfigPanel({
               <div className="dashboardSectionHeader">
                 <div>
                   <h2>Suite editor</h2>
-                  <span>{editorMode === "form" ? "Structured sections with help, defaults, current value, validation rule, and reload impact." : "Advanced TOML editor for settings not covered by structured controls."}</span>
+                  <span>
+                    {editorMode === "form"
+                      ? "Structured sections with help, defaults, current value, validation rule, and reload impact."
+                        : "Advanced TOML editor for settings not covered by structured controls."}
+                  </span>
                 </div>
                 <div className="editorModeGroup">
+                  <label className="systemConfigSearch">
+                    <Search size={15} />
+                    <span>
+                      {normalizedConfigSearch
+                        ? `${visibleConfigFieldCount} matching settings`
+                        : "Search settings"}
+                    </span>
+                    <input
+                      aria-label="Search suite config settings"
+                      onChange={(event) => setConfigSearch(event.target.value)}
+                      placeholder="Search key, label, help"
+                      type="search"
+                      value={configSearch}
+                    />
+                  </label>
                   <ConsoleStatusBadge tone={parsedDraft.ok ? "ok" : "warning"}>
                     {parsedDraft.ok ? "TOML parsed" : "TOML invalid"}
                   </ConsoleStatusBadge>
-                  <div className="segmented" role="group" aria-label="Suite config editor mode">
-                    <button aria-pressed={editorMode === "form"} className={editorMode === "form" ? "selected" : ""} onClick={() => setEditorMode("form")} type="button">
+                  <div
+                    className="segmented"
+                    role="group"
+                    aria-label="Suite config editor mode"
+                  >
+                    <button
+                      aria-pressed={editorMode === "form"}
+                      className={editorMode === "form" ? "selected" : ""}
+                      onClick={() => setEditorMode("form")}
+                      type="button"
+                    >
                       Fields
                     </button>
-                    <button aria-pressed={editorMode === "toml"} className={editorMode === "toml" ? "selected" : ""} onClick={() => setEditorMode("toml")} type="button">
+                    <button
+                      aria-pressed={editorMode === "toml"}
+                      className={editorMode === "toml" ? "selected" : ""}
+                      onClick={() => setEditorMode("toml")}
+                      type="button"
+                    >
                       Advanced TOML
                     </button>
                   </div>
@@ -4056,12 +5582,39 @@ function SystemConfigPanel({
               </div>
               {!parsedDraft.ok && (
                 <div className="panelWarning systemConfigNotice">
-                  Structured controls are paused until the TOML parses. Use the advanced TOML editor to repair the document.
+                  Structured controls are paused until the TOML parses. Use the
+                  advanced TOML editor to repair the document.
                 </div>
               )}
               {editorMode === "form" ? (
                 <div className="systemConfigSectionStack">
-                  {suiteConfigSections.map((section) => (
+                  {filteredConfigSections.length === 0 ? (
+                    <div className="systemConfigEmptySearch">
+                      <strong>No settings match “{configSearch.trim()}”</strong>
+                      <span>
+                        Search labels, config paths, validation rules, defaults,
+                        and help text.
+                      </span>
+                      <button
+                        className="secondaryAction compactAction"
+                        onClick={() => setConfigSearch("")}
+                        type="button"
+                      >
+                        Clear search
+                      </button>
+                    </div>
+                  ) : null}
+                  {filteredConfigSections.length > 0 &&
+                  displayedConfigSections.length === 0 ? (
+                    <div className="systemConfigEmptySearch">
+                      <strong>Review workflow selected</strong>
+                      <span>
+                        Use the review panel below for validation, privilege,
+                        save, reload, restart, and audit evidence.
+                      </span>
+                    </div>
+                  ) : null}
+                  {displayedConfigSections.map((section) => (
                     <ConfigSection
                       activeValidation={activeValidation}
                       currentDraft={currentConfigDraft}
@@ -4075,15 +5628,23 @@ function SystemConfigPanel({
               ) : (
                 <div className="systemTomlEditor">
                   <div className="systemTomlNotes">
-                    <span>{config?.hot_reload_note ?? "Hot-reload notes unavailable"}</span>
-                    <span>{config?.restart_required_note ?? "Restart notes unavailable"}</span>
+                    <span>
+                      {config?.hot_reload_note ??
+                        "Hot-reload notes unavailable"}
+                    </span>
+                    <span>
+                      {config?.restart_required_note ??
+                        "Restart notes unavailable"}
+                    </span>
                   </div>
                   <textarea
                     aria-label="Suite config TOML"
                     className="systemConfigToml"
                     onChange={(event) => {
+                      validationRequestId.current += 1;
                       setDraftToml(event.target.value);
                       setValidation(null);
+                      setValidationPending(false);
                       setConfirmOpen(false);
                     }}
                     spellCheck={false}
@@ -4101,16 +5662,33 @@ function SystemConfigPanel({
               <div className="dashboardSectionHeader">
                 <div>
                   <h2>Review and save</h2>
-                  <span>Edit, validate, unlock, review diff, save, then follow reload/restart and audit evidence.</span>
+                  <span>
+                    Edit, auto-validate, unlock, review diff, save, then
+                    follow reload/restart and audit evidence.
+                  </span>
                 </div>
-                <ConsoleStatusBadge tone={validation?.validation.valid ? "ok" : dirty ? "warning" : "neutral"}>
-                  {validation ? `${changedKeys.length} changed` : dirty ? "Draft" : "No draft"}
+                <ConsoleStatusBadge
+                  tone={
+                    validation?.validation.valid
+                      ? "ok"
+                      : dirty
+                        ? "warning"
+                        : "neutral"
+                  }
+                >
+                  {validation
+                    ? `${changedKeys.length} changed`
+                    : dirty
+                      ? "Draft"
+                      : "No draft"}
                 </ConsoleStatusBadge>
               </div>
 
               <div className="systemReviewStack">
                 <ConfigSaveStepper
-                  auditRecorded={configMessage?.includes("Saved suite config") ?? false}
+                  auditRecorded={
+                    configMessage?.includes("Saved suite config") ?? false
+                  }
                   dirty={dirty}
                   pending={pending}
                   privilegeReady={Boolean(privilegeMaterial)}
@@ -4121,12 +5699,21 @@ function SystemConfigPanel({
                   <strong>{nextAction.label}</strong>
                   <span>{nextAction.detail}</span>
                   {nextAction.action === "validate" ? (
-                    <button className="secondaryAction compactAction" disabled={pending || !draftToml.trim()} onClick={validateDraft} type="button">
+                    <button
+                      className="secondaryAction compactAction"
+                      disabled={pending || !draftToml.trim()}
+                      onClick={() => void validateDraft({ silent: false })}
+                      type="button"
+                    >
                       <CheckCircle2 size={16} />
-                      Validate
+                      Validate now
                     </button>
                   ) : nextAction.action === "unlock" ? (
-                    <button className="secondaryAction compactAction" onClick={onOpenPrivilegeUnlock} type="button">
+                    <button
+                      className="secondaryAction compactAction"
+                      onClick={onOpenPrivilegeUnlock}
+                      type="button"
+                    >
                       <LockKeyhole size={16} />
                       Open Privilege Vault
                     </button>
@@ -4134,12 +5721,16 @@ function SystemConfigPanel({
                     <button
                       className="primaryAction compactAction"
                       disabled={reviewDisabled}
-                      onClick={() => setConfirmOpen(true)}
-                      title={reviewDisabled ? nextAction.detail : "Review changed suite config keys, reload impact, and privilege state."}
+                      onClick={() => void reviewChanges()}
+                      title={
+                        reviewDisabled
+                          ? nextAction.detail
+                          : "Review changed suite config keys, reload impact, and privilege state."
+                      }
                       type="button"
                     >
                       <Save size={16} />
-                      Review save
+                      Review changes
                     </button>
                   ) : null}
                 </div>
@@ -4148,28 +5739,64 @@ function SystemConfigPanel({
                   <h3>Changed keys</h3>
                   <div className="chipList compactChipList">
                     {changedKeys.map((key) => (
-                      <span className={configFieldImpact(key, activeValidation)} key={key}>
+                      <span
+                        className={configFieldImpact(key, activeValidation)}
+                        key={key}
+                      >
                         {key}
                       </span>
                     ))}
-                    {validation && changedKeys.length === 0 ? <span>No changes</span> : null}
-                    {!validation ? <span>Validate draft first</span> : null}
+                    {validation && changedKeys.length === 0 ? (
+                      <span>No changes</span>
+                    ) : null}
+                    {!validation ? (
+                      <span>
+                        {validationPending
+                          ? "Auto-validating draft"
+                          : "Draft will validate before review"}
+                      </span>
+                    ) : null}
                   </div>
                 </div>
 
-                <div className="systemImpactGrid" aria-label="Suite config reload and restart plan">
-                  <ImpactList title="Hot reload after save" fields={changedHotReloadFields} emptyLabel="No changed hot-reload fields" />
-                  <ImpactList title="Restart required after save" fields={changedRestartRequiredFields} emptyLabel="No changed restart-only fields" />
-                  <ImpactList title="Impact not reported" fields={changedUnknownImpactFields} emptyLabel="All changed keys have a reported impact" />
+                <div
+                  className="systemImpactGrid"
+                  aria-label="Suite config reload and restart plan"
+                >
+                  <ImpactList
+                    title="Hot reload after save"
+                    fields={changedHotReloadFields}
+                    emptyLabel="No changed hot-reload fields"
+                  />
+                  <ImpactList
+                    title="Restart required after save"
+                    fields={changedRestartRequiredFields}
+                    emptyLabel="No changed restart-only fields"
+                  />
+                  <ImpactList
+                    title="Impact not reported"
+                    fields={changedUnknownImpactFields}
+                    emptyLabel="All changed keys have a reported impact"
+                  />
                 </div>
 
                 <div className="systemReviewBlock">
                   <h3>Privilege</h3>
-                  <div className={`privilegeGateBox ${privilegeMaterial ? "ready" : ""}`}>
+                  <div
+                    className={`privilegeGateBox ${privilegeMaterial ? "ready" : ""}`}
+                  >
                     <LockKeyhole size={18} />
-                    <span>{privilegeMaterial ? "Privilege unlocked for this browser session" : "Open Privilege Vault before saving suite config"}</span>
+                    <span>
+                      {privilegeMaterial
+                        ? "Privilege unlocked for this browser session"
+                        : "Open Privilege Vault before saving suite config"}
+                    </span>
                     {!privilegeMaterial && (
-                      <button className="secondaryAction compactAction" onClick={onOpenPrivilegeUnlock} type="button">
+                      <button
+                        className="secondaryAction compactAction"
+                        onClick={onOpenPrivilegeUnlock}
+                        type="button"
+                      >
                         Open Privilege Vault
                       </button>
                     )}
@@ -4181,12 +5808,16 @@ function SystemConfigPanel({
                   <button
                     className="primaryAction wideAction"
                     disabled={reviewDisabled}
-                    onClick={() => setConfirmOpen(true)}
-                    title={reviewDisabled ? nextAction.detail : "Review changed suite config keys, reload impact, and privilege state."}
+                    onClick={() => void reviewChanges()}
+                    title={
+                      reviewDisabled
+                        ? nextAction.detail
+                        : "Review changed suite config keys, reload impact, and privilege state."
+                    }
                     type="button"
                   >
                     <Save size={16} />
-                    <span>{pending ? "Saving" : "Review save"}</span>
+                    <span>{savePending ? "Saving" : "Review changes"}</span>
                   </button>
                 </div>
 
@@ -4195,11 +5826,17 @@ function SystemConfigPanel({
                   <div className="systemDiffPreview">
                     <div>
                       <h3>Current redacted</h3>
-                      <pre className="jsonPreview compactJsonPreview">{formatJson(config?.redacted ?? validation?.old_redacted ?? null)}</pre>
+                      <pre className="jsonPreview compactJsonPreview">
+                        {formatJson(
+                          config?.redacted ?? validation?.old_redacted ?? null,
+                        )}
+                      </pre>
                     </div>
                     <div>
                       <h3>Draft redacted</h3>
-                      <pre className="jsonPreview compactJsonPreview">{formatJson(validation?.redacted ?? null)}</pre>
+                      <pre className="jsonPreview compactJsonPreview">
+                        {formatJson(validation?.redacted ?? null)}
+                      </pre>
                     </div>
                   </div>
                 </details>
@@ -4210,14 +5847,23 @@ function SystemConfigPanel({
                 error={configError}
                 items={[
                   { label: "Changed keys", value: String(changedKeys.length) },
-                  { label: "Hot reload changed", value: String(changedHotReloadFields.length) },
-                  { label: "Restart required changed", value: String(changedRestartRequiredFields.length) },
-                  { label: "Privilege", value: privilegeMaterial ? "Unlocked locally" : "Locked" },
+                  {
+                    label: "Hot reload changed",
+                    value: String(changedHotReloadFields.length),
+                  },
+                  {
+                    label: "Restart required changed",
+                    value: String(changedRestartRequiredFields.length),
+                  },
+                  {
+                    label: "Privilege",
+                    value: privilegeMaterial ? "Unlocked locally" : "Locked",
+                  },
                 ]}
                 onCancel={() => setConfirmOpen(false)}
                 onConfirm={() => void saveDraft()}
                 open={confirmOpen}
-                pending={pending}
+                pending={savePending}
                 title="Confirm suite config save"
                 tone="danger"
               />
@@ -4229,7 +5875,9 @@ function SystemConfigPanel({
   );
 }
 
-type ParsedTomlDraft = { ok: true; table: TomlTable } | { ok: false; error: string };
+type ParsedTomlDraft =
+  | { ok: true; table: TomlTable }
+  | { ok: false; error: string };
 
 function SystemConfigStatusItem({
   icon,
@@ -4251,12 +5899,22 @@ function SystemConfigStatusItem({
   );
 }
 
-function ImpactList({ emptyLabel, fields, title }: { emptyLabel: string; fields: string[]; title: string }) {
+function ImpactList({
+  emptyLabel,
+  fields,
+  title,
+}: {
+  emptyLabel: string;
+  fields: string[];
+  title: string;
+}) {
   return (
     <div className="systemImpactList">
       <h3>{title}</h3>
       <ul>
-        {fields.slice(0, 8).map((field) => <li key={field}>{field}</li>)}
+        {fields.slice(0, 8).map((field) => (
+          <li key={field}>{field}</li>
+        ))}
         {fields.length === 0 ? <li>{emptyLabel}</li> : null}
         {fields.length > 8 ? <li>{fields.length - 8} more fields</li> : null}
       </ul>
@@ -4320,38 +5978,57 @@ function ConfigFieldControl({
   parsedDraft: ParsedTomlDraft;
 }) {
   const pathParts = field.path.split(".");
-  const draftValue = parsedDraft.ok ? getTomlPath(parsedDraft.table, pathParts) : undefined;
-  const currentValue = currentDraft?.ok ? getTomlPath(currentDraft.table, pathParts) : undefined;
+  const draftValue = parsedDraft.ok
+    ? getTomlPath(parsedDraft.table, pathParts)
+    : undefined;
+  const currentValue = currentDraft?.ok
+    ? getTomlPath(currentDraft.table, pathParts)
+    : undefined;
   const currentLabel = formatConfigValue(currentValue);
   const draftLabel = formatConfigValue(draftValue);
+  const defaultValue = configFieldDefaultValue(field);
+  const defaultLabel = formatConfigValue(defaultValue);
+  const changed = !configValuesEqual(draftValue, currentValue);
   const impact = configFieldImpact(field.path, activeValidation);
   const controlId = `suite-config-field-${field.path.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   return (
-    <div className="systemConfigFieldRow">
+    <div className={`systemConfigFieldRow ${changed ? "changed" : ""}`}>
       <div className="systemConfigFieldText">
         <label htmlFor={controlId}>
           {field.label}
           {field.required ? <span>required</span> : null}
+          {changed ? <span className="changed">changed</span> : null}
         </label>
         <p>{field.help}</p>
-        <dl>
-          <div>
-            <dt>Current</dt>
-            <dd title={currentLabel}>{currentLabel}</dd>
-          </div>
-          <div>
-            <dt>Default</dt>
-            <dd title={field.defaultValue}>{field.defaultValue}</dd>
-          </div>
-          <div>
-            <dt>Validation</dt>
-            <dd title={field.rule}>{field.rule}</dd>
-          </div>
-          <div>
-            <dt>Impact</dt>
-            <dd><ConfigImpactBadge impact={impact} /></dd>
-          </div>
-        </dl>
+        <details className="systemConfigFieldMeta" open={changed}>
+          <summary>
+            <strong>{changed ? "Changed metadata" : "Field metadata"}</strong>
+            <span>
+              Current {currentLabel} · Default {defaultLabel} ·{" "}
+              {configImpactLabel(impact)}
+            </span>
+          </summary>
+          <dl>
+            <div>
+              <dt>Current</dt>
+              <dd title={currentLabel}>{currentLabel}</dd>
+            </div>
+            <div>
+              <dt>Default</dt>
+              <dd title={defaultLabel}>{defaultLabel}</dd>
+            </div>
+            <div>
+              <dt>Validation</dt>
+              <dd title={field.rule}>{field.rule}</dd>
+            </div>
+            <div>
+              <dt>Impact</dt>
+              <dd>
+                <ConfigImpactBadge impact={impact} />
+              </dd>
+            </div>
+          </dl>
+        </details>
       </div>
       <div className="systemConfigFieldControl">
         {field.kind === "checkbox" ? (
@@ -4373,24 +6050,61 @@ function ConfigFieldControl({
             min={field.kind === "number" ? 0 : undefined}
             onChange={(event) => {
               const next = event.target.value.trim();
-              onChange(field.path, next ? field.kind === "number" ? Number(next) : event.target.value : undefined);
+              onChange(
+                field.path,
+                next
+                  ? field.kind === "number"
+                    ? Number(next)
+                    : event.target.value
+                  : undefined,
+              );
             }}
             title={draftLabel}
             type={field.kind === "number" ? "number" : "text"}
-            value={field.kind === "number" ? formatNumberInputValue(draftValue) : formatTextInputValue(draftValue)}
+            value={
+              field.kind === "number"
+                ? formatNumberInputValue(draftValue)
+                : formatTextInputValue(draftValue)
+            }
           />
         )}
-        <span id={`${controlId}-meta`} className="systemConfigPath" title={field.path}>{field.path}</span>
+        <span
+          id={`${controlId}-meta`}
+          className="systemConfigPath"
+          title={field.path}
+        >
+          {field.path}
+        </span>
+        <div className="systemConfigFieldActions">
+          <button
+            className="secondaryAction compactAction"
+            disabled={!parsedDraft.ok || configValuesEqual(draftValue, currentValue)}
+            onClick={() => onChange(field.path, currentValue)}
+            title={`Reset ${field.label} to loaded value: ${currentLabel}`}
+            type="button"
+          >
+            <TimerReset size={14} />
+            <span>Reset current</span>
+          </button>
+          <button
+            className="secondaryAction compactAction"
+            disabled={!parsedDraft.ok || configValuesEqual(draftValue, defaultValue)}
+            onClick={() => onChange(field.path, defaultValue)}
+            title={`Use default for ${field.label}: ${defaultLabel}`}
+            type="button"
+          >
+            <SlidersHorizontal size={14} />
+            <span>Use default</span>
+          </button>
+        </div>
       </div>
     </div>
   );
 }
 
 function ConfigImpactBadge({ impact }: { impact: ConfigImpact }) {
-  const label = impact === "restart" ? "Restart required" : impact === "hot" ? "Hot reload" : "Not reported";
-  return (
-    <span className={`configImpactBadge ${impact}`}>{label}</span>
-  );
+  const label = configImpactLabel(impact);
+  return <span className={`configImpactBadge ${impact}`}>{label}</span>;
 }
 
 function ConfigSaveStepper({
@@ -4417,8 +6131,17 @@ function ConfigSaveStepper({
   return (
     <ol className="systemConfigStepper" aria-label="Suite config save flow">
       {steps.map((step) => (
-        <li className={`${step.complete ? "complete" : ""} ${step.active ? "active" : ""}`} key={step.label}>
-          <span>{step.complete ? <CheckCircle2 size={14} /> : <span aria-hidden="true" />}</span>
+        <li
+          className={`${step.complete ? "complete" : ""} ${step.active ? "active" : ""}`}
+          key={step.label}
+        >
+          <span>
+            {step.complete ? (
+              <CheckCircle2 size={14} />
+            ) : (
+              <span aria-hidden="true" />
+            )}
+          </span>
           <strong>{step.label}</strong>
         </li>
       ))}
@@ -4433,10 +6156,18 @@ function configFieldImpact(
   if (!validation) {
     return "unknown";
   }
-  if (validation.restart_required_fields.some((pattern) => configPathMatches(path, pattern))) {
+  if (
+    validation.restart_required_fields.some((pattern) =>
+      configPathMatches(path, pattern),
+    )
+  ) {
     return "restart";
   }
-  if (validation.hot_reload_fields.some((pattern) => configPathMatches(path, pattern))) {
+  if (
+    validation.hot_reload_fields.some((pattern) =>
+      configPathMatches(path, pattern),
+    )
+  ) {
     return "hot";
   }
   return "unknown";
@@ -4455,10 +6186,10 @@ function configPathMatches(path: string, pattern: string): boolean {
 
 function formatConfigValue(value: unknown): string {
   if (value === undefined || value === null || value === "") {
-    return "unset";
+    return "Unset (uses default)";
   }
   if (typeof value === "boolean") {
-    return value ? "true" : "false";
+    return value ? "On" : "Off";
   }
   if (typeof value === "number") {
     return String(value);
@@ -4469,8 +6200,62 @@ function formatConfigValue(value: unknown): string {
   return "configured";
 }
 
+function changedKeyCountLabel(count: number): string {
+  return `${count} changed key${count === 1 ? "" : "s"}`;
+}
+
+function configFieldDefaultValue(field: ConfigFieldSpec): unknown {
+  if (field.defaultValue === "unset") {
+    return undefined;
+  }
+  if (field.kind === "checkbox") {
+    return field.defaultValue === "true";
+  }
+  if (field.kind === "number") {
+    const numeric = Number(field.defaultValue);
+    return Number.isFinite(numeric) ? numeric : undefined;
+  }
+  return field.defaultValue;
+}
+
+function configValuesEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+function configImpactLabel(impact: ConfigImpact): string {
+  return impact === "restart"
+    ? "Restart required"
+    : impact === "hot"
+      ? "Hot reload"
+      : "Impact not reported";
+}
+
+function configFieldMatchesSearch(
+  section: ConfigSectionSpec,
+  field: ConfigFieldSpec,
+  query: string,
+): boolean {
+  if (!query) {
+    return true;
+  }
+  return [
+    section.title,
+    section.description,
+    field.label,
+    field.path,
+    field.help,
+    field.rule,
+    field.defaultValue,
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(query);
+}
+
 function formatNumberInputValue(value: unknown): string {
-  return typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+  return typeof value === "number" && Number.isFinite(value)
+    ? String(value)
+    : "";
 }
 
 function formatTextInputValue(value: unknown): string {
@@ -4506,23 +6291,35 @@ function systemConfigNextAction({
   if (!dirty) {
     return {
       action: "none",
-      detail: "No draft changes are waiting. Edit a field or use Advanced TOML to start a save flow.",
+      detail:
+        "No draft changes are waiting. Edit a field or use Advanced TOML to start a save flow.",
       label: "No draft changes",
       tone: "neutral",
     };
   }
   if (!validation) {
+    if (!privilegeReady) {
+      return {
+        action: "unlock",
+        detail:
+          "Draft validation runs automatically. Unlock privilege before reviewing changed keys and reload impact.",
+        label: "Next: unlock privilege",
+        tone: "warning",
+      };
+    }
     return {
-      action: "validate",
-      detail: "Validate the draft before review so changed keys and reload impact are authoritative.",
-      label: "Next: validate draft",
+      action: "review",
+      detail:
+        "Review changes will validate this draft before opening the save confirmation.",
+      label: "Next: review changes",
       tone: "warning",
     };
   }
   if (!validation.validation.valid) {
     return {
       action: "validate",
-      detail: "Validation failed. Fix TOML or field values, then validate again.",
+      detail:
+        "Validation failed. Fix TOML or field values; the draft will validate again automatically.",
       label: "Fix validation errors",
       tone: "warning",
     };
@@ -4530,7 +6327,8 @@ function systemConfigNextAction({
   if (!privilegeReady) {
     return {
       action: "unlock",
-      detail: "Suite config writes require local privilege unlock before review can proceed.",
+      detail:
+        "Suite config writes require local privilege unlock before review can proceed.",
       label: "Next: unlock privilege",
       tone: "warning",
     };
@@ -4538,14 +6336,16 @@ function systemConfigNextAction({
   if (!reviewDisabled) {
     return {
       action: "review",
-      detail: "Changed keys, reload plan, and privilege state are ready for final confirmation.",
-      label: "Next: review save",
+      detail:
+        "Changed keys, reload plan, and privilege state are ready for final confirmation.",
+      label: "Next: review changes",
       tone: "ok",
     };
   }
   return {
     action: "none",
-    detail: "The save flow is waiting for a valid draft, privilege, and review state.",
+    detail:
+      "The save flow is waiting for a valid draft, privilege, and review state.",
     label: "Review unavailable",
     tone: "neutral",
   };
@@ -4609,6 +6409,122 @@ function gatewayHealthTone(
   return softSignals > 0 ? "warning" : "ok";
 }
 
+function dispatchCapacityHealth({
+  dispatcherBatch,
+  dispatcherInFlight,
+  oldestAgeSecs,
+  queueDepth,
+  queueGrowth,
+}: {
+  dispatcherBatch: number | null;
+  dispatcherInFlight: number | null;
+  oldestAgeSecs: number | null;
+  queueDepth: number;
+  queueGrowth: number | null;
+}): { reason: string; tone: SystemHealthTone; warningThreshold: string } {
+  const warningThreshold = dispatcherInFlight
+    ? Math.ceil(dispatcherInFlight * 0.5)
+    : null;
+  const hardThreshold = dispatcherBatch ?? dispatcherInFlight;
+  const thresholdLabel = warningThreshold
+    ? `${warningThreshold} queued`
+    : "Not configured";
+  if (queueDepth <= 0) {
+    return {
+      reason: "queue empty",
+      tone: "ok",
+      warningThreshold: thresholdLabel,
+    };
+  }
+  if (!dispatcherInFlight) {
+    return {
+      reason: "worker capacity not configured",
+      tone: "critical",
+      warningThreshold: thresholdLabel,
+    };
+  }
+  if (hardThreshold && queueDepth >= hardThreshold) {
+    return {
+      reason: "queue reached configured batch capacity",
+      tone: "critical",
+      warningThreshold: thresholdLabel,
+    };
+  }
+  if (oldestAgeSecs !== null && oldestAgeSecs >= 300) {
+    return {
+      reason: "oldest queued item exceeds 5m",
+      tone: "critical",
+      warningThreshold: thresholdLabel,
+    };
+  }
+  if (oldestAgeSecs !== null && oldestAgeSecs >= 60) {
+    return {
+      reason: "oldest queued item exceeds 60s",
+      tone: "warning",
+      warningThreshold: thresholdLabel,
+    };
+  }
+  if (warningThreshold && queueDepth >= warningThreshold) {
+    return {
+      reason: "queue crossed half of in-flight capacity",
+      tone: "warning",
+      warningThreshold: thresholdLabel,
+    };
+  }
+  if (queueGrowth !== null && queueGrowth > 0) {
+    return {
+      reason: "queue is growing in selected samples",
+      tone: "warning",
+      warningThreshold: thresholdLabel,
+    };
+  }
+  return {
+    reason: "queue below threshold",
+    tone: "info",
+    warningThreshold: thresholdLabel,
+  };
+}
+
+function gatewayCapacityHealth({
+  gatewayEvents,
+  queueGrowth,
+}: {
+  gatewayEvents:
+    | SystemDashboardRecord["current"]["gateway_events"]
+    | undefined;
+  queueGrowth: number | null;
+}): { reason: string; tone: SystemHealthTone } {
+  if (!gatewayEvents || gatewayEvents.status !== "live") {
+    return { reason: "gateway status unavailable", tone: "warning" };
+  }
+  const hardFailures =
+    (gatewayEvents.critical_failures ?? 0) +
+    gatewayEvents.critical_failures_by_reason.global_queue_full +
+    gatewayEvents.critical_failures_by_reason.target_queue_full +
+    gatewayEvents.critical_failures_by_reason.expired +
+    gatewayEvents.dropped_by_reason.global_queue_full +
+    gatewayEvents.dropped_by_reason.target_queue_full +
+    (gatewayEvents.expired_events ?? 0);
+  if (hardFailures > 0) {
+    return { reason: "queue-full or expired gateway failures", tone: "critical" };
+  }
+  const queueDepth = gatewayEvents.current_queue_depth ?? 0;
+  const oldestAgeSecs = gatewayEvents.oldest_event_age_secs;
+  if (oldestAgeSecs !== null && oldestAgeSecs >= 300) {
+    return { reason: "oldest gateway event exceeds 5m", tone: "critical" };
+  }
+  if (oldestAgeSecs !== null && oldestAgeSecs >= 60) {
+    return { reason: "oldest gateway event exceeds 60s", tone: "warning" };
+  }
+  if (queueGrowth !== null && queueGrowth > 0) {
+    return { reason: "gateway queue is growing", tone: "warning" };
+  }
+  if (queueDepth > 0) {
+    return { reason: "queue present below age threshold", tone: "info" };
+  }
+  return { reason: "queue clear", tone: "ok" };
+}
+
 function mostSevereTone(tones: SystemHealthTone[]): SystemHealthTone {
   if (tones.includes("critical")) {
     return "critical";
@@ -4644,7 +6560,7 @@ function buildSystemAttentionItems({
   dispatchTone,
   gatewayCriticalFailures,
   gatewayDropped,
-  gatewayOldestAge,
+  gatewayOldestAgeLabel,
   gatewayQueueDepth,
   gatewayRejected,
   gatewayRetries,
@@ -4657,7 +6573,7 @@ function buildSystemAttentionItems({
   dispatchTone: SystemHealthTone;
   gatewayCriticalFailures: number;
   gatewayDropped: number;
-  gatewayOldestAge: number;
+  gatewayOldestAgeLabel: string;
   gatewayQueueDepth: number;
   gatewayRejected: number;
   gatewayRetries: number;
@@ -4668,7 +6584,8 @@ function buildSystemAttentionItems({
   const items: SystemAttentionItem[] = [];
   if (dbTone !== "ok") {
     items.push({
-      detail: "DB pool pressure crossed the dashboard threshold; validate pool sizing before sustained operator traffic.",
+      detail:
+        "DB pool pressure crossed the dashboard threshold; validate pool sizing before sustained operator traffic.",
       label: "DB pool pressure",
       tone: dbTone,
       value: `${dbPressurePercent}%`,
@@ -4676,7 +6593,8 @@ function buildSystemAttentionItems({
   }
   if (dispatchTone !== "ok") {
     items.push({
-      detail: "Queued dispatch work exists in the current sample; confirm the queue is draining and retries are not climbing.",
+      detail:
+        "Queued dispatch work exists in the current sample; confirm the queue is draining and retries are not climbing.",
       label: "Dispatch queue",
       tone: dispatchTone,
       value: `${queueDepth} queued`,
@@ -4684,7 +6602,8 @@ function buildSystemAttentionItems({
   }
   if (lifecycleFailures > 0) {
     items.push({
-      detail: "Control, agent timeout, or lost-agent outcomes were recorded in the last 24 hours.",
+      detail:
+        "Control, agent timeout, or lost-agent outcomes were recorded in the last 24 hours.",
       label: "Deadline timeouts",
       tone: "warning",
       value: `${lifecycleFailures} events`,
@@ -4692,23 +6611,104 @@ function buildSystemAttentionItems({
   }
   if (gatewayTone !== "ok") {
     items.push({
-      detail: `${gatewayQueueDepth} queued, ${gatewayOldestAge}s oldest, ${gatewayDropped} dropped, ${gatewayRetries} retries, ${gatewayRejected} rejected connects.`,
+      detail: `${gatewayQueueDepth} queued, ${gatewayOldestAgeLabel}, ${gatewayDropped} dropped, ${gatewayRetries} retries, ${gatewayRejected} rejected connects.`,
       label: "Gateway delivery",
       tone: gatewayTone,
-      value: gatewayCriticalFailures > 0 ? `${gatewayCriticalFailures} critical` : `${gatewayDropped} dropped`,
+      value:
+        gatewayCriticalFailures > 0
+          ? `${gatewayCriticalFailures} critical`
+          : `${gatewayDropped} dropped`,
     });
   }
   return items;
 }
 
-function chartLines(series: SystemMetricSeriesRecord[], metrics: string[]): { lines: TimeSeriesChartLine[]; times: string[] } {
+function seriesDelta(
+  series: SystemMetricSeriesRecord[],
+  metric: string,
+): { delta: number | null; latest: number | null } {
+  const entry = series.find((candidate) => candidate.metric === metric);
+  const values =
+    entry?.points
+      .map((point) => point.latest_value)
+      .filter((value) => Number.isFinite(value)) ?? [];
+  if (!values.length) {
+    return { delta: null, latest: null };
+  }
+  return {
+    delta: values[values.length - 1] - values[0],
+    latest: values[values.length - 1],
+  };
+}
+
+function formatDelta(value: number | null): string {
+  if (value === null) {
+    return "Not reported";
+  }
+  if (value > 0) {
+    return `+${formatNumber(value)}`;
+  }
+  return formatNumber(value);
+}
+
+function systemSeriesCoverageSummary(series: SystemMetricSeriesRecord[]): string {
+  const times = Array.from(
+    new Set(
+      series.flatMap((entry) =>
+        entry.points.map((point) => point.bucket_start),
+      ),
+    ),
+  ).sort((left, right) => Date.parse(left) - Date.parse(right));
+  if (!times.length) {
+    return "no samples in selected range";
+  }
+  const first = Date.parse(times[0]);
+  const last = Date.parse(times[times.length - 1]);
+  if (!Number.isFinite(first) || !Number.isFinite(last)) {
+    return `${times.length} sample buckets`;
+  }
+  const firstLabel = new Date(first).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  const lastLabel = new Date(last).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  const duration = formatDurationLabel(Math.max(0, Math.round((last - first) / 1000)));
+  return `${times.length} sample buckets from ${firstLabel} to ${lastLabel} (${duration})`;
+}
+
+function formatDurationLabel(totalSeconds: number): string {
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const minutes = Math.round(totalSeconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m`;
+  }
+  const hours = Math.round(minutes / 60);
+  return `${hours}h`;
+}
+
+function chartLines(
+  series: SystemMetricSeriesRecord[],
+  metrics: string[],
+): { lines: TimeSeriesChartLine[]; times: string[] } {
   const selected = metrics
     .map((metric) => series.find((entry) => entry.metric === metric))
     .filter((entry): entry is SystemMetricSeriesRecord => Boolean(entry));
-  const times = Array.from(new Set(selected.flatMap((entry) => entry.points.map((point) => point.bucket_start))))
-    .sort((left, right) => Date.parse(left) - Date.parse(right));
+  const times = Array.from(
+    new Set(
+      selected.flatMap((entry) =>
+        entry.points.map((point) => point.bucket_start),
+      ),
+    ),
+  ).sort((left, right) => Date.parse(left) - Date.parse(right));
   const lines = selected.map((entry, index) => {
-    const points = new Map(entry.points.map((point) => [point.bucket_start, point.latest_value]));
+    const points = new Map(
+      entry.points.map((point) => [point.bucket_start, point.latest_value]),
+    );
     return {
       color: dashboardChartColors[index % dashboardChartColors.length],
       label: entry.label,
@@ -4722,7 +6722,10 @@ function parseTomlDraft(toml: string): ParsedTomlDraft {
   try {
     return { ok: true, table: parse(toml) as TomlTable };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : "Invalid TOML" };
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Invalid TOML",
+    };
   }
 }
 
@@ -4744,7 +6747,11 @@ function getTomlPath(table: TomlTable, path: string[]): unknown {
 function setTomlPath(table: TomlTable, path: string[], value: unknown) {
   let current = table as Record<string, unknown>;
   for (const part of path.slice(0, -1)) {
-    if (!current[part] || typeof current[part] !== "object" || Array.isArray(current[part])) {
+    if (
+      !current[part] ||
+      typeof current[part] !== "object" ||
+      Array.isArray(current[part])
+    ) {
       current[part] = {};
     }
     current = current[part] as Record<string, unknown>;
@@ -4758,17 +6765,31 @@ function setTomlPath(table: TomlTable, path: string[], value: unknown) {
 }
 
 function formatNumber(value: number | null | undefined): string {
-  return value === null || value === undefined ? "No data" : String(Math.round(value));
+  return value === null || value === undefined
+    ? "No data"
+    : String(Math.round(value));
 }
 
 function valueOrUnset(value: number | null | undefined): string {
   return value === null || value === undefined ? "unset" : String(value);
 }
 
+function valueOrNotConfigured(value: number | null | undefined): string {
+  return value === null || value === undefined ? "Not configured" : String(value);
+}
+
 function secondsOrUnset(value: number | null | undefined): string {
   return value === null || value === undefined ? "unset" : `${value}s`;
 }
 
+function secondsOrNotConfigured(value: number | null | undefined): string {
+  return value === null || value === undefined
+    ? "Not configured"
+    : `${value}s`;
+}
+
 function formatJson(value: JsonValue | null): string {
-  return value === null ? "Validate draft to preview redacted JSON." : JSON.stringify(value, null, 2);
+  return value === null
+    ? "Validate draft to preview redacted JSON."
+    : JSON.stringify(value, null, 2);
 }

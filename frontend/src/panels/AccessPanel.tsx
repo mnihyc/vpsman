@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import {
   AlertTriangle,
   Ban,
@@ -13,10 +21,17 @@ import {
   UsersRound,
   Trash2,
   Wifi,
+  X,
 } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
-import { ConsoleDataGrid, type ConsoleDataGridColumn } from "../components/ConsoleDataGrid";
-import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
+import {
+  ConsoleDataGrid,
+  type ConsoleDataGridColumn,
+} from "../components/ConsoleDataGrid";
+import {
+  useReviewGenerationGuard,
+  waitForReviewRender,
+} from "../hooks/useReviewGenerationGuard";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { clearPrivilegeVault, hasPrivilegeVault } from "../vault";
@@ -73,6 +88,18 @@ type AccessConfirmationAction =
   | "session-clear"
   | "totp-disable"
   | "vault-clear";
+type AccessOverviewTone = "attention" | "neutral" | "ready";
+type IdentityWorkflow = "register" | "rotate" | "revoke" | null;
+
+type AccessOverviewItem = {
+  action: string;
+  detail: string;
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+  tone: AccessOverviewTone;
+  value: string;
+};
 
 type AgentIdentityConfirmationSnapshot = {
   clientId: string;
@@ -121,7 +148,6 @@ type AccessPanelProps = {
   clientKeyRevocations: ClientKeyRevocationView[];
   keyLifecycleReport: KeyLifecycleReportView | null;
   privilegeMaterial: PrivilegeMaterial | null;
-  sessionVaultAvailable: boolean;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   wsState: string;
 };
@@ -155,9 +181,40 @@ function accessRouteForSubpage(subpage: AccessSubpage): AccessReleaseSubpage {
   }
 }
 
+function accessPanelHeader(subpage: AccessSubpage): {
+  title: string;
+  description: string;
+} {
+  switch (subpage) {
+    case "VPS identities":
+      return {
+        title: "VPS identity registry",
+        description:
+          "Agent identity registration, key rotation, revocation, and install evidence",
+      };
+    case "Gateway sessions":
+      return {
+        title: "Gateway session inventory",
+        description:
+          "Live gateway connectivity evidence and shared gateway configuration",
+      };
+    case "Privilege vault":
+      return {
+        title: "Privilege workflow",
+        description:
+          "Local unlock state, request-bound assertions, and vault controls",
+      };
+    default:
+      return {
+        title: "Access overview",
+        description:
+          "Direct gateway identities, browser session state, and live access streams",
+      };
+  }
+}
+
 export function AccessPanel({
   activeSubpage: routeSubpage,
-  apiToken,
   error,
   gatewaySessions,
   lastLiveEvent,
@@ -180,13 +237,13 @@ export function AccessPanel({
   clientKeyRevocations,
   keyLifecycleReport,
   privilegeMaterial,
-  sessionVaultAvailable,
   setPrivilegeMaterial,
   wsState,
 }: AccessPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const identityFormRef = useRef<HTMLFormElement | null>(null);
   const revokeFormRef = useRef<HTMLFormElement | null>(null);
+  const identityWorkflowRef = useRef<HTMLElement | null>(null);
   const [activeSubpage, setActiveSubpage] = useState<AccessSubpage>(
     accessSubpageFromRoute(routeSubpage),
   );
@@ -205,6 +262,8 @@ export function AccessPanel({
   const [identityMode, setIdentityMode] = useState<"register" | "rotate">(
     "register",
   );
+  const [identityWorkflow, setIdentityWorkflow] =
+    useState<IdentityWorkflow>(null);
   const [identityPending, setIdentityPending] = useState(false);
   const [identityReviewPending, setIdentityReviewPending] = useState(false);
   const [identityError, setIdentityError] = useState<string | null>(null);
@@ -229,31 +288,18 @@ export function AccessPanel({
   } = useReviewGenerationGuard();
 
   const canManageOperators = operator?.role === "admin";
-  const sessionState = apiToken ? "Bearer session active" : "No bearer session";
   const vaultState = privilegeMaterial
     ? "Privilege unlocked"
     : vaultAvailable
-      ? "Encrypted privilege vault present"
-      : "No privilege vault";
-  const tokenStorageState = apiToken
-    ? sessionVaultAvailable
-      ? "encrypted vault"
-      : "memory only"
-    : "none";
+      ? "Saved local privilege vault"
+      : "No saved local vault";
   const currentSession =
     operatorSessions.find((session) => session.current) ?? operatorSessions[0];
-  const operatorRefreshTtlDays = operator
-    ? Math.round(operator.session_refresh_ttl_secs / 86_400)
-    : 0;
   const adminMfaRisk = operator?.role === "admin" && !operator.totp_enabled;
-  const adminTtlRisk =
-    operator?.role === "admin" && operator.session_refresh_ttl_secs > 30 * 86_400;
   const gatewayInstallDefaultsReady = Boolean(
     operator?.preferences.gateway_endpoints.trim() &&
-      operator.preferences.gateway_server_public_key_hex?.trim(),
+    operator.preferences.gateway_server_public_key_hex?.trim(),
   );
-  const visibleRoleModel = summarizeRoleModel(operators, operator);
-  const operatorScopeSummary = summarizeOperatorScopes(operator);
   const lifecycleClients = keyLifecycleReport?.clients ?? [];
   const lifecycleVpsOptions = useMemo(
     () =>
@@ -275,7 +321,10 @@ export function AccessPanel({
     (session) => !session.ended_at,
   ).length;
   const activeOperatorSessions = operatorSessions.filter(
-    (session) => !session.revoked,
+    isOperatorSessionActive,
+  ).length;
+  const expiredOperatorSessions = operatorSessions.filter(
+    (session) => !session.revoked && isOperatorSessionExpired(session),
   ).length;
   const revokedClientCount = lifecycleClients.filter(
     (client) => client.status === "revoked" || client.current_key_revoked,
@@ -283,25 +332,9 @@ export function AccessPanel({
   const blockedOrPendingClientCount = lifecycleClients.filter((client) =>
     ["blocked", "pending", "revoked"].includes(identityStatus(client)),
   ).length;
-  const currentSessionExpiry = currentSession
-    ? formatTime(currentSession.expires_at)
-    : "Not reported";
-  const currentRefreshExpiry = currentSession
-    ? formatTime(currentSession.refresh_expires_at)
-    : "Not reported";
-  const authPostureValue = adminMfaRisk
-    ? "Admin MFA required"
-    : operator?.totp_enabled
-      ? "TOTP enabled"
-      : "TOTP not enrolled";
-  const sessionPostureValue = adminTtlRisk
-    ? `Admin refresh TTL ${operatorRefreshTtlDays}d`
-    : currentSession
-      ? `Access expires ${currentSessionExpiry}`
-      : sessionState;
-  const gatewayPostureValue = gatewayInstallDefaultsReady
-    ? `${activeGatewaySessions} active sessions`
-    : "Install defaults missing";
+  const currentSessionState = currentSession
+    ? operatorSessionStateLabel(currentSession)
+    : "Not listed";
   const canUpsertIdentity =
     canManageOperators &&
     !identityPending &&
@@ -315,7 +348,9 @@ export function AccessPanel({
     revokeClientId.trim().length > 0 &&
     !revokePending &&
     !revokeReviewPending;
-  const identityColumns = useMemo<ConsoleDataGridColumn<KeyLifecycleClientView>[]>(
+  const identityColumns = useMemo<
+    ConsoleDataGridColumn<KeyLifecycleClientView>[]
+  >(
     () => [
       {
         id: "vps",
@@ -352,12 +387,10 @@ export function AccessPanel({
         header: "Current key",
         cell: (client) =>
           client.current_public_key_sha256_hex ? (
-            <span
-              className="monoValue"
-              title={client.current_public_key_sha256_hex}
-            >
-              {shortHash(client.current_public_key_sha256_hex)}
-            </span>
+            <CopyableHash
+              label="current key fingerprint"
+              value={client.current_public_key_sha256_hex}
+            />
           ) : (
             "no key"
           ),
@@ -369,7 +402,7 @@ export function AccessPanel({
         header: "Latest revocation",
         cell: (client) =>
           client.latest_revoked_at
-            ? `${formatTime(client.latest_revoked_at)} ${client.latest_revocation_reason ?? ""}`
+            ? `${formatTime(client.latest_revoked_at)} · ${revocationReasonLabel(client.latest_revocation_reason)}`
             : "none",
         searchValue: (client) =>
           `${client.latest_revoked_at ?? ""} ${client.latest_revocation_reason ?? ""}`,
@@ -379,7 +412,9 @@ export function AccessPanel({
     ],
     [vpsNameDisplayMode],
   );
-  const revocationColumns = useMemo<ConsoleDataGridColumn<ClientKeyRevocationView>[]>(
+  const revocationColumns = useMemo<
+    ConsoleDataGridColumn<ClientKeyRevocationView>[]
+  >(
     () => [
       {
         id: "vps",
@@ -399,9 +434,10 @@ export function AccessPanel({
         id: "key",
         header: "Key hash",
         cell: (revocation) => (
-          <span className="monoValue" title={revocation.public_key_sha256_hex}>
-            {shortHash(revocation.public_key_sha256_hex)}
-          </span>
+          <CopyableHash
+            label="revoked key fingerprint"
+            value={revocation.public_key_sha256_hex}
+          />
         ),
         searchValue: (revocation) => revocation.public_key_sha256_hex,
         size: 180,
@@ -409,7 +445,7 @@ export function AccessPanel({
       {
         id: "reason",
         header: "Reason",
-        cell: (revocation) => revocation.reason ?? "operator request",
+        cell: (revocation) => revocationReasonLabel(revocation.reason),
         searchValue: (revocation) => revocation.reason ?? "operator request",
         size: 240,
       },
@@ -423,8 +459,18 @@ export function AccessPanel({
     ],
     [lifecycleNameById],
   );
-  const gatewaySessionColumns = useMemo<ConsoleDataGridColumn<GatewaySessionRecord>[]>(
+  const gatewaySessionColumns = useMemo<
+    ConsoleDataGridColumn<GatewaySessionRecord>[]
+  >(
     () => [
+      {
+        id: "gateway",
+        header: "Gateway",
+        cell: (session) => session.gateway_id,
+        searchValue: (session) => session.gateway_id,
+        sortValue: (session) => session.gateway_id,
+        size: 160,
+      },
       {
         id: "vps",
         header: "VPS",
@@ -440,19 +486,11 @@ export function AccessPanel({
         size: 240,
       },
       {
-        id: "gateway",
-        header: "Gateway",
-        cell: (session) => session.gateway_id,
-        searchValue: (session) => session.gateway_id,
-        sortValue: (session) => session.gateway_id,
-        size: 160,
-      },
-      {
-        id: "status",
-        header: "Status",
+        id: "state",
+        header: "State",
         cell: (session) => (
           <span className={`statusPill ${statusClass(session.status)}`}>
-            {session.status}
+            {gatewaySessionStateLabel(session.status)}
           </span>
         ),
         searchValue: (session) => session.status,
@@ -460,34 +498,34 @@ export function AccessPanel({
         size: 120,
       },
       {
-        id: "lastSeen",
-        header: "Last seen",
+        id: "connected",
+        header: "Connected",
+        cell: (session) => formatTime(session.started_at),
+        sortValue: (session) => session.started_at,
+        size: 180,
+      },
+      {
+        id: "lastActivity",
+        header: "Last activity",
         cell: (session) => formatTime(session.last_seen_at),
         sortValue: (session) => session.last_seen_at,
         size: 190,
       },
       {
-        id: "noiseKey",
-        header: "Noise key",
-        cell: (session) =>
-          session.noise_public_key_hex ? (
-            <span className="monoValue" title={session.noise_public_key_hex}>
-              {shortHash(session.noise_public_key_hex)}
-            </span>
-          ) : (
-            "n/a"
-          ),
-        searchValue: (session) => session.noise_public_key_hex ?? "",
-        size: 160,
+        id: "remoteIp",
+        header: "Remote IP",
+        cell: (session) => session.remote_ip ?? "not reported",
+        searchValue: (session) => session.remote_ip ?? "",
+        sortValue: (session) => session.remote_ip ?? "",
+        size: 150,
       },
       {
-        id: "endReason",
-        header: "End reason",
-        cell: (session) =>
-          session.end_reason ?? (session.ended_at ? "ended" : "active"),
-        searchValue: (session) =>
-          session.end_reason ?? (session.ended_at ? "ended" : "active"),
-        size: 190,
+        id: "version",
+        header: "Version",
+        cell: (session) => session.agent_version || "unknown",
+        searchValue: (session) => session.agent_version,
+        sortValue: (session) => session.agent_version,
+        size: 150,
       },
     ],
     [lifecycleNameById],
@@ -498,6 +536,9 @@ export function AccessPanel({
   }, [routeSubpage]);
 
   function openAccessSubpage(subpage: AccessSubpage) {
+    if (subpage !== "VPS identities") {
+      setIdentityWorkflow(null);
+    }
     setActiveSubpage(subpage);
     onSelectSubpage(accessRouteForSubpage(subpage));
   }
@@ -530,12 +571,26 @@ export function AccessPanel({
     invalidateReviewGeneration();
     setRevokeSnapshot(null);
     setRevokeReviewPending(false);
-    setPendingConfirmation((current) => (current === "key-revoke" ? null : current));
+    setPendingConfirmation((current) =>
+      current === "key-revoke" ? null : current,
+    );
+  }
+
+  function scrollIdentityWorkflowSoon() {
+    window.setTimeout(() => scrollIntoViewSoon(identityWorkflowRef.current), 0);
+  }
+
+  function closeIdentityWorkflow() {
+    setIdentityWorkflow(null);
+    clearIdentityReview();
+    clearRevokeReview();
   }
 
   function prepareNewIdentity() {
     clearIdentityReview();
+    clearRevokeReview();
     setIdentityMode("register");
+    setIdentityWorkflow("register");
     setIdentityClientId("");
     setIdentityPublicKeyHex("");
     setIdentityDisplayName("");
@@ -543,12 +598,15 @@ export function AccessPanel({
     setPrivateKeyHex(null);
     setCreatedIdentity(null);
     setIdentityError(null);
-    scrollIntoViewSoon(identityFormRef.current);
+    openAccessSubpage("VPS identities");
+    scrollIdentityWorkflowSoon();
   }
 
   function prepareIdentityRotation(client: KeyLifecycleClientView) {
     clearIdentityReview();
+    clearRevokeReview();
     setIdentityMode("rotate");
+    setIdentityWorkflow("rotate");
     setIdentityClientId(client.client_id);
     setIdentityPublicKeyHex("");
     setIdentityDisplayName("");
@@ -557,16 +615,18 @@ export function AccessPanel({
     setCreatedIdentity(null);
     setIdentityError(null);
     openAccessSubpage("VPS identities");
-    scrollIntoViewSoon(identityFormRef.current);
+    scrollIdentityWorkflowSoon();
   }
 
   function prepareClientKeyRevoke(clientId: string, reason = "") {
+    clearIdentityReview();
     clearRevokeReview();
+    setIdentityWorkflow("revoke");
     setRevokeClientId(clientId);
     setRevokeReason(reason);
     setRevokeError(null);
     openAccessSubpage("VPS identities");
-    scrollIntoViewSoon(revokeFormRef.current);
+    scrollIdentityWorkflowSoon();
   }
 
   async function setupTotp() {
@@ -640,7 +700,9 @@ export function AccessPanel({
       setPrivateKeyHex(keypair.privateKeyHex);
       setIdentityError(null);
     } catch {
-      setIdentityError("Key generation failed — browser may not support Web Crypto");
+      setIdentityError(
+        "Key generation failed — browser may not support Web Crypto",
+      );
     }
   }
 
@@ -728,11 +790,12 @@ export function AccessPanel({
       setIdentityMode("register");
       setIdentitySnapshot(null);
       setPendingConfirmation(null);
+      setIdentityWorkflow(snapshot.replaceExistingKey ? null : "register");
     } catch (actionError) {
       setIdentityError(
         actionError instanceof Error
           ? actionError.message
-          : "Agent identity import failed",
+          : "VPS identity update failed",
       );
     } finally {
       setIdentityPending(false);
@@ -743,7 +806,11 @@ export function AccessPanel({
     event.preventDefault();
     const clientId = revokeClientId.trim();
     if (!canRevokeClientKey) {
-      setRevokeError(privilegeMaterial ? "VPS ID is required" : "Privilege vault unlock is required");
+      setRevokeError(
+        privilegeMaterial
+          ? "VPS ID is required"
+          : "Privilege vault unlock is required",
+      );
       return;
     }
     const reviewGeneration = captureReviewGeneration();
@@ -802,6 +869,7 @@ export function AccessPanel({
       setRevokeReason("");
       setRevokeSnapshot(null);
       setPendingConfirmation(null);
+      setIdentityWorkflow(null);
     } catch (actionError) {
       setRevokeError(
         actionError instanceof Error
@@ -813,17 +881,132 @@ export function AccessPanel({
     }
   }
 
+  const accessRequiredActionCandidates: Array<AccessOverviewItem | null> = [
+    adminMfaRisk
+      ? {
+          action: "Set up MFA",
+          detail:
+            "Admin MFA is recommended; policy enforcement is not exposed by the API.",
+          icon: <ShieldCheck size={16} />,
+          label: "Policy recommends MFA",
+          onClick: () => openAccessSubpage("Privilege vault"),
+          tone: "attention",
+          value: "Recommended",
+        }
+      : null,
+    expiredOperatorSessions > 0
+      ? {
+          action: "Manage sessions",
+          detail: `${expiredOperatorSessions} listed bearer session${expiredOperatorSessions === 1 ? "" : "s"} expired and are excluded from active-session counts.`,
+          icon: <Clock size={16} />,
+          label: "Expired bearer sessions",
+          onClick: onOpenSystemSessions,
+          tone: "attention",
+          value: `${expiredOperatorSessions} expired`,
+        }
+      : null,
+    blockedOrPendingClientCount > 0
+      ? {
+          action: "Open identities",
+          detail:
+            "Pending, revoked, or blocked VPS identities need operator review.",
+          icon: <Fingerprint size={16} />,
+          label: "VPS identity attention",
+          onClick: () => openAccessSubpage("VPS identities"),
+          tone: "attention",
+          value: `${blockedOrPendingClientCount} need review`,
+        }
+      : null,
+    gatewayInstallDefaultsReady
+      ? null
+      : {
+          action: "Open Preferences",
+          detail:
+            "Gateway endpoints and server public key are needed for generated agent install commands.",
+          icon: <Wifi size={16} />,
+          label: "Gateway install defaults",
+          onClick: onOpenSystemPreferences,
+          tone: "attention",
+          value: "Missing",
+        },
+    privilegeMaterial
+      ? null
+      : {
+          action: "Unlock",
+          detail: "No saved local vault; enter privilege secret when needed.",
+          icon: <LockKeyhole size={16} />,
+          label: "Privilege state",
+          onClick: () => openAccessSubpage("Privilege vault"),
+          tone: vaultAvailable ? "neutral" : "attention",
+          value: vaultState,
+        },
+  ];
+  const accessRequiredActions = accessRequiredActionCandidates.filter(
+    (item): item is AccessOverviewItem => Boolean(item),
+  );
+
+  const accessResponsibilityRows: AccessOverviewItem[] = [
+    {
+      action: "Open Operators",
+      detail: `${operators.length} operators; ${activeOperatorSessions} active session${activeOperatorSessions === 1 ? "" : "s"} after expiry validation; current session ${currentSessionState}.`,
+      icon: <UsersRound size={16} />,
+      label: "Operators and active sessions",
+      onClick: onOpenSystemUsers,
+      tone:
+        operators.length === 0 || expiredOperatorSessions > 0 || adminMfaRisk
+          ? "attention"
+          : "ready",
+      value: `${operators.length} operators / ${activeOperatorSessions} active`,
+    },
+    {
+      action: "Open identities",
+      detail: `${keyLifecycleReport?.revocation_count ?? clientKeyRevocations.length} revocation records; ${revokedClientCount} current keys blocked.`,
+      icon: <Fingerprint size={16} />,
+      label: "VPS identities",
+      onClick: () => openAccessSubpage("VPS identities"),
+      tone: blockedOrPendingClientCount > 0 ? "attention" : "ready",
+      value: `${keyLifecycleReport?.direct_identity_client_count ?? lifecycleClients.length} registered`,
+    },
+    {
+      action: "Open sessions",
+      detail: gatewayInstallDefaultsReady
+        ? `${gatewaySessions.length} recent gateway sessions; install defaults configured.`
+        : "Gateway install defaults are missing endpoint or server-key settings.",
+      icon: <Wifi size={16} />,
+      label: "Gateway sessions",
+      onClick: () => openAccessSubpage("Gateway sessions"),
+      tone: gatewayInstallDefaultsReady ? "ready" : "attention",
+      value: `${activeGatewaySessions} active / ${gatewaySessions.length} recent`,
+    },
+    {
+      action: privilegeMaterial ? "Open vault" : "Unlock",
+      detail: privilegeMaterial
+        ? "Privilege material is local-only and used for request-bound assertions."
+        : "No saved local vault; enter privilege secret when needed.",
+      icon: <LockKeyhole size={16} />,
+      label: "Privilege state",
+      onClick: () => openAccessSubpage("Privilege vault"),
+      tone: privilegeMaterial
+        ? "ready"
+        : vaultAvailable
+          ? "neutral"
+          : "attention",
+      value: privilegeMaterial ? "Unlocked for this browser" : vaultState,
+    },
+  ];
+  const activePanelHeader = accessPanelHeader(activeSubpage);
+
   return (
     <div className="workspace accessWorkspace">
       <section className="fleetPanel accessMain">
         <div className="sectionHeader compactSectionHeader">
           <div>
-            <h2>Access overview</h2>
+            <h2>{activePanelHeader.title}</h2>
             <span>
               {error ??
                 (loading
                   ? "Refreshing access records"
-                  : "Direct gateway identities, browser session state, and live access streams")}
+                  : activePanelHeader.description)}
             </span>
           </div>
           <button
@@ -835,63 +1018,6 @@ export function AccessPanel({
             <RefreshCw size={17} />
             Refresh
           </button>
-        </div>
-
-        <div className="accessPostureGrid" aria-label="Access posture overview">
-          <AccessPostureCard
-            action={operator?.totp_enabled ? "Review MFA" : "Set up MFA"}
-            detail={`${operator?.username ?? "anonymous"} · ${operatorScopeSummary}`}
-            icon={<ShieldCheck size={17} />}
-            label="Operator authentication"
-            onAction={() => openAccessSubpage("Privilege vault")}
-            tone={adminMfaRisk ? "attention" : operator?.totp_enabled ? "ready" : "neutral"}
-            value={authPostureValue}
-          />
-          <AccessPostureCard
-            action="Open Operators"
-            detail={visibleRoleModel.detail}
-            icon={<UsersRound size={17} />}
-            label="RBAC roles/scopes"
-            onAction={onOpenSystemUsers}
-            tone={operators.length > 0 ? "ready" : "attention"}
-            value={visibleRoleModel.value}
-          />
-          <AccessPostureCard
-            action="Manage sessions"
-            detail={`Token in ${tokenStorageState}; refresh expires ${currentRefreshExpiry}.`}
-            icon={<Clock size={17} />}
-            label="Bearer session"
-            onAction={onOpenSystemSessions}
-            tone={adminTtlRisk || !currentSession ? "attention" : "ready"}
-            value={sessionPostureValue}
-          />
-          <AccessPostureCard
-            action={privilegeMaterial ? "Open vault" : "Unlock"}
-            detail="Local-only secret material; API receives signed request-bound assertions."
-            icon={<LockKeyhole size={17} />}
-            label="Privilege vault"
-            onAction={() => openAccessSubpage("Privilege vault")}
-            tone={privilegeMaterial ? "ready" : vaultAvailable ? "neutral" : "attention"}
-            value={privilegeMaterial ? "Unlocked for this browser" : vaultState}
-          />
-          <AccessPostureCard
-            action="Open identities"
-            detail={`Lifecycle: register -> pending install -> connected -> rotate -> revoke -> blocked.`}
-            icon={<Fingerprint size={17} />}
-            label="VPS identities"
-            onAction={() => openAccessSubpage("VPS identities")}
-            tone={blockedOrPendingClientCount > 0 ? "attention" : "ready"}
-            value={`${keyLifecycleReport?.direct_identity_client_count ?? lifecycleClients.length} registered / ${blockedOrPendingClientCount} attention`}
-          />
-          <AccessPostureCard
-            action="Open sessions"
-            detail={gatewayInstallDefaultsReady ? `${gatewaySessions.length} recent sessions.` : "Configure endpoints and gateway server key before generating install commands."}
-            icon={<Wifi size={17} />}
-            label="Gateway sessions"
-            onAction={() => openAccessSubpage("Gateway sessions")}
-            tone={gatewayInstallDefaultsReady ? "ready" : "attention"}
-            value={gatewayPostureValue}
-          />
         </div>
 
         <nav className="subpanelTabs accessTabs" aria-label="Access subpanels">
@@ -908,153 +1034,53 @@ export function AccessPanel({
         </nav>
 
         {activeSubpage === "Overview" && (
-          <div className="workspaceSection accessOverviewGrid">
+          <div className="workspaceSection accessOverviewFocus">
             <section
-              className="controlPanel accessWorkflowMap"
-              aria-label="Access overview authority links"
+              className="controlPanel accessOverviewPanel"
+              aria-label="Access actions required"
             >
               <div className="sectionHeader compact">
-                <h2>Authority workflow map</h2>
-                <span>Jump to the canonical page for each access-control responsibility</span>
+                <h2>Actions required</h2>
+                <span>
+                  Critical access items first; each action opens the canonical
+                  operating page.
+                </span>
               </div>
-              <div className="accessWorkflowLinks">
-                <AccessWorkflowLink
-                  detail={`${operators.length} operators; ${activeOperatorSessions} active sessions`}
-                  icon={<UsersRound size={16} />}
-                  label="Operators"
-                  onClick={onOpenSystemUsers}
-                />
-                <AccessWorkflowLink
-                  detail={`${keyLifecycleReport?.direct_identity_client_count ?? lifecycleClients.length} registered identities; ${blockedOrPendingClientCount} need attention`}
-                  icon={<Fingerprint size={16} />}
-                  label="VPS identities"
-                  onClick={() => openAccessSubpage("VPS identities")}
-                />
-                <AccessWorkflowLink
-                  detail={`${activeGatewaySessions} active gateway streams; ${gatewaySessions.length} recent sessions`}
-                  icon={<Wifi size={16} />}
-                  label="Gateway sessions"
-                  onClick={() => openAccessSubpage("Gateway sessions")}
-                />
-                <AccessWorkflowLink
-                  detail={privilegeMaterial ? "Unlocked in this browser" : vaultState}
-                  icon={<LockKeyhole size={16} />}
-                  label="Privilege vault"
-                  onClick={() => openAccessSubpage("Privilege vault")}
-                />
-              </div>
+              {accessRequiredActions.length > 0 ? (
+                <div className="accessOverviewRows">
+                  {accessRequiredActions.map((item) => (
+                    <AccessOverviewRow item={item} key={item.label} />
+                  ))}
+                </div>
+              ) : (
+                <div className="accessOverviewEmpty">
+                  <ShieldCheck size={18} />
+                  <span>
+                    <strong>No immediate access actions</strong>
+                    <small>
+                      Operators, sessions, identities, gateway, and privilege
+                      state have no visible critical warnings in the loaded
+                      evidence.
+                    </small>
+                  </span>
+                </div>
+              )}
             </section>
-            <section className="controlPanel">
+            <section
+              className="controlPanel accessOverviewPanel"
+              aria-label="Access overview responsibilities"
+            >
               <div className="sectionHeader compact">
-                <h2>Security posture</h2>
-                <span>Authentication, RBAC, session, privilege, identity, and gateway readiness</span>
+                <h2>Access responsibilities</h2>
+                <span>
+                  Operators and sessions, VPS identities, gateway sessions, and
+                  privilege state.
+                </span>
               </div>
-              <div className="metricRows">
-                <MetricRow
-                  label="Operators"
-                  value={`${operators.length} total / ${visibleRoleModel.value}`}
-                />
-                <MetricRow
-                  label="Active operator sessions"
-                  value={`${activeOperatorSessions} active / ${operatorSessions.length} listed`}
-                />
-                <MetricRow
-                  label="Operator authentication"
-                  value={authPostureValue}
-                />
-                <MetricRow
-                  label="Admin session policy"
-                  value={
-                    operator
-                      ? `refresh TTL ${operatorRefreshTtlDays}d${adminTtlRisk ? " (review)" : ""}`
-                      : "operator not loaded"
-                  }
-                />
-                <MetricRow
-                  label="Current bearer session"
-                  value={`${currentSessionExpiry}; refresh ${currentRefreshExpiry}`}
-                />
-                <MetricRow
-                  label="Role model"
-                  value={visibleRoleModel.detail}
-                />
-                <MetricRow
-                  label="Direct identity clients"
-                  value={String(
-                    keyLifecycleReport?.direct_identity_client_count ??
-                      lifecycleClients.length,
-                  )}
-                />
-                <MetricRow
-                  label="Revoked key records"
-                  value={String(
-                    keyLifecycleReport?.revocation_count ??
-                      clientKeyRevocations.length,
-                  )}
-                />
-                <MetricRow
-                  label="Current keys blocked"
-                  value={String(
-                    keyLifecycleReport?.current_key_revoked_count ?? 0,
-                  )}
-                />
-                <MetricRow
-                  label="Gateway install defaults"
-                  value={gatewayInstallDefaultsReady ? "configured" : "missing endpoints or server key"}
-                />
-                <MetricRow
-                  label="Gateway sessions"
-                  value={`${activeGatewaySessions} active / ${gatewaySessions.length} recent`}
-                />
-                <MetricRow
-                  label="Privilege vault"
-                  value={privilegeMaterial ? "unlocked for this browser" : vaultState}
-                />
-                <MetricRow label="WebSocket" value={wsState} />
-                <MetricRow label="Last event" value={lastLiveEvent || "none"} />
-              </div>
-            </section>
-            <section className="controlPanel">
-              <div className="sectionHeader compact">
-                <h2>Attention queues</h2>
-                <span>Jump from access state to the working table</span>
-              </div>
-              <div className="accessQueueList">
-                <AccessQueueRow
-                  action="Open identities"
-                  detail={`${keyLifecycleReport?.revocation_count ?? clientKeyRevocations.length} revocations retained`}
-                  label="VPS identity lifecycle"
-                  onClick={() => openAccessSubpage("VPS identities")}
-                  value={`${revokedClientCount} current blocked`}
-                />
-                <AccessQueueRow
-                  action="Open sessions"
-                  detail={gatewayInstallDefaultsReady ? `${gatewaySessions.length} recent sessions` : "install defaults need endpoints and server key"}
-                  label="Gateway sessions"
-                  onClick={() => openAccessSubpage("Gateway sessions")}
-                  value={`${activeGatewaySessions} active`}
-                />
-                <AccessQueueRow
-                  action="Open vault"
-                  detail={privilegeMaterial ? "ready for privileged review" : "required for key lifecycle actions"}
-                  label="Privilege vault"
-                  onClick={() => openAccessSubpage("Privilege vault")}
-                  value={vaultState}
-                />
-                <AccessQueueRow
-                  action="Manage sessions"
-                  detail={`token in ${tokenStorageState}; refresh TTL ${operatorRefreshTtlDays || "-"}d`}
-                  label="Bearer sessions"
-                  onClick={onOpenSystemSessions}
-                  value={currentSession ? "server listed" : sessionState}
-                />
-                <AccessQueueRow
-                  action="Manage users"
-                  detail={adminMfaRisk ? "admin TOTP is off" : visibleRoleModel.detail}
-                  label="Operator roles and MFA"
-                  onClick={onOpenSystemUsers}
-                  value={adminMfaRisk ? "attention" : visibleRoleModel.value}
-                />
+              <div className="accessOverviewRows">
+                {accessResponsibilityRows.map((item) => (
+                  <AccessOverviewRow item={item} key={item.label} />
+                ))}
               </div>
             </section>
           </div>
@@ -1071,11 +1097,15 @@ export function AccessPanel({
                 </span>
               </div>
               <PrivilegeVaultBox
+                clearVaultLabel="Clear local vault"
                 labelPrefix="Access"
                 lastPayloadHash={privilegeMaterial ? "unlocked" : null}
+                lockPrivilegeLabel="Lock now"
                 onPrivilegeMaterialChange={setPrivilegeMaterial}
                 onVaultAvailabilityChange={setVaultAvailable}
                 privilegeMaterial={privilegeMaterial}
+                unlockLabel="Unlock saved vault"
+                usePrivilegeLabel="Unlock"
               />
             </section>
             <section className="controlPanel">
@@ -1090,10 +1120,18 @@ export function AccessPanel({
                         : "recommended account hardening")}
                 </span>
               </div>
-              <div className={`accessRiskNotice ${adminMfaRisk ? "attention" : "ready"}`}>
-                {adminMfaRisk ? <AlertTriangle size={17} /> : <ShieldCheck size={17} />}
+              <div
+                className={`accessRiskNotice ${adminMfaRisk ? "attention" : "ready"}`}
+              >
+                {adminMfaRisk ? (
+                  <AlertTriangle size={17} />
+                ) : (
+                  <ShieldCheck size={17} />
+                )}
                 <div>
-                  <strong>{adminMfaRisk ? "Admin MFA is off" : "MFA posture recorded"}</strong>
+                  <strong>
+                    {adminMfaRisk ? "Admin MFA is off" : "MFA posture recorded"}
+                  </strong>
                   <span>
                     {adminMfaRisk
                       ? "Production admin accounts should require TOTP before long-lived access or privileged workflows."
@@ -1103,78 +1141,150 @@ export function AccessPanel({
                   </span>
                 </div>
               </div>
-              <div className="sideForm standaloneForm">
-                <label>
-                  <span>Current password</span>
-                  <input
-                    aria-label="TOTP password"
-                    onChange={(event) => setTotpPassword(event.target.value)}
-                    type="password"
-                    value={totpPassword}
-                  />
-                </label>
-                <label>
-                  <span>Authenticator code</span>
-                  <input
-                    aria-label="TOTP code"
-                    onChange={(event) => setTotpCode(event.target.value)}
-                    value={totpCode}
-                  />
-                </label>
-                {totpSetup && (
-                  <div className="inlineSecret">
-                    <strong>{totpSetup.secret_base32}</strong>
-                    <small>{totpSetup.otpauth_uri}</small>
+              {operator?.totp_enabled ? (
+                <div className="totpDisablePanel">
+                  <div>
+                    <strong>TOTP is enabled</strong>
+                    <span>
+                      Disabling requires the current password and an
+                      authenticator code.
+                    </span>
                   </div>
-                )}
-                <div className="actionRow">
-                  <button
-                    className="secondaryAction"
-                    disabled={totpPending || !totpPassword}
-                    onClick={() => void setupTotp()}
-                    type="button"
-                  >
-                    <ShieldCheck size={17} />
-                    Setup TOTP
-                  </button>
-                  <button
-                    className="secondaryAction"
-                    disabled={totpPending || !totpPassword || !totpCode}
-                    onClick={() => void confirmTotp()}
-                    type="button"
-                  >
-                    <Save size={17} />
-                    Confirm
-                  </button>
+                  <div className="totpActionGrid">
+                    <label>
+                      <span>Current password</span>
+                      <input
+                        aria-label="TOTP password"
+                        onChange={(event) => setTotpPassword(event.target.value)}
+                        type="password"
+                        value={totpPassword}
+                      />
+                    </label>
+                    <label>
+                      <span>Authenticator code</span>
+                      <input
+                        aria-label="TOTP code"
+                        onChange={(event) => setTotpCode(event.target.value)}
+                        value={totpCode}
+                      />
+                    </label>
+                    <button
+                      className="secondaryAction dangerAction"
+                      disabled={totpPending || !totpPassword || !totpCode}
+                      onClick={() => setPendingConfirmation("totp-disable")}
+                      type="button"
+                    >
+                      <Trash2 size={17} />
+                      Review disable
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div
+                  aria-label="TOTP enrollment sequence"
+                  className="totpWorkflow"
+                >
+                  <ol className="totpStepList">
+                    <li className={totpPassword ? "ready" : "active"}>
+                      <span>1</span>
+                      <strong>Password</strong>
+                    </li>
+                    <li className={totpSetup ? "ready" : ""}>
+                      <span>2</span>
+                      <strong>QR/secret</strong>
+                    </li>
+                    <li className={totpCode ? "ready" : ""}>
+                      <span>3</span>
+                      <strong>Enter code</strong>
+                    </li>
+                    <li>
+                      <span>4</span>
+                      <strong>Complete</strong>
+                    </li>
+                  </ol>
+                  <div className="totpActionGrid">
+                    <label>
+                      <span>Current password</span>
+                      <input
+                        aria-label="TOTP password"
+                        onChange={(event) => setTotpPassword(event.target.value)}
+                        type="password"
+                        value={totpPassword}
+                      />
+                    </label>
+                    <button
+                      className="secondaryAction"
+                      disabled={totpPending || !totpPassword}
+                      onClick={() => void setupTotp()}
+                      type="button"
+                    >
+                      <ShieldCheck size={17} />
+                      Generate setup
+                    </button>
+                    {totpSetup ? (
+                      <div className="totpSecretPanel">
+                        <strong>Authenticator secret</strong>
+                        <span>{totpSetup.secret_base32}</span>
+                        <small>{totpSetup.otpauth_uri}</small>
+                      </div>
+                    ) : (
+                      <div className="totpSecretPanel muted">
+                        <strong>Authenticator secret</strong>
+                        <span>Generate setup after entering the password.</span>
+                      </div>
+                    )}
+                    <label>
+                      <span>Authenticator code</span>
+                      <input
+                        aria-label="TOTP code"
+                        disabled={!totpSetup}
+                        onChange={(event) => setTotpCode(event.target.value)}
+                        value={totpCode}
+                      />
+                    </label>
+                    <button
+                      className="primaryAction"
+                      disabled={totpPending || !totpPassword || !totpCode}
+                      onClick={() => void confirmTotp()}
+                      type="button"
+                    >
+                      <Save size={17} />
+                      Complete setup
+                    </button>
+                  </div>
+                </div>
+              )}
+              {!operator?.totp_enabled && (
+                <div className="totpDisablePanel disabled">
+                  <div>
+                    <strong>Disable TOTP</strong>
+                    <span>No active TOTP factor is recorded for this account.</span>
+                  </div>
                   <button
                     className="secondaryAction dangerAction"
-                    disabled={totpPending || !totpPassword || !totpCode}
-                    onClick={() => setPendingConfirmation("totp-disable")}
+                    disabled
                     type="button"
                   >
                     <Trash2 size={17} />
                     Review disable
                   </button>
                 </div>
-              </div>
+              )}
             </section>
           </div>
         )}
 
         {activeSubpage === "VPS identities" && (
           <div className="workspaceSection accessTableStack">
-            <IdentityLifecycleGuide
-              blockedCount={blockedOrPendingClientCount}
-              onNewIdentity={prepareNewIdentity}
-              registeredCount={
-                keyLifecycleReport?.direct_identity_client_count ??
-                lifecycleClients.length
-              }
-            />
             <section className="controlPanel">
               <div className="sectionHeader compact">
                 <h2>VPS identities</h2>
-                <span>Registered public keys and revocation state</span>
+                <span>
+                  {keyLifecycleReport?.direct_identity_client_count ??
+                    lifecycleClients.length}{" "}
+                  registered; {blockedOrPendingClientCount} need review. Use row
+                  actions to rotate or revoke keys.
+                </span>
               </div>
               <ConsoleDataGrid
                 actions={[
@@ -1196,7 +1306,8 @@ export function AccessPanel({
                         : "Select exactly one VPS identity to revoke.",
                     disabled: (rows) => rows.length !== 1,
                     icon: <Ban size={14} />,
-                    onSelect: (rows) => prepareClientKeyRevoke(rows[0].client_id),
+                    onSelect: (rows) =>
+                      prepareClientKeyRevoke(rows[0].client_id),
                     tone: "danger",
                   },
                 ]}
@@ -1233,7 +1344,8 @@ export function AccessPanel({
                     description: (rows) =>
                       `Prefill current key revocation for ${rows[0].display_name}.`,
                     icon: <Ban size={14} />,
-                    onSelect: (rows) => prepareClientKeyRevoke(rows[0].client_id),
+                    onSelect: (rows) =>
+                      prepareClientKeyRevoke(rows[0].client_id),
                     tone: "danger",
                   },
                 ]}
@@ -1249,7 +1361,7 @@ export function AccessPanel({
                     type="button"
                   >
                     <Fingerprint size={15} />
-                    <span>New</span>
+                    <span>Register VPS</span>
                   </button>
                 }
               />
@@ -1286,95 +1398,110 @@ export function AccessPanel({
 
         {activeSubpage === "Gateway sessions" && (
           <div className="workspaceSection">
-            <GatewayReadinessPanel
-              activeSessions={activeGatewaySessions}
-              gatewaySessions={gatewaySessions.length}
-              installDefaultsReady={gatewayInstallDefaultsReady}
-              onOpenPreferences={onOpenSystemPreferences}
-              onOpenSuiteConfig={onOpenSystemConfig}
-            />
-            <section className="controlPanel">
-              <div className="sectionHeader compact">
-                <h2>Gateway sessions</h2>
-                <span>
-                  {activeGatewaySessions} active / {gatewaySessions.length}{" "}
-                  recent
-                </span>
-              </div>
-              <ConsoleDataGrid
-                columns={gatewaySessionColumns}
-                defaultPageSize={12}
-                empty="No gateway sessions"
-                expandOnRowClick
-                getRowId={(session) => session.id}
-                itemLabel="gateway sessions"
-                renderExpandedRow={(session) => (
-                  <GatewaySessionDetailGrid
-                    label={lifecycleClientLabel(session.client_id)}
-                    session={session}
-                  />
-                )}
-                rows={gatewaySessions}
-                searchPlaceholder="Search VPS, gateway, status, key, or reason"
-                selectable={false}
-                singleExpandedRow
-                storageKey="vpsman.access.gatewaySessions"
-                title="Gateway sessions"
-              />
-            </section>
+            {gatewaySessions.length === 0 ? (
+              <GatewaySessionEmptyState onOpenGatewaySettings={onOpenSystemConfig} />
+            ) : (
+              <section className="controlPanel">
+                <div className="sectionHeader compact">
+                  <h2>Gateway sessions</h2>
+                  <span>
+                    {activeGatewaySessions} active / {gatewaySessions.length}{" "}
+                    recent
+                  </span>
+                </div>
+                <ConsoleDataGrid
+                  columns={gatewaySessionColumns}
+                  defaultPageSize={12}
+                  empty="No gateway sessions"
+                  expandOnRowClick
+                  getRowId={(session) => session.id}
+                  itemLabel="gateway sessions"
+                  renderExpandedRow={(session) => (
+                    <GatewaySessionDetailGrid
+                      label={lifecycleClientLabel(session.client_id)}
+                      session={session}
+                    />
+                  )}
+                  rows={gatewaySessions}
+                  searchPlaceholder="Search gateway, VPS, state, remote IP, or version"
+                  selectable={false}
+                  singleExpandedRow
+                  storageKey="vpsman.access.gatewaySessions"
+                  title="Gateway sessions"
+                />
+              </section>
+            )}
           </div>
         )}
       </section>
 
-      <aside className="fleetPanel accessInspector">
-        <div className="accessConfigHeading">
-          <strong>
-            {activeSubpage === "VPS identities"
-              ? "Direct identity actions"
-              : "Access actions"}
-          </strong>
-          <span>
-            {canManageOperators ? "Admin controls" : "Admin role required"}
-          </span>
+      <aside
+        className={`fleetPanel accessInspector${activeSubpage === "VPS identities" ? " identityWorkflowPanel" : ""}`}
+        hidden={
+          activeSubpage === "Overview" ||
+          activeSubpage === "Gateway sessions" ||
+          activeSubpage === "Privilege vault" ||
+          (activeSubpage === "VPS identities" && identityWorkflow === null)
+        }
+        ref={identityWorkflowRef}
+      >
+        <div className="accessConfigHeading identityWorkflowHeader">
+          <div>
+            <strong>
+              {activeSubpage === "VPS identities"
+                ? identityWorkflow === "revoke"
+                  ? "Revoke VPS key"
+                  : identityMode === "rotate"
+                    ? "Rotate VPS key"
+                    : "Register VPS"
+                : "Access actions"}
+            </strong>
+            <span>
+              {activeSubpage === "VPS identities"
+                ? canManageOperators
+                  ? "One focused identity workflow; review before mutation"
+                  : "Admin role required"
+                : canManageOperators
+                  ? "Admin controls"
+                  : "Admin role required"}
+            </span>
+          </div>
+          {activeSubpage === "VPS identities" && (
+            <button
+              aria-label="Close VPS identity workflow"
+              className="secondaryAction compact"
+              onClick={closeIdentityWorkflow}
+              type="button"
+            >
+              <X size={15} />
+              Close
+            </button>
+          )}
         </div>
 
         <div
           className="sectionHeader compact"
-          hidden={activeSubpage !== "VPS identities"}
+          hidden={
+            activeSubpage !== "VPS identities" ||
+            identityWorkflow === null ||
+            identityWorkflow === "revoke"
+          }
         >
-          <h2>Import identity</h2>
+          <h2>{identityMode === "rotate" ? "Rotate key" : "Register VPS"}</h2>
           <span>
             {identityError ??
               (identityMode === "rotate"
-                ? "Rotate an existing VPS gateway key"
-                : "Register a VPS client ID and Noise public key")}
+                ? "Replace the selected VPS public key"
+                : "Generate a keypair or import a public key")}
           </span>
         </div>
-        <nav
-          className="accessSubnav"
-          hidden={activeSubpage !== "VPS identities"}
-        >
-          <button
-            className={identityMode === "register" ? "selected" : ""}
-            onClick={prepareNewIdentity}
-            type="button"
-          >
-            New registration
-          </button>
-          <button
-            className={identityMode === "rotate" ? "selected" : ""}
-            onClick={() => {
-              setIdentityMode("rotate");
-              clearIdentityReview();
-            }}
-            type="button"
-          >
-            Key rotation
-          </button>
-        </nav>
         <form
           className="sideForm"
-          hidden={activeSubpage !== "VPS identities"}
+          hidden={
+            activeSubpage !== "VPS identities" ||
+            identityWorkflow === null ||
+            identityWorkflow === "revoke"
+          }
           onSubmit={requestIdentityImport}
           ref={identityFormRef}
         >
@@ -1382,10 +1509,12 @@ export function AccessPanel({
             <strong>
               {identityMode === "rotate"
                 ? "Rotation keeps the VPS identity and replaces only the key."
-                : "Registration starts an install-ready VPS identity."}
+                : "Register a VPS identity before installing or reconnecting the agent."}
             </strong>
             <span>
-              Generate a keypair when creating a new identity, then copy the install command after gateway defaults are configured in Preferences.
+              Generate a keypair for a new install, or paste a pre-generated
+              agent public key. Private key material is shown once and is never
+              saved by the panel.
             </span>
           </div>
           <label>
@@ -1398,9 +1527,7 @@ export function AccessPanel({
                 clearIdentityReview();
               }}
               placeholder={
-                identityMode === "rotate"
-                  ? "existing VPS ID"
-                  : "new VPS ID"
+                identityMode === "rotate" ? "existing VPS ID" : "new VPS ID"
               }
               value={identityClientId}
             />
@@ -1419,7 +1546,8 @@ export function AccessPanel({
               value={identityPublicKeyHex}
             />
             <small className="fieldHelp">
-              64 hex characters. Use Generate keypair for a new install, or paste the agent public key for a pre-generated identity.
+              64 hex characters. Use Generate keypair for a new install, or
+              paste the agent public key for a pre-generated identity.
             </small>
             <button
               className="secondaryAction compact"
@@ -1436,7 +1564,7 @@ export function AccessPanel({
           </label>
           {privateKeyHex && (
             <div className="inlineSecret">
-              <strong>Private key</strong>
+              <strong>Private key - shown once</strong>
               <div className="secretRow">
                 <input
                   aria-label="Agent identity private key"
@@ -1454,8 +1582,8 @@ export function AccessPanel({
                 </button>
               </div>
               <small>
-                Store this key securely. It is not saved by the panel and cannot be
-                recovered.
+                Store this key securely. It is not saved by the panel and cannot
+                be recovered.
               </small>
             </div>
           )}
@@ -1464,7 +1592,9 @@ export function AccessPanel({
             <input
               aria-label="Agent identity display name"
               disabled={
-                !canManageOperators || identityPending || identityMode === "rotate"
+                !canManageOperators ||
+                identityPending ||
+                identityMode === "rotate"
               }
               onChange={(event) => {
                 setIdentityDisplayName(event.target.value);
@@ -1481,14 +1611,18 @@ export function AccessPanel({
             <input
               aria-label="Agent identity tags"
               disabled={
-                !canManageOperators || identityPending || identityMode === "rotate"
+                !canManageOperators ||
+                identityPending ||
+                identityMode === "rotate"
               }
               onChange={(event) => {
                 setIdentityTags(event.target.value);
                 clearIdentityReview();
               }}
               placeholder={
-                identityMode === "rotate" ? "unchanged" : "country:JP, role:edge"
+                identityMode === "rotate"
+                  ? "unchanged"
+                  : "country:JP, role:edge"
               }
               value={identityTags}
             />
@@ -1502,8 +1636,8 @@ export function AccessPanel({
             {identityReviewPending
               ? "Preparing review"
               : identityMode === "rotate"
-              ? "Rotate key"
-              : "Import gateway identity"}
+                ? "Review rotation"
+                : "Review registration"}
           </button>
           {createdIdentity && (
             <div className="formNote">
@@ -1525,14 +1659,18 @@ export function AccessPanel({
 
         <div
           className="sectionHeader compact"
-          hidden={activeSubpage !== "VPS identities"}
+          hidden={
+            activeSubpage !== "VPS identities" || identityWorkflow !== "revoke"
+          }
         >
-          <h2>Revoke key</h2>
-          <span>{revokeError ?? "Block the current gateway key"}</span>
+          <h2>Revoke VPS key</h2>
+          <span>{revokeError ?? "Block the current VPS gateway key"}</span>
         </div>
         <form
           className="sideForm"
-          hidden={activeSubpage !== "VPS identities"}
+          hidden={
+            activeSubpage !== "VPS identities" || identityWorkflow !== "revoke"
+          }
           onSubmit={requestClientKeyRevoke}
           ref={revokeFormRef}
         >
@@ -1573,83 +1711,25 @@ export function AccessPanel({
           </button>
         </form>
 
-        <div
-          className="accessConfigHeading"
-          hidden={activeSubpage !== "Gateway sessions"}
-        >
-          <strong>Gateway model</strong>
-          <span>Agents connect to configured gateways; the panel does not perform endpoint lookup.</span>
-        </div>
-        <div className="timeline" hidden={activeSubpage !== "Gateway sessions"}>
-          <Wifi size={18} />
-          <div>
-            <strong>Endpoint priority controls agent routing</strong>
-            <span>
-              Use Preferences for install defaults and Suite config for gateway
-              bind/control settings.
-            </span>
-            <div className="inlineActions">
-              <button className="secondaryAction compact" onClick={onOpenSystemPreferences} type="button">
-                Preferences
-              </button>
-              <button className="secondaryAction compact" onClick={onOpenSystemConfig} type="button">
-                Suite config
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div
-          className="timeline"
-          hidden={
-            activeSubpage === "VPS identities" ||
-            activeSubpage === "Gateway sessions"
-          }
-        >
-          <LockKeyhole size={18} />
-          <div>
-            <strong>Deny by default</strong>
-            <span>
-              Mutating work still requires explicit confirmation and privilege
-              material when the server marks it privileged.
-            </span>
-            <div className="inlineActions">
-              <button
-                className="secondaryAction compact"
-                disabled={!apiToken}
-                onClick={() => setPendingConfirmation("session-clear")}
-                type="button"
-              >
-                Clear local session
-              </button>
-              <button
-                className="secondaryAction compact dangerAction"
-                disabled={!vaultAvailable && !privilegeMaterial}
-                onClick={() => setPendingConfirmation("vault-clear")}
-                type="button"
-              >
-                Clear privilege vault
-              </button>
-            </div>
-          </div>
-        </div>
       </aside>
 
       <ConfirmationPrompt
         confirmLabel={
-          identitySnapshot?.replaceExistingKey ? "Rotate key" : "Import identity"
+          identitySnapshot?.replaceExistingKey ? "Rotate key" : "Register VPS"
         }
         detail={
           identitySnapshot?.replaceExistingKey
-            ? "This replaces the stored client public key, disconnects the old gateway session, and marks old active work lost."
-            : "This registers a gateway-issued client public key for inventory and key lifecycle management. It does not create a token and does not give the agent a panel endpoint."
+            ? "This replaces the stored VPS public key, disconnects the old gateway session, and marks old active work lost."
+            : "This registers a VPS client ID and public key for gateway identity lifecycle management. It does not create a token and does not give the agent a panel endpoint."
         }
         items={[
           { label: "Client", value: identitySnapshot?.clientId ?? "" },
           {
             label: "Public key",
             title: identitySnapshot?.publicKeyHex,
-            value: identitySnapshot ? shortHash(identitySnapshot.publicKeyHex) : "",
+            value: identitySnapshot
+              ? shortHash(identitySnapshot.publicKeyHex)
+              : "",
           },
           {
             label: "Mode",
@@ -1663,12 +1743,14 @@ export function AccessPanel({
           setPendingConfirmation(null);
         }}
         onConfirm={() => void confirmIdentityImport()}
-        open={pendingConfirmation === "agent-identity" && Boolean(identitySnapshot)}
+        open={
+          pendingConfirmation === "agent-identity" && Boolean(identitySnapshot)
+        }
         pending={identityPending}
         title={
           identitySnapshot?.replaceExistingKey
             ? "Confirm client key rotation"
-            : "Confirm direct gateway identity import"
+            : "Confirm VPS identity registration"
         }
       />
       <ConfirmationPrompt
@@ -1676,7 +1758,10 @@ export function AccessPanel({
         detail="The current stored public key is revoked, the VPS is hidden as revoked, the live gateway session is disconnected, and old active work is marked lost. Revoked or deleted identities cannot be reused through direct import."
         items={[
           { label: "VPS", value: revokeSnapshot?.clientId ?? "" },
-          { label: "Reason", value: revokeSnapshot?.reason ?? "operator request" },
+          {
+            label: "Reason",
+            value: revokeSnapshot?.reason ?? "operator request",
+          },
         ]}
         onCancel={() => {
           setRevokeSnapshot(null);
@@ -1726,164 +1811,54 @@ export function AccessPanel({
   );
 }
 
-function AccessPostureCard({
-  action,
-  detail,
-  icon,
-  label,
-  onAction,
-  tone = "neutral",
-  value,
-}: {
-  action: string;
-  detail: string;
-  icon: ReactNode;
-  label: string;
-  onAction: () => void;
-  tone?: "attention" | "neutral" | "ready";
-  value: string;
-}) {
+function AccessOverviewRow({ item }: { item: AccessOverviewItem }) {
   return (
-    <div className={`accessPostureCard ${tone}`}>
-      <div className="accessPostureIcon">{icon}</div>
-      <div className="accessPostureBody">
-        <span>{label}</span>
-        <strong>{value}</strong>
-        <p>{detail}</p>
-      </div>
-      <button className="secondaryAction compact" onClick={onAction} type="button">
-        {action}
-      </button>
-    </div>
-  );
-}
-
-function IdentityLifecycleGuide({
-  blockedCount,
-  onNewIdentity,
-  registeredCount,
-}: {
-  blockedCount: number;
-  onNewIdentity: () => void;
-  registeredCount: number;
-}) {
-  const steps = [
-    "Register",
-    "Pending install",
-    "Connected",
-    "Rotate",
-    "Revoke",
-    "Blocked",
-  ];
-  return (
-    <section className="accessLifecycleGuide" aria-label="Agent identity lifecycle">
-      <div>
-        <strong>Agent identity lifecycle</strong>
-        <span>
-          {registeredCount} registered identities; {blockedCount} pending, revoked, or blocked.
-        </span>
-      </div>
-      <ol>
-        {steps.map((step) => (
-          <li key={step}>{step}</li>
-        ))}
-      </ol>
-      <button className="secondaryAction compact" onClick={onNewIdentity} type="button">
-        <Fingerprint size={15} />
-        Register VPS
-      </button>
-    </section>
-  );
-}
-
-function GatewayReadinessPanel({
-  activeSessions,
-  gatewaySessions,
-  installDefaultsReady,
-  onOpenPreferences,
-  onOpenSuiteConfig,
-}: {
-  activeSessions: number;
-  gatewaySessions: number;
-  installDefaultsReady: boolean;
-  onOpenPreferences: () => void;
-  onOpenSuiteConfig: () => void;
-}) {
-  return (
-    <section className="accessReadinessPanel" aria-label="Gateway readiness">
-      <div className={installDefaultsReady ? "ready" : "attention"}>
-        <span>Install defaults</span>
-        <strong>{installDefaultsReady ? "Configured" : "Missing endpoints or server key"}</strong>
-        <p>Preferences provide generated agent install commands with gateway endpoint priority and server key.</p>
-      </div>
-      <div className={activeSessions > 0 ? "ready" : "attention"}>
-        <span>Live sessions</span>
-        <strong>{activeSessions} active / {gatewaySessions} recent</strong>
-        <p>Gateway sessions show agent connectivity evidence; absence is actionable, not just empty.</p>
-      </div>
-      <div>
-        <span>Routing model</span>
-        <strong>No panel-side endpoint lookup</strong>
-        <p>Agents use their configured gateway endpoint list; suite config controls gateway bind and control listener.</p>
-      </div>
-      <div className="accessReadinessActions">
-        <button className="secondaryAction compact" onClick={onOpenPreferences} type="button">
-          Preferences
-        </button>
-        <button className="secondaryAction compact" onClick={onOpenSuiteConfig} type="button">
-          Suite config
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function AccessQueueRow({
-  action,
-  detail,
-  label,
-  onClick,
-  value,
-}: {
-  action: string;
-  detail: string;
-  label: string;
-  onClick: () => void;
-  value: string;
-}) {
-  return (
-    <div className="accessQueueRow">
-      <div>
-        <strong>{label}</strong>
-        <span>{detail}</span>
-      </div>
-      <span className="accessQueueValue">{value}</span>
-      <button className="secondaryAction compact" onClick={onClick} type="button">
-        {action}
-      </button>
-    </div>
-  );
-}
-
-function AccessWorkflowLink({
-  detail,
-  icon,
-  label,
-  onClick,
-}: {
-  detail: string;
-  icon: ReactNode;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button className="accessWorkflowLink" onClick={onClick} type="button">
-      <span className="accessWorkflowIcon">{icon}</span>
-      <span>
-        <strong>{label}</strong>
-        <small>{detail}</small>
+    <div className={`accessOverviewRow ${item.tone}`}>
+      <span className="accessOverviewIcon">{item.icon}</span>
+      <span className="accessOverviewText">
+        <strong>{item.label}</strong>
+        <small>{item.detail}</small>
       </span>
-    </button>
+      <span className="accessOverviewValue">{item.value}</span>
+      <button
+        className="secondaryAction compact"
+        onClick={item.onClick}
+        type="button"
+      >
+        {item.action}
+      </button>
+    </div>
+  );
+}
+
+function GatewaySessionEmptyState({
+  onOpenGatewaySettings,
+}: {
+  onOpenGatewaySettings: () => void;
+}) {
+  return (
+    <section
+      aria-label="Gateway sessions empty state"
+      className="controlPanel gatewaySessionEmpty"
+    >
+      <div className="gatewaySessionEmptyIcon">
+        <Wifi size={20} />
+      </div>
+      <div>
+        <h2>Gateway sessions</h2>
+        <p>No active gateway sessions. Configure the gateway endpoint and server key.</p>
+        <span>Gateway defaults are managed from shared system configuration.</span>
+      </div>
+      <div className="gatewaySessionEmptyActions">
+        <button
+          className="primaryAction compact"
+          onClick={onOpenGatewaySettings}
+          type="button"
+        >
+          Gateway settings
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -1933,9 +1908,14 @@ function IdentityDetailGrid({
       </span>
       <span>
         <strong>Current key</strong>
-        <span className="monoValue">
-          {client.current_public_key_sha256_hex ?? "none"}
-        </span>
+        {client.current_public_key_sha256_hex ? (
+          <CopyableHash
+            label="current key fingerprint"
+            value={client.current_public_key_sha256_hex}
+          />
+        ) : (
+          <span>none</span>
+        )}
       </span>
       <span>
         <strong>Latest revoke</strong>
@@ -1947,7 +1927,11 @@ function IdentityDetailGrid({
       </span>
       <span>
         <strong>Reason</strong>
-        <span>{client.latest_revocation_reason ?? "none"}</span>
+        <span>
+          {client.latest_revocation_reason
+            ? revocationReasonLabel(client.latest_revocation_reason)
+            : "none"}
+        </span>
       </span>
     </div>
   );
@@ -1972,11 +1956,14 @@ function RevocationDetailGrid({
       </span>
       <span>
         <strong>Key hash</strong>
-        <span className="monoValue">{revocation.public_key_sha256_hex}</span>
+        <CopyableHash
+          label="revoked key fingerprint"
+          value={revocation.public_key_sha256_hex}
+        />
       </span>
       <span>
         <strong>Reason</strong>
-        <span>{revocation.reason ?? "operator request"}</span>
+        <span>{revocationReasonLabel(revocation.reason)}</span>
       </span>
       <span>
         <strong>Revoked by</strong>
@@ -2017,7 +2004,15 @@ function GatewaySessionDetailGrid({
       </span>
       <span>
         <strong>Status</strong>
-        <span>{session.status}</span>
+        <span>{gatewaySessionStateLabel(session.status)}</span>
+      </span>
+      <span>
+        <strong>Remote IP</strong>
+        <span>{session.remote_ip ?? "not reported"}</span>
+      </span>
+      <span>
+        <strong>Version</strong>
+        <span>{session.agent_version || "unknown"}</span>
       </span>
       <span>
         <strong>Started</strong>
@@ -2029,26 +2024,43 @@ function GatewaySessionDetailGrid({
       </span>
       <span>
         <strong>Ended</strong>
-        <span>{session.ended_at ? formatTime(session.ended_at) : "active"}</span>
+        <span>
+          {session.ended_at ? formatTime(session.ended_at) : "active"}
+        </span>
       </span>
       <span>
         <strong>End reason</strong>
-        <span>{session.end_reason ?? (session.ended_at ? "ended" : "active")}</span>
+        <span>
+          {session.end_reason ?? (session.ended_at ? "ended" : "active")}
+        </span>
       </span>
       <span>
         <strong>Noise key</strong>
-        <span className="monoValue">{session.noise_public_key_hex ?? "n/a"}</span>
+        <span className="monoValue">
+          {session.noise_public_key_hex ?? "n/a"}
+        </span>
       </span>
     </div>
   );
 }
 
-function MetricRow({ label, value }: { label: string; value: string }) {
+function CopyableHash({ label, value }: { label: string; value: string }) {
+  function handleCopy(event: MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    navigator.clipboard.writeText(value).catch(() => {});
+  }
+
   return (
-    <div className="metricRow">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
+    <button
+      aria-label={`Copy ${label}`}
+      className="copyHashButton"
+      onClick={handleCopy}
+      title={value}
+      type="button"
+    >
+      <span>{shortHash(value)}</span>
+      <Copy size={13} />
+    </button>
   );
 }
 
@@ -2056,36 +2068,56 @@ function identityStatus(client: KeyLifecycleClientView): string {
   return client.current_key_revoked ? "blocked" : client.status;
 }
 
-function summarizeRoleModel(
-  operators: OperatorView[],
-  operator: OperatorView | null,
-): { detail: string; value: string } {
-  const source = operators.length > 0 ? operators : operator ? [operator] : [];
-  if (source.length === 0) {
-    return { detail: "Role records not loaded", value: "API gap" };
-  }
-  const counts = new Map<string, number>();
-  source.forEach((entry) => {
-    counts.set(entry.role, (counts.get(entry.role) ?? 0) + 1);
-  });
-  const roles = Array.from(counts.entries())
-    .map(([role, count]) => `${role} ${count}`)
-    .join(", ");
-  const current = operator ? `${operator.role}: ${operator.scopes.join(", ") || "no scopes"}` : "current role unknown";
-  return {
-    detail: `${roles}; current ${current}`,
-    value: `${counts.size} role${counts.size === 1 ? "" : "s"} visible`,
-  };
+function gatewaySessionStateLabel(status: string): string {
+  if (status === "active") return "Active";
+  if (status === "ended") return "Ended";
+  if (status === "expired") return "Expired";
+  return status
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function summarizeOperatorScopes(operator: OperatorView | null): string {
-  if (!operator) {
-    return "operator record unavailable";
+function isOperatorSessionActive(session: OperatorSessionRecord): boolean {
+  return !session.revoked && !isOperatorSessionExpired(session);
+}
+
+function isOperatorSessionExpired(session: OperatorSessionRecord): boolean {
+  return (
+    isPastTime(session.expires_at) || isPastTime(session.refresh_expires_at)
+  );
+}
+
+function operatorSessionStateLabel(session: OperatorSessionRecord): string {
+  if (session.revoked) {
+    return "Revoked";
   }
-  if (operator.scopes.includes("*")) {
-    return `${operator.role} with all scopes`;
+  if (isPastTime(session.refresh_expires_at)) {
+    return "Expired";
   }
-  return `${operator.role}; ${operator.scopes.length} scope${operator.scopes.length === 1 ? "" : "s"}`;
+  if (isPastTime(session.expires_at)) {
+    return "Access expired";
+  }
+  return session.current ? "Current" : "Active";
+}
+
+function isPastTime(value: string): boolean {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp <= Date.now();
+}
+
+function revocationReasonLabel(value: string | null | undefined): string {
+  if (!value?.trim()) {
+    return "Operator request";
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized.includes("fixture") && normalized.includes("rebuild")) {
+    return "Host rebuild";
+  }
+  return value
+    .trim()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/^./, (match) => match.toUpperCase());
 }
 
 function parseListInput(value: string): string[] {
@@ -2124,32 +2156,29 @@ function InstallCommand({
     gateway_endpoints: string;
   } | null;
 }) {
-  const endpoints =
-    (preferences?.gateway_endpoints ?? "").trim();
-  const gatewayKey =
-    (preferences?.gateway_server_public_key_hex ?? "").trim();
+  const endpoints = (preferences?.gateway_endpoints ?? "").trim();
+  const gatewayKey = (preferences?.gateway_server_public_key_hex ?? "").trim();
 
   if (!endpoints || !gatewayKey) {
     return (
       <div className="formNote mutedNote">
         <span>
-          Gateway endpoints or public key not configured. Set them in{" "}
-          <strong>Preferences → Operator</strong> to generate an install command.
+          Gateway endpoint or server key settings are not configured, so the
+          panel cannot generate a complete install command yet.
         </span>
       </div>
     );
   }
 
-  const command =
-    [
-      "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \\",
-      "  VPSMAN_INSTALL_MODE=root \\",
-      `  VPSMAN_AGENT_CLIENT_ID=${clientId} \\`,
-      `  VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=${privateKeyHex} \\`,
-      `  VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=${gatewayKey} \\`,
-      `  VPSMAN_GATEWAY_ENDPOINTS='${endpoints}' \\`,
-      "  bash",
-    ].join("\n");
+  const command = [
+    "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \\",
+    "  VPSMAN_INSTALL_MODE=root \\",
+    `  VPSMAN_AGENT_CLIENT_ID=${clientId} \\`,
+    `  VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=${privateKeyHex} \\`,
+    `  VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=${gatewayKey} \\`,
+    `  VPSMAN_GATEWAY_ENDPOINTS='${endpoints}' \\`,
+    "  bash",
+  ].join("\n");
 
   function handleCopy() {
     navigator.clipboard.writeText(command).catch(() => {});

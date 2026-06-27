@@ -15,6 +15,24 @@ pub(crate) struct ArtifactCleanupPreviewView {
     pub(crate) preview_hash: String,
     pub(crate) matched_count: i64,
     pub(crate) matched_bytes: i64,
+    pub(crate) oldest_created_at: Option<String>,
+    pub(crate) newest_created_at: Option<String>,
+    pub(crate) retained_count: i64,
+    pub(crate) reference_protected_count: i64,
+    pub(crate) representative_objects: Vec<ArtifactCleanupPreviewObjectView>,
+    pub(crate) full_list_download_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ArtifactCleanupPreviewObjectView {
+    pub(crate) id: Uuid,
+    pub(crate) domain: String,
+    pub(crate) object_key: String,
+    pub(crate) size_bytes: i64,
+    pub(crate) status: String,
+    pub(crate) created_at: String,
+    pub(crate) reference_protected: bool,
+    pub(crate) reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -75,5 +93,7 @@ pub(crate) struct ServerArtifactCleanupCandidate {
     pub(crate) client_id: Option<String>,
     pub(crate) stream: Option<String>,
     pub(crate) seq: Option<i32>,
+    pub(crate) backup_artifact_id: Option<Uuid>,
     pub(crate) created_at: String,
+    pub(crate) reference_protected: bool,
 }

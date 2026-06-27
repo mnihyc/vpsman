@@ -20,6 +20,7 @@ type TimeSeriesChartProps = {
   emptyLabel: string;
   height?: number;
   lines: TimeSeriesChartLine[];
+  pointsOnly?: boolean;
   times: string[];
   valueFormatter: (value: number | null) => string;
 };
@@ -29,6 +30,7 @@ export function TimeSeriesChart({
   emptyLabel,
   height = 236,
   lines,
+  pointsOnly = false,
   times,
   valueFormatter,
 }: TimeSeriesChartProps) {
@@ -77,7 +79,8 @@ export function TimeSeriesChart({
           grid: { stroke: consolePalette.neutral.borderSubtle, width: 1 },
           size: 34,
           stroke: consolePalette.neutral.muted,
-          values: (_plot, ticks) => ticks.map((tick) => formatAxisTime(tick, unixTimes)),
+          values: (_plot, ticks) =>
+            formatAxisTicks(ticks, width, unixTimes),
         },
         {
           grid: { stroke: consolePalette.neutral.borderSubtle, width: 1 },
@@ -130,10 +133,10 @@ export function TimeSeriesChart({
         {},
         ...sanitizedLines.map((line) => ({
           label: line.label,
-          points: { show: true, size: 4, width: 1 },
-          spanGaps: true,
+          points: { show: true, size: pointsOnly ? 6 : 4, width: 1 },
+          spanGaps: false,
           stroke: line.color,
-          width: 2,
+          width: pointsOnly ? 0 : 2,
         })),
       ],
       width,
@@ -153,7 +156,7 @@ export function TimeSeriesChart({
       plot.destroy();
       plotRef.current = null;
     };
-  }, [data, height, sanitizedLines, unixTimes, valueFormatter]);
+  }, [data, height, pointsOnly, sanitizedLines, unixTimes, valueFormatter]);
 
   const hasData = unixTimes.length > 0 && sanitizedLines.length > 0;
   const accessibleRows = useMemo(() => {
@@ -170,9 +173,18 @@ export function TimeSeriesChart({
     });
   }, [sanitizedLines, unixTimes, valueFormatter]);
   const latestValues = accessibleRows[accessibleRows.length - 1]?.values ?? [];
+  const coverageLabel = useMemo(
+    () => chartCoverageLabel(unixTimes, sanitizedLines),
+    [sanitizedLines, unixTimes],
+  );
 
   return (
-    <figure className="timeSeriesChartShell" aria-labelledby={captionId}>
+    <figure
+      className="timeSeriesChartShell"
+      aria-labelledby={captionId}
+      data-gap-policy="preserve"
+      data-render-mode={pointsOnly ? "points" : "line"}
+    >
       <figcaption className="srOnly" id={captionId}>
         {ariaLabel}
         {latestValues.length > 0
@@ -192,6 +204,11 @@ export function TimeSeriesChart({
               </span>
             ))}
           </div>
+          {coverageLabel && (
+            <p className="timeSeriesCoverage" aria-label={`${ariaLabel} data coverage`}>
+              {coverageLabel}
+            </p>
+          )}
           {hover && (
             <div className="timeSeriesHover">
               <strong>{hover.timeLabel}</strong>
@@ -235,6 +252,47 @@ export function TimeSeriesChart({
   );
 }
 
+function chartCoverageLabel(
+  unixTimes: number[],
+  lines: TimeSeriesChartLine[],
+): string | null {
+  const totalPoints = unixTimes.length * lines.length;
+  if (totalPoints === 0) {
+    return null;
+  }
+
+  let observedPoints = 0;
+  let firstObservedIndex: number | null = null;
+  let lastObservedIndex: number | null = null;
+  for (const line of lines) {
+    line.values.forEach((value, index) => {
+      if (!Number.isFinite(value)) {
+        return;
+      }
+      observedPoints += 1;
+      firstObservedIndex =
+        firstObservedIndex === null ? index : Math.min(firstObservedIndex, index);
+      lastObservedIndex =
+        lastObservedIndex === null ? index : Math.max(lastObservedIndex, index);
+    });
+  }
+
+  if (observedPoints === 0 || firstObservedIndex === null || lastObservedIndex === null) {
+    return null;
+  }
+
+  const missingPoints = totalPoints - observedPoints;
+  const gapLabel =
+    missingPoints === 0
+      ? "no gaps"
+      : `${missingPoints} ${missingPoints === 1 ? "gap" : "gaps"}`;
+  return [
+    `Data coverage: ${observedPoints}/${totalPoints} points present in selected range`,
+    gapLabel,
+    `samples ${formatChartTime(unixTimes[firstObservedIndex])} to ${formatChartTime(unixTimes[lastObservedIndex])}`,
+  ].join(" · ");
+}
+
 function formatChartTime(unixTime: number): string {
   return new Date(unixTime * 1000).toLocaleString(undefined, {
     day: "2-digit",
@@ -242,6 +300,25 @@ function formatChartTime(unixTime: number): string {
     minute: "2-digit",
     month: "short",
   });
+}
+
+function formatAxisTicks(
+  ticks: number[],
+  width: number,
+  unixTimes: number[],
+): string[] {
+  const maxLabels =
+    width < 420 ? 2 : width < 560 ? 3 : width < 760 ? 4 : ticks.length;
+  if (ticks.length <= maxLabels) {
+    return ticks.map((tick) => formatAxisTime(tick, unixTimes));
+  }
+  const visible = new Set<number>();
+  for (let index = 0; index < maxLabels; index += 1) {
+    visible.add(Math.round((index * (ticks.length - 1)) / (maxLabels - 1)));
+  }
+  return ticks.map((tick, index) =>
+    visible.has(index) ? formatAxisTime(tick, unixTimes) : "",
+  );
 }
 
 function formatAxisTime(unixTime: number, unixTimes: number[]): string {

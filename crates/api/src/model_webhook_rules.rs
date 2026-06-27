@@ -12,6 +12,9 @@ pub(crate) struct WebhookRuleView {
     pub(crate) target: String,
     pub(crate) body_template: String,
     pub(crate) cooldown_secs: i64,
+    #[serde(skip_serializing)]
+    pub(crate) signing_secret: Option<String>,
+    pub(crate) signing_secret_set: bool,
     pub(crate) notes: Option<String>,
     pub(crate) actor_id: Option<Uuid>,
     pub(crate) created_at: String,
@@ -35,6 +38,9 @@ pub(crate) struct CreateWebhookRuleRequest {
     pub(crate) target: String,
     #[serde(default)]
     pub(crate) body_template: String,
+    pub(crate) signing_secret: Option<String>,
+    #[serde(default)]
+    pub(crate) clear_signing_secret: bool,
     pub(crate) cooldown_secs: Option<i64>,
     pub(crate) notes: Option<String>,
     #[serde(default)]
@@ -62,6 +68,8 @@ pub(crate) struct WebhookRuleDeliveryView {
     pub(crate) payload: serde_json::Value,
     pub(crate) matched_vps: Vec<AgentView>,
     pub(crate) message: String,
+    #[serde(skip_serializing)]
+    pub(crate) signing_secret: Option<String>,
     pub(crate) error: Option<String>,
     pub(crate) cooldown_until_unix: i64,
     pub(crate) attempt_count: i32,
@@ -110,6 +118,7 @@ pub(crate) struct WebhookRuleDryRunRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WebhookRuleDispatchRequest {
+    pub(crate) rule_id: Option<Uuid>,
     #[serde(default = "default_webhook_dry_run_event_kind")]
     pub(crate) event_kind: String,
     pub(crate) event_id: Option<String>,
@@ -188,6 +197,7 @@ pub(crate) struct WebhookRuleDeliveryCandidate {
     pub(crate) payload: serde_json::Value,
     pub(crate) matched_vps: Vec<AgentView>,
     pub(crate) message: String,
+    pub(crate) signing_secret: Option<String>,
     pub(crate) cooldown_until_unix: i64,
     pub(crate) actor_id: Option<Uuid>,
 }

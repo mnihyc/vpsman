@@ -8,11 +8,14 @@ pub use backends::{
     backend_config_signature_payload, render_backend_config_for_endpoint,
     render_tunnel_endpoint_backend_config,
 };
-pub use cost::{effective_bandwidth_tier, observed_bandwidth_tier, observed_ospf_cost, ospf_cost};
+pub use cost::{
+    effective_bandwidth_mbps, observed_ospf_cost, ospf_cost, MAX_TUNNEL_BANDWIDTH_MBPS,
+    MIN_TUNNEL_BANDWIDTH_MBPS,
+};
 pub use legacy::{parse_ifupdown_configs, parse_legacy_bird_config};
 pub use models::{
     default_runtime_fou_ipproto, default_runtime_fou_peer_port, default_runtime_fou_port,
-    BandwidthTier, IfupdownConfig, IfupdownInterface, LegacyBirdConfig, LegacyBirdPeer,
+    BandwidthMbps, IfupdownConfig, IfupdownInterface, LegacyBirdConfig, LegacyBirdPeer,
     OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelFouOptions,
     RuntimeTunnelManager, RuntimeTunnelRoute, RuntimeTunnelTopologyIntent,
     RuntimeTunnelTrafficLimit, TunnelAddressFamily, TunnelAddressPair, TunnelBackendConfig,

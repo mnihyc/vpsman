@@ -16,6 +16,7 @@ import {
   Trash2,
   Upload,
   UserRound,
+  X,
 } from "lucide-react";
 import { basicSetup, EditorView } from "codemirror";
 import type { Extension } from "@codemirror/state";
@@ -78,6 +79,7 @@ type BrowserState = {
 
 type PendingConfirmation = {
   detail: string;
+  diffPreview?: string;
   operation: JobOperation;
   refreshPath?: string;
   selectorExpression: string;
@@ -180,6 +182,7 @@ export function FileBrowserPanel({
   );
   const selectedEntry = metadataByPath[selectedPath];
   const locationCommandDisabled = !selectedEntry || pending || !privilegeMaterial;
+  const selectedDownloadDisabled = !selectedEntry || pending || !privilegeMaterial;
   const selectedPathCommandDisabled = !selectedEntry || selectedPath === "/" || pending || !privilegeMaterial;
   const editorDirty = editorContent !== editorSavedContent;
   const currentEntries = entriesByPath[currentPath] ?? [];
@@ -204,7 +207,14 @@ export function FileBrowserPanel({
   const typedPathChanged = pathInput.trim() !== currentPath;
   const pathRefreshTarget = typedPathChanged ? pathInput : staleDirectoryPath ?? pathInput;
   const targetSummary = selectedAgent ? `target ${targetNameId(selectedAgent)}` : "No target VPS";
-  const summary = actionError ?? actionMessage ?? staleMessage ?? (privilegeMaterial ? `${targetSummary} · ${currentEntries.length} entries loaded` : "Locked");
+  const summary =
+    actionError ??
+    actionMessage ??
+    staleMessage ??
+    (privilegeMaterial
+      ? `${targetSummary} · ${currentEntries.length} entries loaded`
+      : `${targetSummary} · unlock to read remote files`);
+  const selectedDownloadLabel = downloadActionLabel(selectedEntry, selectedPath);
   const editorStateText = editorPath ? `${editorContent.length} chars${editorDirty ? " · unsaved" : ""}` : "Select a text file to edit";
   const editorStatusText = actionError ?? (actionMessage ? `${actionMessage}${staleDirectoryPath ? " · refresh available" : ""}` : staleMessage) ?? editorStateText;
 
@@ -413,6 +423,7 @@ export function FileBrowserPanel({
           ? `Save changes to ${editorPath}. No base hash is available, so this writes without optimistic conflict protection.`
           : `Save changes to ${editorPath}. If the file changed on the VPS, the save will be rejected.`,
         parentPath(editorPath),
+        { diffPreview: textDiffPreview(editorSavedContent, editorContent) },
       );
     } catch (error) {
       reportActionError(error);
@@ -438,8 +449,15 @@ export function FileBrowserPanel({
     });
   }
 
-  function confirmOperation(operation: JobOperation, title: string, detail: string, refreshPath?: string) {
+  function confirmOperation(
+    operation: JobOperation,
+    title: string,
+    detail: string,
+    refreshPath?: string,
+    extras: Pick<PendingConfirmation, "diffPreview"> = {},
+  ) {
     setPendingConfirmation({
+      ...extras,
       operation,
       title,
       detail,
@@ -645,6 +663,7 @@ export function FileBrowserPanel({
     if (!path) {
       return;
     }
+    const entry = metadataByPath[path] ?? (path === "/" ? rootEntry() : undefined);
     await runPanelAction(setPending, setActionError, async () => {
       const operation: JobOperation = {
         type: "file_download",
@@ -670,7 +689,7 @@ export function FileBrowserPanel({
           targetLabel: targetNameId(selectedAgent),
         });
       }
-      setActionMessage(`Downloaded ${path}`);
+      setActionMessage(downloadCompletionMessage(entry, path));
     });
   }
 
@@ -813,15 +832,15 @@ export function FileBrowserPanel({
         )}
       </div>
 
-      <div className="fileBrowserWorkspace">
+      <div className={`fileBrowserWorkspace${editorPath ? " editorOpen" : " emptyWorkspace"}`}>
         <aside className="fileTreePane">
           <div className="fileTreeToolbar">
             <button className="secondaryAction compactAction" disabled={pending || !privilegeMaterial} onClick={() => void loadDirectory("/")} type="button">
               /
             </button>
-            <button className="secondaryAction compactAction" disabled={!selectedPath || pending || !privilegeMaterial} onClick={() => void downloadSelected()} type="button">
+            <button className="secondaryAction compactAction" disabled={selectedDownloadDisabled} onClick={() => void downloadSelected()} title={selectedDownloadLabel} type="button">
               <Download size={13} />
-              <span>Download</span>
+              <span>{selectedDownloadLabel}</span>
             </button>
           </div>
           <div className="fileTree" role="tree">
@@ -886,24 +905,45 @@ export function FileBrowserPanel({
           </div>
         </aside>
 
-        <main className="fileEditorPane">
-          <div className="fileEditorToolbar">
-            <div>
-              <strong>{editorPath ?? selectedPath}</strong>
-              <span>{editorStatusText}</span>
+        <main className={`fileEditorPane${editorPath ? "" : " emptyEditorPane"}`}>
+          {editorPath ? (
+            <>
+              <div className="fileEditorToolbar">
+                <div>
+                  <strong>{editorPath}</strong>
+                  <span>{editorStatusText}</span>
+                </div>
+                <div className="fileEditorActions">
+                  <label>
+                    <span>Mode</span>
+                    <input onChange={(event) => setEditorMode(event.target.value)} value={editorMode} />
+                  </label>
+                  <button className="primaryAction" disabled={!editorDirty || pending || !privilegeMaterial} onClick={() => void saveEditor()} type="button">
+                    <Save size={14} />
+                    <span>Review save</span>
+                  </button>
+                  <button
+                    className="secondaryAction compactAction fileEditorCloseMobile"
+                    onClick={() => setEditorPath(null)}
+                    type="button"
+                  >
+                    <X size={14} />
+                    <span>Back to files</span>
+                  </button>
+                </div>
+              </div>
+              <CodeMirrorTextEditor onChange={setEditorContent} path={editorPath} value={editorContent} />
+            </>
+          ) : (
+            <div className="fileEditorEmptyState" role="status">
+              <File size={20} />
+              <strong>Select a VPS and file to begin.</strong>
+              <span>
+                Choose a target, refresh a directory, then open a text file. Directory reads and file
+                operations require privilege unlock because they inspect the remote VPS filesystem.
+              </span>
             </div>
-            <div className="fileEditorActions">
-              <label>
-                <span>Mode</span>
-                <input onChange={(event) => setEditorMode(event.target.value)} value={editorMode} />
-              </label>
-              <button className="primaryAction" disabled={!editorPath || !editorDirty || pending || !privilegeMaterial} onClick={() => void saveEditor()} type="button">
-                <Save size={14} />
-                <span>Review save</span>
-              </button>
-            </div>
-          </div>
-          <CodeMirrorTextEditor onChange={setEditorContent} path={editorPath ?? selectedPath} value={editorContent} />
+          )}
         </main>
 
         <aside className="fileDetailsPane">
@@ -915,12 +955,13 @@ export function FileBrowserPanel({
           </div>
           <div className="fileActionStack">
             <div className="fileDetailsToolbar" aria-label="Selected file actions">
-              <button aria-label="Download selected" className="iconButton" disabled={selectedPathCommandDisabled} onClick={() => void downloadSelected()} title="Download selected" type="button">
+              <button aria-label={selectedDownloadLabel} className="fileActionButton" disabled={selectedDownloadDisabled} onClick={() => void downloadSelected()} title={selectedDownloadLabel} type="button">
                 <Download size={15} />
+                <span>{selectedDownloadLabel}</span>
               </button>
               <button
                 aria-label="Upload here"
-                className="iconButton"
+                className="fileActionButton"
                 disabled={locationCommandDisabled}
                 onClick={() => {
                   setUploadDestination(joinPath(selectedEntry?.is_dir ? selectedPath : currentPath, uploadFile?.name ?? ""));
@@ -930,39 +971,48 @@ export function FileBrowserPanel({
                 type="button"
               >
                 <Upload size={15} />
+                <span>Upload</span>
               </button>
-              <button aria-label="Move or rename selected" className="iconButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("rename")} title="Move or rename selected" type="button">
+              <button aria-label="Move or rename selected" className="fileActionButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("rename")} title="Move or rename selected" type="button">
                 <Scissors size={15} />
+                <span>Move</span>
               </button>
-              <button aria-label="Create file or folder" className="iconButton" disabled={locationCommandDisabled} onClick={() => setActiveCommand("create")} title="Create file or folder" type="button">
+              <button aria-label="Create file or folder" className="fileActionButton" disabled={locationCommandDisabled} onClick={() => setActiveCommand("create")} title="Create file or folder" type="button">
                 <FilePlus2 size={15} />
+                <span>Create</span>
               </button>
-              <button aria-label="Change selected permissions" className="iconButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chmod")} title="Change selected permissions" type="button">
+              <button aria-label="Change selected permissions" className="fileActionButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chmod")} title="Change selected permissions" type="button">
                 <ShieldCheck size={15} />
+                <span>Permissions</span>
               </button>
-              <button aria-label="Change selected owner or group" className="iconButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chown")} title="Change selected owner or group" type="button">
+              <button aria-label="Change selected owner or group" className="fileActionButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chown")} title="Change selected owner or group" type="button">
                 <UserRound size={15} />
+                <span>Owner</span>
               </button>
-              <button aria-label="Review delete selected" className="iconButton dangerIconButton" disabled={selectedPathCommandDisabled} onClick={() => deleteSelected()} title="Review delete selected" type="button">
+              <button aria-label="Review delete selected" className="fileActionButton dangerFileActionButton" disabled={selectedPathCommandDisabled} onClick={() => deleteSelected()} title="Review delete selected" type="button">
                 <Trash2 size={15} />
+                <span>Delete</span>
               </button>
             </div>
-            <label
-              className="inlineCheck actionCheck"
-              title="Disabled by default. Enable only when selected paths are intentionally symlinks and operations should use their targets."
-            >
-              <input
-                checked={followSymlinks}
-                onChange={(event) => setFollowSymlinks(event.target.checked)}
-                type="checkbox"
-              />
-              <span>Follow symlinks</span>
-            </label>
+            <details className="fileAdvancedOptions">
+              <summary>Advanced file options</summary>
+              <label
+                className="inlineCheck actionCheck"
+                title="Disabled by default. Enable only when selected paths are intentionally symlinks and operations should use their targets."
+              >
+                <input
+                  checked={followSymlinks}
+                  onChange={(event) => setFollowSymlinks(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Follow symlinks</span>
+              </label>
+            </details>
 
             {(transferHandoffHint || relatedTransfers.length > 0) && (
-              <section className="fileTransferHandoffPanel" aria-label="File transfer output handoff">
+              <section className="fileTransferHandoffPanel" aria-label="File transfer output">
                 <div>
-                  <strong>Transfer output handoff</strong>
+                  <strong>Transfer output</strong>
                   <span title={transferReferencePath}>
                     {transferHandoffText(transferHandoffHint, relatedTransfers.length, handoffReadyCount)}
                   </span>
@@ -990,7 +1040,7 @@ export function FileBrowserPanel({
                     type="button"
                   >
                     <ArrowLeftRight size={14} />
-                    <span>Open transfer handoffs</span>
+                    <span>Open transfers</span>
                   </button>
                 )}
               </section>
@@ -1181,12 +1231,20 @@ export function FileBrowserPanel({
             {selectedEntry && (
               <dl className="fileMetadataList">
                 <div>
+                  <dt>Name</dt>
+                  <dd title={selectedEntry.path}>{selectedEntry.name || fileName(selectedEntry.path)}</dd>
+                </div>
+                <div>
                   <dt>Type</dt>
-                  <dd>{selectedEntry.file_type}</dd>
+                  <dd>{entryTypeLabel(selectedEntry)}</dd>
                 </div>
                 <div>
                   <dt>Size</dt>
                   <dd>{formatBytes(selectedEntry.size_bytes)}</dd>
+                </div>
+                <div>
+                  <dt>Owner</dt>
+                  <dd>{ownerLabel(selectedEntry)}</dd>
                 </div>
                 <div>
                   <dt>Mode</dt>
@@ -1264,10 +1322,10 @@ function transferHandoffText(
   handoffReadyCount: number,
 ): string {
   if (relatedTransfers > 0) {
-    return `${relatedTransfers} related transfer sessions, ${handoffReadyCount} handoff ready`;
+    return `${relatedTransfers} related transfer sessions, ${handoffReadyCount} ready to download`;
   }
   if (hint) {
-    return "Direct browser download completed; retained transfer handoffs and retry evidence live in Transfers";
+    return "Direct browser download completed; retained download and retry evidence live in Transfers";
   }
   return "Transfer evidence is owned by Remote Operations / Transfers";
 }
@@ -1276,6 +1334,40 @@ function transferHandoffOutputLabel(hint: TransferHandoffHint): string {
   const kind = hint.sourceKind ? hint.sourceKind.replace(/_/g, " ") : "download";
   const size = typeof hint.sizeBytes === "number" ? formatBytes(hint.sizeBytes) : "size not reported";
   return `${kind}, ${size}`;
+}
+
+function downloadActionLabel(entry: FileBrowserEntry | undefined, path: string): string {
+  if (path === "/" || entry?.is_dir) {
+    return "Download folder as archive";
+  }
+  if (entry?.is_file) {
+    return "Download file";
+  }
+  return "Download selected";
+}
+
+function downloadCompletionMessage(entry: FileBrowserEntry | undefined, path: string): string {
+  if (path === "/" || entry?.is_dir) {
+    return `Downloaded archive for ${path}`;
+  }
+  return `Downloaded ${path}`;
+}
+
+function entryTypeLabel(entry: FileBrowserEntry): string {
+  if (entry.is_dir) {
+    return "Folder";
+  }
+  if (entry.is_file) {
+    return "File";
+  }
+  if (entry.is_symlink) {
+    return entry.symlink_target ? `Symlink to ${entry.symlink_target}` : "Symlink";
+  }
+  return entry.file_type.replace(/_/g, " ");
+}
+
+function ownerLabel(entry: FileBrowserEntry): string {
+  return `${entry.uid}:${entry.gid}`;
 }
 
 function TreeNode({
@@ -1356,7 +1448,7 @@ function TreeNode({
               {entry.is_dir ? "Open folder" : "Open editor"}
             </ContextMenu.Item>
             <ContextMenu.Item className="contextMenuItem" onSelect={() => onDownload(path)}>
-              Download
+              {downloadActionLabel(entry, path)}
             </ContextMenu.Item>
             <ContextMenu.Item className="contextMenuItem" onSelect={() => void navigator.clipboard?.writeText(path)}>
               Copy path
@@ -1631,6 +1723,12 @@ function fileConfirmationItems(confirmation: PendingConfirmation): Array<{ label
   if ("size_bytes" in operation) {
     items.push({ label: "Size", value: formatBytes(operation.size_bytes) });
   }
+  if (confirmation.diffPreview) {
+    items.push({
+      label: "Diff",
+      value: <pre className="fileDiffPreview">{confirmation.diffPreview}</pre>,
+    });
+  }
   if ("expected_sha256_hex" in operation && operation.expected_sha256_hex) {
     items.push({ label: "Expected hash", value: shortId(operation.expected_sha256_hex) });
   }
@@ -1715,6 +1813,48 @@ function ownerGroupConfirmationValue(operation: Extract<JobOperation, { type: "f
   const owner = operation.owner ?? operation.uid ?? "-";
   const group = operation.group ?? operation.gid ?? "-";
   return `${owner}:${group} · ${ownershipPolicyLabel(operation.ownership_policy ?? "fail")}`;
+}
+
+function textDiffPreview(before: string, after: string): string {
+  const beforeLines = splitComparableLines(before);
+  const afterLines = splitComparableLines(after);
+  let prefix = 0;
+  while (
+    prefix < beforeLines.length &&
+    prefix < afterLines.length &&
+    beforeLines[prefix] === afterLines[prefix]
+  ) {
+    prefix += 1;
+  }
+  let suffix = 0;
+  while (
+    suffix + prefix < beforeLines.length &&
+    suffix + prefix < afterLines.length &&
+    beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+  const removed = beforeLines.slice(prefix, beforeLines.length - suffix);
+  const added = afterLines.slice(prefix, afterLines.length - suffix);
+  const header = `${added.length} added / ${removed.length} removed lines; ${formatBytes(
+    new TextEncoder().encode(before).byteLength,
+  )} -> ${formatBytes(new TextEncoder().encode(after).byteLength)}`;
+  const body = [
+    ...removed.slice(0, 4).map((line) => `- ${line || "(blank line)"}`),
+    ...added.slice(0, 4).map((line) => `+ ${line || "(blank line)"}`),
+  ];
+  const hiddenLines = Math.max(0, removed.length - 4) + Math.max(0, added.length - 4);
+  if (hiddenLines > 0) {
+    body.push(`... ${hiddenLines} more changed lines`);
+  }
+  return body.length > 0 ? `${header}\n${body.join("\n")}` : header;
+}
+
+function splitComparableLines(value: string): string[] {
+  if (!value) {
+    return [];
+  }
+  return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 }
 
 function targetNameId(target: Pick<AgentView, "display_name" | "id">): string {

@@ -5,6 +5,8 @@ import { usePanelDisplaySettings } from "../panelDisplay";
 
 export function ConfirmationPrompt({
   cancelLabel = "Cancel",
+  children,
+  confirmDisabled = false,
   confirmLabel,
   detail,
   error,
@@ -20,6 +22,8 @@ export function ConfirmationPrompt({
   tone = "normal",
 }: {
   cancelLabel?: string;
+  children?: ReactNode;
+  confirmDisabled?: boolean;
   confirmLabel: string;
   detail: ReactNode;
   error?: ReactNode;
@@ -126,6 +130,7 @@ export function ConfirmationPrompt({
             />
           </label>
         )}
+        {children}
         {error && <small className="confirmationPromptError">{error}</small>}
       </div>
       <button
@@ -153,7 +158,7 @@ export function ConfirmationPrompt({
               ? "primaryAction dangerPrimary compactAction"
               : "primaryAction compactAction"
           }
-          disabled={pending || !typedConfirmationMatches}
+          disabled={pending || confirmDisabled || !typedConfirmationMatches}
           onClick={onConfirm}
           type="button"
         >

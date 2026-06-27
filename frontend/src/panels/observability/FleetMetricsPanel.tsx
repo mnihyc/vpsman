@@ -29,6 +29,21 @@ const resourceMetricOptions: Array<{ label: string; value: DashboardResourceMetr
   { label: "Disk", value: "disk_free" },
 ];
 
+type ResourceChartData = {
+  lines: TimeSeriesChartLine[];
+  observedPoints: number;
+  times: string[];
+};
+
+type ResourceEvidence = {
+  dataAvailableValue: string;
+  isSparse: boolean;
+  lastSampleValue: string;
+  sampleSpanLabel: string;
+  selectedRangeLabel: string;
+  sparseNotice: string | null;
+};
+
 export function FleetMetricsPanel({
   error,
   loading,
@@ -41,9 +56,15 @@ export function FleetMetricsPanel({
 }: FleetMetricsPanelProps) {
   const resourceCurve = overview?.resource_curve ?? null;
   const resourceChart = resourceChartData(resourceCurve?.series ?? []);
+  const sampledClients = resourceCurve?.sampled_clients ?? overview?.resources.sampled_clients ?? 0;
+  const resourceEvidence = buildResourceEvidence(
+    overview,
+    window,
+    resourceChart,
+    sampledClients,
+  );
   const windowOptions = overview?.available_filters.windows.map((option) => option.value) ?? fallbackDashboardWindows;
   const groupOptions = overview?.available_filters.group_by_options ?? [];
-  const sampledClients = resourceCurve?.sampled_clients ?? overview?.resources.sampled_clients ?? 0;
   const excludedClients = resourceCurve?.excluded_clients ?? 0;
   const generatedAt = overview?.generated_at ? formatCompactTime(overview.generated_at) : "No refresh evidence";
   const timeRange = overview
@@ -127,17 +148,27 @@ export function FleetMetricsPanel({
 
         <div className="metricGrid observabilityMetricsSummary" aria-label="Fleet metrics summary">
           <MetricTile label="Current metric" value={resourceMetricTitle(preferences.resourceMetric)} detail={`${sampledClients} VPS sampled`} />
-          <MetricTile label="Time range" value={windowLabel(window)} detail={timeRange} />
-          <MetricTile label="Telemetry freshness" value={loading ? "Refreshing" : generatedAt} detail="last dashboard overview sample" />
-          <MetricTile label="Grouping" value={selectedGroupLabel} detail={`${overview?.label_clusters.length ?? 0} groups; ${excludedClients} excluded`} />
+          <MetricTile label="Selected range" value={windowLabel(window)} detail={resourceEvidence.selectedRangeLabel || timeRange} />
+          <MetricTile
+            label="Telemetry freshness"
+            value={loading ? "Refreshing" : resourceEvidence.lastSampleValue}
+            detail={`Data available ${resourceEvidence.dataAvailableValue}; overview ${generatedAt}`}
+          />
+          <MetricTile
+            label="Grouping"
+            value={selectedGroupLabel}
+            detail={`${overview?.label_clusters.length ?? 0} groups; ${excludedClients} excluded; fleet warning state ${overview?.summary.warnings ?? 0}`}
+          />
         </div>
+
+        <WarningDefinitionStrip overview={overview} />
 
         <section className="dashboardSection observabilityChartSection" aria-labelledby="observability-fleet-resource-title">
           <div className="dashboardSectionHeader">
             <div>
               <h2 id="observability-fleet-resource-title">{resourceMetricTitle(preferences.resourceMetric)} by VPS</h2>
               <span>
-                Legend and hover values are available in the chart; rows keep threshold and drilldown context read-only.
+                Live scan cards stay in Home and Fleet / Monitor; this page analyzes retained telemetry without mutation controls.
               </span>
             </div>
           </div>
@@ -147,10 +178,34 @@ export function FleetMetricsPanel({
                 <span>{resourceMetricTitle(preferences.resourceMetric)} trend</span>
                 <small>{sampledClients} sampled VPS</small>
               </div>
+              <p className="observabilityRangeLine">
+                Selected: {windowLabel(window)} · Data available: {resourceEvidence.dataAvailableValue} · Last sample: {resourceEvidence.lastSampleValue}
+              </p>
+              <div className="observabilityChartEvidence" aria-label="Fleet resource freshness">
+                <div>
+                  <span>Selected window</span>
+                  <strong>{windowLabel(window)}</strong>
+                  <small>{resourceEvidence.selectedRangeLabel}</small>
+                </div>
+                <div className={resourceEvidence.isSparse ? "warning" : undefined}>
+                  <span>Data available</span>
+                  <strong>{resourceEvidence.dataAvailableValue}</strong>
+                  <small>{resourceEvidence.sampleSpanLabel}</small>
+                </div>
+                <div className={resourceEvidence.isSparse ? "warning" : undefined}>
+                  <span>Chart treatment</span>
+                  <strong>{resourceEvidence.isSparse ? "Points only" : "Trend line"}</strong>
+                  <small>{resourceEvidence.isSparse ? "Sparse evidence; no trend implied" : "Enough samples for line reading"}</small>
+                </div>
+              </div>
+              {resourceEvidence.sparseNotice && (
+                <p className="observabilitySparseNotice">{resourceEvidence.sparseNotice}</p>
+              )}
               <TimeSeriesChart
                 ariaLabel="Fleet resource usage curve"
                 emptyLabel="No resource telemetry after current filters and exclusions"
                 lines={resourceChart.lines}
+                pointsOnly={resourceEvidence.isSparse}
                 times={resourceChart.times}
                 valueFormatter={(value) => formatResourceValue(preferences.resourceMetric, value)}
               />
@@ -223,20 +278,69 @@ function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
       <span>{cluster.kind}</span>
       <strong>{cluster.label}</strong>
       <small>
-        {cluster.online}/{cluster.total} online, {cluster.warnings} warnings, {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)}
+        {cluster.online}/{cluster.total} online, {cluster.warnings} warning observations, {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} retained traffic
       </small>
     </div>
   );
 }
 
-function resourceChartData(series: DashboardResourceSeriesRecord[]): { lines: TimeSeriesChartLine[]; times: string[] } {
+function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecord | null }) {
+  const activeAlerts = overview?.operations.active_alerts ?? 0;
+  const warningAlerts = overview?.operations.warning_alerts ?? 0;
+  const affectedVpsCount = uniqueAffectedVpsCount(overview);
+  const warningObservations =
+    overview?.label_clusters.reduce((total, cluster) => total + cluster.warnings, 0) ?? 0;
+  const fleetWarningState = overview?.summary.warnings ?? 0;
+  const definitions = [
+    {
+      detail: `${overview?.operations.critical_alerts ?? 0} critical, ${warningAlerts} warning`,
+      label: "Active alerts",
+      value: String(activeAlerts),
+    },
+    {
+      detail: "unique VPSs named by recent alerts or degraded-agent evidence",
+      label: "Affected VPSs",
+      value: String(affectedVpsCount),
+    },
+    {
+      detail: "group rows can overlap across provider, country, tag, and all-fleet buckets",
+      label: "Warning observations",
+      value: String(warningObservations),
+    },
+    {
+      detail: "same scoped warning count used by the shell fleet status badge",
+      label: "Fleet warning state",
+      value: String(fleetWarningState),
+    },
+  ];
+
+  return (
+    <div className="observabilityWarningDefinitions" aria-label="Fleet metrics warning definitions">
+      {definitions.map((definition) => (
+        <div key={definition.label}>
+          <span>{definition.label}</span>
+          <strong>{definition.value}</strong>
+          <small>{definition.detail}</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function resourceChartData(series: DashboardResourceSeriesRecord[]): ResourceChartData {
   const times = sortedUniqueTimes(series.flatMap((entry) => entry.points.map((point) => point.bucket_start)));
+  const lines = series.map((entry, index) => ({
+    color: dashboardChartColors[index % dashboardChartColors.length],
+    label: entry.label,
+    values: times.map((time) => entry.points.find((point) => point.bucket_start === time)?.value ?? null),
+  }));
   return {
-    lines: series.map((entry, index) => ({
-      color: dashboardChartColors[index % dashboardChartColors.length],
-      label: entry.label,
-      values: times.map((time) => entry.points.find((point) => point.bucket_start === time)?.value ?? null),
-    })),
+    lines,
+    observedPoints: lines.reduce(
+      (total, line) =>
+        total + line.values.filter((value) => Number.isFinite(value)).length,
+      0,
+    ),
     times,
   };
 }
@@ -273,6 +377,104 @@ function resourceMetricTitle(metric: DashboardResourceMetric): string {
 
 function resourcePeakLabel(metric: DashboardResourceMetric): string {
   return metric === "disk_free" ? "Lowest" : "Peak";
+}
+
+function buildResourceEvidence(
+  overview: DashboardOverviewRecord | null,
+  window: DashboardWindow,
+  chart: ResourceChartData,
+  sampledClients: number,
+): ResourceEvidence {
+  const firstSample = chart.times[0] ?? null;
+  const lastSample = chart.times[chart.times.length - 1] ?? null;
+  const selectedStartMs = overview ? Date.parse(overview.time_range.start_at) : NaN;
+  const selectedEndMs = overview ? Date.parse(overview.time_range.end_at) : NaN;
+  const selectedDurationMs =
+    Number.isFinite(selectedStartMs) && Number.isFinite(selectedEndMs)
+      ? Math.max(0, selectedEndMs - selectedStartMs)
+      : 0;
+  const firstSampleMs = firstSample ? Date.parse(firstSample) : NaN;
+  const lastSampleMs = lastSample ? Date.parse(lastSample) : NaN;
+  const sampleDurationMs =
+    Number.isFinite(firstSampleMs) && Number.isFinite(lastSampleMs)
+      ? Math.max(0, lastSampleMs - firstSampleMs)
+      : 0;
+  const dataAvailableValue = !lastSample
+    ? "none"
+    : chart.times.length === 1
+      ? "single sample"
+      : formatDuration(sampleDurationMs);
+  const pointsPerVps =
+    sampledClients > 0 ? Math.round(chart.observedPoints / sampledClients) : chart.times.length;
+  const isSparse =
+    chart.observedPoints > 0 &&
+    (pointsPerVps <= 3 ||
+      (selectedDurationMs > 0 &&
+        sampleDurationMs > 0 &&
+        sampleDurationMs / selectedDurationMs < 0.25));
+
+  return {
+    dataAvailableValue,
+    isSparse,
+    lastSampleValue: lastSample ? formatCompactTime(lastSample) : "No samples",
+    sampleSpanLabel:
+      firstSample && lastSample
+        ? `Samples ${formatEvidenceTime(firstSample)} to ${formatEvidenceTime(lastSample)}`
+        : "No retained samples",
+    selectedRangeLabel: overview
+      ? `${formatEvidenceTime(overview.time_range.start_at)} to ${formatEvidenceTime(overview.time_range.end_at)}`
+      : "No selected range evidence",
+    sparseNotice: isSparse
+      ? `Sparse data: ${pointsPerVps} sample${pointsPerVps === 1 ? "" : "s"} per VPS across the selected ${windowLabel(window)}. Treat this as point evidence, not a continuous trend.`
+      : null,
+  };
+}
+
+function uniqueAffectedVpsCount(overview: DashboardOverviewRecord | null): number {
+  if (!overview) {
+    return 0;
+  }
+  const ids = new Set<string>();
+  for (const alert of overview.operations.recent_alerts) {
+    if (alert.client_id) {
+      ids.add(alert.client_id);
+    }
+  }
+  for (const agent of overview.operations.degraded_agents) {
+    ids.add(agent.client_id);
+  }
+  return ids.size;
+}
+
+function formatEvidenceTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "short",
+  }).format(date);
+}
+
+function formatDuration(valueMs: number): string {
+  if (valueMs <= 0) {
+    return "single point";
+  }
+  const totalMinutes = Math.max(1, Math.round(valueMs / 60_000));
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours < 24) {
+    return minutes ? `${hours}h ${minutes}m` : `${hours}h`;
+  }
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return remainingHours ? `${days}d ${remainingHours}h` : `${days}d`;
 }
 
 function formatBitsPerSecond(value: number): string {

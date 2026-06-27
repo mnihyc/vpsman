@@ -1,7 +1,7 @@
 use uuid::Uuid;
 use vpsman_common::{
-    observed_ospf_cost, plan_tunnel, BandwidthTier, CommandOutput, OspfCostPolicy, OutputStream,
-    TunnelKind, TunnelPlanInput,
+    observed_ospf_cost, plan_tunnel, CommandOutput, OspfCostPolicy, OutputStream, TunnelKind,
+    TunnelPlanInput,
 };
 
 use crate::{
@@ -49,7 +49,7 @@ async fn builds_reviewed_ospf_update_plan_from_observed_recommendation() {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 18.0,
         packet_loss_ratio: 0.0,
         preference: 0.5,
@@ -112,17 +112,14 @@ async fn builds_reviewed_ospf_update_plan_from_observed_recommendation() {
         .iter()
         .find(|item| item.plan_name == "edge-a-edge-b")
         .unwrap();
-    let (expected_cost, _) = observed_ospf_cost(
-        OspfCostPolicy::default(),
-        BandwidthTier::M100,
-        80.0,
-        0.05,
-        0.5,
-        Some(40.0),
-    );
+    let (expected_cost, _) =
+        observed_ospf_cost(OspfCostPolicy::default(), 100, 80.0, 0.05, 0.5, Some(40.0));
 
     assert_eq!(update_plan.status, "review_degraded");
     assert_eq!(update_plan.mutation_mode, "reviewed_plan_only");
+    assert!(update_plan.recommendation_id.starts_with("ospf-"));
+    assert!(update_plan.evidence_summary.contains("80.0 ms avg"));
+    assert!(update_plan.evidence_summary.contains("40.0 Mbps avg"));
     assert_eq!(
         update_plan.current_ospf_cost,
         plan.recommended_ospf_cost as i32

@@ -13,6 +13,7 @@ import {
   Server,
   TerminalSquare,
 } from "lucide-react";
+import { agentDisplayState } from "../agentDisplayState";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import type {
   AgentView,
@@ -24,6 +25,7 @@ import type {
   JobHistoryRecord,
   NetworkObservationRecord,
   NetworkObservationTrendRecord,
+  RuntimeConfigApplyStateRecord,
   SourceStatusRecord,
   SourceTemplateAssignmentRecord,
   TelemetryNetworkRateRecord,
@@ -31,11 +33,12 @@ import type {
   TelemetryTunnelRecord,
   VpsRuleValueRecord,
 } from "../types";
-import { displayNameOrUnnamed, formatTime, shortId } from "../utils";
 import {
-  VpsMonitorCard,
-  type VpsMonitorCardSignal,
-} from "./FleetMonitorPanel";
+  displayNameOrUnnamed,
+  formatCompactTime,
+  formatFullTime,
+  shortId,
+} from "../utils";
 
 type VpsDetailTab =
   | "Summary"
@@ -72,6 +75,7 @@ type VpsDetailPanelProps = {
   onOpenNetworkEvidence: (agent: AgentView) => void;
   onOpenProcesses: (agent: AgentView) => void;
   onOpenTerminal: (agent: AgentView) => void;
+  runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   sourceStatus: SourceStatusRecord[];
   sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
   summary: FleetSummary;
@@ -117,9 +121,9 @@ export function VpsDetailPanel({
   onOpenNetworkEvidence,
   onOpenProcesses,
   onOpenTerminal,
+  runtimeConfigApplyStates,
   sourceStatus,
   sourceTemplateAssignments,
-  summary,
   telemetryNetworkRates,
   telemetryRollups,
   telemetryTunnels,
@@ -139,6 +143,7 @@ export function VpsDetailPanel({
             jobs,
             networkObservations,
             networkTrends,
+            runtimeConfigApplyStates,
             sourceStatus,
             sourceTemplateAssignments,
             telemetryNetworkRates,
@@ -157,6 +162,7 @@ export function VpsDetailPanel({
       jobs,
       networkObservations,
       networkTrends,
+      runtimeConfigApplyStates,
       sourceStatus,
       sourceTemplateAssignments,
       telemetryNetworkRates,
@@ -199,13 +205,11 @@ export function VpsDetailPanel({
   }
 
   const activeAlertCount = related.alerts.filter((alert) => alert.operator_state !== "cleared").length;
-  const latestJob = related.relatedJobs[0] ?? jobs[0] ?? null;
-  const signal = buildDetailCardSignal({
-    activeAlertCount,
-    backups: related.backups,
-    fileTransfers: related.fileTransfers,
-    relatedJobs: related.relatedJobs,
-  });
+  const latestJob = related.relatedJobs[0] ?? null;
+  const displayState = agentDisplayState(agent);
+  const activeJobCount = related.relatedJobs.filter((job) =>
+    isActiveJobStatus(job.status),
+  ).length;
 
   return (
     <section className="workspace singleColumn vpsDetailWorkspace" aria-label="Canonical VPS detail">
@@ -244,40 +248,90 @@ export function VpsDetailPanel({
           </div>
         ) : null}
 
-        <div className="vpsDetailTopGrid">
-          <div className="vpsDetailMonitorSlot" aria-label="Selected VPS health card">
-            <VpsMonitorCard
-              agent={agent}
-              density="comfortable"
-              onOpenBackup={onOpenBackup}
-              onOpenFiles={onOpenFiles}
-              onOpenNetwork={onOpenNetwork}
-              onOpenProcesses={onOpenProcesses}
-              onOpenTerminal={onOpenTerminal}
-              onOpenVpsDetail={() => undefined}
-              rates={related.networkRates}
-              rollup={related.rollup}
-              signals={signal}
-              tunnels={related.tunnels}
-            />
+        <div
+          className="vpsDetailResourceSummary"
+          aria-label="VPS resource summary"
+        >
+          <div className="vpsDetailIdentity" aria-label="Selected VPS identity">
+            <span className={`status ${statusToneClass(displayState.tone)}`}>
+              {displayState.label}
+            </span>
+            <h3>{displayNameOrUnnamed(agent.display_name)}</h3>
+            <span className="monoValue">{agent.id}</span>
+            <small>{displayState.detail}</small>
+            <div className="vpsDetailTags" aria-label="VPS tags">
+              {agent.tags.length ? (
+                agent.tags.map((tag) => <span key={tag}>{tag}</span>)
+              ) : (
+                <span>Untagged</span>
+              )}
+            </div>
           </div>
-          <div className="vpsDetailFacts" aria-label="VPS identity and status facts">
-            <VpsFact icon={<Server size={16} />} label="Client ID" value={agent.id} mono />
-            <VpsFact icon={<Gauge size={16} />} label="Status" value={agent.status} />
-            <VpsFact icon={<Clock3 size={16} />} label="Last seen" value={agent.last_seen_at ? formatTime(agent.last_seen_at) : "Not reported"} />
-            <VpsFact icon={<Boxes size={16} />} label="Tags" value={agent.tags.length ? agent.tags.join(", ") : "Untagged"} />
-            <VpsFact icon={<Network size={16} />} label="Last IP" value={agent.last_ip ?? "Not reported"} mono />
-            <VpsFact icon={<Gauge size={16} />} label="Privilege" value={privilegeLabel(agent)} />
+          <div className="vpsResourceFacts" aria-label="VPS resource facts">
+            <VpsResourceFact
+              icon={<Gauge size={16} />}
+              label="State"
+              value={displayState.label}
+              detail={agent.status ? readableDetailToken(agent.status) : "Inventory state"}
+              tone={displayState.tone === "ok" ? "ready" : "warning"}
+            />
+            <VpsResourceFact
+              icon={<Clock3 size={16} />}
+              label="Last contact"
+              value={
+                agent.last_seen_at ? (
+                  <DetailTime value={agent.last_seen_at} />
+                ) : (
+                  "Not reported"
+                )
+              }
+              detail={agent.last_seen_at ? "Gateway heartbeat" : "No gateway timestamp"}
+              tone={agent.last_seen_at ? "ready" : "warning"}
+            />
+            <VpsResourceFact
+              icon={<Network size={16} />}
+              label="Last IP"
+              value={agent.last_ip ?? agent.registration_ip ?? "Not reported"}
+              detail={agent.last_ip ? "Latest source IP" : agent.registration_ip ? "Registration IP" : "No IP evidence"}
+              mono
+            />
+            <VpsResourceFact
+              icon={<Server size={16} />}
+              label="Agent version"
+              value={agentVersionLabel(agent)}
+              detail={agent.arch ? `Architecture ${agent.arch}` : "Version not exposed by inventory"}
+            />
+            <VpsResourceFact
+              icon={<AlertTriangle size={16} />}
+              label="Alerts"
+              value={`${activeAlertCount} active`}
+              detail={`${related.alerts.length} loaded records`}
+              tone={activeAlertCount > 0 ? "warning" : "ready"}
+            />
+            <VpsResourceFact
+              icon={<History size={16} />}
+              label="Active jobs"
+              value={`${activeJobCount}`}
+              detail={`${related.relatedJobs.length} related job records`}
+              tone={activeJobCount > 0 ? "warning" : "neutral"}
+            />
           </div>
         </div>
 
-        <div className="vpsDetailPosture" aria-label="VPS detail posture">
-          <VpsPostureMetric label="Fleet status" value={`${summary.online}/${summary.total}`} detail="online / visible VPSs" />
-          <VpsPostureMetric label="Alerts" value={activeAlertCount} detail="active alert records" tone={activeAlertCount > 0 ? "warning" : "ready"} />
-          <VpsPostureMetric label="Backups" value={related.backups.length} detail="current request records" tone={backupTone(related.backups)} />
-          <VpsPostureMetric label="Network" value={related.networkObservations.length + related.tunnels.length} detail="observations plus tunnels" />
-          <VpsPostureMetric label="Config" value={related.sourceAssignments.length + related.vpsRules.length} detail="source assignments and VPS rules" />
-        </div>
+        <label className="detailTabSelect">
+          <span>Detail section</span>
+          <select
+            aria-label="VPS detail section"
+            onChange={(event) => setActiveTab(event.target.value as VpsDetailTab)}
+            value={activeTab}
+          >
+            {detailTabs.map((tab) => (
+              <option key={tab} value={tab}>
+                {tab}
+              </option>
+            ))}
+          </select>
+        </label>
 
         <div className="detailTabs" role="tablist" aria-label="VPS detail tabs">
           {detailTabs.map((tab) => (
@@ -406,10 +460,26 @@ function SummaryTab({
   return (
     <div className="vpsDetailGrid">
       <DetailBlock title="Health" icon={<Gauge size={18} />}>
-        <VpsFact label="CPU load" value={related.rollup ? related.rollup.cpu_load_1_avg.toFixed(2) : "No telemetry"} />
-        <VpsFact label="Memory used" value={related.rollup ? percent(related.rollup.memory_total_bytes_max - related.rollup.memory_available_bytes_avg, related.rollup.memory_total_bytes_max) : "No telemetry"} />
-        <VpsFact label="Disk used" value={related.rollup ? percent(related.rollup.disk_total_bytes_max - related.rollup.disk_available_bytes_avg, related.rollup.disk_total_bytes_max) : "No telemetry"} />
-        <VpsFact label="Telemetry sample" value={related.rollup ? formatTime(related.rollup.latest_observed_at) : "No sample"} />
+        <VpsFact label="CPU load" value={related.rollup ? related.rollup.cpu_load_1_avg.toFixed(2) : "No resource rollup"} />
+        <VpsFact label="Memory used" value={related.rollup ? percent(related.rollup.memory_total_bytes_max - related.rollup.memory_available_bytes_avg, related.rollup.memory_total_bytes_max) : "No resource rollup"} />
+        <VpsFact label="Disk used" value={related.rollup ? percent(related.rollup.disk_total_bytes_max - related.rollup.disk_available_bytes_avg, related.rollup.disk_total_bytes_max) : "No resource rollup"} />
+        <VpsFact
+          label="Resource sample"
+          value={
+            related.rollup ? (
+              <DetailTime value={related.rollup.latest_observed_at} />
+            ) : (
+              "No rollup sample"
+            )
+          }
+        />
+        {!related.rollup && (
+          <DetailState
+            loading={loading}
+            title="Resource rollup unavailable"
+            detail="Network, job, backup, and alert evidence may still exist because those workflows retain their own records."
+          />
+        )}
       </DetailBlock>
       <DetailBlock title="Warnings" icon={<AlertTriangle size={18} />}>
         {related.alerts.length === 0 ? (
@@ -418,7 +488,10 @@ function SummaryTab({
           related.alerts.slice(0, 3).map((alert) => (
             <button className="vpsDetailRecord" key={alert.id} onClick={onOpenFleetAlerts} type="button">
               <strong>{alert.title}</strong>
-              <span>{alert.severity} · {alert.operator_state} · {formatTime(alert.observed_at)}</span>
+              <span>
+                {alertSeverityLabel(alert.severity)} · {operatorStateLabel(alert.operator_state)} ·{" "}
+                <DetailTime value={alert.observed_at} />
+              </span>
             </button>
           ))
         )}
@@ -426,8 +499,11 @@ function SummaryTab({
       <DetailBlock title="Latest work" icon={<History size={18} />}>
         {latestJob ? (
           <button className="vpsDetailRecord" onClick={() => onOpenJob(latestJob.id)} type="button">
-            <strong>{latestJob.command_type}</strong>
-            <span>{latestJob.status} · {latestJob.target_count} targets · {formatTime(latestJob.created_at)}</span>
+            <strong>{displayCommandType(latestJob.command_type)}</strong>
+            <span>
+              {jobStatusLabel(latestJob.status)} · {latestJob.target_count} targets ·{" "}
+              <DetailTime value={latestJob.created_at} />
+            </span>
           </button>
         ) : (
           <DetailState loading={loading} title="No related job evidence" detail={`No retained job target evidence is loaded for ${displayNameOrUnnamed(agent.display_name)}.`} />
@@ -435,7 +511,10 @@ function SummaryTab({
         {related.backups[0] ? (
           <span className="vpsDetailRecord static">
             <strong>Backup {shortId(related.backups[0].id)}</strong>
-            <span>{related.backups[0].status} · {formatTime(related.backups[0].created_at)}</span>
+            <span>
+              {backupStatusLabel(related.backups[0].status)} ·{" "}
+              <DetailTime value={related.backups[0].created_at} />
+            </span>
           </span>
         ) : null}
       </DetailBlock>
@@ -485,37 +564,112 @@ function ConfigTab({
   related: VpsDetailContext;
   onOpenConfig: () => void;
 }) {
+  const configPosture = buildConfigPosture(related);
+  const sourceIssueRows = sourceRowsNeedingAttention(related.sourceStatus);
+  const applyState = related.runtimeApplyState;
+
   return (
-    <div className="vpsDetailGrid">
-      <DetailBlock title="Config ownership" icon={<FileCog size={18} />}>
+    <div className="vpsConfigDetailTab">
+      <div className="vpsConfigPosture" aria-label="VPS config posture">
+        {configPosture.map((item) => (
+          <span className={`vpsConfigPostureItem ${item.tone}`} key={item.label}>
+            <small>{item.label}</small>
+            <strong>{item.value}</strong>
+            <em>{item.detail}</em>
+          </span>
+        ))}
+      </div>
+      <div className="vpsConfigActions" aria-label="VPS config actions">
         <button className="primaryAction compactAction" onClick={onOpenConfig} type="button">
-          <span>Open per-VPS config</span>
+          <FileCog size={14} />
+          <span>Open config</span>
         </button>
-        <VpsFact label="Runtime tunnels" value={agent.capabilities.can_manage_runtime_tunnels ? "Supported" : "Not reported"} />
-        <VpsFact label="Source assignments" value={String(related.sourceAssignments.length)} />
-        <VpsFact label="Readiness records" value={String(related.sourceStatus.length)} />
-        <VpsFact label="VPS rules" value={String(related.vpsRules.length)} />
-      </DetailBlock>
-      <DetailBlock title="Source templates" icon={<Boxes size={18} />}>
-        {related.sourceAssignments.length === 0 && related.sourceStatus.length === 0 ? (
-          <DetailState loading={loading} title="No source-template evidence" detail="No assignment or readiness records are loaded for this VPS." />
-        ) : (
-          <>
-            {related.sourceAssignments.slice(0, 3).map((record) => (
-              <span className="vpsDetailRecord static" key={`assignment:${record.domain}:${record.template_id}`}>
-                <strong>{record.template_name || record.template_id}</strong>
-                <span>{record.domain} · assigned · {record.template_scope}</span>
+        <button
+          className="secondaryAction compactAction"
+          onClick={onOpenConfig}
+          title="Open Config / Per-VPS with this VPS selected to compare the current redacted config before applying changes."
+          type="button"
+        >
+          <Boxes size={14} />
+          <span>Compare</span>
+        </button>
+        <button
+          className="secondaryAction compactAction"
+          onClick={onOpenConfig}
+          title="Open Config / Per-VPS to review and apply a runtime config patch with privilege confirmation."
+          type="button"
+        >
+          <Activity size={14} />
+          <span>Apply</span>
+        </button>
+      </div>
+      <div className="vpsDetailGrid">
+        <DetailBlock title="Source readiness" icon={<Boxes size={18} />}>
+          {related.sourceAssignments.length === 0 && related.sourceStatus.length === 0 ? (
+            <DetailState loading={loading} title="No source-template evidence" detail="No assignment or readiness records are loaded for this VPS." />
+          ) : (
+            <>
+              {sourceIssueRows.length > 0 ? (
+                sourceIssueRows.slice(0, 3).map((record) => (
+                  <span className="vpsDetailRecord static warning" key={`issue:${record.domain}:${record.module}:${record.template_id}`}>
+                    <strong>{record.module || readableDetailToken(record.domain)}</strong>
+                    <span>{sourceReadinessStatusLabel(record.status)} · {sourceReadinessReasonLabel(record)}</span>
+                  </span>
+                ))
+              ) : (
+                <DetailState loading={loading} title="Sources ready" detail="Loaded source assignments have no readiness blockers." />
+              )}
+              {related.sourceStatus.slice(0, 4).map((record) => (
+                <span className="vpsDetailRecord static" key={`status:${record.domain}:${record.module}:${record.template_id}`}>
+                  <strong>{record.domain} · {record.module}</strong>
+                  <span>{sourceReadinessStatusLabel(record.status)} · {sourceReadinessReasonLabel(record)}</span>
+                </span>
+              ))}
+            </>
+          )}
+        </DetailBlock>
+        <DetailBlock title="Runtime sync" icon={<FileCog size={18} />}>
+          <VpsFact
+            label="Runtime tunnels"
+            value={agent.capabilities.can_manage_runtime_tunnels ? "Supported" : "Not reported"}
+          />
+          <VpsFact label="Source assignments" value={String(related.sourceAssignments.length)} />
+          <VpsFact label="Readiness records" value={String(related.sourceStatus.length)} />
+          <VpsFact label="VPS rules" value={String(related.vpsRules.length)} />
+          <VpsFact label="Last apply" value={runtimeApplyTimeLabel(applyState)} />
+          <VpsFact label="Apply status" value={runtimeApplyStatusLabel(applyState)} />
+        </DetailBlock>
+        <DetailBlock title="Rules and raw details" icon={<FileCog size={18} />}>
+          {related.vpsRules.length === 0 ? (
+            <DetailState loading={loading} title="No VPS-specific rules" detail="No runtime config rules are scoped directly to this VPS." />
+          ) : (
+            related.vpsRules.slice(0, 4).map((rule) => (
+              <span className={`vpsDetailRecord static ${rule.validation_errors.length ? "warning" : ""}`} key={rule.key}>
+                <strong>{rule.key}</strong>
+                <span>
+                  {rule.parsed_display || rule.value_raw} · {rule.validation_errors.length ? rule.validation_errors.join("; ") : "valid"}
+                </span>
               </span>
-            ))}
-            {related.sourceStatus.slice(0, 3).map((record) => (
-              <span className="vpsDetailRecord static" key={`status:${record.domain}:${record.module}:${record.template_id}`}>
-                <strong>{record.domain} · {record.module}</strong>
-                <span>{record.status} · {record.status_reason}</span>
-              </span>
-            ))}
-          </>
-        )}
-      </DetailBlock>
+            ))
+          )}
+          <details className="vpsDetailDisclosure">
+            <summary>Raw source state details</summary>
+            <div>
+              {related.sourceStatus.length === 0 ? (
+                <span>No raw source readiness records loaded.</span>
+              ) : (
+                related.sourceStatus.map((record) => (
+                  <span key={`raw:${record.domain}:${record.module}:${record.template_id}`}>
+                    <strong>{record.domain}</strong>
+                    <code>{record.status}</code>
+                    <small>{record.status_reason}</small>
+                  </span>
+                ))
+              )}
+            </div>
+          </details>
+        </DetailBlock>
+      </div>
     </div>
   );
 }
@@ -542,8 +696,11 @@ function BackupsTab({
         ) : (
           related.backups.slice(0, 5).map((backup) => (
             <span className="vpsDetailRecord static" key={backup.id}>
-              <strong>{shortId(backup.id)} · {backup.status}</strong>
-              <span>{backup.paths.join(", ") || "No paths"} · {formatTime(backup.created_at)}</span>
+              <strong>{shortId(backup.id)} · {backupStatusLabel(backup.status)}</strong>
+              <span>
+                {backup.paths.join(", ") || "No paths"} ·{" "}
+                <DetailTime value={backup.created_at} />
+              </span>
               {backup.source_job_id ? (
                 <button className="secondaryAction compactAction" onClick={() => onOpenJob(backup.source_job_id as string)} type="button">
                   <span>Open source job</span>
@@ -559,7 +716,7 @@ function BackupsTab({
         ) : (
           related.backupArtifacts.slice(0, 5).map((artifact) => (
             <span className="vpsDetailRecord static" key={artifact.id}>
-              <strong>{shortId(artifact.id)} · {artifact.status}</strong>
+              <strong>{shortId(artifact.id)} · {backupStatusLabel(artifact.status)}</strong>
               <span>{formatBytes(artifact.size_bytes)} · SHA-256 {artifact.sha256_hex.slice(0, 12)}</span>
             </span>
           ))
@@ -599,8 +756,11 @@ function NetworkTab({
         ) : (
           related.networkObservations.slice(0, 6).map((observation) => (
             <span className="vpsDetailRecord static" key={observation.id}>
-              <strong>{observation.kind} · {observation.healthy === false ? "degraded" : "observed"}</strong>
-              <span>{observation.interface_name ?? "interface n/a"} · {formatTime(observation.observed_at)}</span>
+              <strong>{networkObservationLabel(observation.kind)} · {observation.healthy === false ? "Degraded" : "Observed"}</strong>
+              <span>
+                {observation.interface_name ?? "interface n/a"} ·{" "}
+                <DetailTime value={observation.observed_at} />
+              </span>
             </span>
           ))
         )}
@@ -689,7 +849,7 @@ function VpsFact({
   icon?: JSX.Element;
   label: string;
   mono?: boolean;
-  value: string;
+  value: ReactNode;
 }) {
   return (
     <span className="vpsFactRow">
@@ -700,23 +860,36 @@ function VpsFact({
   );
 }
 
-function VpsPostureMetric({
+function VpsResourceFact({
   detail,
+  icon,
   label,
+  mono = false,
   tone = "neutral",
   value,
 }: {
   detail: string;
+  icon: JSX.Element;
   label: string;
+  mono?: boolean;
   tone?: "neutral" | "ready" | "warning";
-  value: number | string;
+  value: ReactNode;
 }) {
   return (
-    <span className={`vpsPostureMetric ${tone}`}>
+    <span className={`vpsResourceFact ${tone}`}>
+      {icon}
       <span>{label}</span>
-      <strong>{value}</strong>
+      <strong className={mono ? "monoValue" : undefined}>{value}</strong>
       <small>{detail}</small>
     </span>
+  );
+}
+
+function DetailTime({ value }: { value: string }) {
+  return (
+    <time dateTime={value} title={formatFullTime(value)}>
+      {formatCompactTime(value)}
+    </time>
   );
 }
 
@@ -749,6 +922,7 @@ function buildVpsDetailContext({
   jobs,
   networkObservations,
   networkTrends,
+  runtimeConfigApplyStates,
   sourceStatus,
   sourceTemplateAssignments,
   telemetryNetworkRates,
@@ -765,6 +939,7 @@ function buildVpsDetailContext({
   jobs: JobHistoryRecord[];
   networkObservations: NetworkObservationRecord[];
   networkTrends: NetworkObservationTrendRecord[];
+  runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   sourceStatus: SourceStatusRecord[];
   sourceTemplateAssignments: SourceTemplateAssignmentRecord[];
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
@@ -815,6 +990,10 @@ function buildVpsDetailContext({
   const relatedArtifacts = backupArtifacts
     .filter((artifact) => artifact.client_id === clientId)
     .sort(newestFirst((artifact) => artifact.created_at));
+  const runtimeApplyState =
+    runtimeConfigApplyStates
+      .filter((state) => state.client_id === clientId)
+      .sort(newestFirst((state) => runtimeApplyStateTime(state)))[0] ?? null;
   const activity: Array<{
     detail: string;
     id: string;
@@ -824,14 +1003,14 @@ function buildVpsDetailContext({
     when: string;
   }> = [
     ...relatedAlerts.map((alert) => ({
-      detail: `${alert.severity} · ${alert.operator_state} · ${formatTime(alert.observed_at)}`,
+      detail: `${alertSeverityLabel(alert.severity)} · ${operatorStateLabel(alert.operator_state)} · ${formatCompactTime(alert.observed_at)}`,
       id: alert.id,
       kind: "alert" as const,
       title: alert.title,
       when: alert.observed_at,
     })),
     ...relatedBackups.map((backup) => ({
-      detail: `${backup.status} · ${backup.paths.join(", ") || "no paths"} · ${formatTime(backup.created_at)}`,
+      detail: `${backupStatusLabel(backup.status)} · ${backup.paths.join(", ") || "no paths"} · ${formatCompactTime(backup.created_at)}`,
       id: backup.id,
       jobId: backup.source_job_id ?? undefined,
       kind: "backup" as const,
@@ -839,7 +1018,7 @@ function buildVpsDetailContext({
       when: backup.created_at,
     })),
     ...relatedTransfers.map((transfer) => ({
-      detail: `${transfer.direction} · ${transfer.status} · ${transfer.path} · ${formatTime(transfer.observed_at)}`,
+      detail: `${transferDirectionLabel(transfer.direction)} · ${readableDetailToken(transfer.status)} · ${transfer.path} · ${formatCompactTime(transfer.observed_at)}`,
       id: transfer.session_id,
       jobId: transfer.last_job_id,
       kind: "transfer" as const,
@@ -847,7 +1026,7 @@ function buildVpsDetailContext({
       when: transfer.observed_at,
     })),
     ...relatedNetworkObservations.map((observation) => ({
-      detail: `${observation.kind} · ${observation.interface_name ?? "interface n/a"} · ${formatTime(observation.observed_at)}`,
+      detail: `${networkObservationLabel(observation.kind)} · ${observation.interface_name ?? "interface n/a"} · ${formatCompactTime(observation.observed_at)}`,
       id: observation.id,
       jobId: observation.job_id,
       kind: "network" as const,
@@ -855,7 +1034,7 @@ function buildVpsDetailContext({
       when: observation.observed_at,
     })),
     ...relatedJobs.map((job) => ({
-      detail: `${job.command_type} · ${job.status} · ${job.target_count} targets · ${formatTime(job.created_at)}`,
+      detail: `${displayCommandType(job.command_type)} · ${jobStatusLabel(job.status)} · ${job.target_count} targets · ${formatCompactTime(job.created_at)}`,
       id: job.id,
       jobId: job.id,
       kind: "job" as const,
@@ -863,7 +1042,7 @@ function buildVpsDetailContext({
       when: job.created_at,
     })),
     ...relatedAudits.map((audit) => ({
-      detail: `${audit.action} · ${audit.target} · ${formatTime(audit.created_at)}`,
+      detail: `${readableDetailToken(audit.action)} · ${audit.target} · ${formatCompactTime(audit.created_at)}`,
       id: audit.id,
       kind: "audit" as const,
       title: `Audit ${shortId(audit.id)}`,
@@ -883,6 +1062,7 @@ function buildVpsDetailContext({
     networkTrends: relatedNetworkTrends,
     relatedJobs,
     rollup,
+    runtimeApplyState,
     sourceAssignments,
     sourceStatus: sourceStatusRows,
     tunnels,
@@ -895,46 +1075,330 @@ function newestFirst<T>(dateFor: (record: T) => string) {
     Date.parse(dateFor(right)) - Date.parse(dateFor(left));
 }
 
-function buildDetailCardSignal({
-  activeAlertCount,
-  backups,
-  fileTransfers,
-  relatedJobs,
-}: {
-  activeAlertCount: number;
-  backups: BackupRequestRecord[];
-  fileTransfers: FileTransferSessionRecord[];
-  relatedJobs: JobHistoryRecord[];
-}): VpsMonitorCardSignal {
-  const latestBackup = backups[0] ?? null;
-  const latestTransfer = fileTransfers[0] ?? null;
-  const failedJobs = relatedJobs.filter((job) => String(job.status).includes("fail")).length;
-  const runningJobs = relatedJobs.filter((job) => ["queued", "running", "dispatching"].includes(String(job.status))).length;
-
-  return {
-    alertText: activeAlertCount > 0 ? `${activeAlertCount} active` : "none",
-    alertTone: activeAlertCount > 0 ? "warning" : "ok",
-    backupText: latestBackup ? String(latestBackup.status) : "no record",
-    backupTone: latestBackup && String(latestBackup.status).includes("fail") ? "critical" : latestBackup ? "ok" : "neutral",
-    jobText: runningJobs > 0 ? `${runningJobs} running` : failedJobs > 0 ? `${failedJobs} failed` : relatedJobs.length > 0 ? `${relatedJobs.length} recent` : "none",
-    jobTone: failedJobs > 0 ? "critical" : runningJobs > 0 ? "info" : relatedJobs.length > 0 ? "ok" : "neutral",
-    statusText: activeAlertCount > 0 ? "Review active alerts" : "No active alert records",
-    transferText: latestTransfer ? String(latestTransfer.status) : "none",
-    transferTone: latestTransfer && String(latestTransfer.status).includes("fail") ? "critical" : latestTransfer ? "info" : "neutral",
-  };
-}
-
 function privilegeLabel(agent: AgentView) {
   if (agent.capabilities.privilege_mode === "root") return "root capable";
   if (agent.capabilities.privilege_mode === "unprivileged") return "unprivileged";
   return agent.capabilities.can_attempt_privileged_ops ? "privilege available" : "unknown";
 }
 
-function backupTone(backups: BackupRequestRecord[]): "neutral" | "ready" | "warning" {
-  if (backups.length === 0) return "warning";
-  return backups.some((backup) => String(backup.status).includes("fail"))
-    ? "warning"
-    : "ready";
+type ConfigPostureItem = {
+  detail: string;
+  label: string;
+  tone: "critical" | "warning" | "ok" | "info" | "neutral";
+  value: ReactNode;
+};
+
+function buildConfigPosture(related: VpsDetailContext): ConfigPostureItem[] {
+  const sourceIssues = sourceRowsNeedingAttention(related.sourceStatus);
+  const ruleErrors = related.vpsRules.flatMap((rule) => rule.validation_errors);
+  const applyState = related.runtimeApplyState;
+  const lastError =
+    applyState?.pending_error ||
+    ruleErrors[0] ||
+    sourceIssues[0]?.status_reason ||
+    null;
+  return [
+    {
+      detail:
+        related.sourceAssignments.length > 0
+          ? sourceDomainSummary(related.sourceAssignments.map((assignment) => assignment.domain))
+          : related.sourceStatus.length > 0
+            ? sourceDomainSummary(related.sourceStatus.map((status) => status.domain))
+            : "No assignment evidence loaded",
+      label: "Desired source",
+      tone: related.sourceAssignments.length > 0 || related.sourceStatus.length > 0 ? "info" : "neutral",
+      value:
+        related.sourceAssignments.length > 0
+          ? `${related.sourceAssignments.length} selected`
+          : related.sourceStatus.length > 0
+            ? `${related.sourceStatus.length} reported`
+            : "Not selected",
+    },
+    {
+      detail:
+        sourceIssues[0] !== undefined
+          ? sourceReadinessReasonLabel(sourceIssues[0])
+          : related.sourceStatus.length > 0
+            ? "Loaded source readiness has no blockers"
+            : "No readiness records loaded",
+      label: "Render status",
+      tone: sourceIssues.length > 0 ? "warning" : related.sourceStatus.length > 0 ? "ok" : "neutral",
+      value: sourceIssues.length > 0 ? "Needs configuration" : related.sourceStatus.length > 0 ? "Ready" : "Unknown",
+    },
+    {
+      detail: configDriftDetail(applyState, sourceIssues.length, ruleErrors.length),
+      label: "Drift state",
+      tone: configDriftTone(applyState, sourceIssues.length, ruleErrors.length),
+      value: configDriftLabel(applyState, sourceIssues.length, ruleErrors.length),
+    },
+    {
+      detail: runtimeApplyDetail(applyState),
+      label: "Last apply",
+      tone: applyState?.pending_status === "failed" ? "critical" : applyState?.applied_at ? "ok" : "neutral",
+      value: runtimeApplyTimeLabel(applyState),
+    },
+    {
+      detail: lastError ?? "No loaded config error",
+      label: "Last error",
+      tone: lastError ? "warning" : "ok",
+      value: lastError ? "Needs review" : "None",
+    },
+  ];
+}
+
+function sourceRowsNeedingAttention(rows: SourceStatusRecord[]): SourceStatusRecord[] {
+  return rows.filter((row) => !sourceReadinessIsOk(row.status));
+}
+
+function sourceReadinessIsOk(status: string): boolean {
+  return ["ok", "ready", "ready_on_demand", "selected", "selected_workflow", "metadata_only"].includes(status);
+}
+
+function sourceReadinessStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    agent_offline: "Agent offline",
+    degraded: "Degraded",
+    metadata_only: "Metadata only",
+    needs_promotion: "Needs promotion",
+    ok: "Ready",
+    ready: "Ready",
+    ready_on_demand: "Ready on demand",
+    selected: "Selected",
+    selected_no_artifacts: "Selected; no artifacts",
+    selected_no_limits: "Selected; no limits",
+    selected_no_samples: "Selected; no samples",
+    selected_no_store: "Selected; storage unavailable",
+    selected_workflow: "Selected workflow",
+    unknown_domain: "Unknown domain",
+  };
+  return labels[status] ?? readableDetailToken(status);
+}
+
+function sourceReadinessReasonLabel(record: SourceStatusRecord): string {
+  if (record.status === "selected_no_store") {
+    return "Backup object-store source selected; server storage is not configured.";
+  }
+  return sentenceCase(record.status_reason || sourceReadinessStatusLabel(record.status));
+}
+
+function sourceDomainSummary(domains: string[]): string {
+  const unique = Array.from(new Set(domains)).filter(Boolean);
+  if (unique.length === 0) {
+    return "No source domains loaded";
+  }
+  return unique.slice(0, 3).map(readableDetailToken).join(", ") + (unique.length > 3 ? ` +${unique.length - 3}` : "");
+}
+
+function configDriftLabel(
+  state: RuntimeConfigApplyStateRecord | null,
+  sourceIssueCount: number,
+  ruleErrorCount: number,
+): string {
+  if (state?.pending_status === "failed") return "Apply failed";
+  if (state?.pending_status === "queued") return runtimeApplyQueuedIsStale(state) ? "Stale apply" : "Pending apply";
+  if (ruleErrorCount > 0) return "Rule errors";
+  if (sourceIssueCount > 0) return "Source attention";
+  if (state?.applied_content_hash) return "No pending apply";
+  return "Not compared";
+}
+
+function configDriftDetail(
+  state: RuntimeConfigApplyStateRecord | null,
+  sourceIssueCount: number,
+  ruleErrorCount: number,
+): string {
+  if (state?.pending_status === "failed") return state.pending_error ?? "Runtime config apply failed";
+  if (state?.pending_status === "queued") return state.pending_reason ?? "Runtime config apply is queued";
+  if (ruleErrorCount > 0) return `${ruleErrorCount} VPS rule validation issue${ruleErrorCount === 1 ? "" : "s"}`;
+  if (sourceIssueCount > 0) return `${sourceIssueCount} source readiness issue${sourceIssueCount === 1 ? "" : "s"}`;
+  if (state?.applied_content_hash) return `Applied hash ${shortId(state.applied_content_hash)}`;
+  return "Open Config / Per-VPS to compare current redacted config";
+}
+
+function configDriftTone(
+  state: RuntimeConfigApplyStateRecord | null,
+  sourceIssueCount: number,
+  ruleErrorCount: number,
+): ConfigPostureItem["tone"] {
+  if (state?.pending_status === "failed") return "critical";
+  if (state?.pending_status === "queued") return runtimeApplyQueuedIsStale(state) ? "warning" : "info";
+  if (ruleErrorCount > 0 || sourceIssueCount > 0) return "warning";
+  if (state?.applied_content_hash) return "ok";
+  return "neutral";
+}
+
+function runtimeApplyTimeLabel(state: RuntimeConfigApplyStateRecord | null): ReactNode {
+  if (state?.applied_at) {
+    return <DetailTime value={state.applied_at} />;
+  }
+  if (state?.pending_updated_at) {
+    return <DetailTime value={state.pending_updated_at} />;
+  }
+  return "Not applied";
+}
+
+function runtimeApplyStatusLabel(state: RuntimeConfigApplyStateRecord | null): string {
+  if (!state) return "No apply-state evidence";
+  if (state.pending_status === "failed") return "Failed apply";
+  if (state.pending_status === "queued") return runtimeApplyQueuedIsStale(state) ? "Stale queued apply" : "Queued apply";
+  if (state.applied_content_hash) return "Current";
+  return "Unknown";
+}
+
+function runtimeApplyDetail(state: RuntimeConfigApplyStateRecord | null): string {
+  if (!state) return "No server-applied runtime sync recorded";
+  if (state.pending_status === "failed") return state.pending_error ?? "Runtime config apply failed";
+  if (state.pending_status === "queued") return state.pending_reason ?? "Runtime config apply queued";
+  if (state.applied_content_hash) {
+    const version = state.applied_version ? `v${state.applied_version}; ` : "";
+    const job = state.applied_job_id ? `; job ${shortId(state.applied_job_id)}` : "";
+    return `${version}hash ${shortId(state.applied_content_hash)}${job}`;
+  }
+  return "No server-applied runtime sync recorded";
+}
+
+function runtimeApplyStateTime(state: RuntimeConfigApplyStateRecord): string {
+  return state.pending_updated_at ?? state.applied_at ?? state.updated_at;
+}
+
+function runtimeApplyQueuedIsStale(state: RuntimeConfigApplyStateRecord): boolean {
+  const updatedAt = Date.parse(runtimeApplyStateTime(state));
+  return !Number.isFinite(updatedAt) || Date.now() - updatedAt > 24 * 60 * 60 * 1000;
+}
+
+function sentenceCase(value: string): string {
+  const normalized = value.trim();
+  if (!normalized) {
+    return "Not reported";
+  }
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function statusToneClass(tone: string): string {
+  return tone === "warning" ? "warn" : tone;
+}
+
+function agentVersionLabel(agent: AgentView): string {
+  if (typeof agent.internal_build_number === "number") {
+    return `Build ${agent.internal_build_number}`;
+  }
+  return "Not reported";
+}
+
+function isActiveJobStatus(status: string): boolean {
+  return ["queued", "running", "dispatching"].includes(status);
+}
+
+function displayCommandType(value: string): string {
+  switch (value) {
+    case "shell_argv":
+      return "Shell command";
+    case "scheduled_shell_argv":
+      return "Scheduled shell command";
+    case "shell_pty":
+      return "Terminal session";
+    case "terminal_input":
+      return "Terminal input";
+    case "file_read":
+      return "File read";
+    case "file_write":
+      return "File write";
+    case "backup":
+      return "Backup run";
+    case "network_probe":
+      return "Network probe";
+    case "network_speed_test":
+      return "Network speed test";
+    case "network_status":
+      return "Network status check";
+    default:
+      return readableDetailToken(value);
+  }
+}
+
+function jobStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    canceled: "Canceled",
+    completed: "Completed",
+    dispatching: "Dispatching",
+    failed: "Failed",
+    queued: "Queued",
+    running: "Running",
+    timed_out: "Timed out",
+  };
+  return labels[status] ?? readableDetailToken(status);
+}
+
+function backupStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    accepted: "Accepted",
+    active: "Available package",
+    artifact_metadata_recorded: "Artifact metadata recorded",
+    artifact_uploaded: "Artifact uploaded",
+    completed: "Completed",
+    creating: "Preparing package",
+    deleted: "Deleted",
+    delete_failed: "Delete failed",
+    failed: "Failed",
+    linked_metadata_only: "Linked metadata only",
+    planned_metadata_only: "Planned metadata only",
+    requested: "Requested",
+    restored: "Restored",
+    running: "Running",
+    tombstoned: "Metadata retained",
+  };
+  return labels[status] ?? readableDetailToken(status);
+}
+
+function alertSeverityLabel(severity: string): string {
+  const labels: Record<string, string> = {
+    critical: "Critical",
+    info: "Info",
+    warning: "Warning",
+  };
+  return labels[severity] ?? readableDetailToken(severity);
+}
+
+function operatorStateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    acknowledged: "Acknowledged",
+    cleared: "Cleared",
+    escalated: "Escalated",
+    muted: "Muted",
+    open: "Open",
+  };
+  return labels[state] ?? readableDetailToken(state);
+}
+
+function transferDirectionLabel(direction: string): string {
+  const labels: Record<string, string> = {
+    download: "Download",
+    upload: "Upload",
+  };
+  return labels[direction] ?? readableDetailToken(direction);
+}
+
+function networkObservationLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    latency_probe: "Latency probe",
+    network_probe: "Network probe",
+    network_speed_test: "Network speed test",
+    network_status: "Network status",
+    speed_test: "Speed test",
+  };
+  return labels[kind] ?? readableDetailToken(kind);
+}
+
+function readableDetailToken(value: string | null | undefined): string {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return "Not reported";
+  }
+  return normalized
+    .split(/[_:\-.]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function percent(used: number, total: number) {

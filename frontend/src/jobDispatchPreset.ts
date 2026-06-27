@@ -22,6 +22,7 @@ export type JobDispatchPreset = {
   fileTransferDownloadName?: string;
   fileTransferDownloadSink?: BrowserDownloadSinkMode;
   fileTransferExistingPolicy?: FileExistingPolicy;
+  fileTransferUploadFile?: File;
   fileTransferMultiTargetPolicy?: BrowserTransferMultiTargetPolicy;
   fileTransferRateLimit?: number;
   fileTransferResumeToken?: string;

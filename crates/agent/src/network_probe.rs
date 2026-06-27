@@ -209,7 +209,7 @@ fn parse_ping_output(stdout: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vpsman_common::{plan_tunnel, BandwidthTier, OspfCostPolicy, TunnelKind, TunnelPlanInput};
+    use vpsman_common::{plan_tunnel, OspfCostPolicy, TunnelKind, TunnelPlanInput};
 
     const TEST_PROBE_WRAPPER: &str = "/opt/vpsman/ping-wrapper";
 
@@ -368,7 +368,7 @@ mod tests {
             ipv6_address_pool_cidr: None,
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 15.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,

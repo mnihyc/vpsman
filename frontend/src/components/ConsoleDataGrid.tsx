@@ -14,6 +14,7 @@ import {
   useReactTable,
   type ColumnDef,
   type ColumnSizingState,
+  type Cell,
   type Header,
   type Row,
   type RowSelectionState,
@@ -74,6 +75,7 @@ export type ConsoleDataGridAction<T> = {
   description?: (rows: T[]) => string;
   disabled?: (rows: T[]) => boolean;
   expandRow?: boolean;
+  hidden?: (rows: T[]) => boolean;
   icon?: ReactNode;
   label: string;
   onSelect: (rows: T[]) => void;
@@ -99,6 +101,7 @@ export function ConsoleDataGrid<T>({
   getRowId,
   itemLabel = "rows",
   expandOnRowClick = false,
+  mobileLayout = "cards",
   onExpandedRowChange,
   onOpenRow,
   onSelectionChange,
@@ -121,6 +124,7 @@ export function ConsoleDataGrid<T>({
   expandOnRowClick?: boolean;
   getRowId: (row: T) => string;
   itemLabel?: string;
+  mobileLayout?: "cards" | "table";
   onExpandedRowChange?: (row: T | null) => void;
   onOpenRow?: (row: T) => void;
   onSelectionChange?: (rows: T[]) => void;
@@ -156,6 +160,8 @@ export function ConsoleDataGrid<T>({
   const [sorting, setSorting] = useState<SortingState>(
     preferences.sorting ?? [],
   );
+  const isMobileGrid = useMediaQuery("(max-width: 640px)");
+  const showMobileCards = isMobileGrid && mobileLayout === "cards";
   const expandedRowsRef = useRef(expandedRows);
   const onExpandedRowChangeRef = useRef(onExpandedRowChange);
   const renderExpandedRowRef = useRef(renderExpandedRow);
@@ -166,17 +172,14 @@ export function ConsoleDataGrid<T>({
   singleExpandedRowRef.current = singleExpandedRow;
   const hasExpandedRows = Boolean(renderExpandedRow);
   const searchValuesForRow = (row: T) =>
-    columns.map((column) =>
-      column.searchValue?.(row) ?? column.sortValue?.(row),
+    columns.map(
+      (column) => column.searchValue?.(row) ?? column.sortValue?.(row),
     );
   const searchFieldsForRow = (row: T): SearchFields =>
     searchFieldsForSearchValues(searchValuesForRow(row));
   const filteredRows = useMemo(() => {
-    return filterBySearchExpression(
-      rows,
-      globalFilter,
-      searchFieldsForRow,
-    ).items;
+    return filterBySearchExpression(rows, globalFilter, searchFieldsForRow)
+      .items;
   }, [columns, globalFilter, rows]);
   const gridSearchSuggestions = useMemo(
     () =>
@@ -278,12 +281,7 @@ export function ConsoleDataGrid<T>({
         ),
       })),
     ],
-    [
-      columns,
-      hasExpandedRows,
-      selectable,
-      title,
-    ],
+    [columns, hasExpandedRows, selectable, title],
   );
   const defaultColumnOrder = useMemo(
     () =>
@@ -333,6 +331,9 @@ export function ConsoleDataGrid<T>({
     .getSelectedRowModel()
     .rows.map((row) => row.original);
   const selectedRowSignature = selectedRows.map(getRowId).join("\u001f");
+  const visibleSelectionActions = actions.filter(
+    (action) => !action.hidden?.(selectedRows),
+  );
   const contextRowActions = rowActions.length > 0 ? rowActions : actions;
   const showContextSelectionActions = false;
   const pageCount = table.getPageCount() || 1;
@@ -418,6 +419,154 @@ export function ConsoleDataGrid<T>({
     return action.description?.(rows) ?? action.label;
   }
 
+  function rowDataCells(row: Row<T>) {
+    return row
+      .getVisibleCells()
+      .filter(
+        (cell) =>
+          cell.column.id !== "__select" && cell.column.id !== "__expand",
+      );
+  }
+
+  function renderMobileCard(row: Row<T>) {
+    const rowId = getRowId(row.original);
+    const dataCells = rowDataCells(row);
+    const primaryCell = dataCells[0] ?? null;
+    const stateCell =
+      dataCells.find((cell, index) => {
+        if (index === 0) return false;
+        return /status|state|result|health|verification|audit|output/i.test(
+          cellHeaderLabel(cell),
+        );
+      }) ??
+      dataCells[1] ??
+      null;
+    const primaryRowActions = rowActions
+      .filter((action) => !action.hidden?.([row.original]))
+      .slice(0, 3);
+    const hasCardActions =
+      primaryRowActions.length > 0 || Boolean(onOpenRow) || Boolean(renderExpandedRow);
+    const detailCells = dataCells.filter((cell) => {
+      if (cell.id === primaryCell?.id || cell.id === stateCell?.id) {
+        return false;
+      }
+      return !(
+        hasCardActions &&
+        /^(action|actions|decision|open)$/i.test(cellHeaderLabel(cell))
+      );
+    });
+    const cardClassName = [
+      "gridMobileCard",
+      row.getIsSelected() ? "selected" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    return (
+      <div
+        aria-label={`${title} mobile card ${rowId}`}
+        className={cardClassName}
+        role="group"
+      >
+        <div className="gridMobileCardHeader">
+          {selectable ? (
+            <input
+              aria-label={`Select ${title} row ${rowId}`}
+              checked={row.getIsSelected()}
+              onClick={(event) => event.stopPropagation()}
+              onChange={row.getToggleSelectedHandler()}
+              type="checkbox"
+            />
+          ) : null}
+          <div className="gridMobilePrimary">
+            {primaryCell ? (
+              flexRender(
+                primaryCell.column.columnDef.cell,
+                primaryCell.getContext(),
+              )
+            ) : (
+              <strong>{rowId}</strong>
+            )}
+          </div>
+          {stateCell ? (
+            <div className="gridMobileState">
+              {flexRender(
+                stateCell.column.columnDef.cell,
+                stateCell.getContext(),
+              )}
+            </div>
+          ) : null}
+        </div>
+
+        {detailCells.length > 0 ? (
+          <div className="gridMobileFields">
+            {detailCells.map((cell) => (
+              <div className="gridMobileField" key={cell.id}>
+                <span>{cellHeaderLabel(cell)}</span>
+                <div className="gridMobileFieldValue">
+                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {(primaryRowActions.length > 0 || onOpenRow || renderExpandedRow) && (
+          <div className="gridMobileActions">
+            {primaryRowActions.map((action) => {
+              const sourceRows = [row.original];
+              return (
+                <button
+                  className={
+                    action.tone === "danger"
+                      ? "secondaryAction compactAction danger"
+                      : "secondaryAction compactAction"
+                  }
+                  disabled={action.disabled?.(sourceRows)}
+                  key={action.label}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    invokeAction(action, sourceRows);
+                  }}
+                  title={actionDescription(action, sourceRows)}
+                  type="button"
+                >
+                  {action.icon}
+                  <span>{action.label}</span>
+                </button>
+              );
+            })}
+            {onOpenRow ? (
+              <button
+                className="secondaryAction compactAction"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenRow(row.original);
+                }}
+                type="button"
+              >
+                Open
+              </button>
+            ) : null}
+            {renderExpandedRow ? (
+              <button
+                aria-expanded={Boolean(expandedRows[row.id])}
+                className="secondaryAction compactAction"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  toggleExpandedRow(row.id, row.original);
+                }}
+                type="button"
+              >
+                {expandedRows[row.id] ? "Hide details" : "Details"}
+              </button>
+            ) : null}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   function handleColumnDragEnd(event: DragEndEvent) {
     const activeId = String(event.active.id);
     const overId = event.over ? String(event.over.id) : "";
@@ -444,12 +593,8 @@ export function ConsoleDataGrid<T>({
   }
 
   function renderEmptyContent() {
-    const emptyContent =
-      empty ?? `No ${itemLabel} match the current view.`;
-    if (
-      typeof emptyContent === "string" ||
-      typeof emptyContent === "number"
-    ) {
+    const emptyContent = empty ?? `No ${itemLabel} match the current view.`;
+    if (typeof emptyContent === "string" || typeof emptyContent === "number") {
       return <div className="emptyState compactEmpty">{emptyContent}</div>;
     }
     return emptyContent;
@@ -475,7 +620,7 @@ export function ConsoleDataGrid<T>({
         />
         <div className="gridToolbarActions">
           {toolbarActions}
-          {selectable && actions.length > 0 && (
+          {selectable && visibleSelectionActions.length > 0 && (
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
                 <button
@@ -502,11 +647,8 @@ export function ConsoleDataGrid<T>({
                   loop
                   sideOffset={6}
                 >
-                  {actions.map((action, index) => {
-                    const description = actionDescription(
-                      action,
-                      selectedRows,
-                    );
+                  {visibleSelectionActions.map((action, index) => {
+                    const description = actionDescription(action, selectedRows);
                     return (
                       <Fragment key={action.label}>
                         {action.separatorBefore && index > 0 && (
@@ -658,36 +800,44 @@ export function ConsoleDataGrid<T>({
             ))}
           </div>
           <div className="gridBody" role="rowgroup">
-            {table.getRowModel().rows.map((row) => (
+            {table.getRowModel().rows.map((row) => {
+              const visibleContextRowActions = contextRowActions.filter(
+                (action) => !action.hidden?.([row.original]),
+              );
+              return (
               <ContextMenu.Root key={row.id}>
                 <ContextMenu.Trigger asChild>
-                  <div>
-                    <div
-                      className={
-                        row.getIsSelected() ? "gridRow selected" : "gridRow"
-                      }
-                      onClick={() => {
-                        onOpenRow?.(row.original);
-                        if (expandOnRowClick) {
-                          toggleExpandedRow(row.id, row.original);
+                  <div className="gridRecord">
+                    {showMobileCards ? (
+                      renderMobileCard(row)
+                    ) : (
+                      <div
+                        className={
+                          row.getIsSelected() ? "gridRow selected" : "gridRow"
                         }
-                      }}
-                      role="row"
-                    >
-                      {row.getVisibleCells().map((cell) => (
-                        <div
-                          className="gridCell"
-                          key={cell.id}
-                          role="gridcell"
-                          style={gridColumnStyle(cell.column)}
-                        >
-                          {flexRender(
-                            cell.column.columnDef.cell,
-                            cell.getContext(),
-                          )}
-                        </div>
-                      ))}
-                    </div>
+                        onClick={() => {
+                          onOpenRow?.(row.original);
+                          if (expandOnRowClick) {
+                            toggleExpandedRow(row.id, row.original);
+                          }
+                        }}
+                        role="row"
+                      >
+                        {row.getVisibleCells().map((cell) => (
+                          <div
+                            className="gridCell"
+                            key={cell.id}
+                            role="gridcell"
+                            style={gridColumnStyle(cell.column)}
+                          >
+                            {flexRender(
+                              cell.column.columnDef.cell,
+                              cell.getContext(),
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     {renderExpandedRow && expandedRows[row.id] && (
                       <div className="gridExpandedRow">
                         <button
@@ -708,7 +858,7 @@ export function ConsoleDataGrid<T>({
                     )}
                   </div>
                 </ContextMenu.Trigger>
-                {(contextRowActions.length > 0 ||
+                {(visibleContextRowActions.length > 0 ||
                   showContextSelectionActions) && (
                   <ContextMenu.Portal>
                     <ContextMenu.Content
@@ -716,12 +866,12 @@ export function ConsoleDataGrid<T>({
                       collisionPadding={12}
                       loop
                     >
-                      {contextRowActions.length > 0 && (
+                      {visibleContextRowActions.length > 0 && (
                         <>
                           <ContextMenu.Label className="consoleMenuLabel">
                             Row actions
                           </ContextMenu.Label>
-                          {contextRowActions.map((action) => {
+                          {visibleContextRowActions.map((action) => {
                             const sourceRows = [row.original];
                             return (
                               <ContextMenu.Item
@@ -732,14 +882,13 @@ export function ConsoleDataGrid<T>({
                                 }
                                 disabled={action.disabled?.(sourceRows)}
                                 key={`row:${action.label}`}
-                                onSelect={() => invokeAction(action, sourceRows)}
+                                onSelect={() =>
+                                  invokeAction(action, sourceRows)
+                                }
                                 title={actionDescription(action, sourceRows)}
                               >
                                 {action.icon && (
-                                  <span
-                                    className="consoleMenuIcon"
-                                    aria-hidden
-                                  >
+                                  <span className="consoleMenuIcon" aria-hidden>
                                     {action.icon}
                                   </span>
                                 )}
@@ -787,7 +936,8 @@ export function ConsoleDataGrid<T>({
                   </ContextMenu.Portal>
                 )}
               </ContextMenu.Root>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -798,6 +948,30 @@ export function ConsoleDataGrid<T>({
       )}
     </div>
   );
+}
+
+function cellHeaderLabel<T>(cell: Cell<T, unknown>) {
+  const header = cell.column.columnDef.header;
+  return typeof header === "string" ? header : cell.column.id;
+}
+
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(() =>
+    typeof window === "undefined" ? false : window.matchMedia(query).matches,
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const media = window.matchMedia(query);
+    const handleChange = () => setMatches(media.matches);
+    handleChange();
+    media.addEventListener("change", handleChange);
+    return () => media.removeEventListener("change", handleChange);
+  }, [query]);
+
+  return matches;
 }
 
 function readGridPreferences(storageKey: string): ConsoleDataGridPreferences {
@@ -848,10 +1022,7 @@ function SortableHeaderCell<T>({
     disabled: !canDrag,
     id: header.column.id,
   });
-  const headerClassName = [
-    "gridHeaderCell",
-    isDragging ? "dragging" : "",
-  ]
+  const headerClassName = ["gridHeaderCell", isDragging ? "dragging" : ""]
     .filter(Boolean)
     .join(" ");
 

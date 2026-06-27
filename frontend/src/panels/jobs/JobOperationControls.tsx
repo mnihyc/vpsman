@@ -26,38 +26,121 @@ export function OperationModeTabs({
   mode: DispatchMode;
   onModeChange: (mode: DispatchMode) => void;
 }) {
-  const modes: { label: string; mode: DispatchMode }[] = [
-    { label: "Argv", mode: "shell" },
-    { label: "Shell", mode: "shell_script" },
-    { label: "Terminal", mode: "terminal_session" },
-    { label: "File pull", mode: "file_pull" },
-    { label: "File push", mode: "file_push" },
-    { label: "Resumable upload", mode: "file_transfer_upload" },
-    { label: "Resumable download", mode: "file_transfer_download" },
-    { label: "Manual update", mode: "agent_update" },
-    { label: "Check update", mode: "agent_update_check" },
-    { label: "Activate", mode: "agent_update_activate" },
-    { label: "Rollback", mode: "agent_update_rollback" },
-    { label: "Backup", mode: "backup" },
-    { label: "Sessions", mode: "user_sessions" },
-    { label: "Processes", mode: "process_list" },
-    { label: "Supervisor", mode: "process_supervisor" },
-  ];
+  const groups = operationModeGroups(includeTerminal);
+  const activeGroup =
+    groups.find((group) => group.modes.some((item) => item.mode === mode)) ??
+    groups[0];
 
   return (
-    <div className="segmented">
-      {modes.filter((item) => includeTerminal || item.mode !== "terminal_session").map((item) => (
-        <button
-          className={mode === item.mode ? "selected" : ""}
-          key={item.mode}
-          onClick={() => onModeChange(item.mode)}
-          type="button"
+    <div className="operationSelector" aria-label="Dispatch operation selector">
+      <label className="operationMobileSelect">
+        <span>Operation</span>
+        <select
+          aria-label="Dispatch operation"
+          onChange={(event) => onModeChange(event.target.value as DispatchMode)}
+          value={mode}
         >
-          {item.label}
-        </button>
-      ))}
+          {groups.map((group) => (
+            <optgroup key={group.id} label={group.label}>
+              {group.modes.map((item) => (
+                <option key={item.mode} value={item.mode}>
+                  {item.label}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+      </label>
+      <div className="operationGroupTabs" aria-label="Dispatch operation groups">
+        {groups.map((group) => (
+          <button
+            aria-pressed={group.id === activeGroup.id}
+            className={group.id === activeGroup.id ? "selected" : ""}
+            key={group.id}
+            onClick={() => onModeChange(group.modes[0].mode)}
+            type="button"
+          >
+            {group.label}
+          </button>
+        ))}
+      </div>
+      <div className="operationChoiceStrip" aria-label={`${activeGroup.label} operations`}>
+        {activeGroup.modes.map((item) => (
+          <button
+            className={mode === item.mode ? "selected" : ""}
+            key={item.mode}
+            onClick={() => onModeChange(item.mode)}
+            type="button"
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
     </div>
   );
+}
+
+type OperationModeChoice = { label: string; mode: DispatchMode };
+
+type OperationModeGroup = {
+  id: string;
+  label: string;
+  modes: OperationModeChoice[];
+};
+
+function operationModeGroups(includeTerminal: boolean): OperationModeGroup[] {
+  const groups: OperationModeGroup[] = [
+    {
+      id: "command",
+      label: "Command",
+      modes: [
+        { label: "Argv", mode: "shell" },
+        { label: "Shell", mode: "shell_script" },
+      ],
+    },
+    {
+      id: "files",
+      label: "Files",
+      modes: [
+        { label: "File pull", mode: "file_pull" },
+        { label: "File push", mode: "file_push" },
+        { label: "Resumable upload", mode: "file_transfer_upload" },
+        { label: "Resumable download", mode: "file_transfer_download" },
+      ],
+    },
+    {
+      id: "update",
+      label: "Update",
+      modes: [
+        { label: "Manual update", mode: "agent_update" },
+        { label: "Check update", mode: "agent_update_check" },
+        { label: "Activate", mode: "agent_update_activate" },
+        { label: "Rollback", mode: "agent_update_rollback" },
+      ],
+    },
+    {
+      id: "backup",
+      label: "Backup",
+      modes: [{ label: "Backup", mode: "backup" }],
+    },
+    {
+      id: "process",
+      label: "Process",
+      modes: [
+        { label: "Sessions", mode: "user_sessions" },
+        { label: "Processes", mode: "process_list" },
+        { label: "Supervisor", mode: "process_supervisor" },
+      ],
+    },
+  ];
+  if (includeTerminal) {
+    groups.splice(1, 0, {
+      id: "terminal",
+      label: "Terminal",
+      modes: [{ label: "Terminal", mode: "terminal_session" }],
+    });
+  }
+  return groups;
 }
 
 function formatBytes(value: number): string {
@@ -96,6 +179,7 @@ export function JobOperationEditor({
   fileFollowSymlinks,
   filePushMode,
   filePushPath,
+  filePushSource,
   fileTransferDownloadSink,
   fileTransferDownloadName,
   fileTransferChunkSize,
@@ -196,6 +280,7 @@ export function JobOperationEditor({
   fileFollowSymlinks: boolean;
   filePushMode: string;
   filePushPath: string;
+  filePushSource: File | null;
   fileTransferDownloadSink: BrowserDownloadSinkMode;
   fileTransferDownloadName: string;
   fileTransferChunkSize: number;
@@ -423,14 +508,14 @@ export function JobOperationEditor({
             value={fileTransferUploadSourceKind}
           >
             <option value="local-file">Local file</option>
-            <option value="source-artifact">Source artifact</option>
+            <option value="source-artifact">Reusable source</option>
           </select>
         </label>
         {fileTransferUploadSourceKind === "source-artifact" ? (
           <label className="wideField">
-            <span>Source artifact</span>
+            <span>Reusable source</span>
             <select
-              aria-label="Resumable upload source artifact"
+              aria-label="Resumable upload reusable source"
               onChange={(event) => setFileTransferSourceArtifactId(event.target.value)}
               value={fileTransferSourceArtifactId}
             >
@@ -443,14 +528,19 @@ export function JobOperationEditor({
             </select>
           </label>
         ) : (
-        <label className="wideField">
-          <span>Source file</span>
-          <input
-            aria-label="Resumable upload source"
-            onChange={(event) => setFilePushSource(event.target.files?.[0] ?? null)}
-            type="file"
-          />
-        </label>
+          <label className="wideField">
+            <span>Source file</span>
+            <input
+              aria-label="Resumable upload source"
+              onChange={(event) => setFilePushSource(event.target.files?.[0] ?? null)}
+              type="file"
+            />
+            {filePushSource ? (
+              <small className="dispatchInlineHint">
+                Selected {filePushSource.name} · {formatBytes(filePushSource.size)}
+              </small>
+            ) : null}
+          </label>
         )}
         <label className="wideField">
           <span>Remote path</span>

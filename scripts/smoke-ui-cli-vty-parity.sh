@@ -117,7 +117,7 @@ workflows=(
   'job output download|job-output-download|job-output-download|onDownloadOutputChunk|frontend/src/panels/JobHistoryPanel.tsx'
   'server jobs inventory|server-jobs|server-jobs|Server jobs|frontend/src/panels/jobs/ServerJobsPanel.tsx frontend/src/hooks/useJobsData.ts'
   'artifact cleanup preview|artifact-cleanup-preview|artifact-cleanup-preview|Artifact cleanup|frontend/src/panels/jobs/ServerJobsPanel.tsx frontend/src/hooks/useJobsData.ts'
-  'artifact cleanup create|artifact-cleanup-create|artifact-cleanup-create|Queue cleanup|frontend/src/panels/jobs/ServerJobsPanel.tsx frontend/src/hooks/useJobsData.ts'
+  'artifact cleanup create|artifact-cleanup-create|artifact-cleanup-create|Delete artifacts|frontend/src/panels/jobs/ServerJobsPanel.tsx frontend/src/hooks/useJobsData.ts'
   'server job cancel|server-job-cancel|server-job-cancel|cancelServerJob|frontend/src/hooks/useJobsData.ts frontend/src/panels/jobs/ServerJobsPanel.tsx'
   'schedule create|schedule-create|schedule-create|Create schedule|frontend/src/panels/SchedulesPanel.tsx'
   'tag create|tag-create|tag-create|Create tag|frontend/src/panels/TagsPanel.tsx'

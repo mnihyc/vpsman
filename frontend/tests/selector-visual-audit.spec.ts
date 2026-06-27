@@ -17,9 +17,13 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   const manifest: Array<Record<string, unknown>> = [];
 
   await page.goto("/");
-  await page.getByLabel("Home scope kind").selectOption("client");
-  await openVpsMenu(page.locator(".dashboardControlBar"), "Home scope value", "sfo", /edge-sfo-01.*agent-sfo-01/);
-  await capture(page, outputDir, manifest, "dashboard-client-scope");
+  await openVpsMenu(
+    page.locator(".homeQuickActions"),
+    "Home quick action target",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
+  await capture(page, outputDir, manifest, "home-quick-action-target");
 
   await openConsoleSubpage(page, "Config", "Per-VPS");
   await openVpsMenu(page.locator(".configApplyGrid"), "VPS config target", "fra", /core-fra-02.*agent-fra-02/);

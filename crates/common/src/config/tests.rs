@@ -6,8 +6,8 @@ use super::{
     AgentRuntimeTrafficSource, AgentTelemetryConfig, AgentTelemetrySource, AgentUserSessionsSource,
 };
 use crate::{
-    plan_tunnel, BandwidthTier, OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl,
-    RuntimeTunnelManager, TunnelConfigBackend, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+    plan_tunnel, OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager,
+    TunnelConfigBackend, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
     DEFAULT_MAX_JOB_TIMEOUT_SECS,
 };
 
@@ -616,7 +616,7 @@ fn validates_runtime_network_root() {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 12.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,

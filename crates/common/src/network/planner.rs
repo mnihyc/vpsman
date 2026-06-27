@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::{
-    cost::ospf_cost,
+    cost::{ospf_cost, MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS},
     models::{
         RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager,
         RuntimeTunnelRoute, RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit,
@@ -46,10 +46,13 @@ pub enum NetworkPlanError {
     InvalidRuntimeTunnelTopology,
     #[error("runtime tunnel route is invalid")]
     InvalidRuntimeTunnelRoute,
+    #[error("bandwidth must be between 10 and 10000 Mbps")]
+    InvalidBandwidthMbps,
 }
 
 pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanError> {
     validate_interface_name(&input.interface_name)?;
+    validate_bandwidth_mbps(input.bandwidth_mbps)?;
     validate_runtime_tunnel_control(&input.runtime_control)?;
     validate_runtime_fou_options(input.kind, &input.runtime_control.fou)?;
     validate_runtime_topology_intent(&input.runtime_topology, &input.interface_name)?;
@@ -93,7 +96,7 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
     let observation = TunnelObservation {
         latency_ms: input.latency_ms,
         packet_loss_ratio: input.packet_loss_ratio,
-        bandwidth: input.bandwidth,
+        bandwidth_mbps: input.bandwidth_mbps,
         preference: input.preference,
     };
     let recommended_ospf_cost = ospf_cost(input.ospf_policy, observation);
@@ -141,7 +144,7 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         ipv4_tunnel: ipv4_tunnel.clone(),
         ipv6_tunnel: ipv6_tunnel.clone(),
         latency_primary_family: primary_family,
-        bandwidth: input.bandwidth,
+        bandwidth_mbps: input.bandwidth_mbps,
         recommended_ospf_cost,
         ifupdown_file: ifupdown_file.clone(),
         bird2_file: bird2_file.clone(),
@@ -160,6 +163,14 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         conflicts,
         mutates_host: false,
     })
+}
+
+fn validate_bandwidth_mbps(value: u32) -> Result<(), NetworkPlanError> {
+    if (MIN_TUNNEL_BANDWIDTH_MBPS..=MAX_TUNNEL_BANDWIDTH_MBPS).contains(&value) {
+        Ok(())
+    } else {
+        Err(NetworkPlanError::InvalidBandwidthMbps)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

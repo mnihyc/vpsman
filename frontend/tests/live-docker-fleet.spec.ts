@@ -63,64 +63,33 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     page.getByRole("heading", { name: "Home", exact: true }),
   ).toBeVisible();
   await expect(
-    page
-      .locator(".quickStats .metric", { hasText: "Online" })
-      .getByText(String(expectedTotal)),
+    page.getByRole("heading", { name: "Fleet command home" }),
   ).toBeVisible({
     timeout: 30_000,
   });
+  await expect(page.getByLabel("Home quick actions")).toBeVisible();
+  await expect(page.getByLabel("Home posture strip")).toContainText(
+    `${expectedTotal}/${expectedTotal}`,
+  );
   await expect(
-    page.getByRole("heading", { name: "Operational Health" }),
+    page.getByRole("heading", { name: "Running work" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Resource Usage" }),
+    page.getByRole("heading", { name: "Recent failures" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Network", exact: true }),
+    page.getByRole("heading", { name: "Needs attention" }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Grouped Statistics" }),
-  ).toBeVisible();
-  await expectLiveDashboardTelemetry(page);
+  await expect(page.getByLabel("Home telemetry widgets")).toHaveCount(0);
   await expectCleanLayout(page);
   await maybeExtendedScreenshot(
     page,
     testInfo.project.name,
-    "page-dashboard-overview",
-    "Home overview page before operator filtering, with live operational health and resource telemetry.",
+    "page-home-overview",
+    "Home overview before operator action, focused on quick actions, fleet availability, running work, and failures.",
   );
 
-  await page.getByLabel("Home group by").selectOption("providers");
-  await expect(page.getByText(/All VPS; grouped by Providers/)).toBeVisible();
-  await expect(
-    page.locator(".dashboardClusterCard", { hasText: "provider:alpha" }),
-  ).toBeVisible();
-  await page.getByLabel("Home scope kind").selectOption("country");
-  await page.getByLabel("Home scope value").selectOption("US");
-  await expect(page.getByText(/country:US; grouped by Providers/)).toBeVisible({
-    timeout: 15_000,
-  });
-  await page.getByLabel("Home group by").selectOption("date");
-  await expect(
-    page.getByText(/country:US; grouped by Date buckets/),
-  ).toBeVisible({ timeout: 15_000 });
-  await maybeExtendedScreenshot(
-    page,
-    testInfo.project.name,
-    "dashboard-filtered-country-date",
-    "Dashboard after operator scopes to US fleet and changes grouping to date buckets.",
-  );
-  const dashboardPreferences = await page.evaluate(() =>
-    JSON.parse(
-      window.localStorage.getItem("vpsman.dashboardPreferences") ?? "{}",
-    ),
-  );
-  expect(dashboardPreferences).toMatchObject({
-    groupBy: "date",
-    scopeKind: "country",
-    scopeValue: "US",
-  });
-  await maybeScreenshot(page, testInfo.project.name, "dashboard");
+  await maybeScreenshot(page, testInfo.project.name, "home");
   await expectLiveSystemDashboardTelemetry(page, testInfo.project.name);
   if (isMobile) {
     writeScreenshotManifest(testInfo.project.name);
@@ -307,11 +276,15 @@ async function expectLiveDashboardTelemetry(page: Page) {
   const operationalHealth = page.locator(".dashboardSection").filter({
     has: page.getByRole("heading", { name: "Operational Health" }),
   });
-  await expect(operationalHealth).toContainText(`${expectedTotal}/${expectedTotal} online`);
+  await expect(operationalHealth).toContainText(
+    `${expectedTotal}/${expectedTotal} online`,
+  );
   await expect(operationalHealth).not.toContainText("DB pool");
   await expect(operationalHealth).not.toContainText("Dispatch queue");
   await expect(operationalHealth).not.toContainText("Gateway events");
-  await expect(operationalHealth).not.toContainText(/No data|Gateway metrics unavailable/i);
+  await expect(operationalHealth).not.toContainText(
+    /No data|Gateway metrics unavailable/i,
+  );
 
   const resourceUsage = page.locator(".dashboardSection").filter({
     has: page.getByRole("heading", { name: "Resource Usage" }),
@@ -419,7 +392,9 @@ async function expectLiveFleetTelemetry(detail: Locator) {
     detail.locator(".metric", { hasText: "Samples" }),
   ).not.toContainText(/No rollup|No data|unavailable/i);
   await detail.getByRole("tab", { name: "Telemetry" }).click();
-  await expect(detail.getByRole("tabpanel").getByText("CPU load")).toBeVisible();
+  await expect(
+    detail.getByRole("tabpanel").getByText("CPU load"),
+  ).toBeVisible();
   await expect(detail).not.toContainText(
     /No rollup|No rate samples|No counters|No data|unavailable/i,
   );
@@ -458,18 +433,24 @@ async function exerciseColumnControls(page: Page, grid: Locator) {
   ).toHaveCount(0);
   await page.keyboard.press("Escape");
   await grid.getByLabel("VPS instance records page size").selectOption("25");
-  await expect(grid.getByText(`1 / ${Math.ceil(expectedTotal / 25)}`)).toBeVisible();
+  await expect(
+    grid.getByText(`1 / ${Math.ceil(expectedTotal / 25)}`),
+  ).toBeVisible();
 }
 
 async function selectGridRow(row: Locator) {
-  const checkbox = await retryGridRowControl(row, "Select VPS instance records row", (control) =>
-    control.check({ timeout: 10_000 }),
+  const checkbox = await retryGridRowControl(
+    row,
+    "Select VPS instance records row",
+    (control) => control.check({ timeout: 10_000 }),
   );
   await expect(checkbox).toBeChecked({ timeout: 5000 });
 }
 
 async function clickGridRowControl(row: Locator, label: string) {
-  await retryGridRowControl(row, label, (control) => control.click({ timeout: 10_000 }));
+  await retryGridRowControl(row, label, (control) =>
+    control.click({ timeout: 10_000 }),
+  );
 }
 
 async function retryGridRowControl<T>(
@@ -510,9 +491,9 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
   });
   await expect(detail).toBeVisible();
   await detail.getByLabel("Webhook rule name").fill("docker-fleet-q2-capacity");
-  await detail.getByLabel("Webhook target").fill(
-    "https://hooks.example/vpsman/docker-fleet",
-  );
+  await detail
+    .getByLabel("Webhook target")
+    .fill("https://hooks.example/vpsman/docker-fleet");
   await detail.getByLabel("Webhook cooldown seconds").fill("60");
   await fillSearchExpression(
     detail.getByLabel("Webhook expression"),
@@ -584,7 +565,9 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
 
   await notifications.getByRole("tab", { name: "Maintenance" }).click();
   await notifications.getByLabel("Webhook rotation days").fill("7");
-  await notifications.getByLabel("Webhook rotation status").selectOption("delivered");
+  await notifications
+    .getByLabel("Webhook rotation status")
+    .selectOption("delivered");
   await notifications.getByRole("button", { name: "Review rotation" }).click();
   await expect(
     notifications.locator(".fleetPolicyStatus", {
@@ -602,7 +585,9 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
 
 async function exerciseAlertPolicyReview(page: Page, projectName: string) {
   await openConsoleSubpage(page, "Fleet", "Alert policies");
-  await expect(page.getByRole("heading", { name: "Alert policies" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Alert policies" }),
+  ).toBeVisible();
   const grid = page.getByLabel("Alert policy rules data grid");
   const row = grid
     .locator(".gridBody [role=row]", { hasText: "docker-edge-resource-alerts" })
@@ -610,7 +595,9 @@ async function exerciseAlertPolicyReview(page: Page, projectName: string) {
   await expect(row).toBeVisible();
   await row.getByLabel("Expand Alert policy rules row").click();
   await expect(
-    grid.locator(".gridExpandedRow", { hasText: "docker-edge-resource-alerts" }),
+    grid.locator(".gridExpandedRow", {
+      hasText: "docker-edge-resource-alerts",
+    }),
   ).toBeVisible();
   await maybeExtendedScreenshot(
     page,
@@ -697,7 +684,9 @@ async function exerciseAlertNotificationChannels(
   );
   await page.getByLabel("Close detail panel").click();
 
-  await notifications.getByRole("button", { name: "Review queued deliveries" }).click();
+  await notifications
+    .getByRole("button", { name: "Review queued deliveries" })
+    .click();
   await expect(
     notifications.locator(".deliveryPreviewSection", {
       hasText: "Notification delivery preview",
@@ -717,33 +706,44 @@ async function exerciseServerJobsCleanup(page: Page, projectName: string) {
     has: page.getByRole("heading", { name: "Artifact cleanup" }),
   });
   await expect(cleanupPanel).toBeVisible();
+  await cleanupPanel.getByLabel("Older than days").fill("");
+  await cleanupPanel.getByText("Advanced expression").click();
   await cleanupPanel.getByLabel("Expression").fill(cleanupExpression);
   await cleanupPanel.getByRole("button", { name: "Preview" }).click();
-  await expect(cleanupPanel.getByLabel("Preview hash")).toHaveValue(
-    /^[0-9a-f]{64}$/,
+  await expect(cleanupPanel.getByLabel("Cleanup preview result")).toContainText(
+    /^[\s\S]*[1-9][0-9]* artifacts/,
   );
-  await expect(cleanupPanel.getByLabel("Matched")).toHaveValue(
-    /^[1-9][0-9]* \//,
-  );
+  await expect(
+    cleanupPanel.getByLabel("Artifact cleanup readiness"),
+  ).toContainText("Ready for confirmation");
+  await expect(
+    cleanupPanel.getByLabel("Representative cleanup objects"),
+  ).toContainText("file-transfer-sources/");
+  await expect(
+    cleanupPanel.getByRole("button", { name: "Delete artifacts" }),
+  ).toBeEnabled();
   await maybeExtendedScreenshot(
     page,
     projectName,
     "system-maintenance-artifact-cleanup-preview",
-    "System maintenance page after previewing a cleanup expression against a real uploaded source artifact.",
+    "System maintenance page after previewing a cleanup expression against a real uploaded source artifact with age, retention, and representative object evidence.",
   );
 
-  await cleanupPanel.getByRole("button", { name: "Queue cleanup" }).click();
+  await cleanupPanel.getByRole("button", { name: "Delete artifacts" }).click();
   const prompt = cleanupPanel.locator(".confirmationPrompt", {
-    hasText: "Confirm artifact cleanup",
+    hasText: "Confirm artifact deletion",
   });
   await expect(prompt).toBeVisible();
   await maybeExtendedScreenshot(
     page,
     projectName,
     "system-maintenance-artifact-cleanup-confirm",
-    "System maintenance page showing the destructive cleanup confirmation prompt with matched artifact count and preview hash.",
+    "System maintenance page showing the destructive cleanup confirmation prompt with matched artifact count and preview evidence.",
   );
-  await prompt.getByRole("button", { name: "Queue cleanup" }).click();
+  await prompt
+    .getByLabel("Type DELETE to confirm artifact deletion")
+    .fill("DELETE");
+  await prompt.getByRole("button", { name: "Delete artifacts" }).click();
 
   const serverJobsPanel = page.locator(".fleetPanel").filter({
     has: page.getByRole("heading", { name: "Maintenance jobs" }),
@@ -756,7 +756,7 @@ async function exerciseServerJobsCleanup(page: Page, projectName: string) {
     page,
     projectName,
     "system-maintenance-artifact-cleanup-queued",
-    "System maintenance page after queueing artifact cleanup from the browser.",
+    "System maintenance page after queueing reviewed artifact cleanup from the browser.",
   );
   await expectCleanLayout(page);
 }
@@ -824,8 +824,8 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     },
     {
       view: "Config",
-      subpage: "Templates",
-      marker: "Templates",
+      subpage: "Template coverage",
+      marker: "Template coverage",
       screenshot: "page-config-templates",
     },
     {
@@ -980,14 +980,14 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     },
     {
       view: "Observability",
-      subpage: "Webhooks",
-      marker: "Webhook rules",
+      subpage: "Event webhooks",
+      marker: "Event webhook rules",
       screenshot: "page-observability-webhooks",
     },
     {
       view: "Observability",
       subpage: "Dashboards",
-      marker: "Saved dashboards",
+      marker: "Dashboard presets",
       screenshot: "page-observability-dashboards",
     },
     {

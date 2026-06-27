@@ -3,7 +3,7 @@ use std::{os::unix::fs::PermissionsExt, path::Path};
 use super::*;
 use crate::network_managed_files::managed_block;
 use vpsman_common::{
-    plan_tunnel, render_tunnel_endpoint_config, AgentNetworkConfig, BandwidthTier, OspfCostPolicy,
+    plan_tunnel, render_tunnel_endpoint_config, AgentNetworkConfig, OspfCostPolicy,
     RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager, TunnelKind, TunnelPlanInput,
 };
 
@@ -533,7 +533,7 @@ fn test_plan() -> TunnelPlan {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 15.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,
@@ -567,7 +567,7 @@ fn external_adapter_plan(interface_name: &str, status: RuntimeTunnelCommand) -> 
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 15.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,

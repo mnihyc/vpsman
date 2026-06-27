@@ -1221,6 +1221,7 @@ impl Repository {
                         id,
                         actor_id,
                         command_type,
+                        source_schedule_id,
                         privileged,
                         status,
                         target_count,
@@ -1242,6 +1243,7 @@ impl Repository {
                     id: row.try_get("id")?,
                     actor_id: row.try_get("actor_id")?,
                     command_type: row.try_get("command_type")?,
+                    source_schedule_id: row.try_get("source_schedule_id")?,
                     privileged: row.try_get("privileged")?,
                     status: row.try_get("status")?,
                     target_count: row.try_get("target_count")?,
@@ -1401,6 +1403,7 @@ impl Repository {
                         OR job_id::text ILIKE $3 ESCAPE '\'
                         OR status ILIKE $3 ESCAPE '\'
                         OR command_type ILIKE $3 ESCAPE '\'
+                        OR source_schedule_id::text ILIKE $3 ESCAPE '\'
                         OR selector_expression ILIKE $3 ESCAPE '\'
                         OR payload_hash ILIKE $3 ESCAPE '\'
                         OR request_fingerprint ILIKE $3 ESCAPE '\'
@@ -1739,6 +1742,7 @@ impl Repository {
                         id,
                         actor_id,
                         command_type,
+                        source_schedule_id,
                         privileged,
                         status,
                         target_count,
@@ -1760,6 +1764,7 @@ impl Repository {
                             id: row.try_get("id")?,
                             actor_id: row.try_get("actor_id")?,
                             command_type: row.try_get("command_type")?,
+                            source_schedule_id: row.try_get("source_schedule_id")?,
                             privileged: row.try_get("privileged")?,
                             status: row.try_get("status")?,
                             target_count: row.try_get("target_count")?,
@@ -1820,6 +1825,7 @@ impl Repository {
                         id,
                         actor_id,
                         command_type,
+                        source_schedule_id,
                         privileged,
                         status,
                         target_count,
@@ -1852,6 +1858,7 @@ impl Repository {
                             id: row.try_get("id")?,
                             actor_id: row.try_get("actor_id")?,
                             command_type: row.try_get("command_type")?,
+                            source_schedule_id: row.try_get("source_schedule_id")?,
                             privileged: row.try_get("privileged")?,
                             status: row.try_get("status")?,
                             target_count: row.try_get("target_count")?,
@@ -2126,6 +2133,7 @@ impl Repository {
                     id: job_id,
                     actor_id,
                     command_type: "api_job_request".to_string(),
+                    source_schedule_id: None,
                     privileged: request.privileged,
                     status: status.to_string(),
                     target_count: resolved_targets.len() as i32,
@@ -2383,6 +2391,7 @@ impl Repository {
                     id: job_id,
                     actor_id,
                     command_type: command_type.clone(),
+                    source_schedule_id,
                     privileged: request.privileged,
                     status: JOB_STATUS_QUEUED.to_string(),
                     target_count: resolved_targets.len() as i32,

@@ -25,6 +25,7 @@ import type { TerminalAction } from "../jobDispatchModel";
 import type { AgentView, WsTerminalOutputEvent } from "../../types";
 import type { TerminalReplayRecord, TerminalSessionRecord } from "../../typesTerminal";
 import { formatTime, shortId } from "../../utils";
+import type { PrivilegeMaterial } from "../../privilege";
 import type { TerminalComposerAction } from "../JobDispatchPanel";
 
 type TerminalLaunchProfile = "posix-login" | "bash-login" | "plain-sh";
@@ -64,9 +65,12 @@ export function TerminalSessionsPanel({
   lastTerminalOutputEvent,
   loading,
   onOpenSessionEvidence,
+  onOpenPrivilegeUnlock,
+  onOpenTerminal,
   onPrepareAction,
   onReplay,
   onRefresh,
+  privilegeMaterial,
 }: {
   agents: AgentView[];
   clientLabel: (clientId: string) => string;
@@ -74,6 +78,14 @@ export function TerminalSessionsPanel({
   lastTerminalOutputEvent: WsTerminalOutputEvent | null;
   loading: boolean;
   onOpenSessionEvidence?: () => void;
+  onOpenPrivilegeUnlock: () => void;
+  onOpenTerminal: (request: {
+    maxTimeoutSecs: number;
+    session: TerminalSessionRecord;
+    terminalReplayFromSeq?: string;
+    terminalUser: string;
+    terminalUserPolicy: "fail" | "fallback";
+  }) => Promise<void>;
   onPrepareAction: (
     session: TerminalSessionRecord,
     action: TerminalAction,
@@ -81,6 +93,7 @@ export function TerminalSessionsPanel({
   ) => void;
   onReplay: (clientId: string, sessionId: string, fromSeq?: number) => Promise<TerminalReplayRecord>;
   onRefresh: () => void;
+  privilegeMaterial: PrivilegeMaterial | null;
 }) {
   const [launchTargetId, setLaunchTargetId] = useState("");
   const [launchProfile, setLaunchProfile] = useState<TerminalLaunchProfile>("posix-login");
@@ -90,11 +103,13 @@ export function TerminalSessionsPanel({
   const [launchCols, setLaunchCols] = useState(120);
   const [launchRows, setLaunchRows] = useState(40);
   const [launchStatus, setLaunchStatus] = useState<string | null>(null);
+  const [launchPending, setLaunchPending] = useState(false);
   const [replayPreview, setReplayPreview] = useState<TerminalReplayPreview | null>(null);
   const [replayPendingKey, setReplayPendingKey] = useState<string | null>(null);
   const [replayError, setReplayError] = useState<string | null>(null);
   const [followKey, setFollowKey] = useState<string | null>(null);
   const [activeKey, setActiveKey] = useState<string | null>(null);
+  const [terminalFocusOpen, setTerminalFocusOpen] = useState(false);
   const launchTarget = agents.find((agent) => agent.id === launchTargetId) ?? agents[0] ?? null;
   const launchProfileRecord =
     TERMINAL_LAUNCH_PROFILES.find((profile) => profile.value === launchProfile) ?? TERMINAL_LAUNCH_PROFILES[0];
@@ -340,6 +355,18 @@ export function TerminalSessionsPanel({
     void loadLiveReplay(lastTerminalOutputEvent.client_id, lastTerminalOutputEvent.session_id);
   }, [lastTerminalOutputEvent, followKey]);
 
+  useEffect(() => {
+    if (!activeSession || activeSession.output_next_seq === null) {
+      return;
+    }
+    const key = `${activeSession.client_id}:${activeSession.session_id}`;
+    if (followKey) {
+      return;
+    }
+    setFollowKey(key);
+    void loadDurableReplay(activeSession);
+  }, [activeSession?.client_id, activeSession?.session_id]);
+
   async function loadDurableReplay(session: TerminalSessionRecord) {
     const key = `${session.client_id}:${session.session_id}`;
     setActiveKey(key);
@@ -403,9 +430,14 @@ export function TerminalSessionsPanel({
     void loadDurableReplay(session);
   }
 
-  function prepareNewTerminal() {
+  async function openNewTerminal() {
     if (!launchTarget) {
-      setLaunchStatus("Select a VPS before preparing a terminal review.");
+      setLaunchStatus("Select a VPS before opening a terminal.");
+      return;
+    }
+    if (!privilegeMaterial) {
+      setLaunchStatus("Unlock privilege, then open the terminal from this launcher.");
+      onOpenPrivilegeUnlock();
       return;
     }
     const now = new Date().toISOString();
@@ -436,13 +468,22 @@ export function TerminalSessionsPanel({
       last_seq: 0,
       observed_at: now,
     };
-    onPrepareAction(session, "open", {
-      maxTimeoutSecs: clampNumber(launchIdleTimeoutSecs, 10, 86400),
-      terminalReplayFromSeq: "",
-      terminalUser: launchUser === "agent" ? "" : "root",
-      terminalUserPolicy: launchUser === "root-fallback" ? "fallback" : "fail",
-    });
-    setLaunchStatus(`${clientLabel(launchTarget.id)} terminal review prepared below.`);
+    setLaunchPending(true);
+    setLaunchStatus(`Opening terminal on ${clientLabel(launchTarget.id)}...`);
+    try {
+      await onOpenTerminal({
+        maxTimeoutSecs: clampNumber(launchIdleTimeoutSecs, 10, 86400),
+        session,
+        terminalReplayFromSeq: "",
+        terminalUser: launchUser === "agent" ? "" : "root",
+        terminalUserPolicy: launchUser === "root-fallback" ? "fallback" : "fail",
+      });
+      setLaunchStatus(`${clientLabel(launchTarget.id)} terminal open job submitted.`);
+    } catch (error) {
+      setLaunchStatus(error instanceof Error ? error.message : "Terminal open failed.");
+    } finally {
+      setLaunchPending(false);
+    }
   }
 
   return (
@@ -469,7 +510,7 @@ export function TerminalSessionsPanel({
         <div className="terminalLaunchIntro">
           <div>
             <h3>New terminal</h3>
-            <span>Prepare one reviewed browser terminal without leaving Remote Operations.</span>
+            <span>Open one browser terminal without leaving Remote Operations.</span>
           </div>
           <strong>Audited terminal_open</strong>
         </div>
@@ -557,16 +598,16 @@ export function TerminalSessionsPanel({
         <div className="terminalLaunchFooter">
           <span>
             {launchStatus ??
-              "Review below freezes target, session id, argv, user policy, window, timeout, and privilege intent."}
+              "Open submits a privileged terminal_open job for the selected VPS; protocol controls stay under Advanced session controls."}
           </span>
           <button
             className="primaryAction compactAction"
-            disabled={!launchTarget}
-            onClick={prepareNewTerminal}
+            disabled={!launchTarget || launchPending}
+            onClick={() => void openNewTerminal()}
             type="button"
           >
             <Play size={15} />
-            <span>Prepare terminal review</span>
+            <span>Open terminal</span>
           </button>
         </div>
       </div>
@@ -637,6 +678,15 @@ export function TerminalSessionsPanel({
               <Keyboard size={13} />
               <span>Input</span>
             </button>
+            <button
+              className="secondaryAction compactAction"
+              disabled={!activeSession}
+              onClick={() => setTerminalFocusOpen(true)}
+              type="button"
+            >
+              <Maximize2 size={13} />
+              <span>Focus terminal</span>
+            </button>
           </div>
         </div>
         <div className="terminalTranscriptState" aria-label="Terminal transcript availability">
@@ -671,6 +721,59 @@ export function TerminalSessionsPanel({
           }
         />
       </div>
+      {terminalFocusOpen && activeSession && (
+        <div
+          aria-label="Focused terminal workspace"
+          className="terminalFocusOverlay"
+          role="dialog"
+        >
+          <header>
+            <div>
+              <strong>{clientLabel(activeSession.client_id)}</strong>
+              <span>
+                {shortId(activeSession.session_id)} -{" "}
+                {formatArgv(activeSession.argv) || activeSession.last_command_type}
+              </span>
+            </div>
+            <div className="rowActions compactRowActions">
+              <button
+                className="secondaryAction compactAction"
+                onClick={() => void loadDurableReplay(activeSession)}
+                type="button"
+              >
+                <History size={13} />
+                <span>Replay</span>
+              </button>
+              <button
+                className="secondaryAction compactAction"
+                disabled={Boolean(activeSession.session_exited) || activeSession.state === "closed"}
+                onClick={() => onPrepareAction(activeSession, "input")}
+                type="button"
+              >
+                <Keyboard size={13} />
+                <span>Input</span>
+              </button>
+              <button
+                aria-label="Close focused terminal"
+                className="secondaryAction compactAction"
+                onClick={() => setTerminalFocusOpen(false)}
+                type="button"
+              >
+                <XCircle size={13} />
+                <span>Close</span>
+              </button>
+            </div>
+          </header>
+          <XtermReplay
+            label="Focused terminal emulator"
+            text={
+              replayPreview && replayPreview.sessionId === activeSession.session_id
+                ? replayPreview.text
+                : "Select Replay or Follow to load retained output for this session.\r\n"
+            }
+          />
+        </div>
+      )}
       <ConsoleDataGrid
         columns={terminalColumns}
         defaultPageSize={8}

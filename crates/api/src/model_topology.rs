@@ -53,7 +53,7 @@ pub(crate) struct TopologyGraphEdgeView {
     pub(crate) desired_missing_count: i64,
     pub(crate) stale_present_count: i64,
     pub(crate) import_candidate_count: i64,
-    pub(crate) bandwidth: String,
+    pub(crate) bandwidth_mbps: u32,
     pub(crate) recommended_ospf_cost: i32,
     pub(crate) cost_delta: Option<i32>,
     pub(crate) latency_avg_ms: Option<f64>,

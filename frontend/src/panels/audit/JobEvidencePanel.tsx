@@ -29,6 +29,15 @@ type EvidenceRecord = {
   job: JobHistoryRecord;
 };
 
+type EvidenceStateTone = "neutral" | "ok" | "warn";
+
+type EvidenceStateLabel = {
+  detail: string;
+  label: string;
+  searchText: string;
+  tone: EvidenceStateTone;
+};
+
 type EvidenceLoadState = {
   error: string | null;
   loading: boolean;
@@ -143,16 +152,16 @@ export function JobEvidencePanel({
       });
   }, [evidenceByJob, onLoadJobOutputs, onLoadJobTargets, selectedRecord]);
 
-  const completedJobs = useMemo(
-    () => jobs.filter((job) => job.status === "completed").length,
-    [jobs],
-  );
   const privilegedJobs = useMemo(
     () => jobs.filter((job) => job.privileged).length,
     [jobs],
   );
   const matchedJobs = useMemo(
     () => evidenceRows.filter((row) => row.auditMatches.length > 0).length,
+    [evidenceRows],
+  );
+  const auditGapCount = useMemo(
+    () => evidenceRows.filter((row) => row.auditMatches.length === 0).length,
     [evidenceRows],
   );
 
@@ -206,7 +215,7 @@ export function JobEvidencePanel({
       },
       {
         id: "status",
-        header: "Status",
+        header: "Result",
         minSize: 120,
         searchValue: (row) => row.job.status,
         size: 130,
@@ -219,32 +228,31 @@ export function JobEvidencePanel({
       },
       {
         id: "audit",
-        header: "Audit link",
+        header: "Audit",
         minSize: 130,
         searchValue: (row) =>
-          row.auditMatches.map((audit) => audit.action).join(" "),
+          auditEvidenceState(row).searchText,
         size: 150,
-        sortValue: (row) => row.auditMatches.length,
-        cell: (row) =>
-          row.auditMatches.length > 0 ? (
-            <span className="status ok">{row.auditMatches.length} matched</span>
-          ) : (
-            <span className="status neutral">job ledger only</span>
-          ),
+        sortValue: (row) => (row.auditMatches.length > 0 ? 1 : 0),
+        cell: (row) => {
+          const state = auditEvidenceState(row);
+          return <span className={`status ${state.tone}`}>{state.label}</span>;
+        },
       },
       {
-        id: "hash",
-        header: "Payload",
+        id: "output",
+        header: "Output",
         minSize: 120,
-        searchValue: (row) => row.job.payload_hash,
-        size: 130,
-        sortValue: (row) => row.job.payload_hash,
-        cell: (row) => (
-          <span className="monoValue">{shortHash(row.job.payload_hash)}</span>
-        ),
+        searchValue: (row) => outputEvidenceState(row.job, evidenceByJob[row.job.id]).searchText,
+        size: 150,
+        sortValue: (row) => outputEvidenceState(row.job, evidenceByJob[row.job.id]).label,
+        cell: (row) => {
+          const state = outputEvidenceState(row.job, evidenceByJob[row.job.id]);
+          return <span className={`status ${state.tone}`}>{state.label}</span>;
+        },
       },
     ],
-    [],
+    [evidenceByJob],
   );
 
   return (
@@ -285,11 +293,11 @@ export function JobEvidencePanel({
             <small>Jobs with audit rows</small>
           </span>
         </div>
-        <div className="metricCard">
+        <div className={`metricCard ${auditGapCount > 0 ? "attention" : ""}`}>
           <FileText size={18} />
           <span>
-            <strong>{completedJobs}</strong>
-            <small>Completed jobs</small>
+            <strong>{auditGapCount}</strong>
+            <small>Audit gaps</small>
           </span>
         </div>
       </div>
@@ -349,6 +357,8 @@ function JobEvidenceDetail({
   ).length;
   const streams = Array.from(new Set(evidence.outputs.map((output) => output.stream))).sort();
   const approvalLabel = approvalStateLabel(record.job, record.auditMatches);
+  const auditState = auditEvidenceState(record);
+  const outputState = outputEvidenceState(record.job, evidence);
 
   return (
     <section className="consoleDetailPanel jobEvidenceDetailPanel" aria-label="Selected job evidence detail">
@@ -385,6 +395,14 @@ function JobEvidenceDetail({
           <span>{targetSummary}</span>
         </span>
         <span>
+          <strong>Audit</strong>
+          <span className={`status ${auditState.tone}`}>{auditState.label}</span>
+        </span>
+        <span>
+          <strong>Output</strong>
+          <span className={`status ${outputState.tone}`}>{outputState.label}</span>
+        </span>
+        <span>
           <strong>Output artifact</strong>
           <span>
             {outputArtifactCount > 0
@@ -415,7 +433,7 @@ function JobEvidenceDetail({
             <small>
               {record.auditMatches.length > 0
                 ? `${record.auditMatches.length} row${record.auditMatches.length === 1 ? "" : "s"}`
-                : "no direct audit row"}
+                : "Audit event missing"}
             </small>
           </div>
           {record.auditMatches.length > 0 ? (
@@ -429,7 +447,7 @@ function JobEvidenceDetail({
             ))
           ) : (
             <div className="dashboardWidgetEmpty">
-              No matching audit row was returned for this payload hash or job ID. Job, target, and output evidence remains visible here.
+              Audit event missing. No matching audit row was returned for this payload hash or job ID; job, target, and output evidence remains visible here.
             </div>
           )}
         </section>
@@ -500,7 +518,7 @@ function JobEvidenceDetail({
             ))
           ) : (
             <div className="dashboardWidgetEmpty">
-              {evidence.loading ? "Loading retained output evidence..." : "No output artifacts or inline output rows returned for this job."}
+              {outputState.detail}
             </div>
           )}
         </section>
@@ -518,6 +536,93 @@ function auditMatchesJob(audit: AuditLogRecord, job: JobHistoryRecord): boolean 
     metadata.includes(job.id.toLowerCase()) ||
     metadata.includes(job.payload_hash.toLowerCase())
   );
+}
+
+function auditEvidenceState(record: EvidenceRecord): EvidenceStateLabel {
+  if (record.auditMatches.length > 0) {
+    const actions = record.auditMatches.map((audit) => audit.action).join(" ");
+    return {
+      detail: `${record.auditMatches.length} audit row${record.auditMatches.length === 1 ? "" : "s"} matched`,
+      label: `${record.auditMatches.length} matched`,
+      searchText: `${actions} matched audit linked`,
+      tone: "ok",
+    };
+  }
+  return {
+    detail: "No audit row matched this job ID or payload hash",
+    label: "Audit event missing",
+    searchText: "audit event missing audit gap",
+    tone: "warn",
+  };
+}
+
+function outputEvidenceState(
+  job: JobHistoryRecord,
+  evidence: EvidenceLoadState | undefined,
+): EvidenceStateLabel {
+  if (!evidence || evidence.loading) {
+    return {
+      detail: evidence?.loading
+        ? "Loading retained output evidence..."
+        : "Select the row to load retained output evidence.",
+      label: "Not loaded",
+      searchText: "not loaded output pending",
+      tone: "neutral",
+    };
+  }
+  if (evidence.error) {
+    const lower = evidence.error.toLowerCase();
+    const retentionExpired =
+      lower.includes("retention") ||
+      lower.includes("expired") ||
+      lower.includes("gone");
+    return retentionExpired
+      ? {
+          detail: "Retention expired. The job remains in the ledger, but retained output is no longer available.",
+          label: "Retention expired",
+          searchText: "retention expired output unavailable",
+          tone: "warn",
+        }
+      : {
+          detail: `Output unavailable. ${evidence.error}`,
+          label: "Output unavailable",
+          searchText: "output unavailable load error",
+          tone: "warn",
+        };
+  }
+  if (evidence.outputs.length === 0) {
+    return {
+      detail:
+        job.status === "completed"
+          ? "Output unavailable. No output artifact or inline output row was returned for this completed job."
+          : "Output unavailable. No retained output row is available yet for this job.",
+      label: "Output unavailable",
+      searchText: "output unavailable no rows",
+      tone: "warn",
+    };
+  }
+  const hasArtifact = evidence.outputs.some((output) =>
+    Boolean(output.artifact_object_key || output.artifact_sha256_hex),
+  );
+  const hasNonEmptyOutput = evidence.outputs.some((output) =>
+    decodeOutputPreview(output.data_base64).trim().length > 0,
+  );
+  if (!hasArtifact && !hasNonEmptyOutput) {
+    return {
+      detail: "Empty output. The retained output stream contains no visible text or artifact reference.",
+      label: "Empty output",
+      searchText: "empty output retained",
+      tone: "neutral",
+    };
+  }
+  return {
+    detail: hasArtifact
+      ? `${evidence.outputs.length} output row${evidence.outputs.length === 1 ? "" : "s"} with retained artifact evidence`
+      : `${evidence.outputs.length} inline output row${evidence.outputs.length === 1 ? "" : "s"} loaded`,
+    label: hasArtifact ? "Retained output" : "Inline output",
+    searchText: `${hasArtifact ? "retained output artifact" : "inline output"} loaded`,
+    tone: "ok",
+  };
 }
 
 function jobActorLabel(job: JobHistoryRecord, audits: AuditLogRecord[]): string {

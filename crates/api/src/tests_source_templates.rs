@@ -1,8 +1,8 @@
 use super::*;
 use vpsman_common::{
-    plan_tunnel, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, BandwidthTier,
-    CommandOutput, OspfCostPolicy, OutputStream, RuntimeTunnelCommand, RuntimeTunnelControl,
-    RuntimeTunnelManager, RuntimeTunnelTrafficLimit, TunnelKind, TunnelPlanInput,
+    plan_tunnel, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, CommandOutput,
+    OspfCostPolicy, OutputStream, RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager,
+    RuntimeTunnelTrafficLimit, TunnelKind, TunnelPlanInput,
 };
 
 #[tokio::test]
@@ -1104,7 +1104,7 @@ async fn source_status_enriches_backup_and_update_runtime_readiness() {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 12.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,

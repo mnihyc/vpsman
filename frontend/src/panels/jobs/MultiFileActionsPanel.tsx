@@ -71,6 +71,19 @@ type BulkPreflightItem = {
   value: string;
 };
 
+type BulkLiveMatchSummaryModel = {
+  attentionTargets: Array<{
+    id: string;
+    label: string;
+    title: string;
+    tone: "stale" | "unavailable";
+  }>;
+  detail: string;
+  label: string;
+  tone: "attention" | "neutral" | "ready";
+  value: string;
+};
+
 export function MultiFileActionsPanel({
   agents,
   initialPath,
@@ -163,7 +176,7 @@ export function MultiFileActionsPanel({
   async function refreshPreview() {
     const reviewGeneration = captureReviewGeneration();
     const reviewSelectorExpression = selectorExpression.trim();
-    setReviewStatus("Resolving bulk file targets");
+    setReviewStatus("Resolving bulk file scope");
     try {
       await waitForReviewRender();
       await runPanelAction(setPending, setActionError, async () => {
@@ -186,7 +199,7 @@ export function MultiFileActionsPanel({
   async function prepareBulkOperation() {
     const reviewGeneration = captureReviewGeneration();
     const reviewSelectorExpression = selectorExpression.trim();
-    setReviewStatus("Preparing bulk file review");
+    setReviewStatus("Preparing bulk file run");
     try {
       await waitForReviewRender();
       await runPanelAction(setPending, setActionError, async () => {
@@ -399,6 +412,11 @@ export function MultiFileActionsPanel({
     lastRunProgress,
     lastSummary,
   });
+  const liveMatchSummary = buildBulkLiveMatchSummary({
+    agentCount: agents.length,
+    localMatches,
+    preview,
+  });
   const reviewButtonTitle = bulkReviewButtonTitle({
     action,
     allowRootPath,
@@ -424,20 +442,9 @@ export function MultiFileActionsPanel({
         </div>
         <button className="secondaryAction" disabled={pending || loading} onClick={() => void refreshPreview()} type="button">
           <RefreshCw size={14} />
-          <span>Review targets</span>
+          <span>Refresh scope</span>
         </button>
       </div>
-
-      {!privilegeMaterial && (
-        <div className="fileBrowserPrivilegeRow">
-          <PrivilegeVaultBox
-            lastPayloadHash={lastPayloadHash}
-            onOpenUnlock={onOpenPrivilegeUnlock}
-            onPrivilegeMaterialChange={setPrivilegeMaterial}
-            privilegeMaterial={privilegeMaterial}
-          />
-        </div>
-      )}
 
       <div className="multiFileLayout">
         <section className="multiFileComposer">
@@ -494,7 +501,7 @@ export function MultiFileActionsPanel({
           {isRootPathValue(path) && (
             <div className="operationNote compactNote rootPathApprovalNote">
               <strong>Filesystem root selected</strong>
-              <span>Bulk operations against / are blocked until you explicitly approve the root path for this review.</span>
+              <span>Bulk operations against / are blocked until you explicitly approve the root path for this run.</span>
               <label className="inlineCheck actionCheck">
                 <input
                   checked={allowRootPath}
@@ -741,6 +748,17 @@ export function MultiFileActionsPanel({
               )}
             </div>
           )}
+          <BulkLiveMatchSummary summary={liveMatchSummary} />
+          {!privilegeMaterial && (
+            <div className="fileBrowserPrivilegeRow bulkPrivilegeInline">
+              <PrivilegeVaultBox
+                lastPayloadHash={lastPayloadHash}
+                onOpenUnlock={onOpenPrivilegeUnlock}
+                onPrivilegeMaterialChange={setPrivilegeMaterial}
+                privilegeMaterial={privilegeMaterial}
+              />
+            </div>
+          )}
           <button
             className={runBulkActionClass(action)}
             disabled={pending || !privilegeMaterial || loading}
@@ -756,7 +774,7 @@ export function MultiFileActionsPanel({
         <section className="bulkSummaryPane">
           <div className="sectionSubheader">
             <div>
-              <h3>Execution summary</h3>
+              <h3>{visibleProgress || lastSummary.length > 0 ? "Execution summary" : "Live match summary"}</h3>
               <span>{executionSummary}</span>
             </div>
             {lastOperation?.type === "file_download" && lastOutputs.length > 0 && (
@@ -778,12 +796,12 @@ export function MultiFileActionsPanel({
           {postRunItems.length > 0 && <BulkPreflightChecklist items={postRunItems} label="Bulk file post-run handling" />}
           {downloadComparison && <BulkDownloadComparisonView agentById={agentById} comparison={downloadComparison} />}
           <div className="bulkSummaryList">
-            {lastSummary.length === 0 ? (
+            {lastSummary.length === 0 && (visibleProgress || postRunItems.length > 0) ? (
               <div className="bulkNoResultsState" aria-label="Bulk file pending output placeholder">
                 <strong>No per-target results yet</strong>
-                <p>Review and confirm a bulk action to populate output groups, failure reasons, download bundle status, and retained artifact evidence.</p>
+                <p>Run a bulk action to populate output groups, failure reasons, download bundle status, and retained artifact evidence.</p>
               </div>
-            ) : (
+            ) : lastSummary.length > 0 ? (
               lastSummary.map((group) => (
                 <details key={group.key} open>
                   <summary>
@@ -817,7 +835,7 @@ export function MultiFileActionsPanel({
                   </div>
                 </details>
               ))
-            )}
+            ) : null}
           </div>
           {preview && lastSummary.length === 0 && (
             <div className="targetImpactPreview">
@@ -878,6 +896,31 @@ function BulkPreflightChecklist({
           <p>{item.detail}</p>
         </div>
       ))}
+    </div>
+  );
+}
+
+function BulkLiveMatchSummary({
+  summary,
+}: {
+  summary: BulkLiveMatchSummaryModel;
+}) {
+  return (
+    <div className={`bulkLiveSummary ${summary.tone}`} aria-label="Bulk file live match summary">
+      <div>
+        <span>{summary.label}</span>
+        <strong>{summary.value}</strong>
+        <p>{summary.detail}</p>
+      </div>
+      {summary.attentionTargets.length > 0 && (
+        <div className="bulkLiveSummaryTargets" aria-label="Bulk file attention targets">
+          {summary.attentionTargets.map((target) => (
+            <span className={target.tone} key={target.id} title={target.title}>
+              {target.label}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1442,8 +1485,8 @@ function buildBulkPreflightItems({
     },
     {
       detail: preview
-        ? "Server target preview is loaded. Review resolves the selector again before confirmation so stale cached scope cannot be executed."
-        : "This is the browser-side selector match. Use Review targets to fetch the server-resolved scope before preparing the operation.",
+        ? "Server target preview is loaded. Run resolves the selector again before confirmation so stale cached scope cannot be executed."
+        : "This is the browser-side selector match. Refresh scope fetches the server-resolved target set before you run.",
       key: "targets",
       label: preview ? "Server target preview" : "Local selector estimate",
       tone: targetTone,
@@ -1462,7 +1505,7 @@ function buildBulkPreflightItems({
       uploadOwnershipPolicy,
     }),
     {
-      detail: `${privilegeMaterial ? "Privilege material is unlocked for this browser session." : "Privilege unlock is required before review."} Stale agents may still reject with a command-version mismatch at execution; unavailable agents remain visible as failed/unavailable targets.`,
+      detail: `${privilegeMaterial ? "Privilege material is unlocked for this browser session." : "Privilege unlock is required before running."} Stale agents may still reject with a command-version mismatch at execution; unavailable agents remain visible as failed/unavailable targets.`,
       key: "compatibility",
       label: "Compatibility",
       tone: privilegeMaterial && availability.unavailable === 0 && availability.stale === 0 ? "ready" : "attention",
@@ -1476,6 +1519,57 @@ function buildBulkPreflightItems({
       value: "Failure groups preserved",
     },
   ];
+}
+
+function buildBulkLiveMatchSummary({
+  agentCount,
+  localMatches,
+  preview,
+}: {
+  agentCount: number;
+  localMatches: AgentView[];
+  preview: BulkResolveResponse | null;
+}): BulkLiveMatchSummaryModel {
+  const targets = preview?.targets ?? localMatches;
+  const availability = targetAvailabilityCounts(targets);
+  const ready = Math.max(0, targets.length - availability.stale - availability.unavailable);
+  const attentionTargets = targets
+    .filter((target) => target.status === "stale" || targetPreflightUnavailable(target))
+    .slice(0, 6)
+    .map((target) => ({
+      id: target.id,
+      label: `${targetDisplayName(target)} ${target.status}`,
+      title: `${target.display_name || target.id} / ${target.id} / ${target.status}`,
+      tone: target.status === "stale" ? "stale" as const : "unavailable" as const,
+    }));
+  const hiddenAttentionCount =
+    availability.stale + availability.unavailable - attentionTargets.length;
+  if (hiddenAttentionCount > 0) {
+    attentionTargets.push({
+      id: "more-attention-targets",
+      label: `+${hiddenAttentionCount} more`,
+      title: `${hiddenAttentionCount} more stale or unavailable VPSs`,
+      tone: "unavailable",
+    });
+  }
+  if (!preview) {
+    return {
+      attentionTargets,
+      detail:
+        "This is the browser-side selector estimate. Run re-resolves the selector on the server immediately before confirmation; Refresh scope shows the server view earlier.",
+      label: "Live match summary",
+      tone: attentionTargets.length > 0 ? "attention" : "neutral",
+      value: `${localMatches.length}/${agentCount} local matches · ${ready} ready`,
+    };
+  }
+  return {
+    attentionTargets,
+    detail:
+      "Server scope is previewed. Run still re-resolves before confirmation so stale cached target scope cannot execute.",
+    label: "Live match summary",
+    tone: attentionTargets.length > 0 ? "attention" : "ready",
+    value: `${preview.target_count} resolved · ${ready} ready`,
+  };
 }
 
 function bulkTransferEstimateItem({
@@ -1514,7 +1608,7 @@ function bulkTransferEstimateItem({
   if (action === "upload_file") {
     if (!uploadFile) {
       return {
-        detail: "Select a browser file before review so the operation can calculate payload size, hash, and chunking.",
+      detail: "Select a browser file before running so the operation can calculate payload size, hash, and chunking.",
         key: "transfer",
         label: "Size estimate",
         tone: "attention",
@@ -1532,7 +1626,7 @@ function bulkTransferEstimateItem({
   if (action === "write_text") {
     const bytes = new TextEncoder().encode(content).byteLength;
     return {
-      detail: `${formatBytes(bytes * targetCount)} estimated dispatch across ${vpsCountLabel(targetCount)}. The review computes the final content hash and applies ${fileActionPolicyLabel(policy).toLowerCase()}.`,
+      detail: `${formatBytes(bytes * targetCount)} estimated dispatch across ${vpsCountLabel(targetCount)}. Run computes the final content hash and applies ${fileActionPolicyLabel(policy).toLowerCase()}.`,
       key: "transfer",
       label: "Size estimate",
       tone: bytes > FILE_BROWSER_TEXT_LIMIT_BYTES ? "attention" : "neutral",
@@ -1614,7 +1708,7 @@ function bulkPathValidationError(
 ): string | null {
   const trimmed = value.trim();
   if (!trimmed) {
-    return `Enter an absolute path before reviewing ${bulkActionNoun(action)}.`;
+    return `Enter an absolute path before running ${bulkActionNoun(action)}.`;
   }
   let normalized: string;
   try {
@@ -1663,20 +1757,20 @@ function bulkPathReadiness(
   if (validationError) {
     return {
       detail: validationError,
-      label: "Needs path review",
+      label: "Needs path",
       shortLabel: "enter a path",
     };
   }
   const normalized = normalizeAbsolutePath(value);
   if (normalized === "/") {
     return {
-      detail: "Filesystem root was explicitly approved for this review. Confirm target scope before executing.",
+      detail: "Filesystem root was explicitly approved for this run. Confirm target scope before executing.",
       label: "Root path explicitly allowed",
       shortLabel: "root path approved",
     };
   }
   return {
-    detail: `${normalized} will be resolved again during review with the latest target selector.`,
+      detail: `${normalized} will be resolved again during Run with the latest target selector.`,
     label: normalized,
     shortLabel: normalized,
   };
@@ -1698,15 +1792,15 @@ function bulkReviewButtonTitle({
   privilegeMaterial: PrivilegeMaterial | null;
 }): string {
   if (pending) {
-    return "Bulk file review is already running.";
+    return "Bulk file run preparation is already in progress.";
   }
   if (loading) {
     return "Fleet data is still loading.";
   }
   if (!privilegeMaterial) {
-    return "Unlock privilege before reviewing a bulk file operation.";
+    return "Unlock privilege before running a bulk file operation.";
   }
-  return bulkPathValidationError(action, path, allowRootPath) ?? "Resolve targets, preview impact, and open confirmation.";
+  return bulkPathValidationError(action, path, allowRootPath) ?? "Resolve the latest targets, preview impact, and open one confirmation.";
 }
 
 function usesFileActionPolicy(action: MultiFileAction): boolean {
@@ -1730,25 +1824,25 @@ function runBulkActionClass(action: MultiFileAction): string {
 function runBulkActionLabel(action: MultiFileAction): string {
   switch (action) {
     case "download_files":
-      return "Review download";
+      return "Run download";
     case "upload_file":
-      return "Review upload";
+      return "Run upload";
     case "copy":
-      return "Review copy";
+      return "Run copy";
     case "rename":
-      return "Review move";
+      return "Run move";
     case "delete":
-      return "Review delete";
+      return "Run delete";
     case "chmod":
-      return "Review permission change";
+      return "Run permission change";
     case "chown":
-      return "Review owner change";
+      return "Run owner change";
     case "mkdir":
-      return "Review create";
+      return "Run create";
     case "write_text":
-      return "Review write";
+      return "Run write";
     default:
-      return "Review action";
+      return "Run action";
   }
 }
 
@@ -1869,7 +1963,7 @@ function confirmationItems(confirmation: PendingBulkConfirmation): Array<{ label
   if ("path" in operation) {
     items.push({ label: "Path", value: operation.path });
     if (operation.path === "/") {
-      items.push({ label: "Root path", value: "Explicitly allowed before review" });
+      items.push({ label: "Root path", value: "Explicitly allowed before run" });
     }
   }
   if ("new_path" in operation) {

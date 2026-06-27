@@ -532,6 +532,7 @@ async fn seed_completed_archive_upload(
             id: job_id,
             actor_id: None,
             command_type: "file_transfer_commit".to_string(),
+            source_schedule_id: None,
             privileged: true,
             status: "completed".to_string(),
             target_count: 1,

@@ -10,8 +10,8 @@ use vpsman_common::{
 
 use crate::{
     model::{
-        ArtifactCleanupPreviewView, AuthContext, NewServerArtifact, ServerArtifactCleanupCandidate,
-        ServerJobView,
+        ArtifactCleanupPreviewObjectView, ArtifactCleanupPreviewView, AuthContext,
+        NewServerArtifact, ServerArtifactCleanupCandidate, ServerJobView,
     },
     repository::Repository,
     unix_now,
@@ -456,6 +456,8 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let internal_domains = artifact_cleanup_internal_domains(domains);
+                let backup_requests = memory.backup_requests.read().await.clone();
+                let backup_artifacts = memory.backup_artifacts.read().await.clone();
                 Ok(memory
                     .server_artifacts
                     .read()
@@ -467,7 +469,20 @@ impl Repository {
                             "creating" | "active" | "deleting" | "delete_failed"
                         ) && internal_domains.contains(&artifact.domain)
                     })
-                    .cloned()
+                    .map(|artifact| {
+                        let mut artifact = artifact.clone();
+                        artifact.reference_protected = artifact.domain == "backup_artifact"
+                            && backup_requests.iter().any(|request| {
+                                request.artifact_id.is_some_and(|request_artifact_id| {
+                                    artifact.backup_artifact_id == Some(request_artifact_id)
+                                        || backup_artifacts.iter().any(|backup_artifact| {
+                                            backup_artifact.id == request_artifact_id
+                                                && backup_artifact.object_key == artifact.object_key
+                                        })
+                                })
+                            });
+                        artifact
+                    })
                     .collect())
             }
             Self::Postgres(pool) => {
@@ -475,21 +490,35 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT
-                        id,
-                        domain,
-                        object_key,
-                        sha256_hex,
-                        size_bytes,
-                        status,
-                        job_id,
-                        client_id,
-                        stream,
-                        seq,
-                        created_at::text AS created_at
-                    FROM server_artifacts
-                    WHERE status IN ('creating', 'active', 'deleting', 'delete_failed')
-                      AND domain = ANY($1)
-                    ORDER BY created_at DESC, object_key ASC
+                        artifact.id,
+                        artifact.domain,
+                        artifact.object_key,
+                        artifact.sha256_hex,
+                        artifact.size_bytes,
+                        artifact.status,
+                        artifact.job_id,
+                        artifact.client_id,
+                        artifact.stream,
+                        artifact.seq,
+                        artifact.backup_artifact_id,
+                        artifact.created_at::text AS created_at,
+                        CASE
+                            WHEN artifact.domain = 'backup_artifact' THEN EXISTS (
+                                SELECT 1
+                                FROM backup_requests requests
+                                JOIN backup_artifacts artifacts ON artifacts.id = requests.artifact_id
+                                WHERE (
+                                    artifact.backup_artifact_id IS NOT NULL
+                                    AND artifacts.id = artifact.backup_artifact_id
+                                )
+                                OR artifacts.object_key = artifact.object_key
+                            )
+                            ELSE false
+                        END AS reference_protected
+                    FROM server_artifacts artifact
+                    WHERE artifact.status IN ('creating', 'active', 'deleting', 'delete_failed')
+                      AND artifact.domain = ANY($1)
+                    ORDER BY artifact.created_at DESC, artifact.object_key ASC
                     LIMIT 10000
                     "#,
                 )
@@ -672,6 +701,7 @@ fn artifact_matches_cleanup_expression(
                 "seq": candidate.seq,
                 "sha256": &candidate.sha256_hex,
                 "created_at": &candidate.created_at,
+                "reference_protected": candidate.reference_protected,
             }),
         )]
         .into_iter()
@@ -688,6 +718,40 @@ fn cleanup_preview_from_matches(
 ) -> ArtifactCleanupPreviewView {
     let matched_count = matched.len() as i64;
     let matched_bytes = matched.iter().map(|candidate| candidate.size_bytes).sum();
+    let reference_protected_count = matched
+        .iter()
+        .filter(|candidate| candidate.reference_protected)
+        .count() as i64;
+    let retained_count = matched_count - reference_protected_count;
+    let mut chronological = matched.to_vec();
+    chronological.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.domain.cmp(&right.domain))
+            .then_with(|| left.object_key.cmp(&right.object_key))
+    });
+    let oldest_created_at = chronological
+        .first()
+        .map(|candidate| candidate.created_at.clone());
+    let newest_created_at = chronological
+        .last()
+        .map(|candidate| candidate.created_at.clone());
+    let representative_objects = chronological
+        .iter()
+        .take(20)
+        .map(|candidate| ArtifactCleanupPreviewObjectView {
+            id: candidate.id,
+            domain: candidate.domain.clone(),
+            object_key: candidate.object_key.clone(),
+            size_bytes: candidate.size_bytes,
+            status: candidate.status.clone(),
+            created_at: candidate.created_at.clone(),
+            reference_protected: candidate.reference_protected,
+            reason: candidate
+                .reference_protected
+                .then(|| "Reference protected by backup request".to_string()),
+        })
+        .collect();
     let mut identity = matched
         .iter()
         .map(|candidate| {
@@ -706,6 +770,12 @@ fn cleanup_preview_from_matches(
         preview_hash,
         matched_count,
         matched_bytes,
+        oldest_created_at,
+        newest_created_at,
+        retained_count,
+        reference_protected_count,
+        representative_objects,
+        full_list_download_url: None,
     }
 }
 
@@ -743,6 +813,7 @@ async fn upsert_memory_server_artifact(
                 && existing.client_id == artifact.client_id
                 && existing.stream == artifact.stream
                 && existing.seq == artifact.seq
+                && existing.backup_artifact_id == artifact.backup_artifact_id
                 && matches!(
                     existing.status.as_str(),
                     "creating" | "active" | "delete_failed"
@@ -763,7 +834,9 @@ async fn upsert_memory_server_artifact(
         client_id: artifact.client_id,
         stream: artifact.stream,
         seq: artifact.seq,
+        backup_artifact_id: artifact.backup_artifact_id,
         created_at: unix_now().to_string(),
+        reference_protected: false,
     });
     Ok(())
 }
@@ -782,7 +855,9 @@ fn server_artifact_candidate_from_row(
         client_id: row.try_get("client_id")?,
         stream: row.try_get("stream")?,
         seq: row.try_get("seq")?,
+        backup_artifact_id: row.try_get("backup_artifact_id")?,
         created_at: row.try_get("created_at")?,
+        reference_protected: row.try_get("reference_protected")?,
     })
 }
 
@@ -833,4 +908,77 @@ async fn expire_stale_artifact_cleanup_jobs_in_pool(pool: &sqlx::PgPool) -> Resu
     .execute(pool)
     .await?;
     Ok(result.rows_affected() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_preview_includes_age_protection_and_representative_objects() {
+        let first_id = Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
+        let second_id = Uuid::parse_str("22222222-2222-4333-8444-555555555555").unwrap();
+        let matched = vec![
+            ServerArtifactCleanupCandidate {
+                id: second_id,
+                domain: "backup_artifact".to_string(),
+                object_key: "backup-artifacts/protected.tar.zst".to_string(),
+                sha256_hex: "b".repeat(64),
+                size_bytes: 20,
+                status: "active".to_string(),
+                job_id: None,
+                client_id: Some("agent-fra-02".to_string()),
+                stream: None,
+                seq: None,
+                backup_artifact_id: Some(second_id),
+                created_at: "2026-06-02T10:00:00Z".to_string(),
+                reference_protected: true,
+            },
+            ServerArtifactCleanupCandidate {
+                id: first_id,
+                domain: "file_transfer_source".to_string(),
+                object_key: "file-transfer-sources/payload.bin".to_string(),
+                sha256_hex: "a".repeat(64),
+                size_bytes: 10,
+                status: "active".to_string(),
+                job_id: None,
+                client_id: Some("agent-sfo-01".to_string()),
+                stream: None,
+                seq: None,
+                backup_artifact_id: None,
+                created_at: "2026-05-31T10:00:00Z".to_string(),
+                reference_protected: false,
+            },
+        ];
+
+        let preview = cleanup_preview_from_matches(
+            "artifact.status = \"active\"".to_string(),
+            &["file_transfer".to_string(), "backup_artifact".to_string()],
+            &matched,
+        );
+
+        assert_eq!(preview.matched_count, 2);
+        assert_eq!(preview.matched_bytes, 30);
+        assert_eq!(
+            preview.oldest_created_at.as_deref(),
+            Some("2026-05-31T10:00:00Z")
+        );
+        assert_eq!(
+            preview.newest_created_at.as_deref(),
+            Some("2026-06-02T10:00:00Z")
+        );
+        assert_eq!(preview.retained_count, 1);
+        assert_eq!(preview.reference_protected_count, 1);
+        assert_eq!(preview.representative_objects.len(), 2);
+        assert_eq!(
+            preview.representative_objects[0].object_key,
+            "file-transfer-sources/payload.bin"
+        );
+        assert!(!preview.representative_objects[0].reference_protected);
+        assert!(preview.representative_objects[1].reference_protected);
+        assert_eq!(
+            preview.representative_objects[1].reason.as_deref(),
+            Some("Reference protected by backup request")
+        );
+    }
 }

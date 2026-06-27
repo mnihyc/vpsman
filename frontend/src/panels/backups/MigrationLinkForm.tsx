@@ -59,18 +59,18 @@ export function MigrationLinkForm({
   );
   const checklist = [
     {
-      label: "Restore plan",
+      label: "Source -> replacement",
       detail: selectedPlan
         ? `${clientLabel(selectedPlan.source_client_id)} to ${clientLabel(selectedPlan.target_client_id)}`
-        : "Select an approved restore plan",
+        : "Select a draft restore that defines both VPSs",
       ready: Boolean(selectedPlan),
       required: true,
     },
     {
-      label: "Archive metadata",
+      label: "Source artifact",
       detail: archiveReady
-        ? "Completed upload transfer selected"
-        : "Required for migration restore; not needed for link-only",
+        ? "Completed upload transfer selected on replacement"
+        : "Stage the source package on the replacement before cutover restore",
       ready: archiveReady,
       required: false,
     },
@@ -81,19 +81,19 @@ export function MigrationLinkForm({
       required: true,
     },
     {
-      label: "Rehearsal mode",
+      label: "Cutover mode",
       detail: restoreDryRun ? "Dry run enabled" : "Live restore selected",
       ready: restoreDryRun,
       required: false,
     },
     {
-      label: "Post-restore",
+      label: "Service check",
       detail: postRestoreArgv.trim() || "No post-restore command configured",
       ready: Boolean(postRestoreArgv.trim()),
       required: false,
     },
     {
-      label: "Privilege policy",
+      label: "Identity policy",
       detail: forceUnprivileged ? "Forced best-effort/unprivileged restore" : "Use client capability policy",
       ready: !forceUnprivileged,
       required: false,
@@ -103,18 +103,18 @@ export function MigrationLinkForm({
   return (
     <section className="backupActionPanel">
       <div className="sectionHeader compact restoreFormHeader">
-        <h2>Migration assistant</h2>
-        <span>Rebuilt VPS identity map and executable restore run</span>
+        <h2>Migration mapping</h2>
+        <span>Source VPS/artifact to replacement VPS, with optional cutover notes</span>
       </div>
       <div className="formGrid">
         <label>
-          Restore plan
+          Draft restore relationship
           <select
-            aria-label="Migration restore plan"
+            aria-label="Migration draft restore"
             onChange={(event) => onMigrationRestorePlanIdChange(event.target.value)}
             value={migrationRestorePlanId}
           >
-            <option value="">Select restore plan</option>
+            <option value="">Select draft restore</option>
             {restorePlans.map((plan) => (
               <option key={plan.id} value={plan.id}>
                 {clientLabel(plan.source_client_id)} to {clientLabel(plan.target_client_id)} ({plan.status})
@@ -125,27 +125,27 @@ export function MigrationLinkForm({
         {selectedPlan ? (
           <div className="migrationPlanSummary" aria-live="polite">
             <div>
-              <span>Plan</span>
+              <span>Draft restore</span>
               <strong>{shortId(selectedPlan.id)}</strong>
             </div>
             <div>
-              <span>Source</span>
+              <span>Source VPS</span>
               <strong>{clientLabel(selectedPlan.source_client_id)}</strong>
             </div>
             <div>
-              <span>Target</span>
+              <span>Replacement VPS</span>
               <strong>{clientLabel(selectedPlan.target_client_id)}</strong>
             </div>
             <div>
-              <span>Scope</span>
+              <span>Path behavior</span>
               <strong>{restoreScopeLabel(selectedPlan)}</strong>
             </div>
             <div>
-              <span>Status</span>
+              <span>Restore state</span>
               <strong className={`status ${restorePlanStatusBadgeClass(selectedPlan.status)}`}>{selectedPlan.status}</strong>
             </div>
             <div>
-              <span>Last link</span>
+              <span>Last mapping</span>
               <strong>{lastMigrationLink ? `${shortId(lastMigrationLink.id)} ${lastMigrationLink.status}` : "none"}</strong>
             </div>
           </div>
@@ -169,9 +169,9 @@ export function MigrationLinkForm({
           ))}
         </div>
         <label>
-          Migration note
+          Cutover notes
           <input
-            aria-label="Migration note"
+            aria-label="Migration cutover notes"
             onChange={(event) => onMigrationNoteChange(event.target.value)}
             placeholder="rebuilt VPS cutover"
             value={migrationNote}
@@ -186,7 +186,7 @@ export function MigrationLinkForm({
             onClick={() => void onSubmit()}
             type="button"
           >
-            Review link
+            Review mapping
           </button>
         )}
         {!runConfirmationOpen && (
@@ -196,7 +196,7 @@ export function MigrationLinkForm({
             onClick={() => void onRunMigrationRestore()}
             type="button"
           >
-            Review migration restore
+            Review cutover restore
           </button>
         )}
       </div>

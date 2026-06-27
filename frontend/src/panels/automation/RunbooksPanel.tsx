@@ -1,9 +1,23 @@
-import { ClipboardList, ExternalLink, Play, RefreshCcw, Search } from "lucide-react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import {
+  ChevronDown,
+  ClipboardList,
+  ExternalLink,
+  Play,
+  RefreshCcw,
+  Search,
+} from "lucide-react";
 import { useMemo, useState } from "react";
 import type { JobDispatchPresetInput } from "../../jobDispatchPreset";
 import { agentsMatchingExpression } from "../../searchExpression";
-import type { AgentView, CommandTemplateRecord, JobHistoryRecord, JobOperation, JsonValue } from "../../types";
-import { shortId } from "../../utils";
+import type {
+  AgentView,
+  CommandTemplateRecord,
+  JobHistoryRecord,
+  JobOperation,
+  JsonValue,
+} from "../../types";
+import { formatCompactTime, formatTime } from "../../utils";
 import type { DispatchMode, SupervisorAction } from "../jobDispatchModel";
 
 type RunbookFilter = "all" | "built_in" | "custom";
@@ -55,8 +69,16 @@ export function RunbooksPanel({
         const lastRun = latestRunForTemplate(template, jobs);
         return {
           capability: capabilityForOperation(template.operation),
+          lastEvidence: lastRunEvidenceForTemplate(
+            template,
+            lastRun,
+            jobs.length,
+          ),
           matchingTargets,
-          requiredParameters: requiredParametersForOperation(template.operation),
+          operationKind: operationTypeLabel(template.command_type),
+          requiredParameters: requiredParametersForOperation(
+            template.operation,
+          ),
           lastRun,
           operationSummary: operationSummary(template.operation),
           selectorExpression,
@@ -89,9 +111,13 @@ export function RunbooksPanel({
       .toLocaleLowerCase()
       .includes(needle);
   });
-  const dispatchableCount = runbooks.filter((runbook) => runbook.capability.dispatchable).length;
-  const customCount = runbooks.filter((runbook) => !runbook.template.built_in).length;
-  const latestRun = jobs[0] ?? null;
+  const dispatchableCount = runbooks.filter(
+    (runbook) => runbook.capability.dispatchable,
+  ).length;
+  const customCount = runbooks.filter(
+    (runbook) => !runbook.template.built_in,
+  ).length;
+  const latestRun = latestLoadedJob(jobs);
 
   function reviewRunbook(runbook: (typeof runbooks)[number]) {
     if (!runbook.capability.dispatchable) {
@@ -107,6 +133,14 @@ export function RunbooksPanel({
     });
   }
 
+  function openRunbookManagement(runbook: (typeof runbooks)[number]) {
+    if (runbook.capability.dispatchable) {
+      reviewRunbook(runbook);
+      return;
+    }
+    onOpenJobsDispatch();
+  }
+
   return (
     <section className="workspace singleColumn runbooksWorkspace">
       <section className="fleetPanel runbooksPanel">
@@ -120,11 +154,20 @@ export function RunbooksPanel({
             </span>
           </div>
           <div className="inlineActions">
-            <button className="secondaryAction compactAction" onClick={onOpenSchedules} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={onOpenSchedules}
+              type="button"
+            >
               <ClipboardList size={16} />
               Schedules
             </button>
-            <button className="secondaryAction compactAction" disabled={loading} onClick={onRefresh} type="button">
+            <button
+              className="secondaryAction compactAction"
+              disabled={loading}
+              onClick={onRefresh}
+              type="button"
+            >
               <RefreshCcw size={16} />
               Refresh
             </button>
@@ -132,13 +175,31 @@ export function RunbooksPanel({
         </div>
 
         <div className="runbookSummary" aria-label="Runbook catalog summary">
-          <RunbookMetric label="Runbooks" value={String(runbooks.length)} detail="template-backed reviewed operations" />
-          <RunbookMetric label="Ready" value={String(dispatchableCount)} detail="can open reviewed dispatch" />
-          <RunbookMetric label="Custom" value={String(customCount)} detail="operator-defined templates" />
           <RunbookMetric
-            label="Last run"
-            value={latestRun ? shortId(latestRun.id) : "none"}
-            detail={latestRun ? `${latestRun.command_type} ${latestRun.status}` : "no job evidence loaded"}
+            label="Runbooks"
+            value={String(runbooks.length)}
+            detail="template-backed reviewed operations"
+          />
+          <RunbookMetric
+            label="Ready"
+            value={String(dispatchableCount)}
+            detail="can open dispatch prefilled"
+          />
+          <RunbookMetric
+            label="Custom"
+            value={String(customCount)}
+            detail="operator-defined templates"
+          />
+          <RunbookMetric
+            label="Latest loaded job"
+            value={latestRun ? jobResultLabel(latestRun.status) : "none"}
+            detail={
+              latestRun
+                ? `${operationTypeLabel(latestRun.command_type)} · ${formatCompactTime(
+                    latestRun.completed_at ?? latestRun.created_at,
+                  )}`
+                : "no job evidence loaded"
+            }
           />
         </div>
 
@@ -170,7 +231,11 @@ export function RunbooksPanel({
               </button>
             ))}
           </div>
-          <button className="secondaryAction compactAction" onClick={onOpenJobsDispatch} type="button">
+          <button
+            className="secondaryAction compactAction"
+            onClick={onOpenJobsDispatch}
+            type="button"
+          >
             <ExternalLink size={15} />
             Jobs / Dispatch
           </button>
@@ -185,8 +250,12 @@ export function RunbooksPanel({
                     <h3>{runbook.template.name}</h3>
                     <span>{runbook.operationSummary}</span>
                   </div>
-                  <span className={runbook.template.built_in ? "status info" : "status ok"}>
-                    {runbook.template.built_in ? "built-in" : "custom"}
+                  <span
+                    className={
+                      runbook.template.built_in ? "status info" : "status ok"
+                    }
+                  >
+                    {runbook.template.built_in ? "Built-in" : "Custom"}
                   </span>
                 </div>
 
@@ -200,38 +269,79 @@ export function RunbooksPanel({
                     <dd>{runbook.matchingTargets} matched</dd>
                   </div>
                   <div>
-                    <dt>Review</dt>
-                    <dd>{runbook.template.command_type}</dd>
+                    <dt>Operation</dt>
+                    <dd>{runbook.operationKind}</dd>
                   </div>
                   <div>
-                    <dt>Last evidence</dt>
-                    <dd>{runbook.lastRun ? `${shortId(runbook.lastRun.id)} ${runbook.lastRun.status}` : "No matching run"}</dd>
+                    <dt>Last result</dt>
+                    <dd>
+                      <span
+                        className={`runbookLastResult ${runbook.lastEvidence.tone}`}
+                        title={runbook.lastEvidence.title}
+                      >
+                        <strong>{runbook.lastEvidence.label}</strong>
+                        <small>{runbook.lastEvidence.detail}</small>
+                      </span>
+                    </dd>
                   </div>
                 </dl>
 
-                <div className="runbookRequirementList" aria-label={`Required review for ${runbook.template.name}`}>
-                  {runbook.requiredParameters.map((item) => (
-                    <span key={item}>{item}</span>
-                  ))}
-                </div>
+                <details className="runbookRequirementsDisclosure">
+                  <summary>
+                    Review inputs
+                    <span>{runbook.requiredParameters.length}</span>
+                  </summary>
+                  <div
+                    className="runbookRequirementList"
+                    aria-label={`Required review for ${runbook.template.name}`}
+                  >
+                    {runbook.requiredParameters.map((item) => (
+                      <span key={item}>{item}</span>
+                    ))}
+                  </div>
+                </details>
 
                 <div className="runbookCardFooter">
-                  {runbook.capability.dispatchable ? (
-                    <button className="primaryAction compactAction" onClick={() => reviewRunbook(runbook)} type="button">
-                      <Play size={15} />
-                      Review in Dispatch
-                    </button>
-                  ) : (
-                    <button
-                      className="secondaryAction compactAction"
-                      onClick={runbook.capability.route === "terminal" ? onOpenRemoteTerminal : onOpenJobsDispatch}
-                      type="button"
-                    >
-                      <ExternalLink size={15} />
-                      {runbook.capability.route === "terminal" ? "Remote terminal" : "Open owner"}
-                    </button>
-                  )}
-                  <span>{runbook.capability.dispatchable ? "Reviewed handoff" : runbook.capability.reason}</span>
+                  <div className="runbookPrimaryActions">
+                    {runbook.capability.dispatchable ? (
+                      <button
+                        className="primaryAction compactAction"
+                        onClick={() => reviewRunbook(runbook)}
+                        type="button"
+                      >
+                        <Play size={15} />
+                        Run
+                      </button>
+                    ) : (
+                      <button
+                        className="secondaryAction compactAction"
+                        onClick={
+                          runbook.capability.route === "terminal"
+                            ? onOpenRemoteTerminal
+                            : onOpenJobsDispatch
+                        }
+                        type="button"
+                      >
+                        <ExternalLink size={15} />
+                        {runbook.capability.route === "terminal"
+                          ? "Remote terminal"
+                          : "Open owner"}
+                      </button>
+                    )}
+                    {!runbook.template.built_in && (
+                      <RunbookManageMenu
+                        onDelete={() => openRunbookManagement(runbook)}
+                        onDuplicate={() => openRunbookManagement(runbook)}
+                        onEdit={() => openRunbookManagement(runbook)}
+                        templateName={runbook.template.name}
+                      />
+                    )}
+                  </div>
+                  <span>
+                    {runbook.capability.dispatchable
+                      ? "Opens Dispatch with scope and template prefilled."
+                      : runbook.capability.reason}
+                  </span>
                 </div>
               </article>
             ))}
@@ -240,7 +350,9 @@ export function RunbooksPanel({
           <div className="emptyState compactEmpty" role="status">
             <ClipboardList size={22} />
             <strong>No runbooks match</strong>
-            <span>Adjust the filter or create command templates in Jobs / Dispatch.</span>
+            <span>
+              Adjust the filter or create command templates in Jobs / Dispatch.
+            </span>
           </div>
         )}
       </section>
@@ -248,7 +360,64 @@ export function RunbooksPanel({
   );
 }
 
-function RunbookMetric({ detail, label, value }: { detail: string; label: string; value: string }) {
+function RunbookManageMenu({
+  onDelete,
+  onDuplicate,
+  onEdit,
+  templateName,
+}: {
+  onDelete: () => void;
+  onDuplicate: () => void;
+  onEdit: () => void;
+  templateName: string;
+}) {
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          aria-label={`Manage ${templateName}`}
+          className="secondaryAction compactAction"
+          type="button"
+        >
+          Manage
+          <ChevronDown size={14} />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align="end"
+          className="consoleMenu"
+          collisionPadding={12}
+          sideOffset={6}
+        >
+          <DropdownMenu.Item className="consoleMenuItem" onSelect={onEdit}>
+            Edit in Dispatch
+          </DropdownMenu.Item>
+          <DropdownMenu.Item className="consoleMenuItem" onSelect={onDuplicate}>
+            Duplicate in Dispatch
+          </DropdownMenu.Item>
+          <DropdownMenu.Separator className="consoleMenuSeparator" />
+          <DropdownMenu.Item
+            className="consoleMenuItem danger"
+            onSelect={onDelete}
+          >
+            Delete in Dispatch
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
+function RunbookMetric({
+  detail,
+  label,
+  value,
+}: {
+  detail: string;
+  label: string;
+  value: string;
+}) {
   return (
     <div className="runbookMetric">
       <small>{label}</small>
@@ -258,8 +427,15 @@ function RunbookMetric({ detail, label, value }: { detail: string; label: string
   );
 }
 
-function latestRunForTemplate(template: CommandTemplateRecord, jobs: JobHistoryRecord[]) {
-  return jobs.find((job) => job.command_type === template.command_type) ?? null;
+function latestRunForTemplate(
+  template: CommandTemplateRecord,
+  jobs: JobHistoryRecord[],
+) {
+  return (
+    jobs
+      .filter((job) => job.command_type === template.command_type)
+      .sort((left, right) => jobTimeMs(right) - jobTimeMs(left))[0] ?? null
+  );
 }
 
 function selectorForTemplateScope(template: CommandTemplateRecord): string {
@@ -309,71 +485,131 @@ function capabilityForOperation(operation: JobOperation): RunbookCapability {
     case "process_list":
       return { dispatchable: true, mode: "process_list" };
     case "process_start":
-      return { dispatchable: true, mode: "process_supervisor", supervisorAction: "start" };
+      return {
+        dispatchable: true,
+        mode: "process_supervisor",
+        supervisorAction: "start",
+      };
     case "process_stop":
-      return { dispatchable: true, mode: "process_supervisor", supervisorAction: "stop" };
+      return {
+        dispatchable: true,
+        mode: "process_supervisor",
+        supervisorAction: "stop",
+      };
     case "process_restart":
-      return { dispatchable: true, mode: "process_supervisor", supervisorAction: "restart" };
+      return {
+        dispatchable: true,
+        mode: "process_supervisor",
+        supervisorAction: "restart",
+      };
     case "process_status":
-      return { dispatchable: true, mode: "process_supervisor", supervisorAction: "status" };
+      return {
+        dispatchable: true,
+        mode: "process_supervisor",
+        supervisorAction: "status",
+      };
     case "process_logs":
-      return { dispatchable: true, mode: "process_supervisor", supervisorAction: "logs" };
+      return {
+        dispatchable: true,
+        mode: "process_supervisor",
+        supervisorAction: "logs",
+      };
     case "terminal_open":
     case "terminal_input":
     case "terminal_poll":
     case "terminal_resize":
     case "terminal_close":
-      return { dispatchable: false, reason: "Terminal lifecycle belongs in Remote Operations.", route: "terminal" };
+      return {
+        dispatchable: false,
+        reason: "Terminal lifecycle belongs in Remote Operations.",
+        route: "terminal",
+      };
     case "file_transfer_start":
     case "file_transfer_chunk":
     case "file_transfer_commit":
     case "file_transfer_abort":
     case "file_transfer_download_start":
     case "file_transfer_download_chunk":
-      return { dispatchable: false, reason: "Transfer sessions belong in Remote Operations / Transfers.", route: "transfers" };
+      return {
+        dispatchable: false,
+        reason: "Transfer sessions belong in Remote Operations / Transfers.",
+        route: "transfers",
+      };
     default:
-      return { dispatchable: false, reason: "Open the owner workflow for this operation type.", route: "unsupported" };
+      return {
+        dispatchable: false,
+        reason: "Open the owner workflow for this operation type.",
+        route: "unsupported",
+      };
   }
 }
 
 function requiredParametersForOperation(operation: JobOperation): string[] {
   switch (operation.type) {
     case "shell":
-      return ["target scope", operation.pty ? "PTY shell review" : "argv review", "timeout"];
+      return [
+        "Target scope",
+        operation.pty ? "PTY session" : "Command arguments",
+        "Timeout",
+      ];
     case "shell_script":
-      return ["target scope", "script review", "timeout"];
+      return ["Target scope", "Script body", "Timeout"];
     case "file_pull":
-      return ["target scope", `path ${operation.path}`, operation.follow_symlinks ? "follow symlinks" : "no symlink follow"];
+      return [
+        "Target scope",
+        `Path ${operation.path}`,
+        operation.follow_symlinks
+          ? "Follow symlinks"
+          : "Do not follow symlinks",
+      ];
     case "backup":
       return [
-        "target scope",
-        operation.include_config ? "include config" : "paths only",
-        operation.paths.length ? `${operation.paths.length} paths` : "no paths",
+        "Target scope",
+        operation.include_config ? "Include config" : "Paths only",
+        operation.paths.length ? `${operation.paths.length} paths` : "No paths",
       ];
     case "agent_update":
-      return ["target scope", "artifact URL", "SHA-256"];
+      return ["Target scope", "Artifact URL", "SHA-256"];
     case "agent_update_check":
-      return ["target scope", "manifest URL", operation.activate ? "activation review" : "check only"];
+      return [
+        "Target scope",
+        "Manifest URL",
+        operation.activate ? "Activation review" : "Check only",
+      ];
     case "agent_update_activate":
-      return ["target scope", "staged SHA-256", operation.restart_agent ? "restart agent" : "no restart"];
+      return [
+        "Target scope",
+        "Staged SHA-256",
+        operation.restart_agent ? "Restart agent" : "No restart",
+      ];
     case "agent_update_rollback":
-      return ["target scope", operation.rollback_sha256_hex ? "rollback SHA-256" : "latest rollback"];
+      return [
+        "Target scope",
+        operation.rollback_sha256_hex ? "Rollback SHA-256" : "Latest rollback",
+      ];
     case "user_sessions":
-      return ["target scope", "session inventory"];
+      return ["Target scope", "Session inventory"];
     case "process_list":
-      return ["target scope", `${operation.limit} process limit`];
+      return ["Target scope", `${operation.limit} process limit`];
     case "process_start":
-      return ["target scope", `process ${operation.name}`, "start review"];
+      return ["Target scope", `Process ${operation.name}`, "Start"];
     case "process_stop":
-      return ["target scope", `process ${operation.name}`, "stop review"];
+      return ["Target scope", `Process ${operation.name}`, "Stop"];
     case "process_restart":
-      return ["target scope", `process ${operation.name}`, "restart review"];
+      return ["Target scope", `Process ${operation.name}`, "Restart"];
     case "process_status":
-      return ["target scope", operation.name ? `process ${operation.name}` : "all processes"];
+      return [
+        "Target scope",
+        operation.name ? `Process ${operation.name}` : "All processes",
+      ];
     case "process_logs":
-      return ["target scope", `process ${operation.name}`, `${operation.max_bytes} log bytes`];
+      return [
+        "Target scope",
+        `Process ${operation.name}`,
+        `${operation.max_bytes} log bytes`,
+      ];
     default:
-      return ["owner workflow", operation.type];
+      return ["Owner workflow", operationTypeLabel(operation.type)];
   }
 }
 
@@ -416,6 +652,122 @@ function operationSummary(operation: JobOperation): string {
   }
 }
 
+type RunbookLastEvidence = {
+  detail: string;
+  label: string;
+  title?: string;
+  tone: "ok" | "warn" | "neutral";
+};
+
+function lastRunEvidenceForTemplate(
+  template: CommandTemplateRecord,
+  lastRun: JobHistoryRecord | null,
+  loadedJobCount: number,
+): RunbookLastEvidence {
+  if (lastRun) {
+    const timestamp = lastRun.completed_at ?? lastRun.created_at;
+    return {
+      detail: `${formatCompactTime(timestamp)} · ${lastRun.target_count} ${lastRun.target_count === 1 ? "VPS" : "VPSs"}`,
+      label: jobResultLabel(lastRun.status),
+      title: `Job ${lastRun.id} · ${formatTime(timestamp)}`,
+      tone: jobResultTone(lastRun.status),
+    };
+  }
+  if (loadedJobCount > 0) {
+    return {
+      detail: `No ${operationTypeLabel(template.command_type).toLowerCase()} execution in loaded history`,
+      label: "No loaded run",
+      tone: "neutral",
+    };
+  }
+  return {
+    detail: "Refresh or run this runbook to create evidence",
+    label: "No job evidence",
+    tone: "neutral",
+  };
+}
+
+function latestLoadedJob(jobs: JobHistoryRecord[]): JobHistoryRecord | null {
+  return (
+    [...jobs].sort((left, right) => jobTimeMs(right) - jobTimeMs(left))[0] ??
+    null
+  );
+}
+
+function jobTimeMs(job: JobHistoryRecord): number {
+  const value = Date.parse(job.completed_at ?? job.created_at);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function operationTypeLabel(commandType: string): string {
+  switch (commandType) {
+    case "shell_argv":
+      return "Shell command";
+    case "scheduled_shell_argv":
+      return "Scheduled shell command";
+    case "shell_pty":
+      return "Interactive shell";
+    case "shell_script":
+      return "Shell script";
+    case "file_pull":
+      return "File download";
+    case "backup":
+      return "Backup";
+    case "agent_update":
+      return "Agent update";
+    case "agent_update_check":
+      return "Agent update check";
+    case "agent_update_activate":
+      return "Agent update activation";
+    case "agent_update_rollback":
+      return "Agent update rollback";
+    case "user_sessions":
+      return "User session inventory";
+    case "process_list":
+      return "Process inventory";
+    case "process_start":
+      return "Start process";
+    case "process_stop":
+      return "Stop process";
+    case "process_restart":
+      return "Restart process";
+    case "process_status":
+      return "Process status";
+    case "process_logs":
+      return "Process logs";
+    default:
+      return commandType.replace(/_/g, " ");
+  }
+}
+
+function jobResultLabel(status: string): string {
+  switch (status) {
+    case "completed":
+      return "Succeeded";
+    case "failed":
+      return "Failed";
+    case "running":
+      return "Running";
+    case "queued":
+      return "Queued";
+    case "canceled":
+    case "cancelled":
+      return "Canceled";
+    default:
+      return status.replace(/_/g, " ");
+  }
+}
+
+function jobResultTone(status: string): RunbookLastEvidence["tone"] {
+  if (status === "completed") {
+    return "ok";
+  }
+  if (status === "failed" || status === "canceled" || status === "cancelled") {
+    return "warn";
+  }
+  return "neutral";
+}
+
 function defaultMaxTimeout(defaults: JsonValue): number | undefined {
   if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) {
     return undefined;
@@ -424,7 +776,9 @@ function defaultMaxTimeout(defaults: JsonValue): number | undefined {
   return typeof value === "number" ? value : undefined;
 }
 
-function processSupervisorPreset(operation: JobOperation): Partial<JobDispatchPresetInput> {
+function processSupervisorPreset(
+  operation: JobOperation,
+): Partial<JobDispatchPresetInput> {
   switch (operation.type) {
     case "process_start":
       return {
@@ -439,7 +793,10 @@ function processSupervisorPreset(operation: JobOperation): Partial<JobDispatchPr
     case "process_status":
       return { supervisorName: operation.name ?? "" };
     case "process_logs":
-      return { supervisorLogBytes: operation.max_bytes, supervisorName: operation.name };
+      return {
+        supervisorLogBytes: operation.max_bytes,
+        supervisorName: operation.name,
+      };
     default:
       return {};
   }

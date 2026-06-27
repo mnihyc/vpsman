@@ -12,9 +12,18 @@ async function activate(locator: Locator) {
 }
 
 async function dispatchWithPrompt(composer: Locator) {
-  await activate(composer.getByRole("button", { name: "Review dispatch" }));
+  await activate(composer.getByRole("button", { name: "Dispatch", exact: true }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   await activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" }));
+}
+
+async function chooseFileOperation(composer: Locator, operation: string) {
+  await activate(
+    composer.getByLabel("Dispatch operation groups").getByRole("button", {
+      name: "Files",
+    }),
+  );
+  await activate(composer.getByRole("button", { name: operation }));
 }
 
 async function unlockDispatchPrivilege(page: Page) {
@@ -31,7 +40,7 @@ test("orchestrates browser resumable upload with ACK progress", async ({ page },
   const composer = page.locator(".commandComposer");
   await expect(composer.getByRole("heading", { name: "Dispatch command" })).toBeVisible();
   await unlockDispatchPrivilege(page);
-  await activate(composer.getByRole("button", { name: "Resumable upload" }));
+  await chooseFileOperation(composer, "Resumable upload");
   await composer.getByLabel("Resumable upload source").setInputFiles({
     name: "payload.bin",
     mimeType: "application/octet-stream",
@@ -84,17 +93,17 @@ test("orchestrates browser resumable upload with ACK progress", async ({ page },
   expect((transferRequests[4].operation as { offset: number }).offset).toBe(24);
 });
 
-test("orchestrates browser resumable upload from retained source artifact", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "browser source-artifact upload flow is covered in the desktop job composer");
+test("orchestrates browser resumable upload from retained reusable source", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "browser reusable-source upload flow is covered in the desktop job composer");
 
   await page.goto("/");
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const composer = page.locator(".commandComposer");
   await unlockDispatchPrivilege(page);
-  await activate(composer.getByRole("button", { name: "Resumable upload" }));
+  await chooseFileOperation(composer, "Resumable upload");
   await composer.getByLabel("Resumable upload producer").selectOption("source-artifact");
-  await composer.getByLabel("Resumable upload source artifact").selectOption("62626262-2222-4333-8444-555555555555");
+  await composer.getByLabel("Resumable upload reusable source").selectOption("62626262-2222-4333-8444-555555555555");
   await composer.getByLabel("Resumable upload path").fill("/tmp/artifact-upload.bin");
   await composer.getByLabel("Resumable upload mode").fill("0644");
   await composer.getByLabel("Resumable upload chunk bytes").fill("8");
@@ -140,13 +149,13 @@ test("orchestrates browser resumable download with artifact chunks", async ({ pa
 
   const composer = page.locator(".commandComposer");
   await unlockDispatchPrivilege(page);
-  await activate(composer.getByRole("button", { name: "Resumable download" }));
+  await chooseFileOperation(composer, "Resumable download");
   await composer.getByLabel("Resumable download path").fill("/tmp/browser-download.bin");
   await composer.getByLabel("Resumable download filename").fill("browser-download.bin");
   await composer.getByLabel("Resumable download chunk bytes").fill("8");
   await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
 
-  await activate(composer.getByRole("button", { name: "Review dispatch" }));
+  await activate(composer.getByRole("button", { name: "Dispatch", exact: true }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   const [download] = await Promise.all([
     page.waitForEvent("download"),
@@ -232,7 +241,7 @@ test("streams browser resumable download through writable file handle", async ({
 
   const composer = page.locator(".commandComposer");
   await unlockDispatchPrivilege(page);
-  await activate(composer.getByRole("button", { name: "Resumable download" }));
+  await chooseFileOperation(composer, "Resumable download");
   await composer.getByLabel("Resumable download path").fill("/tmp/browser-download.bin");
   await composer.getByLabel("Resumable download filename").fill("streamed-download.bin");
   await composer.getByLabel("Resumable download chunk bytes").fill("8");

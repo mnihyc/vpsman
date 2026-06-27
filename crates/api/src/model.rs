@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::{
-    AgentCapabilitySnapshot, BandwidthTier, JobCommand, PrivilegeAssertion, RuntimeTunnelControl,
+    AgentCapabilitySnapshot, BandwidthMbps, JobCommand, PrivilegeAssertion, RuntimeTunnelControl,
     RuntimeTunnelTopologyIntent, TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide,
     TunnelKind, TunnelPlan, TunnelPlanInput,
 };
@@ -95,6 +95,8 @@ pub(crate) struct GatewaySessionView {
     pub(crate) client_id: String,
     pub(crate) status: String,
     pub(crate) noise_public_key_hex: Option<String>,
+    pub(crate) remote_ip: Option<String>,
+    pub(crate) agent_version: String,
     pub(crate) started_at: String,
     pub(crate) last_seen_at: String,
     pub(crate) ended_at: Option<String>,
@@ -221,6 +223,7 @@ pub(crate) struct JobHistoryView {
     pub(crate) id: Uuid,
     pub(crate) actor_id: Option<Uuid>,
     pub(crate) command_type: String,
+    pub(crate) source_schedule_id: Option<Uuid>,
     pub(crate) privileged: bool,
     pub(crate) status: String,
     pub(crate) target_count: i32,
@@ -357,13 +360,14 @@ pub(crate) struct NetworkObservationTrendView {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct NetworkOspfRecommendationView {
+    pub(crate) recommendation_id: String,
     pub(crate) plan_id: Uuid,
     pub(crate) plan_name: String,
     pub(crate) interface_name: String,
     pub(crate) left_client_id: String,
     pub(crate) right_client_id: String,
-    pub(crate) configured_bandwidth: String,
-    pub(crate) effective_bandwidth: String,
+    pub(crate) configured_bandwidth_mbps: u32,
+    pub(crate) effective_bandwidth_mbps: u32,
     pub(crate) plan_ospf_cost: i32,
     pub(crate) recommended_ospf_cost: i32,
     pub(crate) cost_delta: i32,
@@ -376,12 +380,13 @@ pub(crate) struct NetworkOspfRecommendationView {
     pub(crate) latest_observed_at: Option<String>,
     pub(crate) confidence: String,
     pub(crate) reason: String,
+    pub(crate) evidence_summary: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct NetworkOspfUpdateEvidenceView {
-    pub(crate) configured_bandwidth: String,
-    pub(crate) effective_bandwidth: String,
+    pub(crate) configured_bandwidth_mbps: u32,
+    pub(crate) effective_bandwidth_mbps: u32,
     pub(crate) latency_avg_ms: Option<f64>,
     pub(crate) packet_loss_avg_ratio: Option<f64>,
     pub(crate) throughput_avg_mbps: Option<f64>,
@@ -394,6 +399,7 @@ pub(crate) struct NetworkOspfUpdateEvidenceView {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct NetworkOspfUpdatePlanView {
+    pub(crate) recommendation_id: String,
     pub(crate) plan_id: Uuid,
     pub(crate) plan_name: String,
     pub(crate) interface_name: String,
@@ -413,6 +419,7 @@ pub(crate) struct NetworkOspfUpdatePlanView {
     pub(crate) proposed_left_bird2_interface_snippet: String,
     pub(crate) proposed_right_bird2_interface_snippet: String,
     pub(crate) change_summary: String,
+    pub(crate) evidence_summary: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -534,10 +541,17 @@ pub(crate) struct CreateTunnelPlanRequest {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct UpdateTunnelPlanOspfCostRequest {
+    pub(crate) recommendation_id: String,
     pub(crate) current_ospf_cost: u16,
     pub(crate) recommended_ospf_cost: u16,
+    #[serde(default = "default_ospf_cost_mutation_intent")]
+    pub(crate) mutation_intent: String,
     #[serde(default)]
     pub(crate) confirmed: bool,
+}
+
+fn default_ospf_cost_mutation_intent() -> String {
+    "apply".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -580,7 +594,7 @@ pub(crate) struct PromoteTelemetryTunnelRequest {
     pub(crate) latency_primary_family: TunnelAddressFamily,
     pub(crate) side: Option<TunnelEndpointSide>,
     pub(crate) name: Option<String>,
-    pub(crate) bandwidth: Option<BandwidthTier>,
+    pub(crate) bandwidth_mbps: Option<BandwidthMbps>,
     pub(crate) latency_ms: Option<f64>,
     pub(crate) packet_loss_ratio: Option<f64>,
     pub(crate) preference: Option<f64>,

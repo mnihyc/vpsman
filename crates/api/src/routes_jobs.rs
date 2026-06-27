@@ -220,14 +220,11 @@ pub(crate) async fn reject_job_approval(
             "job_approval_decision_requires_confirmation",
         ));
     }
+    let reason = bounded_review_reason(request.reason.as_deref())
+        .ok_or_else(|| ApiError::bad_request("job_approval_rejection_reason_required"))?;
     let approval = state
         .repo
-        .decide_job_approval(
-            approval_id,
-            "rejected",
-            &operator,
-            bounded_review_reason(request.reason.as_deref()).as_deref(),
-        )
+        .decide_job_approval(approval_id, "rejected", &operator, Some(reason.as_str()))
         .await
         .map_err(map_job_approval_repo_error)?;
     Ok(Json(JobApprovalDecisionResponse {
@@ -522,7 +519,7 @@ async fn create_job_inner(
         return Ok((StatusCode::OK, Json(response)));
     }
 
-    if !request.privileged {
+    if !request.privileged && !job_allows_unprivileged_submission(&job_command) {
         return reject_job(
             state,
             job_id,
@@ -531,7 +528,7 @@ async fn create_job_inner(
             &request_fingerprint,
             operator,
             JOB_STATUS_REJECTED,
-            "all non-telemetry jobs require privilege unlock",
+            "job requires privilege unlock",
             StatusCode::FORBIDDEN,
         )
         .await;
@@ -701,6 +698,13 @@ async fn create_job_inner(
             target_counts,
         }),
     ))
+}
+
+fn job_allows_unprivileged_submission(command: &JobCommand) -> bool {
+    matches!(
+        command,
+        JobCommand::ConfigRead | JobCommand::NetworkStatus { .. }
+    ) && !job_command_requires_confirmation(command)
 }
 
 fn validate_job_command_source(

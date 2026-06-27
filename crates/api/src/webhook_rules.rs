@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
+use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
+use sha2::Sha256;
 use std::collections::HashSet;
 use uuid::Uuid;
 use vpsman_common::{
@@ -28,6 +30,11 @@ const WEBHOOK_PROCESS_DRY_RUN_STATUS: &str = "delivery_dry_run";
 const WEBHOOK_DELIVERY_LEASE_SECS: i64 = 300;
 const MAX_WEBHOOK_DELIVERY_ATTEMPTS: i32 = 4;
 const WEBHOOK_RETRY_BACKOFF_SECS: [i64; 3] = [60, 300, 1800];
+const WEBHOOK_SIGNATURE_HEADER: &str = "X-Vpsman-Webhook-Signature";
+const WEBHOOK_DELIVERY_HEADER: &str = "X-Vpsman-Webhook-Delivery";
+const WEBHOOK_EVENT_HEADER: &str = "X-Vpsman-Webhook-Event";
+
+type HmacSha256 = Hmac<Sha256>;
 
 impl AppState {
     pub(crate) async fn dry_run_webhook_rule(
@@ -45,6 +52,8 @@ impl AppState {
                 .unwrap_or_else(|| "https://dry-run.invalid/webhook".to_string()),
             body_template: request.body_template.trim().to_string(),
             cooldown_secs: request.cooldown_secs.unwrap_or(0),
+            signing_secret: None,
+            signing_secret_set: false,
             notes: optional_trimmed(&request.notes),
             actor_id: Some(operator.operator.id),
             created_at: now.clone(),
@@ -94,13 +103,23 @@ impl AppState {
             .event_id
             .clone()
             .unwrap_or_else(|| format!("{event_kind}:{}", unix_now()));
-        let rules = self
-            .repo
-            .list_webhook_rules(request.limit.unwrap_or(100).clamp(1, 1000), Some(true))
-            .await?;
+        let rule_limit = if request.rule_id.is_some() {
+            1000
+        } else {
+            request.limit.unwrap_or(100).clamp(1, 1000)
+        };
+        let rules = self.repo.list_webhook_rules(rule_limit, Some(true)).await?;
         let agents = self.repo.list_agents().await?;
         let mut candidates = Vec::new();
+        let mut matched_rule_id = request.rule_id.is_none();
         for rule in rules {
+            if request
+                .rule_id
+                .is_some_and(|requested_rule_id| rule.id != requested_rule_id)
+            {
+                continue;
+            }
+            matched_rule_id = true;
             if let Some(candidate) = webhook_candidate_for_rule(
                 &rule,
                 event_kind,
@@ -111,6 +130,14 @@ impl AppState {
                 candidates.push(candidate);
             }
         }
+        anyhow::ensure!(
+            matched_rule_id,
+            "webhook_rule_not_found_or_disabled:{}",
+            request
+                .rule_id
+                .map(|rule_id| rule_id.to_string())
+                .unwrap_or_default()
+        );
         let preview_hash =
             webhook_dispatch_preview_hash(request, event_kind, &event_id, &candidates)?;
         if dry_run {
@@ -326,6 +353,7 @@ fn webhook_dispatch_preview_hash(
         "version": 1,
         "kind": "webhook_rule_dispatch",
         "request": {
+            "rule_id": request.rule_id,
             "event_kind": event_kind,
             "event_id": event_id,
             "limit": request.limit,
@@ -472,6 +500,7 @@ pub(crate) fn webhook_candidate_for_event(
         payload,
         matched_vps,
         message,
+        signing_secret: rule.signing_secret.clone(),
         cooldown_until_unix: (unix_now() as i64).saturating_add(rule.cooldown_secs),
         actor_id,
     }))
@@ -482,12 +511,17 @@ pub(crate) async fn deliver_webhook_rule(
     delivery: &WebhookRuleDeliveryView,
 ) -> Result<()> {
     crate::repository_webhook_rules::validate_webhook_rule_target(&delivery.target)?;
-    let response = client
+    let body = serde_json::to_vec(&delivery.payload).context("failed to encode webhook payload")?;
+    let mut request = client
         .post(delivery.target.trim())
-        .json(&delivery.payload)
-        .send()
-        .await
-        .context("webhook request failed")?;
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(WEBHOOK_DELIVERY_HEADER, delivery.id.to_string())
+        .header(WEBHOOK_EVENT_HEADER, delivery.event_kind.trim())
+        .body(body.clone());
+    if let Some(secret) = delivery.signing_secret.as_deref() {
+        request = request.header(WEBHOOK_SIGNATURE_HEADER, webhook_signature(secret, &body)?);
+    }
+    let response = request.send().await.context("webhook request failed")?;
     let status = response.status();
     anyhow::ensure!(
         status.is_success(),
@@ -495,6 +529,16 @@ pub(crate) async fn deliver_webhook_rule(
         status.as_u16()
     );
     Ok(())
+}
+
+fn webhook_signature(secret: &str, body: &[u8]) -> Result<String> {
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).context("invalid webhook signing secret")?;
+    mac.update(body);
+    Ok(format!(
+        "sha256={}",
+        hex::encode(mac.finalize().into_bytes())
+    ))
 }
 
 fn webhook_next_retry_after_secs(attempt_count: i32) -> Option<i64> {
@@ -600,6 +644,8 @@ mod tests {
             target: "https://hooks.example/vpsman".to_string(),
             body_template: "{rule.name} {event.kind} {vps.id}".to_string(),
             cooldown_secs: 30,
+            signing_secret: Some("secret".to_string()),
+            signing_secret_set: true,
             notes: None,
             actor_id: None,
             created_at: "0".to_string(),
@@ -616,5 +662,15 @@ mod tests {
         .unwrap();
         assert_eq!(candidate.matched_vps.len(), 1);
         assert_eq!(candidate.message, "edge-online interval.30sec edge-a");
+        assert_eq!(candidate.signing_secret.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn webhook_signature_uses_payload_bytes() {
+        let signature = webhook_signature("secret", br#"{"hello":"world"}"#).unwrap();
+        assert_eq!(
+            signature,
+            "sha256=2677ad3e7c090b2fa2c0fb13020d66d5420879b8316eb356a2d60fb9073bc778"
+        );
     }
 }

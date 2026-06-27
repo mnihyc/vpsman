@@ -34,13 +34,13 @@ export function ReleaseStatusPanel({
           <ReleaseStatusList
             icon={<CircleDashed size={18} />}
             items={pending}
-            title="Implementation work"
+            title="Not available yet"
             tone="pending"
           />
           <ReleaseStatusList
             icon={<AlertTriangle size={18} />}
             items={blocked}
-            title="Backend or model contract needed"
+            title="Data contract needed"
             tone="blocked"
           />
         </div>

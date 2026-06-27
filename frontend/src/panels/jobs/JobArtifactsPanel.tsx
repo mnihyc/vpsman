@@ -1,4 +1,5 @@
-import { Archive, ExternalLink } from "lucide-react";
+import { useMemo, useState } from "react";
+import { Archive, Copy, ExternalLink } from "lucide-react";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
@@ -20,16 +21,26 @@ type JobArtifactsPanelProps = {
 };
 
 type ArtifactInventoryRow = {
+  actionLabel: string;
   createdAt: string;
-  domain: string;
+  detailLabel: string;
+  downloadPath: string | null;
+  rawStatus: string;
   id: string;
   name: string;
   objectKey: string;
-  relation: string;
+  relationLabel: string;
+  sourceDetail: string;
   sha256Hex: string;
   sizeBytes: number | null;
   sourceWorkflow: string;
-  status: string;
+  type: string;
+  verification:
+    | "Ready"
+    | "Upload incomplete"
+    | "Verification failed"
+    | "Expired";
+  verificationDetail: string;
 };
 
 export function JobArtifactsPanel({
@@ -40,39 +51,52 @@ export function JobArtifactsPanel({
   onOpenBackupsArtifacts,
   onOpenTransfers,
 }: JobArtifactsPanelProps) {
+  const [typeFilter, setTypeFilter] = useState("all");
   const rows = buildArtifactInventoryRows({
     agentUpdateReleases,
     backupArtifacts,
     fileTransferSources,
   });
-  const totalBytes = rows.reduce(
-    (sum, row) => sum + (row.sizeBytes ?? 0),
-    0,
+  const totalBytes = rows.reduce((sum, row) => sum + (row.sizeBytes ?? 0), 0);
+  const artifactTypes = useMemo(
+    () => Array.from(new Set(rows.map((row) => row.type))).sort(),
+    [rows],
   );
-  const domains = new Set(rows.map((row) => row.domain));
+  const visibleRows = useMemo(
+    () =>
+      typeFilter === "all"
+        ? rows
+        : rows.filter((row) => row.type === typeFilter),
+    [rows, typeFilter],
+  );
   const columns: ConsoleDataGridColumn<ArtifactInventoryRow>[] = [
     {
       cell: (row) => (
         <span className="historyPrimary">
           <strong title={row.name}>{row.name}</strong>
-          <small>{row.domain}</small>
+          <small>{row.detailLabel}</small>
         </span>
       ),
       header: "Artifact",
       id: "artifact",
       minSize: 180,
-      searchValue: (row) => `${row.name} ${row.domain} ${row.id}`,
+      searchValue: (row) => `${row.name} ${row.type} ${row.id}`,
       size: 240,
       sortValue: (row) => row.name,
     },
     {
-      cell: (row) => <span className="status">{row.status}</span>,
-      header: "Status",
-      id: "status",
-      minSize: 100,
-      searchValue: (row) => row.status,
-      size: 120,
-      sortValue: (row) => row.status,
+      cell: (row) => (
+        <span className="historyPrimary">
+          <strong>{row.type}</strong>
+          <small>{row.sourceDetail}</small>
+        </span>
+      ),
+      header: "Type",
+      id: "type",
+      minSize: 150,
+      searchValue: (row) => `${row.type} ${row.sourceDetail}`,
+      size: 180,
+      sortValue: (row) => row.type,
     },
     {
       cell: (row) => (
@@ -100,33 +124,30 @@ export function JobArtifactsPanel({
     },
     {
       cell: (row) => (
-        <span className="monoValue" title={row.objectKey}>
-          {row.objectKey}
+        <span className="historyPrimary">
+          <strong>{row.relationLabel}</strong>
+          <small>{row.id.replace(/^[^:]+:/, "")}</small>
         </span>
       ),
-      header: "Object / URL",
-      id: "object",
-      minSize: 180,
-      searchValue: (row) => row.objectKey,
-      size: 300,
-      sortValue: (row) => row.objectKey,
+      header: "VPS / job",
+      id: "relation",
+      minSize: 150,
+      searchValue: (row) => `${row.relationLabel} ${row.id}`,
+      size: 190,
+      sortValue: (row) => row.relationLabel,
     },
     {
-      cell: (row) => (
-        <span className="monoValue" title={row.sha256Hex}>
-          {shortHash(row.sha256Hex)}
-        </span>
-      ),
-      header: "SHA-256",
-      id: "sha",
-      minSize: 90,
-      searchValue: (row) => row.sha256Hex,
-      size: 105,
-      sortValue: (row) => row.sha256Hex,
+      cell: (row) => formatTime(row.createdAt),
+      header: "Created",
+      id: "created",
+      minSize: 130,
+      searchValue: (row) => row.createdAt,
+      size: 150,
+      sortValue: (row) => row.createdAt,
     },
     {
       cell: (row) =>
-        row.sizeBytes === null ? "unknown" : formatBytes(row.sizeBytes),
+        row.sizeBytes === null ? "Unknown" : formatBytes(row.sizeBytes),
       header: "Size",
       id: "size",
       minSize: 95,
@@ -135,13 +156,48 @@ export function JobArtifactsPanel({
       sortValue: (row) => row.sizeBytes ?? -1,
     },
     {
-      cell: (row) => formatTime(row.createdAt),
-      header: "Created",
-      id: "created",
+      cell: (row) => (
+        <span className="historyPrimary">
+          <span
+            className={`status ${artifactVerificationClass(row.verification)}`}
+          >
+            {row.verification}
+          </span>
+          <small>{row.verificationDetail}</small>
+        </span>
+      ),
+      header: "Verification",
+      id: "verification",
+      minSize: 160,
+      searchValue: (row) =>
+        `${row.verification} ${row.verificationDetail} ${row.rawStatus}`,
+      size: 190,
+      sortValue: (row) => row.verification,
+    },
+    {
+      cell: (row) => (
+        <button
+          className="secondaryAction compactAction"
+          onClick={(event) => {
+            event.stopPropagation();
+            openSourceWorkflow(row, {
+              onOpenAgentUpdates,
+              onOpenBackupsArtifacts,
+              onOpenTransfers,
+            });
+          }}
+          type="button"
+        >
+          {row.actionLabel}
+        </button>
+      ),
+      enableHiding: false,
+      header: "Action",
+      id: "action",
       minSize: 130,
-      searchValue: (row) => row.createdAt,
-      size: 160,
-      sortValue: (row) => row.createdAt,
+      searchValue: (row) => row.actionLabel,
+      size: 150,
+      sortValue: (row) => row.actionLabel,
     },
   ];
 
@@ -151,14 +207,20 @@ export function JobArtifactsPanel({
         <div className="sectionHeader">
           <div>
             <h2>Job artifacts</h2>
-            <span>Read-only cross-domain execution artifacts, separated from cleanup.</span>
+            <span>
+              Read-only cross-domain execution artifacts, separated from
+              cleanup.
+            </span>
           </div>
         </div>
-        <section className="jobArtifactsSummary" aria-label="Job artifact inventory summary">
+        <section
+          className="jobArtifactsSummary"
+          aria-label="Job artifact inventory summary"
+        >
           <div>
-            <span>Domains</span>
-            <strong>{domains.size}</strong>
-            <small>backup, file transfer, and agent update sources</small>
+            <span>Artifact types</span>
+            <strong>{artifactTypes.length}</strong>
+            <small>backup, transfer, and update artifact types</small>
           </div>
           <div>
             <span>Records</span>
@@ -176,16 +238,31 @@ export function JobArtifactsPanel({
             <small>no destructive controls on this inventory page</small>
           </div>
         </section>
-        <section className="jobArtifactSourceLinks" aria-label="Artifact source workflow links">
-          <button className="secondaryAction" onClick={onOpenBackupsArtifacts} type="button">
+        <section
+          className="jobArtifactSourceLinks"
+          aria-label="Artifact source workflow links"
+        >
+          <button
+            className="secondaryAction"
+            onClick={onOpenBackupsArtifacts}
+            type="button"
+          >
             <Archive size={16} />
             Backups / Artifacts
           </button>
-          <button className="secondaryAction" onClick={onOpenTransfers} type="button">
+          <button
+            className="secondaryAction"
+            onClick={onOpenTransfers}
+            type="button"
+          >
             <ExternalLink size={16} />
             Remote Operations / Transfers
           </button>
-          <button className="secondaryAction" onClick={onOpenAgentUpdates} type="button">
+          <button
+            className="secondaryAction"
+            onClick={onOpenAgentUpdates}
+            type="button"
+          >
             <ExternalLink size={16} />
             Automation / Agent updates
           </button>
@@ -198,24 +275,87 @@ export function JobArtifactsPanel({
             <div className="emptyState">
               <Archive size={20} />
               <strong>No artifact records</strong>
-              <span>Execution artifact records will appear here after source workflows create them.</span>
+              <span>
+                Execution artifact records will appear here after source
+                workflows create them.
+              </span>
             </div>
           }
           getRowId={(row) => row.id}
           itemLabel="artifacts"
           renderExpandedRow={(row) => (
-            <div className="gridDetailLine">
-              <strong>{row.sourceWorkflow}</strong>
-              <span>{row.relation}</span>
-              <span>{row.status}</span>
-              <span>{row.objectKey}</span>
-              <span>{shortHash(row.sha256Hex)}</span>
+            <div className="consoleInlineDetailGrid artifactDetailGrid">
+              <span>
+                <strong>Object key / URL</strong>
+                <span title={row.objectKey}>{row.objectKey}</span>
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={() => void copyText(row.objectKey)}
+                  type="button"
+                >
+                  <Copy size={13} />
+                  Copy
+                </button>
+              </span>
+              <span>
+                <strong>SHA-256</strong>
+                <span title={row.sha256Hex}>{row.sha256Hex}</span>
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={() => void copyText(row.sha256Hex)}
+                  type="button"
+                >
+                  <Copy size={13} />
+                  Copy
+                </button>
+              </span>
+              <span>
+                <strong>Source</strong>
+                <span>{row.sourceWorkflow}</span>
+                <span>{row.relationLabel}</span>
+              </span>
+              <span>
+                <strong>Verification evidence</strong>
+                <span>{row.verificationDetail}</span>
+                <span>Raw status: {row.rawStatus}</span>
+              </span>
+              <span>
+                <strong>Download path</strong>
+                <span>{row.downloadPath ?? "Handled by source workflow"}</span>
+                {row.downloadPath ? (
+                  <button
+                    className="secondaryAction compactAction"
+                    onClick={() => void copyText(row.downloadPath ?? "")}
+                    type="button"
+                  >
+                    <Copy size={13} />
+                    Copy
+                  </button>
+                ) : null}
+              </span>
             </div>
           )}
-          rows={rows}
+          rows={visibleRows}
           searchPlaceholder="Search artifacts"
           selectable={false}
           storageKey="vpsman.grid.jobs.artifacts"
+          toolbarActions={
+            <label className="jobArtifactTypeFilter">
+              <span>Type</span>
+              <select
+                aria-label="Artifact type filter"
+                onChange={(event) => setTypeFilter(event.target.value)}
+                value={typeFilter}
+              >
+                <option value="all">All types</option>
+                {artifactTypes.map((type) => (
+                  <option key={type} value={type}>
+                    {type}
+                  </option>
+                ))}
+              </select>
+            </label>
+          }
           title="Job artifact inventory"
         />
       </div>
@@ -251,60 +391,82 @@ function buildArtifactInventoryRows({
   fileTransferSources: FileTransferSourceArtifactRecord[];
 }): ArtifactInventoryRow[] {
   const backupRows = backupArtifacts.map((artifact) => ({
+    actionLabel: "Open backup",
     createdAt: artifact.created_at,
-    domain: "backup",
+    detailLabel: `Backup ${shortId(artifact.id)}`,
+    downloadPath: null,
     id: `backup:${artifact.id}`,
-    name: shortId(artifact.id),
+    name: `Backup artifact ${shortId(artifact.id)}`,
     objectKey: artifact.object_key,
-    relation: artifact.client_id,
+    rawStatus: artifact.status,
+    relationLabel: artifact.client_id,
     sha256Hex: artifact.sha256_hex,
     sizeBytes: artifact.size_bytes,
+    sourceDetail: "Backup request output",
     sourceWorkflow: "Backups / Artifacts",
-    status: artifact.status,
+    type: "Backup artifact",
+    ...artifactVerification(artifact.status),
   }));
   const transferRows = fileTransferSources.map((source) => ({
+    actionLabel: "Open transfers",
     createdAt: source.created_at,
-    domain: "file_transfer_source",
+    detailLabel: source.name,
+    downloadPath: source.download_path,
     id: `file-transfer-source:${source.id}`,
     name: source.name,
     objectKey: source.object_key,
-    relation: source.download_path,
+    rawStatus: source.status,
+    relationLabel: source.created_by
+      ? `Operator ${shortId(source.created_by)}`
+      : "Uploaded source",
     sha256Hex: source.sha256_hex,
     sizeBytes: source.size_bytes,
+    sourceDetail: "Reusable upload source",
     sourceWorkflow: "Remote Operations / Transfers",
-    status: source.status,
+    type: "Transfer package",
+    ...artifactVerification(source.status),
   }));
   const releaseRows = agentUpdateReleases.flatMap((release) => {
     const rows: ArtifactInventoryRow[] = [
       {
+        actionLabel: "Open update",
         createdAt: release.created_at,
-        domain: "agent_update",
+        detailLabel: `${release.channel} channel`,
+        downloadPath: null,
         id: `agent-update:${release.id}:artifact`,
         name: `${release.name} ${release.version}`,
         objectKey: release.artifact_url_sha256_hex
           ? `url hash ${shortHash(release.artifact_url_sha256_hex)}`
           : "artifact URL hash unavailable",
-        relation: release.channel,
+        rawStatus: release.status,
+        relationLabel: `Release ${shortId(release.id)}`,
         sha256Hex: release.artifact_sha256_hex,
         sizeBytes: release.size_bytes,
+        sourceDetail: "Primary agent update",
         sourceWorkflow: "Automation / Agent updates",
-        status: release.status,
+        type: "Agent update bundle",
+        ...artifactVerification(release.status),
       },
     ];
     if (release.rollback_artifact_sha256_hex) {
       rows.push({
+        actionLabel: "Open update",
         createdAt: release.created_at,
-        domain: "agent_update_rollback",
+        detailLabel: `${release.channel} channel`,
+        downloadPath: null,
         id: `agent-update:${release.id}:rollback`,
         name: `${release.name} ${release.version} rollback`,
         objectKey: release.rollback_artifact_url_sha256_hex
           ? `url hash ${shortHash(release.rollback_artifact_url_sha256_hex)}`
           : "rollback URL hash unavailable",
-        relation: release.channel,
+        rawStatus: release.status,
+        relationLabel: `Release ${shortId(release.id)}`,
         sha256Hex: release.rollback_artifact_sha256_hex,
         sizeBytes: release.rollback_size_bytes,
+        sourceDetail: "Rollback bundle",
         sourceWorkflow: "Automation / Agent updates",
-        status: release.status,
+        type: "Agent rollback bundle",
+        ...artifactVerification(release.status),
       });
     }
     return rows;
@@ -312,6 +474,64 @@ function buildArtifactInventoryRows({
   return [...backupRows, ...transferRows, ...releaseRows].sort((left, right) =>
     right.createdAt.localeCompare(left.createdAt),
   );
+}
+
+function artifactVerification(
+  status: string,
+): Pick<ArtifactInventoryRow, "verification" | "verificationDetail"> {
+  const normalized = status.toLowerCase();
+  if (
+    normalized.includes("expired") ||
+    normalized.includes("deleted") ||
+    normalized.includes("pruned")
+  ) {
+    return {
+      verification: "Expired",
+      verificationDetail: "Artifact reference is no longer usable",
+    };
+  }
+  if (
+    normalized.includes("failed") ||
+    normalized.includes("mismatch") ||
+    normalized.includes("invalid")
+  ) {
+    return {
+      verification: "Verification failed",
+      verificationDetail: "Hash, upload, or publication check failed",
+    };
+  }
+  if (
+    normalized.includes("creating") ||
+    normalized.includes("upload") ||
+    normalized.includes("pending") ||
+    normalized.includes("partial")
+  ) {
+    return {
+      verification: "Upload incomplete",
+      verificationDetail: "Source workflow has not finished recording bytes",
+    };
+  }
+  return {
+    verification: "Ready",
+    verificationDetail: "Recorded with SHA-256 evidence",
+  };
+}
+
+function artifactVerificationClass(
+  verification: ArtifactInventoryRow["verification"],
+): string {
+  switch (verification) {
+    case "Ready":
+      return "ok";
+    case "Upload incomplete":
+      return "warn";
+    case "Verification failed":
+      return "warn";
+    case "Expired":
+      return "neutral";
+    default:
+      return "neutral";
+  }
 }
 
 function formatBytes(value: number): string {
@@ -326,4 +546,11 @@ function formatBytes(value: number): string {
     unitIndex += 1;
   }
   return `${size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unitIndex]}`;
+}
+
+async function copyText(value: string) {
+  if (!value.trim()) {
+    return;
+  }
+  await navigator.clipboard?.writeText(value);
 }

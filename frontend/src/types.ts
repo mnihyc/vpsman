@@ -53,7 +53,8 @@ export type BackupRequestStatus = GeneratedBackupRequestStatus;
 export type SourceReadinessStatus = GeneratedSourceReadinessStatus;
 export type FleetAlertNotificationDeliveryProcessStatus =
   GeneratedFleetAlertNotificationDeliveryProcessStatus;
-export type FleetAlertNotificationDeliveryStatus = GeneratedFleetAlertNotificationDeliveryStatus;
+export type FleetAlertNotificationDeliveryStatus =
+  GeneratedFleetAlertNotificationDeliveryStatus;
 export type MigrationLinkStatus = GeneratedMigrationLinkStatus;
 export type RestorePlanStatus = GeneratedRestorePlanStatus;
 export type ServerJobStatus = GeneratedServerJobStatus;
@@ -68,8 +69,10 @@ export type TopologyProbeState = GeneratedTopologyProbeState;
 export type TopologyRuntimeState = GeneratedTopologyRuntimeState;
 export type TunnelEndpointStatus = GeneratedTunnelEndpointStatus;
 export type TunnelPlanStatus = GeneratedTunnelPlanStatus;
-export type WebhookRuleDeliveryHistoryStatus = GeneratedWebhookRuleDeliveryHistoryStatus;
-export type WebhookRuleDeliveryProcessStatus = GeneratedWebhookRuleDeliveryProcessStatus;
+export type WebhookRuleDeliveryHistoryStatus =
+  GeneratedWebhookRuleDeliveryHistoryStatus;
+export type WebhookRuleDeliveryProcessStatus =
+  GeneratedWebhookRuleDeliveryProcessStatus;
 export type WebhookRuleDeliveryStatus = GeneratedWebhookRuleDeliveryStatus;
 
 export type FleetSummary = {
@@ -501,7 +504,8 @@ export type VpsRulesDryRunRequest = GeneratedVpsRulesDryRunRequest;
 export type VpsRulesDryRunResponse = GeneratedVpsRulesDryRunResponse;
 export type VpsRulesBulkUpsertRequest = GeneratedVpsRulesBulkUpsertRequest;
 export type VpsRulesBulkUnsetRequest = GeneratedVpsRulesBulkUnsetRequest;
-export type TrafficAccountingSelectorBreakdown = GeneratedTrafficAccountingSelectorBreakdown;
+export type TrafficAccountingSelectorBreakdown =
+  GeneratedTrafficAccountingSelectorBreakdown;
 export type TrafficAccountingRecord = GeneratedTrafficAccountingRecord;
 export type PolicyRuleRecord = GeneratedPolicyRuleRecord;
 export type PolicyGroupRecord = GeneratedPolicyGroupRecord;
@@ -601,6 +605,7 @@ export type WebhookRuleRecord = {
   target: string;
   body_template: string;
   cooldown_secs: number;
+  signing_secret_set: boolean;
   notes: string | null;
   actor_id: string | null;
   created_at: string;
@@ -614,6 +619,8 @@ export type WebhookRuleRequest = {
   expression: string;
   target: string;
   body_template?: string;
+  signing_secret?: string | null;
+  clear_signing_secret?: boolean;
   cooldown_secs?: number | null;
   notes?: string | null;
   confirmed: boolean;
@@ -663,6 +670,7 @@ export type WebhookRuleDryRunRequest = {
 };
 
 export type WebhookRuleDispatchRequest = {
+  rule_id?: string | null;
   event_kind?: string;
   event_id?: string | null;
   limit?: number;
@@ -748,6 +756,8 @@ export type GatewaySessionRecord = {
   client_id: string;
   status: string;
   noise_public_key_hex: string | null;
+  remote_ip: string | null;
+  agent_version: string;
   started_at: string;
   last_seen_at: string;
   ended_at: string | null;
@@ -977,6 +987,7 @@ export type JobHistoryRecord = {
   id: string;
   actor_id: string | null;
   command_type: string;
+  source_schedule_id: string | null;
   privileged: boolean;
   status: JobStatus;
   target_count: number;
@@ -1039,6 +1050,21 @@ export type ArtifactCleanupPreviewRecord = {
   preview_hash: string;
   matched_count: number;
   matched_bytes: number;
+  oldest_created_at?: string | null;
+  newest_created_at?: string | null;
+  retained_count?: number | null;
+  reference_protected_count?: number | null;
+  representative_objects?: Array<{
+    id?: string | null;
+    domain: string;
+    object_key: string;
+    size_bytes: number;
+    status: string;
+    created_at?: string | null;
+    reference_protected?: boolean | null;
+    reason?: string | null;
+  }> | null;
+  full_list_download_url?: string | null;
 };
 
 export type CommandTemplateRecord = {
@@ -1148,7 +1174,6 @@ export type TunnelKind =
   | "wireguard"
   | "tun_tap"
   | "custom";
-export type BandwidthTier = "10m" | "100m" | "1000m";
 export type TunnelEndpointSide = "left" | "right";
 export type TunnelConfigBackend = "ifupdown" | "netplan" | "systemd_networkd";
 export type RuntimeTunnelManager =
@@ -1202,7 +1227,7 @@ export type TunnelPlanInput = {
   ipv6_address_pool_cidr?: string | null;
   ipv6_tunnel?: TunnelAddressPair | null;
   latency_primary_family?: TunnelAddressFamily;
-  bandwidth: BandwidthTier;
+  bandwidth_mbps: number;
   latency_ms: number;
   packet_loss_ratio: number;
   preference: number;
@@ -1286,7 +1311,7 @@ export type PromoteTelemetryTunnelRequest = {
   latency_primary_family?: TunnelAddressFamily;
   side?: TunnelEndpointSide;
   name?: string | null;
-  bandwidth?: BandwidthTier | null;
+  bandwidth_mbps?: number | null;
   latency_ms?: number | null;
   packet_loss_ratio?: number | null;
   preference?: number | null;
@@ -1336,7 +1361,7 @@ export type TopologyGraphEdge = {
   desired_missing_count: number;
   stale_present_count: number;
   import_candidate_count: number;
-  bandwidth: BandwidthTier;
+  bandwidth_mbps: number;
   recommended_ospf_cost: number;
   cost_delta: number | null;
   latency_avg_ms: number | null;
@@ -1504,13 +1529,14 @@ export type NetworkObservationTrendRecord = {
 };
 
 export type NetworkOspfRecommendationRecord = {
+  recommendation_id: string;
   plan_id: string;
   plan_name: string;
   interface_name: string;
   left_client_id: string;
   right_client_id: string;
-  configured_bandwidth: BandwidthTier;
-  effective_bandwidth: BandwidthTier;
+  configured_bandwidth_mbps: number;
+  effective_bandwidth_mbps: number;
   plan_ospf_cost: number;
   recommended_ospf_cost: number;
   cost_delta: number;
@@ -1523,11 +1549,12 @@ export type NetworkOspfRecommendationRecord = {
   latest_observed_at: string | null;
   confidence: string;
   reason: string;
+  evidence_summary: string;
 };
 
 export type NetworkOspfUpdateEvidenceRecord = {
-  configured_bandwidth: BandwidthTier;
-  effective_bandwidth: BandwidthTier;
+  configured_bandwidth_mbps: number;
+  effective_bandwidth_mbps: number;
   latency_avg_ms: number | null;
   packet_loss_avg_ratio: number | null;
   throughput_avg_mbps: number | null;
@@ -1539,6 +1566,7 @@ export type NetworkOspfUpdateEvidenceRecord = {
 };
 
 export type NetworkOspfUpdatePlanRecord = {
+  recommendation_id: string;
   plan_id: string;
   plan_name: string;
   interface_name: string;
@@ -1558,6 +1586,7 @@ export type NetworkOspfUpdatePlanRecord = {
   proposed_left_bird2_interface_snippet: string;
   proposed_right_bird2_interface_snippet: string;
   change_summary: string;
+  evidence_summary: string;
 };
 
 export type PrivilegeAssertion = {
@@ -1566,7 +1595,6 @@ export type PrivilegeAssertion = {
   expires_unix: number;
   assertion_hex: string;
 };
-
 
 export type JobOperation =
   | { type: "shell"; argv: string[]; pty: boolean }
@@ -1709,7 +1737,12 @@ export type JobOperation =
       limit?: number;
       show_hidden?: boolean;
     }
-  | { type: "file_read_text"; path: string; max_bytes?: number; follow_symlinks?: boolean }
+  | {
+      type: "file_read_text";
+      path: string;
+      max_bytes?: number;
+      follow_symlinks?: boolean;
+    }
   | {
       type: "file_write_text";
       path: string;
@@ -1770,8 +1803,18 @@ export type JobOperation =
       follow_symlinks?: boolean;
       policy?: FileActionPolicy;
     }
-  | { type: "file_download"; path: string; max_bytes?: number; follow_symlinks?: boolean }
-  | { type: "file_archive_tar"; path: string; max_bytes?: number; follow_symlinks?: boolean }
+  | {
+      type: "file_download";
+      path: string;
+      max_bytes?: number;
+      follow_symlinks?: boolean;
+    }
+  | {
+      type: "file_archive_tar";
+      path: string;
+      max_bytes?: number;
+      follow_symlinks?: boolean;
+    }
   | { type: "user_sessions" }
   | { type: "process_list"; limit: number }
   | {
@@ -1851,8 +1894,12 @@ export type FileExistingPolicy = "skip" | "replace";
 export type FileOwnershipPolicy = "fail" | "ignore";
 
 type AssertNever<T extends never> = T;
-type _FrontendOperationTypesMissingFromGenerated = AssertNever<Exclude<JobOperation["type"], GeneratedJobOperationType>>;
-type _GeneratedOperationTypesMissingFromFrontend = AssertNever<Exclude<GeneratedJobOperationType, JobOperation["type"]>>;
+type _FrontendOperationTypesMissingFromGenerated = AssertNever<
+  Exclude<JobOperation["type"], GeneratedJobOperationType>
+>;
+type _GeneratedOperationTypesMissingFromFrontend = AssertNever<
+  Exclude<GeneratedJobOperationType, JobOperation["type"]>
+>;
 
 export type CreateJobRequest = {
   job_id: string;
@@ -1881,8 +1928,12 @@ export type DecideJobApprovalRequest = {
   reason?: string | null;
 };
 
-type _FrontendCreateJobRequestExtraKeys = AssertNever<Exclude<keyof CreateJobRequest, GeneratedCreateJobRequestField>>;
-type _GeneratedCreateJobRequestMissingKeys = AssertNever<Exclude<GeneratedCreateJobRequestField, keyof CreateJobRequest>>;
+type _FrontendCreateJobRequestExtraKeys = AssertNever<
+  Exclude<keyof CreateJobRequest, GeneratedCreateJobRequestField>
+>;
+type _GeneratedCreateJobRequestMissingKeys = AssertNever<
+  Exclude<GeneratedCreateJobRequestField, keyof CreateJobRequest>
+>;
 
 export type CreateJobResponse = {
   job_id: string;
@@ -2003,8 +2054,10 @@ export type CreateTunnelPlanRequest = TunnelPlanInput & {
 };
 
 export type UpdateTunnelPlanOspfCostRequest = {
+  recommendation_id: string;
   current_ospf_cost: number;
   recommended_ospf_cost: number;
+  mutation_intent: "apply" | "rollback";
   confirmed: boolean;
 };
 

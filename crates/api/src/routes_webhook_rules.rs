@@ -207,6 +207,19 @@ fn validate_webhook_rule_request(request: &CreateWebhookRuleRequest) -> Result<(
         validate_template(&request.body_template)
             .map_err(|_| ApiError::bad_request("webhook_rule_template_invalid"))?;
     }
+    if request.clear_signing_secret
+        && request
+            .signing_secret
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err(ApiError::bad_request(
+            "webhook_rule_signing_secret_conflict",
+        ));
+    }
+    if let Some(signing_secret) = request.signing_secret.as_deref() {
+        validate_optional_text(signing_secret, 1024, "webhook_rule_signing_secret_invalid")?;
+    }
     if let Some(cooldown_secs) = request.cooldown_secs {
         if !(0..=30 * 24 * 60 * 60).contains(&cooldown_secs) {
             return Err(ApiError::bad_request("webhook_rule_cooldown_invalid"));
@@ -403,6 +416,17 @@ fn validate_required_text(
 ) -> Result<(), ApiError> {
     let value = value.trim();
     if value.is_empty() || value.len() > max_bytes || value.as_bytes().contains(&0) {
+        return Err(ApiError::bad_request(code));
+    }
+    Ok(())
+}
+
+fn validate_optional_text(
+    value: &str,
+    max_bytes: usize,
+    code: &'static str,
+) -> Result<(), ApiError> {
+    if value.len() > max_bytes || value.as_bytes().contains(&0) {
         return Err(ApiError::bad_request(code));
     }
     Ok(())

@@ -3283,3 +3283,4061 @@ Verification plan:
 - Structured screenshots must include `Network / Tunnel plans` default,
   opened create workflow, opened promotion workflow, `Observability / Alerts`,
   alert policy editor, `Observability / Webhooks`, and webhook rule editor.
+
+
+
+# === NEWEST ISSUES ===
+
+My previous audit imported too much enterprise process from Cloudflare and Google Cloud. **vpsman should not imitate their business model, hierarchy, or procedural weight.** Their useful lessons are limited to general interface quality: consistent states, compact navigation, readable tables, predictable actions, clear feedback, and good responsive behavior.
+
+For vpsman, the correct target is:
+
+> **Expert-simple:** expose powerful VPS operations directly, keep common tasks fast, and add friction only when an action is broad, destructive, or difficult to reverse.
+
+## What I would withdraw or strongly derank from the previous report
+
+These are not appropriate as default requirements for this product:
+
+- Organization/folder/project-style resource hierarchy.
+- Multi-party or multi-level approval for ordinary operations.
+- A long universal `Prepare → Preview → Approve → Unlock → Verify...` workflow for every mutation.
+- Full incident-management machinery for simple VPS alerts.
+- A configurable enterprise dashboard builder unless users genuinely need one.
+- A wizard for every raw DSL, JSON, TOML, cron, or networking field.
+- Forcing all actions into formal lifecycles merely because GCP or Cloudflare does so.
+- Requiring an audit note for every routine operation.
+- Splitting simple pages into many subpages just to create conceptual structure.
+
+The product can remain direct and compact. Raw and advanced controls are appropriate because the intended users understand VPS, Linux, networking, and automation. The UI only needs to make those controls safe, legible, and predictable.
+
+# Correct action-friction model
+
+This is the level of process vpsman should use:
+
+| Operation type                           | Appropriate interaction                                      |
+| ---------------------------------------- | ------------------------------------------------------------ |
+| Read-only action                         | Execute immediately                                          |
+| Reversible single-VPS action             | Execute immediately; show result and Undo where possible     |
+| Routine privileged single-VPS action     | One compact confirmation, or no confirmation when the operator has explicitly unlocked the session |
+| Destructive single-VPS action            | One clear confirmation dialog                                |
+| Bulk action                              | Show resolved target count and important exclusions, then one confirmation |
+| Irreversible or security-critical action | Unlock plus one confirmation                                 |
+| Long-running operation                   | Start immediately after confirmation and provide progress, cancellation, and result |
+
+Do **not** require operators to repeatedly review the same payload, click Next through multiple steps, and then unlock after they already made their intent clear.
+
+A preview should usually be inline rather than another page.
+
+------
+
+The standard used here is:
+
+> **Expert-direct:** make normal VPS work fast, preserve advanced controls, and add friction only when an action is broad, destructive, security-sensitive, or difficult to reverse.
+
+I am **not** recommending organization/folder/project hierarchies, multi-level approvals, mandatory wizards, a full incident-management system, a custom dashboard builder, or GCP-style process ceremony.
+
+------
+
+# Highest-priority findings
+
+| Priority | Problem                                                      | Practical correction                                         |
+| -------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **P0**   | Status and data contradictions undermine trust               | Establish shared state, time, freshness, and diff functions. Reject or visibly flag impossible combinations |
+| **P0**   | Config Rules reports changes where before and after are identical | Compare normalized semantic values; suppress no-op rows and disable Apply |
+| **P0**   | OSPF screens disagree between `14→21` and `14→22`            | Use one proposal record and ID across graph, table, evidence, review, apply, and rollback |
+| **P0**   | Approval buttons execute immediately with hard-coded reasons | Open one compact decision dialog; approval note optional, rejection reason required |
+| **P0**   | Old or expired records are presented as current              | Validate timestamps and label records as stale, expired, overdue, or historical |
+| **P0**   | Mobile hides or delays the actual task                       | Replace the repeated mobile shell with a compact app bar; use cards and sticky primary actions |
+| **P0**   | Backup “protection” does not consider backup age             | Use simple states: Recent, Overdue, Unprotected, Unknown     |
+| **P0**   | Cleanup lacks age and retention evidence                     | Do not permit deletion until preview exposes count, size, age range, and affected objects |
+| **P1**   | Every page repeats six fleet cards, scope data, saved views, and other shell controls | Collapse this into one compact fleet-status line             |
+| **P1**   | Simple operations sometimes require preview, unlock, review, and another confirmation | Preview without privilege; require only one final confirmation appropriate to risk |
+| **P1**   | Large blank editors and result surfaces appear before there is anything to show | Render compact empty states and expand the workspace after selection |
+| **P1**   | Internal enums and implementation language appear as operator-facing text | Map internal states to human labels; preserve raw values only in details |
+| **P1**   | Sparse or old samples are presented as continuous trends     | Do not connect missing samples; show available range, point count, and last update |
+| **P1**   | Operational defaults are stored as personal browser preferences | Move gateway and tunnel-generation defaults into shared, audited configuration |
+| **P1**   | Incomplete features appear as ordinary production pages      | Hide or clearly mark them Preview until functional           |
+
+------
+
+# Correct interaction model for vpsman
+
+This should be the consistent product rule:
+
+| Operation                            | Appropriate interaction                                      |
+| ------------------------------------ | ------------------------------------------------------------ |
+| Read-only inspection                 | Immediate                                                    |
+| Reversible single-VPS change         | Immediate, with success feedback and Undo where possible     |
+| Routine privileged single-VPS change | Immediate while explicitly unlocked, or one compact confirmation |
+| Destructive single-VPS change        | One confirmation naming the exact effect                     |
+| Bulk change                          | Inline target count and exclusions, then one confirmation    |
+| Irreversible security action         | Unlock plus one confirmation                                 |
+| Long-running action                  | Start, then progress, cancel where feasible, and result      |
+| Dry run or validation                | Available before privilege unlock unless the read itself is sensitive |
+
+Common workflows should remain very short:
+
+- **Open terminal:** select VPS → Open terminal.
+- **Run command:** select VPS/targets → enter command → Run.
+- **Edit file:** select VPS → open file → edit → Save.
+- **Back up now:** select VPS → Back up now.
+- **Apply config patch:** select targets → enter patch → preview inline → Apply.
+- **Restore:** choose artifact → choose destination → Confirm.
+- **Update agent:** choose version → choose targets → Confirm.
+- **Change group/tag:** select VPSs → add/remove group.
+
+------
+
+# Code-confirmed cross-cutting problems
+
+These are not visual interpretations; they are visible in the implementation.
+
+## 1. Scope control behaves unlike it looks
+
+**Resolved 2026-06-27**
+
+The global scope control now opens the fleet search editor instead of clearing
+scope. Clearing is a separate adjacent X action with its own
+`Clear fleet scope` label and disabled state when no fleet scope is active.
+
+In `ConsoleShell.tsx`, the control displaying the active fleet scope calls `onClearFleetView` when clicked. It visually resembles a scope selector but behaves as a clear button.
+
+**Fix:** clicking the scope control should open scope selection or editing. Place a separate X beside it for clearing.
+
+## 2. Global fleet cards are rendered on every page
+
+**Resolved 2026-06-27**
+
+The shell now renders full fleet health metric cards only on Home and Fleet /
+Monitor. Other pages keep the same `Fleet status summary` landmark but show a
+single compact status strip with total VPS, online, stale, running jobs,
+warnings, and online percentage.
+
+`ConsoleShell.tsx` always renders Online, Offline, Stale, Warnings, Jobs, and Online %. This explains why Access, Audit, System, terminal, file, and editor pages all begin with the same fleet block.
+
+**Fix:** use one compact status strip. Show full fleet health cards only on Home or Fleet Monitor.
+
+## 3. Scope and global statistics can disagree
+
+**Status — implemented 2026-06-26**
+
+`App.tsx` now passes a scoped fleet summary and online percentage to the global
+shell whenever a fleet query or saved view is active. `ConsoleShell` labels the
+summary as `Current scope` or `Entire fleet`, so visible scoped pages no longer
+mix scoped page descriptions with an unlabeled global online percentage.
+
+`App.tsx` computes the online percentage from the global dashboard summary, while page descriptions can use visible scoped agents.
+
+**Fix:** explicitly label values as **Current scope** or **Entire fleet**, and use the current scope by default on scoped pages.
+
+## 4. Online state ignores missing last-seen data
+
+**Status — implemented 2026-06-26**
+
+Fleet Instances now uses an agent display-state helper for operator-facing
+state. An `online` backend status with no `last_seen_at` contact evidence is
+shown as `Contact unknown` with warning tone and explicit gateway-contact
+detail, rather than a green Online badge. Raw backend status remains available
+for filtering and action logic.
+
+`FleetWorkspace.tsx` renders the positive online badge using only `agent.status === "online"`, independently of `last_seen_at`.
+
+**Fix:** use a shared display-state function. An `online` record with no contact evidence should become **State inconsistent** or **Registered; contact unknown**, not green Online.
+
+## 5. Compact timestamps omit year and timezone
+
+**Status — implemented 2026-06-26**
+
+`formatCompactTime()` now returns relative scan text such as `18m ago`,
+`25d ago`, or `in 2h` instead of month/day/hour-only values. A new
+`formatFullTime()` helper includes year, seconds, and timezone for exact
+inspection. Home attention/activity rows, Fleet Alerts observed times, and
+Backup history dense timestamp columns expose the full timestamp in hover
+titles while keeping relative text visible.
+
+`formatCompactTime()` formats only month, day, hour, and minute.
+
+**Fix:** show relative age in dense views—`18m ago`, `25d ago`—and expose a full year/timezone timestamp on hover or in the detail drawer.
+
+## 6. Charts connect missing data
+
+**Status — implemented 2026-06-26**
+
+`TimeSeriesChart.tsx` now preserves missing-data gaps with `spanGaps: false`
+and exposes a compact data-coverage line showing points present in the selected
+range, gap count, and the available sample span. Release navigation coverage
+asserts the preserved-gap policy and the visible coverage summary.
+
+`TimeSeriesChart.tsx` sets `spanGaps: true`, creating visually continuous lines through absent observations.
+
+**Fix:** use `spanGaps: false`. Show gaps honestly and display how much of the selected range actually contains data.
+
+## 7. Approval execution is too immediate
+
+`JobsPanel.tsx` sends `confirmed: true` directly from the row action and supplies fixed reasons such as `Approved from Jobs / Approvals`.
+
+**Fix:** replace the direct check/X execution with a compact review dialog. Keep it simple: operation, targets, requester, risk, optional approval note, required rejection reason.
+
+## 8. Removing a tag is immediately confirmed
+
+**Status — implemented 2026-06-26**
+
+Group Assignment chip removals remain direct for a reversible single-VPS label
+change, but they now show an inline `Removed ... — Undo` status. Undo sends the
+inverse add request for the same VPS/label, and any schedule impacts returned
+by the mutation response are surfaced as a concise automation notice.
+
+`FleetGroupsPanel.tsx` invokes a confirmed bulk-remove request when the X on a tag chip is clicked.
+
+**Fix:** for a single reversible removal, execute and provide Undo. Where that tag drives automation, show one small warning before removal.
+
+## 9. Past “next runs” are not validated
+
+**Status — implemented 2026-06-26**
+
+`SchedulesPanel.tsx` now parses schedule run times, hides past values from the
+future-run chip list, and labels past-only enabled schedules as `Overdue` with
+`Schedule calculation stale` detail. Expanded rows use the same timing model
+instead of formatting `next_run_at` as an ordinary future run.
+
+`SchedulesPanel.tsx` renders `next_run_at` and `next_runs` as received and only deduplicates them. It does not filter past times or label them overdue.
+
+**Fix:** reject past values from the “Next runs” presentation and display **Overdue** or **Schedule calculation stale**.
+
+## 10. Backup protection ignores age
+
+**Status — implemented 2026-06-26**
+
+Backup Overview now derives a simple per-VPS protection state:
+`Recent`, `Overdue`, `Unprotected`, or `Unknown`. Only usable artifact-backed
+backups inside the expected freshness window count as recent. Enabled policy
+cadence estimates the freshness window when available; otherwise one-time
+backup evidence uses a conservative seven-day window. Metadata-only records such
+as `artifact_metadata_recorded` no longer count as protected and are labelled
+`Artifact recorded; content not verified`.
+
+`BackupsPanel.tsx` treats a VPS as protected when it has an enabled policy or any non-error artifact-backed backup. No age or expected interval is checked.
+
+**Fix:** calculate protection from latest successful usable backup age relative to the policy frequency.
+
+## 11. Process Metrics is an internal roadmap page
+
+**Status — resolved 2026-06-27**
+
+Process Metrics is no longer part of normal Observability navigation or the
+mobile page selector. Stale internal requests for the removed
+`process_metrics` subpage normalize to Observability / Fleet metrics until a
+real process-history backend contract exists. Remote Operations / Processes
+does not present the unfinished metrics route as production evidence.
+
+**Fix:** remove Process Metrics from normal navigation until it has actual operator data, or label it clearly as Preview.
+
+## 12. Operational defaults are browser-local
+
+`DEFAULT_OPERATOR_PREFERENCES` includes gateway endpoints, gateway public key, and tunnel allocation pools.
+
+**Fix:** keep personal display choices browser-local, but move values that affect generated install commands and topology plans into shared fleet/system configuration.
+
+## 13. Suite Config summary wording is misleading
+
+**Status — implemented 2026-06-26**
+
+The Suite Config top summary now explicitly distinguishes loaded
+configuration inventory from validated draft impact. Before validation it shows
+`Configuration inventory` with inventory hot-reload and restart field counts;
+after validation it switches to `Draft impact` and changed hot-reload/restart
+counts.
+
+The “13 hot reload fields” and “16 restart required fields” values count all fields in those categories, not changed fields. They sit beside “Changed keys,” which makes them look like current draft impact.
+
+**Fix:** before editing, label this **Configuration inventory**. After editing, switch to **Draft impact: 2 hot reload, 1 restart**.
+
+## 14. Audit “latest event” is not necessarily latest
+
+**Status — implemented 2026-06-26**
+
+`AuditLogPanel.tsx` now calculates the latest visible audit row from the
+maximum valid `created_at` timestamp across filtered records, independent of
+the API/table row order. Playwright coverage feeds deliberately older-first
+audit rows and verifies the coverage summary uses the newer timestamp.
+
+`AuditLogPanel.tsx` uses the first filtered item to render “Latest visible event” without ensuring that the array is sorted newest-first.
+
+**Fix:** calculate the maximum timestamp independently of table order.
+
+## 15. Mobile tables remain desktop grids
+
+**Status — implemented 2026-06-26**
+
+`ConsoleDataGrid` now has a generic mobile card rendering mode. At mobile
+widths, normal data grids render one card per row instead of squeezing desktop
+columns horizontally. Each card keeps the row identity, state, labeled values,
+selection control, Details/Open affordance, and up to three row actions visible
+near the row. Desktop rendering, sorting, column preferences, pagination,
+selection, expansion, and context menus remain unchanged.
+
+Pages with a deliberately custom mobile row layout can opt out with
+`mobileLayout="table"`; Access / Operators uses that to preserve its audited
+operator-card layout. Focused mobile tests verify Jobs / Approvals cards expose
+the Review action and Details control without page-level horizontal overflow,
+and the Access / Operators visual audit still passes. Remaining page-specific
+mobile defects outside `ConsoleDataGrid` stay tracked under their individual
+screen issues.
+
+The responsive CSS narrows the grid but does not transform most records into mobile cards. This is why important actions and columns can disappear horizontally.
+
+**Fix:** add a mobile rendering mode to `ConsoleDataGrid`, with resource, state, primary value, and primary action always visible.
+
+------
+
+# Global shell and navigation
+
+## Current problems
+
+The shell consumes too much of every workflow:
+
+- fleet scope;
+- fleet search;
+- full-page mobile selector;
+- saved-view selector;
+- saved-view save/delete/clear icons;
+- “Live control plane” pill;
+- command palette;
+- session;
+- unlock;
+- breadcrumb;
+- page title and description;
+- context chips;
+- six fleet metrics.
+
+On desktop, this pushes the task downward. On mobile, the operator often passes through more than one screen of framework before reaching the operation.
+
+“Live control plane” also looks like a real connection/freshness indicator even though it is presented as a static pill.
+
+The mobile page selector contains the entire console hierarchy in one dropdown. It is technically functional but difficult to scan and increasingly unwieldy as pages grow.
+
+## Practical redesign
+
+Desktop top bar:
+
+```
+Fleet scope | Search | Active jobs/warnings | Lock state | User
+```
+
+Page header:
+
+```
+Page title | concise subtitle | primary action
+```
+
+Fleet summary:
+
+```
+3 VPS · 2 online · 1 stale · 3 running jobs
+```
+
+Mobile:
+
+- one sticky app bar;
+- menu;
+- current page title;
+- fleet-health dot/count;
+- lock state;
+- optional search icon;
+- page navigation in a drawer rather than a very long select;
+- sticky page action where appropriate.
+
+Saved views should live inside the scope/search area, not occupy permanent space on every page.
+
+------
+
+# Mobile-wide findings
+
+All 64 mobile screenshots inherit the same structural issue. At 390 px, the UI usually displays:
+
+1. scope;
+2. search;
+3. page selector;
+4. command/unlock;
+5. saved views and three icon buttons;
+6. breadcrumb/title/description;
+7. context labels;
+8. six fleet cards;
+
+before reaching the page task.
+
+The most extreme page heights include:
+
+- Suite Config: approximately **11,659 px**
+- Home: approximately **8,914 px**
+- System Overview: approximately **7,201 px**
+- Preferences: approximately **6,251 px**
+- Capacity: approximately **5,826 px**
+- Terminal: approximately **4,613 px**
+- Webhook rule editor: approximately **4,288 px**
+- Alert policy editor: approximately **4,253 px**
+- Network test: approximately **4,064 px**
+
+The answer is not to remove mobile capabilities. It is to reduce presentation:
+
+- cards instead of horizontal tables;
+- one active form/editor section;
+- collapsed advanced fields;
+- full-screen terminal and graph modes;
+- sticky Save/Run/Approve/Apply controls;
+- summaries replaced by one-line status;
+- secondary evidence below the primary operation.
+
+------
+
+# Screen-by-screen audit
+
+## Home and Fleet
+
+### 01 — Home overview — **P1**
+
+**Resolved 2026-06-27 — action-first Home without embedded subsystem inventories**
+
+Home now limits itself to the release-console overview role: quick target
+actions, fleet availability, running work, recent failures, needs-attention
+work, and recent activity. The embedded Fleet Monitor card inventory and Home
+telemetry/chart widgets were removed from the page so Fleet Monitor,
+Observability, Alerts, Backups, Jobs, and Transfers remain the owners of their
+deep workflows.
+
+Running jobs are shown as fleet-level work when only summary counts are loaded,
+instead of repeating global job counts on per-VPS cards. Backup and activity
+states translate internal tokens such as `artifact_metadata_recorded` into
+operator language such as `artifact recorded; upload not verified`, and dotted
+audit events render as readable activity labels. Mobile now reaches target
+selection and the primary quick actions before the six fleet posture metrics.
+
+Fresh screenshots:
+`./tmp/desktop-chrome/01-home-overview-desktop-chrome.png` and
+`./tmp/mobile-chrome/01-home-overview-mobile-chrome.png`.
+
+**Issues**
+
+- The page is 3,925 px on desktop and 8,914 px on mobile.
+- It duplicates content from Fleet Monitor, Observability, Alerts, Backups, Jobs, and Transfers.
+- Per-VPS cards say telemetry is not reported while also displaying latency/network values.
+- The same running-job count appears on multiple VPS cards, apparently using the global count.
+- Internal statuses such as `artifact_metadata_recorded` appear directly.
+- Charts imply a meaningful range even when the actual samples are sparse or old.
+- “Fleet health 67%” is not sufficiently explanatory.
+
+**Practical fix**
+
+Limit Home to:
+
+1. attention requiring action;
+2. currently running work;
+3. fleet availability;
+4. recent failures;
+5. four or five quick actions.
+
+Move deep charts and subsystem inventories behind links. Show per-VPS jobs only when genuinely associated with that VPS. Translate internal states into human language such as **Artifact recorded; upload not verified**.
+
+**Mobile**
+
+The first useful action should appear in the first viewport. Do not make the operator scroll through all six fleet metrics before reaching Open terminal, Run command, Files, or Backup.
+
+------
+
+### 02 — Fleet Instances — **P0**
+
+**Resolved 2026-06-27**
+
+Fleet Instances no longer renders online records without last-contact evidence
+as green Online; they show `Contact unknown` and a contact-evidence detail.
+The remaining Fleet Instances work was resolved by separating browser/control
+plane stream state from VPS state, promoting the default operational columns,
+and making row/card Open affordances explicit.
+
+**Issues**
+
+- VPSs are green Online while Last seen says never seen.
+- `WebSocket connected` is displayed near fleet records and can be interpreted as agent connectivity rather than browser/control-plane connectivity.
+- The default table lacks common operator fields such as IP, agent version, contact age, CPU, memory, disk, and active alert count.
+- Opening a VPS relies on a small icon/expander rather than the row itself.
+- Raw tags occupy considerable width while more important operational state is absent.
+
+Resolved implementation:
+
+- Fleet Instances now uses visible default columns:
+  `VPS · State · IP · Last contact · Agent · CPU · Memory · Disk · Alerts · Action`.
+- Raw `Tags`, `Country`, `Provider`, traffic accounting, quota, selectors, and
+  registration IP remain available from Fields, but no longer displace the
+  default operational read.
+- Browser connectivity is labelled as `Console stream connected`, separate from
+  agent/VPS state.
+- Desktop rows open the canonical instance detail route on row click, and each
+  row also exposes an `Open` action cell.
+- Mobile renders each VPS as a card with state, last contact, IP, alert count,
+  telemetry/resource fields, and one clear `Open` button.
+- The shared mobile grid hides duplicate `Action`/`Open` data cells whenever an
+  `Open` card action is already rendered.
+
+**Practical fix**
+
+Define separate fields:
+
+- Registration state;
+- Gateway connection;
+- Last contact;
+- Telemetry freshness;
+- Agent state.
+
+Default columns:
+
+```
+VPS · State · IP · Last contact · Agent · CPU · Memory · Disk · Alerts · Action
+```
+
+Clicking the row opens the instance detail. Browser connectivity is labelled
+separately as **Console stream connected**.
+
+**Mobile**
+
+Render each VPS as a card with name, state, last contact, IP, alert count, and
+Open. Do not require horizontal scrolling.
+
+Verification passed 2026-06-27:
+
+- `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`
+- `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/components/ConsoleDataGrid.tsx frontend/src/panels/FleetWorkspace.tsx frontend/tests/console-layout.spec.ts frontend/tests/release-ia-navigation.spec.ts frontend/tests/structured-screenshots.spec.ts'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/console-layout.spec.ts -g "renders an operational cloud-console fleet workspace" --project=desktop-chrome --workers=1 --timeout=120000'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/console-layout.spec.ts -g "supports interactive fleet data grid controls" --project=desktop-chrome --workers=1 --timeout=120000'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/console-layout.spec.ts -g "deletes a VPS through grid actions" --project=desktop-chrome --workers=1 --timeout=120000'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "fleet instances table keeps dense grid controls" --project=desktop-chrome --workers=1 --timeout=120000'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 1 of" --project=desktop-chrome --workers=1 --timeout=120000'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 1 of" --project=mobile-chrome --workers=1 --timeout=120000'`
+
+Fresh screenshots:
+
+- `./tmp/desktop-chrome/02-fleet-instances-desktop-chrome.png` (`1440x968`)
+- `./tmp/mobile-chrome/02-fleet-instances-mobile-chrome.png` (`390x2117`)
+- `./tmp/desktop-chrome/02b-fleet-instance-config-detail-desktop-chrome.png`
+  (`1440x1463`)
+- `./tmp/mobile-chrome/02b-fleet-instance-config-detail-mobile-chrome.png`
+  (`390x2901`)
+
+------
+
+### 02b — Fleet instance Config detail — **P1**
+
+**Resolved 2026-06-27 — config posture, source readiness, drift, and compact actions**
+
+- [x] The Config tab now starts with the required posture strip:
+  `Desired source`, `Render status`, `Drift state`, `Last apply`, and
+  `Last error`.
+- [x] Source assignment/readiness, runtime apply state, and drift/error state
+  are separated instead of mixed into one ownership block.
+- [x] `selected_no_store` is translated to
+  `Backup object-store source selected; server storage is not configured.`;
+  raw source statuses are preserved only inside `Raw source state details`.
+- [x] The oversized ownership link was replaced with compact `Open config`,
+  `Compare`, and `Apply` actions that hand off to Config / Per-VPS.
+- [x] The one-VPS detail context no longer repeats the global fleet posture,
+  and it uses the shared display-state model for Online-but-not-reported
+  contact evidence.
+- [x] Mobile uses one `Detail section` selector for the selected detail tab
+  instead of a two-row tab matrix.
+- [x] Fresh screenshots:
+  `./tmp/desktop-chrome/02b-fleet-instance-config-detail-desktop-chrome.png`
+  and
+  `./tmp/mobile-chrome/02b-fleet-instance-config-detail-mobile-chrome.png`.
+- [x] Verification passed:
+  `cd frontend && npm exec -- tsc --noEmit`;
+  `node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/panels/VpsDetailPanel.tsx frontend/src/styles/workspace.css frontend/src/styles/responsive.css frontend/src/App.tsx frontend/tests/release-ia-navigation.spec.ts frontend/tests/structured-screenshots.spec.ts`;
+  `cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "fleet instance config detail|fleet instance detail is the canonical" --project=desktop-chrome --workers=1 --timeout=180000`;
+  `cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 1 of" --project=desktop-chrome --workers=1 --timeout=180000`;
+  `cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 1 of" --project=mobile-chrome --workers=1 --timeout=180000`.
+
+**Issues**
+
+- It inherits the Online/Not reported contradiction.
+- The page repeats global fleet status inside a one-VPS detail context.
+- The Config tab exposes internal source states such as `selected_no_store`.
+- “Config ownership” mostly acts as a large link to another page.
+- Source assignment, readiness, and actual drift are not clearly separated.
+- The operator cannot immediately tell whether the VPS config is correct, merely selected, or unable to render.
+
+**Practical fix**
+
+At the top of the Config tab show:
+
+```
+Desired source · Render status · Drift state · Last apply · Last error
+```
+
+Translate `selected_no_store` to something such as:
+
+> Backup object-store source selected; server storage is not configured.
+
+Keep the raw state in Details. Replace the oversized link with compact actions: **Open config**, **Compare**, **Apply**.
+
+**Mobile**
+
+Use one selected detail tab at a time. The two-row tab matrix and repeated global data make the page unnecessarily long.
+
+------
+
+### 03 — Fleet Monitor — **P1**
+
+**Resolved 2026-06-27 — compact operator cards, scoped signals, and direct workflow actions**
+
+Fleet Monitor now uses the shared display-state model instead of raw backend
+status, so records without contact evidence show `Contact unknown` rather than
+green Online. Card content is aligned to the intended scan order:
+state/contact, CPU, memory, disk, network, telemetry freshness, alerts, backup,
+and transfer.
+
+Global job counts are no longer rendered as a card-local operational signal.
+They appear as contextual evidence text such as
+`Fleet jobs: 3 running fleet-wide`, while the action-weighted signal row is
+limited to card-local alerts, backup, and transfer state. Cards no longer show
+`Network 0 bps` when rate telemetry is absent; missing rate samples render as
+`Network n/a` beside `Telemetry not reported`.
+
+The primary action row now exposes only **Terminal**, **Files**, and **More**.
+Processes, Backup, Network, and Detail remain available under **More**, keeping
+the common VPS workflows fast without turning every card into a dense action
+toolbar. The implementation-oriented `Komari-style` wording has been removed
+from Home and Fleet Monitor copy.
+
+**Issues**
+
+- Multiple VPS cards show the same three-job count, which appears to be global rather than per-resource.
+- Cards display network values while saying telemetry is not reported.
+- Backup, transfer, alert, and job states are given equal visual weight even when some require no action.
+- Every card has several small actions, making scanning slower.
+- The description uses implementation/comparison language such as “Komari-style.”
+
+**Practical fix**
+
+Use true per-VPS values and include freshness. Default card content:
+
+```
+State · Last contact · CPU · Memory · Disk · Network · Alerts
+```
+
+Then provide two direct actions—Terminal and Files—and place remaining actions in More.
+
+Replace implementation-oriented text with an operator-oriented description.
+
+**Mobile**
+
+Compact cards should remain compact. Avoid turning every VPS into a long stack of subsystem panels.
+
+Verification passed 2026-06-27:
+
+- `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "home exposes fleet scan|fleet monitor renders VPS card workflow actions|home monitor card text fits" --project=desktop-chrome --workers=1 --timeout=120000'`
+- `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/panels/FleetMonitorPanel.tsx frontend/src/styles/workspace.css frontend/tests/release-ia-navigation.spec.ts'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 1 of" --project=desktop-chrome --workers=1 --timeout=160000'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 1 of" --project=mobile-chrome --workers=1 --timeout=160000'`
+
+Fresh screenshots:
+
+- `./tmp/desktop-chrome/03-fleet-monitor-desktop-chrome.png` (`1440x968`)
+- `./tmp/mobile-chrome/03-fleet-monitor-mobile-chrome.png` (`390x2381`)
+
+------
+
+### 04 — Fleet Groups — **P1**
+
+**Resolved 2026-06-27 — group registry language, metadata distinction, and compact display-order action**
+
+Fleet / Groups now uses **Groups** as the operator-facing concept while keeping
+the existing tag API/model internally. The registry page says `Create group`,
+`Group registry`, `Assigned VPSs`, and `Delete`; it no longer shows
+`Create tag`, `Tag registry`, or `Review deletion` in the normal registry
+workflow.
+
+Provider and country entries are explicitly classified as managed metadata, and
+operator-created entries are classified as operator groups. The summary cards
+now read `provider metadata`, `country metadata`, `operator groups`, and
+`group assignments`, so operators can tell metadata-derived targeting apart
+from custom VPS group collections.
+
+Create/search now appear before the summary cards on the registry screen.
+The create form accepts one group per submission, disables comma-separated
+input, and explains that provider/country metadata is read from VPS records.
+Deletion remains one compact confirmation showing group, type, assignments,
+preview hash, and schedule-target notices. Display ordering is now behind a
+small **Manage display order** disclosure instead of being promoted as a
+primary registry task.
+
+The adjacent Assignments surface now says `VPS group assignments`, `Current
+groups`, and `Add group` so the Fleet navigation does not immediately fall back
+to the old visible tag vocabulary.
+
+**Issues**
+
+- The navigation says Groups while the UI repeatedly says tags.
+- Provider/country/custom group counts are not intuitive relative to labels shown elsewhere.
+- The “Create tag” field suggests multiple comma-separated values while the action is singular.
+- Fleet tag ordering receives excessive prominence.
+- Simple deletion uses “Review deletion,” which feels heavier than necessary.
+
+**Practical fix**
+
+Choose one visible concept:
+
+- **Labels** for key/value metadata; or
+- **Groups** for named operator-managed collections.
+
+Internally they may remain tags. Distinguish managed labels such as provider/country from custom labels.
+
+Use token entry for multiple labels or accept one label per submission. Move ordering into a small **Manage display order** action.
+
+Deletion needs one confirmation showing the number of assigned VPSs.
+
+**Mobile**
+
+Create and search should come before summary cards. Render each label with count and a named overflow action.
+
+Verification passed 2026-06-27:
+
+- `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "fleet groups expose registry assignments" --project=desktop-chrome --workers=1 --timeout=120000'`
+- `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/panels/FleetGroupsPanel.tsx frontend/src/styles/data.css frontend/tests/release-ia-navigation.spec.ts frontend/tests/structured-screenshots.spec.ts frontend/tests/support/consoleLayoutFixtures.ts'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 1 of" --project=desktop-chrome --workers=1 --timeout=160000'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 1 of" --project=mobile-chrome --workers=1 --timeout=160000'`
+
+Fresh screenshots:
+
+- `./tmp/desktop-chrome/04-fleet-groups-desktop-chrome.png` (`1440x968`)
+- `./tmp/mobile-chrome/04-fleet-groups-mobile-chrome.png` (`390x1533`)
+- `./tmp/desktop-chrome/05-fleet-group-assignments-desktop-chrome.png`
+  (`1440x968`)
+- `./tmp/mobile-chrome/05-fleet-group-assignments-mobile-chrome.png`
+  (`390x1727`)
+
+------
+
+### 05 — Group Assignments — **P1**
+
+**Resolved 2026-06-27 — protected managed labels, registry autocomplete, dependency hints, and mobile cards**
+
+- [x] Clicking a removable operator-group X executes the reversible single-VPS
+  mutation directly and shows `Removed <group> from <VPS>` with inline Undo.
+- [x] Managed metadata labels such as `provider:*` and `country:*` render as
+  protected shield chips and do not expose remove buttons.
+- [x] The Add group control uses the group registry as an autocomplete source
+  and shows compact suggestions with assigned-VPS counts.
+- [x] Automation dependency hints are shown next to linked chips only when a
+  group is referenced by schedules or alert policies; e.g. `provider:alpha`
+  shows `Used by 1 schedule` in the fixture instead of a separate dependency
+  workflow.
+- [x] Mobile renders one assignment card per VPS with wrapping chips, visible
+  Add group controls, and readable `group name` placeholders.
+- [x] The group summary now counts active VPS labels and registry-backed groups
+  together, so provider/country metadata and assignment counts match the chips
+  visible on Fleet / Assignments and Fleet / Groups.
+
+Verification passed:
+
+- `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "fleet groups expose registry assignments" --project=desktop-chrome --workers=1 --timeout=120000'`
+- `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/panels/FleetGroupsPanel.tsx frontend/src/styles/data.css frontend/tests/release-ia-navigation.spec.ts'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 1 of" --project=desktop-chrome --workers=1 --timeout=160000'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 1 of" --project=mobile-chrome --workers=1 --timeout=160000'`
+
+Fresh screenshots:
+
+- `./tmp/desktop-chrome/05-fleet-group-assignments-desktop-chrome.png`
+  (`1440x968`)
+- `./tmp/mobile-chrome/05-fleet-group-assignments-mobile-chrome.png`
+  (`390x1790`)
+
+------
+
+### 06 — Bulk Groups — **P1**
+
+**Resolved 2026-06-27 — inline target resolution and one primary bulk action**
+
+- [x] The empty target preview panel is collapsed until the operator starts a
+  server-backed review.
+- [x] The selector now shows local match evidence inline, for example
+  `Local match 1 VPS · 1 ready · 0 stale`, and separately states that server
+  resolution runs before confirmation.
+- [x] The old `Preview targets → unlock → Review mutation` path is replaced by
+  one primary action such as `Add maintenance:test to 1 VPS`. The action runs
+  the server resolve/preview step, captures the preview hash, and opens the
+  final confirmation.
+- [x] Preview remains available before privilege unlock. The privilege message
+  now says preview works immediately and unlock is needed only for final apply.
+- [x] The final confirmation lists targets, changed count, no-change/excluded
+  count, preview hash, schedule notices, and before/after membership outcome.
+- [x] Mobile keeps mutation, tag, selector, resolution, privilege state, and
+  action together in one compact block without summary-card separation.
+
+Verification passed:
+
+- `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "fleet groups expose registry assignments" --project=desktop-chrome --workers=1 --timeout=120000'`
+- `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/panels/FleetGroupsPanel.tsx frontend/src/styles/data.css frontend/tests/release-ia-navigation.spec.ts frontend/tests/structured-screenshots.spec.ts'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 2 of" --project=desktop-chrome --workers=1 --timeout=160000'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 2 of" --project=mobile-chrome --workers=1 --timeout=160000'`
+
+Fresh screenshots:
+
+- `./tmp/desktop-chrome/06-fleet-bulk-groups-desktop-chrome.png`
+  (`1440x968`)
+- `./tmp/mobile-chrome/06-fleet-bulk-groups-mobile-chrome.png`
+  (`390x1360`)
+
+------
+
+### 07 — Fleet Alerts — **P1**
+
+**Resolved 2026-06-27 — active triage grid, readable alert semantics, and mobile alert cards**
+
+**Issues**
+
+- [x] Alert titles, targets, categories, and times are no longer treated as raw
+  cramped fields. The grid now uses the intended
+  `Severity · Summary · VPS · State · Age · Action` shape, with exact
+  timestamp retained in the time tooltip.
+- [x] Raw categories such as `source_readiness` are mapped to operator labels
+  like `Source readiness` and `Traffic policy`; raw target/evidence values
+  remain in the detail drawer.
+- [x] Operator state and alert status are separated in the State column and in
+  the drawer (`Operator state`, `Alert status`, `Category`, `Target`,
+  `Observed`, `Escalation`).
+- [x] Primary row actions are visible: open alerts show `Acknowledge`, `Open`,
+  and mobile `Mute`; triaged alerts show `Clear`, `Open VPS`, and policy/detail
+  handoffs where applicable.
+- [x] Fleet Alerts is now the active triage list, while Observability / Alerts
+  remains policy/destination/delivery configuration.
+
+**Practical fix**
+
+Use Fleet Alerts as the active triage list:
+
+```
+Severity · Summary · VPS · State · Age · Action
+```
+
+A row opens a compact detail drawer with evidence, policy, acknowledge/silence action, and link to the VPS.
+
+Use Observability / Alerts for policies, destinations, and history.
+
+**Mobile**
+
+Transform each alert into a card. Keep severity, title, VPS, age, and Acknowledge/Open visible without horizontal scrolling.
+
+Resolved implementation:
+
+- Desktop grid uses the intended release columns and keeps the explicit
+  `Action` column.
+- Row details expose readable status/category evidence, policy name when
+  present, `Acknowledge`, `Silence 4h`, `Clear triage`, `Open VPS detail`, and
+  `Open alert policies`.
+- Mobile cards use the shared grid card renderer with state-aware row actions:
+  open cards show `Acknowledge`, `Open VPS`, `Mute`, and `Details`; triaged
+  cards show `Open VPS`, `Clear`, `Alert policies`, and `Details`.
+- Fresh screenshots:
+  `./tmp/desktop-chrome/07-fleet-alerts-desktop-chrome.png`
+  (`1440x968`) and
+  `./tmp/mobile-chrome/07-fleet-alerts-mobile-chrome.png`
+  (`390x2582`).
+- Verification passed:
+  `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`;
+  `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/components/ConsoleDataGrid.tsx frontend/src/panels/FleetAlertsPanel.tsx frontend/src/styles/data.css frontend/tests/release-ia-navigation.spec.ts frontend/tests/structured-screenshots.spec.ts'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "observability alerts and webhooks are explicit separate pages" --project=desktop-chrome --workers=1 --timeout=120000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 2 of" --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 2 of" --project=mobile-chrome --workers=1 --timeout=180000'`.
+
+------
+
+### 08 — Fleet Instance detail, Summary — **P1**
+
+**Resolved 2026-06-27 — resource-scoped facts, human activity labels, and no fleet KPI block**
+
+**Issues**
+
+- [x] It repeats the same inconsistent Online/Last seen state. Resolved by using
+  the shared agent display-state helper in the VPS identity and resource facts;
+  registered-but-unseen agents now read as `Contact unknown` with missing
+  gateway timestamp evidence instead of a false healthy online state.
+- [x] Global fleet-level counts are placed inside a resource page. Resolved by
+  suppressing the shell fleet KPI strip on `Fleet / Instance detail` and keeping
+  the page header scoped to context chips plus the selected resource.
+- [x] Summary quick actions are duplicated at both the page top and resource
+  card. Resolved by keeping workflow handoffs in the page header and keeping the
+  selected-resource card focused on identity and facts.
+- [x] Health says no telemetry while Latest work and network sections still
+  contain operational data. Resolved by renaming the missing sample state to
+  `No resource rollup` and explaining that job, backup, network, and alert
+  evidence can still exist as separate workflow records.
+- [x] Raw operation names such as `scheduled_shell_argv` and raw backup statuses
+  appear. Resolved by mapping workflow enums to operator labels such as
+  `Scheduled shell command`, `Artifact metadata recorded`, and readable alert
+  states; raw values stay out of the normal summary scan.
+- [x] Old records are shown without relative age. Resolved by showing compact
+  relative ages such as `4w ago` in warnings/latest work/activity, with exact
+  timestamps available through the detail time tooltip.
+
+**Practical fix**
+
+The resource header should contain only resource facts:
+
+```
+State · Last contact · IP · Agent version · Alerts · Active jobs
+```
+
+Remove global fleet counts. Use human operation labels such as **Scheduled shell command**. Show age—`26d ago`—with full timestamp on hover.
+
+**Mobile**
+
+Keep the resource identity and main actions sticky or near the top. Render only the selected tab, not large cross-resource summaries.
+
+Resolved implementation:
+
+- `Fleet / Instance detail` now starts with selected VPS identity followed by
+  the required facts: `State`, `Last contact`, `Last IP`, `Agent version`,
+  `Alerts`, and `Active jobs`.
+- The global shell fleet KPI summary is hidden only for the canonical one-VPS
+  detail route; broad fleet pages still retain the compact fleet summary.
+- Summary panels use resource-rollup language, human workflow labels, and
+  relative ages. `scheduled_shell_argv` is covered by regression tests as absent
+  from the canonical VPS detail.
+- Fresh screenshots:
+  `./tmp/desktop-chrome/08-fleet-instance-detail-desktop-chrome.png`
+  (`1440x1068`) and
+  `./tmp/mobile-chrome/08-fleet-instance-detail-mobile-chrome.png`
+  (`390x2270`).
+- Verification passed:
+  `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`;
+  `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/components/ConsoleShell.tsx frontend/src/App.tsx frontend/src/styles/shell.css frontend/tests/release-ia-navigation.spec.ts frontend/src/panels/VpsDetailPanel.tsx frontend/src/styles/workspace.css frontend/src/styles/responsive.css frontend/tests/structured-screenshots.spec.ts'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "release IA reaches every configured page and subpage" --project=desktop-chrome --workers=1 --timeout=160000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "fleet instance detail is the canonical VPS route" --project=desktop-chrome --workers=1 --timeout=160000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 2 of" --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 2 of" --project=mobile-chrome --workers=1 --timeout=180000'`.
+
+------
+
+## Remote Operations
+
+### 09 — Terminal — **P1**
+
+**Resolved 2026-06-27 — direct terminal open, live-follow default, and advanced protocol controls**
+
+**Issues**
+
+- [x] A simple browser terminal sits alongside a large low-level protocol
+  composer. Resolved by moving the generic terminal review composer into a
+  closed `Advanced session controls` disclosure; the default page now leads with
+  the terminal launcher, selected terminal, session inventory, and durable
+  replay.
+- [x] Opening a terminal requires “Prepare terminal review.” Resolved by
+  replacing it with a stable `Open terminal` action that submits a
+  `terminal_open` job directly from Remote Operations when privilege is
+  unlocked, using the same canonical job privilege intent and payload hash as
+  Jobs / Dispatch.
+- [x] Session sequence numbers, replay range, window size, PTY values, and
+  protocol details dominate the page. Resolved by keeping sequence/window
+  evidence in compact context chips and row details; attach/poll/input/resize
+  review controls open only from Advanced session controls.
+- [x] The selected session says it is not following live output. Resolved by
+  automatically following the selected replayable session and loading retained
+  output into the terminal preview.
+- [x] Many actions are icon-only. Resolved by keeping named compact actions:
+  `Replay`, `Copy transcript`, `Download transcript`, `Input`,
+  `Focus terminal`, `Follow`, `Attach`, `Poll`, `Resize`, and `Close`.
+- [x] Transcript functionality appears even when not fully available. Resolved
+  by enabling copy/download only after retained replay is loaded and by keeping
+  unavailable transcript export as explicit browser replay state rather than a
+  false backend export.
+- [x] The page is 2,540 px desktop and 4,613 px mobile. Resolved by closing the
+  advanced composer by default and adding `Focus terminal` full-screen mode for
+  mobile/compact operation. Fresh screenshots are `1440x1544` desktop and
+  `390x3659` mobile.
+
+**Practical fix**
+
+Primary layout:
+
+1. VPS selector;
+2. Open terminal;
+3. active sessions;
+4. selected terminal occupying remaining space.
+
+New sessions should automatically follow output. Put protocol and replay internals in **Advanced session controls** or diagnostics. Use named actions: Follow, Reconnect, Close, Download transcript.
+
+Opening a normal terminal should require no separate review page. If privilege is needed, unlock and open.
+
+**Mobile**
+
+Open the terminal in a dedicated full-screen mode. Session controls should be in a bottom sheet or overflow menu.
+
+Resolved implementation:
+
+- Remote Operations / Terminal now uses the intended production scan:
+  `VPS selector -> Open terminal -> selected terminal -> session inventory`.
+- The normal launcher submits a privileged `terminal_open` job directly from the
+  Terminal page after unlock. Locked users are routed to the privilege vault
+  from the same action instead of a review composer.
+- Selected replayable sessions default to following retained output; the summary
+  shows `Following` and the terminal preview loads durable replay.
+- `Advanced session controls` remains available for protocol-level attach,
+  poll, input, resize, and close reviews, preserving expert operations without
+  dominating the default path.
+- `Focus terminal` opens a full-screen terminal workspace for mobile or compact
+  operation.
+- Fresh screenshots:
+  `./tmp/desktop-chrome/09-remote-operations-terminal-desktop-chrome.png`
+  (`1440x1544`) and
+  `./tmp/mobile-chrome/09-remote-operations-terminal-mobile-chrome.png`
+  (`390x3659`).
+- Verification passed:
+  `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`;
+  `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/panels/RemoteOperationsPanel.tsx frontend/src/panels/jobs/TerminalSessionsPanel.tsx frontend/src/styles/jobs.css frontend/tests/release-ia-navigation.spec.ts frontend/tests/structured-screenshots.spec.ts'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "terminal open and resume stay" --project=desktop-chrome --workers=1 --timeout=160000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "remote operations owns terminal" --project=desktop-chrome --workers=1 --timeout=140000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 2 of" --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 2 of" --project=mobile-chrome --workers=1 --timeout=180000'`.
+
+------
+
+### 10 — Files — **P1**
+
+**Resolved 2026-06-27 — compact file selection, named actions, metadata, and mobile editor focus**
+
+**Issues**
+
+- [x] A large blank editor is reserved before a file is selected. Resolved by
+  replacing the pre-selection editor with the compact state
+  `Select a VPS and file to begin.` and rendering CodeMirror only after a text
+  file opens.
+- [x] The whole page can be locked even for basic browsing. Resolved by keeping
+  VPS/path selection visible while locked and explicitly stating that privilege
+  unlock is required only when the UI reads the remote VPS filesystem.
+- [x] Actions rely on small ambiguous icons. Resolved by replacing the selected
+  file action rail with named compact actions: download, upload, move, create,
+  permissions, owner, and delete.
+- [x] `/` appears as an ordinary download context without explaining whether it
+  downloads a file, directory, or archive. Resolved by naming root/directory
+  download `Download folder as archive` in the toolbar, action group, and
+  context menu.
+- [x] Expected file metadata is missing or visually weak. Resolved by listing
+  Name, Type, Size, Owner, Mode, and Modified for the selected path.
+- [x] Save controls exist before there is anything to save. Resolved by showing
+  mode and Review save only after a text file is open.
+
+**Practical fix**
+
+Before selection, show a compact state:
+
+> Select a VPS and file to begin.
+
+Only render the editor after a text file is selected. List:
+
+```
+Name · Type · Size · Owner · Mode · Modified
+```
+
+For a changed text file, show the diff inside one Save confirmation. Rename root/directory download to **Download folder as archive**. Place Follow symlinks under Advanced.
+
+**Mobile**
+
+Use file list → full-screen editor, not side-by-side panes squeezed into 390 px.
+
+Resolved implementation:
+
+- `FileBrowserPanel.tsx` now gates the editor behind an opened text file, adds
+  a compact empty state, and gives save confirmation a bounded diff preview.
+- The selected action group uses named buttons and places `Follow symlinks`
+  under `Advanced file options`.
+- Mobile CSS hides the file list/details while an editor is open and exposes a
+  `Back to files` control, making the flow list → editor instead of squeezed
+  panes.
+- Verification:
+  `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`;
+  `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/panels/jobs/FileBrowserPanel.tsx frontend/src/styles/jobs.css frontend/tests/console-file-browser.spec.ts frontend/tests/release-ia-navigation.spec.ts frontend/tests/structured-screenshots.spec.ts'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/console-file-browser.spec.ts -g "browses a VPS filesystem|single-file operation" --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/console-file-browser.spec.ts -g "mobile file browser" --project=mobile-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "file browser reads" --project=desktop-chrome --workers=1 --timeout=160000'`.
+  Fresh screenshots:
+  `./tmp/desktop-chrome/10-remote-operations-files-desktop-chrome.png`;
+  `./tmp/mobile-chrome/10-remote-operations-files-mobile-chrome.png`.
+
+------
+
+### 11 — Transfers — **P1**
+
+**Resolved 2026-06-27 — default upload flow, ready-download language, and advanced reusable sources**
+
+**Issues**
+
+- [x] Terms such as handoff and reusable source artifact expose implementation
+  concepts. Resolved by changing the normal Transfers and Files surfaces to
+  `Ready downloads`, `Download`, `Retry`, `Transfer output`, and `Reusable
+  upload sources`; API handoff wording remains internal only.
+- [x] Upload source artifacts, download handoffs, and live transfer sessions
+  are mixed together. Resolved by separating the default upload flow, ready
+  downloads, transfer sessions, retry review, and advanced reusable sources.
+- [x] Creating a reusable artifact is more prominent than the common upload
+  operation. Resolved by making `Upload file` the primary form and moving
+  reusable source management into a collapsed `Advanced: reusable upload
+  sources` drawer after the transfer inventory.
+- [x] Progress, transfer rate, retry state, and destination are difficult to
+  understand at a glance. Resolved with table columns
+  `Direction · VPS · Path · Size · Progress/speed · State · Action`, with
+  `Ready to download`, `Retry`, `Completed`, progress bars, rate caps, path
+  role, size, and chunk evidence visible.
+- [x] Action icons are not self-explanatory. Resolved by replacing transfer row
+  icon-only controls with compact labeled actions: `Download`, `Retry`, and
+  `Job`, plus explicit selected-download controls. `Cancel` and `Delete` are
+  not rendered as fake row actions because the current API does not expose a
+  row-safe cancel/delete lifecycle: abort requires the original resume token,
+  and retained-download deletion is not exposed as a transfer endpoint.
+
+**Practical fix**
+
+Default upload flow:
+
+```
+Choose local file → Choose VPS → Destination path → Upload
+```
+
+Place reusable source artifacts under Advanced.
+
+Use a transfer table:
+
+```
+Direction · VPS · Path · Size · Progress/speed · State · Action
+```
+
+Use **Ready to download**, **Retry**, **Cancel**, and **Delete** rather than internal handoff language.
+
+**Mobile**
+
+Show active transfers first. Put artifact management in a separate collapsed section.
+
+Resolved implementation:
+
+- Remote Operations / Transfers now starts with a default upload flow:
+  local file, target VPS, destination path, and `Upload`. Upload opens Jobs /
+  Dispatch with a resumable upload preset and carries the selected local file
+  forward for review.
+- Ready downloads are separated from reusable sources and use operator copy:
+  `Ready downloads`, `Ready to download`, `Download selected files`, and
+  `Download`.
+- The transfer grid follows the intended scan columns and uses readable state
+  labels instead of raw handoff evidence as the primary signal.
+- Reusable upload sources are kept in `Advanced: reusable upload sources` after
+  the active transfer inventory. The drawer preserves expert reuse without
+  making object-store source creation more important than normal upload.
+- Cancel/delete lifecycle controls remain a backend/API contract gap rather
+  than disabled UI: agent abort requires the original resume token and the
+  transfer API does not expose retained-download deletion.
+- Files handoff copy now points to `Transfer output` and `Open transfers`.
+- Fresh screenshots:
+  `./tmp/desktop-chrome/11-remote-operations-transfers-desktop-chrome.png`
+  and
+  `./tmp/mobile-chrome/11-remote-operations-transfers-mobile-chrome.png`.
+- Verification passed:
+  `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`;
+  `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/panels/jobs/FileTransferSessionsPanel.tsx frontend/src/panels/jobs/FileBrowserPanel.tsx frontend/src/panels/RemoteOperationsPanel.tsx frontend/src/panels/JobDispatchPanel.tsx frontend/src/panels/jobs/JobOperationControls.tsx frontend/src/jobDispatchPreset.ts frontend/src/styles/jobs.css frontend/tests/console-file-transfer-handoff.spec.ts frontend/tests/console-transfer.spec.ts frontend/tests/console-file-transfer-empty.spec.ts frontend/tests/release-ia-navigation.spec.ts frontend/tests/structured-screenshots.spec.ts'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/console-file-transfer-handoff.spec.ts --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/console-transfer.spec.ts -g "retained reusable source" --project=desktop-chrome --workers=1 --timeout=160000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/console-file-transfer-empty.spec.ts --project=desktop-chrome --workers=1 --timeout=120000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "file browser reads" --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "job detail opens" --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 2 of" --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 2 of" --project=mobile-chrome --workers=1 --timeout=180000'`.
+
+------
+
+### 12 — Processes — **P1**
+
+**Resolved 2026-06-27 — process inventory scan model and direct row actions**
+
+Remote Operations / Processes now validates process chronology from
+`started_unix` and `observed_at`. Impossible records show `Timeline
+inconsistent` and `Unknown` uptime instead of presenting impossible Started and
+Observed values as ordinary facts. The scan table now follows the intended
+shape: `Process · VPS · State · CPU · Memory · Uptime · Restarts · Last exit ·
+Actions`, with CPU and memory promoted to first-class columns, source job IDs
+kept in expanded evidence, and long log paths wrapped in detail. The normal
+Processes header no longer links to the unfinished Process Metrics page. Mobile
+now renders process operation cards with CPU, memory, uptime, restarts, last
+exit, and visible Logs / Restart / Stop actions. Restart now submits a canonical
+`process_restart` job directly from the inventory when privilege is already
+unlocked, preserving the shared payload-hash privilege assertion. Stop opens one
+local `Confirm process stop` prompt and then submits a canonical `process_stop`
+job; it no longer detours through the generic Dispatch review. Logs remain a
+Dispatch read workflow because retained log byte count and output review still
+belong in the supervisor log read form.
+
+**Issues**
+
+- Started and Observed times appear chronologically impossible.
+- Process name, source, logs, and other values truncate quickly.
+- Important resource values such as CPU and memory are not prominent.
+- The page links to the unfinished Process Metrics page.
+- Grammar such as “1 processes restarted” remains.
+- Raw source IDs are exposed.
+
+**Practical fix**
+
+Validate chronology and show Unknown when records are invalid.
+
+Columns:
+
+```
+Process · VPS · State · CPU · Memory · Uptime · Restarts · Last exit · Actions
+```
+
+Provide Logs, Restart, and Stop. Restart can be direct while unlocked; Stop gets one confirmation.
+
+Hide Process Metrics until it works.
+
+**Mobile**
+
+Use one process card with resource usage and Restart/Stop actions visible.
+
+Resolved implementation:
+
+- Direct Restart uses the existing job contract: `process_restart`,
+  `selector_expression: id:<client>`, `confirmed: true`, `destructive: true`,
+  and a `buildPrivilegeForJobOperation` assertion. If privilege is locked, the
+  action routes to the existing Privilege Vault unlock.
+- Stop uses one in-page confirmation with operator-facing VPS labels, then
+  submits the same canonical privileged job path for `process_stop`.
+- The expanded row now states the real action model: Logs open Dispatch,
+  Restart submits after unlock, and Stop uses one confirmation on the page.
+- Fresh screenshots:
+  `./tmp/desktop-chrome/12-remote-operations-processes-desktop-chrome.png`
+  and
+  `./tmp/mobile-chrome/12-remote-operations-processes-mobile-chrome.png`.
+
+------
+
+### 13 — Bulk Files — **P1**
+
+**Resolved 2026-06-27 — target/path/run order, live scope summary, and post-run results**
+
+**Issues**
+
+- Review and privilege controls appear before the operator has fully described the operation.
+- “Review targets” and “Review download” split one simple operation into multiple reviews.
+- Local match count, server-resolved scope, and stale targets are not clearly distinguished.
+- The execution summary occupies substantial space before execution.
+- A stale target is not identified prominently by name.
+
+**Practical fix**
+
+Order the screen as:
+
+```
+Targets → Path/files → Live match summary → Run
+```
+
+Show:
+
+> 3 matched · 2 ready · backup-nyc-03 stale
+
+Use one confirmation for the final bulk operation. Unlock only when Run is selected. Replace the empty summary with results after dispatch.
+
+**Mobile**
+
+Keep the operation form and Run button together, then show results below.
+
+Resolved implementation:
+
+- The normal flow now reads as `Targets -> Path/files -> Live match summary -> Run`.
+  Primary action labels use `Run download`, `Run upload`, and `Run ...` for
+  advanced operations instead of presenting a second visible review step.
+- `Refresh scope` remains available as an optional server-scope preview, while
+  `Run` still re-resolves targets before opening the one confirmation prompt so
+  stale cached selector results cannot execute.
+- The privilege unlock panel moved below the described operation and live match
+  summary, so operators describe the target/path/file first and unlock only
+  when they are ready to run.
+- The live match summary distinguishes browser-local estimates from
+  server-resolved scope and names attention targets such as
+  `backup-nyc-03 stale` before confirmation.
+- The right pane is `Live match summary` before execution and changes to
+  `Execution summary` only after a job is running or has produced results. The
+  old empty per-target result placeholder no longer consumes space before a run.
+- Fresh screenshots:
+  `./tmp/desktop-chrome/13-remote-operations-bulk-files-desktop-chrome.png`
+  and
+  `./tmp/mobile-chrome/13-remote-operations-bulk-files-mobile-chrome.png`.
+
+------
+
+## Jobs
+
+### 14 — Job History — **P1**
+
+**Resolved 2026-06-26 — operator scan columns, row-open workflow, and raw evidence demoted to details**
+
+Jobs / History now scans as operational execution evidence instead of raw job
+metadata. The default grid follows:
+
+```
+Operation · Targets · Result · Duration · Started by · Age · Open
+```
+
+Operation names are humanized, target counts are explicit, completed jobs show
+elapsed duration, actor evidence distinguishes operator-triggered jobs from
+worker automation, and age uses relative text with exact timestamp in the
+title. The subtitle now says `Latest execution records` instead of implying
+the table contains only privileged requests. The Open action and whole row both
+load target results, so details no longer depend on a tiny expander.
+
+Raw job IDs, payload hashes, raw command types, actor IDs, timeout, and exact
+created/completed timestamps are kept in row details rather than default scan
+columns. Because the current history record does not expose a job-level error
+summary or resolved target names, the detail view states that per-target exit
+code and error evidence live in Target results. Focused desktop/mobile tests
+verify the new columns/card shape, Open behavior, absence of the Payload column
+from default scan, and raw payload hash availability in details.
+
+**Issues**
+
+- The subtitle says “Latest privileged requests,” but the table includes non-privileged jobs.
+- Raw operation types and IDs dominate.
+- Duration, requester, error summary, and useful target names are absent.
+- Opening details relies on a tiny control.
+- Payload hashes occupy table space without helping initial scanning.
+
+**Practical fix**
+
+Use:
+
+```
+Operation · Targets · Result · Duration · Started by · Age · Open
+```
+
+Translate `shell_argv` to **Shell command**, etc. Put IDs, hashes, and raw payloads in the detail drawer. Make the whole row openable.
+
+**Mobile**
+
+Show one job card with operation, target summary, result, duration, age, and Open.
+
+------
+
+### 15 — Job Dispatch — **P1**
+
+**Resolved 2026-06-27 — grouped operations, explicit all-scope targeting, compact templates, and one dispatch action**
+
+Jobs / Dispatch now treats the normal workflow as operation selection,
+operation-specific fields, explicit target scope, impact preview, collapsed
+execution options, and one final Dispatch confirmation. Operations are grouped
+as Command, Files, Update, Backup, and Process in the desktop selector; Terminal
+creation stays in Remote Operations / Terminal, while terminal-specific
+composer flows still render only terminal controls. Mobile uses one native
+operation select instead of a wall of operation tabs.
+
+The target selector no longer starts with an editable `id:*` token. A blank
+visible selector is explicitly labelled `All N scoped VPSs`, and dispatch,
+preview, confirmation, privilege intent, and backend submission normalize that
+scope to `id:*`. This preserves explicit all-fleet behavior without creating
+malformed token edits such as `id:agentid:*`.
+
+Template management is demoted behind a compact `Manage templates` disclosure,
+leaving the template picker in the normal form. The primary action is now
+`Dispatch`; it re-resolves targets and opens the same confirmation prompt, while
+`Refresh target preview` is a secondary preview action that does not require
+privilege. Execution options are collapsed: the current job request stores
+timeout and privilege mode, while fleet concurrency remains governed by the
+system dispatcher policy; unavailable canary and stop-after-failure controls
+are not faked as per-job settings.
+
+Fresh screenshots:
+
+- `./tmp/desktop-chrome/15-jobs-dispatch-desktop-chrome.png`
+- `./tmp/mobile-chrome/15-jobs-dispatch-mobile-chrome.png`
+
+**Issues**
+
+- Template management competes with the actual dispatch form.
+- Numerous operation tabs create a dense wall of choices.
+- An empty selector can silently mean all three scoped VPSs.
+- Target preview and review controls are separated.
+- Preview can be entangled with privilege state.
+- Fleet safety options are absent from the normal flow, but adding a full rollout wizard would be excessive.
+
+**Practical fix**
+
+Group operations:
+
+- Command;
+- Terminal;
+- Files;
+- Update;
+- Backup;
+- Process.
+
+Show only fields for the selected operation. State target scope explicitly:
+
+> All 3 scoped VPSs
+
+For multiple targets, provide one collapsed **Execution options** section:
+
+- concurrency;
+- timeout;
+- stop after N failures;
+- optional canary.
+
+Templates belong in a small selector or Manage templates menu.
+
+**Mobile**
+
+Use a compact operation select instead of many tabs. Keep the primary Dispatch button sticky.
+
+------
+
+### 16 — Approvals — **P0**
+
+**Status — implemented 2026-06-26**
+
+Direct approve/reject row execution has been replaced with a compact review
+decision prompt. The prompt shows operation, targets, requester, risk,
+requested time, selector, payload, and request reason; approval accepts an
+optional note and rejection requires an operator reason. The API now rejects
+blank rejection reasons, so the rule is enforced by the business model rather
+than the UI alone.
+
+Additional mobile polish completed 2026-06-27: generic data-grid mobile cards no
+longer repeat a `Decision`/`Action` field when the card already renders the
+same row action, so Approval cards expose one clear `Review` action plus
+`Details`.
+
+**Issues**
+
+- Approve and Reject are small direct row actions.
+- Source code immediately submits the decision with `confirmed: true`.
+- The reason is hard-coded rather than attributable to the operator.
+- The row does not expose enough payload/target information before the decision.
+- On mobile, the actions can be outside the initial visible area.
+
+**Practical fix**
+
+Replace direct actions with **Review**. The compact dialog should show:
+
+- operation;
+- targets;
+- requester;
+- risk label;
+- requested time;
+- payload summary.
+
+Approve: optional note.
+ Reject: required reason.
+
+This remains a single dialog, not a multi-level approval process.
+
+**Mobile**
+
+Keep Review as the visible card action. Never require horizontal scrolling to approve or reject.
+
+Verification passed 2026-06-27:
+
+- `bash -ic 'cargo test -p vpsman-api job_approval -- --nocapture'`
+- `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`
+- `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/components/ConsoleDataGrid.tsx frontend/src/panels/JobsPanel.tsx frontend/tests/release-ia-navigation.spec.ts frontend/tests/structured-screenshots.spec.ts'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "jobs approvals and scheduled runs stay separate" --project=desktop-chrome --project=mobile-chrome --workers=1 --timeout=90000'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "generic data grids become actionable mobile cards" --project=mobile-chrome --workers=1 --timeout=90000'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 3 of" --project=desktop-chrome --workers=1 --timeout=120000'`
+- `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 3 of" --project=mobile-chrome --workers=1 --timeout=120000'`
+
+Fresh screenshots:
+
+- `./tmp/desktop-chrome/16-jobs-approvals-desktop-chrome.png` (`1440x906`)
+- `./tmp/mobile-chrome/16-jobs-approvals-mobile-chrome.png` (`390x1202`)
+
+------
+
+### 17 — Scheduled Runs — **P1**
+
+**Resolved 2026-06-26 — schedule-owned grid, source schedule DTO, and Run again semantics**
+
+Jobs / Scheduled runs now uses the shared console data grid instead of a
+hand-built history table. The scan columns are `Schedule · Operation · Targets ·
+Due · Started · Result · Duration · Open`, mobile uses the shared actionable
+card layout, and the page count uses operator-facing `schedule-created run`
+copy.
+
+The API `JobHistoryView` now carries `source_schedule_id`, and the frontend
+joins that against loaded schedule records so the row shows the schedule name
+and cadence when available. Raw job ID, payload hash, schedule ID, authority,
+current next run, and the exact due-time data boundary live in expanded row
+details. The previous implementation-gap strings (`schedule link not exposed`,
+`due not exposed`, `Retry/worker health not exposed`) are removed from the scan
+view. Retry is no longer shown; the mobile/card row action is **Run again** and
+is disabled until a replay endpoint can preserve schedule source, due time,
+targets, and privilege review.
+
+**Issues**
+
+- Internal backend limitations are shown directly: due time not exposed, schedule link not exposed.
+- A completed job offers Retry, which is ambiguous.
+- Schedule and job IDs are more visible than the schedule name.
+- Cadence, duration, and target summary are weak.
+
+**Practical fix**
+
+Hide unavailable fields rather than turning implementation gaps into operator text.
+
+Use:
+
+```
+Schedule · Operation · Targets · Due · Started · Result · Duration · Open
+```
+
+Rename Retry to **Run again** when the previous run succeeded. Link back to the schedule.
+
+**Mobile**
+
+Card layout with schedule name, result, due/start age, and Open/Run again.
+
+------
+
+### 18 — Job Artifacts — **P1**
+
+**Resolved 2026-06-26 — typed artifact inventory, workflow actions, and raw evidence details**
+
+Jobs / Artifacts now scans as:
+`Artifact · Type · Source workflow · VPS/job · Created · Size · Verification · Action`.
+Artifact rows use operator-facing types such as **Backup artifact**, **Transfer
+package**, and **Agent update bundle** instead of raw domains. A compact
+toolbar filter narrows the inventory by artifact type.
+
+Human verification states now map raw artifact statuses to **Ready**, **Upload
+incomplete**, **Verification failed**, or **Expired**. Raw object keys, download
+paths, SHA-256 values, and raw statuses live in expandable row details with
+Copy controls. The default action remains read-only and routes operators to the
+owning workflow: Backups / Artifacts, Remote Operations / Transfers, or
+Automation / Agent updates. Cleanup/destructive controls stay out of this page.
+
+**Mobile verification addendum — 2026-06-26**
+
+Structured screenshot batch 4 had regressed on mobile because long source
+workflow labels in ConsoleDataGrid cards exceeded the viewport. Shared mobile
+card containment now wraps header state, field links, and action labels without
+horizontal scrolling. Fresh mobile and desktop batch 4 screenshots pass for
+Jobs / Artifacts, and the mobile card keeps source workflow, size, action, and
+Details visible.
+
+**Issues**
+
+- Backup, transfer, and agent-update artifacts are combined without enough differentiation.
+- Internal states such as active/published are not explained.
+- Created time, source VPS/job, verification, expiry, and primary action are weak or missing.
+- Hashes and object URLs truncate.
+
+**Practical fix**
+
+Use:
+
+```
+Artifact · Type · Source workflow · VPS/job · Created · Size · Verification · Action
+```
+
+Human states:
+
+- Ready;
+- Upload incomplete;
+- Verification failed;
+- Expired.
+
+Raw object URL and hash go into expandable details with Copy.
+
+**Mobile**
+
+Group artifacts by type or provide a simple filter. Keep Download/Open/Restore visible.
+
+------
+
+## Automation
+
+### 19 — Schedules — **P0**
+
+**Resolved 2026-06-26 — compact schedule registry, bounded future-run menu, and explicit automatic-run policy**
+
+Automation / Schedules now scans as:
+
+```
+Name · Operation · Targets · Human cadence · Next run/Overdue · Last result · State
+```
+
+Past `next_run_at` / `next_runs` values are no longer presented as future run
+chips. Enabled schedules with only stale run times show `Overdue` and
+`Schedule calculation stale`. Rows show only the next future run; additional
+future times are capped to five entries in a portaled menu so the grid does not
+grow horizontally or vertically. Catch-up, retry, raw cron, target selector,
+and error details move to expanded row evidence instead of competing with the
+scan columns.
+
+The page now states the execution model directly: enabled schedules
+automatically dispatch future jobs from their saved target snapshot, Run now is
+one manual dispatch, and Jobs / Approvals is a separate workflow. Row actions
+surface Run now, Enable, Disable, and Edit first, so mobile cards expose the
+operator's normal schedule actions without horizontal scrolling.
+
+**Issues**
+
+- Dates from May are displayed as “Next runs” in late June.
+- The UI does not distinguish past due, stale schedule calculation, and future execution.
+- Multiple future-time chips consume considerable width.
+- Cron, human cadence, timezone, catch-up, and retry compete for attention.
+- It is unclear whether an enabled schedule runs automatically or generates approval work.
+
+**Practical fix**
+
+A schedule row should show:
+
+```
+Name · Operation · Targets · Human cadence · Next run/Overdue · Last result · State
+```
+
+Show only the next run; place the next five in a popover.
+
+An enabled schedule should normally authorize its future runs. Where a schedule intentionally requires approval, state this explicitly as a policy option.
+
+**Mobile**
+
+A schedule card should fit name, cadence, next run, state, and Enable/Run now without horizontal scrolling.
+
+------
+
+### 20 — Runbooks — **P2**
+
+**Resolved 2026-06-26 — operator runbook cards, honest last-run evidence, and custom-template management access**
+
+Automation / Runbooks now keeps the reusable-operation abstraction compact and
+direct. Runbook cards show human operation labels such as `Shell command`
+instead of raw command types, and the catalog summary labels global job history
+as `Latest loaded job` rather than implying it is the selected runbook's last
+run.
+
+Per-card evidence now shows `Last result` with result and relative age when a
+loaded job history row matches the template command type. When no matching row
+is loaded, the card says `No loaded run` and explains the missing command-type
+evidence instead of showing `No matching run` beside unrelated global job
+activity. Raw job IDs stay out of the scan card.
+
+The primary action is now **Run**, opening Jobs / Dispatch with the template,
+scope, and timeout prefilled. Review inputs are collapsed behind a short
+`Review inputs` disclosure so mobile cards stay short. Custom runbooks expose a
+visible **Manage** menu with Edit, Duplicate, and Delete routes into Dispatch,
+where the existing command-template save/delete controls live.
+
+This is one of the better pages. The abstraction matches the product and reduces repeated operator input.
+
+**Remaining issues**
+
+- Last run is represented mainly by a raw job ID.
+- Cards can say no matching run while unrelated global job activity is visible.
+- Internal operation names remain.
+- Custom runbooks lack obvious Edit/Duplicate/Delete access.
+
+**Practical fix**
+
+Show last result and relative time. Translate operation types. Use one primary action: **Run** or **Open in Dispatch**. Put Edit, Duplicate, and Delete in an overflow menu.
+
+**Mobile**
+
+Keep runbook cards short; hide parameter details until opened.
+
+------
+
+### 21 — Source Templates — **P1**
+
+**Resolved 2026-06-26 — registry-first authoring, detail drawer workflows, and honest source readiness**
+
+Automation / Source templates now makes the template registry the primary
+surface. Creation opens a **New source template** drawer, and selecting a
+template opens a closeable detail drawer with explicit Assign, Render, and
+Test / update tabs. The page no longer shows create, assign, render, clone,
+test, diff, and update forms all at once.
+
+Active source status is collapsed into an evidence disclosure and its summary
+uses the same readiness model as the rows, so states such as `selected_no_store`
+count as needing review. Scan rows show human labels such as
+`Source selected; server storage not configured`; raw backend states remain
+available only in expanded details.
+
+Config / Templates has been renamed to **Template coverage** and kept
+read-only. It shows runtime coverage and source-readiness posture while linking
+to Automation / Source templates for persistent authoring, removing the
+authoring/coverage overlap.
+
+**Mobile verification addendum — 2026-06-26**
+
+Structured screenshot batch 4 had regressed on mobile because long template
+domains and action labels exceeded the card width. Shared ConsoleDataGrid mobile
+cards now wrap state text and action labels, so Source Templates cards keep
+template name, domain, scope, assigned count, updated time, and Open / Assign /
+Edit / Details controls visible without horizontal scrolling.
+
+**Issues**
+
+- Registry, source status, create, assign, render, clone, test, diff, and update workflows coexist on one long page.
+- The page says zero need attention while showing attention-style source states.
+- Internal statuses such as `selected_no_store` are exposed.
+- “New” appears while creation controls are already visible elsewhere.
+- Empty selector behavior can mean all scoped VPSs without enough emphasis.
+- It overlaps with Config / Templates.
+
+**Practical fix**
+
+Make the template registry primary. Selecting a template opens a detail drawer with assignment, render, test, clone, and update.
+
+Use + New to open creation. Humanize states and make the attention count truthful.
+
+Rename Config / Templates to **Template coverage** or **Source coverage**, reserving Source Templates for authoring.
+
+**Mobile**
+
+Show only registry or selected-template detail, not every lifecycle tool at once.
+
+------
+
+### 22 — Agent Updates — **P0/P1**
+
+**Resolved 2026-06-26 — honest registry model, compact release drawer, and artifact-gated actions**
+
+Automation / Agent updates now separates release metadata from update
+approval. The page derives an explicit registry model from Suite Config:
+enforced registries are described as a manual-hash gate, while non-enforced
+registries are described as advisory release metadata for audit and Dispatch
+prefills. The registration confirmation states that recording metadata does
+not approve or start an update.
+
+The primary screen now exposes current fleet version posture, available
+version, registered artifact, target/update path, registry policy, health
+checks, and rollback readiness. Current version telemetry is shown honestly as
+unavailable when loaded agents do not expose build/version data. GitHub-specific
+copy was replaced with generic Check update language. Start update is available
+only when a registered artifact hash exists, and Rollback is disabled with a
+visible reason until the latest release records rollback artifact metadata.
+Release registration now opens as a closeable drawer so long metadata fields no
+longer dominate the default workflow. Focused desktop/mobile tests verify the
+new posture labels, Start update dispatch prefill, disabled rollback reason,
+and screenshot manifest required text.
+
+**Issues**
+
+- The screen calls the registry an approval mechanism while also stating the registered-update policy is not enforced.
+- Activate staged and Rollback appear even where no staged/rollback artifact is available.
+- Current fleet version telemetry is unavailable, weakening update decisions.
+- GitHub-specific wording leaks into a generic update workflow.
+- Registration and rollout fields are long and always visible.
+
+**Practical fix**
+
+Choose one honest model:
+
+1. **Registry is informational:** describe it as release metadata; or
+2. **Registry is enforced:** reject unregistered hashes.
+
+Do not imply both.
+
+Primary screen:
+
+```
+Current version posture · Available version · Registered artifact · Targets · Update
+```
+
+Disable unavailable actions with a reason. Put release registration in a drawer. For multiple targets, provide optional canary/concurrency controls, not a large deployment platform.
+
+**Mobile**
+
+Keep Check update and Start update near the top. Collapse release metadata and rollback details.
+
+------
+
+## Network
+
+### 23 — Network Overview — **P2**
+
+**Resolved 2026-06-26 — actionable workflow cards, stale evidence, and direct tunnel creation**
+
+Network / Overview now keeps the compact overview shape but makes the workflow
+tiles read as actionable controls with explicit right-side Open affordances and
+concise tooltips. Operator-facing copy now explains `Observed tunnels to save`
+instead of the more abstract promotion-candidate term, and OSPF review is
+framed as cost changes waiting for review.
+
+The latest evidence summary now derives the newest timestamp across
+observations, trend rollups, OSPF recommendations/update evidence, and telemetry
+tunnel reports. It displays relative age plus `stale` or `current`, with the
+full timestamp available through the title, so old network evidence is no
+longer presented as an ordinary raw timestamp.
+
+The overview header now has a direct **Create tunnel** primary action. It routes
+to Network / Tunnel plans and opens the Create tunnel plan workflow immediately,
+without adding another wizard or subpage.
+
+This is structurally good and reasonably compact.
+
+**Remaining issues**
+
+- Workflow cards do not clearly look clickable.
+- Latest evidence is shown as an old timestamp without a freshness warning.
+- Terms such as promotion candidate and OSPF review need concise help.
+- There is no obvious direct Create tunnel action from the overview.
+
+**Practical fix**
+
+Make the whole card clickable. Add relative age and stale status. Provide concise tooltips and an optional **Create tunnel** primary action.
+
+**Mobile**
+
+The overview cards stack acceptably; reduce the repeated global shell above them.
+
+------
+
+### 24 — Network Graph — **P1**
+
+**Resolved 2026-06-26 — stale evidence badge, compact controls, and list-first mobile graph**
+
+Network / Graph now shows a freshness badge beside the Topology graph title
+using the newest generated, node, or edge evidence timestamp. The badge uses
+relative age plus `stale` or `current` and preserves the full timestamp in the
+title, so old topology evidence is not presented as ordinary current graph
+state.
+
+The graph controls are compact and labelled: health filtering is a View select,
+viewport actions are named Zoom out, Reset, and Zoom in buttons, and the tiny
+minimap is hidden for small topologies. The summary above the graph is reduced
+to Layers, OSPF cost, and Measurements.
+
+Unavailable values are removed from the scan path: empty latency curves no
+longer render as `No curve`, and the cost column uses the same `OSPF 22 (+8)`
+recommendation wording used by Network / OSPF. On mobile, the tunnel list is
+the default scanning surface and the visual graph opens on demand.
+
+**Issues**
+
+- Graph data is from May 31 but is displayed without a prominent stale-data warning.
+- Filter tabs wrap awkwardly.
+- The toolbar is icon-heavy and lacks clear labels.
+- Summary cards take considerable space before the graph.
+- Unknown/no-curve values add noise.
+- OSPF values disagree with other screens.
+- A minimap offers little value for a tiny topology and becomes distracting on mobile.
+
+**Practical fix**
+
+Put a visible freshness badge beside the title:
+
+> Last topology evidence: 26d ago — stale
+
+Use a compact filter dropdown or segmented control. Add tooltips to graph controls. Hide unavailable values. Resolve the OSPF source inconsistency.
+
+For small fleets, the graph can remain simple. No need for complex layer systems.
+
+**Mobile**
+
+Default to a tunnel/node list. Open the graph full-screen on demand.
+
+------
+
+### 25 — Tunnel Plans — **P1**
+
+**Resolved 2026-06-27 — compact registry, clear disabled bulk actions, and mobile card layout**
+
+- [x] Selection-dependent bulk actions are disabled when no plan row is
+  selected, use a visibly disabled secondary-button state, and sit beside the
+  reason text `Select plan rows for bulk enable, disable, or export.`
+- [x] The registry columns follow the intended operator scan:
+  `Plan`, `Endpoints`, `Desired state`, `Runtime state`, `Health`,
+  `OSPF cost`, `Updated`, and row action/detail controls.
+- [x] Plan names and endpoints wrap instead of truncating important endpoint
+  identity. Desired lifecycle state, runtime state, and health are separated.
+- [x] Bandwidth displays with explicit Mbps units, and the registry states the
+  actual model: latency/loss plus a bounded sqrt bandwidth penalty, manual
+  speed-test evidence, and separate monitoring/auto-OSPF state.
+- [x] Mobile now renders compact cards with the toolbar, search, primary
+  workflow buttons, disabled bulk action, field chooser, and pagination visible
+  without the former huge blank stretched-search region.
+- [x] Fresh screenshots:
+  `./tmp/desktop-chrome/25-network-tunnel-plans-desktop-chrome.png` and
+  `./tmp/mobile-chrome/25-network-tunnel-plans-mobile-chrome.png`.
+
+**Issues**
+
+- Selection-dependent actions appear available when no plan is selected.
+- Plan names and endpoints truncate.
+- Enabled and Planned are shown together without clearly separating desired and runtime state.
+- Values such as `100m` lack clear units.
+- “Manual speed tests only” conflicts with surrounding latency/auto-OSPF language.
+- Bandwidth is not limited to three fixed presets. The intended model is an
+  operator-typed Mbps value, with the OSPF cost preview recalculated live as
+  the operator adjusts bandwidth, latency, loss, preference, or priority.
+
+**Practical fix**
+
+Disable selection actions and explain why.
+
+Columns:
+
+```
+Plan · Endpoints · Desired state · Runtime state · Health · OSPF cost · Updated · Action
+```
+
+Use explicit units such as `100 Mbps`. Clarify whether auto-OSPF is enabled, monitoring-only, or manual.
+
+Treat bandwidth as a numeric Mbps input in create/promotion/edit workflows, not
+as a fixed 10/100/1000 tier selector. Show the computed OSPF cost preview next
+to the editable values so operators can tune bandwidth and preference before
+saving.
+
+**Mobile**
+
+Use cards. Avoid rendering the desktop table as a mostly blank horizontally scrollable region.
+
+------
+
+### 25b — Create Tunnel Plan — **P1**
+
+**Resolved 2026-06-27 — three-step create workflow with adjacent OSPF preview**
+
+- [x] Creation uses three compact review sections:
+  `Endpoints & type`, `Addresses & routing`, and `Review & create`.
+- [x] Sections only read ready after their responsible inputs validate, while
+  save-blocking state remains visible in the review strip and disabled save
+  affordance.
+- [x] The lifecycle control uses positive wording:
+  `Enable after save: On/Off`.
+- [x] Bandwidth is a numeric `Bandwidth Mbps` input over the operator range,
+  not a preset tier selector. The `OSPF cost` preview recalculates live beside
+  bandwidth, latency, packet loss, and preference/priority.
+- [x] Mobile create mode hides the plan registry, keeps the close button
+  visible, uses a linear form, and no longer contains severe empty or overflow
+  regions.
+- [x] Fresh screenshots:
+  `./tmp/desktop-chrome/25b-network-tunnel-plans-create-desktop-chrome.png`
+  and
+  `./tmp/mobile-chrome/25b-network-tunnel-plans-create-mobile-chrome.png`.
+
+**Issues**
+
+- Seven status/step cards make tunnel creation appear more complex than necessary.
+- Some steps look complete before valid inputs exist.
+- A checkbox uses negative wording such as Disabled.
+- Bandwidth is a typed Mbps planning input, not a fixed preset list. The form
+  should preview OSPF cost live from bandwidth, latency, loss, and
+  preference/priority.
+- The plans table remains above the creation form.
+- Save-blocking reasons are scattered.
+- The mobile screenshot contains severe empty/overflow regions.
+
+**Practical fix**
+
+Use three compact sections:
+
+1. Endpoints and tunnel type.
+2. Addresses and routing.
+3. Review and create.
+
+Mark sections complete only after validation. Use a positive switch:
+
+> Enable after save — Off
+
+Use a numeric **Bandwidth Mbps** input and a visible **OSPF cost preview** that
+updates as the operator changes bandwidth, latency, loss, and preference.
+
+Show errors beside the responsible field and one concise readiness line beside Create.
+
+**Mobile**
+
+Create mode should hide the plans table. Use a linear form and sticky Create button. Correct the overflow/blank-region defect before release.
+
+------
+
+### 25c — Tunnel Promotion — **P1**
+
+**Resolved 2026-06-27 — observed-to-saved comparison and focused promotion form**
+
+- [x] Promotion starts with three comparison tiles:
+  `Observed source`, `Observed -> saved/proposed`, and `Review gate`, then
+  shows the promotion inputs instead of a long stack of state cards.
+- [x] Selecting observed telemetry pre-fills safe fields such as peer/side,
+  underlay hints, name, and observed endpoint evidence while leaving
+  operator-owned CIDR/routing edits visible.
+- [x] The relationship between observed topology, saved-plan comparison, and
+  proposed plan is explicit before save.
+- [x] The primary action is `Save managed plan`, activation uses
+  `Enable after save: On/Off`, and custom adapter/raw payload controls stay
+  under Advanced.
+- [x] Mobile promotion mode hides the existing-plan registry and keeps the
+  selected observed source/review gate visible in a compact header shape.
+- [x] Fresh screenshots:
+  `./tmp/desktop-chrome/25c-network-tunnel-plans-promotion-desktop-chrome.png`
+  and
+  `./tmp/mobile-chrome/25c-network-tunnel-plans-promotion-mobile-chrome.png`.
+- [x] Verification passed for `25`, `25b`, and `25c`:
+  `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`;
+  `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/styles/topology.css frontend/src/styles/shell.css frontend/src/panels/TopologyPanel.tsx frontend/src/panels/topology/TopologyPromotionPanel.tsx frontend/tests/structured-screenshots.spec.ts frontend/tests/console-layout.spec.ts'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/console-layout.spec.ts -g "authors custom adapter tunnel plans|promotes saved observed tunnel plans|promotes telemetry candidates" --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "network tunnel plans owns promotion" --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 5 of" --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 5 of" --project=mobile-chrome --workers=1 --timeout=180000'`.
+
+**Issues**
+
+- The page uses many workflow-state cards before showing the actual promotion inputs.
+- Selecting observed telemetry does not appear to prefill enough fields.
+- Saved plan list and promotion form compete for space.
+- The relationship between observed plan, current saved plan, and proposed plan is not immediately visible.
+- “Plan enabled” is ambiguous during creation.
+
+**Practical fix**
+
+After selecting an observation, prefill every safe field. Show only missing or conflicting values.
+
+Provide a simple comparison:
+
+```
+Observed → Saved/proposed
+```
+
+Use one **Save managed plan** action and an optional **Enable after save** switch. Keep adapter/raw payload controls under Advanced.
+
+**Mobile**
+
+Hide the existing-plan table while promotion is active and keep the selected observed source visible in a compact header.
+
+**Implementation progress — 2026-06-26**
+
+- Replaced fixed bandwidth tiers with numeric `bandwidth_mbps` fields across
+  shared network planning models, API views, topology graph payloads, CLI/VTY
+  inputs, frontend types, tests, and fixtures.
+- Tuned the OSPF formula for arbitrary 10-10000 Mbps values:
+  `latency + loss * 400 + 10 * sqrt(100 / clamp(bandwidth_mbps, 10, 10000))`,
+  then divided by `max(preference, 0.1)` and clamped to Bird-safe OSPF cost
+  bounds. The square-root term keeps higher bandwidth preferred while
+  preventing large typed values from overwhelming latency or loss.
+- Create and promotion workflows now expose `Bandwidth Mbps`, `Packet loss %`,
+  and `Preference / priority` beside a live `OSPF cost` preview.
+- Mobile create and promotion workflow modes now hide the existing plan table
+  while the workflow is active, keeping the operator focused on the form and
+  close action. The final 2026-06-27 resolved block above covers the remaining
+  workflow simplification, prefill, mobile blank-region, and disabled-action
+  requirements.
+- The create workflow review strip now uses three compact sections:
+  `Endpoints & type`, `Addresses & routing`, and `Review & create`; the
+  activation checkbox uses positive `Enable after save: On/Off` wording.
+- Promotion now uses three comparison tiles: `Observed source`,
+  `Observed -> saved/proposed`, and `Review gate`. The external-observe flow
+  has one primary `Save managed plan` action, positive
+  `Enable after save: On/Off` wording, and keeps custom adapter/raw command
+  controls under Advanced.
+- Selecting a telemetry candidate now pre-fills safe peer, side, local underlay,
+  peer underlay, name, and observed endpoint hints where available while leaving
+  operator-owned CIDR/routing edits visible.
+- The OSPF cost model is now regression-tested for arbitrary typed bandwidth
+  values across the `10..10000 Mbps` range, including a full integer sweep
+  proving costs never increase as bandwidth rises and never move by more than
+  two cost units for a one-Mbps operator tweak. At the default 20 ms / 0% loss /
+  priority 1 baseline, the reviewed anchor costs are `10 Mbps -> 52`,
+  `100 Mbps -> 30`, `1000 Mbps -> 23`, and `10000 Mbps -> 21`; high bandwidth
+  is a diminishing-return preference, not a way to hide bad latency/loss.
+- Added an explicit backend and TypeScript preview guard that the full
+  `10 Mbps -> 10000 Mbps` bandwidth advantage stays secondary to materially
+  worse latency or packet loss at equal priority, while preference/priority
+  remains a deliberate operator override.
+- The live TypeScript OSPF preview now has matching regression coverage for
+  the arbitrary-Mbps curve, range clamps, preference/priority bias, and
+  packet-loss contribution, so the inline preview remains aligned with the
+  backend planner as operators type values.
+- Backend and TypeScript preview tests now also guard former tier boundaries
+  (`100`, `1000`, `5000`, `10000` Mbps) against hidden cliffs, so arbitrary
+  operator-typed bandwidth values remain smooth rather than behaving like the
+  old preset model.
+- The backend OSPF calculation now sanitizes non-finite latency, loss,
+  preference, and policy-weight values before clamping, and the frontend
+  preview test covers temporary numeric form states. Valid operator inputs keep
+  the same reviewed anchors across `10..10000 Mbps`.
+- Effective bandwidth evidence now uses the same `10..10000 Mbps` clamp as the
+  OSPF calculation, so recommendation evidence and preview math cannot disagree
+  at range edges.
+- Fresh desktop and mobile screenshot review passed for
+  `25b-network-tunnel-plans-create` and
+  `25c-network-tunnel-plans-promotion`: close buttons are visible, the mobile
+  registry is hidden while workflows are active, and the OSPF preview sits next
+  to the operator-tweakable bandwidth/latency/loss/preference fields.
+
+------
+
+### 26 — Network Tests — **P1**
+
+**Resolved 2026-06-26 — read-only inspect, unlocked probe, capped speed review, and sparse evidence cards**
+
+Network / Tests now separates the three operator actions by actual risk.
+`Inspect status` runs immediately as a read-only `network_status` job without a
+local privilege assertion. `Run probe` stays immediate after local unlock and
+cannot be submitted through the API as an unprivileged job. `Review speed test`
+remains the only Network Tests confirmation prompt because it opens a temporary
+peer flow and consumes capped traffic.
+
+Sparse one-bucket probe/speed evidence now renders as compact numeric evidence
+cards instead of mini trend charts. The throughput card compares the latest
+measured average against the selected plan baseline and shows the degraded
+state inline, for example `10.1 Mbps avg - 10% of expected 100 Mbps`. The
+header stays compact (`1 sample`) while the warning lives in the body, avoiding
+desktop/mobile truncation.
+
+Verification passed for the Network Tests slice: API tests cover unprivileged
+status acceptance and unprivileged probe rejection; frontend TypeScript passes;
+the Impeccable detector is clean; focused console, release navigation, stale
+confirmation, and structured screenshot batch 5 tests pass on the relevant
+desktop/mobile projects. Fresh screenshots reviewed:
+`tmp/desktop-chrome/26-network-tests-desktop-chrome.png` and
+`tmp/mobile-chrome/26-network-tests-mobile-chrome.png`.
+
+**Issues**
+
+- Status inspection, probe, and speed tests are all blocked behind the same unlock state.
+- Read-only status inspection should not require write privilege.
+- Sparse one-point charts visually imply trends.
+- A measured result around 10 Mbps is shown against a 100 Mbps baseline without strong warning.
+- Multiple review buttons fragment the operation.
+- Timeout and speed-cap fields are not clearly distinguished.
+
+**Practical fix**
+
+- Inspect status: immediate.
+- Probe: immediate while unlocked, or one compact confirmation.
+- Speed test: one confirmation showing expected data amount and duration.
+
+When fewer than two points exist, show a numeric result rather than a line chart. Show baseline comparison:
+
+> 10.1 Mbps — 10% of expected 100 Mbps
+
+Use one plan selector and clear Test buttons.
+
+**Mobile**
+
+Stack test types as compact cards and show results immediately after each test.
+
+------
+
+### 27 — Network OSPF — **P0**
+
+**Resolved 2026-06-26 — immutable recommendation identity, apply-bound API contract, and rollback gate**
+
+Network / OSPF now exposes one reviewed recommendation object with
+Recommendation ID, current cost, proposed cost, evidence time, and evidence
+summary. The recommendation/update-plan API returns the same
+`recommendation_id`, and the OSPF cost mutation request must include that ID
+plus an explicit `apply` or `rollback` intent. Apply requests are checked
+against the server-recomputed recommendation object before the tunnel plan cost
+is changed, and audit metadata records the recommendation ID and intent.
+
+The UI now uses one Apply action and one confirmation for the reviewed network
+change. Rollback is disabled until a successful Apply in the panel creates a
+concrete rollback value, so a rollback prompt cannot appear before an OSPF
+apply occurred. Runtime auto-OSPF telemetry that can contain older external
+updater values is labelled as an observed updater report rather than the
+proposal to apply. Stale evidence is called out by age, and the 10.1 Mbps
+measurement against the 100 Mbps baseline is shown as a warning before Apply.
+
+**Issues**
+
+- The table shows `14→21`, while the review area shows `14→22`.
+- Rollback is visible before an apply operation has occurred.
+- Old evidence is presented without age emphasis.
+- Cost, status, recommendation, and monitoring state use compact internal language.
+- A 10 Mbps effective result against a 100 Mbps baseline is not emphasized sufficiently.
+
+**Practical fix**
+
+Create one immutable recommendation object:
+
+```
+Recommendation ID · Current cost · Proposed cost · Evidence time · Evidence summary
+```
+
+All screens and API actions must use that object. Disable rollback until a successful apply has produced a rollback value.
+
+Show the baseline mismatch as a warning and keep one confirmation for applying the network change.
+
+**Mobile**
+
+Put current/proposed cost and Apply at the top. Place evidence below.
+
+------
+
+### 28 — Network Evidence — **P1**
+
+**Issues**
+
+- “Command output 3 pending” appears to mean output has not been loaded, not that commands are pending.
+- One visualization area looks empty or broken.
+- Observations, tests, recommendations, approvals, and command jobs are mixed.
+- Confidence and health are conflated.
+- Roughly 10 Mbps against a 100 Mbps expectation is labelled too positively.
+- Old timestamps and raw IDs dominate.
+
+**Practical fix**
+
+Rename:
+
+> 3 outputs not loaded
+
+Group evidence into:
+
+1. recommendation;
+2. measurements;
+3. status/probe results;
+4. related jobs.
+
+Keep confidence separate from health. Determine health using the configured baseline. Hide visualization containers that have no useful data.
+
+**Mobile**
+
+Use a chronological evidence list. Do not squeeze the desktop matrix into a phone.
+
+**Resolved 2026-06-27 — grouped evidence, baseline health, and mobile evidence list**
+
+- Network / Evidence now groups the page into `Recommendation evidence`,
+  `Measurement evidence`, `Status and probe results`, and `Related command
+  jobs`, so recommendations, measurements, persisted observations, and command
+  jobs are no longer mixed into one undifferentiated table.
+- Retained command output now reads as `3 outputs not loaded` and row details
+  use `Output not loaded`, avoiding the misleading `pending` wording for jobs
+  that already completed but whose retained output has not been fetched.
+- OSPF recommendation confidence is shown as its own line (`Confidence
+  Measured`) while the health badge is derived from operator-useful evidence.
+  The configured/effective bandwidth baseline now marks `10.1 Mbps avg - 10%
+  of expected 100 Mbps` as `Degraded`, rather than letting measured confidence
+  look healthy.
+- Visible recommendation rows no longer lead with raw recommendation IDs or full
+  timestamp-heavy evidence summaries. They show the cost, bandwidth baseline,
+  sample count, compact recency, privilege state, and approval-scope count.
+- Empty latency visualizations are hidden until enough points exist to draw a
+  meaningful curve.
+- Mobile Network / Evidence now stacks evidence rows into a chronological
+  evidence list instead of rendering the desktop matrix as clipped columns.
+- Fresh screenshots reviewed:
+  `./tmp/desktop-chrome/28-network-evidence-desktop-chrome.png`
+  (`1440x1823`) and
+  `./tmp/mobile-chrome/28-network-evidence-mobile-chrome.png` (`390x3023`).
+  Desktop and mobile show the grouped evidence sections, degraded throughput
+  baseline, unloaded-output copy, and no clipped evidence matrix.
+
+------
+
+## Backups
+
+### 29 — Backup Overview — **P0/P1**
+
+**Resolved 2026-06-27 — decision-first overview with direct backup actions**
+
+- [x] The overview uses the four intended protection states:
+  `Recent`, `Overdue`, `Unprotected`, and `Unknown`; metadata-only
+  `artifact_metadata_recorded` evidence does not count as usable backup
+  protection.
+- [x] The first operator surface is now recoverability decision, affected VPSs,
+  and the three direct actions: `Back up now`, `Create policy`, and `Restore`.
+- [x] Supporting records are compact links instead of a lifecycle-card map, so
+  Requests, Policies, Artifacts, Restore, and optional Migration remain
+  reachable without dominating the page.
+- [x] Migration is neutral until used: empty migration state now reads
+  `not used` / `Not used` and explains that migration is optional unless a
+  replacement or cutover workflow starts.
+- [x] Artifact evidence is separated into `recorded`, `uploaded`, and
+  `verified` states, with text clarifying that recorded metadata alone is not
+  usable recovery evidence.
+- [x] Detailed posture cards are collapsed behind `Detailed posture`, reducing
+  ceremony while preserving the deeper recoverability, retention, restore, and
+  policy evidence for operators who need it.
+- [x] Mobile shows the protection decision, affected VPSs, and three actions
+  before supporting records and detailed evidence. Current evidence rows wrap
+  instead of truncating artifact and migration explanations.
+- [x] Fresh screenshots:
+  `./tmp/desktop-chrome/29-backups-overview-desktop-chrome.png` and
+  `./tmp/mobile-chrome/29-backups-overview-mobile-chrome.png`.
+- [x] Verification passed:
+  `bash -ic 'cd frontend && npm exec -- tsc --noEmit'`;
+  `bash -ic 'node .agents/skills/impeccable/scripts/detect.mjs --json frontend/src/panels/BackupsPanel.tsx frontend/src/styles/backups.css frontend/tests/release-ia-navigation.spec.ts frontend/tests/structured-screenshots.spec.ts'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/release-ia-navigation.spec.ts -g "backups overview explains" --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 6 of" --project=desktop-chrome --workers=1 --timeout=180000'`;
+  `bash -ic 'cd frontend && npm exec -- playwright test tests/structured-screenshots.spec.ts -g "screenshot batch 6 of" --project=mobile-chrome --workers=1 --timeout=180000'`.
+
+**Earlier implementation note — age-based protection states implemented 2026-06-26**
+
+The overview now reports Recent, Overdue, Unprotected, and Unknown backup
+protection states instead of a broad protected count. The fixture’s old
+metadata-only backup is no longer treated as healthy. The final 2026-06-27
+resolved block above covers the later lifecycle-card reduction, neutral
+migration state, primary backup actions, and mobile ordering requirements.
+
+**Issues**
+
+- Any non-error artifact-backed backup can contribute to “protected,” regardless of age.
+- `artifact_metadata_recorded` is treated too positively.
+- An old backup is not clearly Overdue.
+- Migration not planned appears like an attention item even when migration is irrelevant.
+- The page contains many lifecycle cards and ownership explanations.
+- “Needs restore test” may be valid, but the surrounding model feels more elaborate than required.
+
+**Practical fix**
+
+Use four simple protection states:
+
+- **Recent:** successful usable backup within expected interval.
+- **Overdue:** latest backup older than expected.
+- **Unprotected:** no policy or usable backup.
+- **Unknown:** data unavailable.
+
+Separate artifact states:
+
+- Recorded;
+- Uploaded;
+- Verified.
+
+Keep migration neutral until used. Overview should prioritize Back up now, Create policy, and Restore.
+
+**Mobile**
+
+Show the protection decision, affected VPSs, and three actions first. Collapse deeper posture details.
+
+------
+
+### 30 — Backup Requests — **P1**
+
+**Resolved 2026-06-26 — compact request history with artifact/retry actions**
+
+Backups / Requests no longer repeats the full backup posture block. It now
+leads with one compact summary line such as
+`0 recent · 2 unprotected · 0 failed`, followed by request and artifact counts.
+The request grid/card shape is operator-first:
+`VPS`, `Paths`, `State`, `Size`, `Started`, `Duration`, `Artifact`, and
+`Action`. Request IDs, payload hashes, source job/schedule IDs, requester
+availability, notes, and raw status remain in row details.
+
+Artifact-backed rows expose **Open artifact**, which takes the operator to the
+artifact inventory. Rows without usable artifact evidence expose **Retry** by
+prefilling the existing reviewed backup-request drawer from the selected
+request. The raw `artifact_metadata_recorded` state now renders as
+`Recorded` with `content not verified` beside it, instead of implying a
+verified upload.
+
+Screenshots regenerated and reviewed:
+`./tmp/desktop-chrome/30-backups-requests-desktop-chrome.png` and
+`./tmp/mobile-chrome/30-backups-requests-mobile-chrome.png`.
+
+**Issues**
+
+- The full backup posture block is repeated above the records.
+- Request IDs and artifact IDs are more prominent than useful operational details.
+- Age, duration, size, requester, and result detail are weak.
+- A raw status such as artifact ready does not explain upload/verification state.
+
+**Practical fix**
+
+Replace the repeated posture block with one line:
+
+> 1 recent · 2 unprotected · 0 failed
+
+Use:
+
+```
+VPS · Paths · State · Size · Started · Duration · Artifact · Action
+```
+
+Provide Open artifact or Retry where appropriate.
+
+**Mobile**
+
+Place Open backup request beside the heading and render request cards below.
+
+------
+
+### 31 — Backup Policies — **P1**
+
+**Resolved 2026-06-26 — automatic-policy registry and clear empty state**
+
+Backups / Policies no longer repeats the full backup posture block. It now
+uses a compact policy summary for enabled, paused, failing, fixed-target, and
+next-run evidence. The primary page action is **Create policy**, matching the
+operator task.
+
+The policy registry copy no longer says scheduled selectors materialize as
+approval-required jobs. It states the intended model directly: enabled policies
+run automatically on their UTC cadence, while prune remains separate retention
+maintenance. The policy row model is:
+`Name`, `Targets`, `Frequency`, `Next run`, `Retention`, `Last result`, and
+`State`. Raw schedule IDs, catch-up policy, retry cadence, selector expression,
+scope, and next-run count stay in details.
+
+When no policy exists, the empty state now says:
+`No scheduled backups` and explains that the operator should create a policy
+for automatic backups or use Back up now in Requests for a one-time backup.
+Screenshots regenerated and reviewed:
+`./tmp/desktop-chrome/31-backups-policies-desktop-chrome.png` and
+`./tmp/mobile-chrome/31-backups-policies-mobile-chrome.png`.
+
+**Issues**
+
+- Backup posture repeats again.
+- Text says scheduled selectors materialize as approval-required jobs, which makes routine scheduled backup behavior unclear.
+- The empty policy state does not strongly explain the consequence.
+- Protect and policy editing concepts overlap.
+
+**Practical fix**
+
+An enabled policy should normally run automatically. Where approvals are intentionally required, expose that as an explicit policy option.
+
+Policy row:
+
+```
+Name · Targets · Frequency · Next run · Retention · Last result · State
+```
+
+Empty state:
+
+> No scheduled backups. Create a policy or use Back up now.
+
+**Mobile**
+
+Primary action should be Create policy. Keep posture to one compact warning.
+
+------
+
+### 32 — Backup Artifacts — **P1**
+
+**Resolved 2026-06-26 — inventory-first artifacts with direct restore/download actions**
+
+Backups / Artifacts now makes the artifact inventory primary instead of
+repeating the full backup posture block. The grid follows the intended operator
+shape: `Artifact`, `VPS`, `Created`, `Size`, `Verification`, `Retention`,
+`Restore`, and `Download`. Restore and Download are direct row/card actions;
+Restore opens the restore workflow with the linked backup request selected, and
+Download uses the existing artifact package endpoint. Object key, checksum, raw
+status, and request lineage moved into row details.
+
+The former handoff wording has been changed to operator-facing transfer-package
+language in the page header, guide, drawer form, and confirmation prompt.
+Screenshots regenerated and reviewed:
+`./tmp/desktop-chrome/32-backups-artifacts-desktop-chrome.png` and
+`./tmp/mobile-chrome/32-backups-artifacts-mobile-chrome.png`.
+
+**Issues**
+
+- Backup posture repeats.
+- Artifact ownership, linked request, handoff source, and restore consumers are presented as a conceptual map rather than direct artifact actions.
+- Created time, verification, retention, and restore/download actions are not strong enough.
+- “Handoff” remains implementation-oriented.
+
+**Practical fix**
+
+Make the artifact inventory primary:
+
+```
+Artifact · VPS · Created · Size · Verification · Retention/expiry · Restore · Download
+```
+
+Put ownership and lineage in the artifact detail drawer. Rename handoff to **Download package** or **Transfer package** where applicable.
+
+**Mobile**
+
+Artifact cards should expose Restore and Download directly.
+
+------
+
+### 33 — Restore — **P1**
+
+**Resolved 2026-06-26 — source-artifact restore workflow with draft/live confirmation**
+
+Backups / Restore no longer repeats the full backup posture block or the former
+five-stage guide. The page starts with a compact restore summary and a source
+grid shaped around `Artifact`, `Readiness`, `Destination`, `Path behavior`,
+`Draft restore`, and `Action`. Selecting Restore opens the workflow drawer with
+that source artifact selected.
+
+The drawer now uses operator-facing workflow language: **Draft restore** for the
+saved incomplete intent, **Confirm restore** for dry-run/live dispatch, and a
+separate rollback section. Unavailable or unverified artifacts show a warning in
+the page summary, source grid, and drawer before a live restore can be reviewed.
+Live restore confirmations name the destination VPS, path behavior, restore
+path, archive transfer, and replacement scope; dry-run confirmations are not
+styled as destructive.
+
+Screenshots regenerated and reviewed:
+`./tmp/desktop-chrome/33-backups-restore-desktop-chrome.png` and
+`./tmp/mobile-chrome/33-backups-restore-mobile-chrome.png`.
+
+**Issues**
+
+- Backup posture repeats.
+- The restore workflow is framed as five formal stages.
+- Metadata-plan and approval language adds ceremony.
+- A staged plan can appear positive even when the source artifact has not been verified.
+- The actual destination and overwrite behavior are not prominent enough at the top.
+
+**Practical fix**
+
+Use:
+
+1. Choose artifact.
+2. Choose destination and path behavior.
+3. Confirm.
+
+One destructive confirmation should name what will be replaced. Saved incomplete work can be called a **draft restore**, not an approval plan.
+
+Show a strong warning when the artifact is unverified.
+
+**Mobile**
+
+One section at a time is appropriate here, with sticky Continue/Restore. Do not repeat backup posture above every step.
+
+------
+
+### 34 — Migration — **P1**
+
+**Resolved 2026-06-26 — source-to-replacement migration mappings**
+
+Backups / Migration no longer repeats the backup posture block or starts with a
+large formal cutover checklist. The page begins with a compact relationship
+summary:
+
+```
+Source VPS/artifact -> Replacement VPS
+```
+
+The table is now **Migration mappings** instead of internal migration links, with
+operator columns for source artifact, replacement VPS, path behavior, cutover
+state, and mapping details. Empty state copy explains that a draft restore must
+define the source artifact and replacement VPS before a mapping can be saved.
+
+The drawer now uses **Migration mapping** language. It separates the required
+source-to-replacement relationship from optional source artifact staging,
+identity policy, service check, cutover mode, and cutover notes. Review buttons
+are `Review mapping` and `Review cutover restore`; confirmation prompts name the
+source-to-replacement route, path behavior, archive transfer, and mapping hash.
+
+Screenshots regenerated and reviewed:
+`./tmp/desktop-chrome/34-backups-migration-desktop-chrome.png` and
+`./tmp/mobile-chrome/34-backups-migration-mobile-chrome.png`.
+
+**Issues**
+
+- Backup posture repeats.
+- The page uses a large formal cutover checklist before establishing the simple source/destination relationship.
+- “Accepted migration links” is internal language.
+- Identity mapping, source artifact, restore plan, and cutover evidence compete.
+
+**Practical fix**
+
+Start with:
+
+```
+Source VPS/artifact → Replacement VPS
+```
+
+Then optional:
+
+- identity/key mapping;
+- service checklist;
+- cutover notes.
+
+Use one confirmation for the actual cutover or identity switch. Call saved relationships **Migration mappings**.
+
+**Mobile**
+
+Keep source and replacement visible in a compact sticky summary while editing the checklist.
+
+------
+
+## Config
+
+### 35 — Config Overview — **P0/P1**
+
+**Status — implemented 2026-06-26**
+
+Config Overview now shows a latest-state-per-VPS surface by default. Stale queued
+work is labeled **Stale apply**, missing resources are labeled **Deleted or
+unavailable VPS**, rule validity uses clear copy such as **3/3 rules valid**, and
+failed/stale available VPSs get a direct **Retry** handoff into Bulk patch.
+Historical apply/job attempts are collapsed under Recent changes.
+
+**Issues**
+
+- A VPS identifier appears that is not present in the visible fleet.
+- Applied, queued, failed, and runtime-sync counts do not clearly represent latest state versus historical attempts.
+- An old queued action remains presented as queued.
+- Phrases such as “0 of 3 rows are not ok” are awkward.
+- Config health, drift, templates, and apply-state summaries overlap.
+
+**Practical fix**
+
+Show only the latest current state per VPS by default. Historical attempts belong in details.
+
+Old queued work should become:
+
+- Timed out;
+- Lost;
+- Stale;
+- or Unknown.
+
+Label missing resources as **Deleted or unavailable VPS**.
+
+Use clear language:
+
+> 3/3 rules valid
+
+Provide direct Retry for failed or stale applies.
+
+**Mobile**
+
+Prioritize the affected-VPS list and required action; collapse secondary summary cards.
+
+------
+
+### 36 — Per-VPS Config — **P1**
+
+**Status — implemented 2026-06-26**
+
+Per-VPS Config now follows `Select VPS -> Load current config -> Edit desired
+patch -> Apply`. The empty page shows only the target selector and compact
+guidance, redacted config reads submit as unprivileged read-only `config_read`
+jobs, timeout moved under Advanced, patch sections/payload hash update while the
+operator types, and the only mutation entry point is a final `Apply patch`
+confirmation after privilege unlock. Mobile uses selectable Current base /
+Desired patch views with the Apply action kept in the patch workflow.
+
+**Issues**
+
+- Large blank editors are shown before a VPS is selected.
+- Reading a redacted config is blocked by the same privilege path as writing.
+- Max timeout is prominent in a common config workflow.
+- Validate and Review apply create separate steps.
+- Current, desired, and override concepts are not visually strong enough.
+
+**Practical fix**
+
+Sequence:
+
+```
+Select VPS → Load current config → Edit/patch → Inline diff → Apply
+```
+
+A redacted read should be a normal authorized read where safe. Auto-validate while editing. Use one final Apply confirmation. Put timeout under Advanced.
+
+Do not render editor height until a VPS is selected.
+
+**Mobile**
+
+Use a full-screen editor and sticky Save/Apply. Show current/desired as selectable views rather than adjacent columns.
+
+------
+
+### 37 — Bulk Patch — **P1**
+
+**Status — implemented 2026-06-26**
+
+Bulk Patch now follows `Patch/generator -> Targets -> Preview changes -> Apply`.
+The primary workflow shows the generator or temporary patch editor first, then
+an explicit target selector state where an empty selector is never treated as
+all VPSs. `Preview changes` renders generator TOML, resolves the exact target
+count, and shows a per-VPS change summary before Apply. `Apply patch` remains
+locked until the preview exists and privilege material is available; the final
+confirmation still re-renders and re-resolves the frozen request before
+submission.
+
+Generator management moved behind `Manage generators` / `Patch generator
+registry`, so the registry selection model no longer competes with the selected
+generator in the apply form. Timeout moved under Advanced apply options. Mobile
+keeps the editor first, target count second, preview summary below the selector,
+and Apply after the privilege section without the previous sticky-order jump.
+
+**Issues**
+
+- Generator selector, saved generator registry, and generator management compete.
+- The page can visually show a selected generator while the registry says zero selected.
+- Raw generator names truncate.
+- Target scope and empty-selector behavior are not sufficiently explicit.
+- Timeout is prominent.
+- The resulting per-VPS change is not immediately visible.
+
+**Practical fix**
+
+Primary form:
+
+```
+Patch/generator · Targets · Preview changes · Apply
+```
+
+Move generator management behind Manage generators. Auto-render or provide one Preview changes button. Show target count and per-VPS change summary.
+
+For multiple targets, place timeout/concurrency under Advanced.
+
+**Mobile**
+
+Show the patch editor first, target count second, and sticky Apply after preview.
+
+------
+
+### 38 — Config Templates / Coverage — **P1**
+
+**Status — implemented 2026-06-26**
+
+Template coverage now renders as source coverage rather than template
+authoring. Each domain shows `Desired source`, `Stored/available`,
+`Assigned VPSs`, `Ready`, `Attention`, and `Fix`. Raw readiness states are
+mapped to operator labels such as `Server storage missing`, and each Fix action
+opens Automation / Source Templates with the relevant source/template search
+seeded.
+
+Fresh desktop and mobile screenshots for `38-config-templates` passed after
+visual review: coverage cards are compact, the desktop grid no longer clips
+action labels, and mobile cards show the essential state with one Fix/Review/Add
+action plus details.
+
+**Issues**
+
+- The page is mostly a coverage summary linking back to Source Templates, so its name overlaps with template authoring.
+- Built-in source, stored template, selected source, assignment, and readiness are difficult to distinguish.
+- Raw states such as `selected_no_store` appear.
+- Readiness numbers and attention states are not immediately reconcilable.
+- Grammar and labels remain rough.
+
+**Practical fix**
+
+Rename the page **Template coverage** or **Source coverage**.
+
+For each domain show:
+
+```
+Desired source · Stored/available · Assigned VPSs · Ready · Attention · Fix
+```
+
+Use human status labels and direct links to the exact source/template requiring action.
+
+**Mobile**
+
+Coverage cards should show only the essential state and Fix action.
+
+------
+
+### 39 — Config Rules — **P0**
+
+**Status — implemented 2026-06-26**
+
+Dry-run previews now filter rows whose normalized before/after values are
+semantically equal, including quota units, selector list ordering/defaults, JSON
+equivalence, and numeric/boolean encodings. A preview with no effective diff
+shows `No changes detected` and does not open Apply. Mixed previews show only
+effective rows, label hidden no-op rows, use **Preview changes** / **Apply N
+changes** wording, and move the backend preview hash into Details.
+
+The bulk editor now has one authoritative **Preview changes** action and a
+Set/Unset mode switch. Set mode exposes typed cards for reset day, total/RX/TX
+quota, and traffic interfaces/selectors; raw `key=value` editing remains under
+Advanced. Unset mode keeps the explicit key checklist. Mobile preview rows
+render as before/after cards, and Apply remains available only through a valid
+review prompt after preview.
+
+**Issues**
+
+- Dry run says three rows changed while every visible before/after value is the same.
+- Multiple dry-run/review buttons create uncertainty about which action is authoritative.
+- A long preview hash is prominent.
+- Apply is not obvious as the final next step.
+- Known fields such as traffic quota are still presented as generic key/value operations.
+
+**Practical fix**
+
+Normalize values before comparison, including units, list ordering, and equivalent encodings. Remove no-op rows. When no actual changes exist:
+
+> No changes detected
+
+Disable Apply.
+
+Use one **Preview changes** action and one **Apply N changes** action. Hide the preview hash in Details.
+
+Typed fields are useful for well-known rules such as quota, reset day, and interfaces; preserve raw key/value under Advanced.
+
+**Mobile**
+
+Render changed rules as before/after cards. Keep Apply visible only after a valid preview.
+
+------
+
+## Observability
+
+### 40 — Fleet Metrics — **P0/P1**
+
+**Resolved 2026-06-26 — freshness contract, sparse points, warning definitions**
+
+Fleet Metrics now keeps the shared no-gap chart behavior and adds page-specific
+freshness evidence above the chart: selected range, actual data span, sample
+window, last sample age, and sparse-data treatment. Sparse retained telemetry is
+rendered as points only with an explicit notice that it is point evidence, not a
+continuous trend. Warning copy is normalized into active alerts, affected VPSs,
+warning observations, and fleet warning state, so the page no longer reuses one
+ambiguous "warnings" term for different concepts.
+
+**Issues**
+
+- A 24-hour range is selected while the summary references old dates and the chart contains only a short period.
+- Lines connect missing samples because `spanGaps` is enabled.
+- Sparse data is visually presented as a meaningful trend.
+- Warning totals differ from shell/fleet warnings because the term is not defined consistently.
+- The charts do not clearly disclose last update and available data span.
+
+**Practical fix**
+
+Display:
+
+> Selected: 24h · Data available: 18m · Last sample: 20d ago
+
+Do not join gaps. When sample count is very low, show points and a sparse-data notice.
+
+Distinguish:
+
+- active alerts;
+- affected VPSs;
+- warning observations;
+- fleet warning state.
+
+**Mobile**
+
+Charts are full width, one metric at a time. The selected range, available data
+span, and last-sample line remains immediately above the chart on mobile.
+
+------
+
+### 41 — Network Metrics — **P1**
+
+**Resolved 2026-06-26 — stale banner, selected metric, directional labels**
+
+Network Metrics now leads stale retained evidence with a warning banner and
+direct links to Evidence and capped Network tests. The chart section uses a
+selected metric control instead of stacking three tiny charts; sparse evidence
+renders as points only with an explicit retained-evidence time filter, point
+count, last sample, and no continuous-trend implication. Count definitions now
+separate observation rows, chart samples, degraded signals, and overlay rows.
+Endpoint and tunnel rows use directional labels such as
+`agent-fra-02 -> agent-sfo-01`, translate runtime states such as
+`matched_saved_plan` to operator labels, and use `No measurement` instead of
+bare dashes.
+
+**Issues**
+
+- Evidence is from May 31 without a prominent stale warning.
+- Three points are drawn as a trend.
+- Observation, sample, degraded-signal, and overlay counts are not clearly related.
+- Internal values such as `matched_saved_plan` are visible.
+- One endpoint can be Down while another shows latency/loss without explaining direction.
+- Missing values appear as bare dashes.
+- No clear time filter is visible.
+
+**Practical fix**
+
+Add a stale-data banner and show point count. Translate runtime states. Explicitly label directional observations:
+
+> edge-sfo-01 → core-fra-02
+
+Use **No measurement** instead of `—`. Explain count definitions in tooltips. Link degraded observations directly to Evidence or Run test.
+
+**Mobile**
+
+Show one selected tunnel/metric at a time rather than a very long stack of small charts.
+
+------
+
+### 42 — Process Metrics — **P0/P1**
+
+**Resolved 2026-06-27 — removed from normal navigation**
+
+Process Metrics is removed from normal Observability navigation, the desktop
+sidebar, and the mobile page selector. Stale programmatic requests for the old
+`process_metrics` subpage fall back to Observability / Fleet metrics instead of
+showing an implementation-status page. Remote Operations / Processes no longer
+links to unfinished process metrics as production evidence.
+
+**Issues**
+
+- This is an implementation-status page inside normal production navigation.
+- It exposes “Implementation work” and backend model requirements to operators.
+- The Processes page links to it despite no useful metrics being available.
+
+**Practical fix**
+
+Hide it or mark it Preview in both navigation and page title. The best fix is to remove it until the backend provides process history.
+
+Do not replace it with more placeholder cards.
+
+**Mobile**
+
+The empty internal roadmap no longer occupies a dedicated mobile route.
+
+------
+
+### 43 — Observability Alerts — **P1**
+
+**Resolved 2026-06-27 — tabbed configuration page with Fleet triage handoff**
+
+Observability / Alerts is now configuration-first: policy authoring is the
+default tab, Destinations owns alert notification channels, and Deliveries owns
+previewed/failed/retained notification evidence. Active triage is explicitly
+handed off to Fleet / Alerts. The page no longer renders policies, destinations,
+and delivery history as one long stacked mobile route. Alert queue controls on
+this page are simplified to `Preview matches`, `Send / retry`, and
+`Open deliveries`; the full lower-level queue controls remain available only in
+the broader notification registry where that operational depth is intentional.
+
+**Issues**
+
+- Policies, active alert count, policy groups, notification channels, queue operations, and delivery history share one page.
+- This overlaps with the active Fleet Alerts queue.
+- Four similar actions—review matches, queue dispatch, queued deliveries, delivery—are difficult to distinguish.
+- Policy/channel names and times truncate.
+- Failed delivery evidence is not easy to reach.
+
+**Practical fix**
+
+Keep this page for configuration:
+
+- Policies;
+- Destinations;
+- Delivery history.
+
+Link to Fleet Alerts for active triage.
+
+Simplify queue actions to:
+
+- Preview match;
+- Send/retry;
+- Open delivery.
+
+Put cleanup in Maintenance or an overflow menu.
+
+**Mobile**
+
+Use tabs for Policies, Destinations, and Deliveries. Do not render all three sequentially.
+
+------
+
+### 43b — Alert Policy Editor — **P1**
+
+**Resolved 2026-06-27 — focused editor with explicit match preview**
+
+Alert policy creation/editing from Observability / Alerts now opens as a
+focused policy editor. While it is open, the Alerts summary cards, tabs, active
+triage handoff, policy grid, destinations, and delivery history are hidden.
+The focused editor exposes one `Preview matches` action and one
+`Create policy` / `Update policy` save action; the old `Dry-run`,
+`Review create`, and `New policy` controls remain out of this release flow. The
+activation checkbox now uses `Enable after creation` for new policies, and the
+match summary states `Matches N VPSs` after preview alongside incomplete-VPS
+and invalid-rule counts. The lower-level shared policy manager remains
+unchanged for Fleet policy workflows where inline editing is intentional.
+
+**Issues**
+
+- The editor expands inside the full Alerts page while unrelated channels and delivery sections remain below.
+- The page reaches 2,262 px desktop and 4,253 px mobile.
+- “Evaluate policy” is used where the operator expects Enabled.
+- Target expression and condition are expert-capable but lack a clear matched-VPS result.
+- Dry-run, Review create, and New policy are confusing during one create operation.
+- A new policy can be enabled immediately without enough emphasis.
+
+**Practical fix**
+
+Open a focused editor or side drawer. Show:
+
+```
+Matches 3 VPSs
+```
+
+Use **Enable after creation**, defaulting according to product policy. Provide one Preview and one Create action. Keep raw conditions, with common threshold controls only where they save time.
+
+**Mobile**
+
+Use a full-screen editor and hide the rest of Alerts until it closes.
+
+------
+
+### 43c — Webhooks — **P1**
+
+**Resolved 2026-06-27 — Event webhooks tabs, scoped Send test, and explicit retry**
+
+Observability / Webhooks is now **Observability / Event webhooks** across the
+page title, breadcrumb, page selector, release navigation, screenshot manifest,
+and page copy. The page states that event webhooks are independent from alert
+notification destinations, while Alerts keeps notification destinations on the
+Alerts page.
+
+The page now opens to a Rules tab with summary actions and a compact
+Rules / Deliveries / Maintenance tab set. Delivery history and retention
+cleanup no longer render below the rule table by default; Deliveries owns
+retained evidence and Maintenance owns cleanup review.
+
+The Event webhooks rule manager now uses configuration-mode queue actions:
+`Preview event`, `Send test`, and `Retry failed`. `Retry failed` sends the
+existing backend `status: failed` process request, and `Send test` is backed by
+a new optional `rule_id` dispatch field so each rule card can open a reviewed,
+rule-scoped test dispatch instead of accidentally matching every enabled rule.
+The dispatch preview hash includes the scoped rule id.
+
+Fresh desktop/mobile screenshots show the default Rules tab only, visible
+rule-card `Send test`, no notification-channel bleed, and no long stacked
+deliveries/maintenance sections.
+
+**Issues**
+
+- Event webhook rules can be confused with alert notification destinations.
+- Failure and delivery counts differ from alert delivery counts without explaining that they are separate domains.
+- Several queue-review actions have nearly identical wording.
+- No strong Send test action is visible.
+- Retention/cleanup receives too much prominence on the main operational page.
+- Internal expression and delivery terms dominate.
+
+**Practical fix**
+
+Rename this **Event webhooks** and explain:
+
+> Event webhooks are independent from alert notification destinations.
+
+Primary actions:
+
+- Create rule;
+- Send test;
+- Retry failed.
+
+Keep dispatch preview only where useful. Move cleanup under Maintenance or More.
+
+**Mobile**
+
+Use Rules and Deliveries tabs. Keep Send test visible on each rule card.
+
+------
+
+### 43d — Webhook Rule Editor — **P1**
+
+**Resolved 2026-06-27 — focused editor, sample payload, and real signed webhooks**
+
+Observability / Event webhooks now opens webhook rule creation in a focused
+editor. While the editor is open, the page hides routing summary cards, tabs,
+the rule grid, queue controls, delivery history, and maintenance. The editor
+uses `Enable after creation`, `Test`, and `Create rule` / `Update rule`;
+`Review create`, `New rule`, and queue controls are absent from the focused
+create flow.
+
+The Test action now renders an inline sample payload panel inside the editor:
+matched VPS count and names, rendered message, dry-run delivery status, and a
+bounded JSON payload sample. It does not navigate the operator to Deliveries
+while editing.
+
+The secret field is now real rather than cosmetic. Webhook rule requests accept
+an optional signing secret plus an explicit clear flag; responses expose only
+`signing_secret_set` and never serialize the secret value. Editing with a blank
+secret preserves the existing secret, entering a new value sets or rotates it,
+and `Clear existing signing secret` removes it. API-triggered delivery
+processing and the background worker both sign the exact JSON payload bytes with
+`X-Vpsman-Webhook-Signature: sha256=...` when a rule has a secret. Delivery
+history rows do not persist secret material; processing resolves the current
+rule secret when claiming a delivery.
+
+Verification passed for this resolved slice: backend tests cover redaction,
+preserve/rotate/clear lifecycle, scoped dispatch secret propagation, and HMAC
+signature output; worker tests cover HMAC signing output; TypeScript passes;
+the Impeccable detector is clean on touched UI/test files; focused Event
+webhooks release-navigation tests pass; and fresh desktop/mobile screenshot
+batch 9 passed with the secret field visible in the focused editor.
+
+**Issues**
+
+- Like the policy editor, it expands inside a very long full page.
+- The page reaches 2,279 px desktop and 4,288 px mobile.
+- “Evaluate rule” is used instead of Enabled.
+- Body template editing lacks a prominent rendered sample.
+- Review rule, Review create, and New rule duplicate intent.
+- Queue and cleanup sections remain visible below.
+
+**Practical fix**
+
+Focused editor:
+
+- name;
+- expression;
+- target URL;
+- secret;
+- cooldown;
+- body template;
+- sample payload;
+- Test;
+- Enable after creation;
+- Create.
+
+Show response status and latency after Test. Keep queue management outside the editor.
+
+**Mobile**
+
+Use a full-screen editor with sticky Test and Create controls.
+
+------
+
+### 44 — Dashboards — **P0/P1**
+
+**Resolved 2026-06-27 — source counts, sparse coverage, and mobile section shape**
+
+Observability / Dashboards now calls the read-only layouts `Dashboard presets`
+instead of saved dashboards, shows compact freshness and source-count summaries,
+and reconciles fleet/job/alert counts from the dashboard overview contract.
+Missing `offline` counts are derived from `total - online - stale` when that
+summary evidence is available, avoiding raw `undefined` text without inventing a
+new API source. The page now exposes sparse 24-hour sampled coverage near the
+dashboard summary and beside resource/network widgets, keeps Share / Export as a
+simple handoff section, and avoids bad plurals such as `1 records`. Mobile uses
+a single preset menu plus a selected section switcher so operators see one
+preset and one widget section at a time.
+
+**Issues**
+
+- The page calls predefined read-only views “Saved dashboards,” implying user-managed dashboards.
+- `undefined offline` is visibly rendered.
+- Fleet, alert, and job counts disagree with other surfaces.
+- The selected 24-hour range contains old or sparse data.
+- “Share and export” and “mutation boundary” text over-explain implementation concepts.
+- Grammar such as “1 records” remains.
+
+**Practical fix**
+
+Call them **Dashboard presets** unless users can actually save custom dashboards.
+
+Fix all undefined fallbacks and use a shared summary source. Show freshness and available range.
+
+Provide simple Share link and Export JSON actions. A dashboard builder is not required.
+
+**Mobile**
+
+Let the operator select one preset and one widget section at a time.
+
+------
+
+## Audit
+
+### 45 — Audit Events — **P0/P1**
+
+**Resolved 2026-06-27 — human ledger columns, compact coverage, and mobile cards**
+
+Audit / Events now uses the intended default ledger shape:
+`Time · Operator · Action · Target · Result · Related job/session`. The table
+derives operator-facing labels from audit metadata while retaining raw action,
+raw target, command hash, source IP, session, privilege scope, event ID, exact
+timezone-bearing time, and JSON metadata in the detail panel. Related job,
+terminal, schedule, and session references are correlated into the visible
+`Related job/session` column so operators can follow evidence without reading
+payload JSON.
+
+The earlier latest-event bug remains covered by the older-first fixture
+regression. Coverage explanation is reduced to one compact warning that reports
+which expected sensitive workflow families are missing from the returned rows,
+rather than filling the page with contract cards. Mobile uses the shared
+ConsoleDataGrid card mode with time, result, operator, action, target, and
+related evidence visible before opening details.
+
+**Issues**
+
+- The “latest visible event” summary is older than another visible row.
+- Only a small number of audit rows appear despite numerous sensitive workflows.
+- Actor, action, target, payload, hash, and result are raw or truncated.
+- Full timestamps still lack an obvious timezone label.
+- Coverage-contract explanations dominate the page.
+
+**Practical fix**
+
+Fix latest-time calculation and ensure sensitive operations create linked records.
+
+Default columns:
+
+```
+Time · Operator · Action · Target · Result · Related job/session
+```
+
+Place raw JSON, hashes, IP, and metadata in a detail drawer. Keep one compact coverage warning rather than several explanatory cards.
+
+**Mobile**
+
+Audit cards need time, actor, action, target, and result. Open details for everything else.
+
+------
+
+### 46 — Audit Job Evidence — **P0/P1**
+
+**Resolved 2026-06-26 — audit gaps are warnings and output evidence has explicit states**
+
+Audit / Job evidence now uses the intended table shape:
+`Job · Actor · Privilege · Targets · Result · Audit · Output`. Missing
+correlation is no longer neutral `Job ledger only`; rows and detail panels show
+`Audit event missing` with warning tone when no audit row matches the job ID or
+payload hash. The summary also exposes an `Audit gaps` count.
+
+Output evidence now has explicit operator states: `Not loaded`, `Empty output`,
+`Retention expired`, `Output unavailable`, `Inline output`, and `Retained
+output`. The selected-job detail explains which state was derived from loaded
+output rows or load errors, while keeping raw payload hashes in the detail
+panel instead of the default scan columns. Desktop and mobile screenshot
+coverage proves the warning state is visible in the Audit / Job evidence page.
+
+**Issues**
+
+- Four privileged jobs are visible, but only two appear linked to audit rows.
+- Completed jobs can have no output evidence without clearly saying whether output was empty, not retained, expired, or unavailable.
+- Job IDs and hashes dominate.
+- “Job ledger only” sounds neutral even though it indicates an audit-evidence gap.
+
+**Practical fix**
+
+Treat missing audit correlation as a warning:
+
+> Audit event missing
+
+Distinguish output states:
+
+- Empty output;
+- Not loaded;
+- Retention expired;
+- Output unavailable.
+
+Use:
+
+```
+Job · Actor · Privilege · Targets · Result · Audit · Output
+```
+
+**Mobile**
+
+Show one evidence card per job with warning badges and Open job.
+
+------
+
+### 47 — Audit Sessions — **P0/P1**
+
+**Earlier implementation note — stale/expired session display implemented 2026-06-26**
+
+Audit / Sessions now derives operator-facing state from terminal last activity
+and bearer-session expiry instead of trusting raw `open`, `current`, or
+`active` flags. Old open terminal records are shown as `Stale state`, stale
+terminals are excluded from the open count, expired bearer sessions are shown as
+`Expired`, tiny retained transcript ranges are labelled as trace-only evidence,
+and raw replay API paths are hidden under Advanced. The final resolved block
+for this section covers demo/test-data labelling, mobile evidence cards, and
+the strongest started/expiry columns available from current backend evidence.
+
+**Issues**
+
+- Sessions from May appear open in late June.
+- Very small retained transcript sizes are described as replayable evidence without qualification.
+- Raw replay API paths and IDs appear.
+- Fixture-like user-agent and localhost values are displayed as ordinary production evidence.
+- Created, expiry, and last activity are not consistently visible.
+- Times truncate.
+
+**Practical fix**
+
+Validate session state from expiry and last activity. An old “open” session should become **Stale state** or **Expired**.
+
+Use:
+
+```
+Operator · VPS · State · Started · Last activity · Expiry · Transcript · Audit
+```
+
+Hide replay API paths in Advanced details. Clearly label demo/test data where applicable.
+
+**Mobile**
+
+Keep transcript and audit actions visible on the session card.
+
+**Resolved 2026-06-27 — evidence timings, demo/test labels, and mobile cards**
+
+- [x] Terminal session evidence now uses the intended production scan:
+  `Operator · VPS · State · Started · Last activity · Expiry · Transcript · Audit`.
+- [x] `Started` is derived from the earliest linked `terminal.open` audit event
+  when available; absent terminal-start data is explicitly labelled as not
+  reported instead of inferred.
+- [x] `Last activity` remains sourced from terminal inventory and is shown with
+  full timestamp detail in the selected proof panel.
+- [x] `Expiry` is sourced from linked bearer-session expiry when available, with
+  expired bearer sessions labelled directly; missing terminal expiry remains a
+  visible backend-data gap.
+- [x] Localhost, documentation IP ranges, and Playwright user agents are labelled
+  as demo/test auth signals in the summary, grid detail, and operator-session
+  evidence instead of appearing as ordinary production proof.
+- [x] Operator-session evidence now shows role, state, created time, refresh
+  expiry, and auth source; mobile stacks these values instead of hiding them.
+- [x] Raw replay paths remain under Advanced replay path, while transcript and
+  audit evidence stay visible on the selected session.
+
+------
+
+### 48 — Retention & Export — **P1**
+
+**Issues**
+
+- The page exposes many backend/compliance limitations directly.
+- Ten policy domains are summarized while only a small subset is easily inspectable.
+- Export scope and time range are not obvious.
+- Save, Preview prune, and Review cleanup create more stages than necessary.
+- Raw domain names such as `audit_logs` are used.
+- Storage usage is unknown yet presented as a posture card.
+
+**Practical fix**
+
+Simple model:
+
+```
+Domain · Retention days · Metadata only · Export enabled
+```
+
+Save policy directly.
+
+Cleanup:
+
+```
+Choose domain and cutoff → Preview → Delete
+```
+
+Export:
+
+```
+Choose domain and time range → Export
+```
+
+Humanize domain labels and hide implementation-gap details under Diagnostics.
+
+**Mobile**
+
+Use one selected domain editor rather than showing all retention concepts in one vertical page.
+
+**Resolved 2026-06-27 — policy table, selected-domain workflows, and diagnostics**
+
+- [x] Audit / Retention & export now leads with a compact policy summary and a
+  policy table shaped as `Domain · Retention days · Metadata only · Export enabled`.
+- [x] Domain names are humanized in the normal UI; raw retention domain IDs are
+  hidden inside Diagnostics.
+- [x] The selected-domain editor is the main work area for changing domain,
+  retention days, prune limit, metadata-only mode, and export-enabled state.
+- [x] Policy save is direct in the page while still sending the backend-required
+  confirmed request.
+- [x] Cleanup is separated into `Preview cleanup` followed by disabled-then-enabled
+  `Delete reviewed rows`; the destructive confirmation uses the reviewed preview
+  row/object counts and effect text.
+- [x] Export is scoped to the selected domain and clearly states `All retained
+  records` and `JSON history bundle`.
+- [x] Backend/data limitations such as storage size, raw domain, current row total
+  limits, and missing custom date-window export live under Diagnostics instead
+  of dominating the page.
+- [x] Mobile now shows only the selected policy row plus the selected-domain
+  editor, cleanup, export, and collapsed diagnostics.
+
+------
+
+## Access
+
+### 49 — Access Overview — **P1**
+
+**Resolved 2026-06-27 — actions-first overview and five explicit access responsibilities**
+
+Access / Overview now renders only the intended operating shape:
+`Actions required`, `Operators and active sessions`, `VPS identities`,
+`Gateway sessions`, and `Privilege state`. The old repeated posture cards,
+authority workflow map, security-posture metric table, and attention queue are
+removed from the Overview.
+
+MFA copy now says `Policy recommends MFA` and `Recommended` where enforcement
+is not exposed. Bearer sessions are expiry-validated before being counted as
+active, so expired sessions are shown as expired and excluded from the active
+session total. The privilege state uses the plain operator wording:
+`No saved local vault; enter privilege secret when needed.`
+
+The Overview no longer shows the generic admin-actions inspector. Mobile now
+starts with critical access warnings and direct actions, then the four
+responsibility rows, with no horizontal overflow in structured screenshots.
+
+**Issues**
+
+- The same access information appears in overview cards, an authority workflow map, security posture, and attention queues.
+- Terms such as authority posture are more abstract than necessary.
+- MFA is described as required although code states enforcement is not exposed.
+- Expired-looking bearer sessions appear current.
+- The page says no privilege vault while the global shell still offers Unlock, creating uncertainty.
+- Gateway and identity states are repeated.
+
+**Practical fix**
+
+Limit the overview to:
+
+1. actions required;
+2. operators and active sessions;
+3. VPS identities;
+4. gateway sessions;
+5. privilege state.
+
+Use **Recommended** versus **Enforced** accurately. Validate expired sessions. Explain unlock plainly:
+
+> No saved local vault; enter privilege secret when needed.
+
+Remove the workflow map and repeated status sets.
+
+**Mobile**
+
+The first screen should show only critical access warnings and direct actions.
+
+------
+
+### 50 — Operators — **P0/P1**
+
+**Resolved 2026-06-26 — operator policy language, row shape, and mobile cards**
+
+Access / Operators now uses explicit operator-facing policy language instead of
+backend-gap posture. The page says MFA is recommended when enforcement is not
+exposed by the API, uses `MFA off`, `MFA enabled`, and
+`Policy recommends MFA`, and removes the old `admin off` wording. Backend
+evidence gaps such as password age, invite/locked state, and API-token inventory
+are consolidated into an evidence-boundary note rather than counted as healthy
+or unhealthy posture.
+
+The role model now presents the three standard roles, Viewer, Operator, and
+Admin, with visible counts and custom roles only when loaded. Authentication
+failure summary text states that counts come from loaded auth history and
+separates visible-operator failures from unknown-user failures, so the summary
+and per-operator details use the same evidence scope. Refresh TTL labels explain
+the admin target and distinguish refresh-token lifetime from short access-token
+expiry.
+
+The operator table now follows:
+
+```
+User · Status · Role · MFA · Active sessions · Last login · Actions
+```
+
+Row actions expose **Manage** and **Revoke sessions** directly. Mobile renders
+the Operators table as readable cards with Status, Role, MFA, Sessions, Last
+login, Manage, and Revoke sessions visible without page-level horizontal
+overflow. Full timestamps remain available through time titles while scan views
+use compact relative time or `Never`.
+
+**Issues**
+
+- The page exposes backend gaps as normal posture tiles.
+- MFA-required language is stronger than actual enforcement.
+- Role count appears inconsistent with the visible Viewer, Operator, and Admin model.
+- Authentication-failure summary and per-user failure counts do not reconcile.
+- `admin off` is awkward.
+- Session TTLs of 365/90 days are visible without a concise policy explanation.
+- Dates truncate.
+
+**Practical fix**
+
+Use human language:
+
+- **MFA off**
+- **MFA enabled**
+- **Policy recommends MFA**
+- **Policy enforced**
+
+Make role counts consistent. Explain whether auth failures represent all history or the current user.
+
+Operator row:
+
+```
+User · Status · Role · MFA · Active sessions · Last login · Actions
+```
+
+Role changes need one compact confirmation.
+
+**Mobile**
+
+Operator cards should expose Manage and Revoke sessions directly.
+
+------
+
+### 51 — VPS Identities — **P1**
+
+**Resolved 2026-06-27 — registry-first identities and opened VPS registration workflows**
+
+Access / VPS identities is now registry-first. The repeated Access posture
+overview and identity lifecycle band are removed from the page. The default
+screen shows the identity registry first, then retained key revocations; the
+registration, rotation, and revocation forms are hidden until the operator
+opens a specific workflow.
+
+`Register VPS` opens the VPS identity workflow. Row/selection actions open
+rotation and revocation workflows for the selected VPS. The workflow copy now
+uses VPS identity terminology instead of `Import gateway identity`, and the
+confirmation prompt says `Confirm VPS identity registration`.
+
+Fingerprints in the registry and detail rows are copyable. Fixture-style
+revocation reasons such as `fixture rebuild` are rendered as operator language
+such as `Host rebuild`. Generated private keys are labelled
+`Private key - shown once`, with copy explaining that the panel never saves
+private material.
+
+Mobile keeps the table/cards first. Opening `Register VPS` displays the
+identity workflow as a full-screen mobile panel with a visible close action.
+
+**Issues**
+
+- The full Access Overview is repeated above the identity page.
+- Lifecycle explanation, table, registration form, and revocation form all coexist.
+- Fixture-style rebuild reasons are visible.
+- Public-key fingerprints are not optimized for copy/verification.
+- - New and an always-visible creation form duplicate intent.
+- “Import gateway identity” does not match VPS identity terminology.
+- Gateway defaults depend on personal preferences.
+- Keypair generation needs clearer one-time private-key handling.
+
+**Practical fix**
+
+Remove the repeated overview. Make the identity registry primary. **Register VPS** opens a drawer.
+
+Default flow:
+
+1. generate client ID/keypair or import public key;
+2. show installer command/private material once;
+3. confirm registration.
+
+Use row actions Rotate and Revoke. Make fingerprints copyable. Rename the workflow consistently.
+
+**Mobile**
+
+Show the table/cards first; forms should be full-screen drawers.
+
+------
+
+### 52 — Gateway Sessions — **P1**
+
+**Resolved 2026-06-27 — compact empty state, shared settings route, and session evidence columns**
+
+Access / Gateway sessions no longer repeats the Access Overview or the old
+readiness architecture cards. The page header is scoped to
+`Gateway session inventory`, and an empty page shows one compact state:
+`No active gateway sessions. Configure the gateway endpoint and server key.`
+
+The empty state provides exactly one `Gateway settings` action and routes it to
+shared Suite config rather than browser-local Preferences. Empty desktop grids
+are not rendered, so mobile receives the same compact state without wrapped
+table headers.
+
+The gateway session API and frontend type now expose session `remote_ip` plus
+agent `agent_version`, allowing the populated table shape to be:
+`Gateway · VPS · State · Connected · Last activity · Remote IP · Version`.
+Expanded rows retain detailed evidence such as session ID, client ID, end
+reason, and Noise key.
+
+**Issues**
+
+- The Access Overview is repeated.
+- An empty session page is dominated by architecture explanations.
+- “No panel-side endpoint lookup” is repeated.
+- Preferences and Suite Config buttons duplicate settings paths.
+- The empty table header wraps poorly.
+- Gateway install defaults are browser-local.
+
+**Practical fix**
+
+Use a compact empty state:
+
+> No active gateway sessions. Configure the gateway endpoint and server key.
+
+Provide one **Gateway settings** action. Store defaults in shared configuration.
+
+When populated:
+
+```
+Gateway · VPS · State · Connected · Last activity · Remote IP · Version
+```
+
+**Mobile**
+
+Do not show an empty desktop grid. Use the compact empty state and one settings button.
+
+------
+
+### 53 — Privilege Vault — **P1**
+
+**Resolved 2026-06-27 — scoped local unlock, visible vault state, and separated TOTP setup**
+
+Access / Privilege Vault no longer repeats Access Overview or the old
+deny-by-default routine-action language. The vault panel now leads with the
+operator state that matters: Locked/Unlocked, unlock scope, unlocked-until
+state, and local vault saved/not saved. Direct actions are explicit and central:
+Unlock, Lock now, and Clear local vault.
+
+The local-save copy now says saved privilege material is encrypted in this
+browser with the operator passphrase and is not shared with the server. The old
+`Save encrypted vault` wording was replaced with `Keep encrypted in this
+browser`, and the raw verifier language is no longer the visible form copy on
+the Access page.
+
+TOTP enrollment is now a short sequence: Password, QR/secret, Enter code, and
+Complete. Disable TOTP is separated into its own panel and stays disabled when
+no active TOTP factor exists.
+
+**Issues**
+
+- Access Overview repeats again.
+- The UI asks directly for a privilege secret and verifier salt hex.
+- “Save encrypted vault” is not sufficiently clear about local storage and risk.
+- Unlock scope and duration are not visible.
+- TOTP enrollment, confirmation, and disable controls share one long form.
+- Lock now is not central after unlocking.
+- “Deny by default” language can suggest repeated confirmation for every routine action.
+
+**Practical fix**
+
+Simplify the vault area:
+
+- Locked/Unlocked;
+- unlocked until;
+- local vault saved/not saved;
+- Unlock;
+- Lock now;
+- Clear local vault.
+
+Explain that saved material is encrypted locally and not shared with the server.
+
+TOTP should be a short sequence:
+
+```
+Password → QR/secret → Enter code → Complete
+```
+
+Do not show Disable until TOTP is enabled.
+
+**Mobile**
+
+Use separate full-screen flows for Unlock and TOTP setup.
+
+------
+
+## System
+
+### 54 — System Overview — **P1**
+
+**Resolved 2026-06-27 — compact service-health overview with diagnostics folded away**
+
+System / Overview now leads with the operator-critical control-plane view:
+service health, control-plane queue, database/gateway/worker state, four key
+KPIs, one selected dispatch chart, and a compact attention list. Capacity
+profile notes, dispatch-limit details, and drilldown/backend gaps are no longer
+normal posture cards; they are available under Diagnostics instead.
+
+The page description now matches the overview role, and `unset`-style wording
+in the overview path is replaced by explicit `Not configured` or state-specific
+copy such as `No queued events`. Mobile uses compact subsystem disclosures for
+Database, Dispatch, Gateway, and Worker, and the shared chart axis now reduces
+tick labels on narrow screens to avoid mobile overlap.
+
+**Issues**
+
+- The page is 3,574 px desktop and 7,201 px mobile.
+- A 24-hour range contains only a short old sample period.
+- Many detailed metrics duplicate System Capacity.
+- Backend/drilldown gaps appear as operator cards.
+- Warning meanings differ from global fleet warnings.
+- Values such as unset are rendered without explanation.
+- Too many equally weighted panels dilute what needs attention.
+
+**Practical fix**
+
+System Overview should contain:
+
+- service health;
+- control-plane queue;
+- database/gateway/worker state;
+- four key KPIs;
+- one selected chart;
+- attention list.
+
+Move detailed capacity curves to Capacity. Use **Not configured** instead of unset. Hide implementation gaps under Diagnostics.
+
+**Mobile**
+
+Use collapsible Database, Dispatch, Gateway, and Worker sections.
+
+------
+
+### 55 — System Capacity — **P1**
+
+**Resolved 2026-06-27 — subsystem tabs, factor-based queue health, and compact telemetry gaps**
+
+System / Capacity now opens on a selected subsystem instead of rendering every
+capacity chart at once. Database, Dispatch, Gateway, and Storage are explicit
+tabs; mobile shows one subsystem, its factors, and one chart at a time. The
+fresh screenshots are much shorter than the audit baseline: `1596 px` desktop
+and `3494 px` mobile for `55-system-capacity`.
+
+Queue posture is no longer “any queue depth is attention.” Dispatch capacity
+uses oldest-item age when available, queue growth, the configured in-flight /
+batch thresholds, and worker capacity availability. Gateway capacity uses live
+status, queue age, growth, and queue-full / expired failure signals. The UI
+keeps the OSPF-style operator expectation of realtime threshold adjacency:
+growth, threshold, and availability sit beside the current queue values rather
+than far away in a separate diagnostic block.
+
+Artifact bytes, retention prune backlog, and worker lag are no longer normal
+posture cards. They appear once in a compact unavailable-telemetry banner and
+the Storage tab explains the missing backend fields without implying healthy
+storage posture. Capacity limits link directly to the relevant System / Suite
+Config keys such as `capacity.dispatcher_in_flight`,
+`capacity.dispatcher_batch`, `capacity.api_db_pool`, and
+`storage.artifact_max_bytes`.
+
+**Issues**
+
+- The page is 2,925 px desktop and 5,826 px mobile.
+- Time range and available data again disagree.
+- Any queue depth is treated as attention without considering age or growth.
+- Artifact storage, retention, and worker-lag backend gaps occupy normal posture cards.
+- Dense chart legends create long mobile output.
+- Capacity profile values lack enough threshold context.
+
+**Practical fix**
+
+A queue should warn based on:
+
+- oldest item age;
+- growth;
+- configured threshold;
+- worker availability.
+
+Use Database, Dispatch, Gateway, and Storage tabs on mobile. Show unavailable data in one compact banner.
+
+Link each capacity limit directly to the relevant Suite Config field.
+
+**Mobile**
+
+One subsystem and chart at a time.
+
+------
+
+### 56 — Suite Config — **P1**
+
+**Resolved 2026-06-27 — selected-section editor, search, compact field metadata, auto-validation, and one Review changes flow**
+
+Suite Config now renders one selected settings section at a time by default,
+with a left section rail and searchable field mode for cross-section lookup.
+This cuts the fresh screenshot length from the audit baseline of `6151 px`
+desktop / `11659 px` mobile to `2530 px` desktop / `4559 px` mobile while
+keeping Review and save visible below the selected section.
+
+Every field now has compact metadata instead of always-open Current / Default /
+Validation / Impact boxes. Changed fields open their metadata automatically,
+blank values read as `Unset (uses default)`, and each row exposes `Reset
+current` plus `Use default`. The page also has a sticky save/status bar with the
+next validation/review action and mobile keeps that bar, section rail, and
+privilege gate readable.
+
+Validation now runs automatically after structured field or Advanced TOML edits.
+The normal operator path has one `Review changes` action that validates the
+current draft if needed, opens `Confirm suite config save` only when validation
+and privilege state allow it, and then saves through the existing redacted diff,
+privilege assertion, reload/restart, and audit contract. Manual `Validate now`
+is retained only as a recovery action for invalid or advanced TOML states.
+
+**Issues**
+
+- The page is 6,151 px desktop and 11,659 px mobile.
+- The top summary says Changed keys: not validated beside 13 hot-reload and 16 restart fields, making those counts appear to be current draft impact.
+- Every field repeats current, default, validation, and impact information, producing heavy vertical repetition.
+- Validation and help text truncate.
+- Blank values do not clearly mean unset, inherited, or empty string.
+- Negative boolean wording is counterintuitive.
+- Search and reset-to-default are missing or insufficient.
+- Validate then Review save can create an unnecessary extra action.
+- A large Advanced TOML view adds further length.
+
+**Practical fix**
+
+Before editing, label the top counts:
+
+> Configuration inventory: 13 hot-reload fields · 16 restart fields
+
+After editing:
+
+> 3 changed · 2 hot reload · 1 restart
+
+Auto-validate on change. Use one **Review changes** action, then Save.
+
+Add:
+
+- search settings;
+- per-field Reset;
+- explicit units;
+- Unset/Default labels;
+- sticky changed-fields bar;
+- unsaved-change warning.
+
+Collapse Current/Default/Impact metadata unless the field is changed or expanded.
+
+Use positive switches:
+
+> Require registered updates — Off
+
+**Mobile**
+
+Use accordion sections and a sticky Save bar. Render Advanced TOML only when explicitly opened.
+
+------
+
+### 57 — System Maintenance — **P0/P1**
+
+**Resolved 2026-06-26 — cleanup preview evidence contract, common criteria, and one final Delete confirmation**
+
+System / Maintenance now presents artifact cleanup as common criteria first:
+artifact types, older-than age, state, and optional object prefix. The raw
+expression is kept under Advanced and is combined with the common criteria.
+Operator-facing wording now uses `Artifact types`, `Preview gate`, and
+`Delete artifacts` instead of authority-domain/queue-first language.
+
+The cleanup preview API now returns oldest/newest object age, eligible/protected
+counts, and a bounded representative object list. The UI keeps Delete disabled
+until that evidence is present, then opens one final typed Delete confirmation.
+The preview result shows count, total size, age range, eligible/protected
+objects, preview snapshot, and representative object keys. Focused tests prove
+stale previews still invalidate the destructive action, complete previews enable
+the confirmation, and the queued request is bound to the reviewed preview hash.
+Desktop and mobile structured screenshot coverage verifies the compact
+criteria-preview-delete grouping without horizontal overflow.
+
+**Issues**
+
+- The expression targets `job_output` while several artifact-type checkboxes are selected, making conjunction/scope unclear.
+- Cleanup relies on expert DSL even for ordinary age-based deletion.
+- Preview hash and matched values truncate.
+- The API explicitly does not report age and retention rules.
+- Deletion impact is described as irreversible without enough object-level evidence.
+- “Authority domains” is implementation language.
+- Empty maintenance-job space is large.
+
+**Practical fix**
+
+Common form:
+
+- Artifact types;
+- Older than N days;
+- State;
+- Optional path/prefix.
+
+Keep raw expression under Advanced.
+
+Preview must show:
+
+- count;
+- total size;
+- oldest/newest;
+- retained/reference-protected objects;
+- representative list or downloadable full list.
+
+Until age and retention evidence exists, block cleanup rather than merely warn. Use one Preview followed by one Delete confirmation.
+
+**Mobile**
+
+Keep criteria, preview summary, and Delete together. Collapse empty job history.
+
+------
+
+### 58 — Preferences — **P1**
+
+**Resolved 2026-06-27 — scoped Preferences tabs, sticky save, labeled resets, and system-linked default handoffs**
+
+System / Preferences now separates `Personal display`, `Browser state`, and
+`System-linked defaults` as explicit tabs. The default view shows only personal
+operator presentation settings, cutting the fresh screenshot length from the
+audit baseline of `2874 px` desktop / `6251 px` mobile to `2138 px` desktop /
+`5130 px` mobile.
+
+Home telemetry curve controls are now labeled as personal chart presentation.
+Gateway install material and tunnel allocation pools are no longer editable as
+ordinary personal preferences; Preferences links operators to Suite Config and
+Access / VPS identities for those shared workflows. The page has a sticky save
+bar with changed-setting count, retains the bottom submit for keyboard flow,
+uses named `Reset` actions instead of unlabeled icon-only resets, and moves the
+build number into a low-emphasis footer note.
+
+**Issues**
+
+- The separation between personal, browser-local, and fleet/system preferences is conceptually good.
+- Gateway endpoints, server key, and tunnel allocation pools are nevertheless stored per operator even though they affect generated operational output.
+- The page is 2,874 px desktop and 6,251 px mobile.
+- Save is far below edited settings.
+- Reset icons lack sufficiently obvious labels.
+- Some Home/dashboard curve choices are ambiguously labelled as fleet/system behavior despite possibly being personal presentation.
+- Build number receives more attention than necessary.
+
+**Practical fix**
+
+Keep personal/browser-local:
+
+- timezone;
+- language;
+- table/display density;
+- name format;
+- sidebar behavior;
+- chart presentation preferences.
+
+Move shared operational values:
+
+- gateway endpoints;
+- gateway server key;
+- tunnel address pools;
+
+to fleet/system configuration.
+
+Clearly label every setting:
+
+> Personal — stored for this operator
+>  Browser — stored on this device
+>  System — shared by all operators
+
+Provide a sticky Save bar and named Reset actions.
+
+**Mobile**
+
+Use collapsible Personal, Browser, and System-linked sections. Show Save whenever changes exist.
+
+------
+
+# Visual hierarchy and styling
+
+The visual system is clean, but too many concepts receive the same bordered-card treatment. This makes pages look orderly while weakening prioritization.
+
+## Remaining visual issues
+
+- Almost every fact is enclosed in a pale bordered box.
+- Green/yellow cards are used both for state and general information.
+- Primary and secondary actions can have similar visual weight.
+- Long helper paragraphs appear repeatedly.
+- Important resource names are sometimes less prominent than metadata.
+- Dense text and large blank areas coexist on the same page.
+- Small icon-only actions remain common.
+- Truncated strings often have no obvious reveal/copy affordance.
+
+## Practical styling corrections
+
+- Reduce card borders by approximately one third.
+- Use open sections and dividers for ordinary information.
+- Reserve filled status cards for actual attention or success states.
+- Use red only for actual failure/destruction, yellow for action/review, green for verified healthy state, blue for active/informational.
+- Give each screen one unmistakable primary action.
+- Put raw IDs and hashes in smaller secondary text.
+- Add tooltips to every icon-only action.
+- Prefer relative time in scanning views.
+- Expand blank editors, charts, and output areas only when populated.
+- Use clearer heading levels rather than more boxes.
+
+------
+
+# Terminology that should be simplified
+
+| Current/internal wording              | Better operator wording                        |
+| ------------------------------------- | ---------------------------------------------- |
+| `shell_argv` / `scheduled_shell_argv` | Shell command / Scheduled shell command        |
+| `artifact_metadata_recorded`          | Artifact recorded; content not verified        |
+| `selected_no_store`                   | Source selected; server storage not configured |
+| Handoff                               | Download package / transfer package            |
+| Authority domains                     | Artifact types                                 |
+| Materialized run                      | Scheduled run                                  |
+| Request-bound assertion               | Temporary privilege authorization              |
+| Review queued deliveries              | View queued deliveries                         |
+| Evaluate policy/rule                  | Enabled                                        |
+| Promotion candidate                   | Observed tunnel available to save              |
+| No rollup                             | No historical data                             |
+| Output not loaded                     | Load output                                    |
+| Job ledger only                       | Audit event missing                            |
+| Current records not exposed           | Data unavailable                               |
+| `unset`                               | Not configured                                 |
+
+Raw values can remain in Advanced details for debugging.
+
+------
+
+# What should remain intentionally simple
+
+The following should **not** be expanded merely to resemble a large cloud provider:
+
+- no organization/folder/project hierarchy unless vpsman actually supports those scopes;
+- no multi-party approval for normal commands or config writes;
+- no mandatory wizard for shell, TOML, JSON, selectors, cron, or tunnel fields;
+- no full incident-management system for fleet alerts;
+- no custom dashboard builder unless users request it;
+- no forced audit note for every routine action;
+- no giant universal rollout workflow for one-VPS operations;
+- no artificial exclusivity between terminals, transfers, jobs, and file operations.
+
+Concurrency, raw expert controls, compact tables, and direct navigation are appropriate. They only need honest state, safer defaults, and predictable actions.
+
+------
+
+# Recommended implementation order
+
+## 1. Fix trust failures
+
+- Online versus never-seen contradiction.
+- OSPF `21/22` disagreement.
+- Config Rules no-op diff.
+- Past next-run dates.
+- Expired/current session contradictions.
+- Audit latest-event calculation.
+- `undefined offline`.
+- Impossible process timestamps.
+- Old telemetry presented as current.
+- Backup-protection age semantics.
+
+## 2. Simplify the global shell
+
+- Remove six repeated cards from normal pages.
+- Correct the scope selector behavior.
+- Move saved views into scope/search.
+- Replace the mobile page dropdown with a drawer.
+- Show unlock scope and expiry.
+- Separate console connectivity from agent connectivity.
+
+## 3. Repair mobile operations
+
+- Add mobile card rendering to the data grid.
+- Keep the primary action visible.
+- Make terminal and editors full-screen.
+- Use list mode for topology.
+- Fix tunnel-plan overflow.
+- Add accordion/sticky-save behavior to Suite Config and Preferences.
+
+## 4. Normalize action friction
+
+- Preview before unlock.
+- One confirmation for destructive or bulk operations.
+- No confirmation for ordinary reads.
+- Optional Undo for reversible single-target changes.
+- Replace immediate approval with one compact decision dialog.
+- Collapse advanced controls by default.
+
+## 5. Reduce page duplication
+
+- Remove repeated backup posture from every backup subpage.
+- Remove repeated Access Overview from every access subpage.
+- Remove global fleet cards from resource and system pages.
+- Separate Fleet Alerts triage from Observability alert configuration.
+- Rename Config Templates to Template Coverage.
+- Hide unfinished Process Metrics.
+
+## 6. Improve scanning and polish
+
+- Human operation/status labels.
+- Relative time plus full timestamp.
+- Units on every numeric field.
+- Named primary actions and tooltips.
+- Honest sparse-data charts.
+- Fewer cards and clearer visual hierarchy.
+- Compact actionable empty states.
+
+The central goal should be: **an expert sees the correct state immediately, performs an ordinary operation in a few obvious actions, and encounters extra friction only when the actual risk justifies it.**

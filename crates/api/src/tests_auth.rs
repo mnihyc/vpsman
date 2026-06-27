@@ -2117,6 +2117,8 @@ async fn memory_repository_routes_require_bearer_tokens() {
                 expression: "status = online".to_string(),
                 target: "https://hooks.example/vpsman".to_string(),
                 body_template: String::new(),
+                signing_secret: None,
+                clear_signing_secret: false,
                 cooldown_secs: Some(60),
                 notes: None,
                 confirmed: true,

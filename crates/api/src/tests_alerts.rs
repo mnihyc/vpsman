@@ -111,6 +111,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
             id: backup_job,
             actor_id: None,
             command_type: "backup".to_string(),
+            source_schedule_id: None,
             privileged: true,
             status: "failed".to_string(),
             target_count: 1,
@@ -776,6 +777,8 @@ async fn disabled_webhook_rule_cancels_retryable_deliveries() {
             expression: "status = stale".to_string(),
             target: "http://127.0.0.1:9/webhook".to_string(),
             body_template: String::new(),
+            signing_secret: None,
+            clear_signing_secret: false,
             cooldown_secs: Some(60),
             notes: None,
             confirmed: true,
@@ -796,6 +799,7 @@ async fn disabled_webhook_rule_cancels_retryable_deliveries() {
                 payload: json!({"schema": "test"}),
                 matched_vps: Vec::new(),
                 message: "test".to_string(),
+                signing_secret: None,
                 cooldown_until_unix: 0,
                 actor_id: Some(operator.operator.id),
             },
@@ -812,6 +816,8 @@ async fn disabled_webhook_rule_cancels_retryable_deliveries() {
             expression: "status = stale".to_string(),
             target: "http://127.0.0.1:9/webhook".to_string(),
             body_template: String::new(),
+            signing_secret: None,
+            clear_signing_secret: false,
             cooldown_secs: Some(60),
             notes: None,
             confirmed: true,
@@ -836,6 +842,176 @@ async fn disabled_webhook_rule_cancels_retryable_deliveries() {
         .await
         .unwrap();
     assert!(claimed.is_empty());
+}
+
+#[tokio::test]
+async fn webhook_rule_signing_secret_is_redacted_preserved_rotated_and_cleared() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let rule_id = Uuid::new_v4();
+    let base_request =
+        |signing_secret: Option<&str>, clear_signing_secret: bool, target_suffix: &str| {
+            crate::model_webhook_rules::CreateWebhookRuleRequest {
+                id: Some(rule_id),
+                name: "signed-edge-rule".to_string(),
+                enabled: true,
+                expression: "interval.30sec && tag:edge".to_string(),
+                target: format!("http://127.0.0.1:9/{target_suffix}"),
+                body_template: "{rule.name} {event.kind}".to_string(),
+                signing_secret: signing_secret.map(ToOwned::to_owned),
+                clear_signing_secret,
+                cooldown_secs: Some(60),
+                notes: None,
+                confirmed: true,
+            }
+        };
+
+    let created = repo
+        .upsert_webhook_rule(
+            &base_request(Some("alpha-secret"), false, "create"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(created.signing_secret_set);
+    assert_eq!(created.signing_secret.as_deref(), Some("alpha-secret"));
+    let serialized = serde_json::to_value(&created).unwrap();
+    assert_eq!(serialized["signing_secret_set"], true);
+    assert!(serialized.get("signing_secret").is_none());
+
+    let preserved = repo
+        .upsert_webhook_rule(&base_request(None, false, "preserve"), &operator)
+        .await
+        .unwrap();
+    assert!(preserved.signing_secret_set);
+    assert_eq!(preserved.signing_secret.as_deref(), Some("alpha-secret"));
+    assert_eq!(preserved.target, "http://127.0.0.1:9/preserve");
+
+    let rotated = repo
+        .upsert_webhook_rule(
+            &base_request(Some("beta-secret"), false, "rotate"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(rotated.signing_secret_set);
+    assert_eq!(rotated.signing_secret.as_deref(), Some("beta-secret"));
+
+    let cleared = repo
+        .upsert_webhook_rule(&base_request(None, true, "clear"), &operator)
+        .await
+        .unwrap();
+    assert!(!cleared.signing_secret_set);
+    assert_eq!(cleared.signing_secret, None);
+}
+
+#[tokio::test]
+async fn webhook_rule_dispatch_can_be_scoped_to_one_rule() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.push(AgentView {
+            id: "edge-a".to_string(),
+            display_name: "Edge A".to_string(),
+            status: "online".to_string(),
+            tags: vec!["edge".to_string()],
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: AgentCapabilitySnapshot::default(),
+        });
+    }
+    let first_rule_id = Uuid::new_v4();
+    let scoped_rule_id = Uuid::new_v4();
+    for (id, name) in [
+        (first_rule_id, "alpha-webhook"),
+        (scoped_rule_id, "zulu-webhook"),
+    ] {
+        repo.upsert_webhook_rule(
+            &crate::model_webhook_rules::CreateWebhookRuleRequest {
+                id: Some(id),
+                name: name.to_string(),
+                enabled: true,
+                expression: "interval.30sec && tag:edge".to_string(),
+                target: format!("http://127.0.0.1:9/{name}"),
+                body_template: "{rule.name} {event.kind}".to_string(),
+                signing_secret: (id == scoped_rule_id).then(|| "scoped-secret".to_string()),
+                clear_signing_secret: false,
+                cooldown_secs: Some(60),
+                notes: None,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    }
+
+    let state = alert_test_state(repo);
+    let broad_preview = state
+        .dispatch_webhook_rules(
+            &crate::model_webhook_rules::WebhookRuleDispatchRequest {
+                rule_id: None,
+                event_kind: "interval.30sec".to_string(),
+                event_id: Some("event-1".to_string()),
+                limit: Some(100),
+                dry_run: Some(true),
+                preview_hash: None,
+                confirmed: false,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(broad_preview.len(), 2);
+
+    let scoped_preview = state
+        .dispatch_webhook_rules(
+            &crate::model_webhook_rules::WebhookRuleDispatchRequest {
+                rule_id: Some(scoped_rule_id),
+                event_kind: "interval.30sec".to_string(),
+                event_id: Some("event-2".to_string()),
+                limit: Some(1),
+                dry_run: Some(true),
+                preview_hash: None,
+                confirmed: false,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(scoped_preview.len(), 1);
+    assert_eq!(scoped_preview[0].rule_id, scoped_rule_id);
+    assert_eq!(scoped_preview[0].status, "matched_dry_run");
+    assert_eq!(
+        scoped_preview[0].signing_secret.as_deref(),
+        Some("scoped-secret")
+    );
+
+    let scoped_review_hash = scoped_preview[0].review_preview_hash.clone();
+    let scoped_dispatch = state
+        .dispatch_webhook_rules(
+            &crate::model_webhook_rules::WebhookRuleDispatchRequest {
+                rule_id: Some(scoped_rule_id),
+                event_kind: "interval.30sec".to_string(),
+                event_id: Some("event-2".to_string()),
+                limit: Some(1),
+                dry_run: Some(false),
+                preview_hash: scoped_review_hash,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(scoped_dispatch.len(), 1);
+    assert_eq!(scoped_dispatch[0].rule_id, scoped_rule_id);
+    assert_eq!(scoped_dispatch[0].status, "event_logged");
 }
 
 fn alert_test_state(repo: Repository) -> AppState {

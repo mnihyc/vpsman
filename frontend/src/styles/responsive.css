@@ -54,7 +54,7 @@
     display: none;
   }
 
-  .scopeSelector {
+  .scopeSelectorGroup {
     display: flex;
     width: 100%;
     min-width: 0;
@@ -86,16 +86,36 @@
   .preferenceScopeOverview,
   .preferenceSectionGrid,
   .preferenceGroup,
+  .vpsConfigPosture,
+  .vpsDetailResourceSummary,
   .vpsDetailTopGrid,
-  .vpsDetailFacts {
+  .vpsDetailFacts,
+  .vpsResourceFacts {
     grid-template-columns: minmax(0, 1fr);
   }
 
   .preferenceResetRow,
   .preferenceTagVisibilityToolbar,
+  .preferenceStickySaveBar,
+  .systemLinkedPreferenceRow,
   .tagCreateForm .formRow,
   .accessQueueRow {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .preferenceStickySaveBar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .preferenceStickySaveBar .buttonCluster,
+  .systemLinkedPreferenceActions {
+    justify-content: stretch;
+  }
+
+  .preferenceStickySaveBar .buttonCluster button,
+  .systemLinkedPreferenceActions button {
+    flex: 1 1 min(100%, 150px);
   }
 
   .retentionActions {
@@ -112,6 +132,16 @@
 
   .systemConfigOwnership {
     grid-template-columns: 1fr;
+  }
+
+  .systemConfigStickyBar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .systemConfigStickyBar .buttonCluster {
+    justify-content: flex-start;
+    width: 100%;
   }
 
   .systemConfigBody {
@@ -136,8 +166,61 @@
     grid-template-columns: 1fr;
   }
 
-  .systemConfigFieldText dl {
+  .systemConfigSearch {
+    grid-template-columns: auto minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .systemConfigFieldMeta dl {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .topologyEvidenceGroup {
+    padding: 14px 12px;
+  }
+
+  .topologyEvidenceGroupHeader {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .topologyEvidence .historyTable {
+    overflow-x: visible;
+  }
+
+  .topologyEvidence .historyRow.heading.topologyEvidenceGrid {
+    display: none;
+  }
+
+  .topologyEvidence .historyRow.topologyEvidenceGrid {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: flex-start;
+    gap: 8px;
+    min-height: 0;
+    padding: 12px 0;
+  }
+
+  .topologyEvidence .historyRow.topologyEvidenceGrid > span {
+    min-width: 0;
+  }
+
+  .topologyEvidence .historyPrimary {
+    gap: 2px;
+  }
+
+  .topologyEvidence .historyPrimary .compactAction {
+    justify-content: center;
+    width: 100%;
+  }
+
+  .systemConfigReview .privilegeGateBox {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .systemConfigReview .privilegeGateBox button {
+    width: 100%;
   }
 
   .systemConfigStepper {
@@ -177,6 +260,9 @@
 
   .dashboardSectionTools button {
     flex: 1 1 0;
+    min-width: 0;
+    padding: 0 6px;
+    font-size: 12px;
   }
 
   .actionDrawer {
@@ -186,6 +272,12 @@
 
   .quickStats {
     grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  }
+
+  .fleetStatusStrip {
+    justify-content: flex-start;
+    justify-self: stretch;
+    width: 100%;
   }
 
   .row {
@@ -290,7 +382,11 @@
   .operationalGrid,
   .resourceGrid,
   .systemPostureGrid,
+  .systemCapacityTabs,
+  .systemCapacityFactorGrid,
+  .systemSubsystemGrid,
   .systemCapacityStrip,
+  .systemDiagnosticsGrid,
   .operatorRoleMatrix {
     grid-template-columns: 1fr;
   }
@@ -344,6 +440,14 @@
   .vpsDetailPosture,
   .vpsDetailGrid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vpsDetailPanel > .detailTabSelect {
+    display: grid;
+  }
+
+  .vpsDetailPanel > .detailTabs {
+    display: none;
   }
 
   .vpsFactRow {
@@ -464,6 +568,10 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .preferenceStickySaveBar {
+    position: static;
+  }
+
   .commandComposer .segmented {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -472,6 +580,25 @@
     min-width: 0;
     padding-left: 4px;
     padding-right: 4px;
+  }
+
+  .operationMobileSelect {
+    display: grid;
+  }
+
+  .operationGroupTabs,
+  .operationChoiceStrip {
+    display: none;
+  }
+
+  .templateToolbarPrimary,
+  .templateManageGrid,
+  .dispatchExecutionOptionsGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .templateToolbarStatus {
+    justify-self: start;
   }
 
   .terminalOperation {
@@ -494,12 +621,16 @@
   }
 
   .dispatchActions {
+    align-items: stretch;
+    flex-direction: column;
     justify-content: stretch;
   }
 
   .dispatchActions button {
-    flex: 1 1 min(100%, 150px);
+    flex: 1 1 auto;
+    justify-content: center;
     min-width: 0;
+    width: 100%;
   }
 
   .targetSelectorHeader {
@@ -651,8 +782,69 @@
     grid-column: 1;
   }
 
-  .systemThresholdChips {
+  .systemSubsystemDisclosure summary,
+  .systemDiagnosticsDisclosure summary {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .systemDiagnosticsDisclosure summary {
+    display: grid;
+  }
+
+  .systemDiagnosticsDisclosure summary small {
+    text-align: left;
+  }
+
+  .systemDiagnosticsRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .systemDiagnosticsRow b {
+    text-align: left;
+  }
+
+  .systemCapacityConfigLinks {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .systemCapacityConfigLinks > div,
+  .systemCapacityUnavailableBanner {
     justify-content: flex-start;
+  }
+
+  .systemCapacityUnavailableBanner {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dashboardChartHeader {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dashboardChartHeader > span {
+    white-space: normal;
+  }
+
+  .systemThresholdChips {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .systemThresholdChips span {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: 6px;
+    align-items: center;
+    border-radius: 6px;
+    width: 100%;
+  }
+
+  .systemThresholdChips strong {
+    margin-right: 0;
   }
 
   .operatorEvidenceGrid {

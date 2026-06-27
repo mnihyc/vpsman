@@ -1,5 +1,15 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { ConsoleShell, type CommandPaletteItem } from "./components/ConsoleShell";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import {
+  ConsoleShell,
+  type CommandPaletteItem,
+} from "./components/ConsoleShell";
 import { AuthPanel } from "./panels/AuthPanel";
 import { FleetAlertsPanel } from "./panels/FleetAlertsPanel";
 import { FleetMonitorPanel } from "./panels/FleetMonitorPanel";
@@ -8,16 +18,9 @@ import { SessionEvidencePanel } from "./panels/audit/SessionEvidencePanel";
 import { JobArtifactsPanel } from "./panels/jobs/JobArtifactsPanel";
 import { NetworkOverviewPanel } from "./panels/NetworkOverviewPanel";
 import { PanelDisplayProvider } from "./panelDisplay";
-import { ReleaseStatusPanel } from "./panels/ReleaseStatusPanel";
-import type { ActiveView, AgentView } from "./types";
+import type { ActiveView, AgentView, FleetSummary } from "./types";
 import type { PrivilegeMaterial } from "./privilege";
-import {
-  defaultSubpages,
-  normalizeSubpage,
-  subpageDescription,
-  subpageLabel,
-  viewSubpages,
-} from "./constants";
+import { defaultSubpages, normalizeSubpage, viewSubpages } from "./constants";
 import {
   DEFAULT_OPERATOR_PREFERENCES,
   getPageDescription,
@@ -27,6 +30,7 @@ import {
 } from "./utils";
 import { useDashboardData } from "./hooks/useDashboardData";
 import { useFleetViews } from "./hooks/useFleetViews";
+import { agentDisplayState } from "./agentDisplayState";
 import type {
   JobDispatchPreset,
   JobDispatchPresetInput,
@@ -125,9 +129,11 @@ const WebhooksPanel = lazy(() =>
   })),
 );
 const ObservabilityDashboardsPanel = lazy(() =>
-  import("./panels/observability/ObservabilityDashboardsPanel").then((module) => ({
-    default: module.ObservabilityDashboardsPanel,
-  })),
+  import("./panels/observability/ObservabilityDashboardsPanel").then(
+    (module) => ({
+      default: module.ObservabilityDashboardsPanel,
+    }),
+  ),
 );
 const AccessPanel = lazy(() =>
   import("./panels/AccessPanel").then((module) => ({
@@ -172,7 +178,7 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
   }
   if (view === "Remote Operations") {
     switch (subpage) {
-    case "terminal":
+      case "terminal":
         return "Terminal";
       case "files":
         return "Files";
@@ -180,7 +186,7 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
         return "Bulk files";
       case "transfers":
         return "Transfers";
-    case "processes":
+      case "processes":
         return "Processes";
       default:
         return "Remote operations";
@@ -190,14 +196,14 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
     switch (subpage) {
       case "dispatch":
         return "Command dispatch";
-    case "approvals":
+      case "approvals":
         return "Approvals";
       case "scheduled_runs":
         return "Scheduled runs";
       case "artifacts":
         return "Job artifacts";
-    default:
-      return "Job history";
+      default:
+        return "Job history";
     }
   }
   if (view === "Automation") {
@@ -280,12 +286,10 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
     switch (subpage) {
       case "network_metrics":
         return "Network metrics";
-      case "process_metrics":
-        return "Process metrics";
       case "alerts":
         return "Alerts";
       case "webhooks":
-        return "Webhooks";
+        return "Event webhooks";
       case "dashboards":
         return "Dashboards";
       default:
@@ -322,7 +326,7 @@ function getScopedPageDescription(view: ActiveView, subpage: string): string {
       case "preferences":
         return "Personal console preferences, display defaults, and workflow presentation";
       default:
-        return "Control-plane metrics, thresholds, capacity posture, and drilldown coverage";
+        return "Service health, queue state, key control-plane KPIs, and attention signals";
     }
   }
   if (view === "Access") {
@@ -346,7 +350,7 @@ function getScopedPageDescription(view: ActiveView, subpage: string): string {
       case "policies":
         return "Backup policy registry, retention, schedule linkage, and prune review";
       case "artifacts":
-        return "Backup artifact inventory, upload, hash, size, and handoff workflows";
+        return "Backup artifact inventory, upload, hash, size, and transfer package workflows";
       case "restore":
         return "Restore planning, execution review, verification state, and rollback";
       case "migration":
@@ -359,12 +363,10 @@ function getScopedPageDescription(view: ActiveView, subpage: string): string {
     switch (subpage) {
       case "network_metrics":
         return "Latency, loss, speed, tunnel grouping, endpoint comparison, and alert overlays";
-      case "process_metrics":
-        return "Process trends when backend history exists, with links to process actions";
       case "alerts":
         return "Alert policies, active alert context, notification channels, and delivery evidence";
       case "webhooks":
-        return "Webhook rules, dispatch previews, retained delivery evidence, and retention maintenance";
+        return "Event webhook rules, tests, retained delivery evidence, and maintenance independent from alert notification destinations";
       case "dashboards":
         return "Saved read-only observability widgets and shared dashboards";
       default:
@@ -401,6 +403,9 @@ export function App() {
   );
   const [jobDispatchPreset, setJobDispatchPreset] =
     useState<JobDispatchPreset | null>(null);
+  const [networkPlanWorkflowIntent, setNetworkPlanWorkflowIntent] = useState<
+    "create" | null
+  >(null);
   const [privilegeMaterial, setPrivilegeMaterial] =
     useState<PrivilegeMaterial | null>(null);
   const dashboard = useDashboardData(activeView);
@@ -427,18 +432,9 @@ export function App() {
     [dashboard.agents, selectedAgent, selectedAgentId],
   );
   const visibleSummary = useMemo(
-    () => ({
-      online: visibleAgents.filter((agent) => agent.status === "online").length,
-      total: visibleAgents.length,
-    }),
-    [visibleAgents],
+    () => displaySummaryForAgents(visibleAgents, dashboard.summary.running_jobs),
+    [dashboard.summary.running_jobs, visibleAgents],
   );
-  const onlineRatio = useMemo(() => {
-    if (dashboard.summary.total === 0) {
-      return "0%";
-    }
-    return `${Math.round((dashboard.summary.online / dashboard.summary.total) * 100)}%`;
-  }, [dashboard.summary.online, dashboard.summary.total]);
   const activeSubpage = normalizeSubpage(
     activeView,
     activeSubpages[activeView],
@@ -447,11 +443,22 @@ export function App() {
   const hasFleetScope =
     fleetViews.fleetQuery.trim().length > 0 ||
     fleetViews.activeSavedViewId !== null;
+  const shellSummary =
+    hasFleetScope || activeView === "Home" || activeView === "Fleet"
+      ? visibleSummary
+      : dashboard.summary;
+  const summaryScopeLabel = hasFleetScope ? "Current scope" : "Entire fleet";
+  const onlineRatio = useMemo(() => {
+    if (shellSummary.total === 0) {
+      return "0%";
+    }
+    return `${Math.round((shellSummary.online / shellSummary.total) * 100)}%`;
+  }, [shellSummary.online, shellSummary.total]);
   const pageDescription =
     activeView === "Fleet" && hasFleetScope
       ? `${visibleSummary.online} visible online / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
       : activeView === "Fleet"
-        ? `${dashboard.summary.online} online / ${dashboard.summary.total} total`
+        ? `${visibleSummary.online} online / ${visibleSummary.total} total`
         : getScopedPageDescription(activeView, activeSubpage);
 
   useEffect(() => {
@@ -559,6 +566,11 @@ export function App() {
     selectView("Network", "graph");
   }
 
+  const openCreateTunnelPlan = useCallback(() => {
+    setNetworkPlanWorkflowIntent("create");
+    selectView("Network", "tunnel_plans");
+  }, []);
+
   function openConfigWorkflow(agent: AgentView) {
     setSelectedAgentId(agent.id);
     window.localStorage.setItem("vpsman.config.single.clientId", agent.id);
@@ -596,18 +608,24 @@ export function App() {
 
   const commandItems = useMemo<CommandPaletteItem[]>(() => {
     const agentNameById = new Map(
-      dashboard.agents.map((agent) => [agent.id, agent.display_name || agent.id]),
+      dashboard.agents.map((agent) => [
+        agent.id,
+        agent.display_name || agent.id,
+      ]),
     );
-    const pageItems = (Object.entries(viewSubpages) as Array<[ActiveView, typeof viewSubpages[ActiveView]]>).flatMap(
-      ([view, subpages]) =>
-        subpages.map((subpage) => ({
-          id: `page:${view}:${subpage.id}`,
-          group: "Page" as const,
-          label: `${view} / ${subpage.label}`,
-          detail: subpage.description,
-          keywords: `${view} ${subpage.id} ${subpage.label}`,
-          onSelect: () => selectView(view, subpage.id),
-        })),
+    const pageItems = (
+      Object.entries(viewSubpages) as Array<
+        [ActiveView, (typeof viewSubpages)[ActiveView]]
+      >
+    ).flatMap(([view, subpages]) =>
+      subpages.map((subpage) => ({
+        id: `page:${view}:${subpage.id}`,
+        group: "Page" as const,
+        label: `${view} / ${subpage.label}`,
+        detail: subpage.description,
+        keywords: `${view} ${subpage.id} ${subpage.label}`,
+        onSelect: () => selectView(view, subpage.id),
+      })),
     );
     const vpsItems = dashboard.agents.map((agent) => ({
       id: `vps:${agent.id}`,
@@ -780,7 +798,9 @@ export function App() {
         policyAlerts={dashboard.policyAlerts}
         trafficAccounting={dashboard.trafficAccounting}
         vpsRuleValues={dashboard.vpsRuleValues}
-        fleetAlertNotificationChannels={dashboard.fleetAlertNotificationChannels}
+        fleetAlertNotificationChannels={
+          dashboard.fleetAlertNotificationChannels
+        }
         fleetAlertNotifications={dashboard.fleetAlertNotifications}
         webhookRules={dashboard.webhookRules}
         webhookRuleDeliveries={dashboard.webhookRuleDeliveries}
@@ -799,18 +819,26 @@ export function App() {
         onUpdateAgentAlias={dashboard.updateAgentAlias}
         privilegeMaterial={privilegeMaterial}
         scopeActive={hasFleetScope}
-        onDeleteFleetAlertNotificationChannel={dashboard.deleteFleetAlertNotificationChannel}
+        onDeleteFleetAlertNotificationChannel={
+          dashboard.deleteFleetAlertNotificationChannel
+        }
         onDeleteFleetAlertPolicy={dashboard.deleteFleetAlertPolicy}
         onDeleteWebhookRule={dashboard.deleteWebhookRule}
-        onDispatchFleetAlertNotifications={dashboard.dispatchFleetAlertNotifications}
+        onDispatchFleetAlertNotifications={
+          dashboard.dispatchFleetAlertNotifications
+        }
         onDispatchWebhookRules={dashboard.dispatchWebhookRules}
         onDryRunWebhookRule={dashboard.dryRunWebhookRule}
         onDryRunFleetAlertPolicy={dashboard.dryRunFleetAlertPolicy}
-        onProcessFleetAlertNotifications={dashboard.processFleetAlertNotifications}
+        onProcessFleetAlertNotifications={
+          dashboard.processFleetAlertNotifications
+        }
         onProcessWebhookRuleDeliveries={dashboard.processWebhookRuleDeliveries}
         onRotateWebhookDeliveryHistory={dashboard.rotateWebhookDeliveryHistory}
         onUpdateFleetAlertState={dashboard.updateFleetAlertState}
-        onUpsertFleetAlertNotificationChannel={dashboard.upsertFleetAlertNotificationChannel}
+        onUpsertFleetAlertNotificationChannel={
+          dashboard.upsertFleetAlertNotificationChannel
+        }
         onUpsertFleetAlertPolicy={dashboard.upsertFleetAlertPolicy}
         onUpsertWebhookRule={dashboard.upsertWebhookRule}
         selectedAgent={selectedAgent}
@@ -842,7 +870,9 @@ export function App() {
         onResolveBulk={dashboard.resolveBulkPreview}
         onUpdateTagOrder={dashboard.updateTagOrder}
         privilegeMaterial={privilegeMaterial}
+        schedules={dashboard.schedules}
         tags={dashboard.tags}
+        fleetAlertPolicies={dashboard.fleetAlertPolicies}
       />
     );
   }
@@ -880,6 +910,7 @@ export function App() {
         onOpenNetworkEvidence={releaseRoutes.openNetworkEvidence}
         onOpenProcesses={releaseRoutes.openProcess}
         onOpenTerminal={releaseRoutes.openTerminal}
+        runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
         sourceStatus={dashboard.sourceStatus}
         sourceTemplateAssignments={dashboard.sourceTemplateAssignments}
         summary={dashboard.summary}
@@ -911,19 +942,29 @@ export function App() {
         onCreateJob={dashboard.createJob}
         onLoadJobOutputs={dashboard.loadJobOutputs}
         onLoadJobTargets={dashboard.loadJobTargets}
-        onDeleteRuntimeConfigPatchGenerator={dashboard.deleteRuntimeConfigPatchGenerator}
+        onDeleteRuntimeConfigPatchGenerator={
+          dashboard.deleteRuntimeConfigPatchGenerator
+        }
         onOpenJobDetails={openJobDetails}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
-        onOpenSourceTemplates={() => selectView("Automation", "source_templates")}
+        onOpenSourceTemplates={() =>
+          selectView("Automation", "source_templates")
+        }
         onOpenAlerts={() => selectView("Observability", "alerts")}
         onRefresh={dashboard.loadTagInventory}
         onBulkUnsetVpsRules={dashboard.bulkUnsetVpsRules}
         onBulkUpsertVpsRules={dashboard.bulkUpsertVpsRules}
         onDryRunVpsRules={dashboard.dryRunVpsRules}
-        onRenderRuntimeConfigPatchGenerator={dashboard.renderRuntimeConfigPatchGenerator}
+        onRenderRuntimeConfigPatchGenerator={
+          dashboard.renderRuntimeConfigPatchGenerator
+        }
         onResolveBulk={dashboard.resolveBulkPreview}
-        onSelectSubpage={(subpage) => selectReleaseDestination("Config", subpage)}
-        onUpsertRuntimeConfigPatchGenerator={dashboard.upsertRuntimeConfigPatchGenerator}
+        onSelectSubpage={(subpage) =>
+          selectReleaseDestination("Config", subpage)
+        }
+        onUpsertRuntimeConfigPatchGenerator={
+          dashboard.upsertRuntimeConfigPatchGenerator
+        }
         privilegeMaterial={privilegeMaterial}
         setPrivilegeMaterial={setPrivilegeMaterial}
       />
@@ -935,17 +976,27 @@ export function App() {
       <AlertsPanel
         agents={dashboard.agents}
         apiError={dashboard.apiError}
-        fleetAlertNotificationChannels={dashboard.fleetAlertNotificationChannels}
+        fleetAlertNotificationChannels={
+          dashboard.fleetAlertNotificationChannels
+        }
         fleetAlertNotifications={dashboard.fleetAlertNotifications}
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
         fleetAlerts={dashboard.fleetAlerts}
-        onDeleteFleetAlertNotificationChannel={dashboard.deleteFleetAlertNotificationChannel}
+        onDeleteFleetAlertNotificationChannel={
+          dashboard.deleteFleetAlertNotificationChannel
+        }
         onDeleteFleetAlertPolicy={dashboard.deleteFleetAlertPolicy}
-        onDispatchFleetAlertNotifications={dashboard.dispatchFleetAlertNotifications}
+        onDispatchFleetAlertNotifications={
+          dashboard.dispatchFleetAlertNotifications
+        }
         onDryRunFleetAlertPolicy={dashboard.dryRunFleetAlertPolicy}
         onOpenFleetAlerts={() => selectView("Fleet", "alerts")}
-        onProcessFleetAlertNotifications={dashboard.processFleetAlertNotifications}
-        onUpsertFleetAlertNotificationChannel={dashboard.upsertFleetAlertNotificationChannel}
+        onProcessFleetAlertNotifications={
+          dashboard.processFleetAlertNotifications
+        }
+        onUpsertFleetAlertNotificationChannel={
+          dashboard.upsertFleetAlertNotificationChannel
+        }
         onUpsertFleetAlertPolicy={dashboard.upsertFleetAlertPolicy}
         policyAlerts={dashboard.policyAlerts}
       />
@@ -975,7 +1026,9 @@ export function App() {
         error={dashboard.dashboardOverviewError}
         loading={dashboard.dashboardOverviewLoading}
         onOpenFleetMetrics={() => selectView("Observability", "fleet_metrics")}
-        onOpenNetworkMetrics={() => selectView("Observability", "network_metrics")}
+        onOpenNetworkMetrics={() =>
+          selectView("Observability", "network_metrics")
+        }
         onRefresh={() => void dashboard.loadDashboardOverview()}
         overview={dashboard.dashboardOverview}
         preferences={dashboard.dashboardPreferences}
@@ -1080,6 +1133,7 @@ export function App() {
         error={dashboard.jobsError}
         jobApprovals={dashboard.jobApprovals}
         jobs={dashboard.jobs}
+        schedules={dashboard.schedules}
         commandTemplates={dashboard.commandTemplates}
         dispatchPreset={jobDispatchPreset}
         fileTransferSources={dashboard.fileTransferSources}
@@ -1103,7 +1157,9 @@ export function App() {
         onSubmitTerminalInput={dashboard.submitTerminalInput}
         onOpenSchedules={() => selectView("Automation", "schedules")}
         onOpenVpsDetail={releaseRoutes.openVpsDetail}
-        onOpenRemoteOperations={(subpage) => selectView("Remote Operations", subpage)}
+        onOpenRemoteOperations={(subpage) =>
+          selectView("Remote Operations", subpage)
+        }
         onSelectedJobDetailsOpened={() => setPendingJobDetailId(null)}
         onRefresh={dashboard.loadJobs}
         onResolveTargets={dashboard.resolveJobTargets}
@@ -1144,12 +1200,13 @@ export function App() {
         onOpenJobDetails={openJobDetails}
         onOpenJobsDispatch={() => selectView("Jobs", "dispatch")}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
-        onOpenProcessMetrics={() => selectView("Observability", "process_metrics")}
         onOpenSessionEvidence={() => selectView("Audit", "sessions")}
         onRefresh={dashboard.loadJobs}
         onResolveTargets={dashboard.resolveJobTargets}
         onSaveFileTransferHandoff={dashboard.saveFileTransferHandoff}
-        onSelectSubpage={(subpage) => selectReleaseDestination("Remote Operations", subpage)}
+        onSelectSubpage={(subpage) =>
+          selectReleaseDestination("Remote Operations", subpage)
+        }
         onSubmitTerminalInput={dashboard.submitTerminalInput}
         onUploadFileTransferSource={dashboard.uploadFileTransferSource}
         onDeleteCommandTemplate={dashboard.deleteCommandTemplate}
@@ -1211,8 +1268,10 @@ export function App() {
         error={dashboard.topologyError}
         jobs={dashboard.jobs}
         loading={dashboard.topologyLoading}
+        initialPlanWorkflow={networkPlanWorkflowIntent}
         networkObservations={dashboard.networkObservations}
         networkTrends={dashboard.networkTrends}
+        onInitialPlanWorkflowConsumed={() => setNetworkPlanWorkflowIntent(null)}
         ospfRecommendations={dashboard.ospfRecommendations}
         ospfUpdatePlans={dashboard.ospfUpdatePlans}
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
@@ -1230,9 +1289,13 @@ export function App() {
         onOpenJobDetails={openJobDetails}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenVpsDetail={releaseRoutes.openVpsDetail}
-        onSelectSubpage={(subpage) => selectReleaseDestination("Network", subpage)}
+        onSelectSubpage={(subpage) =>
+          selectReleaseDestination("Network", subpage)
+        }
         onPromoteTelemetryTunnel={dashboard.promoteTelemetryTunnel}
-        onPromoteTunnelPlanToCustomAdapter={dashboard.promoteTunnelPlanToCustomAdapter}
+        onPromoteTunnelPlanToCustomAdapter={
+          dashboard.promoteTunnelPlanToCustomAdapter
+        }
         onRefresh={dashboard.loadTunnelPlans}
         onSubmitRuntimeConfigPatch={dashboard.submitRuntimeConfigPatch}
         onSetTunnelPlanEnabled={dashboard.setTunnelPlanEnabled}
@@ -1329,7 +1392,6 @@ export function App() {
         privilegeMaterial={privilegeMaterial}
         clientKeyRevocations={dashboard.clientKeyRevocations}
         keyLifecycleReport={dashboard.keyLifecycleReport}
-        sessionVaultAvailable={dashboard.authVaultAvailable}
         setPrivilegeMaterial={setPrivilegeMaterial}
         wsState={dashboard.wsState}
       />
@@ -1385,11 +1447,17 @@ export function App() {
           <FleetMonitorPanel
             agents={visibleAgents}
             backups={dashboard.backups}
-            failedJobCount={dashboard.jobs.filter((job) => isFailedJobStatus(job.status)).length}
+            failedJobCount={
+              dashboard.jobs.filter((job) => isFailedJobStatus(job.status))
+                .length
+            }
             fileTransfers={dashboard.fileTransfers}
             fleetAlerts={dashboard.fleetAlerts}
             jobs={dashboard.jobs}
-            runningJobCount={dashboard.jobs.filter((job) => isActiveJobStatus(job.status)).length || dashboard.summary.running_jobs}
+            runningJobCount={
+              dashboard.jobs.filter((job) => isActiveJobStatus(job.status))
+                .length || dashboard.summary.running_jobs
+            }
             telemetryNetworkRates={dashboard.telemetryNetworkRates}
             telemetryRollups={dashboard.telemetryRollups}
             telemetryTunnels={dashboard.telemetryTunnels}
@@ -1422,7 +1490,9 @@ export function App() {
       return renderFleetWorkspace("instances");
     }
     if (activeView === "Remote Operations") {
-      return renderRemoteOperationsPanel(remoteOperationsSubpage(activeSubpage));
+      return renderRemoteOperationsPanel(
+        remoteOperationsSubpage(activeSubpage),
+      );
     }
     if (activeView === "Jobs") {
       if (activeSubpage === "artifacts") {
@@ -1442,7 +1512,8 @@ export function App() {
     if (activeView === "Automation") {
       if (activeSubpage === "schedules") return renderSchedulesPanel();
       if (activeSubpage === "runbooks") return renderRunbooksPanel();
-      if (activeSubpage === "source_templates") return renderSourceTemplatesPanel();
+      if (activeSubpage === "source_templates")
+        return renderSourceTemplatesPanel();
       if (activeSubpage === "agent_updates") return renderAgentUpdatesPanel();
       return renderRunbooksPanel();
     }
@@ -1452,6 +1523,7 @@ export function App() {
           <NetworkOverviewPanel
             networkObservations={dashboard.networkObservations}
             networkTrends={dashboard.networkTrends}
+            onCreateTunnelPlan={openCreateTunnelPlan}
             onSelectSubpage={(subpage) => selectView("Network", subpage)}
             ospfRecommendations={dashboard.ospfRecommendations}
             ospfUpdatePlans={dashboard.ospfUpdatePlans}
@@ -1470,19 +1542,13 @@ export function App() {
     }
     if (activeView === "Observability") {
       if (activeSubpage === "fleet_metrics") return renderFleetMetricsPanel();
-      if (activeSubpage === "network_metrics") return renderNetworkMetricsPanel();
+      if (activeSubpage === "network_metrics")
+        return renderNetworkMetricsPanel();
       if (activeSubpage === "alerts") return renderAlertsPanel();
       if (activeSubpage === "webhooks") return renderWebhooksPanel();
-      if (activeSubpage === "dashboards") return renderObservabilityDashboardsPanel();
-      return (
-        <ReleaseStatusPanel
-          title={subpageLabel(activeView, activeSubpage)}
-          description={subpageDescription(activeView, activeSubpage)}
-          ready={activeSubpage === "network_metrics" ? ["Network trend charts are currently available from Network / Tests and Network / Evidence."] : []}
-          pending={["Extract read-only metrics from action pages into this Observability page."]}
-          blocked={activeSubpage === "process_metrics" ? ["Long-term process history is not exposed by the backend yet."] : []}
-        />
-      );
+      if (activeSubpage === "dashboards")
+        return renderObservabilityDashboardsPanel();
+      return renderFleetMetricsPanel();
     }
     if (activeView === "Audit") {
       if (activeSubpage === "events") return renderAuditPanel("events");
@@ -1504,14 +1570,19 @@ export function App() {
           />
         );
       }
-      if (activeSubpage === "retention_export") return renderAuditPanel("retention");
+      if (activeSubpage === "retention_export")
+        return renderAuditPanel("retention");
       if (activeSubpage === "sessions") {
         return (
           <SessionEvidencePanel
             agents={dashboard.agents}
             audits={dashboard.audits}
             jobs={dashboard.jobs}
-            loading={dashboard.jobsLoading || dashboard.auditLoading || dashboard.accessLoading}
+            loading={
+              dashboard.jobsLoading ||
+              dashboard.auditLoading ||
+              dashboard.accessLoading
+            }
             onRefresh={() => {
               void dashboard.loadAudits();
               void dashboard.loadJobs();
@@ -1531,7 +1602,8 @@ export function App() {
       return renderAccessPanel(accessSubpage(activeSubpage));
     }
     if (activeView === "System") {
-      if (activeSubpage === "maintenance") return renderSystemMaintenancePanel();
+      if (activeSubpage === "maintenance")
+        return renderSystemMaintenancePanel();
       return renderSystemPanel(systemSubpage(activeSubpage));
     }
     return null;
@@ -1574,6 +1646,9 @@ export function App() {
         draftSavedFleetViewName={fleetViews.draftSavedViewName}
         filteredAgentCount={visibleAgents.length}
         fleetQuery={fleetViews.fleetQuery}
+        hideFleetStatusSummary={
+          activeView === "Fleet" && activeSubpage === "instance_detail"
+        }
         pageDescription={pageDescription}
         pageTitle={pageTitle}
         onApplySavedFleetView={fleetViews.applySavedFleetView}
@@ -1589,7 +1664,8 @@ export function App() {
         operatorPreferencesReady={dashboard.operator !== null}
         privilegeUnlocked={privilegeMaterial !== null}
         savedFleetViews={fleetViews.savedViews}
-        summary={dashboard.summary}
+        summary={shellSummary}
+        summaryScopeLabel={summaryScopeLabel}
       >
         <Suspense fallback={<ConsolePanelFallback view={activeView} />}>
           {renderActivePanel()}
@@ -1599,17 +1675,28 @@ export function App() {
   );
 }
 
-function releaseDestination(view: ActiveView, subpage = ""): { view: ActiveView; subpage: string } {
-  if (view === "Config") return { view: "Config", subpage: configReleaseSubpage(subpage) };
+function releaseDestination(
+  view: ActiveView,
+  subpage = "",
+): { view: ActiveView; subpage: string } {
+  if (view === "Config")
+    return { view: "Config", subpage: configReleaseSubpage(subpage) };
   if (view === "Jobs") return jobReleaseDestination(subpage);
-  if (view === "Fleet") return { view: "Fleet", subpage: normalizeFleetReleaseSubpage(subpage) };
-  if (view === "Access") return { view: "Access", subpage: accessReleaseSubpage(subpage) };
+  if (view === "Fleet")
+    return { view: "Fleet", subpage: normalizeFleetReleaseSubpage(subpage) };
+  if (view === "Access")
+    return { view: "Access", subpage: accessReleaseSubpage(subpage) };
   if (view === "System") return systemReleaseDestination(subpage);
-  if (view === "Audit") return { view: "Audit", subpage: auditReleaseSubpage(subpage) };
-  if (view === "Network") return { view: "Network", subpage: networkReleaseSubpage(subpage) };
-  if (view === "Remote Operations") return { view, subpage: remoteOperationsReleaseSubpage(subpage) };
-  if (view === "Automation") return { view, subpage: automationReleaseSubpage(subpage) };
-  if (view === "Observability") return { view, subpage: observabilityReleaseSubpage(subpage) };
+  if (view === "Audit")
+    return { view: "Audit", subpage: auditReleaseSubpage(subpage) };
+  if (view === "Network")
+    return { view: "Network", subpage: networkReleaseSubpage(subpage) };
+  if (view === "Remote Operations")
+    return { view, subpage: remoteOperationsReleaseSubpage(subpage) };
+  if (view === "Automation")
+    return { view, subpage: automationReleaseSubpage(subpage) };
+  if (view === "Observability")
+    return { view, subpage: observabilityReleaseSubpage(subpage) };
   if (view === "Home") return { view, subpage: subpage || "overview" };
   if (view === "Backups") return { view, subpage: subpage || "overview" };
   return { view: "Home", subpage: "overview" };
@@ -1633,56 +1720,103 @@ function normalizeFleetReleaseSubpage(subpage: string) {
 }
 
 function configReleaseSubpage(subpage: string) {
-  if (["overview", "per_vps", "bulk_patch", "templates", "rules"].includes(subpage)) {
+  if (
+    ["overview", "per_vps", "bulk_patch", "templates", "rules"].includes(
+      subpage,
+    )
+  ) {
     return subpage;
   }
   return "overview";
 }
 
-function jobReleaseDestination(subpage: string): { view: ActiveView; subpage: string } {
-  if (["history", "dispatch", "approvals", "scheduled_runs", "artifacts"].includes(subpage)) {
+function jobReleaseDestination(subpage: string): {
+  view: ActiveView;
+  subpage: string;
+} {
+  if (
+    [
+      "history",
+      "dispatch",
+      "approvals",
+      "scheduled_runs",
+      "artifacts",
+    ].includes(subpage)
+  ) {
     return { view: "Jobs", subpage };
   }
   return { view: "Jobs", subpage: "history" };
 }
 
 function networkReleaseSubpage(subpage: string) {
-  if (["overview", "graph", "tunnel_plans", "tests", "ospf", "evidence"].includes(subpage)) {
+  if (
+    ["overview", "graph", "tunnel_plans", "tests", "ospf", "evidence"].includes(
+      subpage,
+    )
+  ) {
     return subpage;
   }
   return "overview";
 }
 
 function remoteOperationsReleaseSubpage(subpage: string) {
-  if (["terminal", "files", "transfers", "processes", "bulk_files"].includes(subpage)) {
+  if (
+    ["terminal", "files", "transfers", "processes", "bulk_files"].includes(
+      subpage,
+    )
+  ) {
     return subpage;
   }
   return "terminal";
 }
 
 function automationReleaseSubpage(subpage: string) {
-  if (["schedules", "runbooks", "source_templates", "agent_updates"].includes(subpage)) {
+  if (
+    ["schedules", "runbooks", "source_templates", "agent_updates"].includes(
+      subpage,
+    )
+  ) {
     return subpage;
   }
   return "schedules";
 }
 
 function observabilityReleaseSubpage(subpage: string) {
-  if (["fleet_metrics", "network_metrics", "process_metrics", "alerts", "webhooks", "dashboards"].includes(subpage)) {
+  if (
+    [
+      "fleet_metrics",
+      "network_metrics",
+      "alerts",
+      "webhooks",
+      "dashboards",
+    ].includes(subpage)
+  ) {
     return subpage;
   }
   return "fleet_metrics";
 }
 
 function accessReleaseSubpage(subpage: string) {
-  if (["operators", "vps_identities", "gateway_sessions", "privilege_vault"].includes(subpage)) {
+  if (
+    [
+      "operators",
+      "vps_identities",
+      "gateway_sessions",
+      "privilege_vault",
+    ].includes(subpage)
+  ) {
     return subpage;
   }
   return "overview";
 }
 
-function systemReleaseDestination(subpage: string): { view: ActiveView; subpage: string } {
-  if (["capacity", "suite_config", "maintenance", "preferences"].includes(subpage)) {
+function systemReleaseDestination(subpage: string): {
+  view: ActiveView;
+  subpage: string;
+} {
+  if (
+    ["capacity", "suite_config", "maintenance", "preferences"].includes(subpage)
+  ) {
     return { view: "System", subpage };
   }
   return { view: "System", subpage: "overview" };
@@ -1699,8 +1833,33 @@ function isActiveJobStatus(status: string) {
   return ["queued", "dispatching", "running"].includes(status);
 }
 
+function displaySummaryForAgents(
+  agents: AgentView[],
+  runningJobs: number,
+): FleetSummary {
+  const states = agents.map((agent) => agentDisplayState(agent));
+  return {
+    never: agents.filter((agent) => !agent.last_seen_at).length,
+    offline: states.filter((state) => state.label === "Offline").length,
+    online: states.filter((state) => state.label === "Online").length,
+    running_jobs: runningJobs,
+    stale: states.filter((state) => state.label === "Stale").length,
+    total: agents.length,
+    warnings: states.filter(
+      (state) => state.tone === "warning" || state.tone === "critical",
+    ).length,
+  };
+}
+
 function isFailedJobStatus(status: string) {
-  return ["failed", "rejected", "agent_lost", "agent_timeout", "control_timeout", "deadline_expired"].includes(status);
+  return [
+    "failed",
+    "rejected",
+    "agent_lost",
+    "agent_timeout",
+    "control_timeout",
+    "deadline_expired",
+  ].includes(status);
 }
 
 function tagPanelSubpage(subpage: string) {
@@ -1719,12 +1878,14 @@ function configSubpage(subpage: string) {
 
 function remoteOperationsSubpage(subpage: string) {
   if (subpage === "bulk_files") return "multi_files";
-  if (["terminal", "files", "transfers", "processes"].includes(subpage)) return subpage;
+  if (["terminal", "files", "transfers", "processes"].includes(subpage))
+    return subpage;
   return "terminal";
 }
 
 function jobSubpage(subpage: string) {
-  if (["approvals", "dispatch", "scheduled_runs"].includes(subpage)) return subpage;
+  if (["approvals", "dispatch", "scheduled_runs"].includes(subpage))
+    return subpage;
   return "history";
 }
 

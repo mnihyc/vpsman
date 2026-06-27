@@ -131,6 +131,7 @@ async fn dashboard_overview_aggregates_memory_state() {
             id: job_id,
             actor_id: None,
             command_type: "shell".to_string(),
+            source_schedule_id: None,
             privileged: true,
             status: "running".to_string(),
             target_count: 1,

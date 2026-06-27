@@ -52,6 +52,7 @@ type ConsoleShellProps = {
   draftSavedFleetViewName: string;
   filteredAgentCount: number;
   fleetQuery: string;
+  hideFleetStatusSummary?: boolean;
   onApplySavedFleetView: (viewId: string) => void;
   onClearSession: () => void;
   onClearFleetView: () => void;
@@ -68,6 +69,7 @@ type ConsoleShellProps = {
   privilegeUnlocked: boolean;
   savedFleetViews: SavedFleetView[];
   summary: FleetSummary;
+  summaryScopeLabel: string;
 };
 
 export function ConsoleShell({
@@ -82,6 +84,7 @@ export function ConsoleShell({
   draftSavedFleetViewName,
   filteredAgentCount,
   fleetQuery,
+  hideFleetStatusSummary = false,
   onApplySavedFleetView,
   onClearFleetView,
   onClearSession,
@@ -98,6 +101,7 @@ export function ConsoleShell({
   privilegeUnlocked,
   savedFleetViews,
   summary,
+  summaryScopeLabel,
 }: ConsoleShellProps) {
   const { preferences } = usePanelDisplaySettings();
   const initialSubpanelPreferences = useRef(readSidebarSubpanelPreferences());
@@ -111,6 +115,8 @@ export function ConsoleShell({
   const hasFleetScope = fleetQuery.trim().length > 0 || activeSavedFleetViewId !== null;
   const activeSavedFleetView = savedFleetViews.find((view) => view.id === activeSavedFleetViewId) ?? null;
   const scopeName = activeSavedFleetView?.name ?? (fleetQuery.trim() ? "Filtered resources" : "All VPS resources");
+  const showFullFleetMetrics =
+    activeView === "Home" || (activeView === "Fleet" && activeSubpage === "monitor");
   const activeViewLabel = viewLabel(activeView);
   const activeSubpageLabel = subpageLabel(activeView, activeSubpage);
   const activeSubpageDescription = subpageDescription(activeView, activeSubpage);
@@ -192,6 +198,24 @@ export function ConsoleShell({
   const selectCommandItem = (item: CommandPaletteItem) => {
     item.onSelect();
     closeCommandPalette();
+  };
+  const openFleetScopeEditor = () => {
+    const search = document.getElementById("fleet-search");
+    if (search instanceof HTMLInputElement) {
+      search.focus();
+      search.select();
+      return;
+    }
+    if (search instanceof HTMLElement) {
+      search.focus();
+      if (search.isContentEditable) {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(search);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      }
+    }
   };
 
   useEffect(() => {
@@ -309,15 +333,33 @@ export function ConsoleShell({
 
       <main className="content">
         <header className="topbar">
-          <button className="scopeSelector" onClick={onClearFleetView} title="Clear fleet scope" type="button">
-            <FolderKanban size={18} />
-            <span className="scopeMeta">
-              <strong>{scopeName}</strong>
-              <small>
-                {filteredAgentCount} / {summary.total} resources
-              </small>
-            </span>
-          </button>
+          <div className="scopeSelectorGroup">
+            <button
+              aria-label={`Edit fleet scope: ${scopeName}, ${filteredAgentCount} of ${summary.total} resources`}
+              className="scopeSelector"
+              onClick={openFleetScopeEditor}
+              title="Edit fleet scope in search"
+              type="button"
+            >
+              <FolderKanban size={18} />
+              <span className="scopeMeta">
+                <strong>{scopeName}</strong>
+                <small>
+                  {filteredAgentCount} / {summary.total} resources
+                </small>
+              </span>
+            </button>
+            <button
+              aria-label="Clear fleet scope"
+              className="iconButton scopeClearButton"
+              disabled={!hasFleetScope}
+              onClick={onClearFleetView}
+              title="Clear fleet scope"
+              type="button"
+            >
+              <X size={16} />
+            </button>
+          </div>
           <SearchExpressionInput
             agents={agents}
             ariaLabel="Search fleet"
@@ -441,7 +483,9 @@ export function ConsoleShell({
           </div>
         </header>
 
-        <section className="consoleHeader">
+        <section
+          className={`consoleHeader${hideFleetStatusSummary ? " withoutFleetStatus" : ""}`}
+        >
           <div className="titleBlock">
             <span className="breadcrumb">
               vpsman / {activeViewLabel} / {activeSubpageLabel}
@@ -463,14 +507,29 @@ export function ConsoleShell({
               </span>
             </div>
           </div>
-          <div className="quickStats" aria-label="Fleet status summary">
-            <Metric label="Online" value={String(summary.online)} tone="green" />
-            <Metric label="Offline" value={String(summary.offline)} tone="yellow" />
-            <Metric label="Stale" value={String(summary.stale)} tone="yellow" />
-            <Metric label="Warnings" value={String(summary.warnings)} tone="yellow" />
-            <Metric label="Jobs" value={String(summary.running_jobs)} tone="blue" />
-            <Metric label="Online %" value={onlineRatio} tone="green" />
-          </div>
+          {hideFleetStatusSummary ? null : showFullFleetMetrics ? (
+            <div className="quickStats" aria-label="Fleet status summary">
+              <span className="summaryScopeLabel">{summaryScopeLabel}</span>
+              <Metric label="Online" value={String(summary.online)} tone="green" />
+              <Metric label="Offline" value={String(summary.offline)} tone="yellow" />
+              <Metric label="Stale" value={String(summary.stale)} tone="yellow" />
+              <Metric label="Warnings" value={String(summary.warnings)} tone="yellow" />
+              <Metric label="Jobs" value={String(summary.running_jobs)} tone="blue" />
+              <Metric label="Online %" value={onlineRatio} tone="green" />
+            </div>
+          ) : (
+            <div className="fleetStatusStrip" aria-label="Fleet status summary">
+              <strong>
+                {summaryScopeLabel}: {summary.total} VPS · {summary.online} online · {summary.stale} stale · {summary.running_jobs} running jobs
+              </strong>
+              <span className={summary.warnings > 0 ? "warn" : "ok"}>
+                {summary.warnings > 0
+                  ? `${summary.warnings} warnings`
+                  : "No fleet warnings"}
+              </span>
+              <small>{onlineRatio} online</small>
+            </div>
+          )}
         </section>
 
         {children}

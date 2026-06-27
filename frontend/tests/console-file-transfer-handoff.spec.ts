@@ -10,33 +10,35 @@ async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
-test("creates server-side handoff for a completed download session", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "dense transfer handoff controls are covered in desktop layout");
+test("downloads a completed transfer when it is ready", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "dense ready-download controls are covered in desktop layout");
 
   await page.goto("/");
   await openConsoleSubpage(page, "Remote Operations", "Transfers");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
-  await expect(panel.getByText("Upload source artifacts").first()).toBeVisible();
+  await expect(panel.getByText("Upload file").first()).toBeVisible();
+  await expect(panel.getByText("Ready downloads").first()).toBeVisible();
   await expect(panel.getByText("Transfer sessions").first()).toBeVisible();
   await expect(panel.getByText("Upload to VPS").first()).toBeVisible();
   await expect(panel.getByText("Download from VPS").first()).toBeVisible();
-  await expect(panel.getByText("Upload session").first()).toBeVisible();
+  await expect(panel.getByText("Upload complete").first()).toBeVisible();
   await expect(panel.getByText("100 Mbps cap")).toBeVisible();
   await expect(panel.getByText("No transfer cap").first()).toBeVisible();
   await expect(panel.getByText("No handoff")).toHaveCount(0);
-  await expect(panel.getByText("core-fra-02 (ra02) / 51515151")).toBeVisible();
-  await expect(panel.getByText("Retained outputs").first()).toBeVisible();
-  await activate(panel.getByRole("button", { name: "Create transfer handoff session 51515151" }));
-  await expect(panel.getByLabel("Confirm transfer handoff download")).toBeVisible();
+  await expect(panel.getByText("core-fra-02 (ra02)").first()).toBeVisible();
+  await expect(panel.getByText("51515151").first()).toBeVisible();
+  await expect(panel.getByText("Ready to download").first()).toBeVisible();
+  await activate(panel.getByRole("button", { name: "Ready to download session 51515151" }));
+  await expect(panel.getByLabel("Confirm ready download")).toBeVisible();
   await page.screenshot({
     fullPage: true,
-    path: testInfo.outputPath("remote-operations-transfers-completed-handoff.png"),
+    path: testInfo.outputPath("remote-operations-transfers-ready-download.png"),
   });
   await activate(
     panel
-      .getByLabel("Confirm transfer handoff download")
-      .getByRole("button", { name: "Create and download handoffs" }),
+      .getByLabel("Confirm ready download")
+      .getByRole("button", { name: "Download selected files" }),
   );
 
   const requests = await page.evaluate(() => (window as any).__vpsmanTestRequests.fileTransferHandoffs);
@@ -49,22 +51,22 @@ test("creates server-side handoff for a completed download session", async ({ pa
   ]);
 });
 
-test("downloads selected handoffs for multiple completed download sessions", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "dense transfer handoff controls are covered in desktop layout");
+test("downloads selected ready transfers for multiple completed sessions", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "dense ready-download controls are covered in desktop layout");
 
   await page.goto("/");
   await openConsoleSubpage(page, "Remote Operations", "Transfers");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
-  await expect(panel.getByText("2 handoff ready, 0 unavailable, 0 selected")).toBeVisible();
+  await expect(panel.getByText("2 ready to download, 0 unavailable, 0 selected")).toBeVisible();
   await activate(panel.getByRole("button", { name: "Select all" }));
-  await expect(panel.getByText("2 handoff ready, 0 unavailable, 2 selected")).toBeVisible();
-  await activate(panel.getByRole("button", { name: "Review selected handoffs" }));
-  await expect(panel.getByLabel("Confirm transfer handoff download")).toBeVisible();
+  await expect(panel.getByText("2 ready to download, 0 unavailable, 2 selected")).toBeVisible();
+  await activate(panel.getByRole("button", { name: "Review selected downloads" }));
+  await expect(panel.getByLabel("Confirm ready download")).toBeVisible();
   await activate(
     panel
-      .getByLabel("Confirm transfer handoff download")
-      .getByRole("button", { name: "Create and download handoffs" }),
+      .getByLabel("Confirm ready download")
+      .getByRole("button", { name: "Download selected files" }),
   );
 
   await expect
@@ -85,6 +87,33 @@ test("downloads selected handoffs for multiple completed download sessions", asy
   ]);
 });
 
+test("starts the default upload flow in resumable dispatch", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "desktop covers quick upload dispatch handoff");
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Remote Operations", "Transfers");
+
+  const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
+  const payload = Buffer.from("quick upload payload");
+  await panel.getByLabel("Transfer upload local file").setInputFiles({
+    name: "quick-upload.bin",
+    mimeType: "application/octet-stream",
+    buffer: payload,
+  });
+  await panel.getByLabel("Transfer upload destination path").fill("/tmp/quick-upload.bin");
+  await expect(panel.getByText("quick-upload.bin · 20 B")).toBeVisible();
+  await activate(panel.getByRole("button", { name: "Upload", exact: true }));
+
+  await expect(page.getByRole("heading", { level: 1, name: "Command dispatch" })).toBeVisible();
+  const composer = page.locator(".fleetPanel", { hasText: "Dispatch command" });
+  await expect(composer.getByRole("button", { name: "Resumable upload", exact: true })).toHaveClass(/selected/);
+  await expect(composer.getByLabel("Bulk target selector expression")).toContainText("id:agent-sfo-01");
+  await expect(composer.getByLabel("Resumable upload path")).toHaveValue("/tmp/quick-upload.bin");
+  await expect(composer.getByLabel("Resumable upload source").locator("..")).toContainText(
+    "Selected quick-upload.bin",
+  );
+});
+
 test("opens failed transfer retry metadata in resumable dispatch", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "dense transfer retry review is covered in desktop layout");
 
@@ -96,7 +125,7 @@ test("opens failed transfer retry metadata in resumable dispatch", async ({ page
   await expect(panel.getByText("aborted")).toBeVisible();
   await expect(panel.getByText("/var/log/nginx/error.log")).toBeVisible();
 
-  await activate(panel.getByRole("button", { name: "Review transfer retry session 53535353" }));
+  await activate(panel.getByRole("button", { name: "Retry transfer session 53535353" }));
   const review = panel.getByRole("region", { name: "Transfer retry review" });
   await expect(review).toContainText("Failed transfer retry review");
   await expect(review).toContainText("edge-sfo-01 (fo01)");
@@ -133,8 +162,8 @@ test("opens failed transfer retry metadata in resumable dispatch", async ({ page
   await expect(composer.getByLabel("Resumable download resume token")).toHaveValue("");
 });
 
-test("streams a handoff artifact to a browser file handle", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "dense transfer handoff controls are covered in desktop layout");
+test("streams a ready download to a browser file handle", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "dense ready-download controls are covered in desktop layout");
 
   await page.addInitScript(() => {
     Object.defineProperty(window, "__vpsmanStreamedArtifact", {
@@ -165,13 +194,13 @@ test("streams a handoff artifact to a browser file handle", async ({ page }, tes
   await openConsoleSubpage(page, "Remote Operations", "Transfers");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
-  await panel.getByLabel("Transfer handoff save method").selectOption("stream-to-file");
-  await activate(panel.getByRole("button", { name: "Create transfer handoff session 51515151" }));
-  await expect(panel.getByLabel("Confirm transfer handoff download")).toBeVisible();
+  await panel.getByLabel("Ready download save method").selectOption("stream-to-file");
+  await activate(panel.getByRole("button", { name: "Ready to download session 51515151" }));
+  await expect(panel.getByLabel("Confirm ready download")).toBeVisible();
   await activate(
     panel
-      .getByLabel("Confirm transfer handoff download")
-      .getByRole("button", { name: "Create and download handoffs" }),
+      .getByLabel("Confirm ready download")
+      .getByRole("button", { name: "Download selected files" }),
   );
 
   await expect
@@ -188,33 +217,34 @@ test("streams a handoff artifact to a browser file handle", async ({ page }, tes
   expect(streamed.text).toContain("server-side transfer handoff agent-fra-02");
 });
 
-test("uploads a confirmed source artifact for transfer reuse", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "dense transfer source controls are covered in desktop layout");
+test("uploads a confirmed reusable source for transfer reuse", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "dense reusable source controls are covered in desktop layout");
 
   await page.goto("/");
   await openConsoleSubpage(page, "Remote Operations", "Transfers");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
-  await expect(panel.getByRole("heading", { name: "Upload source artifacts" })).toBeVisible();
+  await panel.getByText("Advanced: reusable upload sources").click();
+  await expect(panel.getByRole("heading", { name: "Reusable upload sources" })).toBeVisible();
   await expect(panel.getByText("payload.bin")).toBeVisible();
 
-  const payload = Buffer.from("source artifact payload");
+  const payload = Buffer.from("reusable source payload");
   await panel.getByLabel("Source file").setInputFiles({
     name: "source.bin",
     mimeType: "application/octet-stream",
     buffer: payload,
   });
-  await panel.getByLabel("Artifact name").fill("source.bin");
-  await activate(panel.getByRole("button", { name: "Review source artifact" }));
-  await expect(panel.getByLabel("Confirm source artifact upload")).toBeVisible();
+  await panel.getByLabel("Reusable source name").fill("source.bin");
+  await activate(panel.getByRole("button", { name: "Review reusable source" }));
+  await expect(panel.getByLabel("Confirm reusable source upload")).toBeVisible();
   await page.screenshot({
     fullPage: true,
-    path: testInfo.outputPath("remote-operations-transfers-source-artifact-upload.png"),
+    path: testInfo.outputPath("remote-operations-transfers-reusable-source-upload.png"),
   });
   await activate(
     panel
-      .getByLabel("Confirm source artifact upload")
-      .getByRole("button", { name: "Upload source artifact" }),
+      .getByLabel("Confirm reusable source upload")
+      .getByRole("button", { name: "Upload reusable source" }),
   );
 
   const requests = await page.evaluate(() => (window as any).__vpsmanTestRequests.fileTransferSourceUploads);

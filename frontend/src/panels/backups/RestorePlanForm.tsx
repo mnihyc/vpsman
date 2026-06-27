@@ -15,6 +15,7 @@ type RestorePlanFormProps = {
   onTargetIdChange: (value: string) => void;
   pending: boolean;
   privilegeReady: boolean;
+  restoreArtifactWarning: string | null;
   restoreDestinationRoot: string;
   restoreIncludeConfig: boolean;
   restoreNote: string;
@@ -35,6 +36,7 @@ export function RestorePlanForm({
   onTargetIdChange,
   pending,
   privilegeReady,
+  restoreArtifactWarning,
   restoreDestinationRoot,
   restoreIncludeConfig,
   restoreNote,
@@ -46,18 +48,18 @@ export function RestorePlanForm({
   return (
     <>
       <div className="sectionHeader compact restoreFormHeader">
-        <h2>Plan restore</h2>
-        <span>{restoreTargetName ?? "Metadata-only restore plan"}</span>
+        <h2>Draft restore</h2>
+        <span>{restoreTargetName ?? "Choose artifact, destination, and path behavior"}</span>
       </div>
       <form className="dispatchForm" onSubmit={onSubmit}>
         <label>
-          <span>Source backup</span>
+          <span>Source artifact</span>
           <select
             aria-label="Restore source backup request"
             onChange={(event) => onSourceIdChange(event.target.value)}
             value={restoreSourceId}
           >
-            <option value="">Select backup request</option>
+            <option value="">Select source artifact</option>
             {backups.map((backup) => (
               <option key={backup.id} value={backup.id}>
                 {shortId(backup.id)} from {clientLabel(backup.client_id)}
@@ -75,6 +77,12 @@ export function RestorePlanForm({
             value={restoreTargetId}
           />
         </label>
+        {restoreArtifactWarning && (
+          <div className="restoreArtifactWarning" role="status">
+            <strong>Artifact warning</strong>
+            <span>{restoreArtifactWarning}</span>
+          </div>
+        )}
         <div className="restoreReadOnlyField">
           <span>Source scope</span>
           <strong title={restoreScopeTitle(restoreIncludeConfig, restorePaths)}>
@@ -82,7 +90,7 @@ export function RestorePlanForm({
           </strong>
         </div>
         <div className="restoreReadOnlyField">
-          <span>Generated destination root</span>
+          <span>Restore path</span>
           <strong title={restoreDestinationRoot || "Select source and target"}>
             {restoreDestinationRoot || "Select source and target"}
           </strong>
@@ -116,7 +124,7 @@ export function RestorePlanForm({
             type="submit"
           >
             <RotateCcw size={17} />
-            Review plan
+            Review draft restore
           </button>
         )}
       </form>

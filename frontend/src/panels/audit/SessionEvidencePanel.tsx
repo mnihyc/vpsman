@@ -4,9 +4,6 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
-import {
-  terminalSessionStateBadgeClass,
-} from "../../jobStatusPresentation";
 import type {
   AgentView,
   AuditLogRecord,
@@ -16,13 +13,37 @@ import type {
   OperatorSessionRecord,
 } from "../../types";
 import type { TerminalSessionRecord } from "../../typesTerminal";
-import { formatTime, metadataOperator, shortHash, shortId } from "../../utils";
+import {
+  formatCompactTime,
+  formatFullTime,
+  formatTime,
+  metadataOperator,
+  shortHash,
+  shortId,
+} from "../../utils";
 
 type TerminalEvidenceRecord = {
   audits: AuditLogRecord[];
   job: JobHistoryRecord | null;
   session: TerminalSessionRecord;
 };
+
+type EvidenceStateTone = "info" | "neutral" | "ok" | "warn";
+
+type TerminalEvidenceState = {
+  detail: string;
+  label: string;
+  open: boolean;
+  tone: EvidenceStateTone;
+};
+
+type OperatorSessionEvidenceState = {
+  detail: string;
+  label: string;
+  tone: EvidenceStateTone;
+};
+
+const TERMINAL_STALE_FLOOR_MS = 60 * 60 * 1000;
 
 export function SessionEvidencePanel({
   agents,
@@ -45,7 +66,10 @@ export function SessionEvidencePanel({
 }) {
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const agentNameById = useMemo(
-    () => new Map(agents.map((agent) => [agent.id, agent.display_name || agent.id])),
+    () =>
+      new Map(
+        agents.map((agent) => [agent.id, agent.display_name || agent.id]),
+      ),
     [agents],
   );
   const jobsById = useMemo(
@@ -68,7 +92,9 @@ export function SessionEvidencePanel({
         return {
           audits: audits
             .filter((audit) => auditMatchesTerminalSession(audit, session, job))
-            .sort((left, right) => right.created_at.localeCompare(left.created_at)),
+            .sort((left, right) =>
+              right.created_at.localeCompare(left.created_at),
+            ),
           job,
           session,
         };
@@ -88,60 +114,152 @@ export function SessionEvidencePanel({
       null,
     [evidenceRows, selectedKey],
   );
-  const openSessions = terminalSessions.filter((session) => isTerminalOpen(session)).length;
-  const replayableSessions = terminalSessions.filter((session) => session.output_next_seq !== null).length;
+  const terminalStateByKey = useMemo(
+    () =>
+      new Map(
+        terminalSessions.map((session) => [
+          terminalKey(session),
+          terminalEvidenceState(session),
+        ]),
+      ),
+    [terminalSessions],
+  );
+  const operatorStateById = useMemo(
+    () =>
+      new Map(
+        operatorSessions.map((session) => [
+          session.id,
+          operatorSessionEvidenceState(session),
+        ]),
+      ),
+    [operatorSessions],
+  );
+  const openSessions = terminalSessions.filter(
+    (session) => terminalStateByKey.get(terminalKey(session))?.open,
+  ).length;
+  const staleTerminalSessions = terminalSessions.filter(
+    (session) =>
+      terminalStateByKey.get(terminalKey(session))?.label === "Stale state",
+  ).length;
+  const replayableSessions = terminalSessions.filter(
+    (session) => transcriptEvidenceState(session).replayable,
+  ).length;
   const retainedBytes = terminalSessions.reduce(
     (total, session) => total + (session.output_retained_bytes ?? 0),
     0,
   );
-  const matchedSessions = evidenceRows.filter((row) => row.audits.length > 0).length;
+  const matchedSessions = evidenceRows.filter(
+    (row) => row.audits.length > 0,
+  ).length;
+  const expiredOperatorSessions = operatorSessions.filter(
+    (session) => operatorStateById.get(session.id)?.label === "Expired",
+  ).length;
+  const demoAuthSignals = operatorAuthEvents.filter(isDemoAuthEvent).length;
 
   const columns = useMemo<ConsoleDataGridColumn<TerminalEvidenceRecord>[]>(
     () => [
       {
-        id: "session",
-        header: "Terminal session",
-        minSize: 190,
-        searchValue: (row) => `${row.session.session_id} ${row.session.argv.join(" ")}`,
-        size: 230,
-        sortValue: (row) => row.session.observed_at,
-        cell: (row) => (
-          <span className="historyPrimary">
-            <strong>{formatArgv(row.session.argv) || row.session.last_command_type}</strong>
-            <small>{shortId(row.session.session_id)}</small>
-          </span>
-        ),
-      },
-      {
-        id: "actor",
-        header: "Actor",
+        id: "operator",
+        header: "Operator",
         minSize: 140,
         searchValue: (row) => terminalActorLabel(row, authEventBySessionId),
         size: 150,
         sortValue: (row) => terminalActorLabel(row, authEventBySessionId),
-        cell: (row) => terminalActorLabel(row, authEventBySessionId),
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>{terminalActorLabel(row, authEventBySessionId)}</strong>
+            <small>{terminalActorDetail(row, authEventBySessionId)}</small>
+          </span>
+        ),
       },
       {
-        id: "target",
-        header: "Target VPS",
+        id: "vps",
+        header: "VPS",
         minSize: 130,
-        searchValue: (row) => `${row.session.client_id} ${agentNameById.get(row.session.client_id) ?? ""}`,
+        searchValue: (row) =>
+          `${row.session.client_id} ${agentNameById.get(row.session.client_id) ?? ""}`,
         size: 150,
-        sortValue: (row) => agentNameById.get(row.session.client_id) ?? row.session.client_id,
-        cell: (row) => agentNameById.get(row.session.client_id) ?? row.session.client_id,
+        sortValue: (row) =>
+          agentNameById.get(row.session.client_id) ?? row.session.client_id,
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>
+              {agentNameById.get(row.session.client_id) ??
+                row.session.client_id}
+            </strong>
+            <small>{row.session.client_id}</small>
+          </span>
+        ),
       },
       {
         id: "state",
         header: "State",
         minSize: 120,
-        searchValue: (row) => `${row.session.state} ${row.session.last_status}`,
+        searchValue: (row) => {
+          const state =
+            terminalStateByKey.get(terminalKey(row.session)) ??
+            terminalEvidenceState(row.session);
+          return `${state.label} ${state.detail} ${row.session.state} ${row.session.last_status}`;
+        },
         size: 130,
-        sortValue: (row) => row.session.state,
+        sortValue: (row) =>
+          terminalStateSort(
+            terminalStateByKey.get(terminalKey(row.session)) ??
+              terminalEvidenceState(row.session),
+          ),
+        cell: (row) => {
+          const state =
+            terminalStateByKey.get(terminalKey(row.session)) ??
+            terminalEvidenceState(row.session);
+          return (
+            <span className={`status ${state.tone}`} title={state.detail}>
+              {state.label}
+            </span>
+          );
+        },
+      },
+      {
+        id: "started",
+        header: "Started",
+        minSize: 130,
+        searchValue: (row) => terminalStartedLabel(row),
+        size: 150,
+        sortValue: (row) => terminalStartedAt(row) ?? row.session.observed_at,
+        cell: (row) => {
+          const startedAt = terminalStartedAt(row);
+          return startedAt ? (
+            <time dateTime={startedAt} title={formatFullTime(startedAt)}>
+              {formatCompactTime(startedAt)}
+            </time>
+          ) : (
+            "Terminal start not reported"
+          );
+        },
+      },
+      {
+        id: "last_activity",
+        header: "Last activity",
+        minSize: 150,
+        searchValue: (row) => row.session.observed_at,
+        size: 170,
+        sortValue: (row) => row.session.observed_at,
         cell: (row) => (
-          <span className={`status ${terminalSessionStateBadgeClass(row.session.state)}`}>
-            {row.session.state}
-          </span>
+          <time
+            dateTime={row.session.observed_at}
+            title={formatFullTime(row.session.observed_at)}
+          >
+            {formatCompactTime(row.session.observed_at)}
+          </time>
         ),
+      },
+      {
+        id: "expiry",
+        header: "Expiry",
+        minSize: 150,
+        searchValue: (row) => terminalExpiryLabel(row, operatorSessions),
+        size: 170,
+        sortValue: (row) => terminalExpirySort(row, operatorSessions),
+        cell: (row) => terminalExpiryLabel(row, operatorSessions),
       },
       {
         id: "transcript",
@@ -166,29 +284,28 @@ export function SessionEvidencePanel({
             <span className="status neutral">session ledger</span>
           ),
       },
-      {
-        id: "observed",
-        header: "Observed",
-        minSize: 150,
-        searchValue: (row) => row.session.observed_at,
-        size: 170,
-        sortValue: (row) => row.session.observed_at,
-        cell: (row) => formatTime(row.session.observed_at),
-      },
     ],
-    [agentNameById, authEventBySessionId],
+    [agentNameById, authEventBySessionId, operatorSessions, terminalStateByKey],
   );
 
   return (
-    <section className="fleetPanel auditSessionEvidencePanel" aria-label="Audit session evidence">
+    <section
+      className="fleetPanel auditSessionEvidencePanel"
+      aria-label="Audit session evidence"
+    >
       <div className="sectionHeader">
         <span>
           <h2>Session evidence</h2>
           <small>
-            Read-only terminal, transcript, operator-session, and authentication evidence for security review.
+            Read-only terminal, transcript, operator-session, and authentication
+            evidence for security review.
           </small>
         </span>
-        <button className="secondaryAction compactAction" onClick={onRefresh} type="button">
+        <button
+          className="secondaryAction compactAction"
+          onClick={onRefresh}
+          type="button"
+        >
           Refresh
         </button>
       </div>
@@ -212,7 +329,11 @@ export function SessionEvidencePanel({
           <TerminalSquare size={18} />
           <span>
             <strong>{openSessions}</strong>
-            <small>Open terminals</small>
+            <small>
+              {staleTerminalSessions > 0
+                ? `${staleTerminalSessions} stale terminal states hidden from open count`
+                : "Open terminals"}
+            </small>
           </span>
         </div>
         <div className="metricCard">
@@ -233,7 +354,18 @@ export function SessionEvidencePanel({
           <KeyRound size={18} />
           <span>
             <strong>{operatorSessions.length}</strong>
-            <small>Bearer sessions</small>
+            <small>
+              {expiredOperatorSessions > 0
+                ? `${expiredOperatorSessions} expired bearer sessions`
+                : "Bearer sessions"}
+            </small>
+          </span>
+        </div>
+        <div className="metricCard">
+          <KeyRound size={18} />
+          <span>
+            <strong>{demoAuthSignals}</strong>
+            <small>Demo/test auth signals</small>
           </span>
         </div>
       </div>
@@ -245,7 +377,10 @@ export function SessionEvidencePanel({
           <div className="emptyState">
             <TerminalSquare size={22} />
             <strong>No terminal sessions returned</strong>
-            <span>Terminal open, input, replay, and close evidence will appear here after remote operations run.</span>
+            <span>
+              Terminal open, input, replay, and close evidence will appear here
+              after remote operations run.
+            </span>
           </div>
         }
         getRowId={(row) => terminalKey(row.session)}
@@ -266,6 +401,11 @@ export function SessionEvidencePanel({
         <SelectedSessionEvidence
           agentNameById={agentNameById}
           authEventBySessionId={authEventBySessionId}
+          operatorSessions={operatorSessions}
+          state={
+            terminalStateByKey.get(terminalKey(selectedRecord.session)) ??
+            terminalEvidenceState(selectedRecord.session)
+          }
           record={selectedRecord}
         />
       )}
@@ -273,6 +413,7 @@ export function SessionEvidencePanel({
       <OperatorSessionEvidence
         authEventBySessionId={authEventBySessionId}
         operatorSessions={operatorSessions}
+        stateById={operatorStateById}
       />
     </section>
   );
@@ -281,25 +422,34 @@ export function SessionEvidencePanel({
 function SelectedSessionEvidence({
   agentNameById,
   authEventBySessionId,
+  operatorSessions,
   record,
+  state,
 }: {
   agentNameById: Map<string, string>;
   authEventBySessionId: Map<string, OperatorAuthEventRecord>;
+  operatorSessions: OperatorSessionRecord[];
   record: TerminalEvidenceRecord;
+  state: TerminalEvidenceState;
 }) {
   const operatorSessionId = terminalOperatorSessionId(record.audits);
   const authEvent = operatorSessionId
-    ? authEventBySessionId.get(operatorSessionId) ?? null
+    ? (authEventBySessionId.get(operatorSessionId) ?? null)
     : null;
   const transcriptPath = `/api/v1/terminal-sessions/${encodeURIComponent(record.session.client_id)}/${encodeURIComponent(record.session.session_id)}/replay`;
 
   return (
-    <section className="consoleDetailPanel sessionEvidenceDetailPanel" aria-label="Selected terminal session evidence">
+    <section
+      className="consoleDetailPanel sessionEvidenceDetailPanel"
+      aria-label="Selected terminal session evidence"
+    >
       <div className="consoleDetailPanelHeader">
         <span>
           <strong>Selected terminal proof</strong>
           <small>
-            {agentNameById.get(record.session.client_id) ?? record.session.client_id} · {shortId(record.session.session_id)}
+            {agentNameById.get(record.session.client_id) ??
+              record.session.client_id}{" "}
+            · {shortId(record.session.session_id)}
           </small>
         </span>
       </div>
@@ -311,11 +461,28 @@ function SelectedSessionEvidence({
         </span>
         <span>
           <strong>Target</strong>
-          <span>{agentNameById.get(record.session.client_id) ?? record.session.client_id}</span>
+          <span>
+            {agentNameById.get(record.session.client_id) ??
+              record.session.client_id}
+          </span>
         </span>
         <span>
           <strong>Lifecycle</strong>
-          <span>{sessionLifecycleLabel(record.session)}</span>
+          <span>
+            {state.label}: {state.detail}
+          </span>
+        </span>
+        <span>
+          <strong>Started</strong>
+          <span>{terminalStartedDetail(record)}</span>
+        </span>
+        <span>
+          <strong>Last activity</strong>
+          <span>{formatFullTime(record.session.observed_at)}</span>
+        </span>
+        <span>
+          <strong>Expiry</strong>
+          <span>{terminalExpiryDetail(record, operatorSessions)}</span>
         </span>
         <span>
           <strong>Transcript link</strong>
@@ -332,31 +499,49 @@ function SelectedSessionEvidence({
       </div>
 
       <div className="jobEvidenceSections sessionEvidenceSections">
-        <section className="dashboardWidgetTable" aria-label="Terminal audit events for selected session">
+        <section
+          className="dashboardWidgetTable"
+          aria-label="Terminal audit events for selected session"
+        >
           <div className="dashboardWidgetHeader">
             <strong>Terminal audit events</strong>
             <small>{record.audits.length} matched</small>
           </div>
           {record.audits.length > 0 ? (
             record.audits.slice(0, 6).map((audit) => (
-              <div className="dashboardWidgetRow auditEvidenceRow" key={audit.id}>
+              <div
+                className="dashboardWidgetRow auditEvidenceRow"
+                key={audit.id}
+              >
                 <strong>{audit.action}</strong>
-                <span>{audit.target}</span>
-                <small>{audit.command_hash ? shortHash(audit.command_hash) : "no hash"}</small>
-                <small>{formatTime(audit.created_at)}</small>
+                <span title={audit.target}>
+                  {terminalAuditTargetLabel(audit)}
+                </span>
+                <small>
+                  {audit.command_hash
+                    ? shortHash(audit.command_hash)
+                    : "no hash"}
+                </small>
+                <small title={formatFullTime(audit.created_at)}>
+                  {formatCompactTime(audit.created_at)}
+                </small>
               </div>
             ))
           ) : (
             <div className="dashboardWidgetEmpty">
-              No direct audit row returned for this terminal session ID. Terminal inventory and transcript references remain visible.
+              No direct audit row returned for this terminal session ID.
+              Terminal inventory and transcript references remain visible.
             </div>
           )}
         </section>
 
-        <section className="dashboardWidgetTable" aria-label="Transcript references for selected session">
+        <section
+          className="dashboardWidgetTable"
+          aria-label="Transcript references for selected session"
+        >
           <div className="dashboardWidgetHeader">
             <strong>Transcript references</strong>
-            <small>{record.session.output_replay_truncated ? "truncated" : "retained"}</small>
+            <small>{transcriptEvidenceState(record.session).label}</small>
           </div>
           <div className="sessionEvidenceReferenceGrid">
             <span>
@@ -365,19 +550,26 @@ function SelectedSessionEvidence({
             </span>
             <span>
               <strong>Retained bytes</strong>
-              <small>{formatBytes(record.session.output_retained_bytes ?? 0)}</small>
+              <small>
+                {formatBytes(record.session.output_retained_bytes ?? 0)}
+              </small>
             </span>
-            <span className="wideReference">
-              <strong>Replay API</strong>
+            <details className="wideReference sessionEvidenceAdvanced">
+              <summary>Advanced replay path</summary>
               <small>{transcriptPath}</small>
-            </span>
+            </details>
           </div>
         </section>
 
-        <section className="dashboardWidgetTable" aria-label="Operator auth evidence for selected session">
+        <section
+          className="dashboardWidgetTable"
+          aria-label="Operator auth evidence for selected session"
+        >
           <div className="dashboardWidgetHeader">
             <strong>Operator auth evidence</strong>
-            <small>{operatorSessionId ? shortId(operatorSessionId) : "not linked"}</small>
+            <small>
+              {operatorSessionId ? shortId(operatorSessionId) : "not linked"}
+            </small>
           </div>
           <div className="sessionEvidenceReferenceGrid">
             <span>
@@ -390,11 +582,15 @@ function SelectedSessionEvidence({
             </span>
             <span>
               <strong>Remote IP</strong>
-              <small>{authEvent?.remote_ip ?? "not recorded"}</small>
+              <small>{formatAuthRemoteIp(authEvent)}</small>
             </span>
             <span>
               <strong>User agent</strong>
-              <small>{authEvent?.user_agent ?? "not recorded"}</small>
+              <small>{formatAuthUserAgent(authEvent)}</small>
+            </span>
+            <span>
+              <strong>Auth source</strong>
+              <small>{formatAuthEvidenceSource(authEvent)}</small>
             </span>
           </div>
         </section>
@@ -406,25 +602,46 @@ function SelectedSessionEvidence({
 function OperatorSessionEvidence({
   authEventBySessionId,
   operatorSessions,
+  stateById,
 }: {
   authEventBySessionId: Map<string, OperatorAuthEventRecord>;
   operatorSessions: OperatorSessionRecord[];
+  stateById: Map<string, OperatorSessionEvidenceState>;
 }) {
   return (
-    <section className="dashboardWidgetTable operatorSessionEvidenceTable" aria-label="Operator session evidence">
+    <section
+      className="dashboardWidgetTable operatorSessionEvidenceTable"
+      aria-label="Operator session evidence"
+    >
       <div className="dashboardWidgetHeader">
         <strong>Operator session evidence</strong>
-        <small>{operatorSessions.length} bearer sessions</small>
+        <small>
+          {operatorSessions.length} bearer sessions · created and refresh expiry
+          shown
+        </small>
       </div>
       {operatorSessions.length > 0 ? (
         operatorSessions.slice(0, 6).map((session) => {
           const authEvent = authEventBySessionId.get(session.id);
+          const state =
+            stateById.get(session.id) ?? operatorSessionEvidenceState(session);
           return (
-            <div className="dashboardWidgetRow operatorSessionEvidenceRow" key={session.id}>
+            <div
+              className="dashboardWidgetRow operatorSessionEvidenceRow"
+              key={session.id}
+            >
               <strong>{session.operator_username}</strong>
               <span>{session.operator_role}</span>
-              <small>{session.current ? "current" : session.revoked ? "revoked" : "active"}</small>
-              <small>{authEvent?.remote_ip ?? "IP not recorded"}</small>
+              <small className={`status ${state.tone}`} title={state.detail}>
+                {state.label}
+              </small>
+              <small title={formatFullTime(session.created_at)}>
+                Created {formatCompactTime(session.created_at)}
+              </small>
+              <small title={formatFullTime(session.refresh_expires_at)}>
+                Refresh expiry {formatCompactTime(session.refresh_expires_at)}
+              </small>
+              <small>{formatAuthEvidenceSource(authEvent)}</small>
             </div>
           );
         })
@@ -437,12 +654,133 @@ function OperatorSessionEvidence({
   );
 }
 
+function terminalEvidenceState(
+  session: TerminalSessionRecord,
+): TerminalEvidenceState {
+  if (!isTerminalOpen(session)) {
+    return {
+      detail: session.close_reason
+        ? `Closed by ${session.close_reason}; last event ${session.last_event}.`
+        : `Closed; last event ${session.last_event}.`,
+      label: "Closed",
+      open: false,
+      tone: "neutral",
+    };
+  }
+  const observedMs = parseTimeMs(session.observed_at);
+  if (observedMs === null) {
+    return {
+      detail: "The backend did not provide a valid last-activity timestamp.",
+      label: "State unknown",
+      open: false,
+      tone: "warn",
+    };
+  }
+  const idleTimeoutMs = Math.max(0, session.idle_timeout_secs ?? 0) * 1000;
+  const staleAfterMs = Math.max(idleTimeoutMs * 2, TERMINAL_STALE_FLOOR_MS);
+  if (Date.now() - observedMs > staleAfterMs) {
+    return {
+      detail: `Last activity was ${formatTime(session.observed_at)}; raw backend state is ${session.state}.`,
+      label: "Stale state",
+      open: false,
+      tone: "warn",
+    };
+  }
+  return {
+    detail: `Live terminal state reported at ${formatTime(session.observed_at)}.`,
+    label: "Open",
+    open: true,
+    tone: "ok",
+  };
+}
+
+function operatorSessionEvidenceState(
+  session: OperatorSessionRecord,
+): OperatorSessionEvidenceState {
+  if (session.revoked) {
+    return {
+      detail: session.revoked_at
+        ? `Revoked at ${formatTime(session.revoked_at)}.`
+        : "This bearer session is revoked.",
+      label: "Revoked",
+      tone: "neutral",
+    };
+  }
+  const accessExpired = isPast(session.expires_at);
+  const refreshExpired = isPast(session.refresh_expires_at);
+  if (accessExpired || refreshExpired) {
+    return {
+      detail: refreshExpired
+        ? `Refresh expired at ${formatTime(session.refresh_expires_at)}.`
+        : `Access expired at ${formatTime(session.expires_at)}.`,
+      label: "Expired",
+      tone: "warn",
+    };
+  }
+  if (session.current) {
+    return {
+      detail: "This is the current console bearer session.",
+      label: "Current",
+      tone: "info",
+    };
+  }
+  return {
+    detail: `Access expires ${formatTime(session.expires_at)}.`,
+    label: "Active",
+    tone: "ok",
+  };
+}
+
+function transcriptEvidenceState(session: TerminalSessionRecord): {
+  label: string;
+  replayable: boolean;
+} {
+  if (session.output_next_seq == null) {
+    return { label: "No transcript range", replayable: false };
+  }
+  const retainedBytes = session.output_retained_bytes ?? 0;
+  if (session.output_replay_truncated) {
+    return { label: "Transcript truncated", replayable: true };
+  }
+  if (retainedBytes < 128) {
+    return {
+      label: "Trace only; small retained transcript",
+      replayable: false,
+    };
+  }
+  return { label: "Replayable transcript", replayable: true };
+}
+
+function terminalStateSort(state: TerminalEvidenceState): number {
+  if (state.label === "Open") {
+    return 0;
+  }
+  if (state.label === "Stale state") {
+    return 1;
+  }
+  if (state.label === "State unknown") {
+    return 2;
+  }
+  return 3;
+}
+
+function isPast(value: string): boolean {
+  const timestamp = parseTimeMs(value);
+  return timestamp !== null && timestamp <= Date.now();
+}
+
+function parseTimeMs(value: string): number | null {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
 function auditMatchesTerminalSession(
   audit: AuditLogRecord,
   session: TerminalSessionRecord,
   job: JobHistoryRecord | null,
 ): boolean {
-  const text = `${audit.target} ${JSON.stringify(audit.metadata)}`.toLowerCase();
+  const text =
+    `${audit.target} ${JSON.stringify(audit.metadata)}`.toLowerCase();
   if (
     text.includes(session.session_id.toLowerCase()) ||
     text.includes(session.last_job_id.toLowerCase())
@@ -457,27 +795,224 @@ function terminalActorLabel(
   authEventBySessionId: Map<string, OperatorAuthEventRecord>,
 ): string {
   const auditActor = record.audits
-    .map((audit) =>
-      metadataOperator(audit.metadata) ??
-      metadataText(audit.metadata, ["operator_username", "username", "operator_id", "actor_id"]),
+    .map(
+      (audit) =>
+        metadataOperator(audit.metadata) ??
+        metadataText(audit.metadata, [
+          "operator_username",
+          "username",
+          "operator_id",
+          "actor_id",
+        ]),
     )
     .find(Boolean);
   if (auditActor) {
     return auditActor;
   }
   const operatorSessionId = terminalOperatorSessionId(record.audits);
-  const authEvent = operatorSessionId ? authEventBySessionId.get(operatorSessionId) : null;
+  const authEvent = operatorSessionId
+    ? authEventBySessionId.get(operatorSessionId)
+    : null;
   return authEvent?.username ?? shortId(record.job?.actor_id) ?? "not reported";
+}
+
+function terminalActorDetail(
+  record: TerminalEvidenceRecord,
+  authEventBySessionId: Map<string, OperatorAuthEventRecord>,
+): string {
+  const operatorSessionId = terminalOperatorSessionId(record.audits);
+  const authEvent = operatorSessionId
+    ? (authEventBySessionId.get(operatorSessionId) ?? null)
+    : null;
+  if (authEvent) {
+    return formatAuthEvidenceSource(authEvent);
+  }
+  if (operatorSessionId) {
+    return `bearer session ${shortId(operatorSessionId)}`;
+  }
+  if (record.job?.actor_id) {
+    return `job actor ${shortId(record.job.actor_id)}`;
+  }
+  return "operator source not reported";
 }
 
 function terminalOperatorSessionId(audits: AuditLogRecord[]): string | null {
   for (const audit of audits) {
-    const value = metadataText(audit.metadata, ["operator_session_id", "session_id"]);
+    const value = metadataText(audit.metadata, [
+      "operator_session_id",
+      "session_id",
+    ]);
     if (value) {
       return value;
     }
   }
   return null;
+}
+
+function terminalAuditTargetLabel(audit: AuditLogRecord): string {
+  const clientId = metadataText(audit.metadata, ["client_id"]);
+  const terminalSessionId = metadataText(audit.metadata, [
+    "terminal_session_id",
+  ]);
+  if (clientId || terminalSessionId) {
+    return [
+      clientId ?? "terminal",
+      terminalSessionId ? shortId(terminalSessionId) : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  return audit.target.replace(/^terminal:/, "");
+}
+
+function terminalStartedAt(record: TerminalEvidenceRecord): string | null {
+  return (
+    record.audits
+      .filter((audit) => audit.action === "terminal.open")
+      .map((audit) => audit.created_at)
+      .sort((left, right) => left.localeCompare(right))[0] ?? null
+  );
+}
+
+function terminalStartedLabel(record: TerminalEvidenceRecord): string {
+  const startedAt = terminalStartedAt(record);
+  return startedAt
+    ? formatCompactTime(startedAt)
+    : "Terminal start not reported";
+}
+
+function terminalStartedDetail(record: TerminalEvidenceRecord): string {
+  const startedAt = terminalStartedAt(record);
+  return startedAt
+    ? formatFullTime(startedAt)
+    : "Terminal start not reported by backend or audit ledger";
+}
+
+function terminalExpiryLabel(
+  record: TerminalEvidenceRecord,
+  operatorSessions: OperatorSessionRecord[],
+): string {
+  const operatorSession = operatorSessionForTerminal(record, operatorSessions);
+  if (!operatorSession) {
+    return "Terminal expiry not reported";
+  }
+  const state = operatorSessionEvidenceState(operatorSession);
+  return `${state.label} refresh ${formatCompactTime(operatorSession.refresh_expires_at)}`;
+}
+
+function terminalExpiryDetail(
+  record: TerminalEvidenceRecord,
+  operatorSessions: OperatorSessionRecord[],
+): string {
+  const operatorSession = operatorSessionForTerminal(record, operatorSessions);
+  if (!operatorSession) {
+    return "Terminal expiry not reported by backend; linked bearer expiry unavailable";
+  }
+  const state = operatorSessionEvidenceState(operatorSession);
+  return `${state.label} bearer session; access ${formatFullTime(operatorSession.expires_at)}; refresh ${formatFullTime(operatorSession.refresh_expires_at)}`;
+}
+
+function terminalExpirySort(
+  record: TerminalEvidenceRecord,
+  operatorSessions: OperatorSessionRecord[],
+): string {
+  return (
+    operatorSessionForTerminal(record, operatorSessions)?.refresh_expires_at ??
+    record.session.observed_at
+  );
+}
+
+function operatorSessionForTerminal(
+  record: TerminalEvidenceRecord,
+  operatorSessions: OperatorSessionRecord[],
+): OperatorSessionRecord | null {
+  const operatorSessionId = terminalOperatorSessionId(record.audits);
+  if (!operatorSessionId) {
+    return null;
+  }
+  return (
+    operatorSessions.find((session) => session.id === operatorSessionId) ?? null
+  );
+}
+
+function isDemoAuthEvent(event: OperatorAuthEventRecord): boolean {
+  return (
+    isLocalTestIp(event.remote_ip) ||
+    isDocumentationTestIp(event.remote_ip) ||
+    isTestAutomationUserAgent(event.user_agent)
+  );
+}
+
+function formatAuthRemoteIp(
+  event: OperatorAuthEventRecord | null | undefined,
+): string {
+  if (!event?.remote_ip) {
+    return "not recorded";
+  }
+  if (isLocalTestIp(event.remote_ip)) {
+    return `${event.remote_ip} (local test)`;
+  }
+  if (isDocumentationTestIp(event.remote_ip)) {
+    return `${event.remote_ip} (documentation/test IP)`;
+  }
+  return event.remote_ip;
+}
+
+function formatAuthUserAgent(
+  event: OperatorAuthEventRecord | null | undefined,
+): string {
+  if (!event?.user_agent) {
+    return "not recorded";
+  }
+  if (isTestAutomationUserAgent(event.user_agent)) {
+    return `${event.user_agent} (test automation)`;
+  }
+  return event.user_agent;
+}
+
+function formatAuthEvidenceSource(
+  event: OperatorAuthEventRecord | null | undefined,
+): string {
+  if (!event) {
+    return "not linked";
+  }
+  const labels = [
+    isLocalTestIp(event.remote_ip) ? "local test IP" : null,
+    isDocumentationTestIp(event.remote_ip) ? "documentation/test IP" : null,
+    isTestAutomationUserAgent(event.user_agent) ? "test automation" : null,
+  ].filter(Boolean);
+  if (labels.length > 0) {
+    return `Demo/test: ${labels.join(", ")}`;
+  }
+  return "Production-like auth signal";
+}
+
+function isLocalTestIp(value: string | null | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    normalized.startsWith("127.")
+  );
+}
+
+function isDocumentationTestIp(value: string | null | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+  const normalized = value.trim();
+  return (
+    normalized.startsWith("192.0.2.") ||
+    normalized.startsWith("198.51.100.") ||
+    normalized.startsWith("203.0.113.")
+  );
+}
+
+function isTestAutomationUserAgent(value: string | null | undefined): boolean {
+  return Boolean(value?.toLowerCase().includes("playwright"));
 }
 
 function metadataText(metadata: JsonValue, keys: string[]): string | null {
@@ -510,10 +1045,11 @@ function sessionLifecycleLabel(session: TerminalSessionRecord): string {
 }
 
 function transcriptLabel(session: TerminalSessionRecord): string {
-  if (session.output_next_seq == null) {
-    return "no transcript range";
+  const transcript = transcriptEvidenceState(session);
+  if (!transcript.replayable) {
+    return transcript.label;
   }
-  return `${formatOutputRange(session)} · ${formatBytes(session.output_retained_bytes ?? 0)}`;
+  return `${transcript.label}: ${formatOutputRange(session)} · ${formatBytes(session.output_retained_bytes ?? 0)}`;
 }
 
 function formatOutputRange(session: TerminalSessionRecord): string {

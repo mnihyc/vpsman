@@ -116,6 +116,49 @@ async fn job_approval_reject_records_decision_without_dispatching_job() {
     assert!(repo.get_job(job_id).await.unwrap().is_none());
 }
 
+#[tokio::test]
+async fn job_approval_reject_requires_operator_reason() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_agent(&repo, "client-a").await;
+    let state = test_state(repo.clone());
+    let (_operator, headers) = crate::test_auth_context_and_headers(&state).await;
+    let job_id = Uuid::new_v4();
+    let (_status, Json(approval)) = create_job_approval(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateJobApprovalRequest {
+            approval_id: None,
+            job: approval_job_request(job_id, "client-a"),
+            reason: None,
+            risk: Some("maintenance".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let error = reject_job_approval(
+        State(state.clone()),
+        headers,
+        axum::extract::Path(approval.id),
+        Json(DecideJobApprovalRequest {
+            confirmed: true,
+            reason: Some("   ".to_string()),
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "job_approval_rejection_reason_required");
+    let (stored, _) = repo
+        .get_job_approval_request(approval.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, "pending");
+    assert!(repo.get_job(job_id).await.unwrap().is_none());
+}
+
 fn approval_job_request(job_id: Uuid, client_id: &str) -> CreateJobRequest {
     CreateJobRequest {
         job_id: Some(job_id),

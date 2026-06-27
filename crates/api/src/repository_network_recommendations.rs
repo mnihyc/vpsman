@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use vpsman_common::{
-    observed_ospf_cost, render_tunnel_endpoint_config, BandwidthTier, TunnelEndpointSide,
+    observed_ospf_cost, payload_hash, render_tunnel_endpoint_config, TunnelEndpointSide,
 };
 
 use crate::{
@@ -96,7 +96,7 @@ fn recommend_plan_ospf_cost(
         Some(latency) => {
             let (cost, bandwidth) = observed_ospf_cost(
                 plan.input.ospf_policy,
-                plan.input.bandwidth,
+                plan.input.bandwidth_mbps,
                 latency,
                 packet_loss_avg_ratio,
                 plan.input.preference,
@@ -119,7 +119,7 @@ fn recommend_plan_ospf_cost(
         }
         None => (
             plan.recommended_ospf_cost,
-            plan.input.bandwidth,
+            plan.input.bandwidth_mbps,
             if throughput_avg_mbps.is_some() {
                 "throughput_only"
             } else {
@@ -133,14 +133,33 @@ fn recommend_plan_ospf_cost(
         ),
     };
 
+    let evidence_summary = ospf_evidence_summary(
+        latency_avg_ms,
+        latency_avg_ms.map(|_| packet_loss_avg_ratio),
+        throughput_avg_mbps,
+        throughput_max_mbps,
+        sample_count,
+        degraded_count,
+        latest_observed_at.as_deref(),
+        reason,
+    );
+    let recommendation_id = ospf_recommendation_id(
+        plan.id,
+        plan.recommended_ospf_cost,
+        recommended_ospf_cost,
+        &evidence_summary,
+        latest_observed_at.as_deref(),
+    );
+
     NetworkOspfRecommendationView {
+        recommendation_id,
         plan_id: plan.id,
         plan_name: plan.name.clone(),
         interface_name: plan.plan.interface_name.clone(),
         left_client_id: plan.left_client_id.clone(),
         right_client_id: plan.right_client_id.clone(),
-        configured_bandwidth: bandwidth_label(plan.input.bandwidth).to_string(),
-        effective_bandwidth: bandwidth_label(effective_bandwidth).to_string(),
+        configured_bandwidth_mbps: plan.input.bandwidth_mbps,
+        effective_bandwidth_mbps: effective_bandwidth,
         plan_ospf_cost: plan.recommended_ospf_cost,
         recommended_ospf_cost,
         cost_delta: recommended_ospf_cost - plan.recommended_ospf_cost,
@@ -153,6 +172,7 @@ fn recommend_plan_ospf_cost(
         latest_observed_at,
         confidence: confidence.to_string(),
         reason: reason.to_string(),
+        evidence_summary,
     }
 }
 
@@ -182,6 +202,7 @@ fn build_ospf_update_plan(
     };
 
     Ok(NetworkOspfUpdatePlanView {
+        recommendation_id: recommendation.recommendation_id,
         plan_id: recommendation.plan_id,
         plan_name: recommendation.plan_name,
         interface_name: recommendation.interface_name,
@@ -201,8 +222,8 @@ fn build_ospf_update_plan(
             format!("client:{}", recommendation.right_client_id),
         ],
         evidence: NetworkOspfUpdateEvidenceView {
-            configured_bandwidth: recommendation.configured_bandwidth,
-            effective_bandwidth: recommendation.effective_bandwidth,
+            configured_bandwidth_mbps: recommendation.configured_bandwidth_mbps,
+            effective_bandwidth_mbps: recommendation.effective_bandwidth_mbps,
             latency_avg_ms: recommendation.latency_avg_ms,
             packet_loss_avg_ratio: recommendation.packet_loss_avg_ratio,
             throughput_avg_mbps: recommendation.throughput_avg_mbps,
@@ -215,7 +236,49 @@ fn build_ospf_update_plan(
         proposed_left_bird2_interface_snippet: left_endpoint.bird2_interface_snippet,
         proposed_right_bird2_interface_snippet: right_endpoint.bird2_interface_snippet,
         change_summary,
+        evidence_summary: recommendation.evidence_summary,
     })
+}
+
+fn ospf_recommendation_id(
+    plan_id: uuid::Uuid,
+    current_ospf_cost: i32,
+    recommended_ospf_cost: i32,
+    evidence_summary: &str,
+    latest_observed_at: Option<&str>,
+) -> String {
+    let payload = format!(
+        "v1|{plan_id}|{current_ospf_cost}|{recommended_ospf_cost}|{}|{evidence_summary}",
+        latest_observed_at.unwrap_or("none")
+    );
+    format!("ospf-{}", &payload_hash(payload.as_bytes())[..16])
+}
+
+fn ospf_evidence_summary(
+    latency_avg_ms: Option<f64>,
+    packet_loss_avg_ratio: Option<f64>,
+    throughput_avg_mbps: Option<f64>,
+    throughput_max_mbps: Option<f64>,
+    sample_count: i64,
+    degraded_count: i64,
+    latest_observed_at: Option<&str>,
+    reason: &str,
+) -> String {
+    let latency = latency_avg_ms
+        .map(|value| format!("{value:.1} ms avg"))
+        .unwrap_or_else(|| "latency unavailable".to_string());
+    let loss = packet_loss_avg_ratio
+        .map(|value| format!("{:.2}% loss", value * 100.0))
+        .unwrap_or_else(|| "loss unavailable".to_string());
+    let throughput = throughput_avg_mbps
+        .map(|avg| {
+            throughput_max_mbps
+                .map(|max| format!("{avg:.1} Mbps avg, {max:.1} Mbps max"))
+                .unwrap_or_else(|| format!("{avg:.1} Mbps avg"))
+        })
+        .unwrap_or_else(|| "throughput unavailable".to_string());
+    let observed = latest_observed_at.unwrap_or("no observation time");
+    format!("{latency}; {loss}; {throughput}; {sample_count} samples; {degraded_count} degraded; latest {observed}; {reason}")
 }
 
 fn update_plan_status(recommendation: &NetworkOspfRecommendationView) -> String {
@@ -259,12 +322,4 @@ where
         samples += trend.sample_count.max(1);
     }
     (samples > 0).then_some(total / samples as f64)
-}
-
-fn bandwidth_label(tier: BandwidthTier) -> &'static str {
-    match tier {
-        BandwidthTier::M10 => "10m",
-        BandwidthTier::M100 => "100m",
-        BandwidthTier::M1000 => "1000m",
-    }
 }

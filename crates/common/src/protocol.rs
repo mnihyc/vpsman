@@ -1045,6 +1045,8 @@ pub struct GatewaySessionLifecycleIngest {
     pub noise_public_key_hex: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_version: Option<String>,
     pub reason: Option<String>,
 }
 

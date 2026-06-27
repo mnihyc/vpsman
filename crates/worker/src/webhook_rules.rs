@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
+use hmac::{Hmac, Mac};
 use reqwest::{redirect::Policy, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::Sha256;
 use sqlx::{types::Json as SqlJson, PgPool, Postgres, Row, Transaction};
 use tokio::time::Duration;
 use uuid::Uuid;
@@ -21,12 +23,17 @@ const MAX_ERROR_BYTES: usize = 1024;
 const MAX_AUDIT_DELIVERY_ROWS: usize = 100;
 const MAX_DELIVERY_ATTEMPTS: i32 = 4;
 const RETRY_BACKOFF_SECS: [i64; 3] = [60, 5 * 60, 30 * 60];
+const WEBHOOK_SIGNATURE_HEADER: &str = "X-Vpsman-Webhook-Signature";
+const WEBHOOK_DELIVERY_HEADER: &str = "X-Vpsman-Webhook-Delivery";
+const WEBHOOK_EVENT_HEADER: &str = "X-Vpsman-Webhook-Event";
 const INTERVAL_EVENTS: &[(&str, i64)] = &[
     ("interval.30sec", 30),
     ("interval.1min", 60),
     ("interval.5min", 5 * 60),
     ("interval.1h", 60 * 60),
 ];
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WebhookRuleWorkerConfig {
@@ -126,6 +133,7 @@ struct DeliveryRow {
     event_kind: String,
     event_id: String,
     target: String,
+    signing_secret: Option<String>,
     payload: Value,
     attempt_count: i32,
 }
@@ -730,8 +738,8 @@ async fn process_queued_deliveries(
     let rows = sqlx::query(
         r#"
         WITH claim AS (
-            SELECT delivery.id
-            FROM webhook_rule_deliveries delivery
+                        SELECT delivery.id, rule.signing_secret
+                        FROM webhook_rule_deliveries delivery
             JOIN webhook_rules rule
               ON rule.id = delivery.rule_id
              AND rule.enabled = TRUE
@@ -763,6 +771,7 @@ async fn process_queued_deliveries(
             delivery.event_kind,
             delivery.event_id,
             delivery.target,
+            claim.signing_secret,
             delivery.payload,
             delivery.attempt_count
         "#,
@@ -932,12 +941,17 @@ async fn webhook_rule_enabled(pool: &PgPool, rule_id: Uuid) -> Result<bool> {
 
 async fn deliver_webhook(client: &reqwest::Client, delivery: &DeliveryRow) -> Result<()> {
     let url = validate_webhook_url(&delivery.target)?;
-    let response = client
+    let body = serde_json::to_vec(&delivery.payload).context("failed to encode webhook payload")?;
+    let mut request = client
         .post(url)
-        .json(&delivery.payload)
-        .send()
-        .await
-        .context("webhook request failed")?;
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(WEBHOOK_DELIVERY_HEADER, delivery.id.to_string())
+        .header(WEBHOOK_EVENT_HEADER, delivery.event_kind.trim())
+        .body(body.clone());
+    if let Some(secret) = delivery.signing_secret.as_deref() {
+        request = request.header(WEBHOOK_SIGNATURE_HEADER, webhook_signature(secret, &body)?);
+    }
+    let response = request.send().await.context("webhook request failed")?;
     let status = response.status();
     anyhow::ensure!(
         status.is_success(),
@@ -945,6 +959,16 @@ async fn deliver_webhook(client: &reqwest::Client, delivery: &DeliveryRow) -> Re
         status.as_u16()
     );
     Ok(())
+}
+
+fn webhook_signature(secret: &str, body: &[u8]) -> Result<String> {
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).context("invalid webhook signing secret")?;
+    mac.update(body);
+    Ok(format!(
+        "sha256={}",
+        hex::encode(mac.finalize().into_bytes())
+    ))
 }
 
 pub(crate) async fn ensure_event_partitions(pool: &PgPool) -> Result<()> {
@@ -1294,6 +1318,7 @@ fn delivery_from_row(row: sqlx::postgres::PgRow) -> Result<DeliveryRow> {
         event_kind: row.try_get("event_kind")?,
         event_id: row.try_get("event_id")?,
         target: row.try_get("target")?,
+        signing_secret: row.try_get("signing_secret")?,
         payload: payload.0,
         attempt_count: row.try_get("attempt_count")?,
     })
@@ -1387,6 +1412,15 @@ mod tests {
     fn delivery_error_is_bounded() {
         let error = "x".repeat(MAX_ERROR_BYTES + 100);
         assert_eq!(truncate_error(&error).len(), MAX_ERROR_BYTES);
+    }
+
+    #[test]
+    fn webhook_signature_uses_payload_bytes() {
+        let signature = webhook_signature("secret", br#"{"hello":"world"}"#).unwrap();
+        assert_eq!(
+            signature,
+            "sha256=2677ad3e7c090b2fa2c0fb13020d66d5420879b8316eb356a2d60fb9073bc778"
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   DndContext,
   KeyboardSensor,
@@ -29,11 +29,13 @@ import type {
   AgentView,
   BulkResolveResponse,
   BulkTagMutationRequest,
+  FleetAlertPolicyRecord,
+  ScheduleRecord,
   TagMutationResponse,
   TagView,
 } from "../types";
 import { buildPrivilegeAssertion, canonicalDbPrivilegeIntent, type PrivilegeMaterial, type PrivilegeAssertion } from "../privilege";
-import { parseSearchExpression, selectorExpressionForClientIds } from "../searchExpression";
+import { agentsMatchingExpression, parseSearchExpression, selectorExpressionForClientIds } from "../searchExpression";
 import { formatVpsName, runPanelAction } from "../utils";
 
 const TAG_BULK_SELECTOR_STORAGE_KEY = "vpsman.tags.bulk.selectorExpression";
@@ -60,7 +62,9 @@ export function FleetGroupsPanel({
   onResolveBulk,
   onUpdateTagOrder,
   privilegeMaterial,
+  schedules,
   tags,
+  fleetAlertPolicies,
 }: {
   activeSubpage: string;
   agents: AgentView[];
@@ -81,21 +85,25 @@ export function FleetGroupsPanel({
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
   onUpdateTagOrder: (orderedTags: string[]) => Promise<TagView[]>;
   privilegeMaterial: PrivilegeMaterial | null;
+  schedules: ScheduleRecord[];
   tags: TagView[];
+  fleetAlertPolicies: FleetAlertPolicyRecord[];
 }) {
   const subpage = ["registry", "assignments", "bulk"].includes(activeSubpage) ? activeSubpage : "registry";
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [lastMutation, setLastMutation] = useState<TagMutationResponse | null>(null);
   const groupSummary = useMemo(() => buildGroupSummary(tags, agents), [agents, tags]);
+  const activeLabelCount =
+    groupSummary.providerGroupCount + groupSummary.countryGroupCount + groupSummary.customGroupCount;
   const status =
     actionError ??
     error ??
     (lastMutation
-      ? `${lastMutation.action} ${lastMutation.tag}: ${lastMutation.changed_count} changed, ${lastMutation.skipped_count} skipped`
+      ? `Group ${lastMutation.tag}: ${lastMutation.changed_count} changed, ${lastMutation.skipped_count} skipped`
       : loading
         ? "Refreshing group state"
-        : `${tags.length} groups across ${agents.length} VPSs`);
+        : `${tags.length} registry groups, ${activeLabelCount} active labels across ${agents.length} VPSs`);
 
   return (
     <section className="workspace singleColumn">
@@ -110,7 +118,6 @@ export function FleetGroupsPanel({
             <span>Refresh</span>
           </button>
         </div>
-        <GroupSummaryStrip summary={groupSummary} />
         {subpage === "registry" && (
           <TagRegistry
             onCreateTag={onCreateTag}
@@ -122,9 +129,11 @@ export function FleetGroupsPanel({
             privilegeMaterial={privilegeMaterial}
             runAction={(action) => runPanelAction(setPending, setActionError, action)}
             setLastMutation={setLastMutation}
+            summary={groupSummary}
             tags={tags}
           />
         )}
+        {subpage !== "registry" && <GroupSummaryStrip summary={groupSummary} />}
         {subpage === "assignments" && (
           <TagAssignments
             agents={agents}
@@ -134,8 +143,10 @@ export function FleetGroupsPanel({
             pending={pending}
             privilegeMaterial={privilegeMaterial}
             runAction={(action) => runPanelAction(setPending, setActionError, action)}
+            schedules={schedules}
             setLastMutation={setLastMutation}
             tags={tags}
+            fleetAlertPolicies={fleetAlertPolicies}
           />
         )}
         {subpage === "bulk" && (
@@ -174,19 +185,19 @@ function GroupSummaryStrip({ summary }: { summary: GroupSummary }) {
     <div className="groupSummaryStrip" aria-label="Fleet group counts">
       <span>
         <strong>{summary.providerGroupCount}</strong>
-        <small>provider groups</small>
+        <small>provider metadata</small>
       </span>
       <span>
         <strong>{summary.countryGroupCount}</strong>
-        <small>country groups</small>
+        <small>country metadata</small>
       </span>
       <span>
         <strong>{summary.customGroupCount}</strong>
-        <small>custom groups</small>
+        <small>operator groups</small>
       </span>
       <span>
         <strong>{summary.totalAssignments}</strong>
-        <small>tag assignments</small>
+        <small>group assignments</small>
       </span>
       <span>
         <strong>{summary.assignedVpsCount}</strong>
@@ -202,22 +213,32 @@ function GroupSummaryStrip({ summary }: { summary: GroupSummary }) {
 
 function buildGroupSummary(tags: TagView[], agents: AgentView[]): GroupSummary {
   const assignedVpsIds = new Set<string>();
-  let totalAssignments = 0;
+  const assignments = new Set<string>();
+  const groupNames = new Set<string>();
   for (const tag of tags) {
-    totalAssignments += tag.clients.length;
+    groupNames.add(tag.name);
     for (const client of tag.clients) {
       assignedVpsIds.add(client.id);
+      assignments.add(`${tag.name}\u0000${client.id}`);
     }
   }
+  for (const agent of agents) {
+    for (const tag of agent.tags) {
+      groupNames.add(tag);
+      assignedVpsIds.add(agent.id);
+      assignments.add(`${tag}\u0000${agent.id}`);
+    }
+  }
+  const groupNameList = Array.from(groupNames);
   return {
     assignedVpsCount: assignedVpsIds.size,
-    countryGroupCount: tags.filter((tag) => tag.name.toLowerCase().startsWith("country:")).length,
-    customGroupCount: tags.filter((tag) => !isProviderGroup(tag.name) && !isCountryGroup(tag.name)).length,
+    countryGroupCount: groupNameList.filter((tag) => isCountryGroup(tag)).length,
+    customGroupCount: groupNameList.filter((tag) => !isProviderGroup(tag) && !isCountryGroup(tag)).length,
     offlineCount: agents.filter((agent) => agent.status === "offline").length,
     onlineCount: agents.filter((agent) => agent.status === "online").length,
-    providerGroupCount: tags.filter((tag) => tag.name.toLowerCase().startsWith("provider:")).length,
+    providerGroupCount: groupNameList.filter((tag) => isProviderGroup(tag)).length,
     staleCount: agents.filter((agent) => agent.status === "stale").length,
-    totalAssignments,
+    totalAssignments: assignments.size,
   };
 }
 
@@ -227,6 +248,199 @@ function isCountryGroup(tag: string) {
 
 function isProviderGroup(tag: string) {
   return tag.toLowerCase().startsWith("provider:");
+}
+
+function groupKind(tag: string): "country" | "custom" | "provider" {
+  if (isProviderGroup(tag)) return "provider";
+  if (isCountryGroup(tag)) return "country";
+  return "custom";
+}
+
+function groupKindLabel(tag: string) {
+  const kind = groupKind(tag);
+  if (kind === "provider") return "Provider metadata";
+  if (kind === "country") return "Country metadata";
+  return "Operator group";
+}
+
+function groupKindTone(tag: string) {
+  return groupKind(tag) === "custom" ? "ok" : "info";
+}
+
+function groupKindDetail(tag: string) {
+  const kind = groupKind(tag);
+  if (kind === "provider") {
+    return "Managed from VPS provider metadata; useful for scoped filters.";
+  }
+  if (kind === "country") {
+    return "Managed from VPS location metadata; useful for regional targeting.";
+  }
+  return "Created by operators for recurring VPS targeting.";
+}
+
+function groupDisplayName(tag: string) {
+  const [prefix, ...rest] = tag.split(":");
+  const value = rest.join(":");
+  if (!value) return tag;
+  if (prefix.toLowerCase() === "provider") return `Provider: ${value}`;
+  if (prefix.toLowerCase() === "country") return `Country: ${value}`;
+  return tag;
+}
+
+function groupOption(tag: TagView) {
+  return {
+    label: groupOptionLabel(tag.name, tag.clients.length),
+    value: tag.name,
+  };
+}
+
+function groupOptionLabel(tag: string, clientCount: number) {
+  return `${tag} (${clientCount} VPS${clientCount === 1 ? "" : "s"})`;
+}
+
+function tagClientsCount(tags: TagView[], tagName: string) {
+  return tags.find((tag) => tag.name === tagName)?.clients.length ?? 0;
+}
+
+type GroupDependencySummary = {
+  alertPolicies: number;
+  schedules: number;
+  total: number;
+};
+
+function groupDependencySummary(
+  tag: string,
+  schedules: ScheduleRecord[],
+  fleetAlertPolicies: FleetAlertPolicyRecord[],
+): GroupDependencySummary {
+  const scheduleCount = schedules.filter(
+    (schedule) =>
+      !schedule.deleted_at &&
+      selectorReferencesGroup(schedule.selector_expression, tag),
+  ).length;
+  const policyCount = fleetAlertPolicies.filter(
+    (policy) =>
+      policy.enabled && selectorReferencesGroup(policy.selector_expression, tag),
+  ).length;
+  return {
+    alertPolicies: policyCount,
+    schedules: scheduleCount,
+    total: scheduleCount + policyCount,
+  };
+}
+
+function selectorReferencesGroup(selector: string | null | undefined, tag: string) {
+  if (!selector || !tag) {
+    return false;
+  }
+  const haystack = selector.toLowerCase();
+  const needle = tag.toLowerCase();
+  const variants = new Set([
+    needle,
+    `tag:${needle}`,
+    `tags:${needle}`,
+    `vps.tag:${needle}`,
+    `vps.tags:${needle}`,
+  ]);
+  return Array.from(variants).some((variant) =>
+    new RegExp(`(^|[^a-z0-9_:-])${escapeRegExp(variant)}($|[^a-z0-9_:-])`, "i").test(haystack),
+  );
+}
+
+function dependencySummaryText(summary: GroupDependencySummary) {
+  if (summary.total === 0) {
+    return "No automation references";
+  }
+  const parts = [];
+  if (summary.schedules > 0) {
+    parts.push(`${summary.schedules} schedule${summary.schedules === 1 ? "" : "s"}`);
+  }
+  if (summary.alertPolicies > 0) {
+    parts.push(`${summary.alertPolicies} alert polic${summary.alertPolicies === 1 ? "y" : "ies"}`);
+  }
+  return `Used by ${parts.join(" and ")}`;
+}
+
+type TargetStatusCounts = {
+  offline: number;
+  ready: number;
+  stale: number;
+  total: number;
+};
+
+function targetStatusCounts(targets: AgentView[]): TargetStatusCounts {
+  const ready = targets.filter((target) => target.status === "online").length;
+  const stale = targets.filter((target) => target.status === "stale").length;
+  const offline = targets.filter((target) => target.status === "offline").length;
+  return {
+    offline,
+    ready,
+    stale,
+    total: targets.length,
+  };
+}
+
+function targetStatusText(prefix: string, targets: AgentView[]) {
+  const counts = targetStatusCounts(targets);
+  const parts = [
+    `${prefix} ${bulkVpsCountLabel(counts.total)}`,
+    `${counts.ready} ready`,
+    `${counts.stale} stale`,
+  ];
+  if (counts.offline > 0) {
+    parts.push(`${counts.offline} offline`);
+  }
+  return parts.join(" · ");
+}
+
+function bulkVpsCountLabel(count: number) {
+  return `${count} VPS${count === 1 ? "" : "s"}`;
+}
+
+function bulkMutationPrimaryLabel(
+  action: "add" | "delete" | "remove",
+  tag: string,
+  targetCount: number,
+) {
+  if (!tag && action === "delete") {
+    return "Choose group to delete";
+  }
+  if (!tag && targetCount === 0) {
+    return "Choose group and targets";
+  }
+  if (!tag) {
+    return `Choose group for ${bulkVpsCountLabel(targetCount)}`;
+  }
+  if (action !== "delete" && targetCount === 0) {
+    return "Select target VPSs";
+  }
+  if (action === "delete") {
+    return tag ? `Delete ${tag} globally` : "Delete group globally";
+  }
+  if (action === "remove") {
+    return `Remove ${tag} from ${bulkVpsCountLabel(targetCount)}`;
+  }
+  return `Add ${tag} to ${bulkVpsCountLabel(targetCount)}`;
+}
+
+function membershipOutcomeText(
+  action: "add" | "delete" | "remove",
+  preview: TagMutationResponse | null | undefined,
+) {
+  if (!preview) {
+    return "Server preview required before apply.";
+  }
+  if (action === "delete") {
+    return `${preview.changed_count} assignment${preview.changed_count === 1 ? "" : "s"} removed; ${preview.skipped_count} skipped.`;
+  }
+  if (action === "remove") {
+    return `${preview.changed_count} VPS${preview.changed_count === 1 ? "" : "s"} will lose the group; ${preview.skipped_count} already lacked it.`;
+  }
+  return `${preview.changed_count} VPS${preview.changed_count === 1 ? "" : "s"} will gain the group; ${preview.skipped_count} already had it.`;
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function TagRegistry({
@@ -239,6 +453,7 @@ function TagRegistry({
   privilegeMaterial,
   runAction,
   setLastMutation,
+  summary,
   tags,
 }: {
   onCreateTag: (name: string, privilegeAssertion: PrivilegeAssertion) => Promise<void>;
@@ -255,16 +470,22 @@ function TagRegistry({
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
   setLastMutation: (response: TagMutationResponse | null) => void;
+  summary: GroupSummary;
   tags: TagView[];
 }) {
   const [tagName, setTagName] = useState("");
   const [deleteCandidate, setDeleteCandidate] = useState<TagView | null>(null);
   const [deletePreview, setDeletePreview] = useState<TagMutationResponse | null>(null);
+  const trimmedGroupName = tagName.trim();
+  const groupNameHasComma = trimmedGroupName.includes(",");
 
   async function submitTag(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!trimmedGroupName || groupNameHasComma) {
+      return;
+    }
     await runAction(async () => {
-      const tag = tagName.trim();
+      const tag = trimmedGroupName;
       const privilegeAssertion = await dbPrivilegeAssertion(
         privilegeMaterial,
         onOpenPrivilegeUnlock,
@@ -319,19 +540,31 @@ function TagRegistry({
     () => [
       {
         cell: (tag) => (
-          <span className="tags">
-            <em>{tag.name}</em>
+          <span className="historyPrimary">
+            <strong>{groupDisplayName(tag.name)}</strong>
+            <small>{tag.name}</small>
           </span>
         ),
-        header: "Tag",
-        id: "tag",
+        header: "Group",
+        id: "group",
         searchValue: (tag) => tag.name,
         sortValue: (tag) => tag.name,
       },
       {
+        cell: (tag) => (
+          <span className={`consoleStatusBadge ${groupKindTone(tag.name)}`}>
+            {groupKindLabel(tag.name)}
+          </span>
+        ),
+        header: "Type",
+        id: "type",
+        searchValue: (tag) => groupKindLabel(tag.name),
+        sortValue: (tag) => groupKindLabel(tag.name),
+      },
+      {
         cell: (tag) => tag.clients.length,
-        header: "Clients",
-        id: "clients",
+        header: "Assigned VPSs",
+        id: "assigned",
         searchValue: (tag) => tag.clients.length,
         sortValue: (tag) => tag.clients.length,
       },
@@ -347,7 +580,7 @@ function TagRegistry({
             type="button"
           >
             <Trash2 size={13} />
-            <span>Review deletion</span>
+            <span>Delete</span>
           </button>
         ),
         enableHiding: false,
@@ -361,54 +594,94 @@ function TagRegistry({
   return (
     <>
       <form className="compactForm tagCreateForm" onSubmit={submitTag}>
-        <strong>Create tag</strong>
+        <strong>Create group</strong>
+        <span className="formHint">
+          Add one operator-managed group per submission. Provider and country
+          metadata are read from VPS records.
+        </span>
         <div className="formRow">
-          <input aria-label="Tag name" onChange={(event) => setTagName(event.target.value)} placeholder="provider:alpha, country:us, app:edge" value={tagName} />
-          <button className="secondaryAction" disabled={pending || !tagName.trim()} type="submit">
+          <input
+            aria-describedby="group-name-hint"
+            aria-label="Group name"
+            onChange={(event) => setTagName(event.target.value)}
+            placeholder="role:edge or maintenance"
+            value={tagName}
+          />
+          <button
+            className="secondaryAction"
+            disabled={pending || !trimmedGroupName || groupNameHasComma}
+            type="submit"
+          >
             <Plus size={14} />
-            <span>Create</span>
+            <span>Create group</span>
           </button>
         </div>
+        <small id="group-name-hint">
+          {groupNameHasComma
+            ? "Use one group name per submission; commas are not accepted here."
+            : "Use the group later in selectors, schedules, alerts, and bulk operations."}
+        </small>
       </form>
       <ConsoleDataGrid
         columns={tagColumns}
         defaultPageSize={12}
         expandOnRowClick
         getRowId={(tag) => tag.name}
-        itemLabel="tags"
+        itemLabel="groups"
         empty={
           <div className="emptyState">
             <ShieldCheck size={22} />
-            <strong>No tags</strong>
-            <span>Create provider, country, or custom tags to target recurring VPS groups.</span>
+            <strong>No groups</strong>
+            <span>Create operator groups to target recurring VPS workflows.</span>
           </div>
         }
         renderExpandedRow={(tag) => (
           <div className="consoleInlineDetailGrid">
-            <span>Tag</span>
+            <span>Group</span>
             <strong>{tag.name}</strong>
+            <span>Type</span>
+            <strong>{groupKindLabel(tag.name)}</strong>
+            <span>Model</span>
+            <strong>{groupKindDetail(tag.name)}</strong>
             <span>Assigned VPSs</span>
             <strong>{tag.clients.length}</strong>
-            <span>Clients</span>
+            <span>VPS IDs</span>
             <strong>{tag.clients.map((client) => client.id).join(", ") || "None"}</strong>
           </div>
         )}
+        rowActions={[
+          {
+            icon: <Trash2 size={13} />,
+            label: "Delete",
+            onSelect: ([tag]) => {
+              if (tag) {
+                void previewDelete(tag);
+              }
+            },
+            tone: "danger",
+          },
+        ]}
         rows={tags}
-        searchPlaceholder="Search tags"
+        searchPlaceholder="Search groups or metadata"
         selectable={false}
         storageKey="vpsman.tags.registry"
-        title="Tag registry"
+        title="Group registry"
       />
+      <GroupSummaryStrip summary={summary} />
       <TagOrderManager
         disabled={pending}
         onUpdateTagOrder={onUpdateTagOrder}
         tags={tags}
       />
       <ConfirmationPrompt
-        confirmLabel="Delete tag"
-        detail="Delete this tag and all assignments."
+        confirmLabel="Delete group"
+        detail="Delete this group and remove it from assigned VPSs. Managed metadata can reappear when VPS records report it again."
         items={[
-          { label: "Tag", value: deleteCandidate?.name ?? "-" },
+          { label: "Group", value: deleteCandidate?.name ?? "-" },
+          {
+            label: "Type",
+            value: deleteCandidate ? groupKindLabel(deleteCandidate.name) : "-",
+          },
           { label: "Assignments", value: String(deletePreview?.target_count ?? deleteCandidate?.clients.length ?? 0) },
           {
             label: "Preview hash",
@@ -424,7 +697,7 @@ function TagRegistry({
         onConfirm={() => void deleteSelected()}
         open={deleteCandidate !== null}
         pending={pending}
-        title="Confirm tag delete"
+        title="Confirm group delete"
       />
     </>
   );
@@ -484,23 +757,23 @@ function TagOrderManager({
   }
 
   return (
-    <section className="tagOrderPanel">
-      <div className="tagOrderHeader">
+    <details className="tagOrderPanel">
+      <summary className="tagOrderSummary">
         <div>
-          <strong>Fleet tag order</strong>
-          <span>{tags.length} tags</span>
+          <strong>Manage display order</strong>
+          <span>{tags.length} groups</span>
         </div>
         {status && (
           <span className={`consoleStatusBadge ${saving || status !== "Order saved" ? "warning" : "ok"}`}>
             {status}
           </span>
         )}
-      </div>
+      </summary>
       {orderedTags.length === 0 ? (
         <div className="emptyState compactEmptyState">
           <ShieldCheck size={20} />
-          <strong>No tags</strong>
-          <span>Create tags before setting Fleet display order.</span>
+          <strong>No groups</strong>
+          <span>Create groups before setting fleet display order.</span>
         </div>
       ) : (
         <DndContext collisionDetection={closestCenter} onDragEnd={(event) => void handleDragEnd(event)} sensors={sensors}>
@@ -518,7 +791,7 @@ function TagOrderManager({
           </SortableContext>
         </DndContext>
       )}
-    </section>
+    </details>
   );
 }
 
@@ -570,30 +843,45 @@ function SortableTagOrderRow({
 
 function TagAssignments({
   agents,
+  fleetAlertPolicies,
   onAssignTag,
   onBulkMutateTags,
   onOpenPrivilegeUnlock,
   pending,
   privilegeMaterial,
   runAction,
+  schedules,
   setLastMutation,
   tags,
 }: {
   agents: AgentView[];
+  fleetAlertPolicies: FleetAlertPolicyRecord[];
   onAssignTag: (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => Promise<TagMutationResponse>;
   onBulkMutateTags: (request: BulkTagMutationRequest) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
+  schedules: ScheduleRecord[];
   setLastMutation: (response: TagMutationResponse | null) => void;
   tags: TagView[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [tagByAgent, setTagByAgent] = useState<Record<string, string>>({});
+  const [recentRemoval, setRecentRemoval] = useState<{
+    agentId: string;
+    agentLabel: string;
+    scheduleImpactCount: number;
+    selectorExpression: string;
+    tag: string;
+  } | null>(null);
   const tagNames = useMemo(() => tags.map((tag) => tag.name), [tags]);
+  const tagOptions = useMemo(() => tags.map(groupOption), [tags]);
+  const suggestionsText = tagOptions.length
+    ? `Suggestions: ${tagOptions.slice(0, 4).map((option) => option.label).join(", ")}`
+    : "No saved operator groups yet";
 
-  async function addTag(agent: AgentView) {
+  const addTag = useCallback(async (agent: AgentView) => {
     const tag = tagByAgent[agent.id]?.trim();
     if (!tag) {
       return;
@@ -609,10 +897,12 @@ function TagAssignments({
       );
       setLastMutation(await onAssignTag(agent.id, tag, privilegeAssertion));
       setTagByAgent((current) => ({ ...current, [agent.id]: "" }));
+      setRecentRemoval(null);
     });
-  }
+  }, [onAssignTag, onOpenPrivilegeUnlock, privilegeMaterial, runAction, setLastMutation, tagByAgent]);
 
-  async function removeTag(agent: AgentView, tag: string) {
+  const removeTag = useCallback(async (agent: AgentView, tag: string) => {
+    const agentLabel = formatVpsName(agent, vpsNameDisplayMode);
     await runAction(async () => {
       const selector = selectorExpressionForClientIds([agent.id]);
       const privilegeAssertion = await dbPrivilegeAssertion(
@@ -623,16 +913,54 @@ function TagAssignments({
         selector,
         [agent.id],
       );
+      const response = await onBulkMutateTags({
+        action: "remove",
+        confirmed: true,
+        privilege_assertion: privilegeAssertion,
+        selector_expression: selector,
+        target_client_ids: [agent.id],
+        tag,
+      });
+      setLastMutation(response);
+      if (response.changed_count > 0) {
+        setRecentRemoval({
+          agentId: agent.id,
+          agentLabel,
+          scheduleImpactCount: response.schedule_impacts.length,
+          selectorExpression: selector,
+          tag,
+        });
+      } else {
+        setRecentRemoval(null);
+      }
+    });
+  }, [onBulkMutateTags, onOpenPrivilegeUnlock, privilegeMaterial, runAction, setLastMutation, vpsNameDisplayMode]);
+
+  async function undoRemoveTag() {
+    if (!recentRemoval) {
+      return;
+    }
+    const removal = recentRemoval;
+    await runAction(async () => {
+      const privilegeAssertion = await dbPrivilegeAssertion(
+        privilegeMaterial,
+        onOpenPrivilegeUnlock,
+        "tag.bulk_add",
+        removal.tag,
+        removal.selectorExpression,
+        [removal.agentId],
+      );
       setLastMutation(
         await onBulkMutateTags({
-          action: "remove",
+          action: "add",
           confirmed: true,
           privilege_assertion: privilegeAssertion,
-          selector_expression: selector,
-          target_client_ids: [agent.id],
-          tag,
+          selector_expression: removal.selectorExpression,
+          target_client_ids: [removal.agentId],
+          tag: removal.tag,
         }),
       );
+      setRecentRemoval(null);
     });
   }
 
@@ -660,63 +988,103 @@ function TagAssignments({
       {
         cell: (agent) => (
           <span className="tagChipList">
-            {agent.tags.map((tag) => (
-              <button
-                className="tagRemoveChip"
-                disabled={pending}
-                key={tag}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void removeTag(agent, tag);
-                }}
-                title={`Remove ${tag}`}
-                type="button"
-              >
-                <span>{tag}</span>
-                <X size={12} />
-              </button>
-            ))}
+            {agent.tags.map((tag) => {
+              const dependencies = groupDependencySummary(tag, schedules, fleetAlertPolicies);
+              const dependencyLabel = dependencySummaryText(dependencies);
+              const hasDependencies = dependencies.total > 0;
+              if (groupKind(tag) !== "custom") {
+                return (
+                  <span
+                    className="tagRemoveChip managed"
+                    key={tag}
+                    title={`${groupKindLabel(tag)}. ${dependencyLabel}`}
+                  >
+                    <ShieldCheck size={12} />
+                    <span>{tag}</span>
+                    {hasDependencies && <small>{dependencyLabel}</small>}
+                  </span>
+                );
+              }
+              return (
+                <button
+                  aria-label={`Remove ${tag} from ${formatVpsName(agent, vpsNameDisplayMode)}`}
+                  className={`tagRemoveChip${hasDependencies ? " linked" : ""}`}
+                  disabled={pending}
+                  key={tag}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void removeTag(agent, tag);
+                  }}
+                  title={`Remove ${tag}. ${dependencyLabel}`}
+                  type="button"
+                >
+                  <span>{tag}</span>
+                  {hasDependencies && <small>{dependencyLabel}</small>}
+                  <X size={12} />
+                </button>
+              );
+            })}
           </span>
         ),
-        header: "Current tags",
+        header: "Current groups",
         id: "tags",
         searchValue: (agent) => agent.tags.join(" "),
         sortValue: (agent) => agent.tags.join(" "),
       },
       {
         cell: (agent) => (
-          <span className="formRow inlineTagAdd">
-            <input
-              aria-label={`Tag to add to ${agent.display_name}`}
-              list="tag-options"
-              onChange={(event) => setTagByAgent((current) => ({ ...current, [agent.id]: event.target.value }))}
-              onClick={(event) => event.stopPropagation()}
-              placeholder="tag"
-              value={tagByAgent[agent.id] ?? ""}
-            />
-            <button
-              className="secondaryAction compactAction"
-              disabled={pending || !(tagByAgent[agent.id] ?? "").trim()}
-              onClick={(event) => {
-                event.stopPropagation();
-                void addTag(agent);
-              }}
-              type="button"
-            >
-              <Plus size={13} />
-            </button>
+          <span className="inlineTagAddStack">
+            <span className="formRow inlineTagAdd">
+              <input
+                aria-describedby={`group-suggestions-${agent.id}`}
+                aria-label={`Group to add to ${agent.display_name}`}
+                list="tag-options"
+                onChange={(event) => setTagByAgent((current) => ({ ...current, [agent.id]: event.target.value }))}
+                onClick={(event) => event.stopPropagation()}
+                placeholder="group name"
+                value={tagByAgent[agent.id] ?? ""}
+              />
+              <button
+                aria-label={`Add group to ${formatVpsName(agent, vpsNameDisplayMode)}`}
+                className="secondaryAction compactAction"
+                disabled={pending || !(tagByAgent[agent.id] ?? "").trim()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void addTag(agent);
+                }}
+                type="button"
+              >
+                <Plus size={13} />
+              </button>
+            </span>
+            <small id={`group-suggestions-${agent.id}`}>{suggestionsText}</small>
           </span>
         ),
         enableHiding: false,
-        header: "Add tag",
+        header: "Add group",
         id: "addTag",
       },
     ],
-    [pending, tagByAgent, vpsNameDisplayMode],
+    [addTag, fleetAlertPolicies, pending, removeTag, schedules, suggestionsText, tagByAgent, vpsNameDisplayMode],
   );
 
   return (
     <>
+      {recentRemoval && (
+        <div className="tagAssignmentNotice" role="status" aria-live="polite">
+          <span>
+            Removed <strong>{recentRemoval.tag}</strong> from <strong>{recentRemoval.agentLabel}</strong>.
+          </span>
+          {recentRemoval.scheduleImpactCount > 0 && (
+            <small>
+              Used by {recentRemoval.scheduleImpactCount} schedule{recentRemoval.scheduleImpactCount === 1 ? "" : "s"}; saved targets stay fixed until updated.
+            </small>
+          )}
+          <button className="secondaryAction compactAction" disabled={pending} onClick={undoRemoveTag} type="button">
+            Undo
+          </button>
+        </div>
+      )}
       <ConsoleDataGrid
         columns={assignmentColumns}
         defaultPageSize={10}
@@ -731,7 +1099,7 @@ function TagAssignments({
             <strong>{agent.id}</strong>
             <span>Status</span>
             <strong>{agent.status}</strong>
-            <span>Tags</span>
+            <span>Groups</span>
             <strong>{agent.tags.join(", ") || "None"}</strong>
           </div>
         )}
@@ -739,11 +1107,11 @@ function TagAssignments({
         searchPlaceholder="Search VPS assignments"
         selectable={false}
         storageKey="vpsman.tags.assignments"
-        title="VPS tag assignments"
+        title="VPS group assignments"
       />
       <datalist id="tag-options">
         {tagNames.map((tag) => (
-          <option key={tag} value={tag} />
+          <option key={tag} label={groupOptionLabel(tag, tagClientsCount(tags, tag))} value={tag} />
         ))}
       </datalist>
     </>
@@ -784,6 +1152,7 @@ function BulkTagPanel({
   const [action, setAction] = useState<"add" | "remove" | "delete">("add");
   const [tag, setTag] = useState("");
   const [preview, setPreview] = useState<TagMutationResponse | null>(null);
+  const [resolvedTargets, setResolvedTargets] = useState<BulkResolveResponse | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [mutationSnapshot, setMutationSnapshot] = useState<BulkTagMutationSnapshot | null>(null);
   const [previewStatus, setPreviewStatus] = useState<string | null>(null);
@@ -793,23 +1162,42 @@ function BulkTagPanel({
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
   const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
+  const trimmedTag = tag.trim();
+  const trimmedSelector = selectorExpression.trim();
+  const localTargets = useMemo(
+    () =>
+      trimmedSelector && !selectorParse.error
+        ? agentsMatchingExpression(agents, trimmedSelector)
+        : [],
+    [agents, selectorParse.error, trimmedSelector],
+  );
+  const targetCountForAction =
+    action === "delete"
+      ? (preview?.target_count ?? 0)
+      : (resolvedTargets?.target_count ?? localTargets.length);
+  const canReviewMutation = Boolean(
+    trimmedTag &&
+      (action === "delete" ||
+        (trimmedSelector && !selectorParse.error && localTargets.length > 0)),
+  );
 
   useEffect(() => writeLocalString(TAG_BULK_SELECTOR_STORAGE_KEY, selectorExpression), [selectorExpression]);
 
   function clearMutationPreview() {
     invalidateReviewGeneration();
     setPreview(null);
+    setResolvedTargets(null);
     setMutationSnapshot(null);
     setConfirmOpen(false);
     setPreviewStatus(null);
   }
 
-  async function previewTargets() {
+  async function reviewMutation() {
     const reviewGeneration = captureReviewGeneration();
     const frozenAction = action;
-    const frozenTag = tag.trim();
-    const frozenSelector = selectorExpression.trim();
-    setPreviewStatus("Preparing tag preview");
+    const frozenTag = trimmedTag;
+    const frozenSelector = trimmedSelector;
+    setPreviewStatus(frozenAction === "delete" ? "Preparing delete preview" : "Resolving targets and preparing preview");
     try {
       await runAction(async () => {
         await waitForReviewRender();
@@ -822,16 +1210,24 @@ function BulkTagPanel({
             return;
           }
           setPreview(nextPreview);
-          setMutationSnapshot(null);
+          setResolvedTargets(null);
+          setMutationSnapshot({
+            action: frozenAction,
+            preview: nextPreview,
+            selectorExpression: "",
+            tag: frozenTag,
+          });
+          setConfirmOpen(true);
           return;
         }
         const resolved = await onResolveBulk(frozenSelector);
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
         }
+        setResolvedTargets(resolved);
         const targetClientIds = resolved.targets.map((target) => target.id);
         if (!targetClientIds.length) {
-          throw new Error("Bulk tag preview resolved no VPSs");
+          throw new Error("Bulk group action resolved no VPSs");
         }
         const nextPreview = await onBulkMutateTags({
           action: frozenAction,
@@ -845,7 +1241,13 @@ function BulkTagPanel({
           return;
         }
         setPreview(nextPreview);
-        setMutationSnapshot(null);
+        setMutationSnapshot({
+          action: frozenAction,
+          preview: nextPreview,
+          selectorExpression: frozenSelector,
+          tag: frozenTag,
+        });
+        setConfirmOpen(true);
       });
     } finally {
       if (isReviewGenerationCurrent(reviewGeneration)) {
@@ -913,7 +1315,7 @@ function BulkTagPanel({
   return (
     <div className="configApplyGrid bulkTagApplyGrid">
       <div className="compactForm bulkTagMutationForm">
-        <strong>Bulk mutation</strong>
+        <strong>Bulk tag mutation</strong>
         <label>
           <span>Mutation</span>
           <select
@@ -961,21 +1363,27 @@ function BulkTagPanel({
               showMatchCount
               value={selectorExpression}
               verification={selectorParse.error ? "invalid" : selectorExpression.trim() ? "valid" : "neutral"}
-              verificationMessage={selectorParse.error ?? (preview ? `${preview.target_count}/${agents.length}` : selectorExpression.trim() ? undefined : "no selector")}
+              verificationMessage={selectorParse.error ?? (selectorExpression.trim() ? targetStatusText("Local match", localTargets) : undefined)}
             />
-            <button className="secondaryAction" disabled={pending || !tag.trim() || !selectorExpression.trim()} onClick={previewTargets} type="button">
-              Preview targets
-            </button>
+            <div className="bulkTargetResolution" aria-label="Bulk group target resolution">
+              <span>
+                {selectorExpression.trim()
+                  ? selectorParse.error
+                    ? selectorParse.error
+                    : targetStatusText("Local match", localTargets)
+                  : "Enter a selector to estimate local matches."}
+              </span>
+              <span>
+                {resolvedTargets
+                  ? targetStatusText("Server resolved", resolvedTargets.targets)
+                  : "Server resolution runs before confirmation."}
+              </span>
+            </div>
           </>
         )}
-        {action === "delete" && (
-          <button className="secondaryAction" disabled={pending || !tag.trim()} onClick={previewTargets} type="button">
-            Preview targets
-          </button>
-        )}
-        <div className="privilegeGateBox">
+        <div className={`privilegeGateBox ${privilegeMaterial ? "ready" : ""}`}>
           <ShieldCheck size={16} />
-          <span>{privilegeMaterial ? "Privilege unlocked" : "Open Privilege Vault to enable bulk tag mutation"}</span>
+          <span>{privilegeMaterial ? "Privilege unlocked for final apply" : "Preview works now; unlock only when applying."}</span>
           {!privilegeMaterial && (
             <button className="secondaryAction compactAction" onClick={onOpenPrivilegeUnlock} type="button">
               Open Privilege Vault
@@ -984,30 +1392,20 @@ function BulkTagPanel({
         </div>
         <button
           className="primaryAction"
-          disabled={pending || !privilegeMaterial || !tag.trim() || !preview || (action !== "delete" && Boolean(selectorParse.error))}
-          onClick={() => {
-            if (!preview) {
-              return;
-            }
-            setMutationSnapshot({
-              action,
-              preview,
-              selectorExpression: action === "delete" ? "" : selectorExpression.trim(),
-              tag: tag.trim(),
-            });
-            setConfirmOpen(true);
-          }}
+          disabled={pending || !canReviewMutation}
+          onClick={() => void reviewMutation()}
           type="button"
         >
           <Tag size={16} />
-          Review mutation
+          {previewStatus ?? bulkMutationPrimaryLabel(action, trimmedTag, targetCountForAction)}
         </button>
       </div>
+      {(preview || previewStatus) && (
       <section className="bulkTagPreviewPanel" aria-label="Bulk tag target preview">
         <div className="bulkTagPreviewHeader">
           <div>
-            <strong>Target preview</strong>
-            <span>{previewStatus ?? (preview ? `${preview.target_count} resolved / ${preview.changed_count} changes` : "Review before mutation")}</span>
+            <strong>Server preview</strong>
+            <span>{previewStatus ?? (preview ? `${preview.target_count} resolved / ${preview.changed_count} changes` : "Resolving target snapshot")}</span>
           </div>
         </div>
         {preview && (
@@ -1019,6 +1417,10 @@ function BulkTagPanel({
             <span>
               <strong>{preview.changed_count}</strong>
               <small>changed</small>
+            </span>
+            <span>
+              <strong>{preview.skipped_count}</strong>
+              <small>no-change</small>
             </span>
             <span>
               <strong>{preview.schedule_impacts.length}</strong>
@@ -1045,6 +1447,7 @@ function BulkTagPanel({
           </div>
         )}
       </section>
+      )}
       <ConfirmationPrompt
         confirmLabel="Apply tag mutation"
         detail={confirmationSnapshot?.action === "delete" ? "Delete this tag and all assignments." : "Apply this selector-based tag mutation."}
@@ -1060,6 +1463,8 @@ function BulkTagPanel({
           },
           { label: "Targets", value: String(confirmationPreview?.target_count ?? 0) },
           { label: "Changed", value: String(confirmationPreview?.changed_count ?? 0) },
+          { label: "Excluded / no-change", value: String(confirmationPreview?.skipped_count ?? 0) },
+          { label: "Membership after apply", value: membershipOutcomeText(confirmationSnapshot?.action ?? action, confirmationPreview) },
           {
             label: "Preview hash",
             title: confirmationPreview?.preview_hash,

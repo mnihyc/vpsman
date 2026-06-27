@@ -7,10 +7,9 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 use vpsman_common::{
-    allocate_tunnel_endpoints as allocate_tunnel_endpoint_pairs, plan_tunnel, BandwidthTier,
-    NetworkPlanError, OspfCostPolicy, RuntimeTunnelControl, RuntimeTunnelManager,
-    RuntimeTunnelTopologyIntent, TunnelAddressFamily, TunnelEndpointSide, TunnelKind, TunnelPlan,
-    TunnelPlanInput,
+    allocate_tunnel_endpoints as allocate_tunnel_endpoint_pairs, plan_tunnel, NetworkPlanError,
+    OspfCostPolicy, RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelTopologyIntent,
+    TunnelAddressFamily, TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
 use crate::{
@@ -208,12 +207,15 @@ pub(crate) async fn update_tunnel_plan_ospf_cost(
         require_tunnel_endpoint_agents(&state, &existing.left_client_id, &existing.right_client_id)
             .await?;
     }
+    validate_ospf_recommendation_contract(&state, plan_id, &request).await?;
     let view = state
         .repo
         .update_tunnel_plan_ospf_cost(
             plan_id,
+            &request.recommendation_id,
             request.current_ospf_cost,
             request.recommended_ospf_cost,
+            &request.mutation_intent,
             &operator,
         )
         .await
@@ -347,11 +349,47 @@ fn validate_tunnel_plan_ospf_cost_request(
     request: &UpdateTunnelPlanOspfCostRequest,
 ) -> Result<(), ApiError> {
     require_tunnel_plan_confirmed(request.confirmed)?;
+    if request.recommendation_id.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "tunnel_plan_ospf_recommendation_id_required",
+        ));
+    }
+    if !matches!(request.mutation_intent.as_str(), "apply" | "rollback") {
+        return Err(ApiError::bad_request(
+            "tunnel_plan_ospf_mutation_intent_invalid",
+        ));
+    }
     if request.current_ospf_cost == 0 || request.recommended_ospf_cost == 0 {
         return Err(ApiError::bad_request("tunnel_plan_ospf_cost_invalid"));
     }
     if request.current_ospf_cost == request.recommended_ospf_cost {
         return Err(ApiError::bad_request("tunnel_plan_ospf_cost_noop"));
+    }
+    Ok(())
+}
+
+async fn validate_ospf_recommendation_contract(
+    state: &AppState,
+    plan_id: Uuid,
+    request: &UpdateTunnelPlanOspfCostRequest,
+) -> Result<(), ApiError> {
+    if request.mutation_intent == "rollback" {
+        return Ok(());
+    }
+    let update_plans = state.repo.list_network_ospf_update_plans(1_000).await?;
+    let Some(plan) = update_plans
+        .into_iter()
+        .find(|plan| plan.plan_id == plan_id)
+    else {
+        return Err(ApiError::conflict(
+            "tunnel_plan_ospf_recommendation_missing",
+        ));
+    };
+    if plan.recommendation_id != request.recommendation_id
+        || plan.current_ospf_cost != i32::from(request.current_ospf_cost)
+        || plan.recommended_ospf_cost != i32::from(request.recommended_ospf_cost)
+    {
+        return Err(ApiError::conflict("tunnel_plan_ospf_recommendation_stale"));
     }
     Ok(())
 }
@@ -463,6 +501,7 @@ fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
         | NetworkPlanError::AddressPoolTooSmall
         | NetworkPlanError::AddressPoolExhausted
         | NetworkPlanError::AddressPoolRequired
+        | NetworkPlanError::InvalidBandwidthMbps
         | NetworkPlanError::TunnelAddressRequired => "invalid_tunnel_plan_input",
     }
 }
@@ -567,7 +606,7 @@ fn telemetry_promotion_input(
         ipv6_address_pool_cidr: request.ipv6_address_pool_cidr.clone(),
         ipv6_tunnel: request.ipv6_tunnel.clone(),
         latency_primary_family: request.latency_primary_family,
-        bandwidth: request.bandwidth.unwrap_or(BandwidthTier::M100),
+        bandwidth_mbps: request.bandwidth_mbps.unwrap_or(100),
         latency_ms: request.latency_ms.unwrap_or(10.0),
         packet_loss_ratio: request.packet_loss_ratio.unwrap_or(0.0),
         preference: request.preference.unwrap_or(1.0),

@@ -22,7 +22,7 @@ test("captures reviewed confirmation prompts in operator workflows", async ({ pa
   await captureTopologyLifecyclePrompt(page, outputDir, manifest);
   await captureTopologySpeedTestPrompt(page, outputDir, manifest);
   await captureTopologySavePrompt(page, outputDir, manifest);
-  await captureServerJobCancelPrompt(page, outputDir, manifest);
+  await captureArtifactDeletionPrompt(page, outputDir, manifest);
   await captureBackupRestoreRunPrompt(page, outputDir, manifest);
 
   writeFileSync(
@@ -107,7 +107,7 @@ async function captureTopologySavePrompt(
   await activate(page.getByRole("button", { name: "Close confirmation" }));
 }
 
-async function captureServerJobCancelPrompt(
+async function captureArtifactDeletionPrompt(
   page: Page,
   outputDir: string,
   manifest: Array<Record<string, unknown>>,
@@ -116,22 +116,14 @@ async function captureServerJobCancelPrompt(
   const cleanupPanel = page.locator(".fleetPanel").filter({
     has: page.getByRole("heading", { name: "Artifact cleanup" }),
   });
+  await cleanupPanel.getByLabel("Older than days").fill("");
+  await cleanupPanel.getByText("Advanced expression").click();
   await cleanupPanel.getByLabel("Expression").fill('artifact.domain = "file_transfer_source"');
   await cleanupPanel.getByRole("button", { name: "Preview" }).click();
-  await expect(cleanupPanel.getByLabel("Preview hash")).toHaveValue(/^[0-9a-f]{64}$/);
-  await cleanupPanel.getByRole("button", { name: "Queue cleanup" }).click();
-  await expect(page.getByRole("region", { name: "Confirm artifact cleanup" })).toBeVisible();
+  await expect(cleanupPanel.getByLabel("Artifact cleanup readiness")).toContainText("Ready for confirmation");
+  await cleanupPanel.getByRole("button", { name: "Delete artifacts" }).click();
+  await expect(page.getByRole("region", { name: "Confirm artifact deletion" })).toBeVisible();
   await capture(page, page.locator("main.content"), outputDir, manifest, "artifact-cleanup-confirm");
-  await page.getByLabel("Type DELETE to confirm artifact cleanup").fill("DELETE");
-  await activate(page.getByRole("region", { name: "Confirm artifact cleanup" }).getByRole("button", { name: "Queue cleanup" }));
-
-  const serverJobsPanel = page.locator(".fleetPanel").filter({
-    has: page.getByRole("heading", { name: "Maintenance jobs" }),
-  });
-  await expect(serverJobsPanel).toContainText("queued");
-  await activate(serverJobsPanel.getByRole("button", { name: "Cancel" }).first());
-  await expect(page.getByLabel("Confirm maintenance job cancellation")).toBeVisible();
-  await capture(page, page.locator("main.content"), outputDir, manifest, "server-job-cancel-confirm");
   await activate(page.getByRole("button", { name: "Close confirmation" }));
 }
 

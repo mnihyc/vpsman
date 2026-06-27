@@ -314,6 +314,91 @@
   font-size: 13px;
 }
 
+.backupQuickStart {
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(320px, 1.05fr);
+  gap: 12px;
+  align-items: stretch;
+  min-width: 0;
+  margin: 0 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.backupAffectedSummary {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.backupAffectedSummary span,
+.backupPostureDisclosure summary span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.backupAffectedSummary strong {
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.backupAffectedSummary p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.backupQuickActions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.backupQuickAction {
+  justify-content: flex-start;
+  height: auto;
+  min-height: 54px;
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+.backupQuickAction > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  text-align: left;
+}
+
+.backupQuickAction strong,
+.backupQuickAction small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backupQuickAction strong {
+  color: inherit;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.backupQuickAction small {
+  color: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  opacity: 0.82;
+}
+
 .backupWorkflowMap,
 .backupEvidenceSummary {
   display: grid;
@@ -325,11 +410,71 @@
   padding: 14px;
 }
 
+.backupWorkflowMap.compact {
+  padding: 12px;
+}
+
 .backupWorkflowLinks {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 10px;
   min-width: 0;
+}
+
+.backupRecordLinks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.backupRecordLink {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 3px 8px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--text);
+  cursor: pointer;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.backupRecordLink:hover {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+}
+
+.backupRecordLink:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.backupRecordLink .backupWorkflowIcon {
+  grid-row: 1 / span 2;
+}
+
+.backupRecordLink strong,
+.backupRecordLink small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backupRecordLink strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.backupRecordLink small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .backupWorkflowLink {
@@ -446,6 +591,41 @@
   text-transform: uppercase;
 }
 
+.backupPostureDisclosure {
+  display: grid;
+  gap: 0;
+  margin: 0 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.backupPostureDisclosure summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  cursor: pointer;
+  list-style: none;
+  padding: 12px 14px;
+}
+
+.backupPostureDisclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.backupPostureDisclosure summary small {
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.backupPostureDisclosure .backupPostureOverview {
+  border-top: 1px solid var(--border-subtle);
+  padding: 0 14px 14px;
+}
+
 .backupWorkflowSteps strong {
   overflow-wrap: anywhere;
   color: var(--text);
@@ -513,13 +693,20 @@
 .backupEvidenceRow span {
   color: var(--text-secondary);
   font-size: 12px;
+  line-height: 1.35;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .backupEvidenceRow small {
   color: var(--text);
   font-size: 12px;
   font-weight: 800;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
   text-align: right;
+  white-space: normal;
 }
 
 .backupPostureHeader {
@@ -547,6 +734,150 @@
 .backupPostureHeader svg {
   flex: 0 0 auto;
   color: var(--primary-text);
+}
+
+.backupRequestSummary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  margin: 0 18px 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-neutral);
+  color: var(--text-secondary);
+  padding: 10px 12px;
+}
+
+.backupRequestSummary strong,
+.backupRequestSummary span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
+.backupRequestSummary strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.backupRequestSummary span {
+  font-size: 12px;
+}
+
+.backupRestoreSummary.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.backupRestoreSummary.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.backupRestoreSummary.ready strong {
+  color: var(--success-text);
+}
+
+.backupRestoreSummary.attention strong {
+  color: var(--warning-text);
+}
+
+.restoreArtifactWarning {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-soft);
+  color: var(--warning-text);
+  padding: 10px;
+}
+
+.restoreArtifactWarning strong,
+.restoreArtifactWarning span {
+  line-height: 1.35;
+}
+
+.restoreArtifactWarning strong {
+  font-size: 13px;
+}
+
+.restoreArtifactWarning span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.backupMigrationSummary {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0 18px 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-neutral);
+  color: var(--text-secondary);
+  padding: 12px;
+}
+
+.backupMigrationRoute {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+}
+
+.backupMigrationRoute > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.backupMigrationRoute span,
+.backupMigrationMeta span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.backupMigrationRoute strong,
+.backupMigrationRoute small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backupMigrationRoute strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.backupMigrationRoute small {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.backupMigrationRoute svg {
+  color: var(--primary-text);
+}
+
+.backupMigrationMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.backupMigrationMeta span {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  padding: 4px 8px;
 }
 
 .backupLifecycleStrip {
@@ -669,8 +1000,23 @@
 
 @media (max-width: 900px) {
   .backupRecoveryDecision,
+  .backupQuickStart,
+  .backupMigrationRoute,
   .backupEvidenceRow {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .backupQuickActions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .backupMigrationRoute svg {
+    display: none;
+  }
+
+  .backupRequestSummary {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .backupEvidenceRow small {

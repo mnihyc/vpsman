@@ -22,10 +22,11 @@ test("file transfer inventory empty state is covered by screenshot", async ({
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
   await expect(panel.getByText("0 downloads, 0 uploads tracked")).toBeVisible();
-  await expect(panel.getByText("No source artifacts")).toBeVisible();
   await expect(panel.getByText("No file transfer sessions")).toBeVisible();
-  await expect(panel.getByLabel("File transfer lifecycle summary")).toContainText("0 reusable objects");
+  await expect(panel.getByText("Advanced: reusable upload sources")).toBeVisible();
   await expect(panel.getByLabel("File transfer lifecycle summary")).toContainText("0 ready, 0 unavailable");
+  await panel.getByText("Advanced: reusable upload sources").click();
+  await expect(panel.getByText("No reusable upload sources")).toBeVisible();
 
   await page.screenshot({
     fullPage: true,

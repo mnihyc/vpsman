@@ -1,4 +1,12 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import { FileSliders, Play, RefreshCw, ServerCog, Trash2 } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
@@ -9,7 +17,10 @@ import {
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
-import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
+import {
+  useReviewGenerationGuard,
+  waitForReviewRender,
+} from "../hooks/useReviewGenerationGuard";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { VpsCombobox } from "../components/VpsCombobox";
 import {
@@ -22,11 +33,13 @@ import { sha256Hex } from "../fileTransfer";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
   buildPrivilegeAssertion,
-  buildPrivilegeForJobOperation,
   canonicalDbPrivilegeIntent,
   type PrivilegeMaterial,
 } from "../privilege";
-import { parseSearchExpression, selectorExpressionForClientIds } from "../searchExpression";
+import {
+  parseSearchExpression,
+  selectorExpressionForClientIds,
+} from "../searchExpression";
 import {
   clampJobMaxTimeoutSecs,
   clampInteger,
@@ -64,25 +77,42 @@ import type {
 } from "../types";
 import { formatTime, formatVpsName, runPanelAction, shortId } from "../utils";
 
-const CONFIG_BULK_SELECTOR_STORAGE_KEY = "vpsman.config.bulk.selectorExpression";
-const CONFIG_SINGLE_SELECTOR_STORAGE_KEY = "vpsman.config.single.selectorExpression";
+const CONFIG_BULK_SELECTOR_STORAGE_KEY =
+  "vpsman.config.bulk.selectorExpression";
+const CONFIG_SINGLE_SELECTOR_STORAGE_KEY =
+  "vpsman.config.single.selectorExpression";
 const CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY = "vpsman.config.single.clientId";
-const CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY = "vpsman.config.vpsRules.selectorExpression";
+const CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY =
+  "vpsman.config.vpsRules.selectorExpression";
 const CONFIG_HELP = {
-  incrementalPatch: "Incremental TOML patches modify only reviewed runtime keys; bootstrap and server-managed keys stay immutable.",
-  patchGenerator: "Saved generators render incremental TOML from reviewed JSON variables before any VPS target is touched.",
-  targetSelector: "Selector expressions freeze the exact VPS set for preview and review so later fleet changes cannot silently expand scope.",
-  maxTimeout: "Per-target command timeout bounded by the backend so slow agents cannot hold config work indefinitely.",
-  redactedRuntimeToml: "Runtime config returned by the agent with secret material removed; the base hash is used to detect stale overrides.",
-  guardedOverride: "One-VPS override requires a current base hash, validated TOML sections, payload hash, and privilege assertion before apply.",
-  currentBase: "Hash of the redacted config read used to prove the override was reviewed against the current runtime state.",
-  sections: "Top-level TOML sections touched by the override; validate before review so the operator sees the blast radius.",
-  payload: "Hash of the exact override payload that the confirmation prompt will bind to the privileged request.",
-  vpsRules: "Per-VPS traffic rule values feed accounting and alert policies; dry-run previews changed rows before write.",
-  ruleSelector: "Fleet selector used for the dry-run and final reviewed VPS rule mutation.",
-  ruleSetValues: "Key=value lines become typed VPS rule values after backend validation and dry-run diffing.",
-  ruleUnsetValues: "Explicit rule keys removed from every matched VPS after dry-run review.",
-  previewHash: "Backend hash of the dry-run diff that the apply request must echo to prevent stale writes.",
+  incrementalPatch:
+    "Incremental TOML patches modify only reviewed runtime keys; bootstrap and server-managed keys stay immutable.",
+  patchGenerator:
+    "Saved generators render incremental TOML from reviewed JSON variables before any VPS target is touched.",
+  targetSelector:
+    "Selector expressions freeze the exact VPS set for preview and review so later fleet changes cannot silently expand scope.",
+  maxTimeout:
+    "Per-target command timeout bounded by the backend so slow agents cannot hold config work indefinitely.",
+  redactedRuntimeToml:
+    "Runtime config returned by the agent with secret material removed; the base hash is used to detect stale overrides.",
+  guardedOverride:
+    "One-VPS override requires a current base hash, validated TOML sections, payload hash, and privilege assertion before apply.",
+  currentBase:
+    "Hash of the redacted config read used to prove the override was reviewed against the current runtime state.",
+  sections:
+    "Top-level TOML sections touched by the override; validate before review so the operator sees the blast radius.",
+  payload:
+    "Hash of the exact override payload that the confirmation prompt will bind to the privileged request.",
+  vpsRules:
+    "Per-VPS traffic rule values feed accounting and alert policies; dry-run previews changed rows before write.",
+  ruleSelector:
+    "Fleet selector used for the dry-run and final reviewed VPS rule mutation.",
+  ruleSetValues:
+    "Key=value lines become typed VPS rule values after backend validation and dry-run diffing.",
+  ruleUnsetValues:
+    "Explicit rule keys removed from every matched VPS after dry-run review.",
+  previewHash:
+    "Backend hash of the dry-run diff that the apply request must echo to prevent stale writes.",
 } as const;
 const VPS_RULE_KEYS = [
   "traffic.reset_day",
@@ -91,6 +121,7 @@ const VPS_RULE_KEYS = [
   "traffic.quota.tx",
   "traffic.selectors",
 ] as const;
+const RUNTIME_CONFIG_QUEUED_STALE_MS = 60 * 60 * 1000;
 
 type BulkConfigApplySnapshot = {
   jobId: string;
@@ -163,9 +194,16 @@ export function ConfigPanel({
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
   fleetAlertPolicies: FleetAlertPolicyRecord[];
-  jobs: Array<{ id: string; command_type: string; status: string; created_at: string }>;
+  jobs: Array<{
+    id: string;
+    command_type: string;
+    status: string;
+    created_at: string;
+  }>;
   loading: boolean;
-  onSubmitRuntimeConfigPatch: (request: RuntimeConfigPatchRequest) => Promise<RuntimeConfigPatchResponse>;
+  onSubmitRuntimeConfigPatch: (
+    request: RuntimeConfigPatchRequest,
+  ) => Promise<RuntimeConfigPatchResponse>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
@@ -178,13 +216,24 @@ export function ConfigPanel({
   onOpenSourceTemplates: () => void;
   onOpenAlerts: () => void;
   onRefresh: () => void;
-  onBulkUnsetVpsRules: (request: VpsRulesBulkUnsetRequest) => Promise<VpsRulesDryRunResponse>;
-  onBulkUpsertVpsRules: (request: VpsRulesBulkUpsertRequest) => Promise<VpsRulesDryRunResponse>;
-  onDryRunVpsRules: (request: VpsRulesDryRunRequest) => Promise<VpsRulesDryRunResponse>;
-  onRenderRuntimeConfigPatchGenerator: (generatorId: string, request: { values: JsonValue }) => Promise<RuntimeConfigPatchGeneratorRenderResponse>;
+  onBulkUnsetVpsRules: (
+    request: VpsRulesBulkUnsetRequest,
+  ) => Promise<VpsRulesDryRunResponse>;
+  onBulkUpsertVpsRules: (
+    request: VpsRulesBulkUpsertRequest,
+  ) => Promise<VpsRulesDryRunResponse>;
+  onDryRunVpsRules: (
+    request: VpsRulesDryRunRequest,
+  ) => Promise<VpsRulesDryRunResponse>;
+  onRenderRuntimeConfigPatchGenerator: (
+    generatorId: string,
+    request: { values: JsonValue },
+  ) => Promise<RuntimeConfigPatchGeneratorRenderResponse>;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
   onSelectSubpage: (subpage: string) => void;
-  onUpsertRuntimeConfigPatchGenerator: (request: UpsertRuntimeConfigPatchGeneratorRequest) => Promise<RuntimeConfigPatchGeneratorRecord>;
+  onUpsertRuntimeConfigPatchGenerator: (
+    request: UpsertRuntimeConfigPatchGeneratorRequest,
+  ) => Promise<RuntimeConfigPatchGeneratorRecord>;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
@@ -209,7 +258,12 @@ export function ConfigPanel({
                   : configSubtitle(subpage))}
             </span>
           </div>
-          <button className="secondaryAction" disabled={loading || pending} onClick={onRefresh} type="button">
+          <button
+            className="secondaryAction"
+            disabled={loading || pending}
+            onClick={onRefresh}
+            type="button"
+          >
             <RefreshCw size={15} />
             <span>Refresh</span>
           </button>
@@ -232,18 +286,26 @@ export function ConfigPanel({
             agents={agents}
             runtimeConfigPatchGenerators={runtimeConfigPatchGenerators}
             onSubmitRuntimeConfigPatch={onSubmitRuntimeConfigPatch}
-            onDeleteRuntimeConfigPatchGenerator={onDeleteRuntimeConfigPatchGenerator}
+            onDeleteRuntimeConfigPatchGenerator={
+              onDeleteRuntimeConfigPatchGenerator
+            }
             onCreateJob={onCreateJob}
             onLoadJobOutputs={onLoadJobOutputs}
             onLoadJobTargets={onLoadJobTargets}
             onOpenJobDetails={onOpenJobDetails}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-            onRenderRuntimeConfigPatchGenerator={onRenderRuntimeConfigPatchGenerator}
+            onRenderRuntimeConfigPatchGenerator={
+              onRenderRuntimeConfigPatchGenerator
+            }
             onResolveBulk={onResolveBulk}
-            onUpsertRuntimeConfigPatchGenerator={onUpsertRuntimeConfigPatchGenerator}
+            onUpsertRuntimeConfigPatchGenerator={
+              onUpsertRuntimeConfigPatchGenerator
+            }
             pending={pending}
             privilegeMaterial={privilegeMaterial}
-            runAction={(action) => runPanelAction(setPending, setActionError, action)}
+            runAction={(action) =>
+              runPanelAction(setPending, setActionError, action)
+            }
             setPrivilegeMaterial={setPrivilegeMaterial}
           />
         )}
@@ -259,7 +321,9 @@ export function ConfigPanel({
             onSubmitRuntimeConfigPatch={onSubmitRuntimeConfigPatch}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
-            runAction={(action) => runPanelAction(setPending, setActionError, action)}
+            runAction={(action) =>
+              runPanelAction(setPending, setActionError, action)
+            }
             setPrivilegeMaterial={setPrivilegeMaterial}
           />
         )}
@@ -308,38 +372,83 @@ function ConfigOverview({
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
   vpsRuleValues: VpsRuleValueRecord[];
-  jobs: Array<{ id: string; command_type: string; status: string; created_at: string }>;
+  jobs: Array<{
+    id: string;
+    command_type: string;
+    status: string;
+    created_at: string;
+  }>;
   onSelectSubpage: (subpage: string) => void;
 }) {
-  const agentNameById = new Map(agents.map((agent) => [agent.id, agent.display_name]));
-  const configJobs = jobs
-    .filter((job) => ["config_read", "runtime_config_sync"].includes(job.command_type))
-    .slice(0, 5);
-  const sourceRiskRows = sourceStatus.filter((row) => !isReadySourceStatus(row.status));
-  const sourceReadyRows = sourceStatus.length - sourceRiskRows.length;
-  const pendingSyncs = runtimeConfigApplyStates.filter((state) => state.pending_status === "queued").length;
-  const failedSyncs = runtimeConfigApplyStates.filter((state) => state.pending_status === "failed").length;
-  const appliedClientIds = new Set(
-    runtimeConfigApplyStates
-      .filter((state) => Boolean(state.applied_content_hash))
-      .map((state) => state.client_id),
+  const agentNameById = new Map(
+    agents.map((agent) => [agent.id, agent.display_name]),
   );
-  const assignedClientIds = new Set(sourceTemplateAssignments.map((assignment) => assignment.client_id));
-  const missingApplyStates = Math.max(agents.length - appliedClientIds.size, 0);
-  const missingTemplateCoverage = Math.max(agents.length - assignedClientIds.size, 0);
-  const customTemplateCount = sourceTemplates.filter((template) => !template.built_in).length;
-  const invalidRuleRows = vpsRuleValues.filter((row) => row.state !== "ok").length;
+  const configJobs = jobs
+    .filter((job) =>
+      ["config_read", "runtime_config_sync"].includes(job.command_type),
+    )
+    .slice(0, 5);
+  const sourceRiskRows = sourceStatus.filter(
+    (row) => !isReadySourceStatus(row.status),
+  );
+  const sourceReadyRows = sourceStatus.length - sourceRiskRows.length;
+  const currentStateRows = buildConfigCurrentStateRows(
+    agents,
+    runtimeConfigApplyStates,
+  );
+  const pendingSyncs = currentStateRows.filter(
+    (row) => row.statusKind === "queued",
+  ).length;
+  const staleApplyRows = currentStateRows.filter(
+    (row) => row.statusKind === "stale",
+  ).length;
+  const failedSyncs = currentStateRows.filter(
+    (row) => row.statusKind === "failed",
+  ).length;
+  const appliedClientIds = new Set(
+    currentStateRows
+      .filter((row) => row.resourceAvailable && row.statusKind === "current")
+      .map((row) => row.clientId),
+  );
+  const assignedClientIds = new Set(
+    sourceTemplateAssignments.map((assignment) => assignment.client_id),
+  );
+  const missingApplyStates = currentStateRows.filter(
+    (row) => row.resourceAvailable && row.statusKind === "unknown",
+  ).length;
+  const missingTemplateCoverage = Math.max(
+    agents.length - assignedClientIds.size,
+    0,
+  );
+  const customTemplateCount = sourceTemplates.filter(
+    (template) => !template.built_in,
+  ).length;
+  const invalidRuleRows = vpsRuleValues.filter(
+    (row) => row.state !== "ok",
+  ).length;
+  const validRuleRows = vpsRuleValues.length - invalidRuleRows;
+  const applyAttentionCount = currentStateRows.filter((row) =>
+    ["failed", "stale", "queued", "unknown"].includes(row.statusKind),
+  ).length;
+  const retryableApplyRows = currentStateRows.filter(
+    (row) => row.actionKind === "retry",
+  );
   const configHealth = configHealthStatus({
     failedSyncs,
     invalidRuleRows,
     missingApplyStates,
     missingTemplateCoverage,
     pendingSyncs,
+    staleApplyRows,
     sourceRiskCount: sourceRiskRows.length,
+    totalRuleRows: vpsRuleValues.length,
+    validRuleRows,
   });
   const latestApplyStates = runtimeConfigApplyStates
     .slice()
-    .sort((left, right) => configApplyStateTime(right).localeCompare(configApplyStateTime(left)))
+    .sort((left, right) =>
+      configApplyStateTime(right).localeCompare(configApplyStateTime(left)),
+    )
     .slice(0, 4);
   const recentChanges = [
     ...latestApplyStates.map((state) => ({
@@ -372,23 +481,37 @@ function ConfigOverview({
     },
     {
       action: "Open Bulk patch",
-      detail: "Resolve target scope, render a patch, unlock privilege, and review apply.",
+      detail:
+        "Resolve target scope, render a patch, unlock privilege, and review apply.",
       subpage: "bulk_patch",
       title: "Bulk patch",
     },
     {
-      action: "Open Templates",
-      detail: "Review coverage and assignments; persistent authoring belongs to Source templates.",
+      action: "Open Template coverage",
+      detail:
+        "Review coverage and assignments; persistent authoring belongs to Source templates.",
       subpage: "templates",
-      title: "Templates",
+      title: "Template coverage",
     },
     {
       action: "Open Rules",
-      detail: "Dry-run traffic and accounting rule values before they affect policy context.",
+      detail:
+        "Dry-run traffic and accounting rule values before they affect policy context.",
       subpage: "rules",
       title: "Rules",
     },
   ];
+  function openCurrentStateAction(row: ConfigCurrentStateRow) {
+    if (row.actionKind === "retry" && row.resourceAvailable) {
+      writeLocalString(CONFIG_BULK_SELECTOR_STORAGE_KEY, `id:${row.clientId}`);
+      onSelectSubpage("bulk_patch");
+      return;
+    }
+    if (row.actionKind === "inspect" && row.resourceAvailable) {
+      writeLocalString(CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY, row.clientId);
+      onSelectSubpage("per_vps");
+    }
+  }
   return (
     <div className="configOverviewStack">
       <section className="configHealthPanel" aria-label="Config health posture">
@@ -400,43 +523,119 @@ function ConfigOverview({
               traffic/accounting rule risk.
             </span>
           </div>
-          <ConsoleStatusBadge tone={configHealth.tone}>{configHealth.label}</ConsoleStatusBadge>
+          <ConsoleStatusBadge tone={configHealth.tone}>
+            {configHealth.label}
+          </ConsoleStatusBadge>
         </div>
         <div className="configHealthSummary">
           <span>
-            <strong>{failedSyncs}</strong>
-            <small>failed runtime syncs</small>
+            <strong>
+              {appliedClientIds.size}/{agents.length || 0}
+            </strong>
+            <small>VPSs current</small>
           </span>
           <span>
-            <strong>{pendingSyncs}</strong>
-            <small>queued runtime syncs</small>
+            <strong>{failedSyncs + staleApplyRows}</strong>
+            <small>failed or stale applies</small>
           </span>
           <span>
-            <strong>{sourceRiskRows.length}</strong>
-            <small>source checks needing review</small>
+            <strong>
+              {sourceReadyRows}/{sourceStatus.length || 0}
+            </strong>
+            <small>source checks ready</small>
           </span>
           <span>
-            <strong>{invalidRuleRows}</strong>
-            <small>rule rows needing review</small>
+            <strong>
+              {ruleValidityLabel(validRuleRows, vpsRuleValues.length)}
+            </strong>
+            <small>traffic/accounting rows</small>
           </span>
         </div>
         <p>{configHealth.detail}</p>
       </section>
 
+      <section
+        className="configOverviewBlock"
+        aria-label="Current config state by VPS"
+      >
+        <div className="configOverviewBlockHeader">
+          <h3>Affected VPS current state</h3>
+          <ConsoleStatusBadge
+            tone={retryableApplyRows.length ? "warning" : "ok"}
+          >
+            {retryableApplyRows.length} retryable
+          </ConsoleStatusBadge>
+        </div>
+        <div className="configCurrentStateList">
+          {currentStateRows.map((row) => (
+            <div
+              className={`configCurrentStateRow ${row.statusKind}`}
+              key={row.id}
+            >
+              <span className="configCurrentTarget">
+                <strong title={row.targetTitle}>{row.targetLabel}</strong>
+                <small>{row.targetDetail}</small>
+              </span>
+              <span>
+                <ConsoleStatusBadge tone={row.tone}>
+                  {row.statusLabel}
+                </ConsoleStatusBadge>
+                <small>{row.statusDetail}</small>
+              </span>
+              <span>
+                <strong>{row.ruleLabel}</strong>
+                <small>{row.ruleDetail}</small>
+              </span>
+              <span>
+                <strong>{formatTime(row.updatedAt)}</strong>
+                <small>{row.updatedDetail}</small>
+              </span>
+              {row.actionKind === "retry" || row.actionKind === "inspect" ? (
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={() => openCurrentStateAction(row)}
+                  type="button"
+                >
+                  {row.actionLabel}
+                </button>
+              ) : (
+                <small className="configCurrentStateAction">
+                  {row.actionLabel}
+                </small>
+              )}
+            </div>
+          ))}
+        </div>
+      </section>
+
       <div className="configOverviewColumns">
-        <section className="configOverviewBlock" aria-label="Config drift summary">
+        <section
+          className="configOverviewBlock"
+          aria-label="Config drift summary"
+        >
           <div className="configOverviewBlockHeader">
             <h3>Drift summary</h3>
-            <ConsoleStatusBadge tone={sourceRiskRows.length || failedSyncs ? "warning" : "ok"}>
-              {sourceRiskRows.length + failedSyncs + pendingSyncs} open signals
+            <ConsoleStatusBadge
+              tone={sourceRiskRows.length || failedSyncs ? "warning" : "ok"}
+            >
+              {applyAttentionCount + sourceRiskRows.length + invalidRuleRows}{" "}
+              action items
             </ConsoleStatusBadge>
           </div>
           <div className="configRiskList">
             <ConfigOverviewRiskRow
-              detail={`${failedSyncs} failed, ${pendingSyncs} queued, ${missingApplyStates} without applied-state evidence`}
-              label="Runtime apply drift"
-              tone={failedSyncs ? "critical" : pendingSyncs || missingApplyStates ? "warning" : "ok"}
-              value={failedSyncs + pendingSyncs + missingApplyStates}
+              detail={`${failedSyncs} failed, ${staleApplyRows} stale, ${pendingSyncs} queued, ${missingApplyStates} unknown; latest state per VPS only`}
+              label="Runtime apply state"
+              tone={
+                failedSyncs
+                  ? "critical"
+                  : staleApplyRows || pendingSyncs || missingApplyStates
+                    ? "warning"
+                    : "ok"
+              }
+              value={
+                failedSyncs + staleApplyRows + pendingSyncs + missingApplyStates
+              }
             />
             <ConfigOverviewRiskRow
               detail={
@@ -448,18 +647,23 @@ function ConfigOverview({
               value={sourceRiskRows.length}
             />
             <ConfigOverviewRiskRow
-              detail={`${invalidRuleRows} of ${vpsRuleValues.length} traffic/accounting rule rows are not ok`}
-              label="Rule validation drift"
+              detail={`${ruleValidityLabel(validRuleRows, vpsRuleValues.length)}; invalid values stay in Rules details`}
+              label="Rule validation"
               tone={invalidRuleRows ? "warning" : "ok"}
               value={invalidRuleRows}
             />
           </div>
         </section>
 
-        <section className="configOverviewBlock" aria-label="Config template coverage">
+        <section
+          className="configOverviewBlock"
+          aria-label="Config template coverage"
+        >
           <div className="configOverviewBlockHeader">
             <h3>Template coverage</h3>
-            <ConsoleStatusBadge tone={missingTemplateCoverage ? "warning" : "ok"}>
+            <ConsoleStatusBadge
+              tone={missingTemplateCoverage ? "warning" : "ok"}
+            >
               {assignedClientIds.size}/{agents.length || 0} VPSs
             </ConsoleStatusBadge>
           </div>
@@ -487,40 +691,12 @@ function ConfigOverview({
             operator review.
           </p>
         </section>
-
-        <section className="configOverviewBlock" aria-label="Config apply-state summary">
-          <div className="configOverviewBlockHeader">
-            <h3>Apply-state summary</h3>
-            <ConsoleStatusBadge tone={failedSyncs ? "critical" : pendingSyncs ? "warning" : "ok"}>
-              {appliedClientIds.size}/{agents.length || 0} applied
-            </ConsoleStatusBadge>
-          </div>
-          <div className="configCoverageGrid">
-            <span>
-              <strong>{appliedClientIds.size}</strong>
-              <small>Applied runtime state</small>
-            </span>
-            <span>
-              <strong>{pendingSyncs}</strong>
-              <small>Queued apply</small>
-            </span>
-            <span>
-              <strong>{failedSyncs}</strong>
-              <small>Failed apply</small>
-            </span>
-            <span>
-              <strong>{runtimeConfigPatchGenerators.length}</strong>
-              <small>Patch generators available</small>
-            </span>
-          </div>
-          <p>
-            Apply evidence is per VPS. Operators should inspect one target or
-            run a reviewed bulk patch instead of editing from the overview.
-          </p>
-        </section>
       </div>
 
-      <section className="configWorkflowLinks" aria-label="Config overview workflow links">
+      <section
+        className="configWorkflowLinks"
+        aria-label="Config overview workflow links"
+      >
         {workflowLinks.map((link) => (
           <button
             className="configWorkflowLink"
@@ -535,11 +711,14 @@ function ConfigOverview({
         ))}
       </section>
 
-      <section className="configOverviewBlock" aria-label="Recent config changes">
-        <div className="configOverviewBlockHeader">
+      <details
+        className="configOverviewBlock configHistoryDisclosure"
+        aria-label="Recent config changes"
+      >
+        <summary className="configOverviewBlockHeader">
           <h3>Recent changes</h3>
-          <span>{recentChanges.length} runtime config records</span>
-        </div>
+          <span>{recentChanges.length} historical runtime config records</span>
+        </summary>
         <div className="table hierarchyTable">
           <div className="historyRow heading configRecentGrid">
             <span>Target</span>
@@ -552,14 +731,22 @@ function ConfigOverview({
             <div className="historyRow configRecentGrid" key={change.id}>
               <span>{change.target}</span>
               <span>{change.operation}</span>
-              <span><ConsoleStatusBadge tone={change.tone}>{change.status}</ConsoleStatusBadge></span>
+              <span>
+                <ConsoleStatusBadge tone={change.tone}>
+                  {change.status}
+                </ConsoleStatusBadge>
+              </span>
               <span>{change.detail}</span>
               <span>{formatTime(change.time)}</span>
             </div>
           ))}
-          {recentChanges.length === 0 && <div className="emptyState compactEmpty">No recent config changes.</div>}
+          {recentChanges.length === 0 && (
+            <div className="emptyState compactEmpty">
+              No recent config changes.
+            </div>
+          )}
         </div>
-      </section>
+      </details>
     </div>
   );
 }
@@ -586,13 +773,270 @@ function ConfigOverviewRiskRow({
   );
 }
 
+type ConfigApplyStatusKind =
+  | "current"
+  | "failed"
+  | "queued"
+  | "stale"
+  | "unknown";
+
+type ConfigCurrentStateRow = {
+  actionKind: "inspect" | "none" | "retry" | "unavailable";
+  actionLabel: string;
+  clientId: string;
+  id: string;
+  resourceAvailable: boolean;
+  ruleDetail: string;
+  ruleLabel: string;
+  statusDetail: string;
+  statusKind: ConfigApplyStatusKind;
+  statusLabel: string;
+  targetDetail: string;
+  targetLabel: string;
+  targetTitle: string;
+  tone: "critical" | "warning" | "ok" | "info" | "neutral";
+  updatedAt: string;
+  updatedDetail: string;
+};
+
+function buildConfigCurrentStateRows(
+  agents: AgentView[],
+  states: RuntimeConfigApplyStateRecord[],
+): ConfigCurrentStateRow[] {
+  const agentById = new Map(agents.map((agent) => [agent.id, agent]));
+  const latestStateByClient = latestRuntimeConfigApplyStateByClient(states);
+  const visibleRows = agents.map((agent) =>
+    buildConfigCurrentStateRow({
+      agent,
+      clientId: agent.id,
+      resourceAvailable: true,
+      state: latestStateByClient.get(agent.id) ?? null,
+    }),
+  );
+  const unavailableRows = Array.from(latestStateByClient.entries())
+    .filter(([clientId]) => !agentById.has(clientId))
+    .map(([clientId, state]) =>
+      buildConfigCurrentStateRow({
+        agent: null,
+        clientId,
+        resourceAvailable: false,
+        state,
+      }),
+    );
+  return [...visibleRows, ...unavailableRows].sort(
+    (left, right) =>
+      configCurrentStatePriority(left) - configCurrentStatePriority(right) ||
+      left.targetLabel.localeCompare(right.targetLabel),
+  );
+}
+
+function latestRuntimeConfigApplyStateByClient(
+  states: RuntimeConfigApplyStateRecord[],
+): Map<string, RuntimeConfigApplyStateRecord> {
+  const latest = new Map<string, RuntimeConfigApplyStateRecord>();
+  for (const state of states) {
+    const current = latest.get(state.client_id);
+    if (
+      !current ||
+      configApplyStateTime(state) > configApplyStateTime(current)
+    ) {
+      latest.set(state.client_id, state);
+    }
+  }
+  return latest;
+}
+
+function buildConfigCurrentStateRow({
+  agent,
+  clientId,
+  resourceAvailable,
+  state,
+}: {
+  agent: AgentView | null;
+  clientId: string;
+  resourceAvailable: boolean;
+  state: RuntimeConfigApplyStateRecord | null;
+}): ConfigCurrentStateRow {
+  const status = runtimeConfigApplyCurrentStatus(state);
+  const targetLabel = resourceAvailable
+    ? agent?.display_name || clientId
+    : "Deleted or unavailable VPS";
+  const targetDetail = resourceAvailable
+    ? `${clientId} · ${agent?.status ?? "unknown"}`
+    : clientId;
+  const actionKind = configCurrentStateActionKind(
+    status.kind,
+    resourceAvailable,
+  );
+  return {
+    actionKind,
+    actionLabel: configCurrentStateActionLabel(actionKind),
+    clientId,
+    id: `${resourceAvailable ? "visible" : "unavailable"}:${clientId}`,
+    resourceAvailable,
+    ruleDetail: resourceAvailable
+      ? "Open Rules for per-key validation detail"
+      : "Rules hidden because the VPS is not in the visible fleet",
+    ruleLabel: resourceAvailable ? "Rules visible" : "Rules unavailable",
+    statusDetail: status.detail,
+    statusKind: status.kind,
+    statusLabel: status.label,
+    targetDetail,
+    targetLabel,
+    targetTitle: resourceAvailable ? clientId : `Missing resource ${clientId}`,
+    tone: status.tone,
+    updatedAt: state ? configApplyStateTime(state) : new Date(0).toISOString(),
+    updatedDetail: status.updatedDetail,
+  };
+}
+
+function runtimeConfigApplyCurrentStatus(
+  state: RuntimeConfigApplyStateRecord | null,
+): {
+  detail: string;
+  kind: ConfigApplyStatusKind;
+  label: string;
+  tone: "critical" | "warning" | "ok" | "info" | "neutral";
+  updatedDetail: string;
+} {
+  if (!state) {
+    return {
+      detail: "No server-applied runtime sync recorded",
+      kind: "unknown",
+      label: "Unknown",
+      tone: "neutral",
+      updatedDetail: "no apply-state evidence",
+    };
+  }
+  if (state.pending_status === "failed") {
+    const error = state.pending_error ? `: ${state.pending_error}` : "";
+    return {
+      detail: `Apply failed${error}`,
+      kind: "failed",
+      label: "Failed apply",
+      tone: "critical",
+      updatedDetail: "failed apply evidence",
+    };
+  }
+  if (state.pending_status === "queued") {
+    if (runtimeConfigQueuedStateIsStale(state)) {
+      return {
+        detail: `Queued since ${formatTime(configApplyStateTime(state))}; treat as stale before retry`,
+        kind: "stale",
+        label: "Stale apply",
+        tone: "warning",
+        updatedDetail: "stale queued apply",
+      };
+    }
+    return {
+      detail: state.pending_reason ?? "Runtime apply is queued",
+      kind: "queued",
+      label: "Queued apply",
+      tone: "info",
+      updatedDetail: "queued apply",
+    };
+  }
+  if (state.applied_content_hash) {
+    const version = state.applied_version
+      ? `v${state.applied_version}`
+      : "applied";
+    return {
+      detail: `${version}; hash ${shortId(state.applied_content_hash)}`,
+      kind: "current",
+      label: "Current",
+      tone: "ok",
+      updatedDetail: "latest applied state",
+    };
+  }
+  return {
+    detail: "No server-applied runtime sync recorded",
+    kind: "unknown",
+    label: "Unknown",
+    tone: "neutral",
+    updatedDetail: "no apply-state evidence",
+  };
+}
+
+function runtimeConfigQueuedStateIsStale(
+  state: RuntimeConfigApplyStateRecord,
+): boolean {
+  const updatedAt = Date.parse(configApplyStateTime(state));
+  if (!Number.isFinite(updatedAt)) {
+    return true;
+  }
+  return Date.now() - updatedAt > RUNTIME_CONFIG_QUEUED_STALE_MS;
+}
+
+function configCurrentStateActionKind(
+  status: ConfigApplyStatusKind,
+  resourceAvailable: boolean,
+): ConfigCurrentStateRow["actionKind"] {
+  if (!resourceAvailable) {
+    return "unavailable";
+  }
+  if (status === "failed" || status === "stale") {
+    return "retry";
+  }
+  if (status === "unknown" || status === "queued") {
+    return "inspect";
+  }
+  return "none";
+}
+
+function configCurrentStateActionLabel(
+  action: ConfigCurrentStateRow["actionKind"],
+): string {
+  switch (action) {
+    case "retry":
+      return "Retry";
+    case "inspect":
+      return "Inspect";
+    case "unavailable":
+      return "Unavailable";
+    default:
+      return "Current";
+  }
+}
+
+function configCurrentStatePriority(row: ConfigCurrentStateRow): number {
+  if (row.statusKind === "failed") {
+    return row.resourceAvailable ? 0 : 3;
+  }
+  if (row.statusKind === "stale") {
+    return 1;
+  }
+  if (row.statusKind === "queued") {
+    return 2;
+  }
+  if (row.statusKind === "unknown") {
+    return 4;
+  }
+  return 5;
+}
+
+function ruleValidityLabel(validRows: number, totalRows: number): string {
+  return totalRows > 0
+    ? `${validRows}/${totalRows} rules valid`
+    : "No rule rows";
+}
+
 type ConfigTemplateCoverageRow = {
   assignedClients: number;
   assignments: number;
+  attentionLabel: string;
   attentionChecks: number;
-  defaultTemplate: string;
+  attentionRows: SourceStatusRecord[];
   domain: string;
+  domainLabel: string;
+  desiredDetail: string;
+  desiredSource: string;
+  fixDetail: string;
+  fixFilter: string;
+  fixLabel: string;
   readyChecks: number;
+  readinessTotal: number;
+  storedDetail: string;
+  storedLabel: string;
   templates: number;
   updatedAt: string;
 };
@@ -615,9 +1059,15 @@ function ConfigTemplateSummary({
     () => new Set(assignments.map((assignment) => assignment.client_id)),
     [assignments],
   );
-  const readyStatusCount = sourceStatus.filter((row) => isReadySourceStatus(row.status)).length;
-  const attentionStatusRows = sourceStatus.filter((row) => !isReadySourceStatus(row.status));
-  const customTemplateCount = templates.filter((template) => !template.built_in).length;
+  const readyStatusCount = sourceStatus.filter((row) =>
+    isReadySourceStatus(row.status),
+  ).length;
+  const attentionStatusRows = sourceStatus.filter(
+    (row) => !isReadySourceStatus(row.status),
+  );
+  const customTemplateCount = templates.filter(
+    (template) => !template.built_in,
+  ).length;
   const coverageRows = useMemo<ConfigTemplateCoverageRow[]>(() => {
     const domains = Array.from(
       new Set([
@@ -627,95 +1077,245 @@ function ConfigTemplateSummary({
       ]),
     ).sort((left, right) => left.localeCompare(right));
     return domains.map((domain) => {
-      const domainTemplates = templates.filter((template) => template.domain === domain);
-      const domainAssignments = assignments.filter((assignment) => assignment.domain === domain);
+      const domainTemplates = templates.filter(
+        (template) => template.domain === domain,
+      );
+      const domainAssignments = assignments.filter(
+        (assignment) => assignment.domain === domain,
+      );
       const domainStatus = sourceStatus.filter((row) => row.domain === domain);
       const defaultTemplate =
         domainTemplates.find((template) => template.is_default)?.name ??
         domainTemplates[0]?.name ??
-        "No template";
-      const updatedAt = domainTemplates
-        .map((template) => template.updated_at)
+        "";
+      const attentionRows = domainStatus.filter(
+        (row) => !isReadySourceStatus(row.status),
+      );
+      const readyChecks = domainStatus.filter((row) =>
+        isReadySourceStatus(row.status),
+      ).length;
+      const primaryStatus = attentionRows[0] ?? domainStatus[0] ?? null;
+      const desiredSource =
+        primaryStatus?.template_name ??
+        defaultTemplate ??
+        "No selected source";
+      const desiredDetail = primaryStatus
+        ? `${sourceDomainLabel(domain)} uses ${sourceTokenLabel(
+            primaryStatus.source_kind,
+          )}`
+        : defaultTemplate
+          ? "Domain default from template registry"
+          : "No source status or template record loaded";
+      const storedLabel =
+        domainTemplates.length > 0
+          ? `${domainTemplates.length} stored`
+          : primaryStatus?.template_name
+            ? "Runtime selected only"
+            : "No stored template";
+      const storedDetail =
+        domainTemplates.length > 0
+          ? [
+              `${domainTemplates.filter((template) => template.built_in).length} built-in`,
+              `${domainTemplates.filter((template) => !template.built_in).length} custom`,
+              defaultTemplate ? `default ${defaultTemplate}` : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")
+          : primaryStatus?.template_name
+            ? `${primaryStatus.template_name} is visible from source status, not the registry`
+            : "Create or import a source template before assignment";
+      const attentionLabel =
+        attentionRows.length > 0
+          ? sourceStatusLabel(attentionRows[0].status)
+          : domainStatus.length > 0
+            ? "No attention"
+            : "No checks";
+      const fixLabel =
+        attentionRows.length > 0
+          ? "Fix source"
+          : domainTemplates.length === 0
+            ? "Add"
+            : "Review";
+      const fixFilter = [
+        sourceDomainLabel(domain),
+        domain,
+        primaryStatus?.template_name,
+        primaryStatus?.source_kind,
+      ]
         .filter(Boolean)
-        .sort((left, right) => right.localeCompare(left))[0] ??
+        .join(" ");
+      const fixDetail =
+        attentionRows.length > 0
+          ? `${formatVpsName(
+              attentionRows[0],
+              vpsNameDisplayMode,
+            )}: ${sourceStatusLabel(attentionRows[0].status)}`
+          : domainTemplates.length === 0
+            ? "Open authoring filtered to this source domain"
+            : "Open the source template registry for this domain";
+      const updatedAt =
+        domainTemplates
+          .map((template) => template.updated_at)
+          .filter(Boolean)
+          .sort((left, right) => right.localeCompare(left))[0] ??
         domainAssignments
           .map((assignment) => assignment.assigned_at)
           .filter(Boolean)
           .sort((left, right) => right.localeCompare(left))[0] ??
         "";
       return {
-        assignedClients: new Set(domainAssignments.map((assignment) => assignment.client_id)).size,
+        assignedClients: new Set(
+          domainAssignments.map((assignment) => assignment.client_id),
+        ).size,
         assignments: domainAssignments.length,
-        attentionChecks: domainStatus.filter((row) => !isReadySourceStatus(row.status)).length,
-        defaultTemplate,
+        attentionChecks: attentionRows.length,
+        attentionLabel,
+        attentionRows,
         domain,
-        readyChecks: domainStatus.filter((row) => isReadySourceStatus(row.status)).length,
+        domainLabel: sourceDomainLabel(domain),
+        desiredDetail,
+        desiredSource,
+        fixDetail,
+        fixFilter,
+        fixLabel,
+        readyChecks,
+        readinessTotal: domainStatus.length,
+        storedDetail,
+        storedLabel,
         templates: domainTemplates.length,
         updatedAt,
       };
     });
-  }, [assignments, sourceStatus, templates]);
-  const coverageColumns = useMemo<ConsoleDataGridColumn<ConfigTemplateCoverageRow>[]>(
+  }, [assignments, sourceStatus, templates, vpsNameDisplayMode]);
+  const openCoverageFix = (row: ConfigTemplateCoverageRow) => {
+    seedSourceTemplateSearch(row.fixFilter);
+    onOpenSourceTemplates();
+  };
+  const coverageColumns = useMemo<
+    ConsoleDataGridColumn<ConfigTemplateCoverageRow>[]
+  >(
     () => [
       {
         cell: (row) => (
-          <span className="historyPrimary">
-            <strong>{row.domain}</strong>
-            <small>{row.defaultTemplate}</small>
+          <span className="historyPrimary sourceCoverageCellText">
+            <strong>{row.domainLabel}</strong>
+            <small>Desired source: {row.desiredSource}</small>
           </span>
         ),
-        header: "Domain",
-        id: "domain",
+        header: "Desired source",
+        id: "desired",
         minSize: 220,
-        searchValue: (row) => `${row.domain} ${row.defaultTemplate}`,
-        sortValue: (row) => row.domain,
+        searchValue: (row) =>
+          `${row.domain} ${row.domainLabel} ${row.desiredSource} ${row.desiredDetail}`,
+        sortValue: (row) => row.domainLabel,
       },
       {
-        cell: (row) => row.templates,
-        header: "Templates",
-        id: "templates",
+        cell: (row) => (
+          <span className="historyPrimary sourceCoverageCellText">
+            <strong>{row.storedLabel}</strong>
+            <small>{row.storedDetail}</small>
+          </span>
+        ),
+        header: "Stored/available",
+        id: "stored",
+        minSize: 220,
+        searchValue: (row) => `${row.storedLabel} ${row.storedDetail}`,
         sortValue: (row) => row.templates,
       },
       {
-        cell: (row) => `${row.assignedClients} VPSs / ${row.assignments} rows`,
-        header: "Assignments",
+        cell: (row) => (
+          <span className="historyPrimary sourceCoverageCellText">
+            <strong>
+              {row.assignedClients}/{agents.length} VPSs
+            </strong>
+            <small>{row.assignments} assignment rows</small>
+          </span>
+        ),
+        header: "Assigned VPSs",
         id: "assignments",
-        searchValue: (row) => `${row.assignedClients} ${row.assignments}`,
+        minSize: 150,
+        searchValue: (row) =>
+          `${row.assignedClients} VPSs ${row.assignments} assignment rows`,
         sortValue: (row) => row.assignedClients,
       },
       {
         cell: (row) => (
-          <ConsoleStatusBadge tone={row.attentionChecks > 0 ? "warning" : "ok"}>
-            {row.readyChecks} ready / {row.attentionChecks} review
+          <ConsoleStatusBadge tone={row.readyChecks > 0 ? "ok" : "neutral"}>
+            {row.readinessTotal > 0
+              ? `${row.readyChecks}/${row.readinessTotal} ready`
+              : "No checks"}
           </ConsoleStatusBadge>
         ),
-        header: "Readiness",
-        id: "readiness",
-        searchValue: (row) => `${row.readyChecks} ready ${row.attentionChecks} review`,
+        header: "Ready",
+        id: "ready",
+        searchValue: (row) =>
+          `${row.readyChecks} ready ${row.readinessTotal} checks`,
+        sortValue: (row) => row.readyChecks,
+      },
+      {
+        cell: (row) => (
+          <span className="historyPrimary sourceCoverageCellText">
+            <ConsoleStatusBadge
+              tone={row.attentionChecks > 0 ? "warning" : "ok"}
+            >
+              {row.attentionChecks > 0
+                ? `${row.attentionChecks} attention`
+                : "None"}
+            </ConsoleStatusBadge>
+            <small>{row.attentionLabel}</small>
+          </span>
+        ),
+        header: "Attention",
+        id: "attention",
+        minSize: 170,
+        searchValue: (row) =>
+          `${row.attentionChecks} attention ${row.attentionLabel}`,
         sortValue: (row) => row.attentionChecks,
       },
       {
-        cell: (row) => (row.updatedAt ? formatTime(row.updatedAt) : "No update evidence"),
-        header: "Latest update",
-        id: "updated",
-        searchValue: (row) => row.updatedAt,
-        sortValue: (row) => row.updatedAt,
+        cell: (row) => (
+          <button
+            className="secondaryAction compactAction sourceCoverageFixAction"
+            onClick={(event) => {
+              event.stopPropagation();
+              openCoverageFix(row);
+            }}
+            title={row.fixDetail}
+            type="button"
+          >
+            <FileSliders size={15} />
+            <span>{row.fixLabel}</span>
+          </button>
+        ),
+        header: "Fix",
+        id: "fix",
+        minSize: 150,
+        searchValue: (row) => `${row.fixLabel} ${row.fixDetail}`,
+        sortValue: (row) => row.attentionChecks,
       },
     ],
-    [],
+    [agents.length, onOpenSourceTemplates],
   );
   return (
-    <div className="configOverviewStack configTemplateSummary" aria-label="Config template summary">
-      <section className="configHealthPanel" aria-label="Config template coverage summary">
+    <div
+      className="configOverviewStack configTemplateSummary"
+      aria-label="Config template summary"
+    >
+      <section
+        className="configHealthPanel"
+        aria-label="Config template coverage summary"
+      >
         <div className="configHealthHeader">
           <div>
             <h3>Template coverage</h3>
             <span>
-              Read-only runtime template posture for Config. Persistent template
-              authoring lives in Automation / Source Templates.
+              Read-only source coverage for Config: selected source, stored
+              template, assigned VPSs, readiness, and fix target.
             </span>
           </div>
-          <ConsoleStatusBadge tone={attentionStatusRows.length > 0 ? "warning" : "ok"}>
+          <ConsoleStatusBadge
+            tone={attentionStatusRows.length > 0 ? "warning" : "ok"}
+          >
             {attentionStatusRows.length > 0 ? "Needs review" : "Ready"}
           </ConsoleStatusBadge>
         </div>
@@ -733,7 +1333,9 @@ function ConfigTemplateSummary({
             <small>assignments</small>
           </span>
           <span>
-            <strong>{assignedClientIds.size}/{agents.length}</strong>
+            <strong>
+              {assignedClientIds.size}/{agents.length}
+            </strong>
             <small>VPSs covered</small>
           </span>
           <span>
@@ -747,18 +1349,24 @@ function ConfigTemplateSummary({
         </div>
       </section>
 
-      <section className="configOverviewBlock configTemplateCanonical" aria-label="Source template canonical home">
+      <section
+        className="configOverviewBlock configTemplateCanonical"
+        aria-label="Source template canonical home"
+      >
         <div className="configOverviewBlockHeader">
-          <h3>Canonical authoring</h3>
+          <h3>Source template authoring</h3>
           <span>Automation / Source Templates</span>
         </div>
         <p>
-          Config shows coverage and source readiness only. Create, clone, diff,
-          test, update, assign, and render persistent source templates in the
-          Automation workflow so emergency patches and persistent authoring stay
-          separate.
+          Config shows runtime source coverage only. Create, clone, diff, test,
+          update, assign, and render persistent templates in Automation so
+          emergency config patches and source authoring stay separate.
         </p>
-        <button className="primaryAction" onClick={onOpenSourceTemplates} type="button">
+        <button
+          className="primaryAction"
+          onClick={onOpenSourceTemplates}
+          type="button"
+        >
           <FileSliders size={16} />
           Open Source Templates
         </button>
@@ -777,38 +1385,100 @@ function ConfigTemplateSummary({
         itemLabel="template domains"
         renderExpandedRow={(row) => (
           <div className="consoleInlineDetailGrid">
-            <span>Domain</span>
-            <strong>{row.domain}</strong>
-            <span>Default template</span>
-            <strong>{row.defaultTemplate}</strong>
-            <span>Template records</span>
-            <strong>{row.templates}</strong>
-            <span>Assignment records</span>
-            <strong>{row.assignments}</strong>
-            <span>Readiness checks</span>
-            <strong>{row.readyChecks + row.attentionChecks}</strong>
+            <span>
+              <strong>Desired source</strong>
+              <span>{row.desiredSource}</span>
+            </span>
+            <span>
+              <strong>Stored/available</strong>
+              <span>{row.storedDetail}</span>
+            </span>
+            <span>
+              <strong>Assigned VPSs</strong>
+              <span>
+                {row.assignedClients}/{agents.length} VPSs from{" "}
+                {row.assignments} assignments
+              </span>
+            </span>
+            <span>
+              <strong>Ready</strong>
+              <span>
+                {row.readinessTotal > 0
+                  ? `${row.readyChecks}/${row.readinessTotal} source checks`
+                  : "No source checks loaded"}
+              </span>
+            </span>
+            <span>
+              <strong>Attention</strong>
+              <span>{row.attentionLabel}</span>
+            </span>
+            <span>
+              <strong>Latest evidence</strong>
+              <span>
+                {row.updatedAt ? formatTime(row.updatedAt) : "No update evidence"}
+              </span>
+            </span>
+            <span>
+              <strong>Fix target</strong>
+              <span>{row.fixDetail}</span>
+            </span>
           </div>
         )}
         rows={coverageRows}
-        searchPlaceholder="Search template domains"
+        searchPlaceholder="Search source coverage"
         selectable={false}
         storageKey="vpsman.config.templateSummary.domains"
-        title="Template domain coverage"
+        title="Source coverage by domain"
       />
 
-      <section className="configOverviewBlock" aria-label="Config source readiness exceptions">
+      <section
+        className="configOverviewBlock"
+        aria-label="Config source readiness exceptions"
+      >
         <div className="configOverviewBlockHeader">
           <h3>Source readiness exceptions</h3>
           <span>{attentionStatusRows.length} records need review</span>
         </div>
         <div className="configRiskList">
           {attentionStatusRows.slice(0, 6).map((row) => (
-            <div className="configRiskRow" key={`${row.client_id}:${row.domain}`}>
+            <div
+              className="configRiskRow"
+              key={`${row.client_id}:${row.domain}`}
+            >
               <span>
-                <strong>{formatVpsName(row, vpsNameDisplayMode)} / {row.domain}</strong>
-                <small>{row.template_name} / {row.status_reason}</small>
+                <strong>
+                  {formatVpsName(row, vpsNameDisplayMode)} /{" "}
+                  {sourceDomainLabel(row.domain)}
+                </strong>
+                <small>
+                  {row.template_name} / {row.status_reason}
+                </small>
               </span>
-              <ConsoleStatusBadge tone="warning">{row.status}</ConsoleStatusBadge>
+              <div className="sourceCoverageExceptionActions">
+                <ConsoleStatusBadge tone="warning">
+                  {sourceStatusLabel(row.status)}
+                </ConsoleStatusBadge>
+                <button
+                  className="secondaryAction compactAction sourceCoverageFixAction"
+                  onClick={() => {
+                    seedSourceTemplateSearch(
+                      [
+                        sourceDomainLabel(row.domain),
+                        row.domain,
+                        row.template_name,
+                        row.source_kind,
+                      ]
+                        .filter(Boolean)
+                        .join(" "),
+                    );
+                    onOpenSourceTemplates();
+                  }}
+                  type="button"
+                >
+                  <FileSliders size={15} />
+                  <span>Fix source</span>
+                </button>
+              </div>
             </div>
           ))}
           {attentionStatusRows.length === 0 && (
@@ -822,6 +1492,87 @@ function ConfigTemplateSummary({
   );
 }
 
+function seedSourceTemplateSearch(filter: string) {
+  const trimmed = filter.trim();
+  if (!trimmed || typeof window === "undefined") {
+    return;
+  }
+  for (const storageKey of [
+    "vpsman.sourceTemplates.registry",
+    "vpsman.sourceTemplates.activeSources",
+  ]) {
+    try {
+      const current = window.localStorage.getItem(storageKey);
+      const parsed = current ? JSON.parse(current) : {};
+      const preferences =
+        parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? parsed
+          : {};
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({ ...preferences, globalFilter: trimmed }),
+      );
+    } catch {
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({ globalFilter: trimmed }),
+      );
+    }
+  }
+}
+
+function sourceStatusLabel(status: SourceStatusRecord["status"]): string {
+  switch (status) {
+    case "ok":
+    case "ready":
+      return "Ready";
+    case "ready_on_demand":
+      return "Ready on demand";
+    case "selected":
+      return "Selected";
+    case "selected_workflow":
+      return "Workflow selected";
+    case "metadata_only":
+      return "Metadata only";
+    case "agent_offline":
+      return "VPS offline";
+    case "unknown_domain":
+      return "Unknown source domain";
+    case "selected_no_store":
+      return "Server storage missing";
+    case "selected_no_artifacts":
+      return "Artifacts missing";
+    case "selected_no_limits":
+      return "Limits unavailable";
+    case "selected_no_samples":
+      return "Samples missing";
+    case "needs_promotion":
+      return "Promotion needed";
+    case "degraded":
+      return "Degraded";
+    default:
+      return sourceTokenLabel(status);
+  }
+}
+
+function sourceDomainLabel(value: string): string {
+  return sourceTokenLabel(value)
+    .replace(/\bospf\b/gi, "OSPF")
+    .replace(/\bvps\b/gi, "VPS");
+}
+
+function sourceTokenLabel(value: string | null | undefined): string {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    return "Not configured";
+  }
+  return trimmed
+    .replace(/[_:-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
 function isReadySourceStatus(status: SourceStatusRecord["status"]): boolean {
   return ["ok", "ready", "ready_on_demand", "selected"].includes(status);
 }
@@ -832,31 +1583,45 @@ function configHealthStatus({
   missingApplyStates,
   missingTemplateCoverage,
   pendingSyncs,
+  staleApplyRows,
   sourceRiskCount,
+  totalRuleRows,
+  validRuleRows,
 }: {
   failedSyncs: number;
   invalidRuleRows: number;
   missingApplyStates: number;
   missingTemplateCoverage: number;
   pendingSyncs: number;
+  staleApplyRows: number;
   sourceRiskCount: number;
+  totalRuleRows: number;
+  validRuleRows: number;
 }): { detail: string; label: string; tone: "critical" | "warning" | "ok" } {
-  if (failedSyncs > 0) {
+  const failedOrStaleApplies = failedSyncs + staleApplyRows;
+  if (failedOrStaleApplies > 0) {
     return {
-      detail: `${failedSyncs} runtime syncs failed. Review the affected VPS before relying on generated config or traffic policy state.`,
+      detail: `${failedOrStaleApplies} latest runtime applies failed or went stale. Retry affected VPSs before relying on generated config or traffic policy state.`,
       label: "Action required",
       tone: "critical",
     };
   }
-  if (pendingSyncs > 0 || sourceRiskCount > 0 || invalidRuleRows > 0 || missingApplyStates > 0 || missingTemplateCoverage > 0) {
+  if (
+    pendingSyncs > 0 ||
+    sourceRiskCount > 0 ||
+    invalidRuleRows > 0 ||
+    missingApplyStates > 0 ||
+    missingTemplateCoverage > 0
+  ) {
     return {
-      detail: `${pendingSyncs} syncs queued, ${sourceRiskCount} source checks need review, and ${missingTemplateCoverage} VPSs lack template assignment evidence.`,
+      detail: `${pendingSyncs} applies are queued, ${sourceRiskCount} source checks need review, ${missingApplyStates} VPSs lack apply-state evidence, and ${ruleValidityLabel(validRuleRows, totalRuleRows)}.`,
       label: "Needs review",
       tone: "warning",
     };
   }
   return {
-    detail: "All loaded VPSs have applied runtime state, source readiness, template assignment evidence, and valid rule rows.",
+    detail:
+      "All loaded VPSs have applied runtime state, source readiness, template assignment evidence, and valid rule rows.",
     label: "Healthy",
     tone: "ok",
   };
@@ -866,35 +1631,21 @@ function configApplyStateTime(state: RuntimeConfigApplyStateRecord): string {
   return state.pending_updated_at ?? state.applied_at ?? state.updated_at;
 }
 
-function runtimeConfigApplyStatusLabel(state: RuntimeConfigApplyStateRecord): string {
-  if (state.pending_status === "failed") {
-    return "failed";
-  }
-  if (state.pending_status === "queued") {
-    return "queued";
-  }
-  if (state.applied_content_hash) {
-    return "applied";
-  }
-  return "missing";
+function runtimeConfigApplyStatusLabel(
+  state: RuntimeConfigApplyStateRecord,
+): string {
+  return runtimeConfigApplyCurrentStatus(state).label;
 }
 
 function runtimeConfigApplyTone(
   state: RuntimeConfigApplyStateRecord,
 ): "critical" | "warning" | "ok" | "info" | "neutral" {
-  if (state.pending_status === "failed") {
-    return "critical";
-  }
-  if (state.pending_status === "queued") {
-    return "warning";
-  }
-  if (state.applied_content_hash) {
-    return "ok";
-  }
-  return "neutral";
+  return runtimeConfigApplyCurrentStatus(state).tone;
 }
 
-function configJobStatusTone(status: string): "critical" | "warning" | "ok" | "info" | "neutral" {
+function configJobStatusTone(
+  status: string,
+): "critical" | "warning" | "ok" | "info" | "neutral" {
   if (status === "failed") {
     return "critical";
   }
@@ -927,7 +1678,9 @@ function BulkConfigApply({
 }: {
   agents: AgentView[];
   runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
-  onSubmitRuntimeConfigPatch: (request: RuntimeConfigPatchRequest) => Promise<RuntimeConfigPatchResponse>;
+  onSubmitRuntimeConfigPatch: (
+    request: RuntimeConfigPatchRequest,
+  ) => Promise<RuntimeConfigPatchResponse>;
   onDeleteRuntimeConfigPatchGenerator: (
     generatorId: string,
     request: DeleteRuntimeConfigPatchGeneratorRequest,
@@ -937,25 +1690,40 @@ function BulkConfigApply({
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
-  onRenderRuntimeConfigPatchGenerator: (generatorId: string, request: { values: JsonValue }) => Promise<RuntimeConfigPatchGeneratorRenderResponse>;
+  onRenderRuntimeConfigPatchGenerator: (
+    generatorId: string,
+    request: { values: JsonValue },
+  ) => Promise<RuntimeConfigPatchGeneratorRenderResponse>;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
-  onUpsertRuntimeConfigPatchGenerator: (request: UpsertRuntimeConfigPatchGeneratorRequest) => Promise<RuntimeConfigPatchGeneratorRecord>;
+  onUpsertRuntimeConfigPatchGenerator: (
+    request: UpsertRuntimeConfigPatchGeneratorRequest,
+  ) => Promise<RuntimeConfigPatchGeneratorRecord>;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
-  const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(CONFIG_BULK_SELECTOR_STORAGE_KEY));
-  const [patchMode, setPatchMode] = useState<"generator" | "temporary">("generator");
+  const [selectorExpression, setSelectorExpression] = useState(() =>
+    readLocalString(CONFIG_BULK_SELECTOR_STORAGE_KEY),
+  );
+  const [patchMode, setPatchMode] = useState<"generator" | "temporary">(
+    "generator",
+  );
   const [generatorId, setGeneratorId] = useState("");
   const [valuesText, setValuesText] = useState("");
   const [temporaryToml, setTemporaryToml] = useState("");
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
-  const [rendered, setRendered] = useState<RuntimeConfigPatchGeneratorRenderResponse | null>(null);
-  const [applySnapshot, setApplySnapshot] = useState<BulkConfigApplySnapshot | null>(null);
-  const [deleteGenerator, setDeleteGenerator] = useState<RuntimeConfigPatchGeneratorRecord | null>(null);
+  const [rendered, setRendered] =
+    useState<RuntimeConfigPatchGeneratorRenderResponse | null>(null);
+  const [applySnapshot, setApplySnapshot] =
+    useState<BulkConfigApplySnapshot | null>(null);
+  const [deleteGenerator, setDeleteGenerator] =
+    useState<RuntimeConfigPatchGeneratorRecord | null>(null);
+  const [manageGeneratorsOpen, setManageGeneratorsOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
+  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(
+    DEFAULT_MAX_JOB_TIMEOUT_SECS,
+  );
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
   const {
@@ -963,15 +1731,37 @@ function BulkConfigApply({
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
-  const selectedGenerator = runtimeConfigPatchGenerators.find((generator) => generator.id === (generatorId || runtimeConfigPatchGenerators[0]?.id));
-  const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
-  const ready = Boolean(
-    selectorExpression.trim() &&
-      privilegeMaterial &&
-      !selectorParse.error &&
-      (patchMode === "temporary" ? temporaryToml.trim() : selectedGenerator),
+  const selectedGenerator = runtimeConfigPatchGenerators.find(
+    (generator) =>
+      generator.id === (generatorId || runtimeConfigPatchGenerators[0]?.id),
   );
-  const patchGeneratorColumns = useMemo<ConsoleDataGridColumn<RuntimeConfigPatchGeneratorRecord>[]>(
+  const selectorParse = useMemo(
+    () => parseSearchExpression(selectorExpression),
+    [selectorExpression],
+  );
+  const previewToml =
+    patchMode === "temporary" ? temporaryToml.trim() : rendered?.toml.trim();
+  const previewPatchSections =
+    patchMode === "temporary"
+      ? inferTomlSections(temporaryToml)
+      : (rendered?.affected_sections ?? []);
+  const canPreviewChanges = Boolean(
+    selectorExpression.trim() &&
+    !selectorParse.error &&
+    (patchMode === "temporary" ? temporaryToml.trim() : selectedGenerator),
+  );
+  const ready = Boolean(
+    preview &&
+    preview.target_count > 0 &&
+    previewToml &&
+    selectorExpression.trim() &&
+    privilegeMaterial &&
+    !selectorParse.error &&
+    (patchMode === "temporary" || rendered),
+  );
+  const patchGeneratorColumns = useMemo<
+    ConsoleDataGridColumn<RuntimeConfigPatchGeneratorRecord>[]
+  >(
     () => [
       {
         cell: (generator) => (
@@ -982,7 +1772,8 @@ function BulkConfigApply({
         ),
         header: "Generator",
         id: "name",
-        searchValue: (generator) => `${generator.name} ${generator.description}`,
+        searchValue: (generator) =>
+          `${generator.name} ${generator.description}`,
         sortValue: (generator) => generator.name,
       },
       {
@@ -1007,7 +1798,8 @@ function BulkConfigApply({
         ),
         header: "Scope",
         id: "scope",
-        searchValue: (generator) => (generator.built_in ? "built-in" : "custom"),
+        searchValue: (generator) =>
+          generator.built_in ? "built-in" : "custom",
         sortValue: (generator) => (generator.built_in ? "0" : "1"),
       },
       {
@@ -1020,20 +1812,24 @@ function BulkConfigApply({
     ],
     [],
   );
-  const patchGeneratorActions = useMemo<ConsoleDataGridAction<RuntimeConfigPatchGeneratorRecord>[]>(
+  const patchGeneratorActions = useMemo<
+    ConsoleDataGridAction<RuntimeConfigPatchGeneratorRecord>[]
+  >(
     () => [
       {
         icon: <Play size={14} />,
         label: "Load",
         onSelect: (rows) => loadPatchGeneratorForApply(rows[0]),
         disabled: (rows) => rows.length !== 1,
-        description: (rows) => `Load ${rows[0]?.name ?? "one patch generator"} into the apply form.`,
+        description: (rows) =>
+          `Load ${rows[0]?.name ?? "one patch generator"} into the apply form.`,
       },
       {
         label: "Clone",
         onSelect: (rows) => void clonePatchGenerator(rows[0]),
         disabled: (rows) => rows.length !== 1,
-        description: (rows) => `Clone ${rows[0]?.name ?? "one patch generator"} for editing outside built-ins.`,
+        description: (rows) =>
+          `Clone ${rows[0]?.name ?? "one patch generator"} for editing outside built-ins.`,
       },
       {
         icon: <Trash2 size={14} />,
@@ -1051,11 +1847,17 @@ function BulkConfigApply({
     [generatorId],
   );
 
-  useEffect(() => writeLocalString(CONFIG_BULK_SELECTOR_STORAGE_KEY, selectorExpression), [selectorExpression]);
+  useEffect(
+    () =>
+      writeLocalString(CONFIG_BULK_SELECTOR_STORAGE_KEY, selectorExpression),
+    [selectorExpression],
+  );
 
   useLayoutEffect(() => {
     if (selectedGenerator) {
-      setValuesText(formatJsonObject(exampleValuesForGenerator(selectedGenerator)));
+      setValuesText(
+        formatJsonObject(exampleValuesForGenerator(selectedGenerator)),
+      );
       setRendered(null);
       clearBulkConfigReview();
     }
@@ -1068,7 +1870,9 @@ function BulkConfigApply({
     setReviewStatus(null);
   }
 
-  function loadPatchGeneratorForApply(generator: RuntimeConfigPatchGeneratorRecord) {
+  function loadPatchGeneratorForApply(
+    generator: RuntimeConfigPatchGeneratorRecord,
+  ) {
     setPatchMode("generator");
     setGeneratorId(generator.id);
     setValuesText(formatJsonObject(exampleValuesForGenerator(generator)));
@@ -1076,7 +1880,9 @@ function BulkConfigApply({
     clearBulkConfigReview();
   }
 
-  async function clonePatchGenerator(generator: RuntimeConfigPatchGeneratorRecord) {
+  async function clonePatchGenerator(
+    generator: RuntimeConfigPatchGeneratorRecord,
+  ) {
     await runAction(async () => {
       await onUpsertRuntimeConfigPatchGenerator({
         category: generator.category,
@@ -1110,49 +1916,46 @@ function BulkConfigApply({
     });
   }
 
-  async function previewTargets() {
+  async function previewChanges() {
     clearBulkConfigReview();
     const reviewGeneration = captureReviewGeneration();
     const frozenSelector = selectorExpression.trim();
-    setReviewStatus("Resolving patch targets");
+    const frozenPatchMode = patchMode;
+    const frozenGenerator = selectedGenerator;
+    const frozenValuesText = valuesText;
+    const frozenTemporaryToml = temporaryToml;
+    setReviewStatus("Previewing bulk patch changes");
     try {
       await runAction(async () => {
         await waitForReviewRender();
         if (selectorParse.error) {
           throw new Error(selectorParse.error);
         }
+        if (!frozenSelector) {
+          throw new Error("Add at least one target selector");
+        }
+        if (frozenPatchMode === "generator" && !frozenGenerator) {
+          throw new Error("Select a patch generator");
+        }
+        if (frozenPatchMode === "temporary" && !frozenTemporaryToml.trim()) {
+          throw new Error("Paste a temporary TOML patch");
+        }
+        if (frozenPatchMode === "generator") {
+          const frozenValues = parseJsonObject(frozenValuesText);
+          const nextRendered = await onRenderRuntimeConfigPatchGenerator(
+            frozenGenerator!.id,
+            { values: frozenValues },
+          );
+          if (!isReviewGenerationCurrent(reviewGeneration)) {
+            return;
+          }
+          setRendered(nextRendered);
+        }
         const nextPreview = await onResolveBulk(frozenSelector);
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
         }
         setPreview(nextPreview);
-        setApplySnapshot(null);
-      });
-    } finally {
-      if (isReviewGenerationCurrent(reviewGeneration)) {
-        setReviewStatus(null);
-      }
-    }
-  }
-
-  async function renderPatch() {
-    if (patchMode !== "generator" || !selectedGenerator) {
-      return;
-    }
-    clearBulkConfigReview();
-    const reviewGeneration = captureReviewGeneration();
-    const frozenGeneratorId = selectedGenerator.id;
-    const frozenValuesText = valuesText;
-    setReviewStatus("Rendering runtime config patch");
-    try {
-      await runAction(async () => {
-        const frozenValues = parseJsonObject(frozenValuesText);
-        await waitForReviewRender();
-        const nextRendered = await onRenderRuntimeConfigPatchGenerator(frozenGeneratorId, { values: frozenValues });
-        if (!isReviewGenerationCurrent(reviewGeneration)) {
-          return;
-        }
-        setRendered(nextRendered);
         setApplySnapshot(null);
       });
     } finally {
@@ -1204,7 +2007,10 @@ function BulkConfigApply({
         let patchSections = inferTomlSections(toml);
         if (frozenPatchMode === "generator") {
           const frozenValues = parseJsonObject(frozenValuesText);
-          const nextRendered = await onRenderRuntimeConfigPatchGenerator(frozenGenerator!.id, { values: frozenValues });
+          const nextRendered = await onRenderRuntimeConfigPatchGenerator(
+            frozenGenerator!.id,
+            { values: frozenValues },
+          );
           if (!isReviewGenerationCurrent(reviewGeneration)) {
             return;
           }
@@ -1213,7 +2019,9 @@ function BulkConfigApply({
           patchSections = nextRendered.affected_sections;
           setRendered(nextRendered);
         }
-        const patchPayloadHashHex = await sha256Hex(new TextEncoder().encode(toml));
+        const patchPayloadHashHex = await sha256Hex(
+          new TextEncoder().encode(toml),
+        );
         const privilegeAssertion = await buildPrivilegeAssertion({
           intent: canonicalDbPrivilegeIntent({
             action: "runtime_config.patch",
@@ -1256,7 +2064,9 @@ function BulkConfigApply({
     await runAction(async () => {
       const snapshot = applySnapshot;
       if (!snapshot) {
-        throw new Error("Bulk patch confirmation snapshot is missing; review the apply again");
+        throw new Error(
+          "Bulk patch confirmation snapshot is missing; review the apply again",
+        );
       }
       const response = await onSubmitRuntimeConfigPatch({
         confirmed: true,
@@ -1298,8 +2108,21 @@ function BulkConfigApply({
 
   return (
     <div className="configApplyGrid">
-      <div className="compactForm">
-        <ConfigHelpLabel help={CONFIG_HELP.incrementalPatch} label="Incremental patch" strong />
+      <section className="compactForm bulkPatchPrimary">
+        <div className="bulkPatchHeader">
+          <ConfigHelpLabel
+            help={CONFIG_HELP.incrementalPatch}
+            label="Incremental patch"
+            strong
+          />
+          <button
+            className="secondaryAction"
+            onClick={() => setManageGeneratorsOpen((open) => !open)}
+            type="button"
+          >
+            Manage generators
+          </button>
+        </div>
         <div className="segmentedControl" aria-label="Patch source">
           <button
             className={patchMode === "generator" ? "activeAction" : ""}
@@ -1320,7 +2143,7 @@ function BulkConfigApply({
             }}
             type="button"
           >
-            Temporary
+            Temporary patch
           </button>
         </div>
         {patchMode === "generator" ? (
@@ -1343,6 +2166,17 @@ function BulkConfigApply({
                 </option>
               ))}
             </select>
+            {selectedGenerator && (
+              <div
+                className="bulkPatchGeneratorSummary"
+                title={selectedGenerator.description}
+              >
+                <strong>{selectedGenerator.name}</strong>
+                <span>
+                  {selectedGenerator.category} / {selectedGenerator.domain}
+                </span>
+              </div>
+            )}
             <textarea
               aria-label="Patch generator values JSON"
               onChange={(event) => {
@@ -1353,22 +2187,14 @@ function BulkConfigApply({
               rows={7}
               value={valuesText}
             />
-            <button
-              className="secondaryAction"
-              disabled={pending || !selectedGenerator}
-              onClick={renderPatch}
-              title={
-                pending
-                  ? "Wait for the current config operation to finish before rendering a patch."
-                  : !selectedGenerator
-                    ? "Select a saved generator before rendering a patch."
-                    : "Render the saved generator into incremental TOML."
-              }
-              type="button"
-            >
-              Render patch
-            </button>
-            {rendered && <textarea aria-label="Rendered bulk runtime config patch TOML" readOnly rows={8} value={rendered.toml} />}
+            {rendered && (
+              <textarea
+                aria-label="Rendered bulk runtime config patch TOML"
+                readOnly
+                rows={8}
+                value={rendered.toml}
+              />
+            )}
           </>
         ) : (
           <textarea
@@ -1382,9 +2208,13 @@ function BulkConfigApply({
             value={temporaryToml}
           />
         )}
-      </div>
-      <div className="compactForm">
-        <ConfigHelpLabel help={CONFIG_HELP.targetSelector} label="Targets" strong />
+      </section>
+      <section className="compactForm bulkPatchTargetPanel">
+        <ConfigHelpLabel
+          help={CONFIG_HELP.targetSelector}
+          label="Targets"
+          strong
+        />
         <SearchExpressionInput
           agents={agents}
           ariaLabel="Bulk patch target expression"
@@ -1397,35 +2227,72 @@ function BulkConfigApply({
           placeholder="provider:hetzner && country:US"
           showMatchCount
           value={selectorExpression}
-          verification={selectorParse.error ? "invalid" : selectorExpression.trim() ? "valid" : "neutral"}
-          verificationMessage={selectorParse.error ?? (preview ? `${preview.target_count}/${agents.length}` : selectorExpression.trim() ? undefined : "no selector")}
+          verification={
+            selectorParse.error
+              ? "invalid"
+              : selectorExpression.trim()
+                ? "valid"
+                : "neutral"
+          }
+          verificationMessage={
+            selectorParse.error ??
+            (preview
+              ? `${preview.target_count}/${agents.length}`
+              : selectorExpression.trim()
+                ? "not previewed"
+                : "no selector")
+          }
         />
+        <div className="bulkTargetState">
+          <strong>
+            {preview
+              ? `${bulkVpsCountLabel(preview.target_count)} resolved`
+              : selectorExpression.trim()
+                ? "Selector not previewed"
+                : "No target selector"}
+          </strong>
+          <span>
+            {preview
+              ? "The final Apply confirmation will freeze this selector and re-resolve it before submission."
+              : selectorExpression.trim()
+                ? "Preview changes to show the resolved VPS count and per-VPS patch summary."
+                : "Add a selector; an empty selector is never treated as all VPSs."}
+          </span>
+        </div>
         <button
           className="secondaryAction"
-          disabled={pending || !selectorExpression.trim()}
-          onClick={previewTargets}
+          disabled={pending || !canPreviewChanges}
+          onClick={() => void previewChanges()}
           title={
             pending
-              ? "Wait for the current config operation to finish before reviewing targets."
-              : !selectorExpression.trim()
-                ? "Enter a target selector expression before previewing matched VPSs."
-                : "Preview and freeze matched VPS targets for review."
+              ? "Wait for the current config operation to finish before previewing changes."
+              : !canPreviewChanges
+                ? "Choose a patch source and target selector before previewing changes."
+                : "Render the patch, resolve targets, and show per-VPS change summary."
           }
           type="button"
         >
-          Review targets
+          Preview changes
         </button>
-        <div className="targetChipList">
-          {(preview?.targets ?? []).slice(0, 24).map((agent) => (
-            <span className="targetChip" key={agent.id} title={agent.id}>
-              {agent.display_name}
-            </span>
-          ))}
-          {preview && preview.target_count > 24 && <span className="targetChip mutedChip">+{preview.target_count - 24} more</span>}
-        </div>
-        <div className="inlinePrivilege">
+        {reviewStatus && <span className="formHint">{reviewStatus}</span>}
+        <BulkPatchChangeSummary
+          patchMode={patchMode}
+          patchName={
+            patchMode === "temporary"
+              ? "Temporary patch"
+              : (rendered?.name ?? selectedGenerator?.name ?? "Saved generator")
+          }
+          preview={preview}
+          sections={previewPatchSections}
+          toml={previewToml ?? ""}
+        />
+        <details className="singleConfigAdvanced bulkPatchAdvanced">
+          <summary>Advanced apply options</summary>
           <label>
-            <ConfigHelpLabel help={CONFIG_HELP.maxTimeout} label="Max timeout seconds" />
+            <ConfigHelpLabel
+              help={CONFIG_HELP.maxTimeout}
+              label="Max timeout seconds"
+            />
             <input
               aria-label="Bulk patch max timeout seconds"
               max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
@@ -1438,7 +2305,7 @@ function BulkConfigApply({
               value={maxTimeoutSecs}
             />
           </label>
-        </div>
+        </details>
         <PrivilegeVaultBox
           labelPrefix="Runtime config"
           lastPayloadHash={null}
@@ -1450,24 +2317,73 @@ function BulkConfigApply({
           privilegeMaterial={privilegeMaterial}
           unlockRedirectLabel="Open Privilege Vault for runtime config"
         />
-        {reviewStatus && <span className="formHint">{reviewStatus}</span>}
-        <button
-          className="primaryAction"
-          disabled={pending || !ready}
-          onClick={() => void reviewApply()}
-          title={
-            pending
-              ? "Wait for the current config operation to finish before opening review."
-              : !ready
-                ? "Render or paste a patch, preview targets, and unlock privilege material before review."
-                : "Open the reviewed runtime config apply prompt."
-          }
-          type="button"
-        >
-          <FileSliders size={16} />
-          Review apply
-        </button>
-      </div>
+        <div className="singleConfigStickyActions bulkPatchApplyActions">
+          <span>
+            {ready
+              ? `Ready to apply ${bulkVpsCountLabel(preview?.target_count ?? 0)}`
+              : "Preview changes and unlock before applying a bulk runtime config patch."}
+          </span>
+          <button
+            className="primaryAction"
+            disabled={pending || !ready}
+            onClick={() => void reviewApply()}
+            title={
+              pending
+                ? "Wait for the current config operation to finish before opening apply confirmation."
+                : !ready
+                  ? "Preview changes and unlock privilege material before applying."
+                  : "Open the final runtime config apply confirmation."
+            }
+            type="button"
+          >
+            <FileSliders size={16} />
+            Apply patch
+          </button>
+        </div>
+      </section>
+      <details
+        className="bulkGeneratorManagement"
+        open={manageGeneratorsOpen}
+        onToggle={(event) => setManageGeneratorsOpen(event.currentTarget.open)}
+      >
+        <summary>Patch generator registry</summary>
+        {manageGeneratorsOpen && (
+          <ConsoleDataGrid
+            actions={patchGeneratorActions}
+            columns={patchGeneratorColumns}
+            defaultPageSize={10}
+            expandOnRowClick
+            getRowId={(generator) => generator.id}
+            itemLabel="patch generators"
+            empty="No patch generators match the current search."
+            renderExpandedRow={(generator) => (
+              <div className="consoleInlineDetailGrid">
+                <span>Generator ID</span>
+                <strong>{generator.id}</strong>
+                <span>Name</span>
+                <strong>{generator.name}</strong>
+                <span>Category</span>
+                <strong>{generator.category}</strong>
+                <span>Domain</span>
+                <strong>{generator.domain}</strong>
+                <span>Scope</span>
+                <strong>{generator.built_in ? "built-in" : "custom"}</strong>
+                <span>Updated</span>
+                <strong>{formatTime(generator.updated_at)}</strong>
+                <span>Schema</span>
+                <pre>{JSON.stringify(generator.field_schema, null, 2)}</pre>
+                <span>Docs</span>
+                <pre>{JSON.stringify(generator.docs_metadata, null, 2)}</pre>
+              </div>
+            )}
+            rowActions={patchGeneratorActions}
+            rows={runtimeConfigPatchGenerators}
+            searchPlaceholder="Search patch generators"
+            storageKey="vpsman.config.patchGenerators"
+            title="Patch generators"
+          />
+        )}
+      </details>
       {progress && (
         <ExecutionResultPanel
           loading={pending}
@@ -1481,12 +2397,26 @@ function BulkConfigApply({
         detail={`Apply one generated incremental patch to ${applySnapshot?.clientIds.length ?? 0} frozen VPS targets.`}
         expiresAtUnix={applySnapshot?.privilegeAssertion.expires_unix}
         items={[
-          { label: "Selector", value: applySnapshot?.selectorExpression ?? "-" },
-          { label: "Targets", value: `${applySnapshot?.clientIds.length ?? 0}` },
+          {
+            label: "Selector",
+            value: applySnapshot?.selectorExpression ?? "-",
+          },
+          {
+            label: "Targets",
+            value: `${applySnapshot?.clientIds.length ?? 0}`,
+          },
           { label: "Source", value: applySnapshot?.patchSource ?? "-" },
           { label: "Patch", value: applySnapshot?.patchName ?? "-" },
-          { label: "Sections", value: applySnapshot?.patchSections.join(", ") ?? "-" },
-          { label: "Payload", value: applySnapshot?.payloadHashHex ? shortId(applySnapshot.payloadHashHex) : "-" },
+          {
+            label: "Sections",
+            value: applySnapshot?.patchSections.join(", ") ?? "-",
+          },
+          {
+            label: "Payload",
+            value: applySnapshot?.payloadHashHex
+              ? shortId(applySnapshot.payloadHashHex)
+              : "-",
+          },
         ]}
         onCancel={() => {
           setConfirmOpen(false);
@@ -1496,40 +2426,6 @@ function BulkConfigApply({
         open={confirmOpen}
         pending={pending}
         title="Confirm bulk patch"
-      />
-      <ConsoleDataGrid
-        actions={patchGeneratorActions}
-        columns={patchGeneratorColumns}
-        defaultPageSize={10}
-        expandOnRowClick
-        getRowId={(generator) => generator.id}
-        itemLabel="patch generators"
-        empty="No patch generators match the current search."
-        renderExpandedRow={(generator) => (
-          <div className="consoleInlineDetailGrid">
-            <span>Generator ID</span>
-            <strong>{generator.id}</strong>
-            <span>Name</span>
-            <strong>{generator.name}</strong>
-            <span>Category</span>
-            <strong>{generator.category}</strong>
-            <span>Domain</span>
-            <strong>{generator.domain}</strong>
-            <span>Scope</span>
-            <strong>{generator.built_in ? "built-in" : "custom"}</strong>
-            <span>Updated</span>
-            <strong>{formatTime(generator.updated_at)}</strong>
-            <span>Schema</span>
-            <pre>{JSON.stringify(generator.field_schema, null, 2)}</pre>
-            <span>Docs</span>
-            <pre>{JSON.stringify(generator.docs_metadata, null, 2)}</pre>
-          </div>
-        )}
-        rowActions={patchGeneratorActions}
-        rows={runtimeConfigPatchGenerators}
-        searchPlaceholder="Search patch generators"
-        storageKey="vpsman.config.patchGenerators"
-        title="Patch generators"
       />
       <ConfirmationPrompt
         confirmLabel="Delete patch generator"
@@ -1547,6 +2443,68 @@ function BulkConfigApply({
       />
     </div>
   );
+}
+
+function BulkPatchChangeSummary({
+  patchMode,
+  patchName,
+  preview,
+  sections,
+  toml,
+}: {
+  patchMode: "generator" | "temporary";
+  patchName: string;
+  preview: BulkResolveResponse | null;
+  sections: string[];
+  toml: string;
+}) {
+  const visibleTargets = (preview?.targets ?? []).slice(0, 8);
+  const sectionSummary =
+    sections.length > 0
+      ? sections.join(", ")
+      : inferTomlSections(toml).join(", ");
+  const sourceLabel =
+    patchMode === "generator" ? "Saved generator" : "Temporary patch";
+
+  return (
+    <div
+      className="bulkPatchPreviewSummary"
+      aria-label="Bulk patch change summary"
+    >
+      <div>
+        <strong>Preview changes</strong>
+        <span>
+          {preview
+            ? `${bulkVpsCountLabel(preview.target_count)} will receive ${patchName}.`
+            : "Preview changes renders the patch and resolves exact VPS targets."}
+        </span>
+      </div>
+      <div className="bulkPatchPreviewMeta">
+        <span>{sourceLabel}</span>
+        <span>{sectionSummary || "Sections pending"}</span>
+        <span>{toml ? `${toml.length} TOML chars` : "Patch pending"}</span>
+      </div>
+      {visibleTargets.length > 0 ? (
+        <div className="bulkPatchTargetRows">
+          {visibleTargets.map((target) => (
+            <span key={target.id} title={target.id}>
+              <strong>{target.display_name}</strong>
+              <small>{sectionSummary || "runtime config patch"}</small>
+            </span>
+          ))}
+          {preview && preview.target_count > visibleTargets.length && (
+            <span className="mutedChip">
+              +{preview.target_count - visibleTargets.length} more VPSs
+            </span>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function bulkVpsCountLabel(count: number): string {
+  return `${count} VPS${count === 1 ? "" : "s"}`;
 }
 
 function SingleVpsConfig({
@@ -1570,7 +2528,9 @@ function SingleVpsConfig({
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
-  onSubmitRuntimeConfigPatch: (request: RuntimeConfigPatchRequest) => Promise<RuntimeConfigPatchResponse>;
+  onSubmitRuntimeConfigPatch: (
+    request: RuntimeConfigPatchRequest,
+  ) => Promise<RuntimeConfigPatchResponse>;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
@@ -1582,31 +2542,74 @@ function SingleVpsConfig({
   const [redactedToml, setRedactedToml] = useState("");
   const [baseHash, setBaseHash] = useState("");
   const [overrideToml, setOverrideToml] = useState("");
-  const [overrideValidation, setOverrideValidation] =
-    useState<{ sections: string[]; payloadHashHex: string } | null>(null);
+  const [overrideValidation, setOverrideValidation] = useState<{
+    sections: string[];
+    payloadHashHex: string;
+  } | null>(null);
   const [applySnapshot, setApplySnapshot] =
     useState<SingleVpsConfigApplySnapshot | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [lastJobId, setLastJobId] = useState<string | null>(null);
-  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(DEFAULT_MAX_JOB_TIMEOUT_SECS);
+  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(
+    DEFAULT_MAX_JOB_TIMEOUT_SECS,
+  );
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
+  const [editorView, setEditorView] = useState<"current" | "patch">("patch");
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
-  const singleTarget = useMemo(() => agents.find((agent) => agent.id === clientId) ?? null, [agents, clientId]);
+  const singleTarget = useMemo(
+    () => agents.find((agent) => agent.id === clientId) ?? null,
+    [agents, clientId],
+  );
   const runtimeApplyState = useMemo(
-    () => runtimeConfigApplyStates.find((state) => state.client_id === clientId) ?? null,
+    () =>
+      runtimeConfigApplyStates.find((state) => state.client_id === clientId) ??
+      null,
     [clientId, runtimeConfigApplyStates],
   );
-  const overrideReady = Boolean(singleTarget && privilegeMaterial && baseHash && overrideToml.trim());
+  const overrideReady = Boolean(
+    singleTarget && privilegeMaterial && baseHash && overrideToml.trim(),
+  );
 
   useEffect(() => {
     clientIdRef.current = clientId;
     writeLocalString(CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY, clientId);
   }, [clientId]);
+
+  useEffect(() => {
+    let active = true;
+    const frozenToml = overrideToml.trim();
+    const frozenBaseHash = baseHash;
+    const frozenTargetId = singleTarget?.id ?? "";
+    if (!frozenTargetId || !frozenBaseHash || !frozenToml) {
+      setOverrideValidation(null);
+      return () => {
+        active = false;
+      };
+    }
+    const sections = inferTomlSections(frozenToml);
+    void sha256Hex(new TextEncoder().encode(frozenToml)).then(
+      (payloadHashHex) => {
+        if (
+          active &&
+          clientIdRef.current === frozenTargetId &&
+          baseHash === frozenBaseHash
+        ) {
+          setOverrideValidation({ sections, payloadHashHex });
+          setReviewStatus(
+            `Patch preview ready: ${sections.join(", ")} against base ${shortId(frozenBaseHash)}`,
+          );
+        }
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [baseHash, overrideToml, singleTarget?.id]);
 
   function clearSingleConfigReview() {
     invalidateReviewGeneration();
@@ -1626,35 +2629,7 @@ function SingleVpsConfig({
     setRedactedToml("");
     setBaseHash("");
     setProgress(null);
-  }
-
-  async function validateOverride() {
-    const reviewGeneration = captureReviewGeneration();
-    const frozenTarget = singleTarget;
-    const frozenToml = overrideToml.trim();
-    const frozenBaseHash = baseHash;
-    setApplySnapshot(null);
-    setConfirmOpen(false);
-    setReviewStatus("Validating one-VPS override");
-    await runAction(async () => {
-      await waitForReviewRender();
-      if (!frozenTarget) {
-        throw new Error("Select one VPS before validating an override");
-      }
-      if (!frozenBaseHash) {
-        throw new Error("Read the current VPS config before validating an override");
-      }
-      if (!frozenToml) {
-        throw new Error("Paste a one-VPS runtime config override");
-      }
-      const sections = inferTomlSections(frozenToml);
-      const payloadHashHex = await sha256Hex(new TextEncoder().encode(frozenToml));
-      if (!isReviewGenerationCurrent(reviewGeneration)) {
-        return;
-      }
-      setOverrideValidation({ sections, payloadHashHex });
-      setReviewStatus(`Validated ${sections.join(", ")} against base ${shortId(frozenBaseHash)}`);
-    });
+    setEditorView("patch");
   }
 
   async function reviewOverrideApply() {
@@ -1673,14 +2648,20 @@ function SingleVpsConfig({
         throw new Error("Select one VPS and unlock privilege");
       }
       if (!frozenBaseHash) {
-        throw new Error("Read the current VPS config before applying an override");
+        throw new Error(
+          "Read the current VPS config before applying an override",
+        );
       }
       if (!frozenToml) {
         throw new Error("Paste a one-VPS runtime config override");
       }
-      const selectorExpression = selectorExpressionForClientIds([frozenTarget.id]);
+      const selectorExpression = selectorExpressionForClientIds([
+        frozenTarget.id,
+      ]);
       const patchSections = inferTomlSections(frozenToml);
-      const payloadHashHex = await sha256Hex(new TextEncoder().encode(frozenToml));
+      const payloadHashHex = await sha256Hex(
+        new TextEncoder().encode(frozenToml),
+      );
       const privilegeAssertion = await buildPrivilegeAssertion({
         intent: canonicalDbPrivilegeIntent({
           action: "runtime_config.patch",
@@ -1717,7 +2698,9 @@ function SingleVpsConfig({
     await runAction(async () => {
       const snapshot = applySnapshot;
       if (!snapshot) {
-        throw new Error("One-VPS override snapshot is missing; review the apply again");
+        throw new Error(
+          "One-VPS override snapshot is missing; review the apply again",
+        );
       }
       const response = await onSubmitRuntimeConfigPatch({
         confirmed: true,
@@ -1761,32 +2744,24 @@ function SingleVpsConfig({
     clearSingleConfigReview();
     const reviewGeneration = captureReviewGeneration();
     const frozenTarget = singleTarget;
-    const frozenPrivilegeMaterial = privilegeMaterial;
     const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
     await runAction(async () => {
-      if (!frozenTarget || !frozenPrivilegeMaterial) {
-        throw new Error("Select one VPS and unlock privilege");
+      if (!frozenTarget) {
+        throw new Error("Select one VPS before reading runtime config");
       }
       const operation: JobOperation = { type: "config_read" };
-      const selectorExpressionForTarget = selectorExpressionForClientIds([frozenTarget.id]);
-      const built = await buildPrivilegeForJobOperation({
-        clientIds: [frozenTarget.id],
-        commandType: "config_read",
-        operation,
-        privilegeMaterial: frozenPrivilegeMaterial,
-        selectorExpression: selectorExpressionForTarget,
-        maxTimeoutSecs: boundedMaxTimeoutSecs,
-      });
+      const selectorExpressionForTarget = selectorExpressionForClientIds([
+        frozenTarget.id,
+      ]);
       const response = await onCreateJob({
         argv: [],
         command: "config_read",
-        confirmed: true,
+        confirmed: false,
         destructive: false,
-        force_unprivileged: false,
+        force_unprivileged: true,
         job_id: crypto.randomUUID(),
         operation,
-        privileged: true,
-        privilege_assertion: built.privilegeAssertion,
+        privileged: false,
         selector_expression: selectorExpressionForTarget,
         target_client_ids: [frozenTarget.id],
         max_timeout_secs: boundedMaxTimeoutSecs,
@@ -1795,12 +2770,16 @@ function SingleVpsConfig({
         return;
       }
       setLastJobId(response.job_id);
-      const waited = await waitForBulkJobTargets(response.job_id, onLoadJobTargets, {
-        targetCount: createJobTargetCount(response),
-        onProgress: setProgress,
-        targets: [frozenTarget],
-        maxTimeoutSecs: boundedMaxTimeoutSecs,
-      });
+      const waited = await waitForBulkJobTargets(
+        response.job_id,
+        onLoadJobTargets,
+        {
+          targetCount: createJobTargetCount(response),
+          onProgress: setProgress,
+          targets: [frozenTarget],
+          maxTimeoutSecs: boundedMaxTimeoutSecs,
+        },
+      );
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
       }
@@ -1821,13 +2800,21 @@ function SingleVpsConfig({
       }
       setRedactedToml(config.toml);
       setBaseHash(config.baseHash);
+      setEditorView("patch");
     });
   }
 
   return (
-    <div className="configApplyGrid">
-      <div className="compactForm">
-        <ConfigHelpLabel help={CONFIG_HELP.targetSelector} label="VPS target" strong />
+    <div className="configApplyGrid singleConfigFlow">
+      <section
+        className="compactForm singleConfigTargetPanel"
+        aria-label="Per-VPS config target and load"
+      >
+        <ConfigHelpLabel
+          help={CONFIG_HELP.targetSelector}
+          label="VPS target"
+          strong
+        />
         <VpsCombobox
           agents={agents}
           ariaLabel="VPS config target"
@@ -1838,13 +2825,46 @@ function SingleVpsConfig({
         />
         <div className="configTargetMeta">
           <span className="configTargetName">
-            {singleTarget ? formatVpsName(singleTarget, vpsNameDisplayMode) : clientId ? "Select a listed VPS" : "no target selected"}
+            {singleTarget
+              ? formatVpsName(singleTarget, vpsNameDisplayMode)
+              : clientId
+                ? "Select a listed VPS"
+                : "no target selected"}
           </span>
           <span>{runtimeConfigApplyStateSummary(runtimeApplyState)}</span>
         </div>
-        <div className="inlinePrivilege">
+        <button
+          className="secondaryAction"
+          disabled={pending || !singleTarget}
+          onClick={readConfig}
+          title={
+            pending
+              ? "Wait for the current config operation to finish before reading runtime config."
+              : !singleTarget
+                ? "Select one VPS before reading runtime config."
+                : "Read redacted runtime config from the selected VPS. No privilege unlock is required for this read-only inspection."
+          }
+          type="button"
+        >
+          <ServerCog size={16} />
+          Read current config
+        </button>
+        {lastJobId && (
+          <button
+            className="secondaryAction"
+            onClick={() => onOpenJobDetails(lastJobId)}
+            type="button"
+          >
+            Open job {shortId(lastJobId)}
+          </button>
+        )}
+        <details className="singleConfigAdvanced">
+          <summary>Advanced read/apply options</summary>
           <label>
-            <ConfigHelpLabel help={CONFIG_HELP.maxTimeout} label="Max timeout seconds" />
+            <ConfigHelpLabel
+              help={CONFIG_HELP.maxTimeout}
+              label="Max timeout seconds"
+            />
             <input
               aria-label="VPS config max timeout seconds"
               max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
@@ -1857,128 +2877,214 @@ function SingleVpsConfig({
               value={maxTimeoutSecs}
             />
           </label>
-        </div>
-        <PrivilegeVaultBox
-          labelPrefix="Runtime config"
-          lastPayloadHash={null}
-          onOpenUnlock={onOpenPrivilegeUnlock}
-          onPrivilegeMaterialChange={(material) => {
-            clearSingleConfigReview();
-            setPrivilegeMaterial(material);
-          }}
-          privilegeMaterial={privilegeMaterial}
-          unlockRedirectLabel="Open Privilege Vault for runtime config"
-        />
-        <button
-          className="secondaryAction"
-          disabled={pending || !singleTarget || !privilegeMaterial}
-          onClick={readConfig}
-          title={
-            pending
-              ? "Wait for the current config operation to finish before reading runtime config."
-              : !singleTarget
-                ? "Select one VPS before reading runtime config."
-                : !privilegeMaterial
-                  ? "Unlock privilege material before reading runtime config."
-                  : "Read redacted runtime config from the selected VPS."
-          }
-          type="button"
+        </details>
+      </section>
+
+      {!singleTarget && (
+        <section
+          className="compactForm singleConfigEmpty"
+          aria-label="Per-VPS config start"
         >
-          <ServerCog size={16} />
-          Read runtime config
-        </button>
-        {lastJobId && (
-          <button className="secondaryAction" onClick={() => onOpenJobDetails(lastJobId)} type="button">
-            Open job {shortId(lastJobId)}
-          </button>
-        )}
-      </div>
-      <div className="compactForm configTomlEditor">
-        <ConfigHelpLabel help={CONFIG_HELP.redactedRuntimeToml} label="Redacted runtime TOML" strong />
-        <span>{baseHash ? `base ${shortId(baseHash)} / immutable bootstrap view` : "Read one VPS config before viewing"}</span>
-        <textarea
-          aria-label="VPS redacted runtime config TOML"
-          readOnly
-          rows={22}
-          value={redactedToml}
-        />
-        <span className="formHint">
-          This is the current redacted base used to review a one-VPS override.
-        </span>
-      </div>
-      <div className="compactForm configTomlEditor configOverrideEditor">
-        <ConfigHelpLabel help={CONFIG_HELP.guardedOverride} label="Guarded one-VPS override" strong />
-        <span>
-          Applies one incremental TOML patch to the selected VPS only after the
-          current config base and privilege assertion are reviewed.
-        </span>
-        <div className="configOverrideSummary" aria-label="One-VPS config override guard">
+          <strong>Select one VPS</strong>
           <span>
-            <strong>Exact target</strong>
-            <small>{singleTarget ? formatVpsName(singleTarget, vpsNameDisplayMode) : "Select one VPS"}</small>
+            Choose a visible VPS to load its redacted current config, then draft
+            one guarded TOML patch for that exact target.
           </span>
-          <span>
-            <strong title={CONFIG_HELP.currentBase}>Current base</strong>
-            <small>{baseHash ? shortId(baseHash) : "Read required"}</small>
-          </span>
-          <span>
-            <strong title={CONFIG_HELP.sections}>Sections</strong>
-            <small>{overrideValidation?.sections.join(", ") || "Validate required"}</small>
-          </span>
-          <span>
-            <strong title={CONFIG_HELP.payload}>Payload</strong>
-            <small>{overrideValidation?.payloadHashHex ? shortId(overrideValidation.payloadHashHex) : "Not reviewed"}</small>
-          </span>
-        </div>
-        <textarea
-          aria-label="One-VPS runtime config override TOML"
-          onChange={(event) => {
-            clearSingleConfigReview();
-            setOverrideToml(event.target.value);
-          }}
-          placeholder="[update]\n# one incremental override for this VPS"
-          rows={12}
-          value={overrideToml}
-        />
-        {reviewStatus && <span className="formHint">{reviewStatus}</span>}
-        <div className="configOverrideActions">
-          <button
-            className="secondaryAction"
-            disabled={pending || !singleTarget || !baseHash || !overrideToml.trim()}
-            onClick={() => void validateOverride()}
-            title={
-              pending
-                ? "Wait for the current config operation to finish before validating the override."
-                : !singleTarget
-                  ? "Select one VPS before validating the override."
-                  : !baseHash
-                    ? "Read the selected VPS runtime config before validating the override."
-                    : !overrideToml.trim()
-                      ? "Enter one incremental TOML override before validation."
-                      : "Validate the override against the current base config."
-            }
-            type="button"
+          <div
+            className="singleConfigHelpGrid"
+            aria-label="Per-VPS config safeguards"
           >
-            Validate override
-          </button>
-          <button
-            className="primaryAction"
-            disabled={pending || !overrideReady}
-            onClick={() => void reviewOverrideApply()}
-            title={
-              pending
-                ? "Wait for the current config operation to finish before opening review."
-                : !overrideReady
-                  ? "Validate the override and unlock privilege material before review."
-                  : "Open the reviewed one-VPS config apply prompt."
-            }
-            type="button"
+            <ConfigHelpLabel
+              help={CONFIG_HELP.redactedRuntimeToml}
+              label="Redacted runtime TOML"
+            />
+            <ConfigHelpLabel
+              help={CONFIG_HELP.guardedOverride}
+              label="Guarded one-VPS override"
+            />
+          </div>
+          <SingleConfigGuardAnchors
+            baseLabel="Read current config"
+            payloadLabel="Patch hash before apply"
+            sectionsLabel="Validated TOML sections"
+          />
+          <PrivilegeVaultBox
+            labelPrefix="Runtime config apply"
+            lastPayloadHash={null}
+            onOpenUnlock={onOpenPrivilegeUnlock}
+            onPrivilegeMaterialChange={setPrivilegeMaterial}
+            privilegeMaterial={privilegeMaterial}
+            unlockRedirectLabel="Open Privilege Vault for runtime config apply"
+          />
+        </section>
+      )}
+
+      {singleTarget && !baseHash && (
+        <section
+          className="compactForm singleConfigLoadPanel"
+          aria-label="Per-VPS config load current"
+        >
+          <strong>Load current config</strong>
+          <span>
+            Redacted config reads are inspection-only and do not require
+            privilege unlock. The patch editor opens after the base hash is
+            loaded.
+          </span>
+          <div
+            className="singleConfigHelpGrid"
+            aria-label="Per-VPS config safeguards"
           >
-            <FileSliders size={16} />
-            Review one-VPS apply
-          </button>
-        </div>
-      </div>
+            <ConfigHelpLabel
+              help={CONFIG_HELP.redactedRuntimeToml}
+              label="Redacted runtime TOML"
+            />
+            <ConfigHelpLabel
+              help={CONFIG_HELP.guardedOverride}
+              label="Guarded one-VPS override"
+            />
+          </div>
+          <SingleConfigGuardAnchors
+            baseLabel="Read current config"
+            payloadLabel="Patch hash before apply"
+            sectionsLabel="Validated TOML sections"
+          />
+          <PrivilegeVaultBox
+            labelPrefix="Runtime config apply"
+            lastPayloadHash={null}
+            onOpenUnlock={onOpenPrivilegeUnlock}
+            onPrivilegeMaterialChange={setPrivilegeMaterial}
+            privilegeMaterial={privilegeMaterial}
+            unlockRedirectLabel="Open Privilege Vault for runtime config apply"
+          />
+        </section>
+      )}
+
+      {singleTarget && baseHash && (
+        <>
+          <div
+            className="singleConfigViewTabs"
+            aria-label="Per-VPS config views"
+          >
+            <button
+              className={editorView === "current" ? "active" : ""}
+              onClick={() => setEditorView("current")}
+              type="button"
+            >
+              Current base
+            </button>
+            <button
+              className={editorView === "patch" ? "active" : ""}
+              onClick={() => setEditorView("patch")}
+              type="button"
+            >
+              Desired patch
+            </button>
+          </div>
+          <section
+            className={`compactForm configTomlEditor singleConfigPane singleConfigCurrentPane ${
+              editorView === "current" ? "active" : ""
+            }`}
+            aria-label="Per-VPS current config"
+          >
+            <ConfigHelpLabel
+              help={CONFIG_HELP.redactedRuntimeToml}
+              label="Redacted runtime TOML"
+              strong
+            />
+            <span>
+              base {shortId(baseHash)} / redacted runtime config for{" "}
+              {formatVpsName(singleTarget, vpsNameDisplayMode)}
+            </span>
+            <textarea
+              aria-label="VPS redacted runtime config TOML"
+              readOnly
+              rows={18}
+              value={redactedToml}
+            />
+            <span className="formHint">
+              This immutable redacted base is the guard for the one-VPS patch.
+            </span>
+          </section>
+          <section
+            className={`compactForm configTomlEditor configOverrideEditor singleConfigPane singleConfigPatchPane ${
+              editorView === "patch" ? "active" : ""
+            }`}
+            aria-label="Per-VPS desired config patch"
+          >
+            <ConfigHelpLabel
+              help={CONFIG_HELP.guardedOverride}
+              label="Guarded one-VPS override"
+              strong
+            />
+            <span>
+              Draft one incremental TOML patch for this VPS. Sections and
+              payload hash update while you type; Apply opens the final
+              confirmation.
+            </span>
+            <SingleConfigGuardAnchors
+              baseLabel={shortId(baseHash)}
+              exactTargetLabel={formatVpsName(singleTarget, vpsNameDisplayMode)}
+              payloadLabel={
+                overrideValidation?.payloadHashHex
+                  ? shortId(overrideValidation.payloadHashHex)
+                  : "Not ready"
+              }
+              sectionsLabel={
+                overrideValidation?.sections.join(", ") || "Type patch"
+              }
+            />
+            <textarea
+              aria-label="One-VPS runtime config override TOML"
+              onChange={(event) => {
+                clearSingleConfigReview();
+                setOverrideToml(event.target.value);
+              }}
+              placeholder="[update]\n# one incremental override for this VPS"
+              rows={14}
+              value={overrideToml}
+            />
+            {reviewStatus && <span className="formHint">{reviewStatus}</span>}
+            <PrivilegeVaultBox
+              labelPrefix="Runtime config apply"
+              lastPayloadHash={overrideValidation?.payloadHashHex ?? null}
+              onOpenUnlock={onOpenPrivilegeUnlock}
+              onPrivilegeMaterialChange={(material) => {
+                clearSingleConfigReview();
+                setPrivilegeMaterial(material);
+              }}
+              privilegeMaterial={privilegeMaterial}
+              unlockRedirectLabel="Open Privilege Vault for runtime config apply"
+            />
+            <div className="configOverrideActions singleConfigStickyActions">
+              <span>
+                {privilegeMaterial
+                  ? "Privilege unlocked for final apply"
+                  : "Unlock only when ready to apply"}
+              </span>
+              <button
+                className="primaryAction"
+                disabled={pending || !overrideReady}
+                onClick={() => void reviewOverrideApply()}
+                title={
+                  pending
+                    ? "Wait for the current config operation to finish before applying."
+                    : !baseHash
+                      ? "Read the selected VPS runtime config before applying a patch."
+                      : !overrideToml.trim()
+                        ? "Enter one incremental TOML patch before applying."
+                        : !privilegeMaterial
+                          ? "Unlock privilege material before applying the patch."
+                          : "Open the final one-VPS config apply confirmation."
+                }
+                type="button"
+              >
+                <FileSliders size={16} />
+                Apply patch
+              </button>
+            </div>
+          </section>
+        </>
+      )}
       {progress && (
         <ExecutionResultPanel
           loading={pending}
@@ -1993,11 +3099,30 @@ function SingleVpsConfig({
         expiresAtUnix={applySnapshot?.privilegeAssertion.expires_unix}
         items={[
           { label: "VPS", value: applySnapshot?.target.display_name ?? "-" },
-          { label: "Selector", value: applySnapshot?.selectorExpression ?? "-" },
-          { label: "Base hash", value: applySnapshot?.baseHash ? shortId(applySnapshot.baseHash) : "-" },
-          { label: "Sections", value: applySnapshot?.patchSections.join(", ") ?? "-" },
-          { label: "Payload", value: applySnapshot?.payloadHashHex ? shortId(applySnapshot.payloadHashHex) : "-" },
-          { label: "Timeout", value: `${applySnapshot?.maxTimeoutSecs ?? maxTimeoutSecs}s` },
+          {
+            label: "Selector",
+            value: applySnapshot?.selectorExpression ?? "-",
+          },
+          {
+            label: "Base hash",
+            value: applySnapshot?.baseHash
+              ? shortId(applySnapshot.baseHash)
+              : "-",
+          },
+          {
+            label: "Sections",
+            value: applySnapshot?.patchSections.join(", ") ?? "-",
+          },
+          {
+            label: "Payload",
+            value: applySnapshot?.payloadHashHex
+              ? shortId(applySnapshot.payloadHashHex)
+              : "-",
+          },
+          {
+            label: "Timeout",
+            value: `${applySnapshot?.maxTimeoutSecs ?? maxTimeoutSecs}s`,
+          },
         ]}
         onCancel={() => {
           setConfirmOpen(false);
@@ -2017,8 +3142,60 @@ type VpsRulesReviewSnapshot = {
   selectorExpression: string;
   values: Record<string, string>;
   keys: string[];
-  preview: VpsRulesDryRunResponse;
+  preview: VpsRulesOperatorPreview;
 };
+
+type VpsRulesOperatorPreview = VpsRulesDryRunResponse & {
+  no_op_row_count: number;
+};
+
+type VpsRulesEditMode = "upsert" | "unset";
+
+type VpsRuleFieldDefinition = {
+  help: string;
+  inputMode?: "decimal" | "numeric" | "text";
+  key: (typeof VPS_RULE_KEYS)[number];
+  label: string;
+  placeholder: string;
+};
+
+const VPS_RULE_FIELD_DEFINITIONS: VpsRuleFieldDefinition[] = [
+  {
+    help: "Day of month in UTC when the traffic accounting cycle resets.",
+    inputMode: "numeric",
+    key: "traffic.reset_day",
+    label: "Reset day",
+    placeholder: "14",
+  },
+  {
+    help: "Total monthly traffic quota. Operators may type units such as 4TB, 750GB, or raw bytes.",
+    inputMode: "text",
+    key: "traffic.quota.total",
+    label: "Total quota",
+    placeholder: "4TB",
+  },
+  {
+    help: "Optional receive-side traffic quota. Leave blank to keep this key out of the set request.",
+    inputMode: "text",
+    key: "traffic.quota.rx",
+    label: "RX quota",
+    placeholder: "Optional",
+  },
+  {
+    help: "Optional transmit-side traffic quota. Leave blank to keep this key out of the set request.",
+    inputMode: "text",
+    key: "traffic.quota.tx",
+    label: "TX quota",
+    placeholder: "Optional",
+  },
+  {
+    help: "Traffic selectors as comma-separated interface+direction tokens, for example ens3, eth0+tx, or tun0+rx.",
+    inputMode: "text",
+    key: "traffic.selectors",
+    label: "Interfaces / selectors",
+    placeholder: "ens3, eth0+tx",
+  },
+];
 
 type VpsRuleAlertPolicyImpact = {
   conditionExpression: string;
@@ -2044,6 +3221,51 @@ function vpsRuleEditKeys(valuesText: string, unsetKeys: string[]): string[] {
     }
   }
   return Array.from(keys).sort((left, right) => left.localeCompare(right));
+}
+
+function parseVpsRuleTextValues(text: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    const equals = line.indexOf("=");
+    if (equals <= 0) {
+      continue;
+    }
+    const key = line.slice(0, equals).trim();
+    if (!VPS_RULE_KEYS.includes(key as (typeof VPS_RULE_KEYS)[number])) {
+      continue;
+    }
+    const value = line.slice(equals + 1).trim();
+    if (value) {
+      values[key] = value;
+    }
+  }
+  return values;
+}
+
+function serializeVpsRuleTextValues(values: Record<string, string>): string {
+  return VPS_RULE_KEYS.flatMap((key) => {
+    const value = values[key]?.trim();
+    return value ? [`${key}=${value}`] : [];
+  }).join("\n");
+}
+
+function updateVpsRuleTextValue(
+  text: string,
+  key: (typeof VPS_RULE_KEYS)[number],
+  value: string,
+): string {
+  const values = parseVpsRuleTextValues(text);
+  const trimmed = value.trim();
+  if (trimmed) {
+    values[key] = trimmed;
+  } else {
+    delete values[key];
+  }
+  return serializeVpsRuleTextValues(values);
 }
 
 function affectedAlertPolicyRules(
@@ -2074,6 +3296,191 @@ function affectedAlertPolicyRules(
     );
 }
 
+function buildOperatorVpsRulesPreview(
+  preview: VpsRulesDryRunResponse,
+): VpsRulesOperatorPreview {
+  const changes = preview.changes.filter(
+    (change) => !isNoOpVpsRuleChange(change),
+  );
+  return {
+    ...preview,
+    changed_row_count: changes.length,
+    changes,
+    no_op_row_count: preview.changes.length - changes.length,
+  };
+}
+
+function isNoOpVpsRuleChange(change: VpsRuleChangePreview): boolean {
+  if (change.validation !== "ok" || change.validation_errors.length > 0) {
+    return false;
+  }
+  return (
+    normalizeVpsRuleValue(change.key, change.before) ===
+    normalizeVpsRuleValue(change.key, change.after)
+  );
+}
+
+function normalizeVpsRuleValue(key: string, value: string | null): string {
+  if (value == null) {
+    return "unset";
+  }
+  const text = value.trim();
+  if (!text) {
+    return "empty";
+  }
+  if (key.startsWith("traffic.quota.")) {
+    const bytes = parseByteQuantity(text);
+    if (bytes != null) {
+      return `bytes:${bytes}`;
+    }
+  }
+  if (key === "traffic.reset_day") {
+    const numeric = parsePlainNumber(text);
+    if (numeric != null) {
+      return `number:${numeric}`;
+    }
+  }
+  if (key === "traffic.selectors") {
+    return normalizeSelectorRuleValue(text);
+  }
+  return normalizeGenericRuleValue(text);
+}
+
+function normalizeSelectorRuleValue(text: string): string {
+  const jsonValue = parseJsonValue(text);
+  const rawItems = Array.isArray(jsonValue)
+    ? jsonValue.map((item) => String(item))
+    : text.split(",");
+  const items = rawItems
+    .map((item) => normalizeSelectorRuleToken(item))
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+  return `selectors:${items.join(",")}`;
+}
+
+function normalizeSelectorRuleToken(token: string): string {
+  const normalized = token.trim().replace(/^host:/, "");
+  if (!normalized) {
+    return "";
+  }
+  return normalized.includes("+") ? normalized : `${normalized}+total`;
+}
+
+function normalizeGenericRuleValue(text: string): string {
+  const jsonValue = parseJsonValue(text);
+  if (jsonValue !== undefined) {
+    return `json:${stableJsonStringify(normalizeJsonValue(jsonValue))}`;
+  }
+  const bytes = parseByteQuantity(text);
+  if (bytes != null) {
+    return `bytes:${bytes}`;
+  }
+  const numeric = parsePlainNumber(text);
+  if (numeric != null) {
+    return `number:${numeric}`;
+  }
+  const normalizedText = text.replace(/\s+/g, " ");
+  if (normalizedText.includes(",")) {
+    return `list:${normalizedText
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right))
+      .join(",")}`;
+  }
+  const lower = normalizedText.toLowerCase();
+  if (["false", "no", "off"].includes(lower)) {
+    return "boolean:false";
+  }
+  if (["true", "yes", "on"].includes(lower)) {
+    return "boolean:true";
+  }
+  return `text:${normalizedText}`;
+}
+
+function parseJsonValue(text: string): unknown | undefined {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const values = value.map((item) => normalizeJsonValue(item));
+    if (
+      values.every(
+        (item) =>
+          item === null ||
+          ["boolean", "number", "string"].includes(typeof item),
+      )
+    ) {
+      return values.sort((left, right) =>
+        stableJsonStringify(left).localeCompare(stableJsonStringify(right)),
+      );
+    }
+    return values;
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([objectKey, objectValue]) => [
+          objectKey,
+          normalizeJsonValue(objectValue),
+        ]),
+    );
+  }
+  return typeof value === "string" ? value.trim().replace(/\s+/g, " ") : value;
+}
+
+function stableJsonStringify(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+function parseByteQuantity(text: string): number | null {
+  const match = text
+    .trim()
+    .replace(/_/g, "")
+    .match(
+      /^([0-9]+(?:\.[0-9]+)?)\s*(bytes?|b|kb|mb|gb|tb|pb|kib|mib|gib|tib|pib)?$/i,
+    );
+  if (!match) {
+    return null;
+  }
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount)) {
+    return null;
+  }
+  const unit = (match[2] ?? "b").toLowerCase();
+  const multipliers: Record<string, number> = {
+    b: 1,
+    byte: 1,
+    bytes: 1,
+    gb: 1_000_000_000,
+    gib: 1_073_741_824,
+    kb: 1_000,
+    kib: 1_024,
+    mb: 1_000_000,
+    mib: 1_048_576,
+    pb: 1_000_000_000_000_000,
+    pib: 1_125_899_906_842_624,
+    tb: 1_000_000_000_000,
+    tib: 1_099_511_627_776,
+  };
+  return Math.round(amount * (multipliers[unit] ?? 1));
+}
+
+function parsePlainNumber(text: string): number | null {
+  const compact = text.trim().replace(/_/g, "");
+  if (!/^[+-]?\d+(?:\.\d+)?$/.test(compact)) {
+    return null;
+  }
+  const numeric = Number(compact);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 function VpsRulesPanel({
   agents,
   fleetAlertPolicies,
@@ -2088,8 +3495,12 @@ function VpsRulesPanel({
   agents: AgentView[];
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   initialSelectorExpression: string | null;
-  onBulkUnset: (request: VpsRulesBulkUnsetRequest) => Promise<VpsRulesDryRunResponse>;
-  onBulkUpsert: (request: VpsRulesBulkUpsertRequest) => Promise<VpsRulesDryRunResponse>;
+  onBulkUnset: (
+    request: VpsRulesBulkUnsetRequest,
+  ) => Promise<VpsRulesDryRunResponse>;
+  onBulkUpsert: (
+    request: VpsRulesBulkUpsertRequest,
+  ) => Promise<VpsRulesDryRunResponse>;
   onDryRun: (request: VpsRulesDryRunRequest) => Promise<VpsRulesDryRunResponse>;
   onOpenAlerts: () => void;
   trafficAccounting: TrafficAccountingRecord[];
@@ -2107,13 +3518,20 @@ function VpsRulesPanel({
     "traffic.reset_day=14\ntraffic.quota.total=3TB\ntraffic.selectors=eth0+tx,ens3",
   );
   const [unsetKeys, setUnsetKeys] = useState<string[]>([]);
-  const [preview, setPreview] = useState<VpsRulesDryRunResponse | null>(null);
+  const [editMode, setEditMode] = useState<VpsRulesEditMode>("upsert");
+  const [preview, setPreview] = useState<VpsRulesOperatorPreview | null>(null);
   const [reviewSnapshot, setReviewSnapshot] =
     useState<VpsRulesReviewSnapshot | null>(null);
   const [pending, setPending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const agentNameById = useMemo(
-    () => new Map(agents.map((agent) => [agent.id, formatVpsName(agent, "name_id_suffix")])),
+    () =>
+      new Map(
+        agents.map((agent) => [
+          agent.id,
+          formatVpsName(agent, "name_id_suffix"),
+        ]),
+      ),
     [agents],
   );
   const accountingByClient = useMemo(
@@ -2146,12 +3564,22 @@ function VpsRulesPanel({
   );
   const incompleteClients = new Set(
     trafficAccounting
-      .filter((row) => row.state === "incomplete" || row.incomplete_reasons.length > 0)
+      .filter(
+        (row) =>
+          row.state === "incomplete" || row.incomplete_reasons.length > 0,
+      )
       .map((row) => row.client_id),
   );
   const editedRuleKeys = useMemo(
-    () => vpsRuleEditKeys(valuesText, unsetKeys),
-    [unsetKeys, valuesText],
+    () =>
+      editMode === "upsert"
+        ? vpsRuleEditKeys(valuesText, [])
+        : vpsRuleEditKeys("", unsetKeys),
+    [editMode, unsetKeys, valuesText],
+  );
+  const typedRuleValues = useMemo(
+    () => parseVpsRuleTextValues(valuesText),
+    [valuesText],
   );
   const affectedPolicyRules = useMemo(
     () => affectedAlertPolicyRules(fleetAlertPolicies, editedRuleKeys),
@@ -2164,7 +3592,8 @@ function VpsRulesPanel({
         header: "VPS",
         size: 220,
         minSize: 160,
-        searchValue: (row) => `${row.client_id} ${agentNameById.get(row.client_id) ?? ""}`,
+        searchValue: (row) =>
+          `${row.client_id} ${agentNameById.get(row.client_id) ?? ""}`,
         sortValue: (row) => agentNameById.get(row.client_id) ?? row.client_id,
         cell: (row) => (
           <span className="historyPrimary">
@@ -2293,7 +3722,8 @@ function VpsRulesPanel({
         header: "Validation",
         size: 130,
         minSize: 100,
-        searchValue: (row) => `${row.validation} ${row.validation_errors.join(" ")}`,
+        searchValue: (row) =>
+          `${row.validation} ${row.validation_errors.join(" ")}`,
         sortValue: (row) => row.validation,
         cell: (row) => (
           <ConsoleStatusBadge tone={row.validation === "ok" ? "ok" : "warning"}>
@@ -2364,32 +3794,45 @@ function VpsRulesPanel({
 
   async function dryRun(operation: "upsert" | "unset") {
     setPending(true);
-    setStatus(operation === "upsert" ? "dry-running set values" : "dry-running unset values");
+    setStatus(
+      operation === "upsert"
+        ? "dry-running set values"
+        : "dry-running unset values",
+    );
     try {
       const values = operation === "upsert" ? parseSetValues() : {};
       const keys = operation === "unset" ? unsetKeys : [];
       if (operation === "unset" && keys.length === 0) {
         throw new Error("Select at least one VPS rule key to unset");
       }
-      const nextPreview = await onDryRun({
+      const rawPreview = await onDryRun({
         operation,
         selector_expression: selectorExpression.trim(),
         values,
         keys,
       });
+      const nextPreview = buildOperatorVpsRulesPreview(rawPreview);
       setPreview(nextPreview);
-      setReviewSnapshot({
-        operation,
-        selectorExpression: selectorExpression.trim(),
-        values,
-        keys,
-        preview: nextPreview,
-      });
+      setReviewSnapshot(
+        nextPreview.changed_row_count > 0
+          ? {
+              operation,
+              selectorExpression: selectorExpression.trim(),
+              values,
+              keys,
+              preview: nextPreview,
+            }
+          : null,
+      );
       setStatus(
-        `${operation === "upsert" ? "set" : "unset"} dry-run matched ${nextPreview.matched_vps_count} VPSs`,
+        nextPreview.changed_row_count === 0
+          ? `No changes detected across ${nextPreview.matched_vps_count} matched VPSs`
+          : `${operation === "upsert" ? "set" : "unset"} preview found ${nextPreview.changed_row_count} changes across ${nextPreview.matched_vps_count} matched VPSs`,
       );
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "VPS rules dry-run failed");
+      setStatus(
+        error instanceof Error ? error.message : "VPS rules dry-run failed",
+      );
       setReviewSnapshot(null);
     } finally {
       setPending(false);
@@ -2402,9 +3845,14 @@ function VpsRulesPanel({
       setStatus("Run dry-run before applying VPS rules");
       return;
     }
+    if (snapshot.preview.changed_row_count === 0) {
+      setStatus("No changes detected; Apply is disabled.");
+      setReviewSnapshot(null);
+      return;
+    }
     setPending(true);
     try {
-      const nextPreview =
+      const rawPreview =
         snapshot.operation === "upsert"
           ? await onBulkUpsert({
               selector_expression: snapshot.selectorExpression,
@@ -2418,11 +3866,14 @@ function VpsRulesPanel({
               confirmed: true,
               preview_hash: snapshot.preview.preview_hash,
             });
+      const nextPreview = buildOperatorVpsRulesPreview(rawPreview);
       setPreview(nextPreview);
       setReviewSnapshot(null);
-      setStatus(`applied ${nextPreview.changed_row_count} VPS rule rows`);
+      setStatus(`applied ${nextPreview.changed_row_count} VPS rule changes`);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "VPS rules apply failed");
+      setStatus(
+        error instanceof Error ? error.message : "VPS rules apply failed",
+      );
     } finally {
       setPending(false);
     }
@@ -2450,7 +3901,10 @@ function VpsRulesPanel({
         </label>
         <label>
           <span>Key filter</span>
-          <select value={keyFilter} onChange={(event) => setKeyFilter(event.target.value)}>
+          <select
+            value={keyFilter}
+            onChange={(event) => setKeyFilter(event.target.value)}
+          >
             <option value="">all keys</option>
             {VPS_RULE_KEYS.map((key) => (
               <option key={key} value={key}>
@@ -2461,7 +3915,10 @@ function VpsRulesPanel({
         </label>
         <label>
           <span>State filter</span>
-          <select value={stateFilter} onChange={(event) => setStateFilter(event.target.value)}>
+          <select
+            value={stateFilter}
+            onChange={(event) => setStateFilter(event.target.value)}
+          >
             <option value="">all states</option>
             <option value="ok">ok</option>
             <option value="invalid">invalid</option>
@@ -2499,26 +3956,41 @@ function VpsRulesPanel({
           <span>{affectedPolicyRules.length}</span>
         </span>
       </div>
-      <section className="consoleDetailPanel vpsRulesAlertImpact" aria-label="Affected alert policy context">
+      <section
+        className="consoleDetailPanel vpsRulesAlertImpact"
+        aria-label="Affected alert policy context"
+      >
         <div className="consoleDetailPanelHeader">
           <span>
             <strong>Affected alert policies</strong>
             <small>
-              Policies whose rule conditions reference the current edit keys:
-              {" "}
-              <span className="monoValue">{editedRuleKeys.join(", ") || "traffic.*"}</span>
+              Policies whose rule conditions reference the current edit keys:{" "}
+              <span className="monoValue">
+                {editedRuleKeys.join(", ") || "traffic.*"}
+              </span>
             </small>
           </span>
-          <button className="secondaryAction compactAction" onClick={onOpenAlerts} type="button">
+          <button
+            className="secondaryAction compactAction"
+            onClick={onOpenAlerts}
+            type="button"
+          >
             Open Observability alerts
           </button>
         </div>
         <div className="configRiskList">
           {affectedPolicyRules.slice(0, 6).map((impact) => (
-            <div className="configRiskRow" key={`${impact.policyId}:${impact.ruleId}`}>
+            <div
+              className="configRiskRow"
+              key={`${impact.policyId}:${impact.ruleId}`}
+            >
               <span>
-                <strong>{impact.policyName} / {impact.ruleName}</strong>
-                <small className="monoValue">{impact.conditionExpression}</small>
+                <strong>
+                  {impact.policyName} / {impact.ruleName}
+                </strong>
+                <small className="monoValue">
+                  {impact.conditionExpression}
+                </small>
               </span>
               <ConsoleStatusBadge tone={impact.enabled ? "warning" : "neutral"}>
                 {impact.severity}
@@ -2558,7 +4030,9 @@ function VpsRulesPanel({
             </span>
             <span>
               <strong>Accounting state</strong>
-              <span>{accountingByClient.get(row.client_id)?.state ?? "unknown"}</span>
+              <span>
+                {accountingByClient.get(row.client_id)?.state ?? "unknown"}
+              </span>
             </span>
             <span>
               <strong>Last write request ID</strong>
@@ -2574,31 +4048,88 @@ function VpsRulesPanel({
       <section className="consoleDetailPanel">
         <div className="consoleDetailPanelHeader">
           <span>
-            <ConfigHelpLabel help={CONFIG_HELP.vpsRules} label="Bulk rule editor" strong />
-            <small>Dry-run matched VPSs and changed keys before applying.</small>
+            <ConfigHelpLabel
+              help={CONFIG_HELP.vpsRules}
+              label="Bulk rule editor"
+              strong
+            />
+            <small>
+              Dry-run matched VPSs and changed keys before applying.
+            </small>
           </span>
+          <div className="consoleOperationsActions">
+            <div
+              aria-label="VPS rule edit mode"
+              className="segmented vpsRulesModeSwitch"
+              role="group"
+            >
+              <button
+                aria-pressed={editMode === "upsert"}
+                className={editMode === "upsert" ? "selected" : ""}
+                onClick={() => {
+                  setEditMode("upsert");
+                  setReviewSnapshot(null);
+                }}
+                type="button"
+              >
+                Set values
+              </button>
+              <button
+                aria-pressed={editMode === "unset"}
+                className={editMode === "unset" ? "selected" : ""}
+                onClick={() => {
+                  setEditMode("unset");
+                  setReviewSnapshot(null);
+                }}
+                type="button"
+              >
+                Unset values
+              </button>
+            </div>
+            <button
+              className="primaryAction compactAction"
+              disabled={pending}
+              onClick={() => void dryRun(editMode)}
+              title={
+                pending
+                  ? "Wait for the current VPS rule operation to finish before preview."
+                  : editMode === "upsert"
+                    ? "Preview effective VPS rule value changes before applying them."
+                    : "Preview effective VPS rule removals before applying them."
+              }
+              type="button"
+            >
+              Preview changes
+            </button>
+          </div>
         </div>
         <div className="vpsRulesBulkEditor">
+          <section
+            className="vpsRulesEditorSection vpsRulesModeLegend"
+            aria-label="VPS rule edit mode semantics"
+          >
+            <div>
+              <strong>Set values</strong>
+              <span title={CONFIG_HELP.ruleSetValues}>
+                Key=value lines become typed rule updates after dry-run.
+              </span>
+            </div>
+            <div>
+              <h4 title={CONFIG_HELP.ruleUnsetValues}>Unset values</h4>
+              <span title={CONFIG_HELP.ruleUnsetValues}>
+                Explicit rule keys are removed only after preview review.
+              </span>
+            </div>
+          </section>
           <section className="vpsRulesEditorSection">
             <div className="sectionHeader compactHeader">
               <div>
                 <h4 title={CONFIG_HELP.ruleSelector}>Target VPS selector</h4>
-                <span className="monoValue">{selectorExpression || "unset"}</span>
+                <span className="monoValue">
+                  {selectorExpression || "unset"}
+                </span>
               </div>
               <div className="consoleOperationsActions">
-                <button
-                  className="secondaryAction compactAction"
-                  disabled={pending}
-                  onClick={() => void dryRun("upsert")}
-                  title={
-                    pending
-                      ? "Wait for the current VPS rule operation to finish before dry-run."
-                      : "Preview matched VPSs before applying rule changes."
-                  }
-                  type="button"
-                >
-                  Dry-run matched VPSs
-                </button>
                 <button
                   className="secondaryAction compactAction"
                   onClick={() => setSelectorExpression("")}
@@ -2610,7 +4141,11 @@ function VpsRulesPanel({
             </div>
             <div className="tokenPreview">
               {matchedPreviewClients.length === 0 ? (
-                <span className="tokenChip">No dry-run preview</span>
+                <span className="tokenChip">
+                  {preview
+                    ? `${preview.matched_vps_count} matched · no effective changes`
+                    : "No preview yet"}
+                </span>
               ) : (
                 matchedPreviewClients.map(([clientId, displayName]) => (
                   <span className="tokenChip" key={clientId} title={clientId}>
@@ -2620,65 +4155,82 @@ function VpsRulesPanel({
               )}
             </div>
           </section>
-          <section className="vpsRulesEditorSection">
-            <div className="sectionHeader compactHeader">
-              <div>
-                <h4 title={CONFIG_HELP.ruleSetValues}>Set values</h4>
-                <span title={CONFIG_HELP.ruleSetValues}>key=value lines</span>
+          {editMode === "upsert" ? (
+            <section className="vpsRulesEditorSection vpsRulesTypedEditor">
+              <div className="sectionHeader compactHeader">
+                <div>
+                  <h4 title={CONFIG_HELP.ruleSetValues}>Common rule cards</h4>
+                  <span title={CONFIG_HELP.ruleSetValues}>
+                    Typed fields for quota, reset day, and traffic interfaces
+                  </span>
+                </div>
               </div>
-              <button
-                className="secondaryAction compactAction"
-                disabled={pending}
-                onClick={() => void dryRun("upsert")}
-                title={
-                  pending
-                    ? "Wait for the current VPS rule operation to finish before dry-run."
-                    : "Dry-run typed VPS rule values before applying them."
-                }
-                type="button"
+              <div
+                className="vpsRuleTypedGrid"
+                aria-label="Common VPS rule fields"
               >
-                Dry-run set values
-              </button>
-            </div>
-            <textarea
-              aria-label="VPS rule set values"
-              value={valuesText}
-              onChange={(event) => setValuesText(event.target.value)}
-            />
-          </section>
-          <section className="vpsRulesEditorSection">
-            <div className="sectionHeader compactHeader">
-              <div>
-                <h4 title={CONFIG_HELP.ruleUnsetValues}>Unset values</h4>
-                <span title={CONFIG_HELP.ruleUnsetValues}>Explicit key checklist</span>
+                {VPS_RULE_FIELD_DEFINITIONS.map((field) => (
+                  <label className="vpsRuleTypedCard" key={field.key}>
+                    <span>
+                      <strong>{field.label}</strong>
+                      <small className="monoValue">{field.key}</small>
+                    </span>
+                    <input
+                      aria-label={field.label}
+                      inputMode={field.inputMode ?? "text"}
+                      onChange={(event) =>
+                        setValuesText((current) =>
+                          updateVpsRuleTextValue(
+                            current,
+                            field.key,
+                            event.target.value,
+                          ),
+                        )
+                      }
+                      placeholder={field.placeholder}
+                      title={field.help}
+                      value={typedRuleValues[field.key] ?? ""}
+                    />
+                    <small>{field.help}</small>
+                  </label>
+                ))}
               </div>
-              <button
-                className="secondaryAction compactAction"
-                disabled={pending}
-                onClick={() => void dryRun("unset")}
-                title={
-                  pending
-                    ? "Wait for the current VPS rule operation to finish before dry-run."
-                    : "Dry-run explicit VPS rule removals before applying them."
-                }
-                type="button"
-              >
-                Dry-run unset values
-              </button>
-            </div>
-            <div className="checkListPanel compactChecklist">
-              {VPS_RULE_KEYS.map((key) => (
-                <label className="checkLine" key={key}>
-                  <input
-                    checked={unsetKeys.includes(key)}
-                    onChange={(event) => toggleUnsetKey(key, event.target.checked)}
-                    type="checkbox"
-                  />
-                  <span className="monoValue">{key}</span>
-                </label>
-              ))}
-            </div>
-          </section>
+              <details className="vpsRulesAdvancedRaw">
+                <summary>Advanced raw key/value</summary>
+                <textarea
+                  aria-label="VPS rule set values"
+                  value={valuesText}
+                  onChange={(event) => setValuesText(event.target.value)}
+                />
+              </details>
+            </section>
+          ) : (
+            <section className="vpsRulesEditorSection">
+              <div className="sectionHeader compactHeader">
+                <div>
+                  <h4 title={CONFIG_HELP.ruleUnsetValues}>Unset values</h4>
+                  <span title={CONFIG_HELP.ruleUnsetValues}>
+                    Explicit key checklist
+                  </span>
+                </div>
+              </div>
+              <div className="checkListPanel compactChecklist">
+                {VPS_RULE_KEYS.map((key) => (
+                  <label className="checkLine" key={key}>
+                    <input
+                      aria-label={`Unset ${key}`}
+                      checked={unsetKeys.includes(key)}
+                      onChange={(event) =>
+                        toggleUnsetKey(key, event.target.checked)
+                      }
+                      type="checkbox"
+                    />
+                    <span className="monoValue">{key}</span>
+                  </label>
+                ))}
+              </div>
+            </section>
+          )}
         </div>
         {preview ? (
           <VpsRulesPreviewTable columns={previewColumns} preview={preview} />
@@ -2686,10 +4238,17 @@ function VpsRulesPanel({
         {status && <small className="fleetPolicyStatus">{status}</small>}
       </section>
       <ConfirmationPrompt
-        confirmLabel="Apply VPS rules"
-        detail="Applies the reviewed dry-run preview by selector and preview hash."
+        confirmLabel={
+          reviewSnapshot
+            ? `Apply ${reviewSnapshot.preview.changed_row_count} ${reviewSnapshot.preview.changed_row_count === 1 ? "change" : "changes"}`
+            : "Apply changes"
+        }
+        detail="Applies the reviewed preview by selector and backend preview hash."
         items={[
-          { label: "Selector", value: reviewSnapshot?.selectorExpression ?? "-" },
+          {
+            label: "Selector",
+            value: reviewSnapshot?.selectorExpression ?? "-",
+          },
           { label: "Operation", value: reviewSnapshot?.operation ?? "-" },
           {
             label: "Set keys",
@@ -2699,9 +4258,18 @@ function VpsRulesPanel({
             label: "Unset keys",
             value: reviewSnapshot?.keys.join(", ") || "-",
           },
-          { label: "Matched VPSs", value: reviewSnapshot?.preview.matched_vps_count ?? 0 },
-          { label: "Changed rows", value: reviewSnapshot?.preview.changed_row_count ?? 0 },
-          { label: "Preview hash", value: reviewSnapshot?.preview.preview_hash ?? "-", title: CONFIG_HELP.previewHash },
+          {
+            label: "Matched VPSs",
+            value: reviewSnapshot?.preview.matched_vps_count ?? 0,
+          },
+          {
+            label: "Changed rows",
+            value: reviewSnapshot?.preview.changed_row_count ?? 0,
+          },
+          {
+            label: "No-op rows hidden",
+            value: reviewSnapshot?.preview.no_op_row_count ?? 0,
+          },
         ]}
         onCancel={() => setReviewSnapshot(null)}
         onConfirm={() => void applyReview()}
@@ -2749,12 +4317,50 @@ function ConfigHelpLabel({
   );
 }
 
+function SingleConfigGuardAnchors({
+  baseLabel,
+  exactTargetLabel,
+  payloadLabel,
+  sectionsLabel,
+}: {
+  baseLabel: string;
+  exactTargetLabel?: string;
+  payloadLabel: string;
+  sectionsLabel: string;
+}) {
+  return (
+    <div
+      className="configOverrideSummary"
+      aria-label="One-VPS config override guard"
+    >
+      {exactTargetLabel && (
+        <span>
+          <strong>Exact target</strong>
+          <small>{exactTargetLabel}</small>
+        </span>
+      )}
+      <span>
+        <strong title={CONFIG_HELP.currentBase}>Current base</strong>
+        <small>{baseLabel}</small>
+      </span>
+      <span>
+        <strong title={CONFIG_HELP.sections}>Patch sections</strong>
+        <small>{sectionsLabel}</small>
+      </span>
+      <span>
+        <strong title={CONFIG_HELP.payload}>Payload</strong>
+        <small>{payloadLabel}</small>
+      </span>
+    </div>
+  );
+}
+
 function VpsRulesPreviewTable({
   columns,
   preview,
 }: {
   columns: ConsoleDataGridColumn<VpsRuleChangePreview>[];
-  preview: VpsRulesDryRunResponse;
+  preview: VpsRulesOperatorPreview;
 }) {
   return (
     <div className="vpsRulesPreviewBlock">
@@ -2764,29 +4370,43 @@ function VpsRulesPreviewTable({
           <span>{preview.matched_vps_count}</span>
         </span>
         <span>
-          <strong>Changed rows</strong>
+          <strong>Effective changes</strong>
           <span>{preview.changed_row_count}</span>
+        </span>
+        <span>
+          <strong>No-op rows hidden</strong>
+          <span>{preview.no_op_row_count}</span>
         </span>
         <span>
           <strong>Invalid rows</strong>
           <span>{preview.invalid_row_count}</span>
         </span>
         <span>
-          <strong title={CONFIG_HELP.previewHash}>Preview hash</strong>
-          <span className="monoValue">{preview.preview_hash}</span>
+          <strong>Preview details</strong>
+          <details className="vpsRulesPreviewDetails">
+            <summary>Backend binding</summary>
+            <span className="monoValue" title={CONFIG_HELP.previewHash}>
+              {preview.preview_hash}
+            </span>
+          </details>
         </span>
       </div>
+      {preview.changed_row_count === 0 ? (
+        <div className="emptyState compactEmpty">No changes detected</div>
+      ) : null}
       <ConsoleDataGrid
         columns={columns}
         defaultPageSize={10}
-        empty="No changed rows in dry-run preview."
-        getRowId={(change) => `${change.client_id}:${change.key}:${change.action}`}
+        empty="No effective changes in preview."
+        getRowId={(change) =>
+          `${change.client_id}:${change.key}:${change.action}`
+        }
         itemLabel="changes"
         rows={preview.changes}
         searchPlaceholder="Search dry-run changes"
         selectable={false}
         storageKey="vpsman.grid.config.vpsRules.preview"
-        title="Dry-run changed rows"
+        title="Preview changes"
       />
     </div>
   );
@@ -2815,7 +4435,7 @@ function configTitle(subpage: string): string {
     case "rules":
       return "VPS Rules";
     case "templates":
-      return "Templates";
+      return "Template coverage";
     default:
       return "Runtime config overview";
   }
@@ -2830,13 +4450,15 @@ function configSubtitle(subpage: string): string {
     case "single":
       return "Read and compare one VPS runtime config";
     case "templates":
-      return "Persistent runtime config sources and assignments";
+      return "Read-only runtime template coverage and source readiness";
     default:
       return "Runtime config workflows";
   }
 }
 
-function normalizeConfigSubpage(value: string): "overview" | "bulk" | "single" | "rules" | "templates" {
+function normalizeConfigSubpage(
+  value: string,
+): "overview" | "bulk" | "single" | "rules" | "templates" {
   const base = value.split(":")[0];
   if (base === "per_vps") {
     return "single";
@@ -2844,7 +4466,12 @@ function normalizeConfigSubpage(value: string): "overview" | "bulk" | "single" |
   if (base === "bulk_patch") {
     return "bulk";
   }
-  if (base === "bulk" || base === "single" || base === "rules" || base === "templates") {
+  if (
+    base === "bulk" ||
+    base === "single" ||
+    base === "rules" ||
+    base === "templates"
+  ) {
     return base;
   }
   return "overview";
@@ -2871,7 +4498,9 @@ function inferTomlSections(toml: string): string[] {
   return sections.length > 0 ? sections : ["root"];
 }
 
-function exampleValuesForGenerator(generator: RuntimeConfigPatchGeneratorRecord): Record<string, JsonValue> {
+function exampleValuesForGenerator(
+  generator: RuntimeConfigPatchGeneratorRecord,
+): Record<string, JsonValue> {
   const schema = asRecord(generator.field_schema) ?? {};
   const fields = asRecord(schema.fields) ?? asRecord(schema.properties) ?? {};
   const values: Record<string, JsonValue> = {};
@@ -2881,14 +4510,20 @@ function exampleValuesForGenerator(generator: RuntimeConfigPatchGeneratorRecord)
   return values;
 }
 
-function exampleValueFromSchema(schema: Record<string, unknown> | null): JsonValue {
+function exampleValueFromSchema(
+  schema: Record<string, unknown> | null,
+): JsonValue {
   if (!schema) {
     return "";
   }
   if (isJsonValue(schema.default)) {
     return schema.default;
   }
-  if (Array.isArray(schema.enum) && schema.enum.length > 0 && isJsonValue(schema.enum[0])) {
+  if (
+    Array.isArray(schema.enum) &&
+    schema.enum.length > 0 &&
+    isJsonValue(schema.enum[0])
+  ) {
     return schema.enum[0];
   }
   const type = typeof schema.type === "string" ? schema.type : "string";
@@ -2912,7 +4547,10 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function isJsonValue(value: unknown): value is JsonValue {
-  if (value === null || ["string", "number", "boolean"].includes(typeof value)) {
+  if (
+    value === null ||
+    ["string", "number", "boolean"].includes(typeof value)
+  ) {
     return true;
   }
   if (Array.isArray(value)) {
@@ -2928,7 +4566,10 @@ function formatJsonObject(value: Record<string, JsonValue>): string {
   return JSON.stringify(value, null, 2);
 }
 
-function extractConfigRead(outputs: JobOutputRecord[]): { toml: string; baseHash: string } {
+function extractConfigRead(outputs: JobOutputRecord[]): {
+  toml: string;
+  baseHash: string;
+} {
   for (const output of outputs) {
     if (output.stream !== "status") {
       continue;
@@ -2938,30 +4579,45 @@ function extractConfigRead(outputs: JobOutputRecord[]): { toml: string; baseHash
       toml?: string;
       base_config_sha256_hex?: string;
     };
-    if (value.type === "config_read" && value.toml && value.base_config_sha256_hex) {
+    if (
+      value.type === "config_read" &&
+      value.toml &&
+      value.base_config_sha256_hex
+    ) {
       return { toml: value.toml, baseHash: value.base_config_sha256_hex };
     }
   }
   throw new Error("Config read output was not available yet");
 }
 
-function runtimeConfigApplyStateSummary(state: RuntimeConfigApplyStateRecord | null): string {
+function runtimeConfigApplyStateSummary(
+  state: RuntimeConfigApplyStateRecord | null,
+): string {
   if (!state) {
     return "No server-applied runtime sync recorded";
   }
   if (state.pending_status === "failed") {
-    const job = state.pending_job_id ? ` job ${shortId(state.pending_job_id)}` : "";
+    const job = state.pending_job_id
+      ? ` job ${shortId(state.pending_job_id)}`
+      : "";
     const error = state.pending_error ? `: ${state.pending_error}` : "";
     return `Runtime sync failed${job}${error}`;
   }
   if (state.pending_status === "queued") {
-    const job = state.pending_job_id ? ` job ${shortId(state.pending_job_id)}` : "";
+    const job = state.pending_job_id
+      ? ` job ${shortId(state.pending_job_id)}`
+      : "";
     const version = state.pending_version ? ` v${state.pending_version}` : "";
+    if (runtimeConfigQueuedStateIsStale(state)) {
+      return `Runtime sync stale${version}${job}; queued since ${formatTime(configApplyStateTime(state))}`;
+    }
     return `Runtime sync pending${version}${job}`;
   }
   if (state.applied_content_hash) {
     const version = state.applied_version ? ` v${state.applied_version}` : "";
-    const job = state.applied_job_id ? ` job ${shortId(state.applied_job_id)}` : "";
+    const job = state.applied_job_id
+      ? ` job ${shortId(state.applied_job_id)}`
+      : "";
     const when = state.applied_at ? ` ${formatTime(state.applied_at)}` : "";
     return `Runtime config applied${version}${job}${when}; hash ${shortId(state.applied_content_hash)}`;
   }
@@ -2986,11 +4642,15 @@ function readLocalString(key: string): string {
 }
 
 function readSingleConfigClientId(): string {
-  const storedClientId = readLocalString(CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY).trim();
+  const storedClientId = readLocalString(
+    CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY,
+  ).trim();
   if (storedClientId) {
     return storedClientId;
   }
-  return clientIdFromLegacySelector(readLocalString(CONFIG_SINGLE_SELECTOR_STORAGE_KEY));
+  return clientIdFromLegacySelector(
+    readLocalString(CONFIG_SINGLE_SELECTOR_STORAGE_KEY),
+  );
 }
 
 function clientIdFromLegacySelector(value: string): string {

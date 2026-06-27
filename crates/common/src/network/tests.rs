@@ -16,7 +16,7 @@ fn higher_bandwidth_is_preferred_when_latency_close() {
         TunnelObservation {
             latency_ms: 40.0,
             packet_loss_ratio: 0.0,
-            bandwidth: BandwidthTier::M10,
+            bandwidth_mbps: 10,
             preference: 1.0,
         },
     );
@@ -25,7 +25,7 @@ fn higher_bandwidth_is_preferred_when_latency_close() {
         TunnelObservation {
             latency_ms: 40.0,
             packet_loss_ratio: 0.0,
-            bandwidth: BandwidthTier::M1000,
+            bandwidth_mbps: 1000,
             preference: 1.0,
         },
     );
@@ -33,30 +33,320 @@ fn higher_bandwidth_is_preferred_when_latency_close() {
 }
 
 #[test]
+fn bandwidth_cost_curve_is_smooth_across_operator_range() {
+    let policy = OspfCostPolicy::default();
+    let cost_for = |bandwidth_mbps| {
+        ospf_cost(
+            policy,
+            TunnelObservation {
+                latency_ms: 20.0,
+                packet_loss_ratio: 0.0,
+                bandwidth_mbps,
+                preference: 1.0,
+            },
+        )
+    };
+    let ten = cost_for(10);
+    let twenty = cost_for(20);
+    let fifty = cost_for(50);
+    let hundred = cost_for(100);
+    let two_hundred_fifty = cost_for(250);
+    let five_hundred = cost_for(500);
+    let thousand = cost_for(1000);
+    let five_thousand = cost_for(5000);
+    let ten_thousand = cost_for(10_000);
+
+    assert_eq!(ten, 52);
+    assert_eq!(twenty, 42);
+    assert_eq!(fifty, 34);
+    assert_eq!(hundred, 30);
+    assert_eq!(two_hundred_fifty, 26);
+    assert_eq!(five_hundred, 24);
+    assert_eq!(thousand, 23);
+    assert_eq!(five_thousand, 21);
+    assert_eq!(ten_thousand, 21);
+    assert!(ten > hundred);
+    assert!(hundred > thousand);
+    assert!(thousand >= ten_thousand);
+    assert!(ten - hundred > thousand - ten_thousand);
+}
+
+#[test]
+fn bandwidth_cost_curve_handles_non_preset_operator_values() {
+    let policy = OspfCostPolicy::default();
+    let cost_for = |bandwidth_mbps| {
+        ospf_cost(
+            policy,
+            TunnelObservation {
+                latency_ms: 20.0,
+                packet_loss_ratio: 0.0,
+                bandwidth_mbps,
+                preference: 1.0,
+            },
+        )
+    };
+
+    assert_eq!(cost_for(123), 29);
+    assert_eq!(cost_for(1234), 23);
+    assert_eq!(cost_for(9876), 21);
+    assert!(cost_for(10) - cost_for(100) > cost_for(100) - cost_for(1000));
+    assert!(cost_for(100) - cost_for(1000) > cost_for(1000) - cost_for(10_000));
+}
+
+#[test]
+fn bandwidth_cost_curve_has_no_legacy_tier_cliffs() {
+    let policy = OspfCostPolicy::default();
+    let cost_for = |bandwidth_mbps| {
+        ospf_cost(
+            policy,
+            TunnelObservation {
+                latency_ms: 20.0,
+                packet_loss_ratio: 0.0,
+                bandwidth_mbps,
+                preference: 1.0,
+            },
+        )
+    };
+
+    for legacy_tier in [100_u32, 1000, 5000, 10_000] {
+        let lower = legacy_tier.saturating_sub(1).max(MIN_TUNNEL_BANDWIDTH_MBPS);
+        let upper = (legacy_tier + 1).min(MAX_TUNNEL_BANDWIDTH_MBPS);
+        let costs: Vec<u16> = (lower..=upper).map(cost_for).collect();
+        let min_cost = costs.iter().min().copied().expect("costs");
+        let max_cost = costs.iter().max().copied().expect("costs");
+        assert!(
+            max_cost - min_cost <= 1,
+            "legacy tier {legacy_tier} has a cost cliff across {lower}..={upper}: {costs:?}"
+        );
+    }
+}
+
+#[test]
+fn bandwidth_cost_curve_is_monotonic_for_every_operator_mbps() {
+    let policy = OspfCostPolicy::default();
+    let cost_for = |bandwidth_mbps| {
+        ospf_cost(
+            policy,
+            TunnelObservation {
+                latency_ms: 20.0,
+                packet_loss_ratio: 0.0,
+                bandwidth_mbps,
+                preference: 1.0,
+            },
+        )
+    };
+
+    let mut previous = cost_for(MIN_TUNNEL_BANDWIDTH_MBPS);
+    for bandwidth_mbps in (MIN_TUNNEL_BANDWIDTH_MBPS + 1)..=MAX_TUNNEL_BANDWIDTH_MBPS {
+        let current = cost_for(bandwidth_mbps);
+        assert!(
+            current <= previous,
+            "cost increased from {previous} to {current} at {bandwidth_mbps} Mbps"
+        );
+        assert!(
+            previous - current <= 2,
+            "cost changed too abruptly from {previous} to {current} at {bandwidth_mbps} Mbps"
+        );
+        previous = current;
+    }
+}
+
+#[test]
+fn bandwidth_cost_clamps_to_operator_range_and_keeps_latency_primary() {
+    let policy = OspfCostPolicy::default();
+    let cost_for = |bandwidth_mbps, latency_ms| {
+        ospf_cost(
+            policy,
+            TunnelObservation {
+                latency_ms,
+                packet_loss_ratio: 0.0,
+                bandwidth_mbps,
+                preference: 1.0,
+            },
+        )
+    };
+
+    assert_eq!(cost_for(1, 20.0), cost_for(10, 20.0));
+    assert_eq!(cost_for(20_000, 20.0), cost_for(10_000, 20.0));
+    assert!(cost_for(10_000, 70.0) > cost_for(10, 20.0));
+}
+
+#[test]
+fn bandwidth_cost_curve_balances_bandwidth_latency_loss_and_preference() {
+    let policy = OspfCostPolicy::default();
+    let cost_for = |bandwidth_mbps, latency_ms, packet_loss_ratio, preference| {
+        ospf_cost(
+            policy,
+            TunnelObservation {
+                latency_ms,
+                packet_loss_ratio,
+                bandwidth_mbps,
+                preference,
+            },
+        )
+    };
+    let baseline_low_bandwidth = cost_for(10, 20.0, 0.0, 1.0);
+
+    assert!(cost_for(10_000, 70.0, 0.0, 1.0) > baseline_low_bandwidth);
+    assert!(cost_for(10_000, 20.0, 0.1, 1.0) > baseline_low_bandwidth);
+    assert!(cost_for(100, 20.0, 0.0, 1.2) < cost_for(10_000, 20.0, 0.0, 0.8));
+}
+
+#[test]
+fn bandwidth_cost_curve_keeps_bandwidth_advantage_bounded() {
+    let policy = OspfCostPolicy::default();
+    let cost_for = |bandwidth_mbps, latency_ms, packet_loss_ratio, preference| {
+        ospf_cost(
+            policy,
+            TunnelObservation {
+                latency_ms,
+                packet_loss_ratio,
+                bandwidth_mbps,
+                preference,
+            },
+        )
+    };
+
+    let slow_healthy = cost_for(10, 20.0, 0.0, 1.0);
+    let fast_healthy = cost_for(10_000, 20.0, 0.0, 1.0);
+    let full_bandwidth_advantage = slow_healthy - fast_healthy;
+
+    assert_eq!(full_bandwidth_advantage, 31);
+    assert!(
+        cost_for(
+            10_000,
+            20.0 + f64::from(full_bandwidth_advantage) + 1.0,
+            0.0,
+            1.0,
+        ) > slow_healthy
+    );
+    assert!(
+        cost_for(
+            10_000,
+            20.0,
+            (f64::from(full_bandwidth_advantage) + 1.0) / policy.loss_weight,
+            1.0,
+        ) > slow_healthy
+    );
+}
+
+#[test]
+fn bandwidth_cost_curve_stays_secondary_to_path_health() {
+    let policy = OspfCostPolicy::default();
+    let cost_for = |bandwidth_mbps, latency_ms, packet_loss_ratio, preference| {
+        ospf_cost(
+            policy,
+            TunnelObservation {
+                latency_ms,
+                packet_loss_ratio,
+                bandwidth_mbps,
+                preference,
+            },
+        )
+    };
+
+    for latency_ms in [5.0, 20.0, 80.0, 180.0] {
+        assert!(
+            cost_for(10_000, latency_ms + 32.0, 0.0, 1.0) > cost_for(10, latency_ms, 0.0, 1.0),
+            "bandwidth overpowered latency at {latency_ms} ms"
+        );
+        assert!(
+            cost_for(10_000, latency_ms, 0.08, 1.0) > cost_for(10, latency_ms, 0.0, 1.0),
+            "bandwidth overpowered packet loss at {latency_ms} ms"
+        );
+    }
+
+    assert!(cost_for(10_000, 20.0, 0.0, 0.8) > cost_for(10_000, 20.0, 0.0, 1.2));
+}
+
+#[test]
+fn ospf_cost_sanitizes_non_finite_inputs_before_clamping() {
+    let policy = OspfCostPolicy::default();
+    let safe_zero_observation = TunnelObservation {
+        latency_ms: 0.0,
+        packet_loss_ratio: 0.0,
+        bandwidth_mbps: 100,
+        preference: 1.0,
+    };
+    let unsafe_observation = TunnelObservation {
+        latency_ms: f64::NAN,
+        packet_loss_ratio: f64::INFINITY,
+        bandwidth_mbps: 100,
+        preference: f64::NAN,
+    };
+
+    assert_eq!(
+        ospf_cost(policy, unsafe_observation),
+        ospf_cost(policy, safe_zero_observation)
+    );
+
+    let mut policy_with_bad_weights = policy;
+    policy_with_bad_weights.latency_weight = f64::NAN;
+    policy_with_bad_weights.loss_weight = f64::INFINITY;
+    policy_with_bad_weights.bandwidth_weight = f64::NAN;
+    policy_with_bad_weights.preference_bias = f64::NAN;
+    assert_eq!(
+        ospf_cost(policy_with_bad_weights, safe_zero_observation),
+        ospf_cost(policy, safe_zero_observation)
+    );
+}
+
+#[test]
+fn ospf_cost_orders_policy_bounds_before_clamping() {
+    let mut policy = OspfCostPolicy::default();
+    policy.min_cost = 100;
+    policy.max_cost = 20;
+
+    assert_eq!(
+        ospf_cost(
+            policy,
+            TunnelObservation {
+                latency_ms: 20.0,
+                packet_loss_ratio: 0.0,
+                bandwidth_mbps: 100,
+                preference: 1.0,
+            },
+        ),
+        30
+    );
+}
+
+#[test]
 fn observed_ospf_cost_downgrades_bandwidth_when_speed_is_below_burst() {
     let policy = OspfCostPolicy::default();
     let (healthy_cost, healthy_bandwidth) =
-        observed_ospf_cost(policy, BandwidthTier::M1000, 20.0, 0.0, 1.0, Some(950.0));
+        observed_ospf_cost(policy, 1000, 20.0, 0.0, 1.0, Some(950.0));
     let (degraded_cost, degraded_bandwidth) =
-        observed_ospf_cost(policy, BandwidthTier::M1000, 20.0, 0.0, 1.0, Some(40.0));
+        observed_ospf_cost(policy, 1000, 20.0, 0.0, 1.0, Some(40.0));
 
-    assert_eq!(healthy_bandwidth, BandwidthTier::M1000);
-    assert_eq!(degraded_bandwidth, BandwidthTier::M10);
+    assert_eq!(healthy_bandwidth, 950);
+    assert_eq!(degraded_bandwidth, 40);
     assert!(degraded_cost > healthy_cost);
 }
 
 #[test]
 fn observed_ospf_cost_never_exceeds_configured_bandwidth_burst() {
-    let (_cost, effective_bandwidth) = observed_ospf_cost(
+    let (_cost, effective_bandwidth) =
+        observed_ospf_cost(OspfCostPolicy::default(), 10, 20.0, 0.0, 1.0, Some(950.0));
+
+    assert_eq!(effective_bandwidth, 10);
+}
+
+#[test]
+fn observed_ospf_cost_effective_bandwidth_uses_operator_range() {
+    let (_cost, low_effective_bandwidth) =
+        observed_ospf_cost(OspfCostPolicy::default(), 1, 20.0, 0.0, 1.0, Some(5.0));
+    let (_cost, high_effective_bandwidth) = observed_ospf_cost(
         OspfCostPolicy::default(),
-        BandwidthTier::M10,
+        20_000,
         20.0,
         0.0,
         1.0,
-        Some(950.0),
+        Some(12_500.0),
     );
 
-    assert_eq!(effective_bandwidth, BandwidthTier::M10);
+    assert_eq!(low_effective_bandwidth, 10);
+    assert_eq!(high_effective_bandwidth, 10_000);
 }
 
 #[test]
@@ -141,7 +431,7 @@ fn renders_safe_tunnel_plan_without_mutation() {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M1000,
+        bandwidth_mbps: 1000,
         latency_ms: 138.0,
         packet_loss_ratio: 0.002,
         preference: 1.2,
@@ -196,7 +486,7 @@ fn plans_explicit_dual_stack_tunnel_addresses() {
             prefix_len: 127,
         }),
         latency_primary_family: TunnelAddressFamily::Ipv6,
-        bandwidth: BandwidthTier::M1000,
+        bandwidth_mbps: 1000,
         latency_ms: 20.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,
@@ -259,7 +549,7 @@ fn rejects_tunnel_plan_without_any_endpoint_addresses() {
             ipv6_address_pool_cidr: None,
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 20.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,
@@ -284,7 +574,7 @@ fn rejects_tunnel_plan_without_any_endpoint_addresses() {
             ipv6_address_pool_cidr: Some("fd00:99::/127".to_string()),
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 20.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,
@@ -319,7 +609,7 @@ fn plans_external_observed_tunnel_without_ifupdown_mutation() {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 80.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,
@@ -388,7 +678,7 @@ fn plans_external_managed_adapter_tunnel_with_commands() {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M1000,
+        bandwidth_mbps: 1000,
         latency_ms: 80.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,
@@ -427,7 +717,7 @@ fn rejects_custom_kind_without_external_runtime_manager() {
             ipv6_address_pool_cidr: None,
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 80.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,
@@ -607,7 +897,7 @@ fn renders_side_specific_runtime_tunnel_snippets() {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 50.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,
@@ -658,7 +948,7 @@ fn renders_all_initial_tunnel_kinds() {
             ipv6_address_pool_cidr: None,
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 20.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,
@@ -696,7 +986,7 @@ fn renders_custom_fou_runtime_options_without_hardcoded_ports() {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 20.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,
@@ -745,7 +1035,7 @@ fn renders_backend_specific_tunnel_files_and_signature_payload() {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 50.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,
@@ -804,7 +1094,7 @@ fn rejects_conflicting_or_invalid_tunnel_plans() {
             ipv6_address_pool_cidr: None,
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
-            bandwidth: BandwidthTier::M10,
+            bandwidth_mbps: 10,
             latency_ms: 10.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,

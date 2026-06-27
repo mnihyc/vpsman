@@ -3,8 +3,8 @@ use super::*;
 use axum::{extract::State, http::StatusCode, Json};
 use tokio::sync::broadcast;
 use vpsman_common::{
-    AgentHello, BandwidthTier, OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl,
-    RuntimeTunnelManager, RuntimeTunnelTopologyIntent, TunnelKind, TunnelPlanInput,
+    AgentHello, OspfCostPolicy, RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager,
+    RuntimeTunnelTopologyIntent, TunnelKind, TunnelPlanInput,
 };
 
 use crate::gateway_client::GatewayDispatchClient;
@@ -268,7 +268,7 @@ fn test_plan_input(name: &str, interface_name: &str, kind: TunnelKind) -> Tunnel
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 18.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,

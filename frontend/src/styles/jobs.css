@@ -18,6 +18,22 @@
   overflow: hidden;
 }
 
+.approvalDecisionFields {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.approvalDecisionToggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.approvalDecisionNote textarea {
+  min-height: 84px;
+}
+
 .commandComposer .segmented {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
@@ -30,6 +46,58 @@
   line-height: 1.2;
   padding: 5px 8px;
   white-space: normal;
+}
+
+.operationSelector {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.operationMobileSelect {
+  display: none;
+  min-width: 0;
+}
+
+.operationGroupTabs,
+.operationChoiceStrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.operationGroupTabs button,
+.operationChoiceStrip button {
+  min-height: 32px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.2;
+  padding: 6px 10px;
+}
+
+.operationGroupTabs button.selected,
+.operationChoiceStrip button.selected {
+  border-color: var(--primary-border);
+  background: var(--primary-selected);
+  color: var(--primary-text);
+}
+
+.operationChoiceStrip {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 8px;
+}
+
+.operationChoiceStrip button {
+  background: var(--canvas);
 }
 
 .terminalComposerAnchor {
@@ -98,6 +166,54 @@
   font-size: 12px;
 }
 
+.dispatchExecutionOptions {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 8px 10px;
+}
+
+.dispatchExecutionOptions[open] {
+  display: grid;
+  gap: 9px;
+}
+
+.dispatchExecutionOptions:not([open]) > :not(summary) {
+  display: none;
+}
+
+.dispatchExecutionOptions summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.dispatchExecutionOptionsGrid {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1fr) minmax(260px, 1.2fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.dispatchOptionNote {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.dispatchOptionNote strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.dispatchOptionNote span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .dispatchForm,
 .privilegeManager {
   display: grid;
@@ -112,18 +228,71 @@
 
 .templateToolbar {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
-  align-items: end;
-  gap: 12px;
+  gap: 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
   background: var(--canvas);
 }
 
+.templateToolbarPrimary {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.templateToolbarStatus {
+  align-self: end;
+  justify-self: end;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  max-width: 180px;
+  overflow: hidden;
+  padding: 6px 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .templateToolbar input,
 .templateToolbar select {
   width: 100%;
+  min-width: 0;
+}
+
+.templateManageDrawer {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 8px 10px;
+}
+
+.templateManageDrawer[open] {
+  display: grid;
+  gap: 9px;
+}
+
+.templateManageDrawer:not([open]) > :not(summary) {
+  display: none;
+}
+
+.templateManageDrawer summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.templateManageGrid {
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(120px, 0.7fr) minmax(140px, 0.8fr) auto;
+  align-items: end;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -371,7 +540,10 @@
 }
 
 .terminalOperation {
-  grid-template-columns: auto minmax(220px, 0.8fr) repeat(auto-fit, minmax(150px, 1fr));
+  grid-template-columns: auto minmax(220px, 0.8fr) repeat(
+      auto-fit,
+      minmax(150px, 1fr)
+    );
   align-items: end;
 }
 
@@ -654,7 +826,9 @@
 
 .fileBrowserStateStrip {
   display: grid;
-  grid-template-columns: minmax(150px, 0.8fr) minmax(180px, 1.2fr) minmax(120px, 0.7fr) minmax(170px, 1fr) auto;
+  grid-template-columns:
+    minmax(150px, 0.8fr) minmax(180px, 1.2fr) minmax(120px, 0.7fr)
+    minmax(170px, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 10px 18px;
@@ -708,8 +882,15 @@
 
 .fileBrowserWorkspace {
   display: grid;
-  grid-template-columns: minmax(240px, 300px) minmax(460px, 1fr) minmax(300px, 330px);
+  grid-template-columns: minmax(240px, 300px) minmax(460px, 1fr) minmax(
+      300px,
+      330px
+    );
   min-height: 640px;
+}
+
+.fileBrowserWorkspace.emptyWorkspace {
+  min-height: 420px;
 }
 
 .fileTreePane,
@@ -829,6 +1010,10 @@
   background: var(--surface);
 }
 
+.fileEditorPane.emptyEditorPane {
+  grid-template-rows: 1fr;
+}
+
 .fileEditorToolbar {
   display: flex;
   align-items: center;
@@ -859,9 +1044,40 @@
 
 .fileEditorActions {
   display: grid;
-  grid-template-columns: 84px auto;
+  grid-template-columns: 84px auto auto;
   align-items: end;
   gap: 8px;
+}
+
+.fileEditorCloseMobile {
+  display: none;
+}
+
+.fileEditorEmptyState {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 9px;
+  min-height: 280px;
+  padding: 28px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.fileEditorEmptyState svg {
+  color: var(--primary);
+}
+
+.fileEditorEmptyState strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.fileEditorEmptyState span {
+  max-width: 54ch;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .codeMirrorShell {
@@ -889,20 +1105,76 @@
 
 .fileDetailsToolbar {
   display: grid;
-  grid-template-columns: repeat(7, 30px);
-  gap: 6px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
   align-items: center;
 }
 
-.fileDetailsToolbar .iconButton {
-  width: 30px;
-  height: 30px;
+.fileActionButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 32px;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 0;
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 8px;
 }
 
-.fileDetailsToolbar .dangerIconButton {
+.fileActionButton:hover:not(:disabled),
+.fileActionButton:focus-visible {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  outline: 0;
+}
+
+.fileActionButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.fileActionButton span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dangerFileActionButton {
   color: var(--danger);
+}
+
+.dangerFileActionButton:hover:not(:disabled),
+.dangerFileActionButton:focus-visible {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.fileAdvancedOptions {
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 8px 10px;
+}
+
+.fileAdvancedOptions summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.fileAdvancedOptions .actionCheck {
+  margin-top: 8px;
 }
 
 .fileCommandPopover {
@@ -1110,6 +1382,21 @@
   font-size: 12px;
 }
 
+.fileDiffPreview {
+  max-height: 160px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--canvas);
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 8px;
+  white-space: pre-wrap;
+}
+
 .contextMenuContent {
   z-index: var(--z-dropdown);
   min-width: 160px;
@@ -1212,6 +1499,94 @@
 
 .rootPathApprovalNote > strong {
   color: var(--warning-text);
+}
+
+.bulkPrivilegeInline {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.bulkLiveSummary {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 10px;
+}
+
+.bulkLiveSummary.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.bulkLiveSummary.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.bulkLiveSummary > div:first-child {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.bulkLiveSummary span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.bulkLiveSummary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.bulkLiveSummary.ready strong {
+  color: var(--success-text);
+}
+
+.bulkLiveSummary.attention strong {
+  color: var(--warning-text);
+}
+
+.bulkLiveSummary p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.bulkLiveSummaryTargets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.bulkLiveSummaryTargets span {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  padding: 3px 7px;
+  text-transform: none;
+}
+
+.bulkLiveSummaryTargets span.stale {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.bulkLiveSummaryTargets span.unavailable {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger-strong);
 }
 
 .bulkReadinessSummary {
@@ -1807,9 +2182,48 @@
     padding: 0 10px;
   }
 
-  .fileBrowserStateStrip {
+.fileBrowserStateStrip {
     grid-template-columns: 1fr;
     padding: 10px 12px;
+  }
+
+  .fileBrowserWorkspace.emptyWorkspace {
+    min-height: 0;
+  }
+
+  .fileBrowserWorkspace.editorOpen {
+    min-height: calc(100svh - 180px);
+  }
+
+  .fileBrowserWorkspace.editorOpen .fileTreePane,
+  .fileBrowserWorkspace.editorOpen .fileDetailsPane {
+    display: none;
+  }
+
+  .fileBrowserWorkspace.editorOpen .fileEditorPane {
+    min-height: calc(100svh - 220px);
+  }
+
+  .fileEditorToolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .fileEditorActions {
+    grid-template-columns: minmax(76px, 0.35fr) minmax(0, 1fr);
+  }
+
+  .fileEditorCloseMobile {
+    display: inline-flex;
+    grid-column: 1 / -1;
+  }
+
+  .codeMirrorShell .cm-editor {
+    min-height: calc(100svh - 310px);
+  }
+
+  .fileDetailsToolbar {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1826,7 +2240,9 @@
 }
 
 .topologyEvidenceGrid {
-  grid-template-columns: minmax(180px, 1fr) minmax(110px, 0.55fr) minmax(160px, 1fr) minmax(180px, 1fr) minmax(150px, 0.8fr);
+  grid-template-columns:
+    minmax(180px, 1fr) minmax(110px, 0.55fr) minmax(160px, 1fr)
+    minmax(180px, 1fr) minmax(150px, 0.8fr);
 }
 
 .topologyMetric {
@@ -1843,13 +2259,24 @@
   white-space: nowrap;
 }
 
+.topologyEvidence .topologyMetric strong,
+.topologyEvidence .topologyMetric small {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 .topologyMetric small {
   color: var(--muted);
 }
 
 .fileTransferGrid {
   column-gap: 12px;
-  grid-template-columns: minmax(0, 0.52fr) minmax(0, 1.05fr) minmax(0, 0.9fr) minmax(0, 1.05fr) minmax(0, 1.45fr) minmax(0, 0.8fr) minmax(0, 0.85fr) minmax(0, 0.7fr);
+  grid-template-columns:
+    minmax(0, 0.52fr) minmax(0, 1.05fr) minmax(0, 0.9fr)
+    minmax(0, 1.05fr) minmax(0, 1.45fr) minmax(0, 0.8fr) minmax(0, 0.85fr)
+    minmax(0, 0.7fr);
   min-width: 100%;
   padding-inline: 14px;
 }
@@ -1870,7 +2297,7 @@
 
 .transferLifecycleSummary {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
   gap: 10px;
   padding: 0 18px 14px;
 }
@@ -1949,10 +2376,93 @@
   font-size: 12px;
 }
 
+.transferQuickUpload {
+  display: grid;
+  gap: 12px;
+  margin: 0 18px 12px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--canvas);
+  padding: 12px;
+}
+
+.transferWorkflowHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.transferWorkflowHeader > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.transferWorkflowHeader h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.transferWorkflowHeader span,
+.transferQuickUploadStatus span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.transferWorkflowHeader svg {
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+
+.transferQuickUploadControls {
+  display: grid;
+  grid-template-columns:
+    minmax(180px, 0.95fr) minmax(210px, 1fr) minmax(220px, 1.15fr)
+    max-content;
+  gap: 10px;
+  align-items: end;
+  min-width: 0;
+}
+
+.transferQuickUploadControls label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.transferQuickUploadControls label span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.transferQuickUploadControls input,
+.transferQuickUploadControls .vpsCombobox {
+  min-width: 0;
+}
+
+.transferQuickUploadStatus {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 12px;
+  min-width: 0;
+}
+
 @media (max-width: 640px) {
   .transferFocusBanner {
     align-items: stretch;
     flex-direction: column;
+    margin-inline: 12px;
+  }
+
+  .transferQuickUpload {
     margin-inline: 12px;
   }
 }
@@ -2068,6 +2578,63 @@
   min-width: 150px;
 }
 
+.transferRowSelect {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.transferRowSelect input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.sourceArtifactAdvanced {
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface);
+}
+
+.sourceArtifactAdvanced > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  cursor: pointer;
+  list-style: none;
+  padding: 13px 18px;
+}
+
+.sourceArtifactAdvanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sourceArtifactAdvanced > summary > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sourceArtifactAdvanced > summary strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.sourceArtifactAdvanced > summary small {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.sourceArtifactAdvanced > summary svg {
+  color: var(--muted);
+}
+
 .sourceArtifactPanel {
   display: grid;
   gap: 12px;
@@ -2143,7 +2710,9 @@
 .sourceArtifactEmpty {
   display: grid;
   align-items: center;
-  grid-template-columns: minmax(160px, 1fr) max-content minmax(130px, 0.55fr) 44px;
+  grid-template-columns:
+    minmax(160px, 1fr) max-content minmax(130px, 0.55fr)
+    44px;
   gap: 12px;
   min-height: 52px;
   padding: 10px 12px;
@@ -2176,6 +2745,10 @@
   .transferRetryReview dl {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .transferQuickUploadControls {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 640px) {
@@ -2190,11 +2763,17 @@
   min-width: 0;
 }
 
-.transferProgressCell > span:first-child {
+.transferProgressCell > span:first-child,
+.transferProgressCell small {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.transferProgressCell small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .transferProgressTrack {
@@ -2230,6 +2809,45 @@
 .terminalSessionsPanel .consoleDataGrid,
 .terminalSessionsPanel > .terminalReplayPreview {
   border-top: 1px solid var(--border-subtle);
+}
+
+.terminalAdvancedComposer {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.terminalAdvancedComposer > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 44px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 750;
+  list-style: none;
+  padding: 0 16px;
+}
+
+.terminalAdvancedComposer > summary::-webkit-details-marker {
+  display: none;
+}
+
+.terminalAdvancedComposer > summary::after {
+  content: "Show protocol diagnostics";
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.terminalAdvancedComposer[open] > summary {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.terminalAdvancedComposer[open] > summary::after {
+  content: "Hide protocol diagnostics";
 }
 
 .terminalLaunchPanel {
@@ -2430,6 +3048,133 @@
 
 .processSupervisorSummaryStrip span.attention small {
   color: var(--warning-text);
+}
+
+.processMobileList {
+  display: none;
+}
+
+.processMobileCard {
+  display: grid;
+  gap: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface);
+  padding: 14px 16px;
+}
+
+.processMobileCardHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.processMobileCardHeader > span:first-child {
+  display: grid;
+  flex: 1 1 150px;
+  gap: 3px;
+  min-width: 0;
+}
+
+.processMobileCardHeader .status {
+  flex: 0 0 auto;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.processMobileCardHeader strong,
+.processMobileCardHeader small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.processMobileCardHeader small,
+.processMobileDetail {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.processMobileMetricGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.processMobileMetricGrid div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 8px;
+}
+
+.processMobileMetricGrid dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.processMobileMetricGrid dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 750;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.processMobileDetail {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.processEvidenceValue {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.processInventoryGridShell .gridCell {
+  align-items: flex-start;
+  padding-bottom: 10px;
+  padding-top: 10px;
+}
+
+.processInventoryGridShell .gridCellContent {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.processInventoryGridShell .historyPrimary strong,
+.processInventoryGridShell .historyPrimary small {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.processInventoryGridShell .historyPrimary strong {
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.processInventoryGridShell .historyPrimary small {
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.processInventoryGridShell .status {
+  line-height: 1.2;
+  white-space: normal;
 }
 
 .processRowActions {
@@ -2679,6 +3424,54 @@
   background: var(--text);
 }
 
+.terminalFocusOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0;
+  background: var(--surface);
+}
+
+.terminalFocusOverlay header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 10px 14px;
+}
+
+.terminalFocusOverlay header > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.terminalFocusOverlay header strong,
+.terminalFocusOverlay header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminalFocusOverlay header span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.terminalFocusOverlay .xtermReplay {
+  height: auto;
+  max-height: none;
+  margin: 0;
+  resize: none;
+  border: 0;
+  border-radius: 0;
+}
+
 @media (max-width: 980px) {
   .terminalLaunchGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2756,7 +3549,9 @@
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family:
+    ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono",
+    monospace;
   font-size: 12px;
   line-height: 1.45;
   color: var(--text);
@@ -2893,10 +3688,7 @@
 }
 
 .compactPrivilegeManager {
-  display: flex;
-  justify-content: flex-start;
   border-top: 0;
-  padding: 0;
 }
 
 .privilegeStatus {
@@ -2921,6 +3713,141 @@
 .privilegeFields,
 .inlinePrivilege {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.privilegeVaultWorkflow {
+  align-content: start;
+}
+
+.privilegeStateGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.privilegeStateGrid > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px 12px;
+}
+
+.privilegeStateGrid small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.privilegeStateGrid strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.privilegeVaultNotice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  padding: 10px 12px;
+}
+
+.privilegeVaultNotice span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.privilegeVaultNotice strong {
+  min-width: 0;
+  color: var(--primary-text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.privilegeVaultNotice small,
+.privilegeVaultSection p,
+.vaultSaveOption small {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.privilegeVaultSection {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.privilegeVaultSection h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.privilegeVaultSection .privilegeFields label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.vaultSaveOption {
+  align-items: start;
+}
+
+.privilegeManager .vaultSaveOption span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.35;
+  text-transform: none;
+}
+
+.privilegeManager .vaultSaveOption strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+  text-transform: none;
+}
+
+.privilegeManager .vaultSaveOption small {
+  text-transform: none;
+}
+
+.privilegeActionRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-start;
+}
+
+@media (max-width: 700px) {
+  .privilegeFields,
+  .inlinePrivilege {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .releaseRecordForm {
@@ -2968,6 +3895,21 @@
   justify-content: flex-end;
   gap: 8px;
   min-width: 0;
+}
+
+.releaseActionStack {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  min-width: min(100%, 170px);
+}
+
+.releaseActionStack small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.25;
+  max-width: 210px;
+  text-align: right;
 }
 
 .releasePosture {
@@ -3051,8 +3993,36 @@
 }
 
 .agentReleasesPanel .releaseFormActions,
+.agentReleasesPanel .releaseDrawerHeader,
 .agentReleasesPanel .inlineError {
   grid-column: 1 / -1;
+}
+
+.releaseDrawerHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 10px;
+}
+
+.releaseDrawerHeader > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.releaseDrawerHeader strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.releaseDrawerHeader span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .releaseFormSection {
@@ -3171,6 +4141,14 @@
     justify-content: flex-start;
   }
 
+  .releaseActionStack {
+    justify-items: start;
+  }
+
+  .releaseActionStack small {
+    text-align: left;
+  }
+
   .releasePostureHeader {
     align-items: stretch;
     flex-direction: column;
@@ -3220,6 +4198,28 @@
 }
 
 @media (max-width: 760px) {
+  .processInventoryGridShell {
+    display: none;
+  }
+
+  .processMobileList {
+    display: grid;
+  }
+
+  .processSupervisorSummaryStrip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 10px 14px;
+  }
+
+  .processMobileCard .processRowActions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .processMobileCard .processActionButton {
+    width: 100%;
+  }
+
   .targetImpactGrid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -3285,4 +4285,104 @@
   flex-wrap: wrap;
   gap: 8px;
   margin: 0 18px 14px;
+}
+
+.jobArtifactTypeFilter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.jobArtifactTypeFilter select {
+  min-height: 34px;
+  max-width: 190px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 28px 0 10px;
+}
+
+.scheduleExecutionPolicy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 18px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 9px 10px;
+}
+
+.scheduleExecutionPolicy svg {
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+
+.scheduleExecutionPolicy strong {
+  color: var(--text);
+}
+
+.scheduleNextRunsTrigger {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 26px;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--primary-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+  padding: 0 7px;
+}
+
+.scheduleNextRunsTrigger:hover {
+  background: var(--primary-soft);
+}
+
+.scheduleNextRunsTrigger:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.scheduleRunMenu {
+  min-width: 220px;
+}
+
+.scheduleRunMenuList {
+  display: grid;
+  gap: 2px;
+  padding: 2px;
+}
+
+.scheduleRunMenuItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 6px 8px;
+}
+
+.scheduleRunMenuItem strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.scheduleRunMenuItem span {
+  color: var(--text-secondary);
+  text-align: right;
 }

@@ -11,7 +11,7 @@ async function activate(locator: Locator) {
 }
 
 async function dispatchWithPrompt(composer: Locator) {
-  await activate(composer.getByRole("button", { name: "Review dispatch" }));
+  await activate(composer.getByRole("button", { name: "Dispatch", exact: true }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   await activate(composer.locator(".confirmationPrompt").getByRole("button", { name: "Dispatch job" }));
 }
@@ -35,7 +35,7 @@ test("prepares terminal reconnect actions from retained session inventory", asyn
   await expect(page.getByText("Idle timeout 10m; 64.0 KiB flow window").first()).toBeVisible();
   await expect(page.getByText("1 -> 4")).toHaveCount(0);
   await expect(page.getByText("4 -> 5")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Follow terminal session 61616161" })).toContainText("Follow");
+  await expect(page.getByRole("button", { name: "Stop following terminal session 61616161" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Durable replay terminal session 61616161" })).toContainText("Replay");
   await expect(page.getByRole("button", { name: "Attach terminal session 61616161" })).toContainText("Attach");
   await expect(page.getByRole("button", { name: "Close terminal session 61616161" })).toContainText("Close");

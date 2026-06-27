@@ -6,8 +6,8 @@ use axum::{
 };
 use tokio::sync::broadcast;
 use vpsman_common::{
-    observed_ospf_cost, plan_tunnel, BandwidthTier, CommandOutput, OspfCostPolicy, OutputStream,
-    TunnelKind, TunnelPlan, TunnelPlanInput,
+    observed_ospf_cost, plan_tunnel, CommandOutput, OspfCostPolicy, OutputStream, TunnelKind,
+    TunnelPlan, TunnelPlanInput,
 };
 
 use crate::gateway_client::GatewayDispatchClient;
@@ -222,7 +222,7 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 18.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,
@@ -513,7 +513,7 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 18.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,
@@ -621,7 +621,7 @@ async fn topology_graph_exposes_runtime_status_coverage_and_drift_policy() {
             ipv6_address_pool_cidr: None,
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 18.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,
@@ -740,7 +740,7 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
             ipv6_address_pool_cidr: None,
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 18.0,
             packet_loss_ratio: 0.0,
             preference: 0.5,
@@ -807,19 +807,13 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
         .unwrap();
 
     assert_eq!(recommendation.confidence, "measured");
-    assert_eq!(recommendation.configured_bandwidth, "100m");
-    assert_eq!(recommendation.effective_bandwidth, "10m");
+    assert_eq!(recommendation.configured_bandwidth_mbps, 100);
+    assert_eq!(recommendation.effective_bandwidth_mbps, 40);
     assert_eq!(recommendation.latency_avg_ms, Some(80.0));
     assert_eq!(recommendation.packet_loss_avg_ratio, Some(0.05));
     assert_eq!(recommendation.throughput_avg_mbps, Some(40.0));
-    let (expected_cost, _) = observed_ospf_cost(
-        OspfCostPolicy::default(),
-        BandwidthTier::M100,
-        80.0,
-        0.05,
-        0.5,
-        Some(40.0),
-    );
+    let (expected_cost, _) =
+        observed_ospf_cost(OspfCostPolicy::default(), 100, 80.0, 0.05, 0.5, Some(40.0));
     assert_eq!(recommendation.recommended_ospf_cost, expected_cost as i32);
     assert!(recommendation.recommended_ospf_cost > recommendation.plan_ospf_cost);
     assert!(recommendation.cost_delta > 0);
@@ -850,7 +844,7 @@ fn test_plan_input(right_client_id: &str) -> TunnelPlanInput {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 18.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,

@@ -4,7 +4,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use tokio::sync::broadcast;
 use vpsman_common::{
-    plan_tunnel, AgentCapabilitySnapshot, AgentHello, BandwidthTier, JobCommand, OspfCostPolicy,
+    plan_tunnel, AgentCapabilitySnapshot, AgentHello, JobCommand, OspfCostPolicy,
     RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelTopologyIntent, TunnelEndpointSide,
     TunnelKind, TunnelPlan, TunnelPlanInput, CURRENT_COMMAND_PROTOCOL_VERSION, MANAGED_BIRD2_FILE,
     MIN_COMMAND_PROTOCOL_VERSION,
@@ -58,7 +58,7 @@ async fn tunnel_plan_records_non_mutating_plan_and_audit() {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 18.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,
@@ -518,7 +518,7 @@ async fn create_tunnel_plan_accepts_external_observed_import() {
         ..RuntimeTunnelTopologyIntent::default()
     };
 
-    let state = test_state(repo.clone());
+    let state = test_state_with_privilege_auto_approve(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
     let (status, Json(view)) = crate::routes_network::create_tunnel_plan(
         State(state),
@@ -560,7 +560,7 @@ async fn create_disabled_tunnel_plan_does_not_issue_runtime_sync() {
         seed_online_agent(memory, "right-b").await;
     }
     let input = test_plan_input();
-    let state = test_state(repo.clone());
+    let state = test_state_with_privilege_auto_approve(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
     let (status, Json(view)) = crate::routes_network::create_tunnel_plan(
         State(state),
@@ -888,6 +888,43 @@ async fn network_status_create_job_rejects_wrong_side_target() {
 }
 
 #[tokio::test]
+async fn network_status_create_job_allows_unprivileged_read_submission() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        seed_never_connected_memory_agent(memory, "left-a").await;
+    }
+
+    let request = CreateJobRequest {
+        job_id: Some(Uuid::new_v4()),
+        selector_expression: "id:left-a".to_string(),
+        target_client_ids: vec!["left-a".to_string()],
+        destructive: false,
+        confirmed: false,
+        command: "network_status".to_string(),
+        argv: Vec::new(),
+        operation: Some(JobCommand::NetworkStatus {
+            plan: Box::new(test_plan()),
+            side: TunnelEndpointSide::Left,
+        }),
+        max_timeout_secs: Some(60),
+        force_unprivileged: true,
+        privileged: false,
+        privilege_assertion: None,
+    };
+    let state = test_state_with_privilege_auto_approve(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let (status, Json(response)) = create_job(State(state), headers, Json(request))
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(response.status, "skipped");
+    assert_eq!(response.target_count, 1);
+    let job = repo.get_job(response.job_id).await.unwrap().unwrap();
+    assert!(!job.privileged);
+}
+
+#[tokio::test]
 async fn network_probe_create_job_rejects_wrong_side_target() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
@@ -934,6 +971,43 @@ async fn network_probe_create_job_rejects_wrong_side_target() {
 
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "network_endpoint_target_mismatch");
+}
+
+#[tokio::test]
+async fn network_probe_create_job_requires_privilege_unlock() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        seed_never_connected_memory_agent(memory, "left-a").await;
+    }
+
+    let request = CreateJobRequest {
+        job_id: Some(Uuid::new_v4()),
+        selector_expression: "id:left-a".to_string(),
+        target_client_ids: vec!["left-a".to_string()],
+        destructive: false,
+        confirmed: false,
+        command: "network_probe".to_string(),
+        argv: Vec::new(),
+        operation: Some(JobCommand::NetworkProbe {
+            plan: Box::new(test_plan()),
+            side: TunnelEndpointSide::Left,
+            count: 3,
+            interval_ms: 500,
+        }),
+        max_timeout_secs: Some(60),
+        force_unprivileged: true,
+        privileged: false,
+        privilege_assertion: None,
+    };
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let (status, Json(response)) = create_job(State(state), headers, Json(request))
+        .await
+        .unwrap();
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(response.status, "rejected");
+    assert_eq!(response.target_count, 1);
 }
 
 #[tokio::test]
@@ -1156,7 +1230,7 @@ fn test_plan_input() -> TunnelPlanInput {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 18.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,

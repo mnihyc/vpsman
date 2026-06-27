@@ -180,13 +180,14 @@ impl Repository {
                 sqlx::query(
                     r#"
                     INSERT INTO gateway_sessions (
-                        id, gateway_id, client_id, noise_public_key_hex, status
+                        id, gateway_id, client_id, noise_public_key_hex, remote_ip, status
                     )
-                    VALUES ($1, $2, $3, $4, 'active')
+                    VALUES ($1, $2, $3, $4, $5::inet, 'active')
                     ON CONFLICT (id) DO UPDATE SET
                         gateway_id = EXCLUDED.gateway_id,
                         client_id = EXCLUDED.client_id,
                         noise_public_key_hex = EXCLUDED.noise_public_key_hex,
+                        remote_ip = EXCLUDED.remote_ip,
                         status = 'active',
                         last_seen_at = now(),
                         ended_at = NULL,
@@ -197,6 +198,7 @@ impl Repository {
                 .bind(&event.gateway_id)
                 .bind(&event.client_id)
                 .bind(&event.noise_public_key_hex)
+                .bind(event.remote_ip.as_deref())
                 .execute(&mut *tx)
                 .await?;
                 sqlx::query(
@@ -281,10 +283,11 @@ impl Repository {
                     r#"
                     INSERT INTO gateway_sessions (
                         id, gateway_id, client_id, noise_public_key_hex,
-                        status, ended_at, end_reason
+                        remote_ip, status, ended_at, end_reason
                     )
-                    VALUES ($1, $2, $3, $4, 'ended', now(), $5)
+                    VALUES ($1, $2, $3, $4, $5::inet, 'ended', now(), $6)
                     ON CONFLICT (id) DO UPDATE SET
+                        remote_ip = COALESCE(EXCLUDED.remote_ip, gateway_sessions.remote_ip),
                         status = 'ended',
                         last_seen_at = now(),
                         ended_at = COALESCE(gateway_sessions.ended_at, now()),
@@ -295,6 +298,7 @@ impl Repository {
                 .bind(&event.gateway_id)
                 .bind(&event.client_id)
                 .bind(&event.noise_public_key_hex)
+                .bind(event.remote_ip.as_deref())
                 .bind(&event.reason)
                 .execute(&mut *tx)
                 .await?;
@@ -370,6 +374,8 @@ impl Repository {
                         gateway_sessions.gateway_id,
                         gateway_sessions.client_id,
                         gateway_sessions.noise_public_key_hex,
+                        gateway_sessions.remote_ip::text AS remote_ip,
+                        c.agent_version,
                         gateway_sessions.status,
                         gateway_sessions.started_at::text AS started_at,
                         gateway_sessions.last_seen_at::text AS last_seen_at,
@@ -392,6 +398,8 @@ impl Repository {
                             gateway_id: row.try_get("gateway_id")?,
                             client_id: row.try_get("client_id")?,
                             noise_public_key_hex: row.try_get("noise_public_key_hex")?,
+                            remote_ip: row.try_get("remote_ip")?,
+                            agent_version: row.try_get("agent_version")?,
                             status: row.try_get("status")?,
                             started_at: row.try_get("started_at")?,
                             last_seen_at: row.try_get("last_seen_at")?,
@@ -420,6 +428,10 @@ pub(crate) async fn upsert_memory_gateway_session(
         session.gateway_id = event.gateway_id.clone();
         session.client_id = event.client_id.clone();
         session.noise_public_key_hex = event.noise_public_key_hex.clone();
+        session.remote_ip = event.remote_ip.clone();
+        if let Some(agent_version) = &event.agent_version {
+            session.agent_version = agent_version.clone();
+        }
         session.status = status.to_string();
         session.last_seen_at = now.clone();
         if status == "ended" {
@@ -437,6 +449,8 @@ pub(crate) async fn upsert_memory_gateway_session(
         client_id: event.client_id.clone(),
         status: status.to_string(),
         noise_public_key_hex: event.noise_public_key_hex.clone(),
+        remote_ip: event.remote_ip.clone(),
+        agent_version: event.agent_version.clone().unwrap_or_default(),
         started_at: now.clone(),
         last_seen_at: now.clone(),
         ended_at: (status == "ended").then_some(now),
@@ -528,6 +542,7 @@ mod tests {
             session_id,
             noise_public_key_hex: Some("ab".repeat(32)),
             remote_ip: Some("203.0.113.10".to_string()),
+            agent_version: Some("test".to_string()),
             reason: None,
         }
     }
@@ -593,7 +608,14 @@ mod tests {
             memory.agents.read().await[0].last_ip.as_deref(),
             Some("203.0.113.10")
         );
-        assert_eq!(repo.list_gateway_sessions(10).await.unwrap().len(), 2);
+        let listed_sessions = repo.list_gateway_sessions(10).await.unwrap();
+        let active_session = listed_sessions
+            .iter()
+            .find(|session| session.id == newer)
+            .unwrap();
+        assert_eq!(active_session.remote_ip.as_deref(), Some("203.0.113.10"));
+        assert_eq!(active_session.agent_version, "test");
+        assert_eq!(listed_sessions.len(), 2);
 
         repo.record_gateway_session_ended(&session_event("client-a", newer))
             .await

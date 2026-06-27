@@ -56,11 +56,11 @@ test("job dispatch submits backend-resolved targets when dashboard inventory is 
   await page
     .getByLabel("Bulk target selector expression")
     .fill("id:agent-sfo-01");
-  await activate(page.getByRole("button", { name: "Review dispatch" }));
+  await activate(page.locator(".commandComposer").getByRole("button", { name: "Dispatch", exact: true }));
   await expect(page.getByText("Confirm job dispatch")).toBeVisible();
   await page.getByLabel("Command argv").fill("/usr/bin/id");
   await expect(page.getByText("Confirm job dispatch")).toBeHidden();
-  await activate(page.getByRole("button", { name: "Review dispatch" }));
+  await activate(page.locator(".commandComposer").getByRole("button", { name: "Dispatch", exact: true }));
   await expect(page.getByText("Confirm job dispatch")).toBeVisible();
   await activate(
     page
@@ -86,7 +86,7 @@ test("job dispatch submits backend-resolved targets when dashboard inventory is 
   });
 });
 
-test("bulk file review resolves targets again instead of executing cached preview", async ({
+test("bulk file run resolves targets again instead of executing cached preview", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -101,7 +101,7 @@ test("bulk file review resolves targets again instead of executing cached previe
   await openConsoleSubpage(page, "Remote Operations", "Bulk files");
   await unlockPrivilegeFor(page, "Remote Operations", "Bulk files");
 
-  await activate(page.getByRole("button", { name: "Review targets" }));
+  await activate(page.getByRole("button", { name: "Refresh scope" }));
   await expect(page.getByText("3 VPSs resolved")).toBeVisible();
   const resolveCountAfterPreview = await page.evaluate(() => {
     const requests = (
@@ -112,15 +112,15 @@ test("bulk file review resolves targets again instead of executing cached previe
   expect(resolveCountAfterPreview).toBe(1);
 
   await page.getByLabel("Bulk file path").fill("/etc/app.conf");
-  await activate(page.getByRole("button", { name: "Review download" }));
+  await activate(page.getByRole("button", { name: "Run download" }));
   await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
   await activate(page.getByRole("button", { name: "Close confirmation" }));
   await expect(page.getByText("Confirm bulk file operation")).toBeHidden();
-  await activate(page.getByRole("button", { name: "Review download" }));
+  await activate(page.getByRole("button", { name: "Run download" }));
   await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
   await page.getByLabel("Bulk file path").fill("/etc/app.conf.d/current");
   await expect(page.getByText("Confirm bulk file operation")).toBeHidden();
-  await activate(page.getByRole("button", { name: "Review download" }));
+  await activate(page.getByRole("button", { name: "Run download" }));
   await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
   const resolveCountAfterReview = await page.evaluate(() => {
     const requests = (
@@ -130,7 +130,11 @@ test("bulk file review resolves targets again instead of executing cached previe
   });
   expect(resolveCountAfterReview).toBe(4);
 
-  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
+  await activate(
+    page
+      .getByLabel("Confirm bulk file operation")
+      .getByRole("button", { name: "Download files" }),
+  );
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -149,7 +153,7 @@ test("bulk file review resolves targets again instead of executing cached previe
   });
 });
 
-test("bulk file async review preparation ignores stale path edits", async ({
+test("bulk file async run preparation ignores stale path edits", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -165,15 +169,19 @@ test("bulk file async review preparation ignores stale path edits", async ({
   await unlockPrivilegeFor(page, "Remote Operations", "Bulk files");
 
   await page.getByLabel("Bulk file path").fill("/etc/app.conf");
-  await activate(page.getByRole("button", { name: "Review download" }));
-  await expect(page.getByText("Preparing bulk file review")).toBeVisible();
+  await activate(page.getByRole("button", { name: "Run download" }));
+  await expect(page.getByText("Preparing bulk file run")).toBeVisible();
   await page.getByLabel("Bulk file path").fill("/etc/app.conf.next");
-  await expect(page.getByText("Preparing bulk file review")).toBeHidden();
+  await expect(page.getByText("Preparing bulk file run")).toBeHidden();
   await expect(page.getByText("Confirm bulk file operation")).toBeHidden();
 
-  await activate(page.getByRole("button", { name: "Review download" }));
+  await activate(page.getByRole("button", { name: "Run download" }));
   await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
-  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
+  await activate(
+    page
+      .getByLabel("Confirm bulk file operation")
+      .getByRole("button", { name: "Download files" }),
+  );
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -208,14 +216,20 @@ test("bulk config review uses the current backend-resolved selector instead of a
   await panel
     .getByRole("searchbox", { name: "Bulk patch target expression" })
     .fill("id:agent-sfo-01");
-  await activate(panel.getByRole("button", { name: "Review targets" }));
-  await expect(panel.getByText("1/3")).toBeVisible();
+  await activate(panel.getByRole("button", { name: "Preview changes" }));
+  await expect(panel.getByText("1 VPS resolved")).toBeVisible();
   await panel
     .getByRole("searchbox", { name: "Bulk patch target expression" })
     .fill("id:agent-fra-02");
-  await activate(panel.getByRole("button", { name: "Review apply" }));
+  await expect(
+    panel.getByRole("button", { name: "Apply patch" }),
+  ).toBeDisabled();
+  await activate(panel.getByRole("button", { name: "Preview changes" }));
+  await activate(panel.getByRole("button", { name: "Apply patch" }));
   await expect(page.getByText("Confirm bulk patch")).toBeVisible();
-  await activate(page.getByRole("button", { name: "Apply runtime config patch" }));
+  await activate(
+    page.getByRole("button", { name: "Apply runtime config patch" }),
+  );
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -253,7 +267,9 @@ test("bulk tag mutation requires a fresh preview after selector edits", async ({
   await page
     .getByRole("searchbox", { name: "Bulk tag selector expression" })
     .fill("id:agent-fra-02");
-  await expect(page.getByRole("button", { name: "Review mutation" })).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Review mutation" }),
+  ).toBeDisabled();
   await activate(page.getByRole("button", { name: "Preview targets" }));
   await activate(page.getByRole("button", { name: "Review mutation" }));
   await expect(page.getByText("Confirm tag mutation")).toBeVisible();
@@ -291,13 +307,13 @@ test("job dispatch async review preparation ignores stale edits", async ({
   await page
     .getByLabel("Bulk target selector expression")
     .fill("id:agent-sfo-01");
-  await activate(page.getByRole("button", { name: "Review dispatch" }));
-  await expect(page.getByText("Preparing dispatch review")).toBeVisible();
+  await activate(page.locator(".commandComposer").getByRole("button", { name: "Dispatch", exact: true }));
+  await expect(page.getByText("Preparing dispatch confirmation")).toBeVisible();
   await page.getByLabel("Command argv").fill("/usr/bin/id");
-  await expect(page.getByText("Preparing dispatch review")).toBeHidden();
+  await expect(page.getByText("Preparing dispatch confirmation")).toBeHidden();
   await expect(page.getByText("Confirm job dispatch")).toBeHidden();
 
-  await activate(page.getByRole("button", { name: "Review dispatch" }));
+  await activate(page.locator(".commandComposer").getByRole("button", { name: "Dispatch", exact: true }));
   await expect(page.getByText("Confirm job dispatch")).toBeVisible();
   await activate(
     page
@@ -380,38 +396,45 @@ test("artifact cleanup async preview ignores stale expression edits", async ({
   const cleanupPanel = page.locator(".fleetPanel", {
     has: page.getByRole("heading", { name: "Artifact cleanup" }),
   });
-  const expression = cleanupPanel.getByLabel("Expression");
-  await expression.fill('artifact.domain = "job_output"');
+  const objectPrefix = cleanupPanel.getByLabel("Object path prefix");
+  await objectPrefix.fill("job-outputs/");
   await activate(cleanupPanel.getByRole("button", { name: "Preview" }));
   await expect(page.getByText("Preparing cleanup preview")).toBeVisible();
-  await expression.fill('artifact.domain = "file_transfer_source"');
+  await objectPrefix.fill("file-transfer-sources/");
   await expect(page.getByText("Preparing cleanup preview")).toBeHidden();
-  await expect(cleanupPanel.getByLabel("Preview hash")).toHaveValue(
-    "Preview required before queueing",
-  );
-  await expect(cleanupPanel.getByLabel("Matched")).toHaveValue(
-    "Preview required before queueing",
+  await expect(cleanupPanel.getByLabel("Cleanup preview result")).toContainText(
+    "Preview required",
   );
   await expect(
-    cleanupPanel.getByRole("button", { name: "Queue cleanup" }),
+    cleanupPanel.getByRole("button", { name: "Delete artifacts" }),
   ).toBeDisabled();
 
   await activate(cleanupPanel.getByRole("button", { name: "Preview" }));
-  await expect(cleanupPanel.getByLabel("Preview hash")).toHaveValue(
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  await expect(cleanupPanel.getByLabel("Cleanup preview result")).toContainText(
+    "1 artifacts / 22 B",
   );
-  await expect(cleanupPanel.getByLabel("Matched")).toHaveValue("1 / 22 B");
-  await expect(cleanupPanel).toContainText("Ready after dry run");
-  await expect(cleanupPanel).toContainText(
-    "Age and retention rule not reported",
+  await expect(
+    cleanupPanel.getByLabel("Artifact cleanup readiness"),
+  ).toContainText("Ready for confirmation");
+  await expect(
+    cleanupPanel.getByLabel("Representative cleanup objects"),
+  ).toContainText("file-transfer-sources/");
+  await expect(
+    cleanupPanel.getByRole("button", { name: "Delete artifacts" }),
+  ).toBeEnabled();
+  await activate(
+    cleanupPanel.getByRole("button", { name: "Delete artifacts" }),
   );
-  await activate(cleanupPanel.getByRole("button", { name: "Queue cleanup" }));
-  await expect(page.getByRole("region", { name: "Confirm artifact cleanup" })).toBeVisible();
-  await page.getByLabel("Type DELETE to confirm artifact cleanup").fill("DELETE");
+  await expect(
+    page.getByRole("region", { name: "Confirm artifact deletion" }),
+  ).toBeVisible();
+  await page
+    .getByLabel("Type DELETE to confirm artifact deletion")
+    .fill("DELETE");
   await activate(
     page
       .locator(".confirmationPrompt")
-      .getByRole("button", { name: "Queue cleanup" }),
+      .getByRole("button", { name: "Delete artifacts" }),
   );
 
   const request = await page.evaluate(() => {
@@ -424,10 +447,12 @@ test("artifact cleanup async preview ignores stale expression edits", async ({
   });
   expect(request).toMatchObject({
     domains: ["job_output", "file_transfer"],
-    expression: 'artifact.domain = "file_transfer_source"',
     preview_hash:
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   });
+  expect((request as { expression?: string }).expression).toContain(
+    'artifact.object = "file-transfer-sources/*"',
+  );
 });
 
 test("backup policy review submits a frozen target list and privilege assertion", async ({
@@ -485,7 +510,9 @@ test("backup workflow confirmations clear when switching backup subpages", async
   await openConsoleSubpage(page, "Backups", "Requests");
   await unlockPrivilegeFor(page, "Backups", "Requests");
 
-  await activate(page.getByRole("button", { name: "Open backup request", exact: true }));
+  await activate(
+    page.getByRole("button", { name: "Open backup request", exact: true }),
+  );
   const requestWorkflow = page.getByLabel("Open backup request");
   await chooseVpsBySearch(
     requestWorkflow,
@@ -493,8 +520,12 @@ test("backup workflow confirmations clear when switching backup subpages", async
     "sfo",
     /edge-sfo-01.*agent-sfo-01/,
   );
-  await activate(requestWorkflow.getByRole("button", { name: "Review backup" }));
-  await expect(requestWorkflow.getByLabel("Confirm backup request")).toBeVisible();
+  await activate(
+    requestWorkflow.getByRole("button", { name: "Review backup" }),
+  );
+  await expect(
+    requestWorkflow.getByLabel("Confirm backup request"),
+  ).toBeVisible();
 
   await openConsoleSubpage(page, "Backups", "Policies");
   await expect(page.getByLabel("Confirm backup request")).toBeHidden();
@@ -541,9 +572,9 @@ test("template render preview follows the selected VPS without submitting apply 
     return requests.jobs.length;
   });
   expect(jobCount).toBe(0);
-  await expect(
-    panel.getByRole("button", { name: "Review apply" }),
-  ).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Apply patch" })).toHaveCount(
+    0,
+  );
 });
 
 test("bulk config async review preparation ignores stale selector edits", async ({
@@ -563,15 +594,18 @@ test("bulk config async review preparation ignores stale selector edits", async 
     name: "Bulk patch target expression",
   });
   await selector.fill("id:agent-sfo-01");
-  await activate(panel.getByRole("button", { name: "Review apply" }));
-  await expect(page.getByText("Preparing bulk patch review")).toBeVisible();
+  await activate(panel.getByRole("button", { name: "Preview changes" }));
+  await expect(page.getByText("Previewing bulk patch changes")).toBeVisible();
   await selector.fill("id:agent-fra-02");
-  await expect(page.getByText("Preparing bulk patch review")).toBeHidden();
+  await expect(page.getByText("Previewing bulk patch changes")).toBeHidden();
   await expect(page.getByText("Confirm bulk patch")).toBeHidden();
 
-  await activate(panel.getByRole("button", { name: "Review apply" }));
+  await activate(panel.getByRole("button", { name: "Preview changes" }));
+  await activate(panel.getByRole("button", { name: "Apply patch" }));
   await expect(page.getByText("Confirm bulk patch")).toBeVisible();
-  await activate(page.getByRole("button", { name: "Apply runtime config patch" }));
+  await activate(
+    page.getByRole("button", { name: "Apply runtime config patch" }),
+  );
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -613,10 +647,18 @@ test("template assignment async review ignores stale selector edits", async ({
   await expect(
     page.getByText("Preparing template assignment review"),
   ).toBeHidden();
-  await expect(panel.locator(".confirmationPrompt").getByText("Confirm template assignment")).toBeHidden();
+  await expect(
+    panel
+      .locator(".confirmationPrompt")
+      .getByText("Confirm template assignment"),
+  ).toBeHidden();
 
   await activate(panel.getByRole("button", { name: "Review assignment" }));
-  await expect(panel.locator(".confirmationPrompt").getByText("Confirm template assignment")).toBeVisible();
+  await expect(
+    panel
+      .locator(".confirmationPrompt")
+      .getByText("Confirm template assignment"),
+  ).toBeVisible();
   await activate(
     panel.locator(".confirmationPrompt").getByRole("button", {
       name: "Apply template assignment",
@@ -785,15 +827,15 @@ test("topology network test confirmation closes on edit and submits a fresh snap
   await unlockPrivilegeFor(page, "Network", "Tests");
 
   await page.getByLabel("Network test max timeout seconds").fill("90");
-  await activate(page.getByRole("button", { name: "Review inspect" }));
-  await expect(page.getByText("Confirm status")).toBeVisible();
+  await activate(page.getByRole("button", { name: "Review speed test" }));
+  await expect(page.getByText("Confirm speed test")).toBeVisible();
   await page.getByLabel("Network test max timeout seconds").fill("120");
-  await expect(page.getByText("Confirm status")).toBeHidden();
-  await activate(page.getByRole("button", { name: "Review inspect" }));
-  await expect(page.getByText("Confirm status")).toBeVisible();
+  await expect(page.getByText("Confirm speed test")).toBeHidden();
+  await activate(page.getByRole("button", { name: "Review speed test" }));
+  await expect(page.getByText("Confirm speed test")).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", {
-      name: "Inspect side",
+      name: "Run speed test",
     }),
   );
 
@@ -804,13 +846,14 @@ test("topology network test confirmation closes on edit and submits a fresh snap
     return requests.jobs.at(-1);
   });
   expect(request).toMatchObject({
-    command: "network_status",
-    selector_expression: "id:agent-sfo-01",
-    target_client_ids: ["agent-sfo-01"],
+    command: "network_speed_test",
+    confirmed: true,
+    selector_expression: "id:agent-sfo-01 || id:agent-fra-02",
+    target_client_ids: ["agent-sfo-01", "agent-fra-02"],
     max_timeout_secs: 120,
     operation: {
-      side: "left",
-      type: "network_status",
+      server_side: "left",
+      type: "network_speed_test",
     },
   });
 });
@@ -827,36 +870,37 @@ test("topology async review preparation ignores stale edits", async ({
   await openConsoleSubpage(page, "Network", "Tests");
   await unlockPrivilegeFor(page, "Network", "Tests");
 
-  await activate(page.getByRole("button", { name: "Review inspect" }));
-  await expect(page.getByText("Preparing status review")).toBeVisible();
+  await activate(page.getByRole("button", { name: "Review speed test" }));
+  await expect(page.getByText("Preparing speed test review")).toBeVisible();
   await page.getByLabel("Network test max timeout seconds").fill("135");
-  await expect(page.getByText("Preparing status review")).toBeHidden();
-  await expect(page.getByText("Confirm status")).toBeHidden();
-  await activate(page.getByRole("button", { name: "Review inspect" }));
-  await expect(page.getByText("Confirm status")).toBeVisible();
+  await expect(page.getByText("Preparing speed test review")).toBeHidden();
+  await expect(page.getByText("Confirm speed test")).toBeHidden();
+  await activate(page.getByRole("button", { name: "Review speed test" }));
+  await expect(page.getByText("Confirm speed test")).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", {
-      name: "Inspect side",
+      name: "Run speed test",
     }),
   );
 
-  const statusRequest = await page.evaluate(() => {
+  const speedRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
     ).__vpsmanTestRequests;
     return requests.jobs.at(-1);
   });
-  expect(statusRequest).toMatchObject({
-    command: "network_status",
+  expect(speedRequest).toMatchObject({
+    command: "network_speed_test",
+    confirmed: true,
     max_timeout_secs: 135,
     operation: {
-      side: "left",
-      type: "network_status",
+      server_side: "left",
+      type: "network_speed_test",
     },
   });
 
   await openConsoleSubpage(page, "Network", "OSPF");
-  await activate(page.getByRole("button", { name: "Review cost update" }));
+  await activate(page.getByRole("button", { name: "Apply cost" }));
   await expect(page.getByText("Confirm OSPF cost update")).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", {
@@ -875,7 +919,11 @@ test("topology async review preparation ignores stale edits", async ({
     return requests.tunnelPlanOspfCostUpdates.at(-1);
   });
   expect(ospfRequest).toMatchObject({
-    body: { confirmed: true },
+    body: {
+      confirmed: true,
+      mutation_intent: "apply",
+      recommendation_id: "ospf-1234abcd5678ef90",
+    },
   });
 });
 
@@ -912,13 +960,19 @@ test("OSPF cost update and rollback submit reviewed server-side plan mutations",
   await openConsoleSubpage(page, "Network", "OSPF");
   await unlockPrivilegeFor(page, "Network", "OSPF");
 
-  await activate(page.getByRole("button", { name: "Review cost update" }));
+  await expect(
+    page.getByRole("button", { name: "Rollback cost" }),
+  ).toBeDisabled();
+  await activate(page.getByRole("button", { name: "Apply cost" }));
   const applyPrompt = page.locator(".confirmationPrompt").last();
   await expect(applyPrompt).toContainText("Confirm OSPF cost update");
   await expect(applyPrompt).toContainText("Apply recommended cost");
+  await expect(applyPrompt).toContainText("Recommendation ID");
   await expect(applyPrompt).toContainText("14 -> 22 (+8)");
   await expect(applyPrompt).toContainText("network.ospf_cost.apply");
-  await expect(applyPrompt).toContainText("client:agent-sfo-01, client:agent-fra-02");
+  await expect(applyPrompt).toContainText(
+    "client:agent-sfo-01, client:agent-fra-02",
+  );
   await activate(
     applyPrompt.getByRole("button", {
       name: "Update cost",
@@ -938,18 +992,22 @@ test("OSPF cost update and rollback submit reviewed server-side plan mutations",
   expect(request).toMatchObject({
     body: {
       confirmed: true,
+      mutation_intent: "apply",
+      recommendation_id: "ospf-1234abcd5678ef90",
       current_ospf_cost: 14,
       recommended_ospf_cost: 22,
     },
   });
 
-  await activate(page.getByRole("button", { name: "Review rollback" }));
+  await activate(page.getByRole("button", { name: "Rollback cost" }));
   const rollbackPrompt = page.locator(".confirmationPrompt").last();
   await expect(rollbackPrompt).toContainText("Confirm OSPF rollback");
-  await expect(rollbackPrompt).toContainText("Rollback to prior cost");
+  await expect(rollbackPrompt).toContainText("Rollback applied recommendation");
   await expect(rollbackPrompt).toContainText("22 -> 14 (-8)");
   await expect(rollbackPrompt).toContainText("network.ospf_cost.rollback");
-  await expect(rollbackPrompt).toContainText("client:agent-sfo-01, client:agent-fra-02");
+  await expect(rollbackPrompt).toContainText(
+    "client:agent-sfo-01, client:agent-fra-02",
+  );
   await activate(
     rollbackPrompt.getByRole("button", {
       name: "Rollback cost",
@@ -969,6 +1027,8 @@ test("OSPF cost update and rollback submit reviewed server-side plan mutations",
   expect(rollbackRequest).toMatchObject({
     body: {
       confirmed: true,
+      mutation_intent: "rollback",
+      recommendation_id: "ospf-1234abcd5678ef90",
       current_ospf_cost: 22,
       recommended_ospf_cost: 14,
     },
@@ -985,15 +1045,18 @@ test("custom adapter submits a fresh snapshot after reopening review", async ({
   await installConsoleApiMock(page);
   await page.goto("/");
   await openConsoleSubpage(page, "Network", "Tunnel plans");
+  await activate(page.getByRole("button", { name: "Promotion workflow" }));
 
-  const promotionPanel = page.locator(".scheduleComposer", {
-    has: page.getByRole("heading", { name: "Tunnel promotion" }),
-  });
+  const promotionPanel = page.getByLabel("Tunnel plan promotion workflow");
   const adapterForm = promotionPanel.locator("form", {
     has: page.getByRole("heading", { name: "Custom adapter" }),
   });
-  await expect(promotionPanel.getByText("Promotion diff workflow")).toBeVisible();
-  await activate(promotionPanel.getByText("Advanced: custom adapter promotion"));
+  await expect(
+    promotionPanel.getByText("Promotion diff workflow"),
+  ).toBeVisible();
+  await activate(
+    promotionPanel.getByText("Advanced: custom adapter promotion"),
+  );
   for (const argvLabel of [
     "Status argv",
     "Start argv",
@@ -1002,10 +1065,9 @@ test("custom adapter submits a fresh snapshot after reopening review", async ({
     "Cleanup argv",
     "Traffic argv",
   ]) {
-    await expect(adapterForm.getByLabel(argvLabel, { exact: true })).toHaveAttribute(
-      "title",
-      /Command and arguments executed by the adapter/,
-    );
+    await expect(
+      adapterForm.getByLabel(argvLabel, { exact: true }),
+    ).toHaveAttribute("title", /Command and arguments executed by the adapter/);
   }
   await adapterForm
     .getByLabel("Observed plan")
@@ -1014,15 +1076,16 @@ test("custom adapter submits a fresh snapshot after reopening review", async ({
   await statusArgv.fill(
     "/usr/local/libexec/vpsman-openvpn-adapter\nstatus-a\n{interface}",
   );
-  await activate(adapterForm.getByRole("button", { name: "Review custom adapter" }));
+  await activate(
+    adapterForm.getByRole("button", { name: "Review custom adapter" }),
+  );
   const promotionConfirmation = promotionPanel.locator(".confirmationPrompt", {
     hasText: "Confirm custom adapter",
   });
   await expect(promotionConfirmation).toBeVisible();
-  await expect(promotionConfirmation.locator("dd", { hasText: "status-a" })).toHaveAttribute(
-    "title",
-    /status-a/,
-  );
+  await expect(
+    promotionConfirmation.locator("dd", { hasText: "status-a" }),
+  ).toHaveAttribute("title", /status-a/);
   await activate(
     promotionConfirmation.getByRole("button", { name: "Close confirmation" }),
   );
@@ -1030,7 +1093,9 @@ test("custom adapter submits a fresh snapshot after reopening review", async ({
   await statusArgv.fill(
     "/usr/local/libexec/vpsman-openvpn-adapter\nstatus-b\n{interface}",
   );
-  await activate(adapterForm.getByRole("button", { name: "Review custom adapter" }));
+  await activate(
+    adapterForm.getByRole("button", { name: "Review custom adapter" }),
+  );
   await expect(promotionConfirmation).toBeVisible();
   await activate(
     promotionConfirmation.getByRole("button", {
@@ -1070,7 +1135,9 @@ test("single config applies one-VPS override from a frozen exact target", async 
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await page.evaluate(() => localStorage.removeItem("vpsman.config.single.clientId"));
+  await page.evaluate(() =>
+    localStorage.removeItem("vpsman.config.single.clientId"),
+  );
   await openConsoleSubpage(page, "Config", "Per-VPS");
   await unlockPrivilegeFor(page, "Config", "Per-VPS");
 
@@ -1081,22 +1148,30 @@ test("single config applies one-VPS override from a frozen exact target", async 
     "fra",
     /core-fra-02.*agent-fra-02/,
   );
-  await activate(panel.getByRole("button", { name: "Read runtime config" }));
+  await activate(panel.getByRole("button", { name: "Read current config" }));
   const editor = panel.getByLabel("VPS redacted runtime config TOML");
   await expect(editor).toHaveValue(/client_id = "agent-fra-02"/);
   await expect(editor).toHaveAttribute("readonly", "");
 
-  await panel.getByLabel("One-VPS runtime config override TOML").fill("[update]\nunmanaged_enabled = true\n");
-  await activate(panel.getByRole("button", { name: "Review one-VPS apply" }));
-  await expect(page.getByLabel("Confirm one-VPS runtime config override")).toBeVisible();
+  await panel
+    .getByLabel("One-VPS runtime config override TOML")
+    .fill("[update]\nunmanaged_enabled = true\n");
+  await activate(panel.getByRole("button", { name: "Apply patch" }));
+  await expect(
+    page.getByLabel("Confirm one-VPS runtime config override"),
+  ).toBeVisible();
   await chooseVpsBySearch(
     panel,
     "VPS config target",
     "sfo",
     /edge-sfo-01.*agent-sfo-01/,
   );
-  await expect(page.getByLabel("Confirm one-VPS runtime config override")).toBeHidden();
-  await expect(panel.getByRole("button", { name: "Review one-VPS apply" })).toBeDisabled();
+  await expect(
+    page.getByLabel("Confirm one-VPS runtime config override"),
+  ).toBeHidden();
+  await expect(panel.getByRole("button", { name: "Apply patch" })).toHaveCount(
+    0,
+  );
 
   await chooseVpsBySearch(
     panel,
@@ -1105,23 +1180,35 @@ test("single config applies one-VPS override from a frozen exact target", async 
     /core-fra-02.*agent-fra-02/,
   );
   await expect(panel.locator(".configTargetMeta")).toContainText("core-fra-02");
-  await activate(panel.getByRole("button", { name: "Read runtime config" }));
+  await activate(panel.getByRole("button", { name: "Read current config" }));
   await expect(editor).toHaveValue(/client_id = "agent-fra-02"/);
-  await expect(panel.getByLabel("One-VPS config override guard")).toContainText("bbbbbbbb");
-  await panel.getByLabel("One-VPS runtime config override TOML").fill("[update]\nunmanaged_enabled = true\n");
-  await activate(panel.getByRole("button", { name: "Review one-VPS apply" }));
-  const confirmation = page.getByLabel("Confirm one-VPS runtime config override");
+  await expect(panel.getByLabel("One-VPS config override guard")).toContainText(
+    "bbbbbbbb",
+  );
+  await panel
+    .getByLabel("One-VPS runtime config override TOML")
+    .fill("[update]\nunmanaged_enabled = true\n");
+  await activate(panel.getByRole("button", { name: "Apply patch" }));
+  const confirmation = page.getByLabel(
+    "Confirm one-VPS runtime config override",
+  );
   await expect(confirmation).toBeVisible();
-  await activate(confirmation.getByRole("button", { name: "Apply one-VPS override" }));
+  await activate(
+    confirmation.getByRole("button", { name: "Apply one-VPS override" }),
+  );
 
   const readRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
     ).__vpsmanTestRequests;
-    return requests.jobs.find((request) => (request as { command?: string }).command === "config_read");
+    return requests.jobs.find(
+      (request) => (request as { command?: string }).command === "config_read",
+    );
   });
   expect(readRequest).toMatchObject({
     command: "config_read",
+    force_unprivileged: true,
+    privileged: false,
     selector_expression: "id:agent-fra-02",
     target_client_ids: ["agent-fra-02"],
     operation: {
@@ -1132,7 +1219,9 @@ test("single config applies one-VPS override from a frozen exact target", async 
   const patchRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as {
-        __vpsmanTestRequests: { runtimeConfigPatches: Array<Record<string, unknown>> };
+        __vpsmanTestRequests: {
+          runtimeConfigPatches: Array<Record<string, unknown>>;
+        };
       }
     ).__vpsmanTestRequests;
     return requests.runtimeConfigPatches.at(-1);
@@ -1152,7 +1241,8 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     testInfo.project.name.includes("mobile"),
     "backup restore consistency is covered in desktop workflow tests",
   );
-  const archivePath = "/var/lib/vpsman/restores/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.tar";
+  const archivePath =
+    "/var/lib/vpsman/restores/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.tar";
   const archiveSizeBytes = 512;
   const archiveSha256Hex = "b".repeat(64);
   const destinationRoot = `/var/lib/vpsman/restores/${backupId}/agent-fra-02`;
@@ -1179,9 +1269,7 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     restoreWorkflow.getByLabel("Confirm restore plan"),
   ).toBeVisible();
   await restoreWorkflow.getByLabel("Restore note").fill("restore-b");
-  await expect(
-    restoreWorkflow.getByLabel("Confirm restore plan"),
-  ).toBeHidden();
+  await expect(restoreWorkflow.getByLabel("Confirm restore plan")).toBeHidden();
   await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
   await expect(
     restoreWorkflow.getByLabel("Confirm restore plan"),
@@ -1214,25 +1302,23 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review restore" }),
   );
-  await expect(
-    restoreWorkflow.getByLabel("Confirm restore run"),
-  ).toBeVisible();
+  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
   await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("45");
-  await expect(
-    restoreWorkflow.getByLabel("Confirm restore run"),
-  ).toBeHidden();
+  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeHidden();
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review restore" }),
   );
-  await expect(
-    restoreWorkflow.getByLabel("Confirm restore run"),
-  ).toBeVisible();
-  const restoreRunConfirmation = restoreWorkflow.getByLabel("Confirm restore run");
+  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
+  const restoreRunConfirmation = restoreWorkflow.getByLabel(
+    "Confirm restore run",
+  );
   await expect(
     restoreRunConfirmation.locator("dd", { hasText: archivePath }),
   ).toHaveAttribute("title", archivePath);
   await expect(
-    restoreRunConfirmation.locator("dd", { hasText: archiveSha256Hex.slice(0, 12) }),
+    restoreRunConfirmation.locator("dd", {
+      hasText: archiveSha256Hex.slice(0, 12),
+    }),
   ).toHaveAttribute("title", archiveSha256Hex);
   await activate(
     restoreWorkflow
@@ -1270,7 +1356,8 @@ test("backup restore async review preparation ignores stale edits", async ({
     testInfo.project.name.includes("mobile"),
     "backup restore async review consistency is covered in desktop workflow tests",
   );
-  const archivePath = "/var/lib/vpsman/restores/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.tar";
+  const archivePath =
+    "/var/lib/vpsman/restores/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.tar";
   const destinationRoot = `/var/lib/vpsman/restores/${backupId}/agent-fra-02`;
 
   await installConsoleApiMock(page);
@@ -1294,9 +1381,7 @@ test("backup restore async review preparation ignores stale edits", async ({
   await expect(page.getByText("Preparing restore plan review")).toBeVisible();
   await restoreWorkflow.getByLabel("Restore note").fill("restore-stale-b");
   await expect(page.getByText("Preparing restore plan review")).toBeHidden();
-  await expect(
-    restoreWorkflow.getByLabel("Confirm restore plan"),
-  ).toBeHidden();
+  await expect(restoreWorkflow.getByLabel("Confirm restore plan")).toBeHidden();
 
   await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
   await expect(
@@ -1318,16 +1403,12 @@ test("backup restore async review preparation ignores stale edits", async ({
   await expect(page.getByText("Preparing restore run review")).toBeVisible();
   await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("55");
   await expect(page.getByText("Preparing restore run review")).toBeHidden();
-  await expect(
-    restoreWorkflow.getByLabel("Confirm restore run"),
-  ).toBeHidden();
+  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeHidden();
 
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review restore" }),
   );
-  await expect(
-    restoreWorkflow.getByLabel("Confirm restore run"),
-  ).toBeVisible();
+  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
   await activate(
     restoreWorkflow
       .getByLabel("Confirm restore run")

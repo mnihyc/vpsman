@@ -4,8 +4,8 @@ use axum::{extract::State, http::StatusCode, Json};
 use serde_json::json;
 use tokio::sync::broadcast;
 use vpsman_common::{
-    AgentHello, AgentMetrics, BandwidthTier, GatewayTelemetryIngest, RuntimeTunnelManager,
-    RuntimeTunnelStat, TelemetryEnvelope, TunnelEndpointSide, TunnelKind, MANAGED_BIRD2_FILE,
+    AgentHello, AgentMetrics, GatewayTelemetryIngest, RuntimeTunnelManager, RuntimeTunnelStat,
+    TelemetryEnvelope, TunnelEndpointSide, TunnelKind, MANAGED_BIRD2_FILE,
 };
 
 use crate::{gateway_client::GatewayDispatchClient, model::PromoteTelemetryTunnelRequest};
@@ -59,7 +59,7 @@ async fn promote_telemetry_tunnel_creates_external_observed_plan_and_audit() {
             latency_primary_family: Default::default(),
             side: Some(TunnelEndpointSide::Left),
             name: Some("wg42-import".to_string()),
-            bandwidth: Some(BandwidthTier::M1000),
+            bandwidth_mbps: Some(1000),
             latency_ms: Some(8.0),
             packet_loss_ratio: Some(0.0),
             preference: Some(2.0),
@@ -232,7 +232,7 @@ async fn promote_telemetry_tunnel_rejects_non_import_candidate() {
             latency_primary_family: Default::default(),
             side: None,
             name: None,
-            bandwidth: None,
+            bandwidth_mbps: None,
             latency_ms: None,
             packet_loss_ratio: None,
             preference: None,

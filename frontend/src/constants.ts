@@ -71,102 +71,329 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     {
       id: "overview",
       label: "Overview",
-      description: "Fleet posture, quick actions, attention queue, and recent activity",
+      description:
+        "Fleet posture, quick actions, attention queue, and recent activity",
     },
   ],
   Fleet: [
-    { id: "instances", label: "Instances", description: "Canonical VPS inventory and row actions" },
-    { id: "monitor", label: "Monitor", description: "Komari-style VPS health cards for quick scanning" },
-    { id: "groups", label: "Groups", description: "Tag registry and saved resource grouping" },
-    { id: "group_assignments", label: "Assignments", description: "VPS-centric group/tag assignment" },
-    { id: "group_bulk", label: "Bulk groups", description: "Selector-based group/tag mutations with review" },
-    { id: "alerts", label: "Alerts", description: "Active fleet-resource alert queue and triage" },
-    { id: "instance_detail", label: "Instance detail", description: "Canonical one-VPS details and workflow links" },
+    {
+      id: "instances",
+      label: "Instances",
+      description: "Canonical VPS inventory and row actions",
+    },
+    {
+      id: "monitor",
+      label: "Monitor",
+      description: "Komari-style VPS health cards for quick scanning",
+    },
+    {
+      id: "groups",
+      label: "Groups",
+      description: "Tag registry and saved resource grouping",
+    },
+    {
+      id: "group_assignments",
+      label: "Assignments",
+      description: "VPS-centric group/tag assignment",
+    },
+    {
+      id: "group_bulk",
+      label: "Bulk groups",
+      description: "Selector-based group/tag mutations with review",
+    },
+    {
+      id: "alerts",
+      label: "Alerts",
+      description: "Active fleet-resource alert queue and triage",
+    },
+    {
+      id: "instance_detail",
+      label: "Instance detail",
+      description: "Canonical one-VPS details and workflow links",
+    },
   ],
   "Remote Operations": [
-    { id: "terminal", label: "Terminal", description: "Open, resume, replay, and audit browser terminal sessions" },
-    { id: "files", label: "Files", description: "One-VPS file browser, editor, and guarded file actions" },
-    { id: "transfers", label: "Transfers", description: "Transfer sessions, handoffs, and retry evidence" },
-    { id: "processes", label: "Processes", description: "Process inventory, logs, restart, and stop workflows" },
-    { id: "bulk_files", label: "Bulk files", description: "Multi-VPS file operations with preflight and results" },
+    {
+      id: "terminal",
+      label: "Terminal",
+      description: "Open, resume, replay, and audit browser terminal sessions",
+    },
+    {
+      id: "files",
+      label: "Files",
+      description: "One-VPS file browser, editor, and guarded file actions",
+    },
+    {
+      id: "transfers",
+      label: "Transfers",
+      description: "Transfer sessions, handoffs, and retry evidence",
+    },
+    {
+      id: "processes",
+      label: "Processes",
+      description: "Process inventory, logs, restart, and stop workflows",
+    },
+    {
+      id: "bulk_files",
+      label: "Bulk files",
+      description: "Multi-VPS file operations with preflight and results",
+    },
   ],
   Jobs: [
-    { id: "history", label: "History", description: "Execution evidence, targets, outputs, and comparisons" },
-    { id: "dispatch", label: "Dispatch", description: "Advanced generic command composer and reviewed dispatch" },
-    { id: "approvals", label: "Approvals", description: "Pending reviewed work waiting for approval" },
-    { id: "scheduled_runs", label: "Scheduled runs", description: "Automation execution history and worker evidence" },
-    { id: "artifacts", label: "Artifacts", description: "Retained execution artifacts linked to workflows" },
+    {
+      id: "history",
+      label: "History",
+      description: "Execution evidence, targets, outputs, and comparisons",
+    },
+    {
+      id: "dispatch",
+      label: "Dispatch",
+      description: "Advanced generic command composer and reviewed dispatch",
+    },
+    {
+      id: "approvals",
+      label: "Approvals",
+      description: "Pending reviewed work waiting for approval",
+    },
+    {
+      id: "scheduled_runs",
+      label: "Scheduled runs",
+      description: "Automation execution history and worker evidence",
+    },
+    {
+      id: "artifacts",
+      label: "Artifacts",
+      description: "Retained execution artifacts linked to workflows",
+    },
   ],
   Automation: [
-    { id: "schedules", label: "Schedules", description: "Schedule registry, editor, target preview, and lifecycle actions" },
-    { id: "runbooks", label: "Runbooks", description: "Reusable reviewed operations and parameters" },
-    { id: "source_templates", label: "Source templates", description: "Persistent source template registry and render/test workflow" },
-    { id: "agent_updates", label: "Agent updates", description: "Agent release metadata, rollout, and rollback planning" },
+    {
+      id: "schedules",
+      label: "Schedules",
+      description:
+        "Schedule registry, editor, target preview, and lifecycle actions",
+    },
+    {
+      id: "runbooks",
+      label: "Runbooks",
+      description: "Reusable reviewed operations and parameters",
+    },
+    {
+      id: "source_templates",
+      label: "Source templates",
+      description:
+        "Persistent source template registry and render/test workflow",
+    },
+    {
+      id: "agent_updates",
+      label: "Agent updates",
+      description: "Agent release metadata, rollout, and rollback planning",
+    },
   ],
   Config: [
-    { id: "overview", label: "Overview", description: "Config health, drift, template coverage, recent changes, and workflow entry points" },
-    { id: "per_vps", label: "Per-VPS", description: "One-VPS runtime config read and guarded override" },
-    { id: "bulk_patch", label: "Bulk patch", description: "Temporary incremental patches and reusable patch generators" },
-    { id: "templates", label: "Templates", description: "Runtime template apply summary with links to source templates" },
-    { id: "rules", label: "Rules", description: "Per-VPS traffic rule values for accounting and alert policies" },
+    {
+      id: "overview",
+      label: "Overview",
+      description:
+        "Config health, drift, template coverage, recent changes, and workflow entry points",
+    },
+    {
+      id: "per_vps",
+      label: "Per-VPS",
+      description: "One-VPS runtime config read and guarded override",
+    },
+    {
+      id: "bulk_patch",
+      label: "Bulk patch",
+      description:
+        "Temporary incremental patches and reusable patch generators",
+    },
+    {
+      id: "templates",
+      label: "Template coverage",
+      description:
+        "Runtime template coverage summary with links to source templates",
+    },
+    {
+      id: "rules",
+      label: "Rules",
+      description:
+        "Per-VPS traffic rule values for accounting and alert policies",
+    },
   ],
   Network: [
-    { id: "overview", label: "Overview", description: "Network posture, drift, tunnel health, and recommended next actions" },
-    { id: "graph", label: "Graph", description: "Observed network graph and tunnel plan summary" },
-    { id: "tunnel_plans", label: "Tunnel plans", description: "Saved tunnel plans, reviewed plan authoring, and observed-to-managed promotion" },
-    { id: "tests", label: "Tests", description: "Tunnel status, probes, and speed tests" },
-    { id: "ospf", label: "OSPF", description: "OSPF update recommendations, cost updates, and rollback planning" },
-    { id: "evidence", label: "Evidence", description: "Network trends, observations, and retained plan output" },
+    {
+      id: "overview",
+      label: "Overview",
+      description:
+        "Network posture, drift, tunnel health, and recommended next actions",
+    },
+    {
+      id: "graph",
+      label: "Graph",
+      description: "Observed network graph and tunnel plan summary",
+    },
+    {
+      id: "tunnel_plans",
+      label: "Tunnel plans",
+      description:
+        "Saved tunnel plans, reviewed plan authoring, and observed-to-managed promotion",
+    },
+    {
+      id: "tests",
+      label: "Tests",
+      description: "Tunnel status, probes, and speed tests",
+    },
+    {
+      id: "ospf",
+      label: "OSPF",
+      description:
+        "OSPF update recommendations, cost updates, and rollback planning",
+    },
+    {
+      id: "evidence",
+      label: "Evidence",
+      description: "Network trends, observations, and retained plan output",
+    },
   ],
   Backups: [
-    { id: "overview", label: "Overview", description: "Backup posture, recent failures, coverage, and recovery readiness" },
-    { id: "requests", label: "Requests", description: "Backup request history and metadata" },
-    { id: "policies", label: "Policies", description: "Policy create and retention pruning" },
-    { id: "artifacts", label: "Artifacts", description: "Upload retained backup artifacts and create handoffs" },
-    { id: "restore", label: "Restore", description: "Plan restore, run restore, and rollback" },
-    { id: "migration", label: "Migration", description: "Migration assistant for replacement VPS workflows" },
+    {
+      id: "overview",
+      label: "Overview",
+      description:
+        "Backup posture, recent failures, coverage, and recovery readiness",
+    },
+    {
+      id: "requests",
+      label: "Requests",
+      description: "Backup request history and metadata",
+    },
+    {
+      id: "policies",
+      label: "Policies",
+      description: "Policy create and retention pruning",
+    },
+    {
+      id: "artifacts",
+      label: "Artifacts",
+      description: "Upload retained backup artifacts and create transfer packages",
+    },
+    {
+      id: "restore",
+      label: "Restore",
+      description: "Choose artifact, confirm restore, and rollback",
+    },
+    {
+      id: "migration",
+      label: "Migration",
+      description: "Map source artifacts to replacement VPS workflows",
+    },
   ],
   Observability: [
-    { id: "fleet_metrics", label: "Fleet metrics", description: "CPU, memory, disk, and network trends by fleet group" },
-    { id: "network_metrics", label: "Network metrics", description: "Latency, loss, speed, tunnel, and endpoint trends" },
-    { id: "process_metrics", label: "Process metrics", description: "Process history and restart trends when backend data exists" },
-    { id: "alerts", label: "Alerts", description: "Alert policies, issued policy alerts, and notification channels" },
-    { id: "webhooks", label: "Webhooks", description: "Webhook rules, delivery evidence, dispatch, and retention maintenance" },
-    { id: "dashboards", label: "Dashboards", description: "Saved read-only observability dashboards and widgets" },
+    {
+      id: "fleet_metrics",
+      label: "Fleet metrics",
+      description: "CPU, memory, disk, and network trends by fleet group",
+    },
+    {
+      id: "network_metrics",
+      label: "Network metrics",
+      description: "Latency, loss, speed, tunnel, and endpoint trends",
+    },
+    {
+      id: "alerts",
+      label: "Alerts",
+      description:
+        "Alert policies, issued policy alerts, and notification channels",
+    },
+    {
+      id: "webhooks",
+      label: "Event webhooks",
+      description:
+        "Event webhook rules, tests, deliveries, and maintenance separate from alert destinations",
+    },
+    {
+      id: "dashboards",
+      label: "Dashboards",
+      description: "Saved read-only observability dashboards and widgets",
+    },
   ],
   Audit: [
-    { id: "events", label: "Events", description: "Operator and security audit events" },
-    { id: "job_evidence", label: "Job evidence", description: "Who ran what, with privilege, target, and output context" },
-    { id: "sessions", label: "Sessions", description: "Operator and terminal session evidence without live terminal controls" },
-    { id: "retention_export", label: "Retention & export", description: "History export, retention policy, and prune preview" },
+    {
+      id: "events",
+      label: "Events",
+      description: "Operator and security audit events",
+    },
+    {
+      id: "job_evidence",
+      label: "Job evidence",
+      description: "Who ran what, with privilege, target, and output context",
+    },
+    {
+      id: "sessions",
+      label: "Sessions",
+      description:
+        "Operator and terminal session evidence without live terminal controls",
+    },
+    {
+      id: "retention_export",
+      label: "Retention & export",
+      description: "History export, retention policy, and prune preview",
+    },
   ],
   Access: [
-    { id: "overview", label: "Overview", description: "Operator, session, identity, gateway, and privilege posture" },
-    { id: "operators", label: "Operators", description: "User table, roles, scopes, MFA, and session revocation" },
-    { id: "vps_identities", label: "VPS identities", description: "Agent key lifecycle, registration, rotation, and revocation" },
-    { id: "gateway_sessions", label: "Gateway sessions", description: "Gateway stream state and control-plane routing" },
-    { id: "privilege_vault", label: "Privilege vault", description: "Local privilege unlock, vault state, and lock action" },
+    {
+      id: "overview",
+      label: "Overview",
+      description:
+        "Operator, session, identity, gateway, and privilege posture",
+    },
+    {
+      id: "operators",
+      label: "Operators",
+      description: "User table, roles, scopes, MFA, and session revocation",
+    },
+    {
+      id: "vps_identities",
+      label: "VPS identities",
+      description:
+        "Agent key lifecycle, registration, rotation, and revocation",
+    },
+    {
+      id: "gateway_sessions",
+      label: "Gateway sessions",
+      description: "Gateway stream state and control-plane routing",
+    },
+    {
+      id: "privilege_vault",
+      label: "Privilege vault",
+      description: "Local privilege unlock, vault state, and lock action",
+    },
   ],
   System: [
     {
       id: "overview",
       label: "Overview",
-      description: "Control-plane capacity, queues, deadlines, gateway events, and service health",
+      description:
+        "Control-plane capacity, queues, deadlines, gateway events, and service health",
     },
     {
       id: "capacity",
       label: "Capacity",
-      description: "Queue depth, dispatch capacity, artifact storage, and worker lag",
+      description:
+        "Queue depth, dispatch capacity, artifact storage, and worker lag",
     },
     {
       id: "suite_config",
       label: "Suite config",
-      description: "Suite TOML validation, redacted diff review, and privileged config save",
+      description:
+        "Suite TOML validation, redacted diff review, and privileged config save",
     },
     {
       id: "maintenance",
       label: "Maintenance",
-      description: "Artifact cleanup dry-run, object-store health, prune history, and maintenance jobs",
+      description:
+        "Artifact cleanup dry-run, object-store health, prune history, and maintenance jobs",
     },
     {
       id: "preferences",
@@ -177,10 +404,16 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
 };
 
 export const defaultSubpages: Record<ActiveView, string> = Object.fromEntries(
-  Object.entries(viewSubpages).map(([view, subpages]) => [view, subpages[0]?.id ?? "main"]),
+  Object.entries(viewSubpages).map(([view, subpages]) => [
+    view,
+    subpages[0]?.id ?? "main",
+  ]),
 ) as Record<ActiveView, string>;
 
-export function normalizeSubpage(view: ActiveView, subpage: string | null | undefined): string {
+export function normalizeSubpage(
+  view: ActiveView,
+  subpage: string | null | undefined,
+): string {
   const requested = subpage ?? "";
   const base = requested.split(":")[0];
   const valid = viewSubpages[view].some(
@@ -191,12 +424,20 @@ export function normalizeSubpage(view: ActiveView, subpage: string | null | unde
 
 export function subpageLabel(view: ActiveView, subpage: string): string {
   const base = subpage.split(":")[0];
-  return viewSubpages[view].find((entry) => entry.id === subpage || entry.id === base)?.label ?? subpage;
+  return (
+    viewSubpages[view].find(
+      (entry) => entry.id === subpage || entry.id === base,
+    )?.label ?? subpage
+  );
 }
 
 export function subpageDescription(view: ActiveView, subpage: string): string {
   const base = subpage.split(":")[0];
-  return viewSubpages[view].find((entry) => entry.id === subpage || entry.id === base)?.description ?? "";
+  return (
+    viewSubpages[view].find(
+      (entry) => entry.id === subpage || entry.id === base,
+    )?.description ?? ""
+  );
 }
 
 export const emptySummary: FleetSummary = {

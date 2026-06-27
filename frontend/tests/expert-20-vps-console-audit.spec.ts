@@ -275,7 +275,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     .getByLabel("Bulk target selector expression")
     .fill("provider:acmecloud && tag:payments");
   await expect(composer.getByText("24/24").first()).toBeVisible();
-  await activate(composer.getByRole("button", { name: "Review targets" }));
+  await activate(composer.getByRole("button", { name: "Refresh target preview" }));
   await expect(composer.getByText("24 resolved targets")).toBeVisible();
 
   const impact = composer.locator(".targetImpactPreview");
@@ -294,7 +294,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await expect(impact.getByText(/more/)).toBeVisible();
 
   await composer.getByLabel("Max timeout seconds").fill("120");
-  await activate(composer.getByRole("button", { name: "Review dispatch" }));
+  await activate(composer.getByRole("button", { name: "Dispatch", exact: true }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   await expect(composer.locator(".dispatchActions")).toHaveCount(0);
   await expect(

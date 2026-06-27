@@ -40,12 +40,11 @@ use vpsman_common::{
     webhook_rule_delivery_history_status_class_by_status, webhook_rule_delivery_history_statuses,
     webhook_rule_delivery_process_status_class_by_status, webhook_rule_delivery_process_statuses,
     webhook_rule_delivery_status_class_by_status, webhook_rule_delivery_statuses,
-    workflow_status_classes, BandwidthTier, FileActionPolicy, FileExistingPolicy,
-    FileOwnershipPolicy, FilePushChunk, JobCommand, OspfCostPolicy, ProcessResourceLimits,
-    ProcessRestartPolicy, ProcessRunPolicy, RestoreRollbackFile, TerminalUserPolicy,
-    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
-    CURRENT_COMMAND_PROTOCOL_VERSION, MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_COLS,
-    MIN_TERMINAL_ROWS,
+    workflow_status_classes, FileActionPolicy, FileExistingPolicy, FileOwnershipPolicy,
+    FilePushChunk, JobCommand, OspfCostPolicy, ProcessResourceLimits, ProcessRestartPolicy,
+    ProcessRunPolicy, RestoreRollbackFile, TerminalUserPolicy, TunnelAddressPair,
+    TunnelEndpointSide, TunnelKind, TunnelPlanInput, CURRENT_COMMAND_PROTOCOL_VERSION,
+    MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS,
 };
 
 fn main() -> io::Result<()> {
@@ -1421,7 +1420,7 @@ fn golden_tunnel_plan() -> io::Result<vpsman_common::TunnelPlan> {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 18.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,

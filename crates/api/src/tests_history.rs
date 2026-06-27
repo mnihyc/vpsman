@@ -411,6 +411,8 @@ fn gateway_session(
         client_id: client_id.to_string(),
         status: status.to_string(),
         noise_public_key_hex: None,
+        remote_ip: Some("203.0.113.10".to_string()),
+        agent_version: "test".to_string(),
         started_at: last_seen_at.to_string(),
         last_seen_at: last_seen_at.to_string(),
         ended_at,

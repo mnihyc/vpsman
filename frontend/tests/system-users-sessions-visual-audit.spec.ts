@@ -8,73 +8,161 @@ import {
   unlockPrivilegeFromTop,
 } from "./support/consoleNavigation";
 
-test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual Access operators and Audit sessions screenshots only");
+test.skip(
+  !process.env.VPSMAN_VISUAL_AUDIT,
+  "manual Access operators and Audit sessions screenshots only",
+);
 test.setTimeout(90_000);
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
 });
 
-test("captures Access operators and Audit sessions interaction loop", async ({ page }, testInfo) => {
-  const outputDir = testInfo.outputPath("access-operators-audit-sessions-visual-audit");
+test("captures Access operators and Audit sessions interaction loop", async ({
+  page,
+}, testInfo) => {
+  const outputDir = testInfo.outputPath(
+    "access-operators-audit-sessions-visual-audit",
+  );
   mkdirSync(outputDir, { recursive: true });
   const manifest: Array<Record<string, unknown>> = [];
 
   await page.goto("/");
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Access", "Operators");
-  await expect(page.getByRole("heading", { name: "Operators", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Operators", exact: true }),
+  ).toBeVisible();
   await expect(page.getByText("2 operator records")).toBeVisible();
-  await capture(page, page.locator("main.content"), outputDir, manifest, "users-initial");
+  await capture(
+    page,
+    page.locator("main.content"),
+    outputDir,
+    manifest,
+    "users-initial",
+  );
 
   await activate(page.getByRole("button", { name: "New" }).first());
   const userEditor = page.getByLabel("Operator user editor");
   await expect(userEditor).toBeVisible();
   await userEditor.getByLabel("Operator username").fill("release-admin");
-  await userEditor.getByLabel("Operator password").fill("release-admin-password-123");
+  await userEditor
+    .getByLabel("Operator password")
+    .fill("release-admin-password-123");
   await userEditor.getByLabel("Operator role").selectOption("admin");
   await userEditor.getByLabel("Session refresh TTL days").fill("30");
-  await activate(userEditor.getByRole("button", { name: "Create", exact: true }));
+  await activate(
+    userEditor.getByRole("button", { name: "Create", exact: true }),
+  );
   await expect(page.getByLabel("Confirm admin user action")).toBeVisible();
-  await expect(page.getByText(/targets or grants admin privileges/)).toBeVisible();
-  await capture(page, page.locator("main.content"), outputDir, manifest, "users-create-admin-confirm");
+  await expect(
+    page.getByText(/targets or grants admin privileges/),
+  ).toBeVisible();
+  await capture(
+    page,
+    page.locator("main.content"),
+    outputDir,
+    manifest,
+    "users-create-admin-confirm",
+  );
   await activate(page.getByRole("button", { name: "Create user" }));
   await expect(page.getByText("3 operator records")).toBeVisible();
   await expect(page.getByText("release-admin")).toBeVisible();
-  await capture(page, page.locator("main.content"), outputDir, manifest, "users-after-create");
+  await capture(
+    page,
+    page.locator("main.content"),
+    outputDir,
+    manifest,
+    "users-after-create",
+  );
 
-  await selectGridRow(page, "Users", "99999999-aaaa-4bbb-8ccc-000000000001");
-  await runGridAction(page, "Users", "Edit selected");
+  await selectGridRow(
+    page,
+    "Operator accounts",
+    "99999999-aaaa-4bbb-8ccc-000000000001",
+  );
+  await runGridAction(page, "Operator accounts", "Edit selected");
   await expect(page.getByRole("heading", { name: "Edit user" })).toBeVisible();
-  await activate(userEditor.getByRole("button", { name: "Disable", exact: true }));
+  await activate(
+    userEditor.getByRole("button", { name: "Disable", exact: true }),
+  );
   await expect(page.getByLabel("Confirm admin user action")).toBeVisible();
-  await capture(page, page.locator("main.content"), outputDir, manifest, "users-admin-disable-confirm");
+  await capture(
+    page,
+    page.locator("main.content"),
+    outputDir,
+    manifest,
+    "users-admin-disable-confirm",
+  );
   await activate(page.getByRole("button", { name: "Cancel" }));
 
-  await unselectGridRow(page, "Users", "99999999-aaaa-4bbb-8ccc-000000000001");
-  await selectGridRow(page, "Users", "99999999-aaaa-4bbb-8ccc-000000000002");
-  await runGridAction(page, "Users", "Edit selected");
-  await expect(userEditor.getByLabel("Operator username")).toHaveValue("noc-operator");
-  await userEditor.getByLabel("Operator password").fill("replacement-password-123");
-  await capture(page, page.locator("main.content"), outputDir, manifest, "users-edit-operator");
-  await activate(userEditor.getByRole("button", { name: "Reset password", exact: true }));
+  await unselectGridRow(
+    page,
+    "Operator accounts",
+    "99999999-aaaa-4bbb-8ccc-000000000001",
+  );
+  await selectGridRow(
+    page,
+    "Operator accounts",
+    "99999999-aaaa-4bbb-8ccc-000000000002",
+  );
+  await runGridAction(page, "Operator accounts", "Edit selected");
+  await expect(userEditor.getByLabel("Operator username")).toHaveValue(
+    "noc-operator",
+  );
+  await userEditor
+    .getByLabel("Operator password")
+    .fill("replacement-password-123");
+  await capture(
+    page,
+    page.locator("main.content"),
+    outputDir,
+    manifest,
+    "users-edit-operator",
+  );
+  await activate(
+    userEditor.getByRole("button", { name: "Reset password", exact: true }),
+  );
   await expect(page.getByLabel("Confirm user action")).toBeVisible();
-  await capture(page, page.locator("main.content"), outputDir, manifest, "users-password-reset-confirm");
+  await capture(
+    page,
+    page.locator("main.content"),
+    outputDir,
+    manifest,
+    "users-password-reset-confirm",
+  );
   await activate(page.getByRole("button", { name: "Cancel" }));
-  await activate(userEditor.getByRole("button", { name: "Clear TOTP", exact: true }));
+  await activate(
+    userEditor.getByRole("button", { name: "Clear TOTP", exact: true }),
+  );
   await expect(page.getByLabel("Confirm user action")).toBeVisible();
-  await capture(page, page.locator("main.content"), outputDir, manifest, "users-clear-totp-confirm");
+  await capture(
+    page,
+    page.locator("main.content"),
+    outputDir,
+    manifest,
+    "users-clear-totp-confirm",
+  );
   await activate(page.getByRole("button", { name: "Cancel" }));
 
   await openConsoleSubpage(page, "Audit", "Sessions");
-  await expect(page.getByRole("heading", { name: "Session evidence", exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Authentication history", exact: true })).toBeVisible();
-  await capture(page, page.locator("main.content"), outputDir, manifest, "sessions-initial");
-
-  await selectGridRow(page, "Sessions", "88888888-aaaa-4bbb-8ccc-000000000002");
-  await runGridAction(page, "Sessions", "Revoke selected");
-  await expect(page.getByLabel("Confirm admin session revoke")).toBeVisible();
-  await capture(page, page.locator("main.content"), outputDir, manifest, "sessions-admin-revoke-confirm");
+  await expect(
+    page.getByRole("heading", {
+      level: 1,
+      name: "Session evidence",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Operator session evidence")).toContainText(
+    "Expired",
+  );
+  await capture(
+    page,
+    page.locator("main.content"),
+    outputDir,
+    manifest,
+    "sessions-initial",
+  );
 
   writeFileSync(
     join(outputDir, `manifest-${testInfo.project.name}.json`),
@@ -103,7 +191,10 @@ async function capture(
           style.overflowX === "scroll" ||
           style.overflow === "auto" ||
           style.overflow === "scroll";
-        if (allowsHorizontalScroll && current.scrollWidth > current.clientWidth + 1) {
+        if (
+          allowsHorizontalScroll &&
+          current.scrollWidth > current.clientWidth + 1
+        ) {
           return true;
         }
         current = current.parentElement;
@@ -118,16 +209,24 @@ async function capture(
           clippedByScroller: hasHorizontalScroller(element),
           right: Math.round(rect.right),
           tagName: element.tagName.toLowerCase(),
-          text: (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 100),
+          text: (element.textContent ?? "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 100),
           width: Math.round(rect.width),
         };
       })
       .filter((entry) => entry.right > viewportWidth + 1)
       .slice(0, 10);
     return {
-      horizontalOverflowPx: Math.max(0, document.documentElement.scrollWidth - viewportWidth),
+      horizontalOverflowPx: Math.max(
+        0,
+        document.documentElement.scrollWidth - viewportWidth,
+      ),
       overflowCandidates,
-      uncontainedOverflowCandidates: overflowCandidates.filter((entry) => !entry.clippedByScroller),
+      uncontainedOverflowCandidates: overflowCandidates.filter(
+        (entry) => !entry.clippedByScroller,
+      ),
       viewportHeight,
       viewportWidth,
     };
@@ -136,7 +235,10 @@ async function capture(
     layout.uncontainedOverflowCandidates,
     `${name} uncontained horizontal overflow candidates: ${JSON.stringify(layout.overflowCandidates)}`,
   ).toHaveLength(0);
-  const path = join(outputDir, `${name}-${page.viewportSize()?.width ?? "viewport"}.png`);
+  const path = join(
+    outputDir,
+    `${name}-${page.viewportSize()?.width ?? "viewport"}.png`,
+  );
   await locator.screenshot({ path });
   manifest.push({ name, path, ...layout });
 }
@@ -153,6 +255,9 @@ async function unselectGridRow(page: Page, title: string, rowId: string) {
 
 async function runGridAction(page: Page, title: string, action: string) {
   const grid = page.getByLabel(`${title} data grid`);
-  await grid.getByRole("button", { name: "Action" }).click();
+  await grid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
   await page.getByRole("menuitem", { name: action }).click();
 }

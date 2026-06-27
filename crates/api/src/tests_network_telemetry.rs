@@ -1,9 +1,9 @@
 use super::*;
 use uuid::Uuid;
 use vpsman_common::{
-    plan_tunnel, AgentMetrics, BandwidthTier, DiskStat, GatewayTelemetryIngest, NetworkStat,
-    OspfCostPolicy, RuntimeTunnelAdapterHealthStat, RuntimeTunnelControl, RuntimeTunnelManager,
-    RuntimeTunnelStat, TelemetryEnvelope, TunnelKind, TunnelPlanInput,
+    plan_tunnel, AgentMetrics, DiskStat, GatewayTelemetryIngest, NetworkStat, OspfCostPolicy,
+    RuntimeTunnelAdapterHealthStat, RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelStat,
+    TelemetryEnvelope, TunnelKind, TunnelPlanInput,
 };
 
 #[tokio::test]
@@ -395,7 +395,7 @@ fn plan_input_defaults() -> TunnelPlanInput {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 12.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,

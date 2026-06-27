@@ -353,6 +353,7 @@ CREATE TABLE webhook_rules (
     expression TEXT NOT NULL,
     target TEXT NOT NULL,
     body_template TEXT NOT NULL DEFAULT '',
+    signing_secret TEXT,
     cooldown_secs BIGINT NOT NULL DEFAULT 300,
     notes TEXT,
     actor_id UUID REFERENCES operators(id),
@@ -362,6 +363,7 @@ CREATE TABLE webhook_rules (
     CHECK (length(trim(expression)) BETWEEN 1 AND 4096),
     CHECK (length(trim(target)) BETWEEN 1 AND 512),
     CHECK (length(body_template) <= 4096),
+    CHECK (signing_secret IS NULL OR length(signing_secret) <= 1024),
     CHECK (cooldown_secs >= 0 AND cooldown_secs <= 2592000),
     CHECK (notes IS NULL OR length(notes) <= 1024)
 );

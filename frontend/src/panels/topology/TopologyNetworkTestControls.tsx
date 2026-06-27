@@ -10,11 +10,21 @@ import {
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
-import { TimeSeriesChart, type TimeSeriesChartLine } from "../../components/TimeSeriesChart";
+import {
+  TimeSeriesChart,
+  type TimeSeriesChartLine,
+} from "../../components/TimeSeriesChart";
 import { consolePalette } from "../../colorPalette";
-import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
+import {
+  useReviewGenerationGuard,
+  waitForReviewRender,
+} from "../../hooks/useReviewGenerationGuard";
 import { usePanelDisplaySettings } from "../../panelDisplay";
-import { buildPrivilegeForJobOperation, type PrivilegeAssertion, type PrivilegeMaterial } from "../../privilege";
+import {
+  buildPrivilegeForJobOperation,
+  type PrivilegeAssertion,
+  type PrivilegeMaterial,
+} from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
 import {
   buildNetworkProbeOperation,
@@ -32,7 +42,12 @@ import type {
   TunnelEndpointSide,
   TunnelPlanRecord,
 } from "../../types";
-import { clientDisplayNameFromMap, clientDisplayNameMap, runPanelAction, shortId } from "../../utils";
+import {
+  clientDisplayNameFromMap,
+  clientDisplayNameMap,
+  runPanelAction,
+  shortId,
+} from "../../utils";
 import {
   clampJobMaxTimeoutSecs,
   clampInteger,
@@ -67,7 +82,9 @@ export function TopologyNetworkTestControls({
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
-  const [selectedPlanId, setSelectedPlanId] = useState(() => tunnelPlans[0]?.id ?? "");
+  const [selectedPlanId, setSelectedPlanId] = useState(
+    () => tunnelPlans[0]?.id ?? "",
+  );
   const [side, setSide] = useState<TunnelEndpointSide>("left");
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(60);
   const [probeCount, setProbeCount] = useState(3);
@@ -80,39 +97,65 @@ export function TopologyNetworkTestControls({
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
   const [lastAction, setLastAction] = useState<NetworkAction>("status");
-  const [networkSnapshot, setNetworkSnapshot] = useState<NetworkActionSnapshot | null>(null);
+  const [networkSnapshot, setNetworkSnapshot] =
+    useState<NetworkActionSnapshot | null>(null);
   const [jobProgress, setJobProgress] = useState<BulkJobProgress | null>(null);
-  const [lastJobProgress, setLastJobProgress] = useState<BulkJobProgress | null>(null);
+  const [lastJobProgress, setLastJobProgress] =
+    useState<BulkJobProgress | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [reviewPending, setReviewPending] = useState(false);
-  const selectedPlan = tunnelPlans.find((plan) => plan.id === selectedPlanId) ?? tunnelPlans[0] ?? null;
-  const agentNameById = useMemo(() => clientDisplayNameMap(agents, vpsNameDisplayMode), [agents, vpsNameDisplayMode]);
-  const clientLabel = (clientId: string) => clientDisplayNameFromMap(clientId, agentNameById);
+  const selectedPlan =
+    tunnelPlans.find((plan) => plan.id === selectedPlanId) ??
+    tunnelPlans[0] ??
+    null;
+  const agentNameById = useMemo(
+    () => clientDisplayNameMap(agents, vpsNameDisplayMode),
+    [agents, vpsNameDisplayMode],
+  );
+  const clientLabel = (clientId: string) =>
+    clientDisplayNameFromMap(clientId, agentNameById);
   const endpoint = useMemo(
-    () => (selectedPlan ? renderTunnelEndpointConfig(selectedPlan.plan, side) : null),
+    () =>
+      selectedPlan ? renderTunnelEndpointConfig(selectedPlan.plan, side) : null,
     [selectedPlan, side],
   );
-  const planTargets = resolveAgentsById(agents, selectedPlan ? planClientIds(selectedPlan) : []);
+  const planTargets = resolveAgentsById(
+    agents,
+    selectedPlan ? planClientIds(selectedPlan) : [],
+  );
   const visibleJobProgress = jobProgress ?? lastJobProgress;
   const selectedPlanTrends = useMemo(
     () =>
       selectedPlan
         ? networkTrends.filter(
-            (trend) => trend.plan_id === selectedPlan.id || trend.plan_name === selectedPlan.name,
+            (trend) =>
+              trend.plan_id === selectedPlan.id ||
+              trend.plan_name === selectedPlan.name,
           )
         : [],
     [networkTrends, selectedPlan],
   );
   const recentProbeTrend = useMemo(
-    () => latestTrend(selectedPlanTrends.filter((trend) => trend.kind === "network_probe")),
+    () =>
+      latestTrend(
+        selectedPlanTrends.filter((trend) => trend.kind === "network_probe"),
+      ),
     [selectedPlanTrends],
   );
   const recentSpeedTrend = useMemo(
-    () => latestTrend(selectedPlanTrends.filter((trend) => trend.kind === "network_speed_test")),
+    () =>
+      latestTrend(
+        selectedPlanTrends.filter(
+          (trend) => trend.kind === "network_speed_test",
+        ),
+      ),
     [selectedPlanTrends],
   );
-  const evidenceSummary = formatRecentEvidence(recentProbeTrend, recentSpeedTrend);
+  const evidenceSummary = formatRecentEvidence(
+    recentProbeTrend,
+    recentSpeedTrend,
+  );
   const speedSafetySummary = formatSpeedSafety(
     speedDurationSecs,
     speedMaxBytesMiB,
@@ -133,21 +176,21 @@ export function TopologyNetworkTestControls({
     (reviewPending
       ? `Preparing ${actionLabel(lastAction).toLowerCase()} review`
       : visibleJobProgress
-      ? `${actionLabel(lastAction)} result for job ${shortId(visibleJobProgress.jobId)}`
-      : lastJob
-        ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
-      : selectedPlan && !selectedPlan.enabled
-        ? "Plan disabled; inspect only"
-      : privilegeMaterial
-        ? "Ready"
-        : "Locked");
+        ? `${actionLabel(lastAction)} result for job ${shortId(visibleJobProgress.jobId)}`
+        : lastJob
+          ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
+          : selectedPlan && !selectedPlan.enabled
+            ? "Plan disabled; inspect only"
+            : privilegeMaterial
+              ? "Ready"
+              : "Inspect available; unlock for probe/speed");
 
   function submitStatus() {
-    void openNetworkPrompt("status");
+    void runImmediateNetworkAction("status");
   }
 
   function submitProbe() {
-    void openNetworkPrompt("probe");
+    void runImmediateNetworkAction("probe");
   }
 
   function submitSpeedTest() {
@@ -167,121 +210,194 @@ export function TopologyNetworkTestControls({
     try {
       await waitForReviewRender();
       await runPanelAction(setPending, setActionError, async () => {
-        if (!privilegeMaterial) {
-          throw new Error("Privilege unlock is locked");
+        const snapshot = await buildNetworkActionSnapshot(
+          mode,
+          reviewGeneration,
+        );
+        if (snapshot) {
+          setNetworkSnapshot(snapshot);
         }
-        if (!selectedPlan || !endpoint) {
-          throw new Error("Select a tunnel plan");
-        }
-        if (!selectedPlan.enabled && mode !== "status") {
-          throw new Error("Tunnel plan is disabled");
-        }
-        const boundedProbeCount = clampInteger(probeCount, 1, 20);
-        const boundedProbeIntervalMs = clampInteger(probeIntervalMs, 200, 10_000);
-        const boundedSpeedDurationSecs = clampInteger(speedDurationSecs, 1, 30);
-        const boundedSpeedMaxBytes = clampInteger(speedMaxBytesMiB, 1, 256) * 1024 * 1024;
-        const boundedSpeedRateLimitKbps = clampInteger(speedRateLimitKbps, 64, 1_000_000);
-        const boundedSpeedPort = clampInteger(speedPort, 1024, 65_535);
-        const boundedSpeedConnectTimeoutMs = clampInteger(speedConnectTimeoutMs, 100, 30_000);
-        const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
-        const buildSubmission = async (
-          planRecord: TunnelPlanRecord,
-          planSide: TunnelEndpointSide,
-        ): Promise<NetworkJobSubmission> => {
-          const builtOperation =
-            mode === "status"
-              ? buildNetworkStatusOperation(planRecord.plan, planSide)
-              : mode === "probe"
-                ? buildNetworkProbeOperation(planRecord.plan, planSide, boundedProbeCount, boundedProbeIntervalMs)
-                : buildNetworkSpeedTestOperation(
-                    planRecord.plan,
-                    planSide,
-                    boundedSpeedDurationSecs,
-                    boundedSpeedMaxBytes,
-                    boundedSpeedRateLimitKbps,
-                    boundedSpeedPort,
-                    boundedSpeedConnectTimeoutMs,
-                  );
-          const targetClientIds =
-            mode === "speed_test"
-              ? [builtOperation.endpoint.localClientId, builtOperation.endpoint.peerClientId]
-              : [builtOperation.endpoint.localClientId];
-          const selectorExpression = selectorExpressionForClientIds(targetClientIds);
-          const builtPrivilege = await buildPrivilegeForJobOperation({
+      });
+    } finally {
+      setReviewPending(false);
+    }
+  }
+
+  async function runImmediateNetworkAction(mode: NetworkAction) {
+    setActionError(null);
+    setLastAction(mode);
+    await runPanelAction(setPending, setActionError, async () => {
+      const snapshot = await buildNetworkActionSnapshot(mode);
+      if (snapshot) {
+        await executeNetworkSnapshot(snapshot);
+      }
+    });
+  }
+
+  async function buildNetworkActionSnapshot(
+    mode: NetworkAction,
+    reviewGeneration?: number,
+  ): Promise<NetworkActionSnapshot | null> {
+    const needsPrivilege = actionNeedsPrivilege(mode);
+    if (needsPrivilege && !privilegeMaterial) {
+      throw new Error("Privilege unlock is locked");
+    }
+    if (!selectedPlan || !endpoint) {
+      throw new Error("Select a tunnel plan");
+    }
+    if (!selectedPlan.enabled && mode !== "status") {
+      throw new Error("Tunnel plan is disabled");
+    }
+    const boundedProbeCount = clampInteger(probeCount, 1, 20);
+    const boundedProbeIntervalMs = clampInteger(probeIntervalMs, 200, 10_000);
+    const boundedSpeedDurationSecs = clampInteger(speedDurationSecs, 1, 30);
+    const boundedSpeedMaxBytes =
+      clampInteger(speedMaxBytesMiB, 1, 256) * 1024 * 1024;
+    const boundedSpeedRateLimitKbps = clampInteger(
+      speedRateLimitKbps,
+      64,
+      1_000_000,
+    );
+    const boundedSpeedPort = clampInteger(speedPort, 1024, 65_535);
+    const boundedSpeedConnectTimeoutMs = clampInteger(
+      speedConnectTimeoutMs,
+      100,
+      30_000,
+    );
+    const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
+    const buildSubmission = async (
+      planRecord: TunnelPlanRecord,
+      planSide: TunnelEndpointSide,
+    ): Promise<NetworkJobSubmission> => {
+      const builtOperation =
+        mode === "status"
+          ? buildNetworkStatusOperation(planRecord.plan, planSide)
+          : mode === "probe"
+            ? buildNetworkProbeOperation(
+                planRecord.plan,
+                planSide,
+                boundedProbeCount,
+                boundedProbeIntervalMs,
+              )
+            : buildNetworkSpeedTestOperation(
+                planRecord.plan,
+                planSide,
+                boundedSpeedDurationSecs,
+                boundedSpeedMaxBytes,
+                boundedSpeedRateLimitKbps,
+                boundedSpeedPort,
+                boundedSpeedConnectTimeoutMs,
+              );
+      const targetClientIds =
+        mode === "speed_test"
+          ? [
+              builtOperation.endpoint.localClientId,
+              builtOperation.endpoint.peerClientId,
+            ]
+          : [builtOperation.endpoint.localClientId];
+      const selectorExpression = selectorExpressionForClientIds(targetClientIds);
+      const builtPrivilege = needsPrivilege
+        ? await buildPrivilegeForJobOperation({
             clientIds: targetClientIds,
             commandType: commandName(mode),
             forceUnprivileged: false,
             operation: builtOperation.operation,
-            privilegeMaterial,
+            privilegeMaterial: privilegeMaterial!,
             selectorExpression,
             maxTimeoutSecs: boundedMaxTimeoutSecs,
-          });
-          return {
-            command: commandName(mode),
-            confirmed: requiresConfirmation(mode),
-            destructive: false,
-            forceUnprivileged: false,
-            jobId: crypto.randomUUID(),
-            maxTimeoutSecs: boundedMaxTimeoutSecs,
-            operation: builtOperation.operation,
-            payloadHashHex: builtPrivilege.payloadHashHex,
-            planName: planRecord.name,
-            privilegeAssertion: builtPrivilege.privilegeAssertion,
-            selectorExpression,
-            side: planSide,
-            targetClientIds,
-            targets: resolveAgentsById(agents, targetClientIds),
-          };
-        };
-        const submissionCandidates = selectedPlan ? [{ plan: selectedPlan, side }] : [];
-        const submissions = await Promise.all(
-          submissionCandidates.map((candidate) => buildSubmission(candidate.plan, candidate.side)),
-        );
-        if (!submissions.length) {
-          throw new Error("No tunnel plan is ready for testing");
-        }
-        if (!isReviewGenerationCurrent(reviewGeneration)) {
-          return;
-        }
-        const snapshotTargets = resolveAgentsById(
-          agents,
-          uniqueClientIds(submissions.flatMap((submission) => submission.targetClientIds)),
-        );
-        const scopeLabel = mode === "speed_test" ? "Selected plan endpoints" : "Selected endpoint";
-        const planLabel = submissions[0]?.planName ?? "unknown";
-        setNetworkSnapshot({
-          action: mode,
-          detail: `${actionLabel(mode)} ${submissions[0]?.planName ?? "selected plan"} on ${vpsCountLabel(snapshotTargets.length)}.`,
-          items: [
-            { label: "Operation", value: actionLabel(mode) },
-            { label: "Scope", value: scopeLabel },
-            { label: "Targets", value: formatTargetAvailabilitySummary(snapshotTargets) },
-            { label: "Plans", value: planLabel },
-            { label: "Endpoint", value: submissions.length > 1 ? "Both endpoints" : side },
-            { label: "Baseline", value: formatPlanBaseline(selectedPlan) },
-            { label: "Recent evidence", value: evidenceSummary },
-            ...(mode === "probe"
-              ? [{ label: "Probe cadence", value: `${boundedProbeCount} packets, ${boundedProbeIntervalMs} ms interval` }]
-              : []),
-            ...(mode === "speed_test"
-              ? [{ label: "Safety cap", value: formatSpeedSafety(
+          })
+        : null;
+      return {
+        command: commandName(mode),
+        confirmed: requiresConfirmation(mode),
+        destructive: false,
+        forceUnprivileged: !needsPrivilege,
+        jobId: crypto.randomUUID(),
+        maxTimeoutSecs: boundedMaxTimeoutSecs,
+        operation: builtOperation.operation,
+        payloadHashHex: builtPrivilege?.payloadHashHex ?? null,
+        planName: planRecord.name,
+        privilegeAssertion: builtPrivilege?.privilegeAssertion ?? null,
+        privileged: needsPrivilege,
+        selectorExpression,
+        side: planSide,
+        targetClientIds,
+        targets: resolveAgentsById(agents, targetClientIds),
+      };
+    };
+    const submissions = await Promise.all(
+      [{ plan: selectedPlan, side }].map((candidate) =>
+        buildSubmission(candidate.plan, candidate.side),
+      ),
+    );
+    if (!submissions.length) {
+      throw new Error("No tunnel plan is ready for testing");
+    }
+    if (
+      reviewGeneration !== undefined &&
+      !isReviewGenerationCurrent(reviewGeneration)
+    ) {
+      return null;
+    }
+    const snapshotTargets = resolveAgentsById(
+      agents,
+      uniqueClientIds(
+        submissions.flatMap((submission) => submission.targetClientIds),
+      ),
+    );
+    const scopeLabel =
+      mode === "speed_test" ? "Selected plan endpoints" : "Selected endpoint";
+    const planLabel = submissions[0]?.planName ?? "unknown";
+    return {
+      action: mode,
+      detail: `${actionLabel(mode)} ${submissions[0]?.planName ?? "selected plan"} on ${vpsCountLabel(snapshotTargets.length)}.`,
+      items: [
+        { label: "Operation", value: actionLabel(mode) },
+        { label: "Scope", value: scopeLabel },
+        {
+          label: "Targets",
+          value: formatTargetAvailabilitySummary(snapshotTargets),
+        },
+        { label: "Plans", value: planLabel },
+        {
+          label: "Endpoint",
+          value: submissions.length > 1 ? "Both endpoints" : side,
+        },
+        { label: "Baseline", value: formatPlanBaseline(selectedPlan) },
+        { label: "Recent evidence", value: evidenceSummary },
+        ...(mode === "probe"
+          ? [
+              {
+                label: "Probe cadence",
+                value: `${boundedProbeCount} packets, ${boundedProbeIntervalMs} ms interval`,
+              },
+            ]
+          : []),
+        ...(mode === "speed_test"
+          ? [
+              {
+                label: "Safety cap",
+                value: formatSpeedSafety(
                   boundedSpeedDurationSecs,
                   boundedSpeedMaxBytes / (1024 * 1024),
                   boundedSpeedRateLimitKbps,
                   boundedSpeedPort,
                   boundedSpeedConnectTimeoutMs,
-                ) }]
-              : []),
-            { label: "Max timeout", value: `${boundedMaxTimeoutSecs}s` },
-            { label: "Required privilege", value: `${commandName(mode)} unlocked locally` },
-          ],
-          submissions,
-          targets: snapshotTargets,
-        });
-      });
-    } finally {
-      setReviewPending(false);
-    }
+                ),
+              },
+            ]
+          : []),
+        { label: "Max timeout", value: `${boundedMaxTimeoutSecs}s` },
+        {
+          label: "Required privilege",
+          value: needsPrivilege
+            ? `${commandName(mode)} unlocked locally`
+            : "No local privilege required",
+        },
+      ],
+      submissions,
+      targets: snapshotTargets,
+    };
   }
 
   function clearExecutionResults() {
@@ -291,47 +407,65 @@ export function TopologyNetworkTestControls({
   }
 
   async function submitNetworkChange(snapshot: NetworkActionSnapshot) {
-    setNetworkSnapshot(null);
-    clearExecutionResults();
     await runPanelAction(setPending, setActionError, async () => {
-      const jobs: Array<{ job: CreateJobResponse; submission: NetworkJobSubmission }> = [];
-      for (const submission of snapshot.submissions) {
-        const job = await onCreateJob({
-          argv: [],
-          selector_expression: submission.selectorExpression,
-          target_client_ids: submission.targetClientIds,
-          command: submission.command,
-          confirmed: submission.confirmed,
-          destructive: submission.destructive,
-          operation: submission.operation,
-          force_unprivileged: submission.forceUnprivileged,
-          job_id: submission.jobId,
-          privileged: true,
-          privilege_assertion: submission.privilegeAssertion,
-          max_timeout_secs: submission.maxTimeoutSecs,
-        });
-        jobs.push({ job, submission });
-      }
-      const lastSubmission = snapshot.submissions[snapshot.submissions.length - 1] ?? null;
-      setLastPayloadHash(lastSubmission?.payloadHashHex ?? null);
-      setLastAction(snapshot.action);
-      for (const { job, submission } of jobs) {
-        setLastJob(job);
-        await trackNetworkProgress(job, submission.targets, submission.maxTimeoutSecs);
-      }
+      await executeNetworkSnapshot(snapshot);
     });
   }
 
-  async function trackNetworkProgress(job: CreateJobResponse, targets: AgentView[], maxTimeoutSecsForSnapshot: number) {
+  async function executeNetworkSnapshot(snapshot: NetworkActionSnapshot) {
+    setNetworkSnapshot(null);
+    clearExecutionResults();
+    const jobs: Array<{
+      job: CreateJobResponse;
+      submission: NetworkJobSubmission;
+    }> = [];
+    for (const submission of snapshot.submissions) {
+      const job = await onCreateJob({
+        argv: [],
+        selector_expression: submission.selectorExpression,
+        target_client_ids: submission.targetClientIds,
+        command: submission.command,
+        confirmed: submission.confirmed,
+        destructive: submission.destructive,
+        operation: submission.operation,
+        force_unprivileged: submission.forceUnprivileged,
+        job_id: submission.jobId,
+        privileged: submission.privileged,
+        privilege_assertion: submission.privilegeAssertion,
+        max_timeout_secs: submission.maxTimeoutSecs,
+      });
+      jobs.push({ job, submission });
+    }
+    const lastSubmission =
+      snapshot.submissions[snapshot.submissions.length - 1] ?? null;
+    setLastPayloadHash(lastSubmission?.payloadHashHex ?? null);
+    setLastAction(snapshot.action);
+    for (const { job, submission } of jobs) {
+      setLastJob(job);
+      await trackNetworkProgress(
+        job,
+        submission.targets,
+        submission.maxTimeoutSecs,
+      );
+    }
+  }
+
+  async function trackNetworkProgress(
+    job: CreateJobResponse,
+    targets: AgentView[],
+    maxTimeoutSecsForSnapshot: number,
+  ) {
     const targetCount = createJobTargetCount(job);
     setLastJobProgress(null);
-    setJobProgress(buildBulkJobProgress({
-      jobId: job.job_id,
-      targetCount,
-      targetRecords: [],
-      targets,
-      maxTimeoutSecs: maxTimeoutSecsForSnapshot,
-    }));
+    setJobProgress(
+      buildBulkJobProgress({
+        jobId: job.job_id,
+        targetCount,
+        targetRecords: [],
+        targets,
+        maxTimeoutSecs: maxTimeoutSecsForSnapshot,
+      }),
+    );
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
         onProgress: setJobProgress,
@@ -354,26 +488,42 @@ export function TopologyNetworkTestControls({
         </div>
         <ShieldCheck size={20} />
       </div>
-      <form className="dispatchForm topologyNetworkTestForm" onSubmit={(event) => event.preventDefault()}>
-        <div className="topologyNetworkReviewStrip" aria-label="Network test review contract">
+      <form
+        className="dispatchForm topologyNetworkTestForm"
+        onSubmit={(event) => event.preventDefault()}
+      >
+        <div
+          className="topologyNetworkReviewStrip"
+          aria-label="Network test review contract"
+        >
           <div className={privilegeMaterial ? "ready" : "attention"}>
             <span>Required privilege</span>
-            <strong>{privilegeMaterial ? "Unlocked locally" : "Unlock required"}</strong>
+            <strong>
+              {privilegeMaterial
+                ? "Probe/speed unlocked"
+                : "Inspect available"}
+            </strong>
             <p>
               {privilegeMaterial
-                ? "Local assertion will be bound to the reviewed network payload."
-                : "Unlock before reviewing status, probe, or speed-test jobs."}
+                ? "Probe and speed-test jobs will bind a local assertion to the submitted payload."
+                : "Status inspection is read-only; unlock only before probe or speed-test jobs."}
             </p>
           </div>
           <div>
             <span>Expected baseline</span>
             <strong>{baselineSummary}</strong>
-            <p>Configured plan values used to judge latency, loss, and bandwidth evidence.</p>
+            <p>
+              Configured plan values used to judge latency, loss, and bandwidth
+              evidence.
+            </p>
           </div>
           <div className="attention">
             <span>Speed safety cap</span>
             <strong>{speedSafetySummary}</strong>
-            <p>Speed tests require explicit duration, byte, rate, port, and timeout caps.</p>
+            <p>
+              Speed tests require explicit duration, byte, rate, port, and
+              timeout caps.
+            </p>
           </div>
           <div>
             <span>Recent evidence</span>
@@ -383,10 +533,16 @@ export function TopologyNetworkTestControls({
           <div>
             <span>Last local run</span>
             <strong>{lastRunSummary}</strong>
-            <p>Execution result stays on this screen and links back to Job history.</p>
+            <p>
+              Execution result stays on this screen and links back to Job
+              history.
+            </p>
           </div>
         </div>
-        <NetworkTestTrendCharts trends={selectedPlanTrends} />
+        <NetworkTestTrendCharts
+          expectedBandwidthMbps={selectedPlan?.plan.bandwidth_mbps ?? null}
+          trends={selectedPlanTrends}
+        />
         <div className="topologyNetworkTestGroups">
           <section
             className="topologyNetworkTestGroup"
@@ -409,7 +565,8 @@ export function TopologyNetworkTestControls({
                 >
                   {tunnelPlans.map((plan) => (
                     <option key={plan.id} value={plan.id}>
-                      {plan.name}{plan.enabled ? "" : " (disabled)"}
+                      {plan.name}
+                      {plan.enabled ? "" : " (disabled)"}
                     </option>
                   ))}
                 </select>
@@ -433,7 +590,8 @@ export function TopologyNetworkTestControls({
               <div className="operationNote compactTopologyNote">
                 <strong>{selectedPlan?.name ?? "Selected plan"}</strong>
                 <span title={agentBackendHint(agents, selectedPlan)}>
-                  {clientLabel(selectedPlan?.left_client_id ?? "")} / {clientLabel(selectedPlan?.right_client_id ?? "")}
+                  {clientLabel(selectedPlan?.left_client_id ?? "")} /{" "}
+                  {clientLabel(selectedPlan?.right_client_id ?? "")}
                 </span>
               </div>
             ) : null}
@@ -444,7 +602,10 @@ export function TopologyNetworkTestControls({
             />
           </section>
 
-          <section className="topologyNetworkTestGroup" title="Read-only checks for one selected endpoint side.">
+          <section
+            className="topologyNetworkTestGroup"
+            title="Read-only checks for one selected endpoint side."
+          >
             <div className="topologyNetworkTestGroupHeader">
               <strong>Checks</strong>
               <small>Single endpoint</small>
@@ -496,17 +657,18 @@ export function TopologyNetworkTestControls({
             <div className="topologyNetworkTestActionRow">
               <button
                 className="secondaryAction"
-                disabled={pending || networkSnapshot !== null || !selectedPlan || !endpoint || !privilegeMaterial}
-                onClick={submitStatus}
-                title={
-                  privilegeMaterial
-                    ? "Review read-only status inspection for the selected endpoint"
-                    : "Unlock privilege before reviewing endpoint inspection"
+                disabled={
+                  pending ||
+                  networkSnapshot !== null ||
+                  !selectedPlan ||
+                  !endpoint
                 }
+                onClick={submitStatus}
+                title="Run read-only status inspection for the selected endpoint; no local privilege unlock is required."
                 type="button"
               >
                 <Search size={17} />
-                Review inspect
+                Inspect status
               </button>
               <button
                 className="secondaryAction"
@@ -527,7 +689,7 @@ export function TopologyNetworkTestControls({
                 type="button"
               >
                 <Activity size={17} />
-                Review probe
+                Run probe
               </button>
             </div>
           </section>
@@ -638,15 +800,29 @@ export function TopologyNetworkTestControls({
           </section>
         </div>
         <ConfirmationPrompt
-          confirmLabel={networkSnapshot ? actionConfirmLabel(networkSnapshot.action) : "Run network test"}
+          confirmLabel={
+            networkSnapshot
+              ? actionConfirmLabel(networkSnapshot.action)
+              : "Run network test"
+          }
           detail={networkSnapshot?.detail ?? ""}
-          expiresAtUnix={networkSnapshot ? minSubmissionExpiry(networkSnapshot.submissions) : undefined}
+          expiresAtUnix={
+            networkSnapshot
+              ? minSubmissionExpiry(networkSnapshot.submissions)
+              : undefined
+          }
           items={networkSnapshot?.items ?? []}
           onCancel={() => setNetworkSnapshot(null)}
-          onConfirm={() => networkSnapshot && void submitNetworkChange(networkSnapshot)}
+          onConfirm={() =>
+            networkSnapshot && void submitNetworkChange(networkSnapshot)
+          }
           open={networkSnapshot !== null}
           pending={pending}
-          title={networkSnapshot ? `Confirm ${actionLabel(networkSnapshot.action).toLowerCase()}` : "Confirm network action"}
+          title={
+            networkSnapshot
+              ? `Confirm ${actionLabel(networkSnapshot.action).toLowerCase()}`
+              : "Confirm network action"
+          }
           tone="normal"
         />
         {visibleJobProgress && (
@@ -671,32 +847,78 @@ export function TopologyNetworkTestControls({
   );
 }
 
-function NetworkTestTrendCharts({ trends }: { trends: NetworkObservationTrendRecord[] }) {
-  const probeTrends = sortedTrends(trends.filter((trend) => trend.kind === "network_probe"));
-  const speedTrends = sortedTrends(trends.filter((trend) => trend.kind === "network_speed_test"));
+function NetworkTestTrendCharts({
+  expectedBandwidthMbps,
+  trends,
+}: {
+  expectedBandwidthMbps?: number | null;
+  trends: NetworkObservationTrendRecord[];
+}) {
+  const probeTrends = sortedTrends(
+    trends.filter((trend) => trend.kind === "network_probe"),
+  );
+  const speedTrends = sortedTrends(
+    trends.filter((trend) => trend.kind === "network_speed_test"),
+  );
   const latencyTimes = trendTimes(probeTrends);
   const speedTimes = trendTimes(speedTrends);
   const latencyLines: TimeSeriesChartLine[] = [
-    trendLine(probeTrends, "Average latency", consolePalette.chart.blue, (trend) => trend.latency_avg_ms),
-    trendLine(probeTrends, "Maximum latency", consolePalette.chart.orange, (trend) => trend.latency_max_ms),
-    trendLine(probeTrends, "Minimum latency", consolePalette.chart.green, (trend) => trend.latency_min_ms),
+    trendLine(
+      probeTrends,
+      "Average latency",
+      consolePalette.chart.blue,
+      (trend) => trend.latency_avg_ms,
+    ),
+    trendLine(
+      probeTrends,
+      "Maximum latency",
+      consolePalette.chart.orange,
+      (trend) => trend.latency_max_ms,
+    ),
+    trendLine(
+      probeTrends,
+      "Minimum latency",
+      consolePalette.chart.green,
+      (trend) => trend.latency_min_ms,
+    ),
   ];
   const lossLines: TimeSeriesChartLine[] = [
     trendLine(probeTrends, "Packet loss", consolePalette.chart.red, (trend) =>
-      trend.packet_loss_avg_ratio === null ? null : trend.packet_loss_avg_ratio * 100,
+      trend.packet_loss_avg_ratio === null
+        ? null
+        : trend.packet_loss_avg_ratio * 100,
     ),
   ];
   const speedLines: TimeSeriesChartLine[] = [
-    trendLine(speedTrends, "Average throughput", consolePalette.chart.purple, (trend) => trend.throughput_avg_mbps),
-    trendLine(speedTrends, "Maximum throughput", consolePalette.chart.cyan, (trend) => trend.throughput_max_mbps),
+    trendLine(
+      speedTrends,
+      "Average throughput",
+      consolePalette.chart.purple,
+      (trend) => trend.throughput_avg_mbps,
+    ),
+    trendLine(
+      speedTrends,
+      "Maximum throughput",
+      consolePalette.chart.cyan,
+      (trend) => trend.throughput_max_mbps,
+    ),
   ];
+  const throughputBaseline = throughputBaselineSummary(
+    speedTrends,
+    expectedBandwidthMbps ?? null,
+  );
 
   return (
-    <section className="topologyNetworkTrendCharts" aria-label="Network test trend charts">
+    <section
+      className="topologyNetworkTrendCharts"
+      aria-label="Network test trend charts"
+    >
       <div className="topologyNetworkTrendChartsHeader">
         <div>
           <strong>Trend evidence</strong>
-          <span>Persisted probe and speed-test ranges for the selected plan.</span>
+          <span>
+            Persisted probe and speed-test ranges for the selected plan.
+          </span>
         </div>
         <button
           className="secondaryAction compactAction"
@@ -713,21 +935,29 @@ function NetworkTestTrendCharts({ trends }: { trends: NetworkObservationTrendRec
           lines={latencyLines}
           times={latencyTimes}
           title="Latency"
-          valueFormatter={(value) => (value === null ? "-" : `${formatMetric(value)} ms`)}
+          valueFormatter={(value) =>
+            value === null ? "-" : `${formatMetric(value)} ms`
+          }
         />
         <NetworkTrendChartCard
           emptyLabel="No loss trend samples"
           lines={lossLines}
           times={latencyTimes}
           title="Packet loss"
-          valueFormatter={(value) => (value === null ? "-" : `${formatMetric(value)}%`)}
+          valueFormatter={(value) =>
+            value === null ? "-" : `${formatMetric(value)}%`
+          }
         />
         <NetworkTrendChartCard
+          baselineAttention={throughputBaseline?.attention}
+          baselineLabel={throughputBaseline?.label}
           emptyLabel="No speed trend samples"
           lines={speedLines}
           times={speedTimes}
           title="Throughput"
-          valueFormatter={(value) => (value === null ? "-" : `${formatMetric(value)} Mbps`)}
+          valueFormatter={(value) =>
+            value === null ? "-" : `${formatMetric(value)} Mbps`
+          }
         />
       </div>
     </section>
@@ -735,32 +965,66 @@ function NetworkTestTrendCharts({ trends }: { trends: NetworkObservationTrendRec
 }
 
 function NetworkTrendChartCard({
+  baselineAttention = false,
+  baselineLabel,
   emptyLabel,
   lines,
   times,
   title,
   valueFormatter,
 }: {
+  baselineAttention?: boolean;
+  baselineLabel?: string | null;
   emptyLabel: string;
   lines: TimeSeriesChartLine[];
   times: string[];
   title: string;
   valueFormatter: (value: number | null) => string;
 }) {
+  const singleSample = times.length === 1;
+  const sampleValues = latestLineValues(lines, valueFormatter);
   return (
     <article className="topologyNetworkTrendChartCard">
       <div className="topologyNetworkTrendChartHeader">
         <strong>{title}</strong>
-        <span>{times.length > 0 ? `${times.length} sample${times.length === 1 ? "" : "s"}` : "No samples"}</span>
+        <span>
+          {times.length > 0
+            ? `${times.length} sample${times.length === 1 ? "" : "s"}`
+            : "No samples"}
+        </span>
       </div>
-      <TimeSeriesChart
-        ariaLabel={`Network test ${title.toLowerCase()} trend`}
-        emptyLabel={emptyLabel}
-        height={156}
-        lines={lines}
-        times={times}
-        valueFormatter={valueFormatter}
-      />
+      {singleSample ? (
+        <div
+          aria-label={`Network test ${title.toLowerCase()} single sample`}
+          className="topologyNetworkSingleSample"
+        >
+          <strong className={baselineAttention ? "attention" : undefined}>
+            {baselineLabel ?? "Single evidence bucket"}
+          </strong>
+          <span>No trend line yet; capture another run to compare movement.</span>
+          {sampleValues.length > 0 ? (
+            <dl>
+              {sampleValues.map((sample) => (
+                <div key={sample.label}>
+                  <dt>{sample.label}</dt>
+                  <dd>{sample.value}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : (
+            <p>{emptyLabel}</p>
+          )}
+        </div>
+      ) : (
+        <TimeSeriesChart
+          ariaLabel={`Network test ${title.toLowerCase()} trend`}
+          emptyLabel={emptyLabel}
+          height={156}
+          lines={lines}
+          times={times}
+          valueFormatter={valueFormatter}
+        />
+      )}
     </article>
   );
 }
@@ -775,9 +1039,10 @@ type NetworkJobSubmission = {
   jobId: string;
   maxTimeoutSecs: number;
   operation: JobOperation;
-  payloadHashHex: string;
+  payloadHashHex: string | null;
   planName: string;
-  privilegeAssertion: PrivilegeAssertion;
+  privilegeAssertion: PrivilegeAssertion | null;
+  privileged: boolean;
   selectorExpression: string;
   side: TunnelEndpointSide;
   targetClientIds: string[];
@@ -826,6 +1091,10 @@ function requiresConfirmation(mode: NetworkAction) {
   return mode === "speed_test";
 }
 
+function actionNeedsPrivilege(mode: NetworkAction) {
+  return mode !== "status";
+}
+
 function vpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
 }
@@ -834,10 +1103,15 @@ function uniqueClientIds(clientIds: string[]): string[] {
   return Array.from(new Set(clientIds));
 }
 
-function minSubmissionExpiry(submissions: NetworkJobSubmission[]): number | undefined {
+function minSubmissionExpiry(
+  submissions: NetworkJobSubmission[],
+): number | undefined {
   const expiries = submissions
-    .map((submission) => submission.privilegeAssertion.expires_unix)
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    .map((submission) => submission.privilegeAssertion?.expires_unix)
+    .filter(
+      (value): value is number =>
+        typeof value === "number" && Number.isFinite(value),
+    );
   return expiries.length ? Math.min(...expiries) : undefined;
 }
 
@@ -845,28 +1119,44 @@ function planClientIds(plan: TunnelPlanRecord): string[] {
   return [plan.left_client_id, plan.right_client_id];
 }
 
-function agentBackendHint(agents: AgentView[], plan: TunnelPlanRecord | null): string {
+function agentBackendHint(
+  agents: AgentView[],
+  plan: TunnelPlanRecord | null,
+): string {
   if (!plan) {
     return "agent defaults";
   }
   const backendForClient = (clientId: string) =>
-    agents.find((candidate) => candidate.id === clientId)?.capabilities.network_backend ?? "ifupdown";
+    agents.find((candidate) => candidate.id === clientId)?.capabilities
+      .network_backend ?? "ifupdown";
   return `backend L ${backendForClient(plan.left_client_id)} / R ${backendForClient(plan.right_client_id)}`;
 }
 
-function latestTrend(trends: NetworkObservationTrendRecord[]): NetworkObservationTrendRecord | null {
-  return trends.reduce<NetworkObservationTrendRecord | null>((latest, trend) => {
-    if (!latest) {
-      return trend;
-    }
-    return Date.parse(trend.latest_observed_at) > Date.parse(latest.latest_observed_at)
-      ? trend
-      : latest;
-  }, null);
+function latestTrend(
+  trends: NetworkObservationTrendRecord[],
+): NetworkObservationTrendRecord | null {
+  return trends.reduce<NetworkObservationTrendRecord | null>(
+    (latest, trend) => {
+      if (!latest) {
+        return trend;
+      }
+      return Date.parse(trend.latest_observed_at) >
+        Date.parse(latest.latest_observed_at)
+        ? trend
+        : latest;
+    },
+    null,
+  );
 }
 
-function sortedTrends(trends: NetworkObservationTrendRecord[]): NetworkObservationTrendRecord[] {
-  return [...trends].sort((left, right) => Date.parse(left.latest_observed_at) - Date.parse(right.latest_observed_at));
+function sortedTrends(
+  trends: NetworkObservationTrendRecord[],
+): NetworkObservationTrendRecord[] {
+  return [...trends].sort(
+    (left, right) =>
+      Date.parse(left.latest_observed_at) -
+      Date.parse(right.latest_observed_at),
+  );
 }
 
 function trendTimes(trends: NetworkObservationTrendRecord[]): string[] {
@@ -886,12 +1176,51 @@ function trendLine(
   };
 }
 
+function latestLineValues(
+  lines: TimeSeriesChartLine[],
+  valueFormatter: (value: number | null) => string,
+): Array<{ label: string; value: string }> {
+  return lines
+    .map((line) => {
+      const value = line.values[line.values.length - 1] ?? null;
+      return {
+        label: line.label,
+        value: valueFormatter(value),
+      };
+    })
+    .filter((sample) => sample.value !== "-");
+}
+
+function throughputBaselineSummary(
+  speedTrends: NetworkObservationTrendRecord[],
+  expectedBandwidthMbps: number | null,
+): { attention: boolean; label: string } | null {
+  const latestSpeedTrend = latestTrend(speedTrends);
+  if (
+    !latestSpeedTrend ||
+    latestSpeedTrend.throughput_avg_mbps === null ||
+    expectedBandwidthMbps === null ||
+    expectedBandwidthMbps <= 0
+  ) {
+    return null;
+  }
+  const percentOfExpected = Math.round(
+    (latestSpeedTrend.throughput_avg_mbps / expectedBandwidthMbps) * 100,
+  );
+  return {
+    attention: percentOfExpected < 80,
+    label: `${formatMetric(latestSpeedTrend.throughput_avg_mbps)} Mbps avg - ${percentOfExpected}% of expected ${formatBandwidthMbps(expectedBandwidthMbps)}`,
+  };
+}
+
 function formatPlanBaseline(plan: TunnelPlanRecord): string {
-  const bandwidth = plan.plan.bandwidth ?? plan.input.bandwidth;
+  const bandwidth = plan.plan.bandwidth_mbps ?? plan.input.bandwidth_mbps;
   const latencyMs = plan.plan.latency_ms ?? plan.input.latency_ms;
-  const packetLossRatio = plan.plan.packet_loss_ratio ?? plan.input.packet_loss_ratio;
-  const ospfCost = plan.plan.recommended_ospf_cost ?? plan.recommended_ospf_cost;
-  return `${formatBandwidthTier(bandwidth)}, ${formatMetric(latencyMs)} ms target, ${formatLossRatio(packetLossRatio)} loss, OSPF ${ospfCost}`;
+  const packetLossRatio =
+    plan.plan.packet_loss_ratio ?? plan.input.packet_loss_ratio;
+  const ospfCost =
+    plan.plan.recommended_ospf_cost ?? plan.recommended_ospf_cost;
+  return `${formatBandwidthMbps(bandwidth)}, ${formatMetric(latencyMs)} ms target, ${formatLossRatio(packetLossRatio)} loss, OSPF ${ospfCost}`;
 }
 
 function formatRecentEvidence(
@@ -922,17 +1251,8 @@ function formatSpeedSafety(
   return `${durationSecs}s, ${formatMetric(maxBytesMiB)} MiB cap, ${formatRateLimit(rateLimitKbps)}, TCP ${port}, timeout ${connectTimeoutMs} ms`;
 }
 
-function formatBandwidthTier(value: string): string {
-  if (value === "1000m") {
-    return "1000 Mbps";
-  }
-  if (value === "100m") {
-    return "100 Mbps";
-  }
-  if (value === "10m") {
-    return "10 Mbps";
-  }
-  return value;
+function formatBandwidthMbps(value: number): string {
+  return `${Math.round(value)} Mbps`;
 }
 
 function formatRateLimit(kbps: number): string {
@@ -943,13 +1263,19 @@ function formatRateLimit(kbps: number): string {
 }
 
 function formatNullableMetric(value: number | null, unit: string): string {
-  return value === null ? `${unit} unavailable` : `${formatMetric(value)} ${unit}`;
+  return value === null
+    ? `${unit} unavailable`
+    : `${formatMetric(value)} ${unit}`;
 }
 
 function formatLossRatio(value: number | null | undefined): string {
-  return value === null || value === undefined ? "loss unavailable" : `${formatMetric(value * 100)}%`;
+  return value === null || value === undefined
+    ? "loss unavailable"
+    : `${formatMetric(value * 100)}%`;
 }
 
 function formatMetric(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(value < 10 ? 2 : 1);
+  return Number.isInteger(value)
+    ? String(value)
+    : value.toFixed(value < 10 ? 2 : 1);
 }

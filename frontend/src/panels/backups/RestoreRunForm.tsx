@@ -56,8 +56,8 @@ export function RestoreRunForm({
   return (
     <>
       <div className="sectionHeader compact restoreFormHeader">
-        <h2>Run restore</h2>
-        <span>Runs agent-local archive restores with rehearsal support</span>
+        <h2>Confirm restore</h2>
+        <span>Dry-run first; live restore replaces the selected destination scope</span>
       </div>
       <form className="dispatchForm" onSubmit={(event) => event.preventDefault()}>
         <RestoreArchiveTransferSelect
@@ -67,7 +67,7 @@ export function RestoreRunForm({
           value={archiveTransferKey}
         />
         <label>
-          <span>Post-restore argv</span>
+          <span>Post-restore check argv</span>
           <input
             aria-label="Post-restore argv"
             onChange={(event) => onPostRestoreArgvChange(event.target.value)}
@@ -120,7 +120,7 @@ export function RestoreRunForm({
             type="button"
           >
             <Play size={17} />
-            Review restore
+            {restoreDryRun ? "Review dry run" : "Review live restore"}
           </button>
         )}
       </form>

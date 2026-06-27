@@ -15,7 +15,14 @@ interface ScreenshotEntry {
   tab?: string;
   expandVpsRow?: string;
   detailTab?: string;
-  prepare?: "alert-policy-editor" | "tunnel-plan-create" | "tunnel-plan-promotion" | "vps-rules-preview" | "webhook-rule-editor";
+  prepare?:
+    | "alert-policy-editor"
+    | "config-bulk-patch-preview"
+    | "config-per-vps-loaded"
+    | "tunnel-plan-create"
+    | "tunnel-plan-promotion"
+    | "vps-rules-preview"
+    | "webhook-rule-editor";
   requiredText?: string[];
   heading: string;
   id: string;
@@ -46,7 +53,13 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Overview",
     heading: "Home",
     id: "01-home-overview",
-    requiredText: ["Fleet command home", "Needs attention", "Recent activity"],
+    requiredText: [
+      "Fleet command home",
+      "Running work",
+      "Recent failures",
+      "Needs attention",
+      "Recent activity",
+    ],
   },
   {
     view: "Fleet",
@@ -62,10 +75,12 @@ const allViews: ScreenshotEntry[] = [
     heading: "Instance detail",
     id: "02b-fleet-instance-config-detail",
     requiredText: [
-      "Config ownership",
-      "Open per-VPS config",
-      "Source templates",
-      "VPS rules",
+      "Desired source",
+      "Render status",
+      "Drift state",
+      "Open config",
+      "Compare",
+      "Apply",
     ],
   },
   {
@@ -80,54 +95,86 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Groups",
     heading: "Fleet groups",
     id: "04-fleet-groups",
-    requiredText: ["Tags"],
+    requiredText: ["Group registry", "Create group"],
   },
   {
     view: "Fleet",
     subpage: "Assignments",
     heading: "Group assignments",
     id: "05-fleet-group-assignments",
-    requiredText: ["Tag assignments"],
+    requiredText: ["VPS group assignments"],
   },
   {
     view: "Fleet",
     subpage: "Bulk groups",
     heading: "Bulk groups",
     id: "06-fleet-bulk-groups",
-    requiredText: ["Bulk mutation", "Target preview"],
+    requiredText: [
+      "Bulk tag mutation",
+      "Server resolution runs before confirmation",
+    ],
   },
   {
     view: "Fleet",
     subpage: "Alerts",
     heading: "Fleet alerts",
     id: "07-fleet-alerts",
+    requiredText: [
+      "Tunnel adapter degraded",
+      "Traffic policy",
+      "Acknowledge",
+      "Open",
+    ],
   },
   {
     view: "Fleet",
     subpage: "Instance detail",
     heading: "Instance detail",
     id: "08-fleet-instance-detail",
+    requiredText: [
+      "State",
+      "Last contact",
+      "Agent version",
+      "Active jobs",
+      "Scheduled shell command",
+    ],
   },
   {
     view: "Remote Operations",
     subpage: "Terminal",
     heading: "Terminal",
     id: "09-remote-operations-terminal",
-    requiredText: ["Terminal sessions"],
+    requiredText: [
+      "Terminal sessions",
+      "Open terminal",
+      "Focus terminal",
+      "Advanced session controls",
+    ],
   },
   {
     view: "Remote Operations",
     subpage: "Files",
     heading: "Files",
     id: "10-remote-operations-files",
-    requiredText: ["File browser"],
+    requiredText: [
+      "File browser",
+      "Select a VPS and file to begin.",
+      "Download folder as archive",
+      "Advanced file options",
+    ],
   },
   {
     view: "Remote Operations",
     subpage: "Transfers",
     heading: "Transfers",
     id: "11-remote-operations-transfers",
-    requiredText: ["File transfer sessions"],
+    requiredText: [
+      "File transfer sessions",
+      "Upload file",
+      "Ready downloads",
+      "Transfer sessions",
+      "Advanced: reusable upload sources",
+    ],
   },
   {
     view: "Remote Operations",
@@ -195,26 +242,35 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Agent updates",
     heading: "Agent updates",
     id: "22-automation-agent-updates",
+    requiredText: ["Check update", "Start update", "Registered artifact"],
   },
   {
     view: "Network",
     subpage: "Overview",
     heading: "Network overview",
     id: "23-network-overview",
+    requiredText: ["Create tunnel", "Latest evidence", "stale"],
   },
   {
     view: "Network",
     subpage: "Graph",
     heading: "Network graph",
     id: "24-network-graph",
-    requiredText: ["Topology graph"],
+    requiredText: ["Topology graph", "Last topology evidence", "stale"],
   },
   {
     view: "Network",
     subpage: "Tunnel plans",
     heading: "Tunnel plans",
     id: "25-network-tunnel-plans",
-    requiredText: ["Create tunnel plan", "Promotion workflow", "Generated config"],
+    requiredText: [
+      "Create tunnel plan",
+      "Desired state",
+      "Runtime state",
+      "100 Mbps target",
+      "Promotion workflow",
+      "Generated config",
+    ],
   },
   {
     view: "Network",
@@ -250,60 +306,120 @@ const allViews: ScreenshotEntry[] = [
     heading: "Network evidence",
     id: "28-network-evidence",
   },
-  { view: "Backups", subpage: "Overview", heading: "Backup overview", id: "29-backups-overview" },
+  {
+    view: "Backups",
+    subpage: "Overview",
+    heading: "Backup overview",
+    id: "29-backups-overview",
+  },
   {
     view: "Backups",
     subpage: "Requests",
     heading: "Backup requests",
     id: "30-backups-requests",
+    requiredText: [
+      "Backup request history",
+      "artifact-backed",
+      "Open artifact",
+    ],
   },
   {
     view: "Backups",
     subpage: "Policies",
     heading: "Backup policies",
     id: "31-backups-policies",
+    requiredText: [
+      "Scheduled backup policies",
+      "No scheduled backups",
+      "Create policy",
+    ],
   },
   {
     view: "Backups",
     subpage: "Artifacts",
     heading: "Backup artifacts",
     id: "32-backups-artifacts",
+    requiredText: [
+      "Artifact inventory records",
+      "Available package",
+      "Transfer package",
+    ],
   },
   {
     view: "Backups",
     subpage: "Restore",
     heading: "Restore",
     id: "33-backups-restore",
+    requiredText: [
+      "Restore source records",
+      "Available package",
+      "Draft restore",
+    ],
   },
   {
     view: "Backups",
     subpage: "Migration",
     heading: "Migration",
     id: "34-backups-migration",
+    requiredText: [
+      "Source VPS/artifact",
+      "Replacement VPS",
+      "Migration mapping records",
+    ],
   },
   {
     view: "Config",
     subpage: "Overview",
     heading: "Runtime config overview",
     id: "35-config-overview",
+    requiredText: [
+      "Affected VPS current state",
+      "Stale apply",
+      "Deleted or unavailable VPS",
+      "3/3 rules valid",
+    ],
   },
   {
     view: "Config",
     subpage: "Per-VPS",
     heading: "Per-VPS config",
     id: "36-config-per-vps",
+    requiredText: ["Select one VPS", "Read current config"],
+  },
+  {
+    view: "Config",
+    subpage: "Per-VPS",
+    heading: "Per-VPS config",
+    id: "36b-config-per-vps-loaded",
+    prepare: "config-per-vps-loaded",
+    requiredText: ["Current base", "Desired patch", "Apply patch"],
   },
   {
     view: "Config",
     subpage: "Bulk patch",
     heading: "Bulk patch",
     id: "37-config-bulk-patch",
+    requiredText: ["Incremental patch", "Targets", "Preview changes"],
   },
   {
     view: "Config",
-    subpage: "Templates",
-    heading: "Templates",
+    subpage: "Bulk patch",
+    heading: "Bulk patch",
+    id: "37b-config-bulk-patch-preview",
+    prepare: "config-bulk-patch-preview",
+    requiredText: ["1 VPS resolved", "edge-sfo-01", "Apply patch"],
+  },
+  {
+    view: "Config",
+    subpage: "Template coverage",
+    heading: "Template coverage",
     id: "38-config-templates",
+    requiredText: [
+      "Desired source",
+      "Server storage missing",
+      "Fix source",
+      "Runtime selected only",
+    ],
   },
   {
     view: "Config",
@@ -314,9 +430,11 @@ const allViews: ScreenshotEntry[] = [
     requiredText: [
       "Bulk rule editor",
       "Target VPS selector",
-      "Set values",
-      "Unset values",
-      "Dry-run changed rows",
+      "Common rule cards",
+      "Total quota",
+      "Interfaces / selectors",
+      "Advanced raw key/value",
+      "Preview changes",
     ],
   },
   {
@@ -324,28 +442,40 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Fleet metrics",
     heading: "Fleet metrics",
     id: "40-observability-fleet-metrics",
-    requiredText: ["CPU load by VPS", "Top VPS", "Fleet grouping"],
+    requiredText: [
+      "CPU load by VPS",
+      "Selected: 24h",
+      "Data available:",
+      "Sparse data:",
+      "Active alerts",
+      "Warning observations",
+      "Top VPS",
+      "Fleet grouping",
+    ],
   },
   {
     view: "Observability",
     subpage: "Network metrics",
     heading: "Network metrics",
     id: "41-observability-network-metrics",
-    requiredText: ["Latency, loss, and speed", "Tunnel grouping", "Endpoint comparison", "Alert overlays"],
-  },
-  {
-    view: "Observability",
-    subpage: "Process metrics",
-    heading: "Process metrics",
-    id: "42-observability-process-metrics",
-    requiredText: ["Long-term process history is not exposed by the backend yet."],
+    requiredText: [
+      "Stale network evidence",
+      "Latency, loss, and speed",
+      "Chart samples",
+      "Time filter: retained evidence",
+      "Tunnel grouping",
+      "agent-fra-02 -> agent-sfo-01",
+      "Endpoint comparison",
+      "Saved plan match",
+      "Alert overlays",
+    ],
   },
   {
     view: "Observability",
     subpage: "Alerts",
     heading: "Alerts",
     id: "43-observability-alerts",
-    requiredText: ["Alert policies", "Notification channels", "Notification deliveries"],
+    requiredText: ["Alert policies", "Destinations", "Deliveries"],
   },
   {
     view: "Observability",
@@ -355,6 +485,8 @@ const allViews: ScreenshotEntry[] = [
     prepare: "alert-policy-editor",
     requiredText: [
       "Create alert policy",
+      "Enable after creation",
+      "Preview matches",
       "VPS selector expression",
       "Rule rows",
       "Condition expression",
@@ -364,85 +496,189 @@ const allViews: ScreenshotEntry[] = [
   },
   {
     view: "Observability",
-    subpage: "Webhooks",
-    heading: "Webhooks",
+    subpage: "Event webhooks",
+    heading: "Event webhooks",
     id: "43c-observability-webhooks",
-    requiredText: ["Webhook rules", "Webhook deliveries", "Webhook delivery maintenance"],
+    requiredText: [
+      "Event webhook rules",
+      "Send test",
+      "Retry failed",
+      "Deliveries",
+      "Maintenance",
+    ],
   },
   {
     view: "Observability",
-    subpage: "Webhooks",
-    heading: "Webhooks",
+    subpage: "Event webhooks",
+    heading: "Event webhooks",
     id: "43d-observability-webhooks-rule-editor",
     prepare: "webhook-rule-editor",
-    requiredText: ["Create webhook rule", "Webhook rules are saved expression records"],
+    requiredText: [
+      "Create webhook rule",
+      "Enable after creation",
+      "Signing secret",
+      "Sample payload",
+      "VPSs matched",
+      "Rendered message",
+      "Create rule",
+    ],
   },
   {
     view: "Observability",
     subpage: "Dashboards",
     heading: "Dashboards",
     id: "44-observability-dashboards",
-    requiredText: ["Saved dashboards", "Widget layout", "Share and export"],
+    requiredText: [
+      "Dashboard presets",
+      "Source counts",
+      "Range coverage",
+      "Widget layout",
+      "Share / Export",
+    ],
   },
-  { view: "Audit", subpage: "Events", heading: "Audit events", id: "45-audit-events" },
+  {
+    view: "Audit",
+    subpage: "Events",
+    heading: "Audit events",
+    id: "45-audit-events",
+    requiredText: [
+      "Visible events",
+      "Coverage warning",
+      "Related job/session",
+      "Latest visible",
+    ],
+  },
   {
     view: "Audit",
     subpage: "Job evidence",
     heading: "Job audit evidence",
     id: "46-audit-job-evidence",
-    requiredText: ["Job evidence ledger", "Selected job proof", "Audit context"],
+    requiredText: [
+      "Job evidence ledger",
+      "Selected job proof",
+      "Audit event missing",
+    ],
   },
   {
     view: "Audit",
     subpage: "Sessions",
     heading: "Session evidence",
     id: "47-audit-sessions",
-    requiredText: ["Terminal session evidence", "Operator session evidence", "Transcript references"],
+    requiredText: [
+      "Terminal session evidence",
+      "Operator session evidence",
+      "Transcript references",
+      "Started",
+      "Last activity",
+      "Expiry",
+      "Demo/test auth signals",
+    ],
   },
   {
     view: "Audit",
     subpage: "Retention & export",
     heading: "History retention",
     id: "48-audit-retention-export",
-    requiredText: ["Export scope", "Cleanup review", "Evidence retention only"],
+    requiredText: [
+      "Policy domains",
+      "Audit logs",
+      "Retention days",
+      "Export scope",
+      "Evidence retention only",
+    ],
   },
-  { view: "Access", subpage: "Overview", heading: "Access overview", id: "49-access-overview" },
+  {
+    view: "Access",
+    subpage: "Overview",
+    heading: "Access overview",
+    id: "49-access-overview",
+    requiredText: [
+      "Actions required",
+      "Policy recommends MFA",
+      "Operators and active sessions",
+      "VPS identities",
+      "Gateway sessions",
+      "Privilege state",
+    ],
+  },
   {
     view: "Access",
     subpage: "Operators",
     heading: "Operators",
     id: "50-access-operators",
+    requiredText: [
+      "Operator access policy",
+      "MFA policy",
+      "recommended instead of enforced",
+      "Operator accounts",
+      "Policy recommends MFA",
+      "Revoke sessions",
+    ],
   },
   {
     view: "Access",
     subpage: "VPS identities",
     heading: "VPS identities",
     id: "51-access-vps-identities",
+    requiredText: [
+      "VPS identities",
+      "Register VPS",
+      "Current key",
+      "Client key revocations",
+      "Host rebuild",
+    ],
   },
   {
     view: "Access",
     subpage: "Gateway sessions",
     heading: "Gateway sessions",
     id: "52-access-gateway-sessions",
+    requiredText: [
+      "No active gateway sessions",
+      "gateway endpoint and server key",
+      "Gateway settings",
+    ],
   },
   {
     view: "Access",
     subpage: "Privilege vault",
     heading: "Privilege vault",
     id: "53-access-privilege-vault",
+    requiredText: [
+      "Privilege workflow",
+      "Privilege vault",
+      "Unlock scope",
+      "Unlocked until",
+      "Keep encrypted in this browser",
+      "QR/secret",
+      "Complete setup",
+    ],
   },
   {
     view: "System",
     subpage: "Overview",
     heading: "System overview",
     id: "54-system-overview",
+    requiredText: [
+      "Service health",
+      "Control-plane queue",
+      "What needs attention",
+      "Diagnostics",
+      "Selected chart - Dispatch queue",
+    ],
   },
   {
     view: "System",
     subpage: "Capacity",
     heading: "System capacity",
     id: "55-system-capacity",
-    requiredText: ["Capacity telemetry", "Artifact storage", "Retention pressure", "Worker lag"],
+    requiredText: [
+      "Capacity telemetry",
+      "Subsystem capacity",
+      "Queue growth",
+      "Suite Config fields",
+      "Unavailable capacity telemetry",
+    ],
   },
   {
     view: "System",
@@ -456,7 +692,12 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Maintenance",
     heading: "System maintenance",
     id: "57-system-maintenance",
-    requiredText: ["Dry-run gate", "Maintenance jobs", "Queue cleanup"],
+    requiredText: [
+      "Preview gate",
+      "Artifact types",
+      "Delete artifacts",
+      "Maintenance jobs",
+    ],
   },
   {
     view: "System",
@@ -505,10 +746,20 @@ async function navigateAndScreenshot(
     const row = grid
       .locator(".gridBody [role=row]", { hasText: entry.expandVpsRow })
       .first();
-    await expect(row).toBeVisible({ timeout: 5_000 });
-    await row.click();
+    if ((await row.count()) > 0) {
+      await expect(row).toBeVisible({ timeout: 5_000 });
+      await row.click();
+    } else {
+      const card = grid
+        .locator(".gridMobileCard", { hasText: entry.expandVpsRow })
+        .first();
+      await expect(card).toBeVisible({ timeout: 5_000 });
+      await card.getByRole("button", { name: "Open", exact: true }).click();
+    }
     await expect(
-      page.locator(".consoleHeader").getByText("vpsman / Fleet / Instance detail"),
+      page
+        .locator(".consoleHeader")
+        .getByText("vpsman / Fleet / Instance detail"),
     ).toBeVisible({ timeout: 5_000 });
 
     if (entry.detailTab) {
@@ -516,15 +767,25 @@ async function navigateAndScreenshot(
         name: entry.detailTab,
         exact: true,
       });
-      await expect(detailTab).toBeVisible({ timeout: 5_000 });
-      await detailTab.click();
+      const hasDetailTab = (await detailTab.count()) > 0;
+      if (hasDetailTab && (await detailTab.first().isVisible())) {
+        await detailTab.click();
+      } else {
+        const detailSection = page.getByLabel("VPS detail section");
+        await expect(detailSection).toBeVisible({ timeout: 5_000 });
+        await detailSection.selectOption(entry.detailTab);
+      }
     }
   }
 
   // Wait for heading or any main content
-  const activeSection = entry.expandVpsRow ? "Instance detail" : entry.subpage ?? "Overview";
+  const activeSection = entry.expandVpsRow
+    ? "Instance detail"
+    : (entry.subpage ?? "Overview");
   await expect(
-    page.locator(".consoleHeader").getByText(`vpsman / ${entry.view} / ${activeSection}`),
+    page
+      .locator(".consoleHeader")
+      .getByText(`vpsman / ${entry.view} / ${activeSection}`),
   ).toBeVisible({ timeout: 5_000 });
   try {
     await expect(
@@ -548,39 +809,96 @@ async function navigateAndScreenshot(
     await expect(
       page.locator(".consoleDetailPanel", { hasText: "Create alert policy" }),
     ).toBeVisible({ timeout: 5_000 });
-    await expect(page.getByRole("button", { name: "Close detail panel" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Close detail panel" }),
+    ).toBeVisible();
   }
 
   if (entry.prepare === "tunnel-plan-create") {
+    await closeTunnelPlanWorkflow(page);
     await page.getByRole("button", { name: "Create tunnel plan" }).click();
-    await expect(page.getByRole("heading", { name: "Create tunnel plan" })).toBeVisible({
+    await expect(
+      page.getByRole("heading", { name: "Create tunnel plan" }),
+    ).toBeVisible({
       timeout: 5_000,
     });
-    await expect(page.getByRole("button", { name: "Close create tunnel plan workflow" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Close create tunnel plan workflow" }),
+    ).toBeVisible();
   }
 
   if (entry.prepare === "tunnel-plan-promotion") {
+    await closeTunnelPlanWorkflow(page);
     await page.getByRole("button", { name: "Promotion workflow" }).click();
-    await expect(page.getByLabel("Tunnel plan promotion workflow")).toBeVisible({
-      timeout: 5_000,
-    });
-    await expect(page.getByRole("button", { name: "Close tunnel promotion workflow" })).toBeVisible();
+    await expect(page.getByLabel("Tunnel plan promotion workflow")).toBeVisible(
+      {
+        timeout: 5_000,
+      },
+    );
+    await expect(
+      page.getByRole("button", { name: "Close tunnel promotion workflow" }),
+    ).toBeVisible();
   }
 
   if (entry.prepare === "webhook-rule-editor") {
     await page.getByRole("button", { name: "Create rule" }).click();
+    const editor = page.locator(".consoleDetailPanel", {
+      hasText: "Create webhook rule",
+    });
+    await expect(editor).toBeVisible({ timeout: 5_000 });
     await expect(
-      page.locator(".consoleDetailPanel", { hasText: "Create webhook rule" }),
+      page.getByRole("button", { name: "Close detail panel" }),
+    ).toBeVisible();
+    await editor.getByRole("button", { name: "Test" }).click();
+    await expect(editor).toContainText("Rendered message");
+  }
+
+  if (entry.prepare === "config-per-vps-loaded") {
+    const targetPicker = page.getByRole("combobox", {
+      name: "VPS config target",
+    });
+    await targetPicker.fill("fra");
+    await expect(
+      page.getByRole("option", { name: /core-fra-02.*agent-fra-02/ }),
     ).toBeVisible({ timeout: 5_000 });
-    await expect(page.getByRole("button", { name: "Close detail panel" })).toBeVisible();
+    await page.keyboard.press("Enter");
+    await page.getByRole("button", { name: "Read current config" }).click();
+    await expect(
+      page.getByLabel("VPS redacted runtime config TOML"),
+    ).toHaveValue(/client_id = "agent-fra-02"/, { timeout: 5_000 });
+    await page
+      .getByLabel("One-VPS runtime config override TOML")
+      .fill("[telemetry]\ninterval_secs = 60\n");
+    await expect(
+      page.getByLabel("One-VPS config override guard"),
+    ).toContainText("telemetry", { timeout: 5_000 });
+  }
+
+  if (entry.prepare === "config-bulk-patch-preview") {
+    const selector = page.getByRole("searchbox", {
+      name: "Bulk patch target expression",
+    });
+    await selector.fill("id:agent-sfo-01");
+    await expect(
+      page.getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ }),
+    ).toBeVisible({ timeout: 5_000 });
+    await page.keyboard.press("Enter");
+    await page.getByRole("button", { name: "Preview changes" }).click();
+    await expect(page.getByText("1 VPS resolved")).toBeVisible({
+      timeout: 5_000,
+    });
+    await expect(page.getByLabel("Bulk patch change summary")).toContainText(
+      "edge-sfo-01",
+      { timeout: 5_000 },
+    );
   }
 
   if (entry.prepare === "vps-rules-preview") {
-    await page.getByLabel("VPS rule set values").fill(
-      "traffic.reset_day=14\ntraffic.quota.total=3TB\ntraffic.selectors=eth0+tx,ens3",
-    );
-    await page.getByRole("button", { name: "Dry-run set values" }).click();
-    await expect(page.getByText("Dry-run changed rows")).toBeVisible({
+    await page.getByLabel("Reset day").fill("14");
+    await page.getByLabel("Total quota").fill("4TB");
+    await page.getByLabel("Interfaces / selectors").fill("ens3, eth0+tx");
+    await page.getByRole("button", { name: "Preview changes" }).click();
+    await expect(page.getByLabel("Preview changes data grid")).toBeVisible({
       timeout: 5_000,
     });
     const prompt = page.locator(".confirmationPrompt", {
@@ -656,6 +974,19 @@ async function expectVisibleText(
       { message: `visible text "${text}"`, timeout: 5_000 },
     )
     .toBe(true);
+}
+
+async function closeTunnelPlanWorkflow(page: import("@playwright/test").Page) {
+  for (const label of [
+    "Close create tunnel plan workflow",
+    "Close tunnel promotion workflow",
+    "Close generated config workflow",
+  ]) {
+    const button = page.getByRole("button", { name: label });
+    if (await button.isVisible().catch(() => false)) {
+      await button.click();
+    }
+  }
 }
 
 // Install mock API before each test batch

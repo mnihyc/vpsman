@@ -9,9 +9,8 @@ import {
   terminalSessions,
 } from "./jobSessionFixtures";
 import { installTransferJobApiMock } from "./transferJobMock";
-import {
-  JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
-} from "../../src/generated/protocolContracts";
+import { JOB_COMMAND_TYPE_BY_OPERATION_TYPE } from "../../src/generated/protocolContracts";
+import type { AuditLogRecord } from "../../src/types";
 
 type FixtureJobOutput = {
   client_id: string;
@@ -632,38 +631,183 @@ const systemDashboard = {
   generated_at: "2026-06-05T20:44:58Z",
   notes: ["50-VPS capacity profile active"],
   series: [
-    systemSeries("db_pool.in_use_connections", "DB in-use connections", "connections", [4, 5, 6]),
-    systemSeries("db_pool.open_connections", "DB open connections", "connections", [20, 22, 24]),
-    systemSeries("db_pool.idle_connections", "DB idle connections", "connections", [16, 17, 18]),
-    systemSeries("db_pool.max_connections", "DB max connections", "connections", [32, 32, 32]),
-    systemSeries("dispatch.queue_depth", "Dispatch queue depth", "targets", [1, 2, 4]),
-    systemSeries("targets.dispatching", "Dispatching targets", "targets", [0, 1, 1]),
+    systemSeries(
+      "db_pool.in_use_connections",
+      "DB in-use connections",
+      "connections",
+      [4, 5, 6],
+    ),
+    systemSeries(
+      "db_pool.open_connections",
+      "DB open connections",
+      "connections",
+      [20, 22, 24],
+    ),
+    systemSeries(
+      "db_pool.idle_connections",
+      "DB idle connections",
+      "connections",
+      [16, 17, 18],
+    ),
+    systemSeries(
+      "db_pool.max_connections",
+      "DB max connections",
+      "connections",
+      [32, 32, 32],
+    ),
+    systemSeries(
+      "dispatch.queue_depth",
+      "Dispatch queue depth",
+      "targets",
+      [1, 2, 4],
+    ),
+    systemSeries(
+      "targets.dispatching",
+      "Dispatching targets",
+      "targets",
+      [0, 1, 1],
+    ),
     systemSeries("targets.running", "Running targets", "targets", [1, 2, 2]),
-    systemSeries("dispatch.retried_targets", "Retried targets", "targets", [0, 1, 2]),
-    systemSeries("targets.deadline_expired_active", "Expired active targets", "targets", [0, 0, 0]),
-    systemSeries("targets.control_timeout_last_24h", "Control timeouts", "targets", [0, 1, 1]),
-    systemSeries("targets.agent_timeout_last_24h", "Agent timeouts", "targets", [0, 0, 1]),
-    systemSeries("targets.agent_lost_last_24h", "Agent lost", "targets", [0, 0, 1]),
-    systemSeries("targets.canceled_last_24h", "Canceled targets", "targets", [0, 1, 1]),
-    systemSeries("gateway_events.queued_events", "Gateway queued events", "events", [2, 1, 0]),
-    systemSeries("gateway_events.delivered_events", "Gateway delivered events", "events", [900, 918, 928]),
-    systemSeries("gateway_events.retry_attempts", "Gateway retry attempts", "attempts", [0, 1, 2]),
-    systemSeries("gateway_events.active_queues", "Gateway active queues", "queues", [2, 3, 3]),
-    systemSeries("gateway_events.current_queue_depth", "Gateway queue depth", "events", [2, 1, 0]),
-    systemSeries("gateway_events.oldest_event_age_secs", "Gateway oldest event age", "seconds", [0, 2, 0]),
-    systemSeries("gateway_events.dropped_events", "Gateway dropped events", "events", [0, 0, 1]),
-    systemSeries("gateway_events.telemetry_dropped_events", "Gateway telemetry drops", "events", [0, 0, 1]),
-    systemSeries("gateway_events.expired_events", "Gateway expired events", "events", [0, 0, 0]),
-    systemSeries("gateway_events.critical_failures", "Gateway critical failures", "events", [0, 0, 0]),
-    systemSeries("gateway_events.dropped_by_kind.telemetry", "Gateway telemetry drops by kind", "events", [0, 0, 1]),
-    systemSeries("gateway_events.dropped_by_reason.coalesced", "Gateway coalesced telemetry", "events", [0, 0, 1]),
-    systemSeries("gateway_events.dropped_by_reason.target_queue_full", "Gateway target queue full drops", "events", [0, 0, 0]),
-    systemSeries("gateway_events.retained_output_truncated_events", "Gateway retained output truncations", "events", [0, 0, 0]),
-    systemSeries("gateway_events.rejected_agent_connections", "Gateway rejected agent connections", "connections", [0, 0, 0]),
-    systemSeries("cancellations.requested", "Cancel requested", "targets", [0, 1, 1]),
+    systemSeries(
+      "dispatch.retried_targets",
+      "Retried targets",
+      "targets",
+      [0, 1, 2],
+    ),
+    systemSeries(
+      "targets.deadline_expired_active",
+      "Expired active targets",
+      "targets",
+      [0, 0, 0],
+    ),
+    systemSeries(
+      "targets.control_timeout_last_24h",
+      "Control timeouts",
+      "targets",
+      [0, 1, 1],
+    ),
+    systemSeries(
+      "targets.agent_timeout_last_24h",
+      "Agent timeouts",
+      "targets",
+      [0, 0, 1],
+    ),
+    systemSeries(
+      "targets.agent_lost_last_24h",
+      "Agent lost",
+      "targets",
+      [0, 0, 1],
+    ),
+    systemSeries(
+      "targets.canceled_last_24h",
+      "Canceled targets",
+      "targets",
+      [0, 1, 1],
+    ),
+    systemSeries(
+      "gateway_events.queued_events",
+      "Gateway queued events",
+      "events",
+      [2, 1, 0],
+    ),
+    systemSeries(
+      "gateway_events.delivered_events",
+      "Gateway delivered events",
+      "events",
+      [900, 918, 928],
+    ),
+    systemSeries(
+      "gateway_events.retry_attempts",
+      "Gateway retry attempts",
+      "attempts",
+      [0, 1, 2],
+    ),
+    systemSeries(
+      "gateway_events.active_queues",
+      "Gateway active queues",
+      "queues",
+      [2, 3, 3],
+    ),
+    systemSeries(
+      "gateway_events.current_queue_depth",
+      "Gateway queue depth",
+      "events",
+      [2, 1, 0],
+    ),
+    systemSeries(
+      "gateway_events.oldest_event_age_secs",
+      "Gateway oldest event age",
+      "seconds",
+      [0, 2, 0],
+    ),
+    systemSeries(
+      "gateway_events.dropped_events",
+      "Gateway dropped events",
+      "events",
+      [0, 0, 1],
+    ),
+    systemSeries(
+      "gateway_events.telemetry_dropped_events",
+      "Gateway telemetry drops",
+      "events",
+      [0, 0, 1],
+    ),
+    systemSeries(
+      "gateway_events.expired_events",
+      "Gateway expired events",
+      "events",
+      [0, 0, 0],
+    ),
+    systemSeries(
+      "gateway_events.critical_failures",
+      "Gateway critical failures",
+      "events",
+      [0, 0, 0],
+    ),
+    systemSeries(
+      "gateway_events.dropped_by_kind.telemetry",
+      "Gateway telemetry drops by kind",
+      "events",
+      [0, 0, 1],
+    ),
+    systemSeries(
+      "gateway_events.dropped_by_reason.coalesced",
+      "Gateway coalesced telemetry",
+      "events",
+      [0, 0, 1],
+    ),
+    systemSeries(
+      "gateway_events.dropped_by_reason.target_queue_full",
+      "Gateway target queue full drops",
+      "events",
+      [0, 0, 0],
+    ),
+    systemSeries(
+      "gateway_events.retained_output_truncated_events",
+      "Gateway retained output truncations",
+      "events",
+      [0, 0, 0],
+    ),
+    systemSeries(
+      "gateway_events.rejected_agent_connections",
+      "Gateway rejected agent connections",
+      "connections",
+      [0, 0, 0],
+    ),
+    systemSeries(
+      "cancellations.requested",
+      "Cancel requested",
+      "targets",
+      [0, 1, 1],
+    ),
     systemSeries("cancellations.sent", "Cancel sent", "targets", [0, 1, 1]),
     systemSeries("cancellations.acked", "Cancel acked", "targets", [0, 1, 1]),
-    systemSeries("cancellations.awaiting_ack", "Cancel awaiting ack", "targets", [0, 0, 0]),
+    systemSeries(
+      "cancellations.awaiting_ack",
+      "Cancel awaiting ack",
+      "targets",
+      [0, 0, 0],
+    ),
   ],
   window: "24h",
 };
@@ -733,7 +877,8 @@ const suiteConfigRedacted = {
   secrets: {
     gateway_private_key_file: "/run/secrets/vpsman_gateway_private_key_hex",
     internal_token_file: "/run/secrets/vpsman_internal_token",
-    privilege_verifier_key_file: "/run/secrets/vpsman_privilege_verifier_key_hex",
+    privilege_verifier_key_file:
+      "/run/secrets/vpsman_privilege_verifier_key_hex",
   },
   version: 1,
 };
@@ -918,7 +1063,8 @@ const fleetAlerts = [
     evidence: {
       policy: { name: "edge-resource-policy" },
       rule: {
-        condition_expression: "traffic.cycle.total >= traffic.quota.total * 0.8",
+        condition_expression:
+          "traffic.cycle.total >= traffic.quota.total * 0.8",
       },
       traffic: { cycle_percent: 80.33, reset_day: 14 },
     },
@@ -972,7 +1118,8 @@ const fleetAlertPolicies = [
         enabled: true,
         group_id: "fbfbfbfb-1111-4111-8111-111111111111",
         id: "fbfbfbfb-2222-4111-8111-111111111111",
-        condition_expression: "traffic.cycle.total >= traffic.quota.total * 0.8",
+        condition_expression:
+          "traffic.cycle.total >= traffic.quota.total * 0.8",
         name: "80% total quota",
         rule_version: 1,
         severity: "warning",
@@ -1170,7 +1317,7 @@ const fleetAlertNotifications = [
 const webhookRules = [
   {
     actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-    body_generator:
+    body_template:
       "{rule.name} {event.kind} count={matched_vps.length} {matched_vps.0.display_name}",
     cooldown_secs: 300,
     created_at: "2026-06-02T10:00:00Z",
@@ -1179,6 +1326,7 @@ const webhookRules = [
     id: "fefefefe-1111-4111-8111-111111111111",
     name: "edge-interval-webhook",
     notes: "Routes interval checks for edge fleet capacity reviews.",
+    signing_secret_set: true,
     target: "https://hooks.example/vpsman/edge-capacity",
     updated_at: "2026-06-02T10:00:00Z",
   },
@@ -1660,7 +1808,8 @@ const runtimeConfigPatchGenerators = [
     field_schema: {
       properties: {
         unmanaged_version_url: {
-          default: "https://github.com/mnihyc/vpsman/releases/latest/download/version.json",
+          default:
+            "https://github.com/mnihyc/vpsman/releases/latest/download/version.json",
           type: "string",
         },
         unmanaged_interval_secs: { default: 86400, type: "integer" },
@@ -1691,7 +1840,8 @@ const runtimeConfigPatchGenerators = [
     field_schema: {
       properties: {
         unmanaged_version_url: {
-          default: "https://github.com/mnihyc/vpsman/releases/latest/download/version.json",
+          default:
+            "https://github.com/mnihyc/vpsman/releases/latest/download/version.json",
           type: "string",
         },
         unmanaged_interval_secs: { default: 86400, type: "integer" },
@@ -1799,7 +1949,7 @@ export const tunnelPlans = [
       right_underlay: "203.0.113.20",
       address_pool_cidr: "10.255.0.0/30",
       reserved_addresses: [],
-      bandwidth: "100m",
+      bandwidth_mbps: 100,
       latency_ms: 14,
       packet_loss_ratio: 0,
       preference: 1,
@@ -1815,7 +1965,7 @@ export const tunnelPlans = [
       left_tunnel_address: "10.255.0.0",
       right_tunnel_address: "10.255.0.1",
       tunnel_prefix_len: 31,
-      bandwidth: "100m",
+      bandwidth_mbps: 100,
       recommended_ospf_cost: 14,
       ifupdown_file: "/etc/network/interfaces.d/vpsman-tunnels",
       bird2_file: "/etc/bird/vpsman-ospf.conf",
@@ -1841,7 +1991,9 @@ export const tunnelPlans = [
         "/etc/network/interfaces.d/vpsman-tunnels",
         "/etc/bird/vpsman-ospf.conf",
       ],
-      validation_steps: ["review generated runtime snippets before enabling the plan"],
+      validation_steps: [
+        "review generated runtime snippets before enabling the plan",
+      ],
       rollback_notes: ["remove only the vpsman-managed blocks"],
       conflicts: [],
       mutates_host: false,
@@ -1880,7 +2032,7 @@ export const tunnelPlans = [
       right_underlay: "203.0.113.20",
       address_pool_cidr: "10.44.0.0/30",
       reserved_addresses: [],
-      bandwidth: "100m",
+      bandwidth_mbps: 100,
       latency_ms: 18,
       packet_loss_ratio: 0,
       preference: 1,
@@ -1901,7 +2053,7 @@ export const tunnelPlans = [
       left_tunnel_address: "10.44.0.0",
       right_tunnel_address: "10.44.0.1",
       tunnel_prefix_len: 31,
-      bandwidth: "100m",
+      bandwidth_mbps: 100,
       recommended_ospf_cost: 18,
       ifupdown_file: "",
       bird2_file: "/etc/bird/vpsman-ospf.conf",
@@ -1940,6 +2092,7 @@ const networkJobs = [
     max_timeout_secs: 30,
     payload_hash: "a".repeat(64),
     privileged: false,
+    source_schedule_id: "51515151-6161-4717-8abc-defdefdefdef",
     status: "completed",
     target_count: 2,
   },
@@ -1951,6 +2104,7 @@ const networkJobs = [
     id: "66666666-aaaa-4bbb-8ccc-dddddddddddd",
     payload_hash: "6".repeat(64),
     privileged: true,
+    source_schedule_id: null,
     status: "completed",
     target_count: 1,
   },
@@ -1962,6 +2116,7 @@ const networkJobs = [
     id: networkSpeedJobId,
     payload_hash: "7".repeat(64),
     privileged: true,
+    source_schedule_id: null,
     status: "completed",
     target_count: 2,
   },
@@ -1973,6 +2128,7 @@ const networkJobs = [
     id: networkProbeJobId,
     payload_hash: "9".repeat(64),
     privileged: true,
+    source_schedule_id: null,
     status: "completed",
     target_count: 1,
   },
@@ -1984,6 +2140,7 @@ const networkJobs = [
     id: networkStatusJobId,
     payload_hash: "8".repeat(64),
     privileged: true,
+    source_schedule_id: null,
     status: "completed",
     target_count: 1,
   },
@@ -2023,7 +2180,12 @@ const commandTemplates = [
     built_in: true,
     command_type: "shell_argv",
     created_at: "builtin",
-    defaults: { confirmed: false, destructive: false, force_unprivileged: false, max_timeout_secs: 30 },
+    defaults: {
+      confirmed: false,
+      destructive: false,
+      force_unprivileged: false,
+      max_timeout_secs: 30,
+    },
     display_group: "shell",
     id: "00000000-0000-4100-8000-000000000001",
     name: "Default shell command",
@@ -2342,7 +2504,7 @@ const networkTrends = [
 const topologyGraph = {
   edges: [
     {
-      bandwidth: "100m",
+      bandwidth_mbps: 100,
       cost_delta: 8,
       degraded_count: 0,
       enabled: true,
@@ -2397,11 +2559,13 @@ const topologyGraph = {
 
 const ospfRecommendations = [
   {
-    configured_bandwidth: "100m",
+    configured_bandwidth_mbps: 100,
     confidence: "measured",
     cost_delta: 8,
     degraded_count: 0,
-    effective_bandwidth: "10m",
+    evidence_summary:
+      "12.4 ms avg; 0.25% loss; 10.1 Mbps avg, 11.8 Mbps max; 5 samples; latest 2026-05-31T10:09:00Z",
+    effective_bandwidth_mbps: 10,
     interface_name: "tunab",
     latest_observed_at: "2026-05-31T10:09:00Z",
     latency_avg_ms: 12.4,
@@ -2411,6 +2575,7 @@ const ospfRecommendations = [
     plan_name: "sfo-fra-gre",
     plan_ospf_cost: 14,
     reason: "derived from persisted probe/speed-test trends",
+    recommendation_id: "ospf-1234abcd5678ef90",
     recommended_ospf_cost: 22,
     right_client_id: "agent-fra-02",
     sample_count: 5,
@@ -2429,9 +2594,9 @@ export const ospfUpdatePlans = [
     cost_delta: 8,
     current_ospf_cost: 14,
     evidence: {
-      configured_bandwidth: "100m",
+      configured_bandwidth_mbps: 100,
       degraded_count: 0,
-      effective_bandwidth: "10m",
+      effective_bandwidth_mbps: 10,
       latest_observed_at: "2026-05-31T10:09:00Z",
       latency_avg_ms: 12.4,
       packet_loss_avg_ratio: 0.0025,
@@ -2446,6 +2611,7 @@ export const ospfUpdatePlans = [
     plan_id: tunnelPlans[0].id,
     plan_name: "sfo-fra-gre",
     privilege_required: true,
+    recommendation_id: "ospf-1234abcd5678ef90",
     proposed_left_bird2_interface_snippet: [
       "# vpsman GRE tunnel sfo-fra-gre: agent-sfo-01 -> agent-fra-02",
       'interface "tunab" {',
@@ -2464,6 +2630,8 @@ export const ospfUpdatePlans = [
     requires_approval: true,
     right_client_id: "agent-fra-02",
     status: "review_required",
+    evidence_summary:
+      "12.4 ms avg; 0.25% loss; 10.1 Mbps avg, 11.8 Mbps max; 5 samples; latest 2026-05-31T10:09:00Z",
   },
 ];
 
@@ -2471,6 +2639,8 @@ export async function installConsoleApiMock(
   page: Page,
   options: {
     agentListOverride?: typeof agents;
+    auditLogsOverride?: AuditLogRecord[];
+    dashboardSummaryOverride?: Partial<typeof dashboardOverview.summary>;
     fileTransferSourceArtifactsOverride?: typeof fileTransferSourceArtifacts;
     fileTransfersOverride?: typeof fileTransfers;
   } = {},
@@ -2484,6 +2654,7 @@ export async function installConsoleApiMock(
       artifactsFixture,
       backupsFixture,
       dashboardOverviewFixture,
+      dashboardSummaryOverrideFixture,
       systemDashboardFixture,
       sourceTemplateAssignmentsFixture,
       sourceTemplatesFixture,
@@ -2561,8 +2732,7 @@ export async function installConsoleApiMock(
         (agentListOverrideFixture ?? agentsFixture).filter(
           (agent) => !deletedAgentIds.has(agent.id),
         );
-      const visibleAgents = () =>
-        dashboardAgents();
+      const visibleAgents = () => dashboardAgents();
       const visibleTunnelPlans = () =>
         tunnelPlansFixture.filter(
           (plan) =>
@@ -2577,6 +2747,7 @@ export async function installConsoleApiMock(
         artifactCleanupJobs: [] as unknown[],
         artifactCleanupPreviews: [] as unknown[],
         bulkTagMutations: [] as unknown[],
+        tagDeletes: [] as unknown[],
         bulkResolve: [] as unknown[],
         runtimeConfigPatches: [] as unknown[],
         sourceConfigPatchs: [] as unknown[],
@@ -2597,6 +2768,7 @@ export async function installConsoleApiMock(
         historyRetentionPrunes: [] as unknown[],
         jobs: [] as unknown[],
         jobApprovals: [] as unknown[],
+        jobApprovalDecisions: [] as unknown[],
         jobOutputComparisons: [] as unknown[],
         commandTemplates: [] as unknown[],
         migrationLinks: [] as unknown[],
@@ -2694,9 +2866,9 @@ export async function installConsoleApiMock(
         }>
       >();
       const createdJobOutputs = new Map<string, FixtureJobOutput[]>();
-      const currentJobApprovals = (jobApprovalsFixture as Array<Record<string, unknown>>).map(
-        (approval) => ({ ...approval }),
-      );
+      const currentJobApprovals = (
+        jobApprovalsFixture as Array<Record<string, unknown>>
+      ).map((approval) => ({ ...approval }));
       const serverJobsFixture: Array<Record<string, unknown>> = [];
       const commandTypeForOperation = (
         operation: Record<string, unknown> | undefined,
@@ -2704,11 +2876,14 @@ export async function installConsoleApiMock(
         if (!operation) {
           return null;
         }
-        const operationType = typeof operation.type === "string" ? operation.type : "shell";
+        const operationType =
+          typeof operation.type === "string" ? operation.type : "shell";
         if (operationType === "shell") {
           return operation.pty ? "shell_pty" : "shell_argv";
         }
-        const commandType = (jobCommandTypeByOperationTypeFixture as Record<string, string>)[operationType];
+        const commandType = (
+          jobCommandTypeByOperationTypeFixture as Record<string, string>
+        )[operationType];
         if (!commandType) {
           throw new Error(`unknown mock job operation type: ${operationType}`);
         }
@@ -2723,8 +2898,9 @@ export async function installConsoleApiMock(
         for (const agent of visibleAgents()) {
           const tags = Array.isArray(agent.tags) ? agent.tags : [];
           const matchesId = expression.includes(`id:${agent.id}`);
-          const matchesTag = tags.some((tag) =>
-            expression.includes(`tag:${tag}`) || expression.includes(tag),
+          const matchesTag = tags.some(
+            (tag) =>
+              expression.includes(`tag:${tag}`) || expression.includes(tag),
           );
           if (matchesId || matchesTag) {
             ids.add(agent.id);
@@ -2769,7 +2945,9 @@ export async function installConsoleApiMock(
         selector_expression: schedule.selector_expression ?? "id:*",
         target_client_ids: Array.isArray(schedule.target_client_ids)
           ? schedule.target_client_ids
-          : scheduleTargetIdsFromSelector(schedule.selector_expression ?? "id:*"),
+          : scheduleTargetIdsFromSelector(
+              schedule.selector_expression ?? "id:*",
+            ),
         timezone: schedule.timezone ?? "UTC",
         updated_at:
           schedule.updated_at ?? schedule.created_at ?? "2026-06-02T10:00:00Z",
@@ -2814,11 +2992,13 @@ export async function installConsoleApiMock(
           return tags.some((tag) => expression.includes(tag));
         });
         const selectedAgents =
-          matchedAgents.length > 0 ? matchedAgents : visibleAgents().slice(0, 2);
+          matchedAgents.length > 0
+            ? matchedAgents
+            : visibleAgents().slice(0, 2);
         const ruleName =
           typeof request.name === "string" && request.name.trim()
             ? request.name.trim()
-            : webhookRulesFixture[0]?.name ?? "webhook-rule";
+            : (webhookRulesFixture[0]?.name ?? "webhook-rule");
         const eventKind =
           typeof request.event_kind === "string" && request.event_kind.trim()
             ? request.event_kind.trim()
@@ -2830,10 +3010,12 @@ export async function installConsoleApiMock(
         const target =
           typeof request.target === "string" && request.target.trim()
             ? request.target.trim()
-            : webhookRulesFixture[0]?.target ?? "https://hooks.example/vpsman";
+            : (webhookRulesFixture[0]?.target ??
+              "https://hooks.example/vpsman");
         return {
           actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
-          attempt_count: status === "queued" || status === "matched_dry_run" ? 0 : 1,
+          attempt_count:
+            status === "queued" || status === "matched_dry_run" ? 0 : 1,
           cooldown_until_unix: 0,
           created_at: "2026-06-02T10:04:00Z",
           dedupe_key: `${ruleName}:${eventKind}:${eventId}`,
@@ -2857,8 +3039,8 @@ export async function installConsoleApiMock(
           rule_id:
             typeof request.id === "string"
               ? request.id
-              : webhookRulesFixture[0]?.id ??
-                "fefefefe-1111-4111-8111-111111111111",
+              : (webhookRulesFixture[0]?.id ??
+                "fefefefe-1111-4111-8111-111111111111"),
           rule_name: ruleName,
           status,
           target,
@@ -2885,7 +3067,9 @@ export async function installConsoleApiMock(
         }
         return null;
       };
-      const asFixtureRecord = (value: unknown): Record<string, unknown> | null =>
+      const asFixtureRecord = (
+        value: unknown,
+      ): Record<string, unknown> | null =>
         value && !Array.isArray(value) && typeof value === "object"
           ? (value as Record<string, unknown>)
           : null;
@@ -3182,7 +3366,8 @@ export async function installConsoleApiMock(
                 stream: string;
               }>
             >
-          )[jobId] ?? [];
+          )[jobId] ??
+          [];
         const outputClientIds = Array.from(
           new Set(outputs.map((output) => output.client_id)),
         );
@@ -3222,7 +3407,8 @@ export async function installConsoleApiMock(
                 stream: string;
               }>
             >
-          )[jobId] ?? [];
+          )[jobId] ??
+          [];
         const rows = [] as Array<{
           byte_count: number;
           client_id: string;
@@ -3356,9 +3542,8 @@ export async function installConsoleApiMock(
             after:
               operation === "unset"
                 ? null
-                : ((body.values as Record<string, string> | undefined)?.[
-                    key
-                  ] ?? "14"),
+                : ((body.values as Record<string, string> | undefined)?.[key] ??
+                  "14"),
             before:
               vpsRuleValuesFixture.find((row) => row.key === key)?.value_raw ??
               null,
@@ -3399,6 +3584,12 @@ export async function installConsoleApiMock(
               ...dashboardOverviewFixture.resource_curve,
               metric: requestedResourceMetric,
             },
+            summary: dashboardSummaryOverrideFixture
+              ? {
+                  ...dashboardOverviewFixture.summary,
+                  ...dashboardSummaryOverrideFixture,
+                }
+              : dashboardOverviewFixture.summary,
             scope: {
               kind: scopeKind,
               label:
@@ -3434,16 +3625,20 @@ export async function installConsoleApiMock(
           if (method === "GET") {
             return jsonResponse({
               exists: true,
-              hot_reload_note: "API dispatcher limits, gateway-control read timeout, alert thresholds, job-output artifact threshold, update-registration enforcement, gateway runtime timing, and worker tick/schedule/notification/webhook/retention controls are applied by running services after this file changes.",
+              hot_reload_note:
+                "API dispatcher limits, gateway-control read timeout, alert thresholds, job-output artifact threshold, update-registration enforcement, gateway runtime timing, and worker tick/schedule/notification/webhook/retention controls are applied by running services after this file changes.",
               path: "config/vpsman.toml",
               redacted: suiteConfigRedactedFixture,
-              restart_required_note: "Bind addresses, gateway/API URLs and identities, database URL/migration path/pool sizes, secret refs, object-store clients and local object directories, worker identity/once mode, and connect/write timeout changes require service restart.",
+              restart_required_note:
+                "Bind addresses, gateway/API URLs and identities, database URL/migration path/pool sizes, secret refs, object-store clients and local object directories, worker identity/once mode, and connect/write timeout changes require service restart.",
               toml: currentSuiteConfigToml,
               validation: suiteConfigValidationFixture,
             });
           }
           if (method === "PUT") {
-            const body = (await requestJsonBody(input, init)) as { toml?: string };
+            const body = (await requestJsonBody(input, init)) as {
+              toml?: string;
+            };
             requests.suiteConfigs.push(body);
             currentSuiteConfigToml = body.toml ?? currentSuiteConfigToml;
             return jsonResponse({
@@ -3455,7 +3650,9 @@ export async function installConsoleApiMock(
           }
         }
         if (pathname === "/api/v1/admin/suite-config/validate") {
-          const body = (await requestJsonBody(input, init)) as { toml?: string };
+          const body = (await requestJsonBody(input, init)) as {
+            toml?: string;
+          };
           const draftToml = body.toml ?? currentSuiteConfigToml;
           return jsonResponse({
             changed_keys: ["capacity.api_db_pool"],
@@ -3465,7 +3662,7 @@ export async function installConsoleApiMock(
             redacted: {
               ...suiteConfigRedactedFixture,
               capacity: {
-                ...(suiteConfigRedactedFixture.capacity),
+                ...suiteConfigRedactedFixture.capacity,
                 api_db_pool: draftToml.includes("api_db_pool = 40") ? 40 : 32,
               },
             },
@@ -3512,7 +3709,9 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/vps-rules/dry-run" && method === "POST") {
           const body = await readJsonBody(input, init);
-          return jsonResponse(buildVpsRulesPreview(body as Record<string, unknown>));
+          return jsonResponse(
+            buildVpsRulesPreview(body as Record<string, unknown>),
+          );
         }
         if (
           (pathname === "/api/v1/vps-rules/bulk-upsert" ||
@@ -3520,16 +3719,22 @@ export async function installConsoleApiMock(
           method === "POST"
         ) {
           const body = await readJsonBody(input, init);
-          return jsonResponse(buildVpsRulesPreview(body as Record<string, unknown>));
+          return jsonResponse(
+            buildVpsRulesPreview(body as Record<string, unknown>),
+          );
         }
         if (pathname === "/api/v1/traffic-accounting" && method === "GET") {
           return jsonResponse(trafficAccountingFixture);
         }
-        const trafficAccountingMatch = pathname.match(/^\/api\/v1\/traffic-accounting\/([^/]+)$/);
+        const trafficAccountingMatch = pathname.match(
+          /^\/api\/v1\/traffic-accounting\/([^/]+)$/,
+        );
         if (trafficAccountingMatch && method === "GET") {
           const clientId = decodeURIComponent(trafficAccountingMatch[1]);
           return jsonResponse(
-            trafficAccountingFixture.find((row) => row.client_id === clientId) ?? null,
+            trafficAccountingFixture.find(
+              (row) => row.client_id === clientId,
+            ) ?? null,
           );
         }
         if (pathname === "/api/v1/policy-alerts" && method === "GET") {
@@ -3645,20 +3850,38 @@ export async function installConsoleApiMock(
           return jsonResponse(webhookRulesFixture);
         }
         if (pathname === "/api/v1/webhook-rules" && method === "POST") {
-          const body = await readJsonBody(input, init);
+          const body = (await readJsonBody(input, init)) as Record<
+            string,
+            unknown
+          >;
           requests.webhookRules.push(body);
+          const existingRule = webhookRulesFixture.find(
+            (rule: Record<string, unknown>) => rule.id === body.id,
+          );
+          const nextSecret = body.signing_secret;
+          const signingSecretSet = body.clear_signing_secret
+            ? false
+            : typeof nextSecret === "string" && nextSecret.trim()
+              ? true
+              : Boolean(existingRule?.signing_secret_set);
+          const {
+            signing_secret: _secret,
+            clear_signing_secret: _clear,
+            ...redactedBody
+          } = body;
           return jsonResponse({
-            ...(body as Record<string, unknown>),
+            ...redactedBody,
             actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
             created_at: "2026-06-02T10:04:00Z",
-            id: "adadadad-1111-4111-8111-111111111111",
+            id:
+              typeof body.id === "string"
+                ? body.id
+                : "adadadad-1111-4111-8111-111111111111",
+            signing_secret_set: signingSecretSet,
             updated_at: "2026-06-02T10:04:00Z",
           });
         }
-        if (
-          pathname === "/api/v1/webhook-rules/dry-run" &&
-          method === "POST"
-        ) {
+        if (pathname === "/api/v1/webhook-rules/dry-run" && method === "POST") {
           const body = (await readJsonBody(input, init)) as Record<
             string,
             unknown
@@ -3682,8 +3905,12 @@ export async function installConsoleApiMock(
             unknown
           >;
           requests.webhookRuleDispatches.push(body);
+          const matchingRules = webhookRulesFixture.filter(
+            (rule: Record<string, unknown>) =>
+              !body.rule_id || rule.id === body.rule_id,
+          );
           return jsonResponse(
-            webhookRulesFixture.map((rule: Record<string, unknown>) =>
+            matchingRules.map((rule: Record<string, unknown>) =>
               withReviewPreviewHash(
                 buildWebhookDelivery(
                   {
@@ -3720,13 +3947,15 @@ export async function installConsoleApiMock(
           } | null;
           requests.webhookRuleProcesses.push(body);
           return jsonResponse(
-            webhookDeliveriesFixture.map((delivery: Record<string, unknown>) => ({
-              ...delivery,
-              review_preview_hash: body?.dry_run
-                ? "4444444444444444444444444444444444444444444444444444444444444444"
-                : delivery.review_preview_hash,
-              status: body?.dry_run ? delivery.status : "delivered",
-            })),
+            webhookDeliveriesFixture.map(
+              (delivery: Record<string, unknown>) => ({
+                ...delivery,
+                review_preview_hash: body?.dry_run
+                  ? "4444444444444444444444444444444444444444444444444444444444444444"
+                  : delivery.review_preview_hash,
+                status: body?.dry_run ? delivery.status : "delivered",
+              }),
+            ),
           );
         }
         if (
@@ -3787,9 +4016,7 @@ export async function installConsoleApiMock(
             disabled_at: null as string | null,
             id: `99999999-aaaa-4bbb-8ccc-${String(operatorRecords.length + 1).padStart(12, "0")}`,
             role: String(body.role ?? "operator"),
-            scopes: Array.isArray(body.scopes)
-              ? body.scopes.map(String)
-              : [],
+            scopes: Array.isArray(body.scopes) ? body.scopes.map(String) : [],
             session_refresh_ttl_secs:
               typeof body.session_refresh_ttl_secs === "number"
                 ? body.session_refresh_ttl_secs
@@ -3811,7 +4038,11 @@ export async function installConsoleApiMock(
           const operatorId = decodeURIComponent(operatorMutationMatch[1]);
           const action = operatorMutationMatch[2] ?? "update";
           const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
-          requests.operatorActions.push({ action, body, operator_id: operatorId });
+          requests.operatorActions.push({
+            action,
+            body,
+            operator_id: operatorId,
+          });
           const record = findOperator(operatorId);
           if (method === "PUT") {
             record.role = String(body.role ?? record.role);
@@ -3849,8 +4080,11 @@ export async function installConsoleApiMock(
             body,
             session_id: sessionId,
           });
-          const session = operatorSessions.find((item) => item.id === sessionId);
-          if (!session) return jsonResponse({ error: "not found" }, { status: 404 });
+          const session = operatorSessions.find(
+            (item) => item.id === sessionId,
+          );
+          if (!session)
+            return jsonResponse({ error: "not found" }, { status: 404 });
           session.revoked = true;
           session.revoked_at = "2026-01-03T00:15:00Z";
           return jsonResponse(session);
@@ -4250,14 +4484,14 @@ export async function installConsoleApiMock(
           method === "POST"
         ) {
           const generatorId =
-            pathname.split("/").at(-2) ?? runtimeConfigPatchGeneratorsFixture[0].id;
+            pathname.split("/").at(-2) ??
+            runtimeConfigPatchGeneratorsFixture[0].id;
           const generator =
             runtimeConfigPatchGeneratorsFixture.find(
               (record: { id: string }) => record.id === generatorId,
             ) ?? runtimeConfigPatchGeneratorsFixture[0];
           const body = await readJsonBody(input, init);
-          const values =
-            asFixtureRecord(asFixtureRecord(body)?.values) ?? {};
+          const values = asFixtureRecord(asFixtureRecord(body)?.values) ?? {};
           const toml = renderPatchGeneratorBodyFixture(
             generator.raw_generator_body,
             values,
@@ -4359,7 +4593,9 @@ export async function installConsoleApiMock(
             status: "pending",
             job_id: job.job_id ?? "abababab-4444-4555-8666-777777777777",
             command_type:
-              commandTypeForOperation(job.operation as Record<string, unknown> | undefined) ??
+              commandTypeForOperation(
+                job.operation as Record<string, unknown> | undefined,
+              ) ??
               job.command ??
               "shell_argv",
             selector_expression: job.selector_expression ?? "",
@@ -4376,7 +4612,8 @@ export async function installConsoleApiMock(
             requester_role: "admin",
             requested_at: "2026-06-02T10:13:00Z",
             request_reason: body?.reason ?? null,
-            risk: body?.risk ?? (job.destructive ? "destructive" : "privileged"),
+            risk:
+              body?.risk ?? (job.destructive ? "destructive" : "privileged"),
             decision_by: null,
             decision_username: null,
             decision_reason: null,
@@ -4391,11 +4628,26 @@ export async function installConsoleApiMock(
         if (jobApprovalDecisionMatch && method === "POST") {
           const approvalId = decodeURIComponent(jobApprovalDecisionMatch[1]);
           const decision = jobApprovalDecisionMatch[2];
-          const approval = currentJobApprovals.find((record) => record.id === approvalId);
+          const approval = currentJobApprovals.find(
+            (record) => record.id === approvalId,
+          );
           if (!approval) {
             return jsonResponse({ error: "job_approval_not_found" }, 404);
           }
-          const body = (await readJsonBody(input, init)) as { reason?: string | null } | null;
+          const body = (await readJsonBody(input, init)) as {
+            reason?: string | null;
+          } | null;
+          requests.jobApprovalDecisions.push({
+            approval_id: approvalId,
+            decision,
+            body,
+          });
+          if (decision === "reject" && !String(body?.reason ?? "").trim()) {
+            return jsonResponse(
+              { error: "job_approval_rejection_reason_required" },
+              400,
+            );
+          }
           approval.status = decision === "approve" ? "approved" : "rejected";
           approval.decision_by = "99999999-aaaa-4bbb-8ccc-000000000001";
           approval.decision_username = "console-admin";
@@ -4417,6 +4669,7 @@ export async function installConsoleApiMock(
             max_timeout_secs: approval.max_timeout_secs,
             payload_hash: approval.payload_hash,
             privileged: approval.privileged,
+            source_schedule_id: null,
             status: "running",
             target_count: targetClientIds.length,
           };
@@ -4457,15 +4710,43 @@ export async function installConsoleApiMock(
           const matchedBytes = (
             fileTransferSourceArtifactsFixture as Array<{ size_bytes?: number }>
           ).reduce((sum, artifact) => sum + (artifact.size_bytes ?? 0), 0);
+          const representativeObjects = (
+            fileTransferSourceArtifactsFixture as Array<{
+              created_at?: string;
+              id?: string;
+              object_key?: string;
+              size_bytes?: number;
+              status?: string;
+            }>
+          ).map((artifact) => ({
+            created_at: artifact.created_at ?? "2026-05-31T10:10:00Z",
+            domain: "file_transfer_source",
+            id: artifact.id ?? "62626262-2222-4333-8444-555555555555",
+            object_key:
+              artifact.object_key ?? "file-transfer-sources/payload.bin",
+            reason: null,
+            reference_protected: false,
+            size_bytes: artifact.size_bytes ?? 0,
+            status: artifact.status ?? "active",
+          }));
+          const createdTimes = representativeObjects
+            .map((artifact) => artifact.created_at)
+            .sort();
           return jsonResponse({
             domains: request.domains ?? [],
             expression: request.expression ?? "",
+            full_list_download_url: null,
             matched_count: (
               fileTransferSourceArtifactsFixture as Array<unknown>
             ).length,
             matched_bytes: matchedBytes,
+            newest_created_at: createdTimes.at(-1) ?? null,
+            oldest_created_at: createdTimes[0] ?? null,
             preview_hash:
               "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            reference_protected_count: 0,
+            representative_objects: representativeObjects,
+            retained_count: representativeObjects.length,
           });
         }
         if (
@@ -4535,7 +4816,8 @@ export async function installConsoleApiMock(
           return jsonResponse({
             actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
             built_in: false,
-            command_type: commandTypeForOperation(request.operation) ?? "shell_argv",
+            command_type:
+              commandTypeForOperation(request.operation) ?? "shell_argv",
             created_at: "2026-06-02T10:04:00Z",
             defaults: request.defaults ?? {},
             display_group: request.display_group ?? "shell",
@@ -4551,7 +4833,9 @@ export async function installConsoleApiMock(
             updated_at: "2026-06-02T10:04:00Z",
           });
         }
-        const commandTemplateMatch = pathname.match(/^\/api\/v1\/command-templates\/([^/]+)$/);
+        const commandTemplateMatch = pathname.match(
+          /^\/api\/v1\/command-templates\/([^/]+)$/,
+        );
         if (commandTemplateMatch && method === "DELETE") {
           const templateId = decodeURIComponent(commandTemplateMatch[1]);
           const template = commandTemplatesFixture.find(
@@ -4561,7 +4845,10 @@ export async function installConsoleApiMock(
             return jsonResponse({ error: "command_template_not_found" }, 404);
           }
           if ((template as { built_in?: boolean }).built_in) {
-            return jsonResponse({ error: "command_template_builtin_immutable" }, 409);
+            return jsonResponse(
+              { error: "command_template_builtin_immutable" },
+              409,
+            );
           }
           return jsonResponse(template);
         }
@@ -4814,9 +5101,12 @@ export async function installConsoleApiMock(
             createdJobOutputs.get(outputMatch[1]) ??
             (jobOutputsFixture as Record<string, unknown[]>)[outputMatch[1]] ??
             [];
-          return jsonResponse(
-            { items, limit: 1000, next_cursor: null, has_more: false },
-          );
+          return jsonResponse({
+            items,
+            limit: 1000,
+            next_cursor: null,
+            has_more: false,
+          });
         }
         const jobMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)$/);
         if (jobMatch && method === "GET") {
@@ -4831,6 +5121,30 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/tags") {
           return jsonResponse(tagsFixture);
+        }
+        const tagDeleteMatch = pathname.match(/^\/api\/v1\/tags\/([^/]+)$/);
+        if (tagDeleteMatch && method === "DELETE") {
+          const body = await readJsonBody(input, init);
+          const tagName = decodeURIComponent(tagDeleteMatch[1]);
+          requests.tagDeletes.push({ body, tag: tagName });
+          const confirmed = Boolean((body as { confirmed?: boolean } | null)?.confirmed);
+          const matchedTag = tagsFixture.find((tag) => tag.name === tagName);
+          const affected =
+            matchedTag?.clients ??
+            visibleAgents().filter((agent) => agent.tags.includes(tagName));
+          return jsonResponse({
+            action: "delete",
+            affected,
+            changed_count: confirmed ? affected.length : 0,
+            confirmation_required: !confirmed,
+            preview_hash:
+              (body as { preview_hash?: string | null } | null)?.preview_hash ??
+              "6".repeat(64),
+            schedule_impacts: [],
+            skipped_count: 0,
+            tag: tagName,
+            target_count: affected.length,
+          });
         }
         if (pathname === "/api/v1/tags/bulk" && method === "POST") {
           const body = await readJsonBody(input, init);
@@ -4892,7 +5206,8 @@ export async function installConsoleApiMock(
           const schedule = normalizeScheduleRecord({
             catch_up_limit: request.catch_up_limit ?? 1,
             catch_up_policy: request.catch_up_policy ?? "run_once",
-            command_type: commandTypeForOperation(request.operation) ?? "shell_argv",
+            command_type:
+              commandTypeForOperation(request.operation) ?? "shell_argv",
             created_at: "2026-06-02T10:04:00Z",
             cron_expr: cronExpr,
             deferred_until: null,
@@ -4919,7 +5234,11 @@ export async function installConsoleApiMock(
             },
             retry_delay_secs: request.retry_delay_secs ?? 300,
             selector_expression: request.selector_expression ?? "id:*",
-            target_client_ids: request.target_client_ids ?? scheduleTargetIdsFromSelector(request.selector_expression ?? "id:*"),
+            target_client_ids:
+              request.target_client_ids ??
+              scheduleTargetIdsFromSelector(
+                request.selector_expression ?? "id:*",
+              ),
             timezone: request.timezone ?? "UTC",
             updated_at: "2026-06-02T10:04:00Z",
           });
@@ -4982,7 +5301,9 @@ export async function installConsoleApiMock(
           schedule.updated_at = "2026-06-02T10:08:00Z";
           return jsonResponse(schedule);
         }
-        const scheduleTargetsMatch = pathname.match(/^\/api\/v1\/schedules\/([^/]+)\/targets$/);
+        const scheduleTargetsMatch = pathname.match(
+          /^\/api\/v1\/schedules\/([^/]+)\/targets$/,
+        );
         if (scheduleTargetsMatch && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.scheduleActions.push({ body, method, path: pathname });
@@ -4994,8 +5315,10 @@ export async function installConsoleApiMock(
             selector_expression?: string;
             target_client_ids?: string[];
           };
-          schedule.selector_expression = request.selector_expression ?? schedule.selector_expression;
-          schedule.target_client_ids = request.target_client_ids ?? schedule.target_client_ids;
+          schedule.selector_expression =
+            request.selector_expression ?? schedule.selector_expression;
+          schedule.target_client_ids =
+            request.target_client_ids ?? schedule.target_client_ids;
           schedule.updated_at = "2026-06-02T10:06:30Z";
           return jsonResponse(schedule);
         }
@@ -5031,7 +5354,9 @@ export async function installConsoleApiMock(
             const fixedTargetIds = Array.isArray(schedule.target_client_ids)
               ? schedule.target_client_ids
               : scheduleTargetIdsFromSelector(schedule.selector_expression);
-            const selectedTargets = visibleAgents().filter((agent) => fixedTargetIds.includes(agent.id));
+            const selectedTargets = visibleAgents().filter((agent) =>
+              fixedTargetIds.includes(agent.id),
+            );
             return jsonResponse({
               target_count: fixedTargetIds.length,
               target_counts: queuedTargetCounts(fixedTargetIds.length),
@@ -5092,10 +5417,7 @@ export async function installConsoleApiMock(
             updated_at: "2026-06-02T10:11:00Z",
           });
         }
-        if (
-          pathname === "/api/v1/backup-policies/prune" &&
-          method === "POST"
-        ) {
+        if (pathname === "/api/v1/backup-policies/prune" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.backupPolicyPrunes.push(body);
           const request = body as {
@@ -5175,8 +5497,13 @@ export async function installConsoleApiMock(
         if (tunnelPlanEnabledMatch && method === "POST") {
           const planId = decodeURIComponent(tunnelPlanEnabledMatch[1]);
           const enabled = tunnelPlanEnabledMatch[2] === "enable";
-          requests.tunnelPlanEnabledMutations.push({ enabled, plan_id: planId });
-          const plan = tunnelPlansFixture.find((record) => record.id === planId);
+          requests.tunnelPlanEnabledMutations.push({
+            enabled,
+            plan_id: planId,
+          });
+          const plan = tunnelPlansFixture.find(
+            (record) => record.id === planId,
+          );
           if (plan) {
             plan.enabled = enabled;
             plan.updated_at = "2026-06-02T10:08:00Z";
@@ -5191,23 +5518,44 @@ export async function installConsoleApiMock(
           const planId = decodeURIComponent(tunnelPlanOspfCostMatch[1]);
           const body = await readJsonBody(input, init);
           requests.tunnelPlanOspfCostUpdates.push({ body, plan_id: planId });
-          const plan = tunnelPlansFixture.find((record) => record.id === planId);
+          const plan = tunnelPlansFixture.find(
+            (record) => record.id === planId,
+          );
           if (plan) {
+            const nextCost =
+              (body as { recommended_ospf_cost?: number })
+                .recommended_ospf_cost ?? plan.plan.recommended_ospf_cost;
+            plan.recommended_ospf_cost = nextCost;
             plan.plan = {
               ...plan.plan,
-              recommended_ospf_cost:
-                (body as { recommended_ospf_cost?: number })
-                  .recommended_ospf_cost ?? plan.plan.recommended_ospf_cost,
+              bird2_interface_snippet:
+                plan.plan.bird2_interface_snippet.replace(
+                  /cost \d+;/,
+                  `cost ${nextCost};`,
+                ),
+              recommended_ospf_cost: nextCost,
             };
             plan.updated_at = "2026-06-02T10:08:00Z";
+            const updatePlan = ospfUpdatePlansFixture.find(
+              (record) => record.plan_id === planId,
+            );
+            if (updatePlan) {
+              updatePlan.current_ospf_cost = nextCost;
+              updatePlan.recommended_ospf_cost =
+                (body as { mutation_intent?: string }).mutation_intent ===
+                "rollback"
+                  ? 22
+                  : nextCost;
+              updatePlan.cost_delta =
+                updatePlan.recommended_ospf_cost - updatePlan.current_ospf_cost;
+              updatePlan.status =
+                updatePlan.cost_delta === 0 ? "noop" : "review_required";
+            }
             return jsonResponse(plan);
           }
           return jsonResponse({ code: "tunnel_plan_not_found" }, 400);
         }
-        if (
-          pathname === "/api/v1/tunnel-plans/allocate" &&
-          method === "POST"
-        ) {
+        if (pathname === "/api/v1/tunnel-plans/allocate" && method === "POST") {
           const body = (await readJsonBody(input, init)) as {
             include_ipv4?: boolean;
             include_ipv6?: boolean;
@@ -5251,14 +5599,17 @@ export async function installConsoleApiMock(
             enabled: body.enabled ?? false,
             id: "bbbbbbbb-aaaa-4bbb-8ccc-eeeeeeeeeeee",
             kind: body.kind ?? tunnelPlansFixture[0].kind,
-            left_client_id: body.left_client_id ?? tunnelPlansFixture[0].left_client_id,
+            left_client_id:
+              body.left_client_id ?? tunnelPlansFixture[0].left_client_id,
             name: body.name ?? tunnelPlansFixture[0].name,
             plan: {
               ...tunnelPlansFixture[0].plan,
               interface_name:
-                body.interface_name ?? tunnelPlansFixture[0].plan.interface_name,
+                body.interface_name ??
+                tunnelPlansFixture[0].plan.interface_name,
             },
-            right_client_id: body.right_client_id ?? tunnelPlansFixture[0].right_client_id,
+            right_client_id:
+              body.right_client_id ?? tunnelPlansFixture[0].right_client_id,
             updated_at: "2026-06-02T10:08:00Z",
           });
         }
@@ -5435,10 +5786,7 @@ export async function installConsoleApiMock(
             targets,
           });
         }
-        if (
-          pathname === "/api/v1/runtime-config/patch" &&
-          method === "POST"
-        ) {
+        if (pathname === "/api/v1/runtime-config/patch" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.runtimeConfigPatches.push(body);
           const targets = resolveBulkTargets(body);
@@ -5453,8 +5801,9 @@ export async function installConsoleApiMock(
               updated_at: "2026-06-02T10:08:00Z",
               updated_by: "99999999-aaaa-4bbb-8ccc-000000000001",
             })),
-            sync_job_ids: targets.map((_, index) =>
-              `99999999-9999-4999-8999-${String(index + 1).padStart(12, "0")}`,
+            sync_job_ids: targets.map(
+              (_, index) =>
+                `99999999-9999-4999-8999-${String(index + 1).padStart(12, "0")}`,
             ),
           });
         }
@@ -5560,10 +5909,11 @@ export async function installConsoleApiMock(
       agentListOverrideFixture: options.agentListOverride ?? null,
       agentsFixture: agents,
       agentUpdateReleasesFixture: agentUpdateReleases,
-      auditLogsFixture: auditLogs,
+      auditLogsFixture: options.auditLogsOverride ?? auditLogs,
       artifactsFixture: backupArtifacts,
       backupsFixture: backupRequests,
       dashboardOverviewFixture: dashboardOverview,
+      dashboardSummaryOverrideFixture: options.dashboardSummaryOverride ?? null,
       systemDashboardFixture: systemDashboard,
       sourceTemplateAssignmentsFixture: sourceTemplateAssignments,
       sourceTemplatesFixture: sourceTemplates,
@@ -5582,7 +5932,8 @@ export async function installConsoleApiMock(
       policyAlertsFixture: policyAlerts,
       policyDryRunFixture,
       fileTransferSourceArtifactsFixture:
-        options.fileTransferSourceArtifactsOverride ?? fileTransferSourceArtifacts,
+        options.fileTransferSourceArtifactsOverride ??
+        fileTransferSourceArtifacts,
       fileTransfersFixture: options.fileTransfersOverride ?? fileTransfers,
       historyRetentionPoliciesFixture: historyRetentionPolicies,
       jobApprovalsFixture: jobApprovals,

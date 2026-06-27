@@ -93,9 +93,9 @@ export function ArtifactUploadForm({
       </form>
       <div className="dispatchForm inlineRestoreAction">
         <label>
-          <span>Source job ID</span>
+          <span>Transfer package source job ID</span>
           <input
-            aria-label="Backup artifact handoff source job ID"
+            aria-label="Backup artifact transfer package source job ID"
             onChange={(event) => onHandoffJobIdChange(event.target.value)}
             placeholder="optional completed backup job"
             value={handoffJobId}
@@ -104,7 +104,7 @@ export function ArtifactUploadForm({
         {!handoffConfirmationOpen && (
           <button className="secondaryAction" disabled={pending || !artifactBackupId} onClick={onHandoffSubmit} type="button">
             <Upload size={17} />
-            Review handoff
+            Review transfer package
           </button>
         )}
       </div>

@@ -247,6 +247,7 @@ fn transfer_job(id: uuid::Uuid, created_at: &str) -> JobHistoryView {
         id,
         actor_id: None,
         command_type: "file_transfer_download_chunk".to_string(),
+        source_schedule_id: None,
         privileged: true,
         status: "completed".to_string(),
         target_count: 1,

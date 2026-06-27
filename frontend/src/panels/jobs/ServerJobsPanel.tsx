@@ -14,6 +14,7 @@ import type {
 import { formatTime, shortHash, shortId } from "../../utils";
 
 type ArtifactCleanupDomain = "job_output" | "file_transfer" | "backup_artifact";
+type CleanupArtifactState = "active" | "delete_failed" | "deleting" | "creating" | "any";
 
 const artifactCleanupDomainOptions: Array<{
   description: string;
@@ -59,7 +60,10 @@ export function ServerJobsPanel({
   ) => Promise<ArtifactCleanupPreviewRecord>;
   onRefresh: () => void;
 }) {
-  const [expression, setExpression] = useState('artifact.domain = "job_output"');
+  const [olderThanDays, setOlderThanDays] = useState("30");
+  const [artifactState, setArtifactState] = useState<CleanupArtifactState>("active");
+  const [objectPrefix, setObjectPrefix] = useState("");
+  const [advancedExpression, setAdvancedExpression] = useState("");
   const [domains, setDomains] = useState<ArtifactCleanupDomain[]>([
     "job_output",
     "file_transfer",
@@ -78,20 +82,34 @@ export function ServerJobsPanel({
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
+  const expression = useMemo(
+    () => buildCleanupExpression(olderThanDays, artifactState, objectPrefix, advancedExpression),
+    [advancedExpression, artifactState, objectPrefix, olderThanDays],
+  );
+  const expressionValid = expression.trim().length > 0 && !expression.startsWith("__invalid__");
   const summary =
     error ??
     previewStatus ??
     (preview
-      ? `${preview.matched_count} artifacts, ${formatBytes(preview.matched_bytes)}`
+      ? `${preview.matched_count} artifacts previewed, ${formatBytes(preview.matched_bytes)}`
       : `${jobs.length} maintenance jobs`);
   const previewExpressionMatches = preview?.expression === expression;
   const previewDomainsMatch = preview ? sameDomains(preview.domains, domains) : false;
-  const cleanupReady = Boolean(preview && previewExpressionMatches && previewDomainsMatch);
-  const previewReadiness = cleanupReady
-    ? "Reviewed dry-run snapshot is ready to queue."
+  const previewFresh = Boolean(preview && previewExpressionMatches && previewDomainsMatch);
+  const cleanupEvidence = cleanupPreviewEvidence(preview);
+  const cleanupCanDelete = Boolean(
+    previewFresh &&
+      cleanupEvidence.complete &&
+      preview &&
+      preview.matched_count > 0,
+  );
+  const previewReadiness = cleanupCanDelete
+    ? "Reviewed preview has deletion evidence and can open one final confirmation."
+    : previewFresh
+      ? "Preview is current, but deletion is blocked until the backend reports age range, retention/protection, and affected objects."
     : preview
-      ? "Preview is stale; rerun dry-run before queueing."
-      : "Dry-run preview required before queueing.";
+      ? "Preview is stale; rerun Preview before deletion."
+      : "Preview required before deletion.";
   const serverJobColumns = useMemo<ConsoleDataGridColumn<ServerJobRecord>[]>(
     () => [
       {
@@ -176,6 +194,10 @@ export function ServerJobsPanel({
   );
 
   async function previewCleanup() {
+    if (!expressionValid) {
+      setError("Enter valid cleanup criteria before preview.");
+      return;
+    }
     const reviewGeneration = captureReviewGeneration();
     const frozenExpression = expression;
     const frozenDomains = [...domains];
@@ -212,8 +234,8 @@ export function ServerJobsPanel({
     if (!preview) {
       return;
     }
-    if (!cleanupReady) {
-      setError("Run a fresh cleanup preview before queueing.");
+    if (!cleanupCanDelete) {
+      setError("Deletion is blocked until cleanup preview includes age range, retention/protection, and affected-object evidence.");
       return;
     }
     setPending(true);
@@ -294,30 +316,14 @@ export function ServerJobsPanel({
           <div className="cleanupPreviewContract">
             <ShieldCheck size={18} />
             <div>
-              <strong>Dry-run gate</strong>
+              <strong>Preview gate</strong>
               <span>
-                Cleanup can only be queued from a reviewed preview hash. Editing the expression or domains invalidates the preview.
+                Preview shows the current count and size. Delete stays blocked until the preview also proves object age, retention/protection, and affected-object evidence.
               </span>
             </div>
           </div>
-          <label className="artifactCleanupExpression">
-            <span>Filter expression</span>
-            <textarea
-              aria-label="Expression"
-              rows={3}
-              title="Expression filters artifacts inside the selected domains. Domain authority is selected separately."
-              value={expression}
-              onChange={(event) => {
-                invalidateReviewGeneration();
-                setExpression(event.target.value);
-                setPreview(null);
-                setConfirmOpen(false);
-                setPreviewStatus(null);
-              }}
-            />
-          </label>
           <div className="artifactCleanupDomains">
-            <span>Authority domains</span>
+            <span>Artifact types</span>
             <div className="artifactDomainOptions">
               {artifactCleanupDomainOptions.map((option) => (
                 <label
@@ -338,40 +344,154 @@ export function ServerJobsPanel({
               ))}
             </div>
           </div>
-          <label>
-            <span>Preview hash</span>
-            <input
-              readOnly
-              title={preview?.preview_hash ?? "Run Preview to create a reviewed cleanup snapshot"}
-              value={preview?.preview_hash ?? "Preview required before queueing"}
-            />
-          </label>
-          <label>
-            <span>Matched</span>
-            <input
-              readOnly
-              title={
-                preview
-                  ? `${preview.matched_count} artifacts, ${formatBytes(preview.matched_bytes)}`
-                  : "Preview before queueing cleanup"
-              }
-              value={
-                preview
-                  ? `${preview.matched_count} / ${formatBytes(preview.matched_bytes)}`
-                  : "Preview required before queueing"
-              }
-            />
-          </label>
+          <div className="cleanupCriteriaGrid">
+            <label>
+              <span>Older than</span>
+              <div className="inlineUnitInput">
+                <input
+                  aria-label="Older than days"
+                  inputMode="numeric"
+                  min={0}
+                  max={3650}
+                  onChange={(event) => {
+                    invalidateReviewGeneration();
+                    setOlderThanDays(event.target.value);
+                    setPreview(null);
+                    setConfirmOpen(false);
+                    setPreviewStatus(null);
+                  }}
+                  type="number"
+                  value={olderThanDays}
+                />
+                <small>days</small>
+              </div>
+            </label>
+            <label>
+              <span>State</span>
+              <select
+                aria-label="Artifact state"
+                onChange={(event) => {
+                  invalidateReviewGeneration();
+                  setArtifactState(event.target.value as CleanupArtifactState);
+                  setPreview(null);
+                  setConfirmOpen(false);
+                  setPreviewStatus(null);
+                }}
+                value={artifactState}
+              >
+                <option value="active">Active</option>
+                <option value="delete_failed">Delete failed</option>
+                <option value="deleting">Deleting</option>
+                <option value="creating">Creating</option>
+                <option value="any">Any state</option>
+              </select>
+            </label>
+            <label>
+              <span>Object path/prefix</span>
+              <input
+                aria-label="Object path prefix"
+                onChange={(event) => {
+                  invalidateReviewGeneration();
+                  setObjectPrefix(event.target.value);
+                  setPreview(null);
+                  setConfirmOpen(false);
+                  setPreviewStatus(null);
+                }}
+                placeholder="Optional object key prefix"
+                value={objectPrefix}
+              />
+            </label>
+          </div>
+          <details className="cleanupAdvanced">
+            <summary>Advanced expression</summary>
+            <label className="artifactCleanupExpression">
+              <span>Additional filter expression</span>
+              <textarea
+                aria-label="Expression"
+                rows={3}
+                title="Advanced expression filters artifacts inside the selected artifact types. It is combined with the common criteria above."
+                value={advancedExpression}
+                onChange={(event) => {
+                  invalidateReviewGeneration();
+                  setAdvancedExpression(event.target.value);
+                  setPreview(null);
+                  setConfirmOpen(false);
+                  setPreviewStatus(null);
+                }}
+              />
+            </label>
+            <div className="cleanupExpressionPreview" aria-label="Effective cleanup expression">
+              <span>Effective expression</span>
+              <code>{expressionValid ? expression : "Invalid criteria"}</code>
+            </div>
+          </details>
+          <div className="cleanupPreviewFacts" aria-label="Cleanup preview result">
+            <div>
+              <span>Matched</span>
+              <strong>
+                {preview
+                  ? `${preview.matched_count} artifacts / ${formatBytes(preview.matched_bytes)}`
+                  : "Preview required"}
+              </strong>
+            </div>
+            <div>
+              <span>Age range</span>
+              <strong>{cleanupEvidence.ageRangeLabel}</strong>
+            </div>
+            <div>
+              <span>Retention/protection</span>
+              <strong>{cleanupEvidence.retentionLabel}</strong>
+            </div>
+            <div>
+              <span>Affected objects</span>
+              <strong>{cleanupEvidence.objectsLabel}</strong>
+            </div>
+            <div>
+              <span>Preview snapshot</span>
+              <strong title={preview?.preview_hash}>
+                {preview ? shortHash(preview.preview_hash) : "Not created"}
+              </strong>
+            </div>
+          </div>
+          {preview?.representative_objects?.length ? (
+            <div className="cleanupObjectPreview" aria-label="Representative cleanup objects">
+              <div>
+                <span>Representative objects</span>
+                <strong>{preview.representative_objects.length} shown from preview</strong>
+              </div>
+              <ul>
+                {preview.representative_objects.slice(0, 5).map((object) => (
+                  <li key={`${object.domain}:${object.object_key}`}>
+                    <span className="cleanupObjectIdentity">
+                      <strong>{displayToken(object.domain)}</strong>
+                      <code title={object.object_key}>{object.object_key}</code>
+                    </span>
+                    <span className="cleanupObjectMeta">
+                      {formatBytes(object.size_bytes)} · {object.created_at ? formatTime(object.created_at) : "age unavailable"} · {displayToken(object.status)}
+                      {object.reference_protected ? " · protected" : ""}
+                    </span>
+                    {object.reason ? <span className="cleanupObjectReason">{object.reason}</span> : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           <div className="cleanupReadinessSummary" aria-label="Artifact cleanup readiness">
-            <div className={cleanupReady ? "ready" : "attention"}>
-              <span>Queue status</span>
-              <strong>{cleanupReady ? "Ready after dry run" : "Blocked until dry run"}</strong>
+            <div className={cleanupCanDelete ? "ready" : "attention"}>
+              <span>Delete status</span>
+              <strong>
+                {cleanupCanDelete
+                  ? "Ready for confirmation"
+                  : previewFresh
+                    ? "Delete blocked"
+                    : "Preview required"}
+              </strong>
               <p>{previewReadiness}</p>
             </div>
             <div>
               <span>Scope</span>
               <strong>{formatCleanupDomains(preview?.domains ?? domains) || "No domains selected"}</strong>
-              <p>{domains.length} selected cleanup domains. Domains define the object-store authority boundary.</p>
+              <p>{domains.length} selected artifact types. Type filters and object-prefix criteria narrow the preview.</p>
             </div>
             <div className={preview ? "attention" : undefined}>
               <span>Deletion impact</span>
@@ -382,20 +502,20 @@ export function ServerJobsPanel({
               </strong>
               <p>
                 {preview
-                  ? "Queueing will request irreversible deletion for the reviewed matched set."
-                  : "Run Preview to calculate object count and total size before queueing."}
+                  ? "Count and size are known, but deletion requires object-level evidence before confirmation."
+                  : "Run Preview to calculate object count and total size."}
               </p>
             </div>
             <div>
-              <span>Retention detail</span>
-              <strong>Age and retention rule not reported</strong>
-              <p>The current cleanup preview API returns count, size, domains, expression, and hash only.</p>
+              <span>Missing evidence</span>
+              <strong>{cleanupEvidence.missingLabel}</strong>
+              <p>Backend preview must expose oldest/newest object age, retained/reference-protected counts, and a representative object list or download.</p>
             </div>
           </div>
           <div className="retentionActions">
             <button
               className="secondaryAction"
-              disabled={pending || !expression.trim() || domains.length === 0}
+              disabled={pending || !expressionValid || domains.length === 0}
               onClick={() => void previewCleanup()}
               title="Build a reviewed cleanup snapshot for the selected domains"
               type="button"
@@ -405,29 +525,29 @@ export function ServerJobsPanel({
             </button>
             <button
               className="secondaryAction dangerAction"
-              disabled={pending || !cleanupReady}
+              disabled={pending || !cleanupCanDelete}
               onClick={() => setConfirmOpen(true)}
               title={
-                cleanupReady
-                  ? "Queue cleanup using the reviewed expression, domains, and preview hash"
-                  : "Run a fresh dry-run preview before queueing cleanup"
+                cleanupCanDelete
+                  ? "Delete artifacts using the reviewed expression, artifact types, preview hash, and object evidence"
+                  : "Deletion blocked until preview includes age range, retention/protection, and affected-object evidence"
               }
               type="button"
             >
               <Trash2 size={16} />
-              Queue cleanup
+              Delete artifacts
             </button>
           </div>
         </div>
         <ConfirmationPrompt
-          confirmLabel="Queue cleanup"
-          detail="Queues a control-plane cleanup job for the reviewed artifact set. This operation is destructive and uses the dry-run preview hash as its guardrail."
+          confirmLabel="Delete artifacts"
+          detail="Queues the reviewed artifact set for deletion. This operation is destructive and uses the preview hash plus object evidence as its guardrail."
           error={error}
           items={[
-            { label: "Dry-run gate", value: cleanupReady ? "Fresh preview hash verified" : "Preview required" },
+            { label: "Preview gate", value: cleanupCanDelete ? "Fresh preview evidence verified" : "Preview evidence incomplete" },
             { label: "Expression", value: preview?.expression ?? expression },
             {
-              label: "Domains",
+              label: "Artifact types",
               title: formatCleanupDomains(preview?.domains ?? domains),
               value: formatCleanupDomains(preview?.domains ?? domains),
             },
@@ -437,26 +557,34 @@ export function ServerJobsPanel({
               value: preview ? formatBytes(preview.matched_bytes) : "0 B",
             },
             {
+              label: "Age range",
+              value: cleanupEvidence.ageRangeLabel,
+            },
+            {
+              label: "Affected objects",
+              value: cleanupEvidence.objectsLabel,
+            },
+            {
               label: "Preview hash",
               title: preview?.preview_hash,
               value: preview ? shortHash(preview.preview_hash) : "-",
             },
             {
               label: "Retention detail",
-              value: "Age and retention rule not reported by preview API",
+              value: cleanupEvidence.retentionLabel,
             },
             {
               label: "Effect",
-              value: "Irreversible object deletion request",
+              value: "Irreversible artifact deletion request",
             },
           ]}
           onCancel={() => setConfirmOpen(false)}
           onConfirm={() => void queueCleanup()}
           open={confirmOpen}
           pending={pending}
-          title="Confirm artifact cleanup"
+          title="Confirm artifact deletion"
           tone="danger"
-          typedConfirmationLabel="Type DELETE to confirm artifact cleanup"
+          typedConfirmationLabel="Type DELETE to confirm artifact deletion"
           typedConfirmationText="DELETE"
         />
       </div>
@@ -540,6 +668,94 @@ export function ServerJobsPanel({
 
 function displayToken(value: string): string {
   return value.replace(/_/g, " ");
+}
+
+function buildCleanupExpression(
+  olderThanDays: string,
+  artifactState: CleanupArtifactState,
+  objectPrefix: string,
+  advancedExpression: string,
+): string {
+  const filters: string[] = [];
+  const trimmedDays = olderThanDays.trim();
+  if (trimmedDays) {
+    const parsedDays = Number(trimmedDays);
+    if (!Number.isFinite(parsedDays) || parsedDays < 0 || parsedDays > 3650) {
+      return "__invalid__: older than must be 0-3650 days";
+    }
+    if (parsedDays > 0) {
+      const cutoff = new Date(Date.now() - parsedDays * 24 * 60 * 60 * 1000).toISOString();
+      filters.push(`artifact.created_at <= "${escapeExpressionLiteral(cutoff)}"`);
+    }
+  }
+  if (artifactState !== "any") {
+    filters.push(`artifact.status = "${escapeExpressionLiteral(artifactState)}"`);
+  }
+  const prefix = objectPrefix.trim();
+  if (prefix) {
+    filters.push(`artifact.object = "${escapeExpressionLiteral(prefix)}*"`);
+  }
+  const extra = advancedExpression.trim();
+  if (extra) {
+    filters.push(`(${extra})`);
+  }
+  return filters.join(" && ");
+}
+
+function escapeExpressionLiteral(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function cleanupPreviewEvidence(preview: ArtifactCleanupPreviewRecord | null): {
+  ageRangeLabel: string;
+  complete: boolean;
+  missingLabel: string;
+  objectsLabel: string;
+  retentionLabel: string;
+} {
+  if (!preview) {
+    return {
+      ageRangeLabel: "Not previewed",
+      complete: false,
+      missingLabel: "Preview required",
+      objectsLabel: "Not previewed",
+      retentionLabel: "Not previewed",
+    };
+  }
+  const ageRangeReady = Boolean(preview.oldest_created_at && preview.newest_created_at);
+  const retentionReady =
+    typeof preview.retained_count === "number" &&
+    typeof preview.reference_protected_count === "number";
+  const representativeObjects = preview.representative_objects ?? [];
+  const objectsReady =
+    preview.matched_count === 0 ||
+    representativeObjects.length > 0 ||
+    Boolean(preview.full_list_download_url);
+  const missing: string[] = [];
+  if (!ageRangeReady) {
+    missing.push("age range");
+  }
+  if (!retentionReady) {
+    missing.push("retention/protection");
+  }
+  if (!objectsReady) {
+    missing.push("object list");
+  }
+  return {
+    ageRangeLabel: ageRangeReady
+      ? `${formatTime(preview.oldest_created_at as string)} to ${formatTime(preview.newest_created_at as string)}`
+      : "Not reported by API",
+    complete: missing.length === 0,
+    missingLabel: missing.length > 0 ? missing.join(", ") : "None",
+    objectsLabel: objectsReady
+      ? preview.full_list_download_url
+        ? "Full list available"
+        : `${representativeObjects.length} representative`
+      : "Not reported by API",
+    retentionLabel: retentionReady
+      ? `${preview.retained_count ?? 0} eligible / ${preview.reference_protected_count ?? 0} protected`
+      : "Not reported by API",
+  };
 }
 
 function formatCleanupDomains(domains: string[]): string {

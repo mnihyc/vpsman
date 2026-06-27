@@ -6,11 +6,13 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
+import { VpsCombobox } from "../../components/VpsCombobox";
 import {
   artifactLifecycleStatusBadgeClass,
   fileTransferSessionStatusBadgeClass,
 } from "../../jobStatusPresentation";
 import type { JobDispatchPresetInput } from "../../jobDispatchPreset";
+import type { AgentView } from "../../types";
 import type {
   FileTransferHandoffRecord,
   FileTransferSessionRecord,
@@ -61,6 +63,7 @@ type TransferRetryReviewSnapshot = {
 };
 
 export function FileTransferSessionsPanel({
+  agents,
   clientLabel,
   focusPath,
   transfers,
@@ -68,12 +71,13 @@ export function FileTransferSessionsPanel({
   loading,
   onCreateHandoff,
   onDownloadSource,
+  onOpenDispatchPreset,
   onOpenJobDetails,
-  onOpenRetryPreset,
   onRefresh,
   onSaveHandoff,
   onUploadSource,
 }: {
+  agents: AgentView[];
   clientLabel: (clientId: string) => string;
   focusPath?: string | null;
   transfers: FileTransferSessionRecord[];
@@ -81,8 +85,8 @@ export function FileTransferSessionsPanel({
   loading: boolean;
   onCreateHandoff: (clientId: string, sessionId: string) => Promise<FileTransferHandoffRecord>;
   onDownloadSource: (downloadPath: string) => Promise<Blob>;
+  onOpenDispatchPreset?: (preset: JobDispatchPresetInput) => void;
   onOpenJobDetails?: (jobId: string) => void;
-  onOpenRetryPreset?: (preset: JobDispatchPresetInput) => void;
   onRefresh: () => void;
   onSaveHandoff: (
     downloadPath: string,
@@ -102,6 +106,10 @@ export function FileTransferSessionsPanel({
   const [handoffSnapshot, setHandoffSnapshot] = useState<HandoffReviewSnapshot | null>(null);
   const [retrySnapshot, setRetrySnapshot] = useState<TransferRetryReviewSnapshot | null>(null);
   const [selectedHandoffKeys, setSelectedHandoffKeys] = useState<string[]>([]);
+  const [quickUploadTargetClientId, setQuickUploadTargetClientId] = useState(agents[0]?.id ?? "");
+  const [quickUploadFile, setQuickUploadFile] = useState<File | null>(null);
+  const [quickUploadPath, setQuickUploadPath] = useState("");
+  const [quickUploadError, setQuickUploadError] = useState<string | null>(null);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [sourceFile, setSourceFile] = useState<File | null>(null);
   const [sourceInputKey, setSourceInputKey] = useState(0);
@@ -139,8 +147,8 @@ export function FileTransferSessionsPanel({
           <small>SHA-256 {shortHash(source.sha256_hex)}</small>
         </span>
       ),
-      header: "Artifact",
-      id: "artifact",
+      header: "Source",
+      id: "source",
       searchValue: (source) => `${source.name} ${source.sha256_hex}`,
       sortValue: (source) => source.name,
     },
@@ -173,8 +181,8 @@ export function FileTransferSessionsPanel({
     {
       cell: (source) => (
         <button
-          aria-label={`Download source artifact ${source.name}`}
-          className="sourceArtifactDownload iconButton"
+          aria-label={`Download reusable source ${source.name}`}
+          className="sourceArtifactDownload secondaryAction compactAction"
           disabled={
             sourcePendingId === source.id ||
             source.status === "creating" ||
@@ -187,11 +195,12 @@ export function FileTransferSessionsPanel({
           title={
             source.status === "creating" || source.status === "deleting"
               ? artifactLifecycleStatusTitle(source.status)
-              : "Download source artifact"
+              : "Download reusable upload source"
           }
           type="button"
         >
           <Download size={14} />
+          <span>Download</span>
         </button>
       ),
       enableHiding: false,
@@ -201,77 +210,28 @@ export function FileTransferSessionsPanel({
   ];
   const transferColumns: ConsoleDataGridColumn<FileTransferSessionRecord>[] = [
     {
-      cell: (transfer) => {
-        const key = transferKey(transfer);
-        const selectable = canCreateHandoff(transfer);
-        const evidenceLabel = handoffEvidenceLabel(transfer);
-        const evidenceTitle = handoffEvidenceTitle(transfer);
-        return (
-          <span className="rowSelectCell">
-            {selectable ? (
-              <input
-                aria-label={`Select transfer handoff session ${shortId(transfer.session_id)}`}
-                checked={selectedHandoffKeySet.has(key)}
-                disabled={handoffBusy}
-                onChange={(event) => toggleHandoffSelection(transfer, event.target.checked)}
-                onClick={(event) => event.stopPropagation()}
-                type="checkbox"
-              />
-            ) : (
-              <small title={evidenceTitle}>{evidenceLabel}</small>
-            )}
-          </span>
-        );
-      },
-      enableHiding: false,
-      header: "Select",
-      id: "select",
+      cell: (transfer) => (
+        <span className="historyPrimary">
+          <strong>{transferDirectionLabel(transfer)}</strong>
+          <small>{shortId(transfer.session_id)}</small>
+        </span>
+      ),
+      header: "Direction",
+      id: "direction",
+      searchValue: (transfer) => `${transfer.direction} ${transfer.session_id}`,
+      sortValue: (transfer) => `${transfer.direction}:${transfer.session_id}`,
     },
     {
       cell: (transfer) => (
         <span className="historyPrimary">
-          <strong>{transferDirectionLabel(transfer)}</strong>
-          <small>
-            {clientLabel(transfer.client_id)} / {shortId(transfer.session_id)}
-          </small>
+          <strong>{clientLabel(transfer.client_id)}</strong>
+          <small title={transfer.client_id}>{transfer.client_id}</small>
         </span>
       ),
-      header: "Session",
-      id: "session",
-      searchValue: (transfer) => `${clientLabel(transfer.client_id)} ${transfer.client_id} ${transfer.session_id} ${transfer.direction}`,
-      sortValue: (transfer) => `${transfer.direction}:${clientLabel(transfer.client_id)}`,
-    },
-    {
-      cell: (transfer) => {
-        const evidenceLabel = handoffEvidenceLabel(transfer);
-        const evidenceTitle = handoffEvidenceTitle(transfer);
-        return (
-          <span className="historyPrimary">
-            <span className={`status ${fileTransferSessionStatusBadgeClass(transfer.status)}`}>{transfer.status}</span>
-            <small title={transfer.direction === "download" ? evidenceTitle : transfer.last_event}>
-              {transfer.direction === "download" ? evidenceLabel : transferResumeLabel(transfer)}
-            </small>
-          </span>
-        );
-      },
-      header: "Status",
-      id: "status",
-      searchValue: (transfer) => `${transfer.status} ${transfer.last_event} ${handoffEvidenceLabel(transfer)}`,
-      sortValue: (transfer) => transfer.status,
-    },
-    {
-      cell: (transfer) => (
-        <span className="transferProgressCell">
-          <span>{formatTransferProgress(transfer)}</span>
-          <span className="transferProgressTrack">
-            <span style={{ width: `${Math.round((transfer.progress_ratio ?? 0) * 100)}%` }} />
-          </span>
-        </span>
-      ),
-      header: "Progress",
-      id: "progress",
-      searchValue: (transfer) => formatTransferProgress(transfer),
-      sortValue: (transfer) => transfer.progress_ratio ?? 0,
+      header: "VPS",
+      id: "vps",
+      searchValue: (transfer) => `${clientLabel(transfer.client_id)} ${transfer.client_id}`,
+      sortValue: (transfer) => clientLabel(transfer.client_id),
     },
     {
       cell: (transfer) => (
@@ -288,21 +248,43 @@ export function FileTransferSessionsPanel({
     {
       cell: (transfer) => (
         <span className="historyPrimary">
-          <strong>{formatTransferRateLimit(transfer.rate_limit_kbps)}</strong>
+          <strong>{transfer.size_bytes ? formatBytes(transfer.size_bytes) : "Not reported"}</strong>
           <small>{formatChunkInfo(transfer)}</small>
         </span>
       ),
-      header: "Rate",
-      id: "rate",
-      searchValue: (transfer) => `${formatTransferRateLimit(transfer.rate_limit_kbps)} ${formatChunkInfo(transfer)}`,
-      sortValue: (transfer) => transfer.rate_limit_kbps ?? 0,
+      header: "Size",
+      id: "size",
+      searchValue: (transfer) => `${transfer.size_bytes ?? ""} ${formatChunkInfo(transfer)}`,
+      sortValue: (transfer) => transfer.size_bytes ?? 0,
     },
     {
-      cell: (transfer) => formatTime(transfer.observed_at),
-      header: "Observed",
-      id: "observed",
-      searchValue: (transfer) => formatTime(transfer.observed_at),
-      sortValue: (transfer) => transfer.observed_at,
+      cell: (transfer) => {
+        return (
+          <span className="transferProgressCell">
+            <span>{formatTransferProgress(transfer)}</span>
+            <span className="transferProgressTrack">
+              <span style={{ width: `${Math.round((transfer.progress_ratio ?? 0) * 100)}%` }} />
+            </span>
+            <small>{formatTransferRateLimit(transfer.rate_limit_kbps)}</small>
+          </span>
+        );
+      },
+      header: "Progress/speed",
+      id: "progress_speed",
+      searchValue: (transfer) => `${formatTransferProgress(transfer)} ${formatTransferRateLimit(transfer.rate_limit_kbps)}`,
+      sortValue: (transfer) => transfer.progress_ratio ?? 0,
+    },
+    {
+      cell: (transfer) => (
+        <span className="historyPrimary">
+          <span className={`status ${fileTransferSessionStatusBadgeClass(transfer.status)}`}>{transferStateLabel(transfer)}</span>
+          <small title={transferStateDetail(transfer)}>{transferStateDetail(transfer)}</small>
+        </span>
+      ),
+      header: "State",
+      id: "state",
+      searchValue: (transfer) => `${transfer.status} ${transfer.last_event} ${handoffEvidenceLabel(transfer)} ${transferStateLabel(transfer)}`,
+      sortValue: (transfer) => `${transfer.status}:${transfer.observed_at}`,
     },
     {
       cell: (transfer) => {
@@ -314,9 +296,21 @@ export function FileTransferSessionsPanel({
         return (
           <span className="rowActions">
             {selectable ? (
+              <>
+                <label className="transferRowSelect">
+                  <input
+                    aria-label={`Select ready download session ${shortId(transfer.session_id)}`}
+                    checked={selectedHandoffKeySet.has(key)}
+                    disabled={handoffBusy}
+                    onChange={(event) => toggleHandoffSelection(transfer, event.target.checked)}
+                    onClick={(event) => event.stopPropagation()}
+                    type="checkbox"
+                  />
+                  <span>Select</span>
+                </label>
               <button
-                aria-label={`Create transfer handoff session ${shortId(transfer.session_id)}`}
-                className="iconButton"
+                aria-label={`Ready to download session ${shortId(transfer.session_id)}`}
+                className="secondaryAction compactAction"
                 disabled={handoffPendingKey === key || handoffPendingKey === "bulk"}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -326,12 +320,14 @@ export function FileTransferSessionsPanel({
                 type="button"
               >
                 <Download size={14} />
+                <span>Download</span>
               </button>
+              </>
             ) : null}
             {canRetry ? (
               <button
-                aria-label={`Review transfer retry session ${shortId(transfer.session_id)}`}
-                className="iconButton"
+                aria-label={`Retry transfer session ${shortId(transfer.session_id)}`}
+                className="secondaryAction compactAction"
                 onClick={(event) => {
                   event.stopPropagation();
                   setRetrySnapshot(retryReviewSnapshot(transfer, clientLabel));
@@ -340,12 +336,13 @@ export function FileTransferSessionsPanel({
                 type="button"
               >
                 <RotateCcw size={14} />
+                <span>Retry</span>
               </button>
             ) : null}
             {onOpenJobDetails ? (
               <button
-                aria-label={`Open transfer job details ${shortId(transfer.last_job_id)}`}
-                className="iconButton"
+                aria-label={`Open transfer job ${shortId(transfer.last_job_id)}`}
+                className="secondaryAction compactAction"
                 onClick={(event) => {
                   event.stopPropagation();
                   onOpenJobDetails(transfer.last_job_id);
@@ -354,6 +351,7 @@ export function FileTransferSessionsPanel({
                 type="button"
               >
                 <ExternalLink size={14} />
+                <span>Job</span>
               </button>
             ) : null}
             {!selectable && !canRetry ? (
@@ -375,6 +373,48 @@ export function FileTransferSessionsPanel({
   useEffect(() => {
     setHandoffSnapshot(null);
   }, [handoffDownloadMode, selectedHandoffKeys]);
+
+  useEffect(() => {
+    if (quickUploadTargetClientId || agents.length === 0) {
+      return;
+    }
+    setQuickUploadTargetClientId(agents[0].id);
+  }, [agents, quickUploadTargetClientId]);
+
+  function startQuickUpload() {
+    if (!quickUploadFile) {
+      setQuickUploadError("Choose a local file before uploading");
+      return;
+    }
+    if (!quickUploadTargetClientId) {
+      setQuickUploadError("Choose a VPS before uploading");
+      return;
+    }
+    if (!quickUploadPath.startsWith("/")) {
+      setQuickUploadError("Destination path must be absolute");
+      return;
+    }
+    if (!onOpenDispatchPreset) {
+      setQuickUploadError("Upload dispatch is unavailable on this surface");
+      return;
+    }
+    setQuickUploadError(null);
+    onOpenDispatchPreset({
+      filePushMode: "0644",
+      filePushPath: quickUploadPath,
+      fileTransferChunkSize: 65536,
+      fileTransferExistingPolicy: "skip",
+      fileTransferMultiTargetPolicy: "same-offset",
+      fileTransferRateLimit: 0,
+      fileTransferResumeToken: "",
+      fileTransferSessionId: "",
+      fileTransferUploadFile: quickUploadFile,
+      fileTransferUploadSourceKind: "local-file",
+      maxTimeoutSecs: 300,
+      mode: "file_transfer_upload",
+      selectorExpression: `id:${quickUploadTargetClientId}`,
+    });
+  }
 
   function reviewHandoff(transfer: FileTransferSessionRecord) {
     setHandoffError(null);
@@ -416,10 +456,10 @@ export function FileTransferSessionsPanel({
         });
         completedKeys.add(transfer.key);
       }
-      setHandoffProgress(`Downloaded ${handoffSnapshot.transfers.length} transfer handoffs`);
+      setHandoffProgress(`Downloaded ${handoffSnapshot.transfers.length} selected files`);
       setHandoffSnapshot(null);
     } catch (error) {
-      setHandoffError(error instanceof Error ? error.message : "Transfer handoff failed");
+      setHandoffError(error instanceof Error ? error.message : "Ready download failed");
     } finally {
       setSelectedHandoffKeys((keys) => keys.filter((key) => !completedKeys.has(key)));
       setHandoffPendingKey(null);
@@ -446,11 +486,11 @@ export function FileTransferSessionsPanel({
 
   async function reviewSourceArtifact() {
     if (!sourceFile) {
-      setSourceError("Choose a source artifact first");
+      setSourceError("Choose a reusable source file first");
       return;
     }
     if (sourceFile.size > MAX_SOURCE_ARTIFACT_BYTES) {
-      setSourceError(`Source artifact must be ${formatBytes(MAX_SOURCE_ARTIFACT_BYTES)} or smaller`);
+      setSourceError(`Reusable source must be ${formatBytes(MAX_SOURCE_ARTIFACT_BYTES)} or smaller`);
       return;
     }
     setSourcePending(true);
@@ -469,7 +509,7 @@ export function FileTransferSessionsPanel({
         },
       });
     } catch (error) {
-      setSourceError(error instanceof Error ? error.message : "Source artifact review failed");
+      setSourceError(error instanceof Error ? error.message : "Reusable source review failed");
     } finally {
       setSourcePending(false);
     }
@@ -477,7 +517,7 @@ export function FileTransferSessionsPanel({
 
   async function uploadSourceArtifact() {
     if (!sourceSnapshot) {
-      setSourceError("Review source artifact before upload");
+      setSourceError("Review reusable source before upload");
       return;
     }
     setSourcePending(true);
@@ -489,7 +529,7 @@ export function FileTransferSessionsPanel({
       setSourceInputKey((key) => key + 1);
       setSourceName("");
     } catch (error) {
-      setSourceError(error instanceof Error ? error.message : "Source artifact upload failed");
+      setSourceError(error instanceof Error ? error.message : "Reusable source upload failed");
     } finally {
       setSourcePending(false);
     }
@@ -502,7 +542,7 @@ export function FileTransferSessionsPanel({
       const blob = await onDownloadSource(source.download_path);
       saveBlob(blob, downloadFileName(source.name));
     } catch (error) {
-      setSourceError(error instanceof Error ? error.message : "Source artifact download failed");
+      setSourceError(error instanceof Error ? error.message : "Reusable source download failed");
     } finally {
       setSourcePendingId(null);
     }
@@ -522,140 +562,107 @@ export function FileTransferSessionsPanel({
       </div>
       <div className="transferLifecycleSummary" aria-label="File transfer lifecycle summary">
         <span>
-          <strong>Upload source artifacts</strong>
-          <small>{sources.length} reusable objects</small>
+          <strong>Upload flow</strong>
+          <small>Local file, VPS, destination, upload</small>
         </span>
         <span>
-          <strong>Download handoffs</strong>
+          <strong>Ready downloads</strong>
           <small>{handoffCandidates.length} ready, {unavailableCompletedDownloads} unavailable</small>
         </span>
         <span>
-          <strong>Transfer sessions</strong>
+          <strong>Transfers</strong>
           <small>{downloadTransfers.length} downloads, {uploadTransfers.length} uploads</small>
         </span>
         <span className={failedTransfers.length > 0 ? "attention" : undefined}>
-          <strong>Retry review</strong>
+          <strong>Retries</strong>
           <small>{failedTransfers.length} failed sessions need metadata review</small>
         </span>
       </div>
       {focusPath && (
-        <div className="transferFocusBanner" aria-label="Focused transfer handoff">
+        <div className="transferFocusBanner" aria-label="Focused transfer path">
           <span>
             <strong>Focused from Files</strong>
             <small title={focusPath}>{focusPath}</small>
           </span>
           <span>
             <strong>{focusedTransfers.length} matching sessions</strong>
-            <small>{focusedHandoffReady} handoff ready</small>
+            <small>{focusedHandoffReady} ready to download</small>
           </span>
         </div>
       )}
-      <div className="sourceArtifactPanel">
-        <div className="sectionSubheader">
+      <section className="transferQuickUpload" aria-label="Default upload flow">
+        <div className="transferWorkflowHeader">
           <div>
-            <h3>Upload source artifacts</h3>
-            <span>{sourceError ?? `${sources.length} object-store source records`}</span>
+            <h3>Upload file</h3>
+            <span>{"Choose local file -> Choose VPS -> Destination path -> Upload"}</span>
           </div>
+          <Upload size={18} />
         </div>
-        <div className="sourceArtifactControls">
+        <div className="transferQuickUploadControls">
           <label>
-            <span>Source file</span>
+            <span>Local file</span>
             <input
-              key={sourceInputKey}
+              aria-label="Transfer upload local file"
               onChange={(event) => {
-                const file = event.target.files?.[0] ?? null;
-                setSourceFile(file);
-                setSourceName(file?.name ?? "");
-                setSourceError(null);
+                setQuickUploadFile(event.target.files?.[0] ?? null);
+                setQuickUploadError(null);
               }}
               type="file"
             />
           </label>
           <label>
-            <span>Artifact name</span>
+            <span>VPS</span>
+            <VpsCombobox
+              agents={agents}
+              ariaLabel="Transfer upload target VPS"
+              disabled={agents.length === 0}
+              onChange={(value) => {
+                setQuickUploadTargetClientId(value);
+                setQuickUploadError(null);
+              }}
+              placeholder="Search target VPS"
+              value={quickUploadTargetClientId}
+            />
+          </label>
+          <label>
+            <span>Destination path</span>
             <input
-              onChange={(event) => setSourceName(event.target.value)}
-              placeholder={sourceFile?.name ?? "payload.bin"}
-              type="text"
-              value={sourceName}
+              aria-label="Transfer upload destination path"
+              onChange={(event) => {
+                setQuickUploadPath(event.target.value);
+                setQuickUploadError(null);
+              }}
+              placeholder="/tmp/upload.bin"
+              value={quickUploadPath}
             />
           </label>
           <button
-            className="primaryAction"
-            disabled={sourcePending || !sourceFile || loading}
-            onClick={() => void reviewSourceArtifact()}
+            className="primaryAction compactAction"
+            disabled={loading || !onOpenDispatchPreset}
+            onClick={startQuickUpload}
             type="button"
           >
             <Upload size={14} />
-            <span>{sourcePending ? "Reviewing" : "Review source artifact"}</span>
+            <span>Upload</span>
           </button>
         </div>
-        <ConfirmationPrompt
-          confirmLabel="Upload source artifact"
-          detail="Persists the reviewed source artifact with the computed SHA-256 and size."
-          items={[
-            { label: "Name", value: sourceSnapshot?.request.name ?? sourceSnapshot?.fileName ?? "-" },
-            {
-              label: "SHA-256",
-              title: sourceSnapshot?.request.sha256_hex,
-              value: sourceSnapshot ? shortHash(sourceSnapshot.request.sha256_hex) : "-",
-            },
-            { label: "Size", value: sourceSnapshot ? formatBytes(sourceSnapshot.request.size_bytes) : "-" },
-          ]}
-          onCancel={() => setSourceSnapshot(null)}
-          onConfirm={() => void uploadSourceArtifact()}
-          open={sourceSnapshot !== null}
-          pending={sourcePending}
-          title="Confirm source artifact upload"
-        />
-        <ConsoleDataGrid
-          columns={sourceColumns}
-          defaultPageSize={6}
-          expandOnRowClick
-          getRowId={(source) => source.id}
-          itemLabel="artifacts"
-          empty={
-            <div className="sourceArtifactEmpty">
-              <Database size={18} />
-              <span>No source artifacts</span>
-            </div>
-          }
-          renderExpandedRow={(source) => (
-            <div className="consoleInlineDetailGrid">
-              <span>Artifact ID</span>
-              <strong>{source.id}</strong>
-              <span>Name</span>
-              <strong>{source.name}</strong>
-              <span>SHA-256</span>
-              <strong>{source.sha256_hex}</strong>
-              <span>Size</span>
-              <strong>{formatBytes(source.size_bytes)}</strong>
-              <span>Status</span>
-              <strong>{source.status}</strong>
-              <span>Created</span>
-              <strong>{formatTime(source.created_at)}</strong>
-              <span>Created by</span>
-              <strong>{source.created_by ?? "System"}</strong>
-              <span>Object key</span>
-              <strong title={source.object_key}>{source.object_key}</strong>
-              <span>Download path</span>
-              <strong title={source.download_path}>{source.download_path}</strong>
-              <span>Security policy</span>
-              <strong>SHA-256 is computed before artifact persistence</strong>
-            </div>
-          )}
-          rows={sources}
-          searchPlaceholder="Search source artifacts"
-          selectable={false}
-          storageKey="vpsman.jobs.fileTransferSources"
-          title="Upload source artifacts"
-        />
-      </div>
+        <div className="transferQuickUploadStatus">
+          <span>
+            {quickUploadFile
+              ? `${quickUploadFile.name} · ${formatBytes(quickUploadFile.size)}`
+              : "No local file selected"}
+          </span>
+          <span>
+            {quickUploadError ??
+              `Target ${quickUploadTargetClientId ? clientLabel(quickUploadTargetClientId) : "not selected"}`}
+          </span>
+        </div>
+      </section>
       <div className="handoffBulkBar">
         <span className="historyPrimary">
-          <strong>Download handoffs</strong>
+          <strong>Ready downloads</strong>
           <small>
-            {handoffCandidates.length} handoff ready, {unavailableCompletedDownloads} unavailable,{" "}
+            {handoffCandidates.length} ready to download, {unavailableCompletedDownloads} unavailable,{" "}
             {selectedHandoffTransfers.length} selected
           </small>
         </span>
@@ -663,7 +670,7 @@ export function FileTransferSessionsPanel({
           <label className="handoffModeControl">
             <span>Save method</span>
             <select
-              aria-label="Transfer handoff save method"
+              aria-label="Ready download save method"
               disabled={handoffBusy}
               onChange={(event) => setHandoffDownloadMode(event.target.value as ArtifactDownloadMode)}
               value={handoffDownloadMode}
@@ -678,8 +685,8 @@ export function FileTransferSessionsPanel({
             onClick={() => setAllHandoffSelection(true)}
             title={
               handoffCandidates.length === 0
-                ? "No completed downloads currently have retained handoff evidence."
-                : "Select every handoff-ready completed download."
+                ? "No completed downloads currently have retained download evidence."
+                : "Select every completed download that is ready to save."
             }
             type="button"
           >
@@ -699,19 +706,19 @@ export function FileTransferSessionsPanel({
             onClick={() => reviewSelectedHandoffs()}
             title={
               selectedHandoffTransfers.length === 0
-                ? "Select one or more handoff-ready downloads first."
-                : "Review selected handoff downloads before saving."
+                ? "Select one or more ready downloads first."
+                : "Review selected downloads before saving."
             }
             type="button"
           >
             <Download size={14} />
-            <span>{handoffBusy && handoffPendingKey === "bulk" ? "Downloading" : "Review selected handoffs"}</span>
+            <span>{handoffBusy && handoffPendingKey === "bulk" ? "Downloading" : "Review selected downloads"}</span>
           </button>
         </span>
       </div>
       <ConfirmationPrompt
-        confirmLabel="Create and download handoffs"
-        detail="Creates control-plane transfer handoffs for the reviewed completed download sessions, then saves them using the selected method."
+        confirmLabel="Download selected files"
+        detail="Saves the reviewed completed download sessions using the selected method."
         items={[
           { label: "Save method", value: handoffSnapshot?.mode ?? "-" },
           { label: "Transfers", value: handoffSnapshot ? String(handoffSnapshot.transfers.length) : "-" },
@@ -731,7 +738,7 @@ export function FileTransferSessionsPanel({
         onConfirm={() => void createAndDownloadReviewedHandoffs()}
         open={handoffSnapshot !== null}
         pending={handoffBusy}
-        title="Confirm transfer handoff download"
+        title="Confirm ready download"
       />
       {retrySnapshot && (
         <section className="transferRetryReview" aria-label="Transfer retry review">
@@ -804,15 +811,15 @@ export function FileTransferSessionsPanel({
             <span>{retrySnapshot.retryGuidance}</span>
             <button
               className="secondaryAction compactAction"
-              disabled={!onOpenRetryPreset}
+              disabled={!onOpenDispatchPreset}
               onClick={() => {
-                onOpenRetryPreset?.(retryDispatchPreset(retrySnapshot, "continue"));
+                onOpenDispatchPreset?.(retryDispatchPreset(retrySnapshot, "continue"));
                 setRetrySnapshot(null);
               }}
               title={
-                onOpenRetryPreset
+                onOpenDispatchPreset
                   ? "Open Jobs / Dispatch with this session ID. Enter the original resume token before reviewing."
-                  : "Retry handoff is unavailable on this surface."
+                  : "Retry dispatch is unavailable on this surface."
               }
               type="button"
             >
@@ -821,15 +828,15 @@ export function FileTransferSessionsPanel({
             </button>
             <button
               className="primaryAction compactAction"
-              disabled={!onOpenRetryPreset}
+              disabled={!onOpenDispatchPreset}
               onClick={() => {
-                onOpenRetryPreset?.(retryDispatchPreset(retrySnapshot, "fresh"));
+                onOpenDispatchPreset?.(retryDispatchPreset(retrySnapshot, "fresh"));
                 setRetrySnapshot(null);
               }}
               title={
-                onOpenRetryPreset
+                onOpenDispatchPreset
                   ? "Open Jobs / Dispatch with the same target and path, but start a new transfer session."
-                  : "Retry handoff is unavailable on this surface."
+                  : "Retry dispatch is unavailable on this surface."
               }
               type="button"
             >
@@ -876,7 +883,7 @@ export function FileTransferSessionsPanel({
             <strong>{transferSecurityPolicyLabel(transfer)}</strong>
             <span>Retention expiry</span>
             <strong>Not reported by transfer API</strong>
-            <span>Handoff evidence</span>
+            <span>Download evidence</span>
             <strong>{handoffEvidenceTitle(transfer)}</strong>
             <span>Failure reason</span>
             <strong>{transferFailureReason(transfer)}</strong>
@@ -888,7 +895,7 @@ export function FileTransferSessionsPanel({
             <strong>{transfer.last_job_id}</strong>
             <span>Last sequence</span>
             <strong>{transfer.last_seq}</strong>
-            <span>Handoff object</span>
+            <span>Retained object</span>
             <strong title={transfer.handoff_object_key ?? undefined}>{transfer.handoff_object_key ?? "Not available"}</strong>
           </div>
         )}
@@ -898,6 +905,116 @@ export function FileTransferSessionsPanel({
         storageKey="vpsman.jobs.fileTransferSessions"
         title="Transfer sessions"
       />
+      <details className="sourceArtifactAdvanced">
+        <summary>
+          <span>
+            <strong>Advanced: reusable upload sources</strong>
+            <small>{sourceError ?? `${sources.length} reusable sources`}</small>
+          </span>
+          <Database size={16} />
+        </summary>
+        <div className="sourceArtifactPanel">
+          <div className="sectionSubheader">
+            <div>
+              <h3>Reusable upload sources</h3>
+              <span>Optional object-store sources for repeated uploads.</span>
+            </div>
+          </div>
+          <div className="sourceArtifactControls">
+            <label>
+              <span>Source file</span>
+              <input
+                key={sourceInputKey}
+                onChange={(event) => {
+                  const file = event.target.files?.[0] ?? null;
+                  setSourceFile(file);
+                  setSourceName(file?.name ?? "");
+                  setSourceError(null);
+                }}
+                type="file"
+              />
+            </label>
+            <label>
+              <span>Reusable source name</span>
+              <input
+                onChange={(event) => setSourceName(event.target.value)}
+                placeholder={sourceFile?.name ?? "payload.bin"}
+                type="text"
+                value={sourceName}
+              />
+            </label>
+            <button
+              className="primaryAction"
+              disabled={sourcePending || !sourceFile || loading}
+              onClick={() => void reviewSourceArtifact()}
+              type="button"
+            >
+              <Upload size={14} />
+              <span>{sourcePending ? "Reviewing" : "Review reusable source"}</span>
+            </button>
+          </div>
+          <ConfirmationPrompt
+            confirmLabel="Upload reusable source"
+            detail="Persists the reviewed reusable upload source with computed SHA-256 and size."
+            items={[
+              { label: "Name", value: sourceSnapshot?.request.name ?? sourceSnapshot?.fileName ?? "-" },
+              {
+                label: "SHA-256",
+                title: sourceSnapshot?.request.sha256_hex,
+                value: sourceSnapshot ? shortHash(sourceSnapshot.request.sha256_hex) : "-",
+              },
+              { label: "Size", value: sourceSnapshot ? formatBytes(sourceSnapshot.request.size_bytes) : "-" },
+            ]}
+            onCancel={() => setSourceSnapshot(null)}
+            onConfirm={() => void uploadSourceArtifact()}
+            open={sourceSnapshot !== null}
+            pending={sourcePending}
+            title="Confirm reusable source upload"
+          />
+          <ConsoleDataGrid
+            columns={sourceColumns}
+            defaultPageSize={6}
+            expandOnRowClick
+            getRowId={(source) => source.id}
+            itemLabel="sources"
+            empty={
+              <div className="sourceArtifactEmpty">
+                <Database size={18} />
+                <span>No reusable upload sources</span>
+              </div>
+            }
+            renderExpandedRow={(source) => (
+              <div className="consoleInlineDetailGrid">
+                <span>Source ID</span>
+                <strong>{source.id}</strong>
+                <span>Name</span>
+                <strong>{source.name}</strong>
+                <span>SHA-256</span>
+                <strong>{source.sha256_hex}</strong>
+                <span>Size</span>
+                <strong>{formatBytes(source.size_bytes)}</strong>
+                <span>Status</span>
+                <strong>{source.status}</strong>
+                <span>Created</span>
+                <strong>{formatTime(source.created_at)}</strong>
+                <span>Created by</span>
+                <strong>{source.created_by ?? "System"}</strong>
+                <span>Object key</span>
+                <strong title={source.object_key}>{source.object_key}</strong>
+                <span>Download path</span>
+                <strong title={source.download_path}>{source.download_path}</strong>
+                <span>Security policy</span>
+                <strong>SHA-256 is computed before source persistence</strong>
+              </div>
+            )}
+            rows={sources}
+            searchPlaceholder="Search reusable sources"
+            selectable={false}
+            storageKey="vpsman.jobs.fileTransferSources"
+            title="Reusable upload sources"
+          />
+        </div>
+      </details>
     </div>
   );
 }
@@ -912,6 +1029,37 @@ function canCreateHandoff(transfer: FileTransferSessionRecord): boolean {
 
 function canReviewRetry(transfer: FileTransferSessionRecord): boolean {
   return transfer.status === "aborted" || transfer.status === "unknown";
+}
+
+function transferStateLabel(transfer: FileTransferSessionRecord): string {
+  if (canCreateHandoff(transfer)) {
+    return "Ready to download";
+  }
+  if (canReviewRetry(transfer)) {
+    return "Retry";
+  }
+  if (transfer.status === "completed") {
+    return "Completed";
+  }
+  if (transfer.status === "transferring") {
+    return "In progress";
+  }
+  return transfer.status.replace(/_/g, " ");
+}
+
+function transferStateDetail(transfer: FileTransferSessionRecord): string {
+  if (canCreateHandoff(transfer)) {
+    return handoffEvidenceTitle(transfer);
+  }
+  if (canReviewRetry(transfer)) {
+    return transferFailureReason(transfer);
+  }
+  if (transfer.status === "completed") {
+    return transfer.direction === "download"
+      ? handoffEvidenceTitle(transfer)
+      : transferResumeLabel(transfer);
+  }
+  return transfer.last_event || transferResumeLabel(transfer);
 }
 
 function retryReviewSnapshot(
@@ -1048,9 +1196,9 @@ function handoffFullEvidenceSummary(transfers: HandoffReviewItem[]): string {
 
 function handoffReadyTitle(transfer: FileTransferSessionRecord): string {
   if (transfer.handoff_evidence_status === "artifact_available") {
-    return "Review handoff download from the retained server artifact.";
+    return "Review download from the retained server file.";
   }
-  return "Review handoff download rebuilt from retained chunk outputs.";
+  return "Review download rebuilt from retained chunk outputs.";
 }
 
 function handoffEvidenceLabel(transfer: FileTransferSessionRecord): string {
@@ -1059,14 +1207,14 @@ function handoffEvidenceLabel(transfer: FileTransferSessionRecord): string {
 
 function handoffEvidenceStatusLabel(status: string): string {
   const labels: Record<string, string> = {
-    artifact_available: "Stored artifact",
-    retained_outputs_available: "Retained outputs",
+    artifact_available: "Ready to download",
+    retained_outputs_available: "Ready from retained output",
     retained_outputs_pruned: "Evidence pruned",
     retained_outputs_incomplete: "Incomplete evidence",
     retained_outputs_conflict: "Conflicting chunks",
     missing_final_metadata: "Missing metadata",
     not_completed: "Not completed",
-    not_applicable: "Upload session",
+    not_applicable: "Upload complete",
   };
   return labels[status] ?? status.replace(/_/g, " ");
 }
@@ -1077,21 +1225,21 @@ function handoffEvidenceTitle(transfer: FileTransferSessionRecord): string {
     : "";
   switch (transfer.handoff_evidence_status) {
     case "artifact_available":
-      return "A retained control-plane handoff artifact exists for this completed download.";
+      return "A retained server file exists for this completed download.";
     case "retained_outputs_available":
-      return "Retained chunk output evidence is complete and can rebuild a control-plane handoff artifact.";
+      return "Retained chunk output evidence is complete and can rebuild the download.";
     case "retained_outputs_pruned":
-      return `The completed download remains visible, but the retained chunk outputs needed for a new handoff were pruned.${reason}`;
+      return `The completed download remains visible, but the retained chunk outputs needed for a new download were pruned.${reason}`;
     case "retained_outputs_incomplete":
       return `The completed download remains visible, but retained chunk output evidence is incomplete.${reason}`;
     case "retained_outputs_conflict":
-      return `The completed download remains visible, but duplicate chunk metadata conflicts and handoff is disabled.${reason}`;
+      return `The completed download remains visible, but duplicate chunk metadata conflicts and ready download is disabled.${reason}`;
     case "missing_final_metadata":
-      return `The completed download is missing final size or SHA-256 metadata required for verified handoff.${reason}`;
+      return `The completed download is missing final size or SHA-256 metadata required for verified download.${reason}`;
     case "not_completed":
-      return "Handoff is available after the download session completes.";
+      return "Download is available after the session completes.";
     case "not_applicable":
-      return "Upload sessions do not create download handoff artifacts.";
+      return "Upload sessions do not create ready-download files.";
     default:
       return `${handoffEvidenceStatusLabel(transfer.handoff_evidence_status)}.${reason}`;
   }
@@ -1156,7 +1304,7 @@ function transferSecurityPolicyLabel(transfer: FileTransferSessionRecord): strin
     return "Checksum not reported by session";
   }
   return transfer.direction === "download"
-    ? "SHA-256 is checked before handoff download"
+    ? "SHA-256 is checked before ready download"
     : "SHA-256 is recorded for upload integrity";
 }
 

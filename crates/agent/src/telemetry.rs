@@ -772,7 +772,7 @@ async fn apply_auto_ospf(
         TunnelObservation {
             latency_ms,
             packet_loss_ratio,
-            bandwidth: plan.bandwidth,
+            bandwidth_mbps: plan.bandwidth_mbps,
             preference: 1.0,
         },
     );
@@ -862,7 +862,7 @@ async fn run_auto_ospf_updater(
         },
         "current_ospf_cost": current_cost,
         "recommended_ospf_cost": recommended_cost,
-        "reason": "latency_and_configured_bandwidth_tier",
+        "reason": "latency_loss_configured_bandwidth_mbps_sqrt_model",
     });
     run_json_stdin_command(
         &argv,
@@ -1310,9 +1310,9 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use vpsman_common::{
         plan_tunnel, AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource,
-        AgentTelemetryConfig, AgentTelemetrySource, BandwidthTier, OspfCostPolicy,
-        RuntimeTunnelCommand, RuntimeTunnelControl, RuntimeTunnelManager, TunnelAddressFamily,
-        TunnelEndpointSide, TunnelKind, TunnelPlanInput,
+        AgentTelemetryConfig, AgentTelemetrySource, OspfCostPolicy, RuntimeTunnelCommand,
+        RuntimeTunnelControl, RuntimeTunnelManager, TunnelAddressFamily, TunnelEndpointSide,
+        TunnelKind, TunnelPlanInput,
     };
 
     fn write_test_script(path: &std::path::Path, contents: &str) {
@@ -1349,7 +1349,7 @@ mod tests {
                 prefix_len: 127,
             }),
             latency_primary_family,
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 12.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,
@@ -1445,7 +1445,7 @@ Inter-|   Receive                                                |  Transmit
                 prefix_len: 127,
             }),
             latency_primary_family: TunnelAddressFamily::Ipv6,
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 10.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,
@@ -1492,7 +1492,7 @@ Inter-|   Receive                                                |  Transmit
             ipv6_address_pool_cidr: None,
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 12.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,
@@ -1552,7 +1552,7 @@ Inter-|   Receive                                                |  Transmit
             ipv6_address_pool_cidr: None,
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 12.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,
@@ -1763,7 +1763,10 @@ cat > "$payload_file"
         assert_eq!(payload["latency"]["target"], "10.42.0.1");
         assert_eq!(payload["current_ospf_cost"], 65_535);
         assert_eq!(payload["recommended_ospf_cost"], recommended);
-        assert_eq!(payload["reason"], "latency_and_configured_bandwidth_tier");
+        assert_eq!(
+            payload["reason"],
+            "latency_loss_configured_bandwidth_mbps_sqrt_model"
+        );
 
         let mut stat = RuntimeTunnelStat::default();
         apply_auto_ospf(&config, &telemetry_plan, 300, &mut state, &mut stat, &probe).await;
@@ -1888,7 +1891,7 @@ printf '%s\n' 'RUN' >> "$1"
             ipv6_address_pool_cidr: None,
             ipv6_tunnel: None,
             latency_primary_family: Default::default(),
-            bandwidth: BandwidthTier::M100,
+            bandwidth_mbps: 100,
             latency_ms: 12.0,
             packet_loss_ratio: 0.0,
             preference: 1.0,

@@ -21,7 +21,7 @@ import type {
   FleetAlertStateRecord,
   FleetAlertStateRequest,
 } from "../types";
-import { formatCompactTime, formatVpsName } from "../utils";
+import { formatCompactTime, formatFullTime, formatVpsName } from "../utils";
 
 type FleetAlertsPanelProps = {
   agents: AgentView[];
@@ -137,21 +137,22 @@ function FleetAlertList({
       },
       {
         id: "alert",
-        header: "Alert",
-        size: 360,
+        header: "Summary",
+        size: 390,
         minSize: 240,
         sortValue: (alert) => alert.title,
-        searchValue: (alert) => `${alert.title} ${alert.detail}`,
+        searchValue: (alert) => `${alert.title} ${alert.detail} ${alert.category}`,
         cell: (alert) => (
-          <span className="historyPrimary">
+          <span className="historyPrimary fleetAlertSummary">
             <strong>{alert.title}</strong>
             <small>{alert.detail}</small>
+            <small>{alertCategoryLabel(alert)} · {alertStatusLabel(alert.status)}</small>
           </span>
         ),
       },
       {
         id: "target",
-        header: "Target",
+        header: "VPS",
         size: 210,
         minSize: 150,
         sortValue: (alert) =>
@@ -172,37 +173,29 @@ function FleetAlertList({
               title={`${alert.target_kind}:${alert.target_id}`}
             >
               <strong>{label}</strong>
-              <small>{alert.target_kind}</small>
+              <small>{alertTargetScopeLabel(alert)}</small>
             </span>
           );
         },
       },
       {
-        id: "category",
-        header: "Category",
-        size: 140,
-        minSize: 110,
-        sortValue: (alert) => alert.category,
-        searchValue: (alert) => alert.category,
-        cell: (alert) => <span className="monoValue">{alert.category}</span>,
-      },
-      {
         id: "state",
-        header: "Operator state",
-        size: 170,
-        minSize: 150,
+        header: "State",
+        size: 190,
+        minSize: 160,
         sortValue: alertOperatorState,
         searchValue: (alert) =>
-          `${alertOperatorState(alert)} ${alert.state_reason ?? ""}`,
+          `${alertOperatorState(alert)} ${alert.status} ${alert.state_reason ?? ""}`,
         cell: (alert) => {
           const operatorState = alertOperatorState(alert);
           return (
-            <span className="historyPrimary">
+            <span className="fleetAlertStateStack">
               <ConsoleStatusBadge
                 tone={operatorState === "open" ? "warning" : "info"}
               >
-                {operatorState}
+                {operatorStateLabel(operatorState)}
               </ConsoleStatusBadge>
+              <small>{alertStatusLabel(alert.status)}</small>
               {alert.state_reason && <small>{alert.state_reason}</small>}
             </span>
           );
@@ -210,14 +203,74 @@ function FleetAlertList({
       },
       {
         id: "observed",
-        header: "Observed",
+        header: "Age",
         size: 140,
         minSize: 110,
         sortValue: (alert) => alert.observed_at,
-        cell: (alert) => formatCompactTime(alert.observed_at),
+        cell: (alert) => (
+          <time dateTime={alert.observed_at} title={formatFullTime(alert.observed_at)}>
+            {formatCompactTime(alert.observed_at)}
+          </time>
+        ),
+      },
+      {
+        id: "action",
+        header: "Action",
+        size: 180,
+        minSize: 160,
+        enableHiding: false,
+        cell: (alert) => {
+          const operatorState = alertOperatorState(alert);
+          const agent = alert.client_id ? agentById.get(alert.client_id) : null;
+          return (
+            <span className="fleetAlertInlineActions">
+              {operatorState === "open" ? (
+                <button
+                  className="secondaryAction compactAction"
+                  disabled={pending != null}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    reviewAlertUpdate([alert], "acknowledge");
+                  }}
+                  type="button"
+                >
+                  <Check size={13} />
+                  <span>Acknowledge</span>
+                </button>
+              ) : (
+                <button
+                  className="secondaryAction compactAction"
+                  disabled={pending != null}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    reviewAlertUpdate([alert], "clear");
+                  }}
+                  type="button"
+                >
+                  <CircleCheck size={13} />
+                  <span>Clear</span>
+                </button>
+              )}
+              <button
+                className="secondaryAction compactAction"
+                disabled={!agent}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (agent) {
+                    onOpenVpsDetail(agent);
+                  }
+                }}
+                type="button"
+              >
+                <Server size={13} />
+                <span>Open</span>
+              </button>
+            </span>
+          );
+        },
       },
     ],
-    [nameById],
+    [agentById, nameById, onOpenVpsDetail, pending],
   );
 
   useEffect(() => {
@@ -323,25 +376,64 @@ function FleetAlertList({
         columns={alertColumns}
         defaultPageSize={10}
         empty="No active fleet alerts."
+        expandOnRowClick
         getRowId={(alert) => alert.id}
         itemLabel="alerts"
         renderExpandedRow={(alert) => (
-          <div className="consoleGridDetails">
-            <span>
-              <strong>Status:</strong> {alert.status}
-            </span>
-            <span>
-              <strong>Target:</strong> {alert.target_kind}:{alert.target_id}
-            </span>
-            {alert.muted_until_unix && (
-              <span>
-                <strong>Muted until:</strong> {formatUnixTime(alert.muted_until_unix)}
-              </span>
-            )}
-            <span>
-              <strong>Escalation:</strong> {alert.escalation_level ?? 0}
-            </span>
+          <div className="consoleGridDetails fleetAlertDetail">
+            <div className="consoleInlineDetailGrid">
+              <span>Operator state</span>
+              <strong>{operatorStateLabel(alertOperatorState(alert))}</strong>
+              <span>Alert status</span>
+              <strong>{alertStatusLabel(alert.status)}</strong>
+              <span>Category</span>
+              <strong>{alertCategoryLabel(alert)}</strong>
+              <span>Target</span>
+              <strong>{alert.target_kind}:{alert.target_id}</strong>
+              <span>Observed</span>
+              <strong>{formatFullTime(alert.observed_at)}</strong>
+              {alert.muted_until_unix && (
+                <>
+                  <span>Muted until</span>
+                  <strong>{formatUnixTime(alert.muted_until_unix)}</strong>
+                </>
+              )}
+              <span>Escalation</span>
+              <strong>{alert.escalation_level ?? 0}</strong>
+            </div>
             <div className="configOverrideActions">
+              {alertOperatorState(alert) === "open" ? (
+                <>
+                  <button
+                    className="secondaryAction compactAction"
+                    disabled={pending != null}
+                    onClick={() => reviewAlertUpdate([alert], "acknowledge")}
+                    type="button"
+                  >
+                    <Check size={14} />
+                    <span>Acknowledge</span>
+                  </button>
+                  <button
+                    className="secondaryAction compactAction"
+                    disabled={pending != null}
+                    onClick={() => reviewAlertUpdate([alert], "mute")}
+                    type="button"
+                  >
+                    <VolumeX size={14} />
+                    <span>Silence 4h</span>
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="secondaryAction compactAction"
+                  disabled={pending != null}
+                  onClick={() => reviewAlertUpdate([alert], "clear")}
+                  type="button"
+                >
+                  <CircleCheck size={14} />
+                  <span>Clear triage</span>
+                </button>
+              )}
               <button
                 className="secondaryAction compactAction"
                 disabled={!alert.client_id || !agentById.has(alert.client_id)}
@@ -365,10 +457,30 @@ function FleetAlertList({
                 <span>Open alert policies</span>
               </button>
             </div>
+            {policyNameFromAlert(alert) && (
+              <span className="fleetAlertPolicyHint">
+                Policy: <strong>{policyNameFromAlert(alert)}</strong>
+              </span>
+            )}
             <pre>{JSON.stringify(alert.evidence, null, 2)}</pre>
           </div>
         )}
         rowActions={[
+          {
+            label: "Acknowledge",
+            description: (rows) =>
+              actionTargetDescription(
+                "Acknowledge",
+                "fleet alert",
+                rows[0]?.title,
+                "Marks the open alert as acknowledged.",
+              ),
+            disabled: (rows) =>
+              pending != null || !rows[0] || alertOperatorState(rows[0]) !== "open",
+            hidden: (rows) => !rows[0] || alertOperatorState(rows[0]) !== "open",
+            icon: <Check size={14} />,
+            onSelect: (rows) => reviewAlertUpdate(rows, "acknowledge"),
+          },
           {
             label: "Open VPS",
             description: (rows) =>
@@ -388,30 +500,19 @@ function FleetAlertList({
             },
           },
           {
-            label: "Alert policies",
+            label: "Clear",
             description: (rows) =>
               actionTargetDescription(
-                "Open",
-                "alert policy context for",
-                rows[0]?.title,
-              ),
-            icon: <Bell size={14} />,
-            onSelect: () => onOpenAlertPolicies(),
-          },
-          {
-            label: "Ack",
-            description: (rows) =>
-              actionTargetDescription(
-                "Acknowledge",
+                "Clear",
                 "fleet alert",
                 rows[0]?.title,
-                "Marks the open alert as acknowledged.",
+                "Clears a triaged alert.",
               ),
             disabled: (rows) =>
-              pending != null || !rows[0] || alertOperatorState(rows[0]) !== "open",
-            icon: <Check size={14} />,
-            onSelect: (rows) => reviewAlertUpdate(rows, "acknowledge"),
-            separatorBefore: true,
+              pending != null || !rows[0] || alertOperatorState(rows[0]) === "open",
+            hidden: (rows) => !rows[0] || alertOperatorState(rows[0]) === "open",
+            icon: <CircleCheck size={14} />,
+            onSelect: (rows) => reviewAlertUpdate(rows, "clear"),
           },
           {
             label: "Mute",
@@ -424,8 +525,10 @@ function FleetAlertList({
               ),
             disabled: (rows) =>
               pending != null || !rows[0] || alertOperatorState(rows[0]) !== "open",
+            hidden: (rows) => !rows[0] || alertOperatorState(rows[0]) !== "open",
             icon: <VolumeX size={14} />,
             onSelect: (rows) => reviewAlertUpdate(rows, "mute"),
+            separatorBefore: true,
           },
           {
             label: "Escalate",
@@ -438,22 +541,20 @@ function FleetAlertList({
               ),
             disabled: (rows) =>
               pending != null || !rows[0] || alertOperatorState(rows[0]) !== "open",
+            hidden: (rows) => !rows[0] || alertOperatorState(rows[0]) !== "open",
             icon: <ArrowUpCircle size={14} />,
             onSelect: (rows) => reviewAlertUpdate(rows, "escalate"),
           },
           {
-            label: "Clear",
+            label: "Alert policies",
             description: (rows) =>
               actionTargetDescription(
-                "Clear",
-                "fleet alert",
+                "Open",
+                "alert policy context for",
                 rows[0]?.title,
-                "Clears a triaged alert.",
               ),
-            disabled: (rows) =>
-              pending != null || !rows[0] || alertOperatorState(rows[0]) === "open",
-            icon: <CircleCheck size={14} />,
-            onSelect: (rows) => reviewAlertUpdate(rows, "clear"),
+            icon: <Bell size={14} />,
+            onSelect: () => onOpenAlertPolicies(),
           },
         ]}
         renderSelectionPanel={(rows) => {
@@ -535,6 +636,91 @@ function alertTargetLabel(alert: FleetAlertRecord) {
 
 function alertOperatorState(alert: FleetAlertRecord): string {
   return alert.operator_state?.trim() || "open";
+}
+
+function operatorStateLabel(state: string): string {
+  switch (state) {
+    case "open":
+      return "Open";
+    case "acknowledged":
+      return "Acknowledged";
+    case "muted":
+      return "Muted";
+    case "escalated":
+      return "Escalated";
+    case "cleared":
+      return "Cleared";
+    default:
+      return readableAlertToken(state);
+  }
+}
+
+function alertStatusLabel(status: string): string {
+  switch (status) {
+    case "tunnel_adapter_degraded":
+      return "Tunnel adapter degraded";
+    case "stale":
+      return "Agent stale";
+    case "selected_no_store":
+      return "Source not configured";
+    case "policy_reached":
+      return "Policy threshold reached";
+    default:
+      return readableAlertToken(status);
+  }
+}
+
+function alertCategoryLabel(alert: FleetAlertRecord): string {
+  switch (alert.category) {
+    case "network":
+      return "Network";
+    case "agent_status":
+      return "Agent status";
+    case "source_readiness":
+      return "Source readiness";
+    case "traffic":
+      return "Traffic policy";
+    default:
+      return readableAlertToken(alert.category);
+  }
+}
+
+function alertTargetScopeLabel(alert: FleetAlertRecord): string {
+  switch (alert.target_kind) {
+    case "agent":
+    case "client":
+      return "VPS";
+    case "tunnel":
+      return "Tunnel";
+    case "source_template":
+      return "Source template";
+    case "policy_alert":
+      return "Policy alert";
+    default:
+      return readableAlertToken(alert.target_kind);
+  }
+}
+
+function policyNameFromAlert(alert: FleetAlertRecord): string | null {
+  const evidence = alert.evidence;
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) {
+    return null;
+  }
+  const policy = (evidence as { policy?: unknown }).policy;
+  if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
+    return null;
+  }
+  const name = (policy as { name?: unknown }).name;
+  return typeof name === "string" && name.trim() ? name : null;
+}
+
+function readableAlertToken(value: string): string {
+  const label = value
+    .split(/[_:\-.]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+  return label || "Unknown";
 }
 
 function actionTargetDescription(

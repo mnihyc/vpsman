@@ -13,6 +13,14 @@ export const DEFAULT_RUNTIME_FOU_OPTIONS: RuntimeTunnelFouOptions = {
   peer_port: 5555,
   ipproto: 4,
 };
+export const MIN_TUNNEL_BANDWIDTH_MBPS = 10;
+export const MAX_TUNNEL_BANDWIDTH_MBPS = 10000;
+export const DEFAULT_TUNNEL_BANDWIDTH_MBPS = 100;
+const OSPF_BANDWIDTH_REFERENCE_MBPS = 100;
+const OSPF_BANDWIDTH_WEIGHT = 10;
+const OSPF_LOSS_WEIGHT = 400;
+const OSPF_MIN_COST = 5;
+const OSPF_MAX_COST = 65535;
 
 export type RuntimeControlFormValues = {
   startup: string;
@@ -67,7 +75,9 @@ export function buildRuntimeControl(
   return { manager, traffic_limit: trafficLimit, ...fouPayload };
 }
 
-export function buildRuntimeTopology(values: RuntimeTopologyFormValues): RuntimeTunnelTopologyIntent {
+export function buildRuntimeTopology(
+  values: RuntimeTopologyFormValues,
+): RuntimeTunnelTopologyIntent {
   return {
     version: values.version?.trim() || undefined,
     desired_interfaces: splitList(values.desiredText),
@@ -77,7 +87,9 @@ export function buildRuntimeTopology(values: RuntimeTopologyFormValues): Runtime
   };
 }
 
-export function isDefaultRuntimeTopology(topology: RuntimeTunnelTopologyIntent): boolean {
+export function isDefaultRuntimeTopology(
+  topology: RuntimeTunnelTopologyIntent,
+): boolean {
   return (
     !topology.version &&
     (topology.desired_interfaces?.length ?? 0) === 0 &&
@@ -103,7 +115,7 @@ export function normalizeTelemetryPromotionRequest(
     ipv6_tunnel: normalizeTunnelAddressPair(request.ipv6_tunnel ?? null),
     latency_primary_family: request.latency_primary_family ?? "ipv4",
     name: request.name?.trim() || undefined,
-    bandwidth: request.bandwidth ?? "100m",
+    bandwidth_mbps: clampTunnelBandwidthMbps(request.bandwidth_mbps),
     latency_ms: request.latency_ms ?? 20,
     packet_loss_ratio: request.packet_loss_ratio ?? 0,
     preference: request.preference ?? 1,
@@ -111,7 +123,9 @@ export function normalizeTelemetryPromotionRequest(
   };
 }
 
-function normalizeTunnelAddressPair(pair: PromoteTelemetryTunnelRequest["ipv4_tunnel"]) {
+function normalizeTunnelAddressPair(
+  pair: PromoteTelemetryTunnelRequest["ipv4_tunnel"],
+) {
   if (!pair) {
     return null;
   }
@@ -124,12 +138,60 @@ function normalizeTunnelAddressPair(pair: PromoteTelemetryTunnelRequest["ipv4_tu
 }
 
 export const OSPF_COST_MODEL_DETAIL =
-  "cost = clamp(round((latency_ms + loss_ratio * 400 + 150 / bandwidth_mbps) / max(preference, 0.1)), 5, 65535). Tiers: 10m=10 Mbps, 100m=100 Mbps, 1000m=1000 Mbps. Manual speed-test evidence can downgrade effective bandwidth at 800 Mbps and 80 Mbps thresholds; bandwidth tests never run automatically.";
+  "cost = clamp(round((latency_ms + loss_ratio * 400 + 10 * sqrt(100 / clamp(bandwidth_mbps, 10, 10000))) / max(preference, 0.1)), 5, 65535). The sqrt bandwidth term gives diminishing returns across arbitrary Mbps values, so low bandwidth is visible but high bandwidth cannot hide bad latency or loss. Manual speed-test evidence can downgrade effective bandwidth; bandwidth tests never run automatically.";
 
 export const OSPF_COST_MODEL_SUMMARY =
-  "Latency/loss plus bandwidth tier. Manual speed tests only.";
+  "Latency/loss plus a bounded sqrt bandwidth penalty; speed-test evidence is manual while monitoring and auto-OSPF state are shown separately.";
 
-export function runtimeManagerLabel(manager: RuntimeTunnelManager | string | null | undefined): string {
+export function normalizeTunnelBandwidthMbps(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return DEFAULT_TUNNEL_BANDWIDTH_MBPS;
+  }
+  return Math.round(numeric);
+}
+
+export function clampTunnelBandwidthMbps(value: unknown): number {
+  return Math.min(
+    MAX_TUNNEL_BANDWIDTH_MBPS,
+    Math.max(MIN_TUNNEL_BANDWIDTH_MBPS, normalizeTunnelBandwidthMbps(value)),
+  );
+}
+
+export function calculateOspfCostPreview({
+  bandwidthMbps,
+  latencyMs,
+  packetLossRatio,
+  preference,
+}: {
+  bandwidthMbps: number;
+  latencyMs: number;
+  packetLossRatio: number;
+  preference: number;
+}): number {
+  const bandwidth = clampTunnelBandwidthMbps(bandwidthMbps);
+  const latency = Math.max(0, Number.isFinite(latencyMs) ? latencyMs : 0);
+  const loss = Math.min(
+    1,
+    Math.max(0, Number.isFinite(packetLossRatio) ? packetLossRatio : 0),
+  );
+  const preferenceBias = Math.max(
+    0.1,
+    Number.isFinite(preference) ? preference : 1,
+  );
+  const bandwidthPenalty =
+    OSPF_BANDWIDTH_WEIGHT *
+    Math.sqrt(OSPF_BANDWIDTH_REFERENCE_MBPS / bandwidth);
+  const raw = latency + loss * OSPF_LOSS_WEIGHT + bandwidthPenalty;
+  return Math.min(
+    OSPF_MAX_COST,
+    Math.max(OSPF_MIN_COST, Math.round(raw / preferenceBias)),
+  );
+}
+
+export function runtimeManagerLabel(
+  manager: RuntimeTunnelManager | string | null | undefined,
+): string {
   if (manager === "external_observed") {
     return "External observed";
   }
@@ -165,7 +227,10 @@ export function latencyStatusLabel(status: string | null | undefined): string {
   }
 }
 
-export function ospfStatusLabel(status: string | null | undefined, enabled?: boolean | null): string {
+export function ospfStatusLabel(
+  status: string | null | undefined,
+  enabled?: boolean | null,
+): string {
   switch (status) {
     case "updated":
       return "Updated";
@@ -191,7 +256,9 @@ export function ospfStatusLabel(status: string | null | undefined, enabled?: boo
   }
 }
 
-export function telemetryReasonLabel(reason: string | null | undefined): string {
+export function telemetryReasonLabel(
+  reason: string | null | undefined,
+): string {
   if (!reason) {
     return "";
   }
@@ -200,7 +267,9 @@ export function telemetryReasonLabel(reason: string | null | undefined): string 
   return suffix ? `${label} (${suffix})` : label;
 }
 
-export function telemetrySourceLabel(source: string | null | undefined): string {
+export function telemetrySourceLabel(
+  source: string | null | undefined,
+): string {
   switch (source) {
     case "approved_runtime_status_telemetry":
       return "Agent telemetry";
@@ -234,7 +303,9 @@ export function mutationPolicyLabel(policy: string | null | undefined): string {
   }
 }
 
-export function planCorrelationLabel(correlation: string | null | undefined): string {
+export function planCorrelationLabel(
+  correlation: string | null | undefined,
+): string {
   switch (correlation) {
     case "matched_saved_plan":
       return "Saved plan";
@@ -361,7 +432,11 @@ function parseRouteLine(value: string): RuntimeTunnelRoute {
     }
     if (key === "via") {
       route.via = optionValue;
-    } else if (key === "dev" || key === "interface" || key === "interface_name") {
+    } else if (
+      key === "dev" ||
+      key === "interface" ||
+      key === "interface_name"
+    ) {
       route.interface_name = optionValue;
     } else if (key === "metric") {
       route.metric = Number(optionValue);
@@ -384,11 +459,22 @@ function numericValue(value: string): number | undefined {
   return Math.trunc(parsed);
 }
 
-function buildFouOptions(values: RuntimeControlFormValues): RuntimeTunnelFouOptions | undefined {
+function buildFouOptions(
+  values: RuntimeControlFormValues,
+): RuntimeTunnelFouOptions | undefined {
   const fou: RuntimeTunnelFouOptions = {
-    port: numericValueOrDefault(values.fouPort, DEFAULT_RUNTIME_FOU_OPTIONS.port),
-    peer_port: numericValueOrDefault(values.fouPeerPort, DEFAULT_RUNTIME_FOU_OPTIONS.peer_port),
-    ipproto: numericValueOrDefault(values.fouIpproto, DEFAULT_RUNTIME_FOU_OPTIONS.ipproto),
+    port: numericValueOrDefault(
+      values.fouPort,
+      DEFAULT_RUNTIME_FOU_OPTIONS.port,
+    ),
+    peer_port: numericValueOrDefault(
+      values.fouPeerPort,
+      DEFAULT_RUNTIME_FOU_OPTIONS.peer_port,
+    ),
+    ipproto: numericValueOrDefault(
+      values.fouIpproto,
+      DEFAULT_RUNTIME_FOU_OPTIONS.ipproto,
+    ),
   };
   if (
     fou.port === DEFAULT_RUNTIME_FOU_OPTIONS.port &&
@@ -400,7 +486,10 @@ function buildFouOptions(values: RuntimeControlFormValues): RuntimeTunnelFouOpti
   return fou;
 }
 
-function numericValueOrDefault(value: string | undefined, fallback: number): number {
+function numericValueOrDefault(
+  value: string | undefined,
+  fallback: number,
+): number {
   if (value === undefined || value.trim() === "") {
     return fallback;
   }

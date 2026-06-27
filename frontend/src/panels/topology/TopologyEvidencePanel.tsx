@@ -1,5 +1,13 @@
-import { useMemo, useState } from "react";
-import { Activity, ExternalLink, GitBranch, GitCompareArrows, MapIcon, RefreshCcw, ShieldCheck } from "lucide-react";
+import { type ReactNode, useMemo, useState } from "react";
+import {
+  Activity,
+  ExternalLink,
+  GitBranch,
+  GitCompareArrows,
+  MapIcon,
+  RefreshCcw,
+  ShieldCheck,
+} from "lucide-react";
 import {
   jobStatusBadgeClass,
   topologyObservationStateBadgeClass,
@@ -16,7 +24,13 @@ import type {
   TopologyObservationState,
   TopologyRuntimeState,
 } from "../../types";
-import { decodeOutputPreview, formatTime, shortId } from "../../utils";
+import {
+  decodeOutputPreview,
+  formatCompactTime,
+  formatFullTime,
+  formatTime,
+  shortId,
+} from "../../utils";
 import { readableTelemetryToken } from "../../topologyRuntime";
 
 const networkCommands = new Set([
@@ -62,21 +76,37 @@ export function TopologyEvidencePanel({
   trends: NetworkObservationTrendRecord[];
 }) {
   const networkJobs = useMemo(
-    () => jobs.filter((job) => networkCommands.has(job.command_type)).slice(0, 8),
+    () =>
+      jobs.filter((job) => networkCommands.has(job.command_type)).slice(0, 8),
     [jobs],
   );
-  const [outputsByJob, setOutputsByJob] = useState<Record<string, JobOutputRecord[]>>({});
+  const [outputsByJob, setOutputsByJob] = useState<
+    Record<string, JobOutputRecord[]>
+  >({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const rows = networkJobs.map((job) => {
     const outputs = outputsByJob[job.id];
-    return buildEvidenceRow(job, outputs ?? [], clientLabel, outputs !== undefined);
+    return buildEvidenceRow(
+      job,
+      outputs ?? [],
+      clientLabel,
+      outputs !== undefined,
+    );
   });
-  const ospfUpdateRows = ospfUpdatePlans.slice(0, 6).map(buildOspfUpdatePlanRow);
-  const ospfRows = ospfRecommendations.slice(0, 6).map(buildOspfRecommendationRow);
-  const observationRows = observations.slice(0, 8).map((observation) => buildObservationRow(observation, clientLabel));
-  const trendRows = trends.slice(0, 6).map((trend) => buildTrendRow(trend, clientLabel));
-  const hasUnloadedOutput = rows.some((row) => row.metric === "Output pending");
+  const ospfUpdateRows = ospfUpdatePlans
+    .slice(0, 6)
+    .map(buildOspfUpdatePlanRow);
+  const ospfRows = ospfRecommendations
+    .slice(0, 6)
+    .map(buildOspfRecommendationRow);
+  const observationRows = observations
+    .slice(0, 8)
+    .map((observation) => buildObservationRow(observation, clientLabel));
+  const trendRows = trends
+    .slice(0, 6)
+    .map((trend) => buildTrendRow(trend, clientLabel));
+  const hasUnloadedOutput = rows.some((row) => row.metric === "Output not loaded");
   const hasTrendComparison = trendRows.length > 0;
   const hasPendingApproval = ospfUpdateRows.length > 0;
   const timelineStages = buildTimelineStages({
@@ -87,7 +117,10 @@ export function TopologyEvidencePanel({
     trendRows,
   });
   const probePoints = rows
-    .filter((row) => row.kind === "network_probe" && typeof row.latencyAvgMs === "number")
+    .filter(
+      (row) =>
+        row.kind === "network_probe" && typeof row.latencyAvgMs === "number",
+    )
     .map((row) => ({
       jobId: row.job.id,
       latencyAvgMs: row.latencyAvgMs ?? 0,
@@ -95,37 +128,53 @@ export function TopologyEvidencePanel({
     }))
     .concat(
       observations
-        .filter((observation) => observation.kind === "network_probe" && typeof observation.latency_avg_ms === "number")
+        .filter(
+          (observation) =>
+            observation.kind === "network_probe" &&
+            typeof observation.latency_avg_ms === "number",
+        )
         .map((observation) => ({
           jobId: observation.id,
           latencyAvgMs: observation.latency_avg_ms ?? 0,
           lossRatio: observation.packet_loss_ratio ?? 0,
         })),
     );
-  const maxLatency = Math.max(1, ...probePoints.map((point) => point.latencyAvgMs));
-  const latencyGroups = useMemo(() => buildLatencyCurveGroups(observations, clientLabel), [clientLabel, observations]);
+  const maxLatency = Math.max(
+    1,
+    ...probePoints.map((point) => point.latencyAvgMs),
+  );
+  const latencyGroups = useMemo(
+    () => buildLatencyCurveGroups(observations, clientLabel),
+    [clientLabel, observations],
+  );
+  const hasStandaloneProbeCurve =
+    probePoints.length > 1 && latencyGroups.length === 0;
+  const hasMeasurementEvidence =
+    hasStandaloneProbeCurve || latencyGroups.length > 0 || trendRows.length > 0;
   const status =
     error ??
     (loading
       ? "Loading network outputs"
       : ospfUpdatePlans.length > 0
         ? `${ospfUpdatePlans.length} OSPF update plans`
-      : ospfRecommendations.length > 0
-        ? `${ospfRecommendations.length} OSPF recommendations`
-      : trends.length > 0
-        ? `${observations.length} observations / ${trends.length} trends`
-        : observations.length > 0
-          ? `${observations.length} persisted observations`
-          : networkJobs.length === 0
-            ? "No network jobs"
-            : `${networkJobs.length} recent network jobs`);
+        : ospfRecommendations.length > 0
+          ? `${ospfRecommendations.length} OSPF recommendations`
+          : trends.length > 0
+            ? `${observations.length} observations / ${trends.length} trends`
+            : observations.length > 0
+              ? `${observations.length} persisted observations`
+              : networkJobs.length === 0
+                ? "No network jobs"
+                : `${networkJobs.length} recent network jobs`);
 
   async function refreshEvidence() {
     setLoading(true);
     setError(null);
     try {
       const outputEntries = await Promise.all(
-        networkJobs.map(async (job) => [job.id, await onLoadOutputs(job.id)] as const),
+        networkJobs.map(
+          async (job) => [job.id, await onLoadOutputs(job.id)] as const,
+        ),
       );
       await Promise.all([
         onLoadObservations(),
@@ -136,7 +185,11 @@ export function TopologyEvidencePanel({
       setOutputsByJob(Object.fromEntries(outputEntries));
     } catch (loadError) {
       setOutputsByJob({});
-      setError(loadError instanceof Error ? loadError.message : "Network evidence unavailable");
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : "Network evidence unavailable",
+      );
     } finally {
       setLoading(false);
     }
@@ -156,221 +209,325 @@ export function TopologyEvidencePanel({
           <h2>Network evidence</h2>
           <span>{status}</span>
         </div>
-        <button className="secondaryAction" disabled={loading} onClick={refreshEvidence} type="button">
+        <button
+          className="secondaryAction"
+          disabled={loading}
+          onClick={refreshEvidence}
+          type="button"
+        >
           <RefreshCcw size={17} />
           Refresh evidence
         </button>
       </div>
-      <div className="topologyEvidenceTimeline" aria-label="Network evidence timeline">
+      <div
+        className="topologyEvidenceTimeline"
+        aria-label="Network evidence timeline"
+      >
         <div className="topologyTimelineIntro">
           <strong>Evidence timeline</strong>
-          <span>Read left to right: observed state, measured probes, speed evidence, status checks, cost recommendation, approval path.</span>
+          <span>
+            Read left to right: observed state, measured probes, speed evidence,
+            status checks, cost recommendation, approval path.
+          </span>
         </div>
         {timelineStages.map((stage) => (
-          <div className={stage.tone ? stage.tone : undefined} key={stage.label}>
+          <div
+            className={stage.tone ? stage.tone : undefined}
+            key={stage.label}
+          >
             <span>{stage.label}</span>
             <strong>{stage.value}</strong>
             <p>{stage.detail}</p>
           </div>
         ))}
       </div>
-      <div className="topologyEvidenceActions" aria-label="Network evidence actions">
-        <button className="secondaryAction compactAction" disabled={!onOpenGraph} onClick={onOpenGraph} title="Open the read-only network topology graph" type="button">
+      <div
+        className="topologyEvidenceActions"
+        aria-label="Network evidence actions"
+      >
+        <button
+          className="secondaryAction compactAction"
+          disabled={!onOpenGraph}
+          onClick={onOpenGraph}
+          title="Open the read-only network topology graph"
+          type="button"
+        >
           <MapIcon size={16} />
           <span>Open graph</span>
         </button>
-        <button className="secondaryAction compactAction" disabled={!onOpenTests} onClick={onOpenTests} title="Run reviewed status, probe, and speed diagnostics" type="button">
+        <button
+          className="secondaryAction compactAction"
+          disabled={!onOpenTests}
+          onClick={onOpenTests}
+          title="Run reviewed status, probe, and speed diagnostics"
+          type="button"
+        >
           <Activity size={16} />
           <span>Run tests</span>
         </button>
-        <button className="secondaryAction compactAction" disabled={!onOpenTunnelPlans} onClick={onOpenTunnelPlans} title="Open tunnel plans for lifecycle, allocation, promotion, and export workflows" type="button">
+        <button
+          className="secondaryAction compactAction"
+          disabled={!onOpenTunnelPlans}
+          onClick={onOpenTunnelPlans}
+          title="Open tunnel plans for lifecycle, allocation, promotion, and export workflows"
+          type="button"
+        >
           <GitBranch size={16} />
           <span>Tunnel plans</span>
         </button>
-        <button className="secondaryAction compactAction" disabled={loading} onClick={refreshEvidence} title="Load retained command output and refresh network evidence" type="button">
+        <button
+          className="secondaryAction compactAction"
+          disabled={loading}
+          onClick={refreshEvidence}
+          title="Load retained command output and refresh network evidence"
+          type="button"
+        >
           <RefreshCcw size={16} />
           <span>{hasUnloadedOutput ? "Load output" : "Reload output"}</span>
         </button>
-        <button className="secondaryAction compactAction" disabled={!hasTrendComparison} onClick={scrollToTrendComparison} title="Jump to trend ranges that compare recent observations" type="button">
+        <button
+          className="secondaryAction compactAction"
+          disabled={!hasTrendComparison}
+          onClick={scrollToTrendComparison}
+          title="Jump to trend ranges that compare recent observations"
+          type="button"
+        >
           <GitCompareArrows size={16} />
           <span>Compare to previous</span>
         </button>
-        <button className="secondaryAction compactAction" disabled={!hasPendingApproval || !onOpenOspfApprovals} onClick={onOpenOspfApprovals} title="Open OSPF cost update approvals" type="button">
+        <button
+          className="secondaryAction compactAction"
+          disabled={!hasPendingApproval || !onOpenOspfApprovals}
+          onClick={onOpenOspfApprovals}
+          title="Open OSPF cost update approvals"
+          type="button"
+        >
           <ShieldCheck size={16} />
           <span>Open OSPF</span>
         </button>
       </div>
-      {probePoints.length > 0 && latencyGroups.length === 0 && (
-        <div className="latencyCurve" aria-label="Network probe latency history">
-          {probePoints.map((point) => (
-            <span
-              className={point.lossRatio > 0 ? "warn" : "ok"}
-              key={point.jobId}
-              style={{ height: `${Math.max(8, Math.round((point.latencyAvgMs / maxLatency) * 44))}px` }}
-              title={`${formatMetric(point.latencyAvgMs)} ms avg`}
-            />
-          ))}
-        </div>
-      )}
-      {latencyGroups.length > 0 && (
-        <div className="latencyCurveGroups" aria-label="Per tunnel latency curves">
-          {latencyGroups.map((group) => (
-            <div className="latencyCurveCard" key={group.key}>
-              <span className="latencyCurveTitle">
-                <strong>{group.label}</strong>
-                <small>{group.detail}</small>
-              </span>
-              <div className="latencyCurve compact" aria-label={`${group.label} latency curve`}>
-                {group.points.map((point, index) => (
-                  <span
-                    className={point.lossRatio > 0 ? "warn" : "ok"}
-                    key={`${group.key}-${index}`}
-                    style={{ height: `${Math.max(8, Math.round((point.latencyAvgMs / group.maxLatency) * 38))}px` }}
-                    title={`${formatMetric(point.latencyAvgMs)} ms avg`}
-                  />
-                ))}
+      {(ospfUpdateRows.length > 0 || ospfRows.length > 0) && (
+        <EvidenceGroup
+          detail="Cost proposals are separated from measurements so confidence never substitutes for link health."
+          title="Recommendation evidence"
+        >
+          {ospfUpdateRows.length > 0 && (
+            <div className="table historyTable trendTable">
+              <div className="historyRow heading topologyEvidenceGrid">
+                <span>OSPF update plan</span>
+                <span>Health</span>
+                <span>Cost</span>
+                <span>Approval</span>
+                <span>Latest</span>
               </div>
+              {ospfUpdateRows.map((row) => (
+                <div className="historyRow topologyEvidenceGrid" key={row.id}>
+                  <span className="historyPrimary">
+                    <strong>{row.planName}</strong>
+                    <small>{row.interfaceName}</small>
+                    <small>{row.confidence}</small>
+                  </span>
+                  <span
+                    className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
+                    title={row.healthDetail}
+                  >
+                    {humanStatus(row.signalStatus)}
+                  </span>
+                  <span className="topologyMetric">
+                    <strong>{row.metric}</strong>
+                    <small>{row.metricDetail}</small>
+                  </span>
+                  <span className="topologyMetric">
+                    <strong>{row.target}</strong>
+                    <small>{row.targetDetail}</small>
+                  </span>
+                  <EvidenceTime value={row.latestObservedAt} />
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          )}
+          {ospfRows.length > 0 && (
+            <div className="table historyTable trendTable">
+              <div className="historyRow heading topologyEvidenceGrid">
+                <span>OSPF recommendation</span>
+                <span>Health</span>
+                <span>Cost</span>
+                <span>Evidence</span>
+                <span>Latest</span>
+              </div>
+              {ospfRows.map((row) => (
+                <div className="historyRow topologyEvidenceGrid" key={row.id}>
+                  <span className="historyPrimary">
+                    <strong>{row.planName}</strong>
+                    <small>{row.interfaceName}</small>
+                    <small>{row.confidence}</small>
+                  </span>
+                  <span
+                    className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
+                    title={row.healthDetail}
+                  >
+                    {humanStatus(row.signalStatus)}
+                  </span>
+                  <span className="topologyMetric">
+                    <strong>{row.metric}</strong>
+                    <small>{row.metricDetail}</small>
+                  </span>
+                  <span className="topologyMetric">
+                    <strong>{row.target}</strong>
+                    <small>{row.targetDetail}</small>
+                  </span>
+                  <EvidenceTime value={row.latestObservedAt} />
+                </div>
+              ))}
+            </div>
+          )}
+        </EvidenceGroup>
       )}
-      {ospfUpdateRows.length > 0 && (
-        <div className="table historyTable trendTable">
-          <div className="historyRow heading topologyEvidenceGrid">
-            <span>OSPF update plan</span>
-            <span>Status</span>
-            <span>Cost</span>
-            <span>Approval</span>
-            <span>Latest</span>
-          </div>
-          {ospfUpdateRows.map((row) => (
-            <div className="historyRow topologyEvidenceGrid" key={row.id}>
-              <span className="historyPrimary">
-                <strong>{row.planName}</strong>
-                <small>{row.interfaceName}</small>
-              </span>
-              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>
-                {humanStatus(row.signalStatus)}
-              </span>
-              <span className="topologyMetric">
-                <strong>{row.metric}</strong>
-                <small>{row.metricDetail}</small>
-              </span>
-              <span className="topologyMetric">
-                <strong>{row.target}</strong>
-                <small>{row.targetDetail}</small>
-              </span>
-              <span>{row.latestObservedAt === null ? "pending" : formatTime(row.latestObservedAt)}</span>
+      {hasMeasurementEvidence && (
+        <EvidenceGroup
+          detail="Probe and speed-test trends use retained observations; empty curves are hidden until enough points exist."
+          title="Measurement evidence"
+        >
+          {hasStandaloneProbeCurve && (
+            <div
+              className="latencyCurve"
+              aria-label="Network probe latency history"
+            >
+              {probePoints.map((point) => (
+                <span
+                  className={point.lossRatio > 0 ? "warn" : "ok"}
+                  key={point.jobId}
+                  style={{
+                    height: `${Math.max(8, Math.round((point.latencyAvgMs / maxLatency) * 44))}px`,
+                  }}
+                  title={`${formatMetric(point.latencyAvgMs)} ms avg`}
+                />
+              ))}
             </div>
-          ))}
-        </div>
-      )}
-      {ospfRows.length > 0 && (
-        <div className="table historyTable trendTable">
-          <div className="historyRow heading topologyEvidenceGrid">
-            <span>OSPF plan</span>
-            <span>Confidence</span>
-            <span>Cost</span>
-            <span>Evidence</span>
-            <span>Latest</span>
-          </div>
-          {ospfRows.map((row) => (
-            <div className="historyRow topologyEvidenceGrid" key={row.id}>
-              <span className="historyPrimary">
-                <strong>{row.planName}</strong>
-                <small>{row.interfaceName}</small>
-              </span>
-              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>
-                {humanStatus(row.signalStatus)}
-              </span>
-              <span className="topologyMetric">
-                <strong>{row.metric}</strong>
-                <small>{row.metricDetail}</small>
-              </span>
-              <span className="topologyMetric">
-                <strong>{row.target}</strong>
-                <small>{row.targetDetail}</small>
-              </span>
-              <span>{row.latestObservedAt === null ? "pending" : formatTime(row.latestObservedAt)}</span>
+          )}
+          {latencyGroups.length > 0 && (
+            <div
+              className="latencyCurveGroups"
+              aria-label="Per tunnel latency curves"
+            >
+              {latencyGroups.map((group) => (
+                <div className="latencyCurveCard" key={group.key}>
+                  <span className="latencyCurveTitle">
+                    <strong>{group.label}</strong>
+                    <small>{group.detail}</small>
+                  </span>
+                  <div
+                    className="latencyCurve compact"
+                    aria-label={`${group.label} latency curve`}
+                  >
+                    {group.points.map((point, index) => (
+                      <span
+                        className={point.lossRatio > 0 ? "warn" : "ok"}
+                        key={`${group.key}-${index}`}
+                        style={{
+                          height: `${Math.max(8, Math.round((point.latencyAvgMs / group.maxLatency) * 38))}px`,
+                        }}
+                        title={`${formatMetric(point.latencyAvgMs)} ms avg`}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      )}
-      {trendRows.length > 0 && (
-        <div className="table historyTable trendTable" id="topology-evidence-trends">
-          <div className="historyRow heading topologyEvidenceGrid">
-            <span>Trend</span>
-            <span>Health</span>
-            <span>Metric</span>
-            <span>Endpoint</span>
-            <span>Latest</span>
-          </div>
-          {trendRows.map((row) => (
-            <div className="historyRow topologyEvidenceGrid" key={row.id}>
-              <span className="historyPrimary">
-                <strong>{humanStatus(row.kind)}</strong>
-                <small>{row.sampleCount} samples</small>
-              </span>
-              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>
-                {humanStatus(row.signalStatus)}
-              </span>
-              <span className="topologyMetric">
-                <strong>{row.metric}</strong>
-                <small>{row.metricDetail}</small>
-              </span>
-              <span className="topologyMetric">
-                <strong>{row.target}</strong>
-                <small>{row.targetDetail}</small>
-              </span>
-              <span>{formatTime(row.latestObservedAt)}</span>
+          )}
+          {trendRows.length > 0 && (
+            <div
+              className="table historyTable trendTable"
+              id="topology-evidence-trends"
+            >
+              <div className="historyRow heading topologyEvidenceGrid">
+                <span>Trend</span>
+                <span>Health</span>
+                <span>Metric</span>
+                <span>Endpoint</span>
+                <span>Latest</span>
+              </div>
+              {trendRows.map((row) => (
+                <div className="historyRow topologyEvidenceGrid" key={row.id}>
+                  <span className="historyPrimary">
+                    <strong>{humanStatus(row.kind)}</strong>
+                    <small>{row.sampleCount} samples</small>
+                  </span>
+                  <span
+                    className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
+                  >
+                    {humanStatus(row.signalStatus)}
+                  </span>
+                  <span className="topologyMetric">
+                    <strong>{row.metric}</strong>
+                    <small>{row.metricDetail}</small>
+                  </span>
+                  <span className="topologyMetric">
+                    <strong>{row.target}</strong>
+                    <small>{row.targetDetail}</small>
+                  </span>
+                  <EvidenceTime value={row.latestObservedAt} />
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          )}
+        </EvidenceGroup>
       )}
       {observationRows.length > 0 && (
-        <div className="table historyTable observationTable">
+        <EvidenceGroup
+          detail="Persisted status, probe, and speed-test observations remain separate from recommendations and related jobs."
+          title="Status and probe results"
+        >
+          <div className="table historyTable observationTable">
+            <div className="historyRow heading topologyEvidenceGrid">
+              <span>Observation</span>
+              <span>Signal</span>
+              <span>Metric</span>
+              <span>Target</span>
+              <span>Observed</span>
+            </div>
+            {observationRows.map((row) => (
+              <div className="historyRow topologyEvidenceGrid" key={row.id}>
+                <span className="historyPrimary">
+                  <strong>{humanStatus(row.kind)}</strong>
+                  <small>job {shortId(row.jobId)}</small>
+                </span>
+                <span
+                  className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
+                >
+                  {humanStatus(row.signalStatus)}
+                </span>
+                <span className="topologyMetric">
+                  <strong>{row.metric}</strong>
+                  <small>{row.metricDetail}</small>
+                </span>
+                <span className="topologyMetric">
+                  <strong>{row.target}</strong>
+                  <small>{row.targetDetail}</small>
+                </span>
+                <EvidenceTime value={row.observedAt} />
+              </div>
+            ))}
+          </div>
+        </EvidenceGroup>
+      )}
+      <EvidenceGroup
+        detail="Command rows explain retained-output state and link to job detail without turning evidence review into a mutation page."
+        title="Related command jobs"
+      >
+        <div className="table historyTable">
           <div className="historyRow heading topologyEvidenceGrid">
-            <span>Observation</span>
+            <span>Command</span>
             <span>Signal</span>
             <span>Metric</span>
             <span>Target</span>
-            <span>Observed</span>
+            <span>Created</span>
           </div>
-          {observationRows.map((row) => (
-            <div className="historyRow topologyEvidenceGrid" key={row.id}>
+          {rows.map((row) => (
+            <div className="historyRow topologyEvidenceGrid" key={row.job.id}>
               <span className="historyPrimary">
-                <strong>{humanStatus(row.kind)}</strong>
-                <small>{shortId(row.jobId)}</small>
-              </span>
-              <span className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}>
-                {humanStatus(row.signalStatus)}
-              </span>
-              <span className="topologyMetric">
-                <strong>{row.metric}</strong>
-                <small>{row.metricDetail}</small>
-              </span>
-              <span className="topologyMetric">
-                <strong>{row.target}</strong>
-                <small>{row.targetDetail}</small>
-              </span>
-              <span>{formatTime(row.observedAt)}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      <div className="table historyTable">
-        <div className="historyRow heading topologyEvidenceGrid">
-          <span>Command</span>
-          <span>Signal</span>
-          <span>Metric</span>
-          <span>Target</span>
-          <span>Created</span>
-        </div>
-        {rows.map((row) => (
-          <div className="historyRow topologyEvidenceGrid" key={row.job.id}>
-            <span className="historyPrimary">
                 <strong>{humanStatus(row.job.command_type)}</strong>
-                <small>{shortId(row.job.id)}</small>
+                <small>job {shortId(row.job.id)}</small>
                 {onOpenJobDetails ? (
                   <button
                     className="secondaryAction compactAction"
@@ -382,27 +539,69 @@ export function TopologyEvidencePanel({
                   </button>
                 ) : null}
               </span>
-            <span className={`status ${evidenceStatusBadgeClass(row)}`}>{humanStatus(row.signalStatus)}</span>
-            <span className="topologyMetric">
-              <strong>{row.metric}</strong>
-              <small>{row.metricDetail}</small>
-            </span>
-            <span className="topologyMetric">
-              <strong>{row.target}</strong>
-              <small>{row.targetDetail}</small>
-            </span>
-            <span>{formatTime(row.job.created_at)}</span>
-          </div>
-        ))}
-        {rows.length === 0 && (
-          <div className="emptyState">
-            <Activity size={22} />
-            <strong>No topology evidence</strong>
-            <span>Sync, status, probe, and speed-test results will appear here.</span>
-          </div>
-        )}
-      </div>
+              <span className={`status ${evidenceStatusBadgeClass(row)}`}>
+                {humanStatus(row.signalStatus)}
+              </span>
+              <span className="topologyMetric">
+                <strong>{row.metric}</strong>
+                <small>{row.metricDetail}</small>
+              </span>
+              <span className="topologyMetric">
+                <strong>{row.target}</strong>
+                <small>{row.targetDetail}</small>
+              </span>
+              <EvidenceTime value={row.job.created_at} />
+            </div>
+          ))}
+          {rows.length === 0 && (
+            <div className="emptyState">
+              <Activity size={22} />
+              <strong>No topology evidence</strong>
+              <span>
+                Sync, status, probe, and speed-test results will appear here.
+              </span>
+            </div>
+          )}
+        </div>
+      </EvidenceGroup>
     </section>
+  );
+}
+
+function EvidenceGroup({
+  children,
+  detail,
+  title,
+}: {
+  children: ReactNode;
+  detail: string;
+  title: string;
+}) {
+  return (
+    <section className="topologyEvidenceGroup" aria-label={title}>
+      <div className="topologyEvidenceGroupHeader">
+        <strong>{title}</strong>
+        <span>{detail}</span>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function EvidenceTime({
+  fallback = "pending",
+  value,
+}: {
+  fallback?: string;
+  value: string | null;
+}) {
+  if (!value) {
+    return <span>{fallback}</span>;
+  }
+  return (
+    <time dateTime={value} title={formatFullTime(value)}>
+      {formatCompactTime(value)}
+    </time>
   );
 }
 
@@ -455,6 +654,8 @@ type TrendRow = {
 };
 
 type OspfRecommendationRow = {
+  confidence: string;
+  healthDetail: string;
   id: string;
   planName: string;
   interfaceName: string;
@@ -467,6 +668,8 @@ type OspfRecommendationRow = {
 };
 
 type OspfUpdatePlanRow = {
+  confidence: string;
+  healthDetail: string;
   id: string;
   planName: string;
   interfaceName: string;
@@ -498,18 +701,29 @@ function buildTimelineStages({
   ospfUpdateRows: OspfUpdatePlanRow[];
   trendRows: TrendRow[];
 }): TimelineStage[] {
-  const persistedProbeCount = observationRows.filter((row) => row.kind === "network_probe").length;
-  const persistedSpeedCount = observationRows.filter((row) => row.kind === "network_speed_test").length;
-  const statusCount = observationRows.filter((row) => row.kind === "network_status").length +
-    commandRows.filter((row) => row.kind === "network_status" || row.kind === "runtime_config_sync").length;
-  const unloadedOutputCount = commandRows.filter((row) => row.metric === "Output pending").length;
+  const persistedProbeCount = observationRows.filter(
+    (row) => row.kind === "network_probe",
+  ).length;
+  const persistedSpeedCount = observationRows.filter(
+    (row) => row.kind === "network_speed_test",
+  ).length;
+  const statusCount =
+    observationRows.filter((row) => row.kind === "network_status").length +
+    commandRows.filter(
+      (row) =>
+        row.kind === "network_status" || row.kind === "runtime_config_sync",
+    ).length;
+  const unloadedOutputCount = commandRows.filter(
+    (row) => row.metric === "Output not loaded",
+  ).length;
   const probeTrend = trendRows.find((row) => row.kind === "network_probe");
   const speedTrend = trendRows.find((row) => row.kind === "network_speed_test");
   return [
     {
-      detail: observationRows.length > 0
-        ? `Latest persisted observation ${formatTime(latestObservedAt(observationRows))}`
-        : "No persisted topology observations yet",
+      detail:
+        observationRows.length > 0
+          ? `Latest persisted observation ${formatTime(latestObservedAt(observationRows))}`
+          : "No persisted topology observations yet",
       label: "Observation",
       value: `${observationRows.length} records`,
     },
@@ -530,7 +744,10 @@ function buildTimelineStages({
       tone: persistedSpeedCount > 0 ? "ready" : undefined,
     },
     {
-      detail: statusCount > 0 ? "Runtime status evidence is available in observations or retained command output." : "No status check evidence loaded.",
+      detail:
+        statusCount > 0
+          ? "Runtime status evidence is available in observations or retained command output."
+          : "No status check evidence loaded.",
       label: "Status check",
       value: `${statusCount} checks`,
     },
@@ -542,26 +759,33 @@ function buildTimelineStages({
       value: `${ospfRecommendationRows.length} plans`,
     },
     {
-      detail: ospfUpdateRows.length > 0
-        ? "Review cost update in Network / OSPF."
-        : "No approval-required cost update pending.",
+      detail:
+        ospfUpdateRows.length > 0
+          ? "Apply the reviewed recommendation in Network / OSPF."
+          : "No approval-required cost update pending.",
       label: "Approval",
       tone: ospfUpdateRows.length > 0 ? "attention" : undefined,
       value: `${ospfUpdateRows.length} pending`,
     },
     {
-      detail: unloadedOutputCount > 0
-        ? "Use Load output to fetch retained job output for visible commands."
-        : "All visible command outputs are loaded, parsed, or accounted for.",
+      detail:
+        unloadedOutputCount > 0
+          ? "Use Load output to fetch retained job output for visible commands."
+          : "All visible command outputs are loaded, parsed, or accounted for.",
       label: "Command output",
       tone: unloadedOutputCount > 0 ? "attention" : "ready",
-      value: unloadedOutputCount > 0 ? `${unloadedOutputCount} pending` : "Loaded",
+      value:
+        unloadedOutputCount > 0
+          ? `${unloadedOutputCount} outputs not loaded`
+          : "Loaded",
     },
   ];
 }
 
-function buildOspfUpdatePlanRow(plan: NetworkOspfUpdatePlanRecord): OspfUpdatePlanRow {
-  const signalStatus =
+function buildOspfUpdatePlanRow(
+  plan: NetworkOspfUpdatePlanRecord,
+): OspfUpdatePlanRow {
+  const proposalStatus =
     plan.status === "noop"
       ? "healthy"
       : plan.status === "review_degraded"
@@ -569,69 +793,166 @@ function buildOspfUpdatePlanRow(plan: NetworkOspfUpdatePlanRecord): OspfUpdatePl
         : plan.status === "needs_observation"
           ? "unknown"
           : "recorded";
-  const delta = plan.cost_delta === 0 ? "unchanged" : plan.cost_delta > 0 ? `+${plan.cost_delta}` : String(plan.cost_delta);
-  const privilegeState = plan.privilege_required ? "privilege required" : "read-only";
+  const bandwidthHealth = bandwidthEvidenceHealth({
+    configuredBandwidthMbps: plan.evidence.configured_bandwidth_mbps,
+    effectiveBandwidthMbps: plan.evidence.effective_bandwidth_mbps,
+    measuredThroughputMbps: plan.evidence.throughput_avg_mbps,
+  });
+  const signalStatus =
+    bandwidthHealth.signalStatus === "degraded"
+      ? "degraded"
+      : proposalStatus;
+  const delta =
+    plan.cost_delta === 0
+      ? "unchanged"
+      : plan.cost_delta > 0
+        ? `+${plan.cost_delta}`
+        : String(plan.cost_delta);
+  const privilegeState = plan.privilege_required
+    ? "privilege required"
+    : "read-only";
   return {
-    id: plan.plan_id,
+    id: plan.recommendation_id,
     planName: plan.plan_name,
     interfaceName: plan.interface_name,
+    confidence: `Confidence ${humanStatus(plan.confidence)}`,
+    healthDetail: bandwidthHealth.detail,
     signalStatus,
     metric: `${plan.current_ospf_cost} -> ${plan.recommended_ospf_cost}`,
-    metricDetail: `${delta}; ${plan.confidence}`,
+    metricDetail: `${delta}; ${bandwidthHealth.summary}`,
     target: plan.requires_approval ? "approval required" : "no action",
     targetDetail: plan.requires_approval
-      ? `Review cost update in Network / OSPF; ${privilegeState}; ${plan.approval_scope.join(", ")}`
-      : `${privilegeState}; ${plan.approval_scope.join(", ")}`,
+      ? `${bandwidthHealth.summary}; ${evidenceSampleSummary(plan.evidence.sample_count, plan.evidence.latest_observed_at)}; ${privilegeState}; ${plan.approval_scope.length} approval scopes`
+      : `${bandwidthHealth.summary}; ${evidenceSampleSummary(plan.evidence.sample_count, plan.evidence.latest_observed_at)}; ${privilegeState}`,
     latestObservedAt: plan.evidence.latest_observed_at,
   };
 }
 
-function buildOspfRecommendationRow(recommendation: NetworkOspfRecommendationRecord): OspfRecommendationRow {
+function buildOspfRecommendationRow(
+  recommendation: NetworkOspfRecommendationRecord,
+): OspfRecommendationRow {
+  const bandwidthHealth = bandwidthEvidenceHealth({
+    configuredBandwidthMbps: recommendation.configured_bandwidth_mbps,
+    effectiveBandwidthMbps: recommendation.effective_bandwidth_mbps,
+    measuredThroughputMbps: recommendation.throughput_avg_mbps,
+  });
   const signalStatus =
-    recommendation.confidence === "measured"
-      ? recommendation.degraded_count > 0
-        ? "degraded"
-        : "healthy"
-      : recommendation.confidence === "no_recent_observations"
-        ? "unknown"
-        : "recorded";
-  const delta = recommendation.cost_delta === 0
-    ? "unchanged"
-    : recommendation.cost_delta > 0
-      ? `+${recommendation.cost_delta}`
-      : String(recommendation.cost_delta);
-  const evidence = recommendation.latency_avg_ms !== null
-    ? `${formatMetric(recommendation.latency_avg_ms)} ms; ${formatLoss(recommendation.packet_loss_avg_ratio)} loss`
-    : recommendation.reason;
-  const throughput = recommendation.throughput_avg_mbps === null
-    ? `burst ${recommendation.effective_bandwidth}`
-    : `${formatMetric(recommendation.throughput_avg_mbps)} Mbps avg; burst ${recommendation.effective_bandwidth}`;
+    bandwidthHealth.signalStatus === "degraded"
+      ? "degraded"
+      : recommendation.confidence === "measured"
+        ? recommendation.degraded_count > 0
+          ? "degraded"
+          : "healthy"
+        : recommendation.confidence === "no_recent_observations"
+          ? "unknown"
+          : "recorded";
+  const delta =
+    recommendation.cost_delta === 0
+      ? "unchanged"
+      : recommendation.cost_delta > 0
+        ? `+${recommendation.cost_delta}`
+        : String(recommendation.cost_delta);
+  const evidence =
+    recommendation.latency_avg_ms !== null
+      ? `${formatMetric(recommendation.latency_avg_ms)} ms; ${formatLoss(recommendation.packet_loss_avg_ratio)} loss`
+      : recommendation.reason;
+  const throughput =
+    recommendation.throughput_avg_mbps === null
+      ? `burst ${formatBandwidthMbps(recommendation.effective_bandwidth_mbps)}`
+      : `${formatMetric(recommendation.throughput_avg_mbps)} Mbps avg; burst ${formatBandwidthMbps(recommendation.effective_bandwidth_mbps)}`;
   return {
-    id: recommendation.plan_id,
+    id: recommendation.recommendation_id,
     planName: recommendation.plan_name,
     interfaceName: recommendation.interface_name,
+    confidence: `Confidence ${humanStatus(recommendation.confidence)}`,
+    healthDetail: bandwidthHealth.detail,
     signalStatus,
     metric: `${recommendation.plan_ospf_cost} -> ${recommendation.recommended_ospf_cost}`,
-    metricDetail: `${delta}; ${recommendation.configured_bandwidth} configured`,
+    metricDetail: `${delta}; ${bandwidthHealth.summary}`,
     target: evidence,
-    targetDetail: `${throughput}; ${recommendation.sample_count} samples`,
+    targetDetail: `${bandwidthHealth.summary}; ${evidenceSampleSummary(recommendation.sample_count, recommendation.latest_observed_at)}; ${recommendation.reason || throughput}`,
     latestObservedAt: recommendation.latest_observed_at,
   };
 }
 
-function buildTrendRow(trend: NetworkObservationTrendRecord, clientLabel: (clientId: string) => string): TrendRow {
+function bandwidthEvidenceHealth({
+  configuredBandwidthMbps,
+  effectiveBandwidthMbps,
+  measuredThroughputMbps,
+}: {
+  configuredBandwidthMbps: number;
+  effectiveBandwidthMbps: number;
+  measuredThroughputMbps: number | null;
+}): {
+  detail: string;
+  signalStatus: TopologyObservationState;
+  summary: string;
+} {
+  const measured = measuredThroughputMbps ?? effectiveBandwidthMbps;
+  if (
+    !Number.isFinite(configuredBandwidthMbps) ||
+    configuredBandwidthMbps <= 0 ||
+    !Number.isFinite(measured)
+  ) {
+    return {
+      detail: "Configured bandwidth baseline is unavailable.",
+      signalStatus: "recorded",
+      summary: "baseline unavailable",
+    };
+  }
+  const percent = Math.round((measured / configuredBandwidthMbps) * 100);
+  const measuredLabel =
+    measuredThroughputMbps === null
+      ? formatBandwidthMbps(effectiveBandwidthMbps)
+      : `${formatMetric(measuredThroughputMbps)} Mbps avg`;
+  const summary = `${measuredLabel} - ${percent}% of expected ${formatBandwidthMbps(configuredBandwidthMbps)}`;
+  const effectiveDetail =
+    measuredThroughputMbps === null
+      ? `effective ${formatBandwidthMbps(effectiveBandwidthMbps)}`
+      : `effective ${formatBandwidthMbps(effectiveBandwidthMbps)}; measured ${formatMetric(measuredThroughputMbps)} Mbps avg`;
+  return {
+    detail: `${summary}; ${effectiveDetail}`,
+    signalStatus: percent < 80 ? "degraded" : "healthy",
+    summary,
+  };
+}
+
+function formatBandwidthMbps(value: number): string {
+  return `${Math.round(value)} Mbps`;
+}
+
+function evidenceSampleSummary(
+  sampleCount: number,
+  latestObservedAt: string | null,
+): string {
+  const latest = latestObservedAt
+    ? `; latest ${formatCompactTime(latestObservedAt)}`
+    : "";
+  return `${sampleCount} sample${sampleCount === 1 ? "" : "s"}${latest}`;
+}
+
+function buildTrendRow(
+  trend: NetworkObservationTrendRecord,
+  clientLabel: (clientId: string) => string,
+): TrendRow {
   const signalStatus =
-    trend.degraded_count > 0 ? "degraded" : trend.healthy_count > 0 ? "healthy" : "recorded";
-  const metric = trend.throughput_avg_mbps !== null
-    ? `${formatMetric(trend.throughput_avg_mbps)} Mbps avg`
-    : trend.latency_avg_ms !== null
-      ? `${formatMetric(trend.latency_avg_ms)} ms avg`
-      : `${trend.sample_count} samples`;
-  const metricDetail = trend.throughput_max_mbps !== null
-    ? `${formatMetric(trend.throughput_max_mbps)} Mbps max; ${formatBytes(trend.bytes_total)} total`
-    : trend.latency_min_ms !== null && trend.latency_max_ms !== null
-      ? `${formatMetric(trend.latency_min_ms)}-${formatMetric(trend.latency_max_ms)} ms; ${formatLoss(trend.packet_loss_avg_ratio)} loss`
-      : `${trend.healthy_count} healthy / ${trend.degraded_count} degraded`;
+    trend.degraded_count > 0
+      ? "degraded"
+      : trend.healthy_count > 0
+        ? "healthy"
+        : "recorded";
+  const metric =
+    trend.throughput_avg_mbps !== null
+      ? `${formatMetric(trend.throughput_avg_mbps)} Mbps avg`
+      : trend.latency_avg_ms !== null
+        ? `${formatMetric(trend.latency_avg_ms)} ms avg`
+        : `${trend.sample_count} samples`;
+  const metricDetail =
+    trend.throughput_max_mbps !== null
+      ? `${formatMetric(trend.throughput_max_mbps)} Mbps max; ${formatBytes(trend.bytes_total)} total`
+      : trend.latency_min_ms !== null && trend.latency_max_ms !== null
+        ? `${formatMetric(trend.latency_min_ms)}-${formatMetric(trend.latency_max_ms)} ms; ${formatLoss(trend.packet_loss_avg_ratio)} loss`
+        : `${trend.healthy_count} healthy / ${trend.degraded_count} degraded`;
   return {
     id: `${trend.kind}:${trend.plan_name ?? ""}:${trend.client_id}:${trend.peer_client_id ?? ""}`,
     kind: trend.kind,
@@ -640,14 +961,25 @@ function buildTrendRow(trend: NetworkObservationTrendRecord, clientLabel: (clien
     metric,
     metricDetail,
     target: trend.plan_name ?? trend.interface_name ?? "network",
-    targetDetail: endpointLabel(trend.client_id, trend.peer_client_id, clientLabel),
+    targetDetail: endpointLabel(
+      trend.client_id,
+      trend.peer_client_id,
+      clientLabel,
+    ),
     latestObservedAt: trend.latest_observed_at,
   };
 }
 
-function buildObservationRow(observation: NetworkObservationRecord, clientLabel: (clientId: string) => string): ObservationRow {
+function buildObservationRow(
+  observation: NetworkObservationRecord,
+  clientLabel: (clientId: string) => string,
+): ObservationRow {
   const signalStatus =
-    observation.healthy === true ? "healthy" : observation.healthy === false ? "degraded" : "recorded";
+    observation.healthy === true
+      ? "healthy"
+      : observation.healthy === false
+        ? "degraded"
+        : "recorded";
   if (observation.kind === "network_probe") {
     return {
       id: observation.id,
@@ -655,13 +987,19 @@ function buildObservationRow(observation: NetworkObservationRecord, clientLabel:
       kind: observation.kind,
       signalStatus,
       metric:
-        observation.latency_avg_ms === null ? "No latency" : `${formatMetric(observation.latency_avg_ms)} ms`,
+        observation.latency_avg_ms === null
+          ? "No latency"
+          : `${formatMetric(observation.latency_avg_ms)} ms`,
       metricDetail:
         observation.packet_loss_ratio === null
           ? "loss unavailable"
           : `${formatMetric(observation.packet_loss_ratio * 100)}% loss`,
       target: observation.target ?? "peer tunnel",
-      targetDetail: endpointLabel(observation.client_id, observation.peer_client_id, clientLabel),
+      targetDetail: endpointLabel(
+        observation.client_id,
+        observation.peer_client_id,
+        clientLabel,
+      ),
       observedAt: observation.observed_at,
     };
   }
@@ -672,8 +1010,13 @@ function buildObservationRow(observation: NetworkObservationRecord, clientLabel:
       kind: observation.kind,
       signalStatus,
       metric:
-        observation.throughput_mbps === null ? "No throughput" : `${formatMetric(observation.throughput_mbps)} Mbps`,
-      metricDetail: observation.bytes === null ? "bytes unavailable" : `${formatBytes(observation.bytes)}`,
+        observation.throughput_mbps === null
+          ? "No throughput"
+          : `${formatMetric(observation.throughput_mbps)} Mbps`,
+      metricDetail:
+        observation.bytes === null
+          ? "bytes unavailable"
+          : `${formatBytes(observation.bytes)}`,
       target: observation.target ?? "speed endpoint",
       targetDetail: `${observation.role ?? "role"} ${endpointLabel(observation.client_id, observation.peer_client_id, clientLabel)}`,
       observedAt: observation.observed_at,
@@ -706,7 +1049,11 @@ function buildObservationRow(observation: NetworkObservationRecord, clientLabel:
             : "Recorded status",
     metricDetail: runtimeDetail,
     target: observation.plan_name ?? "tunnel plan",
-    targetDetail: endpointLabel(observation.client_id, observation.peer_client_id, clientLabel),
+    targetDetail: endpointLabel(
+      observation.client_id,
+      observation.peer_client_id,
+      clientLabel,
+    ),
     observedAt: observation.observed_at,
   };
 }
@@ -717,7 +1064,10 @@ function buildLatencyCurveGroups(
 ): LatencyCurveGroup[] {
   const grouped = new Map<string, NetworkObservationRecord[]>();
   for (const observation of observations) {
-    if (observation.kind !== "network_probe" || typeof observation.latency_avg_ms !== "number") {
+    if (
+      observation.kind !== "network_probe" ||
+      typeof observation.latency_avg_ms !== "number"
+    ) {
       continue;
     }
     const key = [
@@ -733,7 +1083,9 @@ function buildLatencyCurveGroups(
     .map(([key, rows]) => {
       const sorted = rows
         .slice()
-        .sort((left, right) => left.observed_at.localeCompare(right.observed_at))
+        .sort((left, right) =>
+          left.observed_at.localeCompare(right.observed_at),
+        )
         .slice(-24);
       const points = sorted.map((row) => ({
         latencyAvgMs: row.latency_avg_ms ?? 0,
@@ -743,12 +1095,21 @@ function buildLatencyCurveGroups(
       return {
         key,
         label: latest.plan_name ?? latest.interface_name ?? "network probe",
-        detail: endpointLabel(latest.client_id, latest.peer_client_id, clientLabel),
+        detail: endpointLabel(
+          latest.client_id,
+          latest.peer_client_id,
+          clientLabel,
+        ),
         maxLatency: Math.max(1, ...points.map((point) => point.latencyAvgMs)),
         points,
       };
     })
-    .sort((left, right) => right.points.length - left.points.length || left.label.localeCompare(right.label))
+    .filter((group) => group.points.length > 1)
+    .sort(
+      (left, right) =>
+        right.points.length - left.points.length ||
+        left.label.localeCompare(right.label),
+    )
     .slice(0, 8);
 }
 
@@ -768,10 +1129,20 @@ function buildEvidenceRow(
       kind: "network_probe",
       signalKind: "observation",
       signalStatus: asBoolean(parsed.healthy) ? "healthy" : "degraded",
-      metric: latencyAvgMs === null ? "No latency" : `${formatMetric(latencyAvgMs)} ms`,
-      metricDetail: lossRatio === null ? "loss unavailable" : `${formatMetric(lossRatio * 100)}% loss`,
+      metric:
+        latencyAvgMs === null
+          ? "No latency"
+          : `${formatMetric(latencyAvgMs)} ms`,
+      metricDetail:
+        lossRatio === null
+          ? "loss unavailable"
+          : `${formatMetric(lossRatio * 100)}% loss`,
       target: asString(parsedStatus.target) ?? "peer tunnel",
-      targetDetail: endpointLabel(asString(parsedStatus.client_id), asString(parsedStatus.peer_client_id), clientLabel),
+      targetDetail: endpointLabel(
+        asString(parsedStatus.client_id),
+        asString(parsedStatus.peer_client_id),
+        clientLabel,
+      ),
       latencyAvgMs: latencyAvgMs ?? undefined,
       lossRatio: lossRatio ?? undefined,
     };
@@ -784,7 +1155,9 @@ function buildEvidenceRow(
     const runtimeStatus = asString(summary.status);
     const runtimeHealthy = asOptionalBoolean(summary.healthy);
     const reasons = asStringArray(summary.reasons);
-    const interfaceState = asString(iface.operstate) ?? (asBoolean(iface.exists) ? "present" : "absent");
+    const interfaceState =
+      asString(iface.operstate) ??
+      (asBoolean(iface.exists) ? "present" : "absent");
     const applied = asBoolean(parsedStatus.applied);
     const statusHealthy = runtimeHealthy ?? applied;
     const runtimeDetail = runtimeSummaryDetail(
@@ -799,33 +1172,48 @@ function buildEvidenceRow(
       signalStatus: statusHealthy ? "healthy" : "drift",
       metric:
         applied && statusHealthy
-        ? "Managed blocks match"
-        : runtimeStatus
-          ? `Runtime ${humanStatus(runtimeStatus).toLowerCase()}`
-          : "Needs review",
+          ? "Managed blocks match"
+          : runtimeStatus
+            ? `Runtime ${humanStatus(runtimeStatus).toLowerCase()}`
+            : "Needs review",
       metricDetail: runtimeDetail,
       target: asString(parsedStatus.interface) ?? "interface",
-      targetDetail: endpointLabel(asString(parsedStatus.client_id), asString(parsedStatus.peer_client_id), clientLabel),
+      targetDetail: endpointLabel(
+        asString(parsedStatus.client_id),
+        asString(parsedStatus.peer_client_id),
+        clientLabel,
+      ),
     };
   }
   const speedStatuses = parseStatusOutputs(outputs).filter(isSpeedTestStatus);
   if (speedStatuses.length > 0) {
-    const clientStatus = speedStatuses.find((status) => asString(status.role) === "client") ?? speedStatuses[0];
-    const serverStatus = speedStatuses.find((status) => asString(status.role) === "server");
+    const clientStatus =
+      speedStatuses.find((status) => asString(status.role) === "client") ??
+      speedStatuses[0];
+    const serverStatus = speedStatuses.find(
+      (status) => asString(status.role) === "server",
+    );
     const throughputMbps = asNumber(clientStatus.throughput_mbps);
     const bytes = asNumber(clientStatus.bytes);
-    const allSucceeded = speedStatuses.length >= 2 && speedStatuses.every((status) => asBoolean(status.success));
+    const allSucceeded =
+      speedStatuses.length >= 2 &&
+      speedStatuses.every((status) => asBoolean(status.success));
     return {
       job,
       kind: "network_speed_test",
       signalKind: "observation",
       signalStatus: allSucceeded ? "healthy" : "degraded",
-      metric: throughputMbps === null ? "No throughput" : `${formatMetric(throughputMbps)} Mbps`,
-      metricDetail: bytes === null ? "bytes unavailable" : `${formatBytes(bytes)} sent`,
+      metric:
+        throughputMbps === null
+          ? "No throughput"
+          : `${formatMetric(throughputMbps)} Mbps`,
+      metricDetail:
+        bytes === null ? "bytes unavailable" : `${formatBytes(bytes)} sent`,
       target: `${asString(clientStatus.server_address) ?? "server"}:${asNumber(clientStatus.port) ?? "port"}`,
       targetDetail: endpointLabel(
         asString(clientStatus.client_id),
-        asString(serverStatus?.client_id) ?? asString(clientStatus.peer_client_id),
+        asString(serverStatus?.client_id) ??
+          asString(clientStatus.peer_client_id),
         clientLabel,
         "server",
       ),
@@ -836,7 +1224,11 @@ function buildEvidenceRow(
     kind: job.command_type,
     signalKind: "job",
     signalStatus: job.status,
-    metric: !outputsLoaded ? "Output pending" : outputs.length === 0 ? "No retained output" : `${outputs.length} chunks`,
+    metric: !outputsLoaded
+      ? "Output not loaded"
+      : outputs.length === 0
+        ? "No retained output"
+        : `${outputs.length} chunks`,
     metricDetail: !outputsLoaded
       ? "Use Load output to fetch retained output"
       : outputs.length === 0
@@ -852,9 +1244,13 @@ function evidenceStatusBadgeClass(row: EvidenceRow): string {
     case "job":
       return jobStatusBadgeClass(row.signalStatus as JobStatus);
     case "observation":
-      return topologyObservationStateBadgeClass(row.signalStatus as TopologyObservationState);
+      return topologyObservationStateBadgeClass(
+        row.signalStatus as TopologyObservationState,
+      );
     case "runtime":
-      return topologyRuntimeStateBadgeClass(row.signalStatus as TopologyRuntimeState);
+      return topologyRuntimeStateBadgeClass(
+        row.signalStatus as TopologyRuntimeState,
+      );
   }
 }
 
@@ -883,14 +1279,18 @@ function parseStatusOutput(outputs: JobOutputRecord[]): unknown {
   return null;
 }
 
-function parseStatusOutputs(outputs: JobOutputRecord[]): Record<string, unknown>[] {
+function parseStatusOutputs(
+  outputs: JobOutputRecord[],
+): Record<string, unknown>[] {
   const statuses: Record<string, unknown>[] = [];
   for (const output of outputs) {
     if (output.stream !== "status") {
       continue;
     }
     try {
-      statuses.push(asRecord(JSON.parse(decodeOutputPreview(output.data_base64))));
+      statuses.push(
+        asRecord(JSON.parse(decodeOutputPreview(output.data_base64))),
+      );
     } catch {
       continue;
     }
@@ -911,7 +1311,9 @@ function isSpeedTestStatus(value: unknown): value is Record<string, unknown> {
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function asString(value: unknown): string | null {
@@ -920,7 +1322,10 @@ function asString(value: unknown): string | null {
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    ? value.filter(
+        (item): item is string =>
+          typeof item === "string" && item.trim().length > 0,
+      )
     : [];
 }
 
@@ -950,16 +1355,24 @@ function humanStatus(value: string): string {
   return readableTelemetryToken(value);
 }
 
-function runtimeSummaryDetail(reasons: string[], importCandidateCount: number | null, fallback: string): string {
+function runtimeSummaryDetail(
+  reasons: string[],
+  importCandidateCount: number | null,
+  fallback: string,
+): string {
   const parts = reasons.map(humanStatus);
   if (importCandidateCount !== null && importCandidateCount > 0) {
-    parts.push(`${importCandidateCount} import candidate${importCandidateCount === 1 ? "" : "s"}`);
+    parts.push(
+      `${importCandidateCount} import candidate${importCandidateCount === 1 ? "" : "s"}`,
+    );
   }
   return parts.length > 0 ? parts.join(", ") : fallback;
 }
 
 function formatMetric(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(value < 10 ? 2 : 1);
+  return Number.isInteger(value)
+    ? String(value)
+    : value.toFixed(value < 10 ? 2 : 1);
 }
 
 function formatBytes(value: number): string {
@@ -977,5 +1390,8 @@ function formatLoss(value: number | null): string {
 }
 
 function latestObservedAt(rows: ObservationRow[]): string {
-  return rows.reduce((latest, row) => row.observedAt > latest ? row.observedAt : latest, rows[0]?.observedAt ?? "");
+  return rows.reduce(
+    (latest, row) => (row.observedAt > latest ? row.observedAt : latest),
+    rows[0]?.observedAt ?? "",
+  );
 }

@@ -159,6 +159,54 @@
   border-top: 0;
 }
 
+.identityWorkflowHeader {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.identityWorkflowHeader > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.copyHashButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.copyHashButton:hover {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.copyHashButton:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.copyHashButton span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .accessConfigHeading strong {
   color: var(--text);
   font-size: 0.86rem;
@@ -333,8 +381,7 @@
 
 .accessPostureBody span,
 .accessRiskNotice span,
-.accessLifecycleGuide span,
-.accessReadinessPanel span {
+.accessLifecycleGuide span {
   color: var(--muted);
   font-size: 11px;
   font-weight: 800;
@@ -344,8 +391,7 @@
 
 .accessPostureBody strong,
 .accessRiskNotice strong,
-.accessLifecycleGuide strong,
-.accessReadinessPanel strong {
+.accessLifecycleGuide strong {
   min-width: 0;
   color: var(--text);
   font-size: 13px;
@@ -354,21 +400,18 @@
 }
 
 .accessPostureCard.ready .accessPostureBody strong,
-.accessRiskNotice.ready strong,
-.accessReadinessPanel .ready strong {
+.accessRiskNotice.ready strong {
   color: var(--success-text);
 }
 
 .accessPostureCard.attention .accessPostureBody strong,
-.accessRiskNotice.attention strong,
-.accessReadinessPanel .attention strong {
+.accessRiskNotice.attention strong {
   color: var(--warning-text);
 }
 
 .accessPostureBody p,
 .accessRiskNotice span,
-.accessLifecycleGuide > div > span,
-.accessReadinessPanel p {
+.accessLifecycleGuide > div > span {
   margin: 0;
   color: var(--text-secondary);
   font-size: 12px;
@@ -475,6 +518,157 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   gap: 14px;
+}
+
+.accessMain .workspaceSection.accessOverviewFocus {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.accessOverviewPanel {
+  display: grid;
+  align-content: start;
+  min-width: 0;
+}
+
+.accessOverviewRows {
+  display: grid;
+  gap: 8px;
+  padding: 14px 18px 18px;
+}
+
+.accessOverviewRow {
+  display: grid;
+  grid-template-columns: auto minmax(220px, 1fr) minmax(140px, 0.45fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+
+.accessOverviewRow.ready {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+}
+
+.accessOverviewRow.attention {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.accessOverviewIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.accessOverviewRow.ready .accessOverviewIcon {
+  background: var(--surface);
+  color: var(--success-text);
+}
+
+.accessOverviewRow.attention .accessOverviewIcon {
+  background: var(--surface);
+  color: var(--warning-text);
+}
+
+.accessOverviewText {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.accessOverviewText strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.accessOverviewText small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.accessOverviewValue {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.accessOverviewRow.ready .accessOverviewValue {
+  color: var(--success-text);
+}
+
+.accessOverviewRow.attention .accessOverviewValue {
+  color: var(--warning-text);
+}
+
+.accessOverviewEmpty {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  margin: 14px 18px 18px;
+  border: 1px solid var(--success-border);
+  border-radius: 8px;
+  background: var(--success-soft);
+  color: var(--success-text);
+  padding: 12px;
+}
+
+.accessOverviewEmpty > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.accessOverviewEmpty strong {
+  color: var(--success-text);
+  font-size: 13px;
+}
+
+.accessOverviewEmpty small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+@media (max-width: 760px) {
+  .accessOverviewRows {
+    padding: 12px;
+  }
+
+  .accessOverviewRow {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .accessOverviewValue,
+  .accessOverviewRow > button {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .accessOverviewRow > button {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .accessOverviewEmpty {
+    margin: 12px;
+  }
 }
 
 .accessWorkflowMap {
@@ -590,8 +784,7 @@
   min-width: 0;
 }
 
-.accessLifecycleGuide,
-.accessReadinessPanel {
+.accessLifecycleGuide {
   display: grid;
   grid-template-columns: minmax(220px, 0.65fr) minmax(0, 1.35fr) auto;
   gap: 12px;
@@ -632,34 +825,198 @@
   font-weight: 700;
 }
 
-.accessReadinessPanel {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
-  background: var(--surface-subtle);
+.gatewaySessionEmpty {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  background: var(--surface);
+  padding: 18px;
 }
 
-.accessReadinessPanel > div {
+.gatewaySessionEmptyIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.gatewaySessionEmpty h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1.25;
+}
+
+.gatewaySessionEmpty p {
+  max-width: 68ch;
+  margin: 4px 0 0;
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.gatewaySessionEmpty span {
+  display: block;
+  max-width: 68ch;
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.gatewaySessionEmptyActions {
+  justify-self: end;
+}
+
+.totpWorkflow,
+.totpDisablePanel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 18px 18px;
+}
+
+.totpStepList {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.totpStepList li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--text-secondary);
+  padding: 7px 9px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.totpStepList li.ready,
+.totpStepList li.active {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.totpStepList li span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: inherit;
+  font-size: 11px;
+}
+
+.totpStepList li strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.totpActionGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 10px;
+  align-items: end;
+  min-width: 0;
+}
+
+.totpActionGrid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.totpActionGrid label span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.totpActionGrid input {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 0 10px;
+}
+
+.totpActionGrid input:focus {
+  border-color: var(--primary);
+  outline: 0;
+}
+
+.totpSecretPanel {
   display: grid;
   gap: 4px;
   min-width: 0;
-  border: 1px solid var(--border);
+  grid-column: 1 / -1;
+  border: 1px solid var(--primary-border);
   border-radius: 8px;
-  background: var(--surface);
+  background: var(--primary-soft);
   padding: 10px 12px;
 }
 
-.accessReadinessPanel > div.ready {
-  border-color: var(--success-border);
-  background: var(--success-soft);
+.totpSecretPanel.muted {
+  border-color: var(--border);
+  background: var(--canvas);
 }
 
-.accessReadinessPanel > div.attention {
-  border-color: var(--warning-border);
-  background: var(--warning-soft);
+.totpSecretPanel strong {
+  color: var(--text);
+  font-size: 13px;
 }
 
-.accessReadinessActions {
-  align-content: center;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.totpSecretPanel span,
+.totpSecretPanel small,
+.totpDisablePanel span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.totpDisablePanel {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.totpDisablePanel > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.totpDisablePanel strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.totpDisablePanel.disabled {
+  background: var(--surface-subtle);
 }
 
 .identityFormGuide {
@@ -754,11 +1111,48 @@
 
 @media (max-width: 700px) {
   .accessLifecycleGuide,
-  .accessReadinessPanel {
+  .gatewaySessionEmpty {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .gatewaySessionEmptyActions {
+    justify-self: stretch;
+  }
+
+  .gatewaySessionEmptyActions .primaryAction {
+    width: 100%;
+  }
+
+  .totpStepList {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .accessPostureCard > button {
     grid-column: 1 / -1;
+  }
+
+  .identityWorkflowPanel {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-modal);
+    align-content: start;
+    overflow: auto;
+    border-radius: 0;
+    background: var(--canvas);
+  }
+
+  .identityWorkflowPanel .accessConfigHeading,
+  .identityWorkflowPanel .sectionHeader.compact {
+    background: var(--surface);
+  }
+
+  .identityWorkflowPanel .sideForm {
+    padding: 12px;
+  }
+
+  .identityWorkflowHeader {
+    position: sticky;
+    top: 0;
+    z-index: var(--z-sticky);
   }
 }

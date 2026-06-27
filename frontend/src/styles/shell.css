@@ -162,24 +162,41 @@ nav {
   border-bottom: 1px solid var(--border);
 }
 
+.scopeSelectorGroup,
 .scopeSelector,
 .controlPlanePill {
   display: inline-flex;
   align-items: center;
   min-width: 0;
+}
+
+.scopeSelector,
+.controlPlanePill {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
   color: var(--text-secondary);
 }
 
+.scopeSelectorGroup {
+  gap: 6px;
+  width: min(100%, 280px);
+}
+
 .scopeSelector {
+  flex: 1 1 auto;
   justify-content: flex-start;
   gap: 10px;
   height: 40px;
   cursor: pointer;
   padding: 0 12px;
   text-align: left;
+}
+
+.scopeClearButton {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
 }
 
 .scopeSelector svg {
@@ -249,7 +266,10 @@ nav {
 
 .savedViewControls {
   display: grid;
-  grid-template-columns: minmax(112px, 0.9fr) minmax(96px, 0.8fr) repeat(3, 36px);
+  grid-template-columns: minmax(112px, 0.9fr) minmax(96px, 0.8fr) repeat(
+      3,
+      36px
+    );
   align-items: center;
   gap: 6px;
   min-width: min(100%, 334px);
@@ -665,7 +685,9 @@ nav {
 }
 
 .monoCell {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    monospace;
   font-size: 12px;
 }
 
@@ -997,11 +1019,31 @@ nav {
 }
 
 .secondaryAction:disabled {
+  border-color: var(--border-subtle);
+  background: var(--surface-neutral);
   color: var(--muted);
   cursor: not-allowed;
+  box-shadow: none;
+}
+
+.secondaryAction:disabled svg {
+  color: var(--muted);
+}
+
+.secondaryAction.active {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  font-weight: 700;
 }
 
 .dangerAction {
+  color: var(--danger);
+}
+
+.dangerAction.active {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
   color: var(--danger);
 }
 
@@ -1108,7 +1150,8 @@ nav {
   font-weight: 700;
 }
 
-.confirmationTypedInput input {
+.confirmationTypedInput input,
+.confirmationTypedInput textarea {
   box-sizing: border-box;
   width: min(320px, 100%);
   min-height: 36px;
@@ -1120,7 +1163,13 @@ nav {
   padding: 7px 10px;
 }
 
-.confirmationTypedInput input:focus {
+.confirmationTypedInput textarea {
+  width: min(520px, 100%);
+  resize: vertical;
+}
+
+.confirmationTypedInput input:focus,
+.confirmationTypedInput textarea:focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.14);
   outline: 0;
@@ -1219,6 +1268,14 @@ nav {
   background: var(--surface);
 }
 
+.consoleHeader.withoutFleetStatus {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.consoleHeader.withoutFleetStatus .titleBlock {
+  max-width: 760px;
+}
+
 .titleBlock {
   display: grid;
   gap: 4px;
@@ -1300,6 +1357,63 @@ h2 {
   width: 100%;
 }
 
+.summaryScopeLabel {
+  grid-column: 1 / -1;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.fleetStatusStrip {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  justify-self: end;
+  min-width: min(100%, 280px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  padding: 10px 12px;
+}
+
+.fleetStatusStrip strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.fleetStatusStrip span,
+.fleetStatusStrip small {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0 8px;
+}
+
+.fleetStatusStrip span.ok {
+  background: var(--success-soft);
+  color: var(--success-text);
+}
+
+.fleetStatusStrip span.warn {
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.fleetStatusStrip small {
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
 .signalGrid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -1326,17 +1440,29 @@ h2 {
 
 .metric.blue {
   border-color: var(--primary);
-  background: linear-gradient(180deg, rgba(26, 115, 232, 0.08), var(--surface) 42%);
+  background: linear-gradient(
+    180deg,
+    rgba(26, 115, 232, 0.08),
+    var(--surface) 42%
+  );
 }
 
 .metric.green {
   border-color: var(--success);
-  background: linear-gradient(180deg, rgba(24, 128, 56, 0.08), var(--surface) 42%);
+  background: linear-gradient(
+    180deg,
+    rgba(24, 128, 56, 0.08),
+    var(--surface) 42%
+  );
 }
 
 .metric.yellow {
   border-color: var(--warning);
-  background: linear-gradient(180deg, rgba(249, 171, 0, 0.12), var(--surface) 42%);
+  background: linear-gradient(
+    180deg,
+    rgba(249, 171, 0, 0.12),
+    var(--surface) 42%
+  );
 }
 
 .consoleMenu {
@@ -1543,6 +1669,11 @@ h2 {
   overscroll-behavior-x: contain;
 }
 
+.gridRecord {
+  min-width: 100%;
+  width: 100%;
+}
+
 .gridHeaderGroup,
 .gridBody {
   min-width: 100%;
@@ -1684,4 +1815,195 @@ h2 {
 .gridIconButton {
   width: 28px;
   height: 28px;
+}
+
+.gridMobileCard {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .consoleDataGrid {
+    overflow: visible;
+  }
+
+  .gridToolbar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .gridCounts {
+    align-items: center;
+  }
+
+  .gridSearch {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+  }
+
+  .gridToolbarActions {
+    flex-wrap: wrap;
+  }
+
+  .gridTable {
+    overflow-x: visible;
+  }
+
+  .gridHeaderGroup {
+    display: none;
+  }
+
+  .gridBody {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+    width: 100%;
+    background: var(--canvas);
+    padding: 12px;
+  }
+
+  .gridRecord {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .gridRecord > .gridRow {
+    display: none;
+  }
+
+  .gridMobileCard {
+    display: grid;
+    gap: 10px;
+    min-width: 0;
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 10px;
+  }
+
+  .gridMobileCard.selected {
+    border-color: var(--primary-border);
+    background: var(--primary-soft);
+    box-shadow: inset 0 0 0 1px var(--primary-border);
+  }
+
+  .gridMobileCardHeader {
+    display: flex;
+    align-items: start;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .gridMobilePrimary {
+    flex: 1 1 min(100%, 170px);
+    min-width: 0;
+  }
+
+  .gridMobilePrimary > *,
+  .gridMobileState > *,
+  .gridMobileFieldValue > * {
+    max-width: 100%;
+  }
+
+  .gridMobileState {
+    flex: 1 1 min(100%, 140px);
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  .gridMobileState .historyPrimary,
+  .gridMobileState .historyPrimary strong,
+  .gridMobileState .historyPrimary small {
+    min-width: 0;
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .gridMobileFields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+    gap: 8px 12px;
+    min-width: 0;
+  }
+
+  .gridMobileField {
+    display: grid;
+    align-content: start;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .gridMobileField > span {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 800;
+    line-height: 1.2;
+    text-transform: uppercase;
+  }
+
+  .gridMobileFieldValue {
+    min-width: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .gridMobileFieldValue .linkButton {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    text-align: left;
+    white-space: normal;
+  }
+
+  .gridMobileFieldValue .monoValue,
+  .gridMobileFieldValue .historyPrimary,
+  .gridMobileFieldValue .jobStatusCell {
+    min-width: 0;
+    white-space: normal;
+  }
+
+  .gridMobileFieldValue .historyPrimary strong,
+  .gridMobileFieldValue .historyPrimary small {
+    white-space: normal;
+  }
+
+  .gridMobileActions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .gridMobileActions .compactAction {
+    flex: 1 1 min(100%, 132px);
+    justify-content: center;
+    height: auto;
+    min-height: 34px;
+    white-space: normal;
+  }
+
+  .gridMobileActions .compactAction span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .gridMobileActions .secondaryAction.danger {
+    border-color: var(--danger-border);
+    background: var(--danger-soft);
+    color: var(--danger);
+  }
+
+  .gridExpandedRow {
+    min-width: 0;
+    padding: 12px 44px 12px 12px;
+  }
 }

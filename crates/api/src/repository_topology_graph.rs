@@ -6,7 +6,7 @@ use vpsman_common::{
     aggregate_topology_probe_state, aggregate_topology_runtime_state, is_topology_drift_action,
     is_topology_drift_policy, is_topology_edge_health_status, is_topology_neighbor_state,
     is_topology_node_status, is_topology_observation_state, is_topology_probe_state,
-    is_topology_runtime_state, topology_runtime_state_is_degraded, BandwidthTier, TunnelKind,
+    is_topology_runtime_state, topology_runtime_state_is_degraded, TunnelKind,
 };
 
 use crate::{
@@ -103,7 +103,7 @@ impl Repository {
                 desired_missing_count: evidence.desired_missing_count,
                 stale_present_count: evidence.stale_present_count,
                 import_candidate_count: evidence.import_candidate_count,
-                bandwidth: bandwidth_label(plan.plan.bandwidth),
+                bandwidth_mbps: plan.plan.bandwidth_mbps,
                 recommended_ospf_cost: recommendation
                     .map(|record| record.recommended_ospf_cost)
                     .unwrap_or(plan.recommended_ospf_cost),
@@ -649,15 +649,6 @@ fn tunnel_kind_label(kind: TunnelKind) -> String {
         TunnelKind::Wireguard => "wireguard",
         TunnelKind::TunTap => "tun_tap",
         TunnelKind::Custom => "custom",
-    }
-    .to_string()
-}
-
-fn bandwidth_label(bandwidth: BandwidthTier) -> String {
-    match bandwidth {
-        BandwidthTier::M10 => "10m",
-        BandwidthTier::M100 => "100m",
-        BandwidthTier::M1000 => "1000m",
     }
     .to_string()
 }

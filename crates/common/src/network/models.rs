@@ -78,25 +78,7 @@ impl TunnelKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum BandwidthTier {
-    #[serde(rename = "10m", alias = "m10")]
-    M10,
-    #[serde(rename = "100m", alias = "m100")]
-    M100,
-    #[serde(rename = "1000m", alias = "m1000")]
-    M1000,
-}
-
-impl BandwidthTier {
-    pub fn mbps(self) -> u32 {
-        match self {
-            Self::M10 => 10,
-            Self::M100 => 100,
-            Self::M1000 => 1000,
-        }
-    }
-}
+pub type BandwidthMbps = u32;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct OspfCostPolicy {
@@ -113,7 +95,7 @@ impl Default for OspfCostPolicy {
         Self {
             latency_weight: 1.0,
             loss_weight: 400.0,
-            bandwidth_weight: 150.0,
+            bandwidth_weight: 10.0,
             preference_bias: 1.0,
             min_cost: 5,
             max_cost: 65535,
@@ -125,7 +107,7 @@ impl Default for OspfCostPolicy {
 pub struct TunnelObservation {
     pub latency_ms: f64,
     pub packet_loss_ratio: f64,
-    pub bandwidth: BandwidthTier,
+    pub bandwidth_mbps: BandwidthMbps,
     pub preference: f64,
 }
 
@@ -334,7 +316,7 @@ pub struct TunnelPlanInput {
     pub ipv6_tunnel: Option<TunnelAddressPair>,
     #[serde(default)]
     pub latency_primary_family: TunnelAddressFamily,
-    pub bandwidth: BandwidthTier,
+    pub bandwidth_mbps: BandwidthMbps,
     pub latency_ms: f64,
     pub packet_loss_ratio: f64,
     pub preference: f64,
@@ -367,7 +349,7 @@ pub struct TunnelPlan {
     pub ipv6_tunnel: Option<TunnelAddressPair>,
     #[serde(default)]
     pub latency_primary_family: TunnelAddressFamily,
-    pub bandwidth: BandwidthTier,
+    pub bandwidth_mbps: BandwidthMbps,
     pub recommended_ospf_cost: u16,
     pub ifupdown_file: String,
     pub bird2_file: String,

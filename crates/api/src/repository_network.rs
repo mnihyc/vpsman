@@ -329,8 +329,10 @@ impl Repository {
     pub(crate) async fn update_tunnel_plan_ospf_cost(
         &self,
         plan_id: Uuid,
+        recommendation_id: &str,
         current_ospf_cost: u16,
         recommended_ospf_cost: u16,
+        mutation_intent: &str,
         operator: &AuthContext,
     ) -> Result<TunnelPlanView> {
         match self {
@@ -358,8 +360,10 @@ impl Repository {
                     .await
                     .push(tunnel_plan_ospf_cost_operator_audit(
                         &updated,
+                        recommendation_id,
                         current_ospf_cost,
                         recommended_ospf_cost,
+                        mutation_intent,
                         operator,
                         now,
                     ));
@@ -415,8 +419,10 @@ impl Repository {
                 .bind(format!("tunnel_plan:{plan_id}"))
                 .bind(tunnel_plan_ospf_cost_operator_metadata(
                     &updated,
+                    recommendation_id,
                     current_ospf_cost,
                     recommended_ospf_cost,
+                    mutation_intent,
                     operator,
                 ))
                 .execute(pool)
@@ -700,8 +706,10 @@ fn tunnel_plan_adapter_metadata(
 
 fn tunnel_plan_ospf_cost_operator_audit(
     view: &TunnelPlanView,
+    recommendation_id: &str,
     current_ospf_cost: u16,
     recommended_ospf_cost: u16,
+    mutation_intent: &str,
     operator: &AuthContext,
     created_at: String,
 ) -> AuditLogView {
@@ -713,8 +721,10 @@ fn tunnel_plan_ospf_cost_operator_audit(
         command_hash: None,
         metadata: tunnel_plan_ospf_cost_operator_metadata(
             view,
+            recommendation_id,
             current_ospf_cost,
             recommended_ospf_cost,
+            mutation_intent,
             operator,
         ),
         created_at,
@@ -723,11 +733,15 @@ fn tunnel_plan_ospf_cost_operator_audit(
 
 fn tunnel_plan_ospf_cost_operator_metadata(
     view: &TunnelPlanView,
+    recommendation_id: &str,
     current_ospf_cost: u16,
     recommended_ospf_cost: u16,
+    mutation_intent: &str,
     operator: &AuthContext,
 ) -> serde_json::Value {
     serde_json::json!({
+        "recommendation_id": recommendation_id,
+        "mutation_intent": mutation_intent,
         "plan_name": &view.name,
         "left_client_id": &view.left_client_id,
         "right_client_id": &view.right_client_id,

@@ -3,8 +3,9 @@ use std::{net::IpAddr, path::PathBuf};
 use anyhow::{Context, Result};
 use uuid::Uuid;
 use vpsman_common::{
-    plan_tunnel, render_tunnel_endpoint_config, BandwidthTier, JobCommand, TunnelAddressFamily,
+    plan_tunnel, render_tunnel_endpoint_config, BandwidthMbps, JobCommand, TunnelAddressFamily,
     TunnelAddressPair, TunnelEndpointSide, TunnelPlan, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+    MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS,
 };
 
 use crate::{
@@ -40,7 +41,7 @@ pub(crate) struct VtyTunnelPromoteExternalObserveRequest {
     pub(crate) latency_primary_family: TunnelAddressFamily,
     pub(crate) side: TunnelEndpointSide,
     pub(crate) name: Option<String>,
-    pub(crate) bandwidth: Option<BandwidthTier>,
+    pub(crate) bandwidth_mbps: Option<BandwidthMbps>,
     pub(crate) latency_ms: Option<f64>,
     pub(crate) packet_loss_ratio: Option<f64>,
     pub(crate) preference: Option<f64>,
@@ -149,7 +150,7 @@ pub(crate) fn submit_vty_tunnel_promote_external_observe(
             "latency_primary_family": request.latency_primary_family,
             "side": request.side,
             "name": request.name,
-            "bandwidth": request.bandwidth,
+            "bandwidth_mbps": request.bandwidth_mbps,
             "latency_ms": request.latency_ms,
             "packet_loss_ratio": request.packet_loss_ratio,
             "preference": request.preference,
@@ -307,7 +308,7 @@ pub(crate) fn parse_vty_tunnel_promote_external_observe(
     let mut latency_primary_family = TunnelAddressFamily::Ipv4;
     let mut side = TunnelEndpointSide::Left;
     let mut name = None::<String>;
-    let mut bandwidth = None::<BandwidthTier>;
+    let mut bandwidth = None::<BandwidthMbps>;
     let mut latency_ms = None::<f64>;
     let mut packet_loss_ratio = None::<f64>;
     let mut preference = None::<f64>;
@@ -456,16 +457,19 @@ pub(crate) fn parse_vty_tunnel_promote_external_observe(
                 name = Some(flag_value(value, "--name=").to_string());
                 index += 1;
             }
-            "--bandwidth" => {
-                bandwidth = Some(parse_promote_bandwidth(next_value(
+            "--bandwidth-mbps" => {
+                bandwidth = Some(parse_promote_bandwidth_mbps(next_value(
                     tokens,
                     index,
-                    "--bandwidth",
+                    "--bandwidth-mbps",
                 )?)?);
                 index += 2;
             }
-            value if value.starts_with("--bandwidth=") => {
-                bandwidth = Some(parse_promote_bandwidth(flag_value(value, "--bandwidth="))?);
+            value if value.starts_with("--bandwidth-mbps=") => {
+                bandwidth = Some(parse_promote_bandwidth_mbps(flag_value(
+                    value,
+                    "--bandwidth-mbps=",
+                ))?);
                 index += 1;
             }
             "--latency-ms" => {
@@ -529,7 +533,7 @@ pub(crate) fn parse_vty_tunnel_promote_external_observe(
         latency_primary_family,
         side,
         name,
-        bandwidth,
+        bandwidth_mbps: bandwidth,
         latency_ms,
         packet_loss_ratio,
         preference,
@@ -819,12 +823,14 @@ fn parse_tunnel_endpoint_side(value: &str) -> Result<TunnelEndpointSide> {
     }
 }
 
-fn parse_promote_bandwidth(value: &str) -> Result<BandwidthTier> {
-    match value {
-        "10m" => Ok(BandwidthTier::M10),
-        "100m" => Ok(BandwidthTier::M100),
-        "1000m" => Ok(BandwidthTier::M1000),
-        _ => anyhow::bail!("--bandwidth must be one of 10m, 100m, 1000m"),
+fn parse_promote_bandwidth_mbps(value: &str) -> Result<BandwidthMbps> {
+    let parsed = value
+        .parse::<u32>()
+        .with_context(|| "--bandwidth-mbps must be an integer")?;
+    if (MIN_TUNNEL_BANDWIDTH_MBPS..=MAX_TUNNEL_BANDWIDTH_MBPS).contains(&parsed) {
+        Ok(parsed)
+    } else {
+        anyhow::bail!("--bandwidth-mbps must be between 10 and 10000")
     }
 }
 
@@ -864,7 +870,7 @@ mod tests {
         parse_vty_tunnel_promote_external_observe, parse_vty_tunnel_status,
     };
     use uuid::Uuid;
-    use vpsman_common::{BandwidthTier, TunnelAddressFamily, TunnelEndpointSide};
+    use vpsman_common::{BandwidthMbps, TunnelAddressFamily, TunnelEndpointSide};
 
     #[test]
     fn parses_vty_tunnel_promote_external_observe() {
@@ -882,8 +888,8 @@ mod tests {
             "--side=right",
             "--name",
             "imported-tun42",
-            "--bandwidth",
-            "1000m",
+            "--bandwidth-mbps",
+            "1000",
             "--latency-ms=21.5",
             "--packet-loss-ratio",
             "0.02",
@@ -902,7 +908,7 @@ mod tests {
         assert_eq!(request.ipv4_tunnel.as_ref().unwrap().left, "10.44.0.0");
         assert_eq!(request.side, TunnelEndpointSide::Right);
         assert_eq!(request.name.as_deref(), Some("imported-tun42"));
-        assert_eq!(request.bandwidth, Some(BandwidthTier::M1000));
+        assert_eq!(request.bandwidth_mbps, Some(1000));
         assert_eq!(request.latency_ms, Some(21.5));
         assert_eq!(request.packet_loss_ratio, Some(0.02));
         assert_eq!(request.preference, Some(1.5));
@@ -985,7 +991,7 @@ mod tests {
             "--local-underlay=198.51.100.10",
             "--peer-underlay=198.51.100.11",
             "--address-pool-cidr=10.44.0.0/30",
-            "--bandwidth=25m",
+            "--bandwidth-mbps=25m",
         ])
         .is_err());
         assert!(parse_vty_tunnel_promote_external_observe(&[

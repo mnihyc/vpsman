@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{ArgAction, Args, ValueEnum};
 use uuid::Uuid;
 use vpsman_common::{
-    plan_tunnel, render_tunnel_endpoint_config, BandwidthTier, JobCommand, OspfCostPolicy,
+    plan_tunnel, render_tunnel_endpoint_config, BandwidthMbps, JobCommand, OspfCostPolicy,
     TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlan,
     TunnelPlanInput, DEFAULT_MAX_JOB_TIMEOUT_SECS, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
     NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
@@ -63,8 +63,8 @@ pub(crate) struct TunnelPlanCommand {
     pub(crate) right_tunnel_ipv6_cidr: Option<String>,
     #[arg(long, value_enum, default_value = "ipv4")]
     pub(crate) latency_primary_family: TunnelAddressFamilyArg,
-    #[arg(long, value_enum)]
-    pub(crate) bandwidth: BandwidthTierArg,
+    #[arg(long, value_name = "MBPS")]
+    pub(crate) bandwidth_mbps: BandwidthMbps,
     #[arg(long)]
     pub(crate) latency_ms: f64,
     #[arg(long, default_value_t = 0.0)]
@@ -150,8 +150,8 @@ pub(crate) struct TunnelPromoteExternalObserveCommand {
     pub(crate) side: TunnelEndpointSideArg,
     #[arg(long)]
     pub(crate) name: Option<String>,
-    #[arg(long, value_enum)]
-    pub(crate) bandwidth: Option<BandwidthTierArg>,
+    #[arg(long, value_name = "MBPS")]
+    pub(crate) bandwidth_mbps: Option<BandwidthMbps>,
     #[arg(long)]
     pub(crate) latency_ms: Option<f64>,
     #[arg(long)]
@@ -286,26 +286,6 @@ impl From<TunnelAddressFamilyArg> for TunnelAddressFamily {
         match value {
             TunnelAddressFamilyArg::Ipv4 => Self::Ipv4,
             TunnelAddressFamilyArg::Ipv6 => Self::Ipv6,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub(crate) enum BandwidthTierArg {
-    #[value(name = "10m")]
-    M10,
-    #[value(name = "100m")]
-    M100,
-    #[value(name = "1000m")]
-    M1000,
-}
-
-impl From<BandwidthTierArg> for BandwidthTier {
-    fn from(value: BandwidthTierArg) -> Self {
-        match value {
-            BandwidthTierArg::M10 => Self::M10,
-            BandwidthTierArg::M100 => Self::M100,
-            BandwidthTierArg::M1000 => Self::M1000,
         }
     }
 }
@@ -752,7 +732,7 @@ pub(crate) fn tunnel_plan(
             "IPv6",
         )?,
         latency_primary_family: request.latency_primary_family.into(),
-        bandwidth: request.bandwidth.into(),
+        bandwidth_mbps: request.bandwidth_mbps,
         latency_ms: request.latency_ms,
         packet_loss_ratio: request.packet_loss_ratio,
         preference: request.preference,
@@ -897,7 +877,7 @@ pub(crate) fn tunnel_promote_external_observe(
                 "latency_primary_family": TunnelAddressFamily::from(request.latency_primary_family),
                 "side": TunnelEndpointSide::from(request.side),
                 "name": request.name,
-                "bandwidth": request.bandwidth.map(BandwidthTier::from),
+                "bandwidth_mbps": request.bandwidth_mbps,
                 "latency_ms": request.latency_ms,
                 "packet_loss_ratio": request.packet_loss_ratio,
                 "preference": request.preference,

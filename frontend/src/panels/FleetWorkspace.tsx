@@ -37,6 +37,7 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
+import { agentDisplayState } from "../agentDisplayState";
 import {
   buildBulkJobProgress,
   bulkOutcomeSummary,
@@ -51,7 +52,10 @@ import {
   type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
-import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
+import {
+  useReviewGenerationGuard,
+  waitForReviewRender,
+} from "../hooks/useReviewGenerationGuard";
 import { WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES } from "../generated/protocolContracts";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { FailureReasonGroups } from "../components/ExecutionResultPanel";
@@ -323,10 +327,7 @@ export function FleetWorkspace({
     policyId: string,
     reviewedName: string,
   ) => Promise<void>;
-  onDeleteWebhookRule: (
-    ruleId: string,
-    reviewedName: string,
-  ) => Promise<void>;
+  onDeleteWebhookRule: (ruleId: string, reviewedName: string) => Promise<void>;
   onDispatchFleetAlertNotifications: (
     request: FleetAlertNotificationDispatchRequest,
   ) => Promise<FleetAlertNotificationDeliveryRecord[]>;
@@ -394,7 +395,9 @@ export function FleetWorkspace({
   const [deleteReviewPending, setDeleteReviewPending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const deleteReviewTargetRef = useRef<string | null>(null);
-  const deleteSnapshotRef = useRef<DeleteAgentConfirmationSnapshot | null>(null);
+  const deleteSnapshotRef = useRef<DeleteAgentConfirmationSnapshot | null>(
+    null,
+  );
   const deleteReviewPendingRef = useRef(false);
   const {
     captureReviewGeneration,
@@ -414,7 +417,8 @@ export function FleetWorkspace({
     [telemetryTunnels],
   );
   const trafficByClient = useMemo(
-    () => new Map(trafficAccounting.map((record) => [record.client_id, record])),
+    () =>
+      new Map(trafficAccounting.map((record) => [record.client_id, record])),
     [trafficAccounting],
   );
   const vpsRulesByClient = useMemo(() => {
@@ -443,11 +447,9 @@ export function FleetWorkspace({
   const policyFocusId = activeSubpage.startsWith("policies:policy:")
     ? decodeURIComponent(activeSubpage.slice("policies:policy:".length))
     : null;
-  const fleetSubpage = [
-    "instances",
-    "policies",
-    "notifications",
-  ].includes(fleetSubpageBase)
+  const fleetSubpage = ["instances", "policies", "notifications"].includes(
+    fleetSubpageBase,
+  )
     ? fleetSubpageBase
     : "instances";
 
@@ -487,37 +489,62 @@ export function FleetWorkspace({
     () => [
       {
         id: "name",
-        header: "Name",
-        size: 300,
-        minSize: 220,
+        header: "VPS",
+        size: 175,
+        minSize: 150,
         sortValue: (agent) => formatVpsName(agent, vpsNameDisplayMode),
         searchValue: (agent) =>
-          `${formatVpsName(agent, vpsNameDisplayMode)} ${agent.id} ${agent.status} ${agent.registration_ip ?? ""} ${agent.last_ip ?? ""}`,
+          `${formatVpsName(agent, vpsNameDisplayMode)} ${agent.id} ${agent.status} ${agentDisplayState(agent).label} ${agent.registration_ip ?? ""} ${agent.last_ip ?? ""}`,
         cell: (agent) => (
           <span className="instance">
             <Server size={17} />
             <span>
               <strong>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
-              <ConsoleStatusBadge
-                tone={agent.status === "online" ? "ok" : "warning"}
-              >
-                {agent.status}
-              </ConsoleStatusBadge>
             </span>
           </span>
         ),
       },
       {
+        id: "state",
+        header: "State",
+        size: 135,
+        minSize: 115,
+        sortValue: (agent) => agentDisplayState(agent).label,
+        searchValue: (agent) => agentDisplayState(agent).detail,
+        cell: (agent) => {
+          const displayState = agentDisplayState(agent);
+          return (
+            <span className="historyPrimary">
+              <ConsoleStatusBadge tone={displayState.tone}>
+                {displayState.label}
+              </ConsoleStatusBadge>
+              <small>{displayState.detail}</small>
+            </span>
+          );
+        },
+      },
+      {
+        id: "last_ip",
+        header: "IP",
+        size: 105,
+        minSize: 90,
+        sortValue: (agent) => agent.last_ip ?? "",
+        searchValue: (agent) => agent.last_ip ?? "",
+        cell: (agent) => (
+          <span className="monoValue">{agent.last_ip ?? "unknown"}</span>
+        ),
+      },
+      {
         id: "last_seen",
-        header: "Last seen",
-        size: 150,
-        minSize: 125,
+        header: "Last contact",
+        size: 120,
+        minSize: 100,
         sortValue: (agent) => normalizedLastSeenSort(agent.last_seen_at),
-        searchValue: (agent) => formatLastSeen(agent.last_seen_at),
+        searchValue: (agent) => formatLastSeenDetail(agent.last_seen_at),
         cell: (agent) => (
           <span className="historyPrimary">
             <strong>{formatLastSeen(agent.last_seen_at)}</strong>
-            {!agent.last_seen_at && <small>until first gateway report</small>}
+            <small>{formatLastSeenDetail(agent.last_seen_at)}</small>
           </span>
         ),
       },
@@ -584,7 +611,8 @@ export function FleetWorkspace({
         minSize: 160,
         sortValue: (agent) =>
           trafficByClient.get(agent.id)?.latest_total_bytes ?? -1,
-        searchValue: (agent) => trafficNowSummary(trafficByClient.get(agent.id)),
+        searchValue: (agent) =>
+          trafficNowSummary(trafficByClient.get(agent.id)),
         cell: (agent) => trafficNowSummary(trafficByClient.get(agent.id)),
       },
       {
@@ -592,8 +620,10 @@ export function FleetWorkspace({
         header: "Cycle Usage",
         size: 210,
         minSize: 160,
-        sortValue: (agent) => trafficByClient.get(agent.id)?.cycle_percent ?? -1,
-        searchValue: (agent) => cycleUsageSummary(trafficByClient.get(agent.id)),
+        sortValue: (agent) =>
+          trafficByClient.get(agent.id)?.cycle_percent ?? -1,
+        searchValue: (agent) =>
+          cycleUsageSummary(trafficByClient.get(agent.id)),
         cell: (agent) => cycleUsageSummary(trafficByClient.get(agent.id)),
       },
       {
@@ -653,28 +683,6 @@ export function FleetWorkspace({
         ),
       },
       {
-        id: "active_policy_alerts",
-        header: "Active Policy Alerts",
-        size: 170,
-        minSize: 140,
-        sortValue: (agent) => policyAlertsByClient.get(agent.id)?.length ?? 0,
-        searchValue: (agent) =>
-          activePolicyAlertSummary(policyAlertsByClient.get(agent.id)),
-        cell: (agent) =>
-          activePolicyAlertSummary(policyAlertsByClient.get(agent.id)),
-      },
-      {
-        id: "last_ip",
-        header: "Last IP",
-        size: 135,
-        minSize: 110,
-        sortValue: (agent) => agent.last_ip ?? "",
-        searchValue: (agent) => agent.last_ip ?? "",
-        cell: (agent) => (
-          <span className="monoValue">{agent.last_ip ?? "unknown"}</span>
-        ),
-      },
-      {
         id: "registration_ip",
         header: "Reg IP",
         size: 135,
@@ -687,8 +695,116 @@ export function FleetWorkspace({
           </span>
         ),
       },
+      {
+        id: "agent_runtime",
+        header: "Agent",
+        size: 110,
+        minSize: 95,
+        sortValue: (agent) => agent.internal_build_number ?? -1,
+        searchValue: (agent) =>
+          `${agent.internal_build_number ?? ""} ${agent.arch ?? ""} ${agent.capabilities.privilege_mode}`,
+        cell: (agent) => (
+          <span className="historyPrimary">
+            <strong>
+              {typeof agent.internal_build_number === "number"
+                ? `Build ${agent.internal_build_number}`
+                : "Unknown"}
+            </strong>
+            <small>
+              {[agent.arch ?? "arch unknown", privilegeModeLabel(agent)]
+                .filter(Boolean)
+                .join(" · ")}
+            </small>
+          </span>
+        ),
+      },
+      {
+        id: "cpu_load",
+        header: "CPU",
+        size: 78,
+        minSize: 68,
+        sortValue: (agent) =>
+          latestRollups.get(agent.id)?.cpu_load_1_avg ?? -1,
+        searchValue: (agent) =>
+          formatLoad(latestRollups.get(agent.id)?.cpu_load_1_avg),
+        cell: (agent) => {
+          const rollup = latestRollups.get(agent.id);
+          return (
+            <span className="historyPrimary">
+              <strong>{formatLoadCompact(rollup?.cpu_load_1_avg)}</strong>
+              <small>{formatRollupFreshness(rollup)}</small>
+            </span>
+          );
+        },
+      },
+      {
+        id: "memory_used",
+        header: "Memory",
+        size: 88,
+        minSize: 76,
+        sortValue: (agent) => memoryUsedRatio(latestRollups.get(agent.id)) ?? -1,
+        searchValue: (agent) => formatMemoryUsed(latestRollups.get(agent.id)),
+        cell: (agent) => {
+          const rollup = latestRollups.get(agent.id);
+          return (
+            <span className="historyPrimary">
+              <strong>{formatMemoryUsedCompact(rollup)}</strong>
+              <small>{formatRollupFreshness(rollup)}</small>
+            </span>
+          );
+        },
+      },
+      {
+        id: "disk_free",
+        header: "Disk",
+        size: 88,
+        minSize: 76,
+        sortValue: (agent) => diskFreeRatio(latestRollups.get(agent.id)) ?? -1,
+        searchValue: (agent) => formatDiskFree(latestRollups.get(agent.id)),
+        cell: (agent) => {
+          const rollup = latestRollups.get(agent.id);
+          return (
+            <span className="historyPrimary">
+              <strong>{formatDiskFreeCompact(rollup)}</strong>
+              <small>{formatRollupFreshness(rollup)}</small>
+            </span>
+          );
+        },
+      },
+      {
+        id: "active_policy_alerts",
+        header: "Alerts",
+        size: 82,
+        minSize: 72,
+        sortValue: (agent) => policyAlertsByClient.get(agent.id)?.length ?? 0,
+        searchValue: (agent) =>
+          activePolicyAlertSummary(policyAlertsByClient.get(agent.id)),
+        cell: (agent) =>
+          activePolicyAlertSummary(policyAlertsByClient.get(agent.id)),
+      },
+      {
+        id: "open_instance",
+        header: "Action",
+        size: 76,
+        minSize: 68,
+        enableHiding: false,
+        cell: (agent) => (
+          <button
+            aria-label={`Open ${formatVpsName(agent, vpsNameDisplayMode)} detail`}
+            className="secondaryAction compactAction"
+            onClick={(event) => {
+              event.stopPropagation();
+              openSingleReleaseWorkflow([agent], "Fleet", "instance_detail");
+            }}
+            type="button"
+          >
+            Open
+          </button>
+        ),
+      },
     ],
     [
+      latestRollups,
       preferences.fleet_tag_visibility_overrides,
       preferences.show_country_flags,
       policyAlertsByClient,
@@ -851,7 +967,8 @@ export function FleetWorkspace({
       label: "Open detail",
       disabled: (rows) => rows.length !== 1,
       icon: <Eye size={15} />,
-      onSelect: (rows) => openSingleReleaseWorkflow(rows, "Fleet", "instance_detail"),
+      onSelect: (rows) =>
+        openSingleReleaseWorkflow(rows, "Fleet", "instance_detail"),
     },
     {
       label: "Open terminal",
@@ -878,7 +995,8 @@ export function FleetWorkspace({
       label: "Open backups",
       disabled: (rows) => rows.length !== 1,
       icon: <DatabaseBackup size={15} />,
-      onSelect: (rows) => openSingleReleaseWorkflow(rows, "Backups", "requests"),
+      onSelect: (rows) =>
+        openSingleReleaseWorkflow(rows, "Backups", "requests"),
     },
     {
       label: "Open network",
@@ -910,7 +1028,8 @@ export function FleetWorkspace({
     {
       label: "Copy client IDs",
       separatorBefore: true,
-      onSelect: (rows) => void copyText(rows.map((agent) => agent.id).join("\n")),
+      onSelect: (rows) =>
+        void copyText(rows.map((agent) => agent.id).join("\n")),
     },
     {
       label: "Copy selector",
@@ -989,7 +1108,9 @@ export function FleetWorkspace({
               selectionStatsMode={selectionStatsMode}
               setSelectionStatsMode={setSelectionStatsMode}
               tagDisplayOrder={tagDisplayOrder}
-              tagVisibilityOverrides={preferences.fleet_tag_visibility_overrides}
+              tagVisibilityOverrides={
+                preferences.fleet_tag_visibility_overrides
+              }
               vpsNameDisplayMode={vpsNameDisplayMode}
             />
           )}
@@ -1007,7 +1128,8 @@ export function FleetWorkspace({
               <span>{`${fleetAlertPolicies.length} policy groups`}</span>
             </div>
             <span className="sectionContext">
-              Selector expressions match VPSs; rule rows issue first-reach alerts
+              Selector expressions match VPSs; rule rows issue first-reach
+              alerts
             </span>
           </div>
           <ConsoleFreshnessBanner error={apiError} />
@@ -1105,7 +1227,8 @@ function FleetInstancesPanel({
           </span>
         </div>
         <span className="sectionContext">
-          {summary.online} online / {summary.total} total · WebSocket {wsState}
+          {summary.online} online / {summary.total} total ·{" "}
+          {formatConsoleStreamState(wsState)}
         </span>
       </div>
 
@@ -1113,13 +1236,14 @@ function FleetInstancesPanel({
         actions={actions}
         columns={columns}
         defaultColumnVisibility={{
-          active_policy_alerts: false,
+          country: false,
           cycle_usage: false,
-          last_ip: false,
+          provider: false,
           quota: false,
           registration_ip: false,
           reset_day: false,
           selectors: false,
+          tags: false,
           traffic_now: false,
           traffic_state: false,
         }}
@@ -1303,6 +1427,7 @@ function FleetInstanceDetail({
     ["bgp", "bird2", "ospf", "tunnel"].includes(tag.toLowerCase()),
   );
   const agentLabel = formatVpsName(agent, vpsNameDisplayMode);
+  const displayState = agentDisplayState(agent);
   const configPreviewSummary = configPreview
     ? `${configPreview.assignments.length} assignments · ${configPreview.unsupported_domains.length} unsupported domains`
     : "Load redacted runtime config view for this VPS.";
@@ -1389,13 +1514,15 @@ function FleetInstanceDetail({
       });
       setInterfacePayloadHash(builtPrivilege.payloadHashHex);
       setInterfaceSnapshot(null);
-      setInterfaceProgress(buildBulkJobProgress({
-        jobId: "",
-        targetCount: 1,
-        targetRecords: [],
-        targets: [agent],
-        maxTimeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
-      }));
+      setInterfaceProgress(
+        buildBulkJobProgress({
+          jobId: "",
+          targetCount: 1,
+          targetRecords: [],
+          targets: [agent],
+          maxTimeoutSecs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+        }),
+      );
       const job = await onCreateJob({
         argv: [],
         selector_expression: selectorExpression,
@@ -1455,7 +1582,9 @@ function FleetInstanceDetail({
           <h3>{agentLabel}</h3>
           <span className="monoValue">{agent.id}</span>
         </div>
-        <span className="sectionContext">WebSocket {wsState}</span>
+        <span className="sectionContext">
+          {formatConsoleStreamState(wsState)}
+        </span>
       </div>
       <div className="fleetNodeDetailControls">
         <form className="aliasEditor" onSubmit={submitAlias}>
@@ -1487,7 +1616,10 @@ function FleetInstanceDetail({
             aliasSnapshot
               ? [
                   { label: "Client ID", value: aliasSnapshot.clientId },
-                  { label: "Current name", value: aliasSnapshot.oldDisplayName },
+                  {
+                    label: "Current name",
+                    value: aliasSnapshot.oldDisplayName,
+                  },
                   { label: "New name", value: aliasSnapshot.newDisplayName },
                 ]
               : []
@@ -1531,20 +1663,19 @@ function FleetInstanceDetail({
         {agent.tags.length === 0 ? (
           <span className="mutedText">No tags assigned</span>
         ) : (
-          sortTagsByDisplayOrder(agent.tags, tagDisplayOrder)
-            .map((tag) => (
-              <button
-                className="tagEditChip"
-                disabled={tagPending}
-                key={tag}
-                onClick={() => void mutateTag("remove", tag)}
-                title={`Remove ${tag}`}
-                type="button"
-              >
-                <span>{tag}</span>
-                <X size={13} />
-              </button>
-            ))
+          sortTagsByDisplayOrder(agent.tags, tagDisplayOrder).map((tag) => (
+            <button
+              className="tagEditChip"
+              disabled={tagPending}
+              key={tag}
+              onClick={() => void mutateTag("remove", tag)}
+              title={`Remove ${tag}`}
+              type="button"
+            >
+              <span>{tag}</span>
+              <X size={13} />
+            </button>
+          ))
         )}
       </div>
       {(tagError || tagStatus) && (
@@ -1605,7 +1736,7 @@ function FleetInstanceDetail({
             <DetailLine
               icon={<Server size={18} />}
               label="Status"
-              value={agent.status}
+              value={displayState.label}
             />
             <DetailLine
               icon={<Boxes size={18} />}
@@ -1617,6 +1748,11 @@ function FleetInstanceDetail({
               icon={<Clock3 size={18} />}
               label="Last seen"
               value={formatLastSeenDetail(agent.last_seen_at)}
+            />
+            <DetailLine
+              icon={<AlertTriangle size={18} />}
+              label="Contact evidence"
+              value={displayState.detail}
             />
             <DetailLine
               icon={<Network size={18} />}
@@ -1658,7 +1794,7 @@ function FleetInstanceDetail({
           <>
             <DetailLine
               icon={<Activity size={18} />}
-              label="Stream"
+              label="Console stream"
               value={wsState}
             />
             <DetailLine
@@ -1886,7 +2022,9 @@ function SourceTemplateConfigList({
             <strong>
               {row.status} · {row.template_name} · {row.source_kind}
             </strong>
-            <small>{row.status_reason || formatSourceTemplateEvidence(row)}</small>
+            <small>
+              {row.status_reason || formatSourceTemplateEvidence(row)}
+            </small>
           </div>
         </div>
       ))}
@@ -2361,7 +2499,9 @@ function TrafficRulesDetail({
       <div className="consoleOperationsBar">
         <span>
           <strong>{selectorSummary(trafficAccounting)}</strong>
-          <small>{trafficAccounting?.selector_hash ?? "no selector hash"}</small>
+          <small>
+            {trafficAccounting?.selector_hash ?? "no selector hash"}
+          </small>
         </span>
         <div className="consoleOperationsActions">
           <button
@@ -2381,11 +2521,7 @@ function TrafficRulesDetail({
             disabled={!selectedPolicyId}
             type="button"
             onClick={() =>
-              selectedPolicyId &&
-              onNavigatePanel?.(
-                "Observability",
-                "alerts",
-              )
+              selectedPolicyId && onNavigatePanel?.("Observability", "alerts")
             }
           >
             Open Alert Policy
@@ -2402,7 +2538,11 @@ function TrafficRulesDetail({
       <div className="signalGrid fleetSignalGrid">
         <Metric
           label="Cycle used"
-          value={trafficAccounting ? formatBytes(trafficAccounting.total_bytes) : "not configured"}
+          value={
+            trafficAccounting
+              ? formatBytes(trafficAccounting.total_bytes)
+              : "not configured"
+          }
           tone="blue"
         />
         <Metric
@@ -2456,7 +2596,9 @@ function TrafficRulesDetail({
         </span>
         <span>
           <strong>Incomplete reasons</strong>
-          <span>{trafficAccounting?.incomplete_reasons.join(", ") || "none"}</span>
+          <span>
+            {trafficAccounting?.incomplete_reasons.join(", ") || "none"}
+          </span>
         </span>
       </div>
       <div className="trafficRulesGridSection">
@@ -2464,9 +2606,7 @@ function TrafficRulesDetail({
           columns={trafficColumns}
           defaultPageSize={5}
           empty="No traffic selectors configured."
-          getRowId={(row) =>
-            `${row.source}:${row.interface}:${row.direction}`
-          }
+          getRowId={(row) => `${row.source}:${row.interface}:${row.direction}`}
           itemLabel="selectors"
           rows={trafficRows}
           searchPlaceholder="Search selected traffic"
@@ -2617,10 +2757,7 @@ function FleetSelectionPanel({
   const selectorExpression = selectorExpressionForClientIds(
     agents.map((agent) => agent.id),
   );
-  const tagNames = useMemo(
-    () => allTags.map((tag) => tag.name),
-    [allTags],
-  );
+  const tagNames = useMemo(() => allTags.map((tag) => tag.name), [allTags]);
   async function submitTag(action: "add" | "remove", tag: string) {
     await runPanelAction(setPending, setError, async () => {
       const response = await mutateTagsForAgents(agents, action, tag);
@@ -2871,24 +3008,27 @@ function FleetSelectionStatsTable({
           <span>Last seen</span>
           <span>Tags</span>
         </div>
-        {rows.map((agent) => (
-          <div className="fleetSelectionStatsRow" key={agent.id}>
-            <span title={agent.id}>
-              {formatVpsName(agent, vpsNameDisplayMode)}
-            </span>
-            <span>{agent.status}</span>
-            <span>{countryFromTags(agent.tags) ?? "unset"}</span>
-            <span>{providerFromTags(agent.tags) ?? "unset"}</span>
-            <span>{formatLastSeen(agent.last_seen_at)}</span>
-            <span>
-              {displayTags(
-                agent.tags,
-                tagDisplayOrder,
-                tagVisibilityOverrides,
-              ).join(", ") || "untagged"}
-            </span>
-          </div>
-        ))}
+        {rows.map((agent) => {
+          const displayState = agentDisplayState(agent);
+          return (
+            <div className="fleetSelectionStatsRow" key={agent.id}>
+              <span title={agent.id}>
+                {formatVpsName(agent, vpsNameDisplayMode)}
+              </span>
+              <span title={displayState.detail}>{displayState.label}</span>
+              <span>{countryFromTags(agent.tags) ?? "unset"}</span>
+              <span>{providerFromTags(agent.tags) ?? "unset"}</span>
+              <span>{formatLastSeen(agent.last_seen_at)}</span>
+              <span>
+                {displayTags(
+                  agent.tags,
+                  tagDisplayOrder,
+                  tagVisibilityOverrides,
+                ).join(", ") || "untagged"}
+              </span>
+            </div>
+          );
+        })}
       </div>
     );
   if (mode === "capabilities")
@@ -3605,6 +3745,14 @@ function WebhookRuleDetailGrid({ rule }: { rule: WebhookRuleRecord }) {
         <span>{rule.cooldown_secs}s</span>
       </span>
       <span>
+        <strong>Signing</strong>
+        <span>
+          {rule.signing_secret_set
+            ? "HMAC secret configured"
+            : "no signing secret"}
+        </span>
+      </span>
+      <span>
         <strong>Body template</strong>
         <span className="monoValue">{rule.body_template}</span>
       </span>
@@ -3704,6 +3852,8 @@ function policyRequestFromRecord(
 
 export function FleetAlertPolicyManager({
   agents,
+  editorMode = "inline",
+  onEditorOpenChange,
   policies,
   policyAlerts,
   policyFocusId,
@@ -3713,6 +3863,8 @@ export function FleetAlertPolicyManager({
   onUpsert,
 }: {
   agents: AgentView[];
+  editorMode?: "inline" | "focused";
+  onEditorOpenChange?: (open: boolean) => void;
   policies: FleetAlertPolicyRecord[];
   policyAlerts: PolicyAlertRecord[];
   policyFocusId: string | null;
@@ -3723,6 +3875,7 @@ export function FleetAlertPolicyManager({
     request: FleetAlertPolicyRequest,
   ) => Promise<FleetAlertPolicyRecord>;
 }) {
+  const focusedEditor = editorMode === "focused";
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [detailPolicyId, setDetailPolicyId] = useState<string | null>(null);
@@ -3870,6 +4023,10 @@ export function FleetAlertPolicyManager({
   }, [name, selectorExpression, enabled, notes, ruleDrafts]);
 
   useEffect(() => {
+    onEditorOpenChange?.(editorOpen);
+  }, [editorOpen, onEditorOpenChange]);
+
+  useEffect(() => {
     if (!policyFocusId) {
       return;
     }
@@ -3944,10 +4101,7 @@ export function FleetAlertPolicyManager({
     setStatus("viewing " + policy.name);
   }
 
-  function updateRuleDraft(
-    localId: string,
-    patch: Partial<PolicyRuleDraft>,
-  ) {
+  function updateRuleDraft(localId: string, patch: Partial<PolicyRuleDraft>) {
     setRuleDrafts((current) =>
       current.map((draft) =>
         draft.localId === localId ? { ...draft, ...patch } : draft,
@@ -3974,12 +4128,11 @@ export function FleetAlertPolicyManager({
     try {
       const preview = await onDryRun(request);
       setDryRunPreview(preview);
-      setStatus(
-        "dry-run matched " + preview.matched_vps_count + " VPSs",
-      );
+      setStatus("dry-run matched " + preview.matched_vps_count + " VPSs");
       return preview;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "policy dry-run failed";
+      const message =
+        error instanceof Error ? error.message : "policy dry-run failed";
       setStatus(message);
       throw error;
     } finally {
@@ -4110,7 +4263,9 @@ export function FleetAlertPolicyManager({
     {
       label: "Enable",
       description: (rows) =>
-        "Enable " + rows.filter((policy) => !policy.enabled).length + " disabled selected policy groups.",
+        "Enable " +
+        rows.filter((policy) => !policy.enabled).length +
+        " disabled selected policy groups.",
       disabled: (rows) => rows.filter((policy) => !policy.enabled).length === 0,
       icon: <Power size={14} />,
       onSelect: (rows) =>
@@ -4122,7 +4277,9 @@ export function FleetAlertPolicyManager({
     {
       label: "Disable",
       description: (rows) =>
-        "Disable " + rows.filter((policy) => policy.enabled).length + " enabled selected policy groups.",
+        "Disable " +
+        rows.filter((policy) => policy.enabled).length +
+        " enabled selected policy groups.",
       disabled: (rows) => rows.filter((policy) => policy.enabled).length === 0,
       icon: <PowerOff size={14} />,
       onSelect: (rows) =>
@@ -4134,7 +4291,9 @@ export function FleetAlertPolicyManager({
     {
       label: "Review deletion",
       description: (rows) =>
-        "Delete " + rows.length + " selected policy groups. Issued alerts remain in alert history.",
+        "Delete " +
+        rows.length +
+        " selected policy groups. Issued alerts remain in alert history.",
       disabled: (rows) => rows.length === 0,
       icon: <Trash2 size={14} />,
       onSelect: requestDeletePolicies,
@@ -4145,11 +4304,18 @@ export function FleetAlertPolicyManager({
   const detailPolicy = detailPolicyId
     ? policies.find((candidate) => candidate.id === detailPolicyId)
     : null;
+  const showPolicyList = !focusedEditor || !editorOpen;
 
   return (
-    <div className="consoleCrudPanel">
+    <div
+      className={
+        focusedEditor && editorOpen
+          ? "consoleCrudPanel focusedPolicyEditor"
+          : "consoleCrudPanel"
+      }
+    >
       <div className="consoleResourceLayout fullWidth">
-        {policyFilterClientId ? (
+        {showPolicyList && policyFilterClientId ? (
           <div className="notice infoNotice">
             Focused VPS:{" "}
             <span className="monoValue">{policyFilterClientId}</span>. Policy
@@ -4157,33 +4323,33 @@ export function FleetAlertPolicyManager({
             inspect exact matched VPSs.
           </div>
         ) : null}
-        <ConsoleDataGrid
-          actions={policyActions}
-          columns={policyColumns}
-          defaultPageSize={10}
-          empty="No alert policies saved."
-          getRowId={(policy) => policy.id}
-          itemLabel="policies"
-          renderExpandedRow={(policy) => (
-            <PolicyDetailGrid policy={policy} />
-          )}
-          rowActions={policyActions}
-          rows={policies}
-          searchPlaceholder="Search policies by name, selector, rules, or notes"
-          storageKey="vpsman.grid.fleet.alertPolicies.v3"
-          title="Policy groups"
-          toolbarActions={
-            <button
-              className="primaryAction compactAction"
-              onClick={createPolicy}
-              type="button"
-            >
-              <Plus size={16} />
-              <span>Create policy</span>
-            </button>
-          }
-        />
-        {detailPolicy && !editorOpen ? (
+        {showPolicyList ? (
+          <ConsoleDataGrid
+            actions={policyActions}
+            columns={policyColumns}
+            defaultPageSize={10}
+            empty="No alert policies saved."
+            getRowId={(policy) => policy.id}
+            itemLabel="policies"
+            renderExpandedRow={(policy) => <PolicyDetailGrid policy={policy} />}
+            rowActions={policyActions}
+            rows={policies}
+            searchPlaceholder="Search policies by name, selector, rules, or notes"
+            storageKey="vpsman.grid.fleet.alertPolicies.v3"
+            title="Policy groups"
+            toolbarActions={
+              <button
+                className="primaryAction compactAction"
+                onClick={createPolicy}
+                type="button"
+              >
+                <Plus size={16} />
+                <span>Create policy</span>
+              </button>
+            }
+          />
+        ) : null}
+        {showPolicyList && detailPolicy && !editorOpen ? (
           <ConsoleDetailPanel
             actions={
               <button
@@ -4208,36 +4374,68 @@ export function FleetAlertPolicyManager({
         {editorOpen ? (
           <ConsoleDetailPanel
             actions={
-              <>
-                <button
-                  className="secondaryAction"
-                  disabled={dryRunPending}
-                  type="button"
-                  onClick={() => void dryRunCurrentPolicy()}
-                >
-                  Dry-run
-                </button>
-                <button
-                  className="primaryAction"
-                  disabled={dryRunPending}
-                  type="button"
-                  onClick={() => void reviewSubmit()}
-                >
-                  {editingId ? "Review update" : "Review create"}
-                </button>
-                <button
-                  className="secondaryAction"
-                  type="button"
-                  onClick={createPolicy}
-                >
-                  New policy
-                </button>
-              </>
+              focusedEditor ? (
+                <>
+                  <button
+                    className="secondaryAction"
+                    disabled={dryRunPending}
+                    type="button"
+                    onClick={() => void dryRunCurrentPolicy()}
+                  >
+                    Preview matches
+                  </button>
+                  <button
+                    className="primaryAction"
+                    disabled={dryRunPending}
+                    type="button"
+                    onClick={() => void reviewSubmit()}
+                  >
+                    {editingId ? "Update policy" : "Create policy"}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    className="secondaryAction"
+                    disabled={dryRunPending}
+                    type="button"
+                    onClick={() => void dryRunCurrentPolicy()}
+                  >
+                    Dry-run
+                  </button>
+                  <button
+                    className="primaryAction"
+                    disabled={dryRunPending}
+                    type="button"
+                    onClick={() => void reviewSubmit()}
+                  >
+                    {editingId ? "Review update" : "Review create"}
+                  </button>
+                  <button
+                    className="secondaryAction"
+                    type="button"
+                    onClick={createPolicy}
+                  >
+                    New policy
+                  </button>
+                </>
+              )
             }
-            description="Edit the selector expression, preview matched VPSs, then confirm the exact policy payload."
+            description={
+              focusedEditor
+                ? "Preview exactly which VPSs match, then save this policy group with the reviewed activation state."
+                : "Edit the selector expression, preview matched VPSs, then confirm the exact policy payload."
+            }
             onClose={() => setEditorOpen(false)}
             title={editingId ? "Edit alert policy" : "Create alert policy"}
           >
+            {focusedEditor ? (
+              <PolicyMatchSummary
+                enabled={enabled}
+                editing={Boolean(editingId)}
+                preview={dryRunPreview}
+              />
+            ) : null}
             <div className="consoleFormGrid">
               <ConsoleField label="Name" className="fieldWide">
                 <input
@@ -4246,14 +4444,20 @@ export function FleetAlertPolicyManager({
                   onChange={(event) => setName(event.target.value)}
                 />
               </ConsoleField>
-              <ConsoleField label="Enabled">
+              <ConsoleField label={focusedEditor ? "Activation" : "Enabled"}>
                 <label className="checkLine inlineCheck">
                   <input
                     checked={enabled}
                     onChange={(event) => setEnabled(event.target.checked)}
                     type="checkbox"
                   />
-                  <span>Evaluate policy</span>
+                  <span>
+                    {focusedEditor
+                      ? editingId
+                        ? "Policy enabled"
+                        : "Enable after creation"
+                      : "Evaluate policy"}
+                  </span>
                 </label>
               </ConsoleField>
               <ConsoleField
@@ -4328,7 +4532,10 @@ export function FleetAlertPolicyManager({
                           }
                         />
                       </ConsoleField>
-                      <ConsoleField label="Condition expression" className="fieldFull">
+                      <ConsoleField
+                        label="Condition expression"
+                        className="fieldFull"
+                      >
                         <textarea
                           aria-label="Rule condition expression"
                           value={draft.condition_expression}
@@ -4363,7 +4570,9 @@ export function FleetAlertPolicyManager({
                         >
                           {POLICY_WINDOWS.map((windowSecs) => (
                             <option key={windowSecs} value={String(windowSecs)}>
-                              {windowSecs === 0 ? "immediate" : windowSecs / 60 + "m"}
+                              {windowSecs === 0
+                                ? "immediate"
+                                : windowSecs / 60 + "m"}
                             </option>
                           ))}
                         </select>
@@ -4394,6 +4603,7 @@ export function FleetAlertPolicyManager({
               <PolicyDryRunPreview
                 agentNameById={agentNameById}
                 preview={dryRunPreview}
+                title={focusedEditor ? "Match preview" : undefined}
               />
             ) : null}
           </ConsoleDetailPanel>
@@ -4465,13 +4675,15 @@ export function FleetAlertPolicyManager({
 function PolicyDryRunPreview({
   agentNameById,
   preview,
+  title = "Dry-run preview",
 }: {
   agentNameById: Map<string, string>;
   preview: PolicyDryRunResponse;
+  title?: string;
 }) {
   return (
     <div className="gridBlock">
-      <h4>Dry-run preview</h4>
+      <h4>{title}</h4>
       <div className="consoleInlineDetailGrid">
         <span>
           <strong>Matched VPSs</strong>
@@ -4497,11 +4709,22 @@ function PolicyDryRunPreview({
       ) : null}
       <div className="miniTable">
         {preview.rule_previews.map((rule) => (
-          <div className="miniTableRow" key={rule.rule_name + rule.condition_expression}>
+          <div
+            className="miniTableRow"
+            key={rule.rule_name + rule.condition_expression}
+          >
             <strong>{rule.rule_name}</strong>
             <span className="monoValue">{rule.condition_expression}</span>
             <span>{rule.category}</span>
-            <ConsoleStatusBadge tone={rule.severity === "critical" ? "critical" : rule.severity === "warning" ? "warning" : "info"}>
+            <ConsoleStatusBadge
+              tone={
+                rule.severity === "critical"
+                  ? "critical"
+                  : rule.severity === "warning"
+                    ? "warning"
+                    : "info"
+              }
+            >
               {rule.severity}
             </ConsoleStatusBadge>
             <span>{rule.true_count} true</span>
@@ -4517,6 +4740,41 @@ function PolicyDryRunPreview({
           </span>
         ))}
       </div>
+    </div>
+  );
+}
+
+function PolicyMatchSummary({
+  enabled,
+  editing,
+  preview,
+}: {
+  enabled: boolean;
+  editing: boolean;
+  preview: PolicyDryRunResponse | null;
+}) {
+  const vpsLabel = preview?.matched_vps_count === 1 ? "VPS" : "VPSs";
+  return (
+    <div className="consoleInlineNotice policyMatchSummary">
+      <strong>
+        {preview
+          ? `Matches ${preview.matched_vps_count} ${vpsLabel}`
+          : "Preview matches before saving"}
+      </strong>
+      <small>
+        {preview
+          ? `${preview.incomplete_vps_count} incomplete VPSs; ${preview.invalid_rule_count} invalid rule rows.`
+          : "Use Preview matches to verify the selector and rule conditions against current fleet data."}
+      </small>
+      <small>
+        {enabled
+          ? editing
+            ? "Policy remains enabled after save."
+            : "Enable after creation is on."
+          : editing
+            ? "Policy is saved disabled after update."
+            : "Enable after creation is off; create saves a disabled policy."}
+      </small>
     </div>
   );
 }
@@ -4537,10 +4795,20 @@ function IssuedPolicyAlertList({
         <div className="miniTable">
           {alerts.slice(0, 8).map((alert) => (
             <div className="miniTableRow" key={alert.id}>
-              <ConsoleStatusBadge tone={alert.severity === "critical" ? "critical" : alert.severity === "warning" ? "warning" : "info"}>
+              <ConsoleStatusBadge
+                tone={
+                  alert.severity === "critical"
+                    ? "critical"
+                    : alert.severity === "warning"
+                      ? "warning"
+                      : "info"
+                }
+              >
                 {alert.severity}
               </ConsoleStatusBadge>
-              <strong>{agentNameById.get(alert.client_id) ?? alert.client_id}</strong>
+              <strong>
+                {agentNameById.get(alert.client_id) ?? alert.client_id}
+              </strong>
               <span>{alert.title}</span>
               <span>{formatCompactTime(alert.observed_at)}</span>
             </div>
@@ -4579,7 +4847,10 @@ export function FleetNotificationsHub({
   alertDeliveries: FleetAlertNotificationDeliveryRecord[];
   webhookDeliveries: WebhookRuleDeliveryRecord[];
   webhookRules: WebhookRuleRecord[];
-  onDeleteAlertChannel: (channelId: string, reviewedName: string) => Promise<void>;
+  onDeleteAlertChannel: (
+    channelId: string,
+    reviewedName: string,
+  ) => Promise<void>;
   onDeleteWebhookRule: (ruleId: string, reviewedName: string) => Promise<void>;
   onDispatchAlertNotifications: (
     request: FleetAlertNotificationDispatchRequest,
@@ -4772,6 +5043,7 @@ export function FleetAlertNotificationManager({
   onPreviewRows,
   onProcess,
   onUpsert,
+  queueMode = "full",
 }: {
   agents: AgentView[];
   channels: FleetAlertNotificationChannelRecord[];
@@ -4787,6 +5059,7 @@ export function FleetAlertNotificationManager({
   onUpsert: (
     request: FleetAlertNotificationChannelRequest,
   ) => Promise<FleetAlertNotificationChannelRecord>;
+  queueMode?: "full" | "configuration";
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -4972,7 +5245,9 @@ export function FleetAlertNotificationManager({
     setMinSeverity(channel.min_severity);
     setCategories(channel.categories.join(", "));
     setOperatorStates(channel.operator_states.join(", "));
-    setDeliveryKind(channel.delivery_kind === "webhook" ? channel.delivery_kind : "webhook");
+    setDeliveryKind(
+      channel.delivery_kind === "webhook" ? channel.delivery_kind : "webhook",
+    );
     setTarget(channel.target);
     setCooldownSecs(String(channel.cooldown_secs));
     setEnabled(channel.enabled);
@@ -5048,9 +5323,7 @@ export function FleetAlertNotificationManager({
     }
   }
 
-  function requestDeleteChannels(
-    rows: FleetAlertNotificationChannelRecord[],
-  ) {
+  function requestDeleteChannels(rows: FleetAlertNotificationChannelRecord[]) {
     setDeleteError(null);
     setDeleteRows(rows);
   }
@@ -5528,8 +5801,9 @@ export function FleetAlertNotificationManager({
         <span>
           <strong>Alert delivery queue</strong>
           <small>
-            Review matching or process queued deliveries without leaving the
-            registry.
+            {queueMode === "configuration"
+              ? "Preview matching alerts, send or retry queued delivery records, or open delivery evidence."
+              : "Review matching or process queued deliveries without leaving the registry."}
           </small>
         </span>
         <div className="consoleOperationsActions">
@@ -5539,39 +5813,52 @@ export function FleetAlertNotificationManager({
             type="button"
             onClick={() => void dispatch(true)}
           >
-            Review matches
+            {queueMode === "configuration"
+              ? "Preview matches"
+              : "Review matches"}
           </button>
-          <button
-            className="secondaryAction"
-            disabled={queuePending}
-            type="button"
-            onClick={() => void dispatch(true, true)}
-          >
-            Review queue dispatch
-          </button>
-          <button
-            className="secondaryAction"
-            disabled={queuePending}
-            type="button"
-            onClick={() => void process(true)}
-          >
-            Review queued deliveries
-          </button>
+          {queueMode === "full" ? (
+            <>
+              <button
+                className="secondaryAction"
+                disabled={queuePending}
+                type="button"
+                onClick={() => void dispatch(true, true)}
+              >
+                Review queue dispatch
+              </button>
+              <button
+                className="secondaryAction"
+                disabled={queuePending}
+                type="button"
+                onClick={() => void process(true)}
+              >
+                Review queued deliveries
+              </button>
+            </>
+          ) : (
+            <button
+              className="secondaryAction"
+              disabled={queuePending}
+              type="button"
+              onClick={onOpenDeliveries}
+            >
+              Open deliveries
+            </button>
+          )}
           <button
             className="primaryAction"
             disabled={queuePending}
             type="button"
             onClick={() => void process(true, true)}
           >
-            Review delivery
+            {queueMode === "configuration" ? "Send / retry" : "Review delivery"}
           </button>
         </div>
       </div>
       <ConfirmationPrompt
         confirmLabel={
-          queueConfirmation === "dispatch"
-            ? "Queue dispatch"
-            : "Deliver queued"
+          queueConfirmation === "dispatch" ? "Queue dispatch" : "Deliver queued"
         }
         detail={
           queueConfirmation === "dispatch"
@@ -5814,17 +6101,21 @@ export function NotificationDeliveryHistoryGrid({
 
 export function WebhookRuleManager({
   agents,
+  editorMode = "inline",
   onDelete,
   onDispatch,
   onDryRun,
+  onEditorOpenChange,
   onOpenDeliveries,
   onPreviewDryRun,
   onPreviewRows,
   onProcess,
   onUpsert,
+  queueMode = "full",
   rules,
 }: {
   agents: AgentView[];
+  editorMode?: "inline" | "focused";
   onDelete: (ruleId: string, reviewedName: string) => Promise<void>;
   onDispatch: (
     request: WebhookRuleDispatchRequest,
@@ -5832,6 +6123,7 @@ export function WebhookRuleManager({
   onDryRun: (
     request: WebhookRuleDryRunRequest,
   ) => Promise<WebhookRuleDryRunRecord>;
+  onEditorOpenChange?: (open: boolean) => void;
   onOpenDeliveries: () => void;
   onPreviewDryRun: (preview: WebhookRuleDryRunRecord | null) => void;
   onPreviewRows: (rows: WebhookRuleDeliveryRecord[]) => void;
@@ -5839,10 +6131,15 @@ export function WebhookRuleManager({
     request: WebhookRuleProcessRequest,
   ) => Promise<WebhookRuleDeliveryRecord[]>;
   onUpsert: (request: WebhookRuleRequest) => Promise<WebhookRuleRecord>;
+  queueMode?: "full" | "configuration";
   rules: WebhookRuleRecord[];
 }) {
+  const configurationQueue = queueMode === "configuration";
+  const focusedEditorMode = editorMode === "focused";
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
+  const [editorTestPreview, setEditorTestPreview] =
+    useState<WebhookRuleDryRunRecord | null>(null);
   const [detailRuleId, setDetailRuleId] = useState<string | null>(null);
   const [deleteRows, setDeleteRows] = useState<WebhookRuleRecord[] | null>(
     null,
@@ -5860,6 +6157,8 @@ export function WebhookRuleManager({
   const [bodyTemplate, setBodyTemplate] = useState(
     "{rule.name} {event.kind} {vps.id}",
   );
+  const [signingSecret, setSigningSecret] = useState("");
+  const [clearSigningSecret, setClearSigningSecret] = useState(false);
   const [cooldownSecs, setCooldownSecs] = useState("300");
   const [notes, setNotes] = useState("");
   const [eventKind, setEventKind] = useState("interval.30sec");
@@ -5879,6 +6178,20 @@ export function WebhookRuleManager({
       .map((agent) => formatVpsName(agent, "name"))
       .join(", ");
   }, [agents, expression]);
+  const focusedEditorOpen = focusedEditorMode && editorOpen;
+  const showRuleList = !focusedEditorOpen;
+  const editingRule = editingId
+    ? (rules.find((rule) => rule.id === editingId) ?? null)
+    : null;
+  const existingSecretConfigured = editingRule?.signing_secret_set ?? false;
+
+  useEffect(() => {
+    onEditorOpenChange?.(focusedEditorOpen);
+  }, [focusedEditorOpen, onEditorOpenChange]);
+
+  useEffect(() => {
+    return () => onEditorOpenChange?.(false);
+  }, [onEditorOpenChange]);
 
   const ruleColumns = useMemo<ConsoleDataGridColumn<WebhookRuleRecord>[]>(
     () => [
@@ -5957,17 +6270,22 @@ export function WebhookRuleManager({
     expression,
     target,
     bodyTemplate,
+    signingSecret,
+    clearSigningSecret,
     cooldownSecs,
     notes,
   ]);
 
   function resetForm() {
     setEditingId(null);
+    setEditorTestPreview(null);
     setName("edge-interval-webhook");
     setEnabled(true);
     setExpression("interval.30sec && tag:edge");
     setTarget("https://hooks.example/vpsman");
     setBodyTemplate("{rule.name} {event.kind} {vps.id}");
+    setSigningSecret("");
+    setClearSigningSecret(false);
     setCooldownSecs("300");
     setNotes("");
     setStatus(null);
@@ -5981,12 +6299,15 @@ export function WebhookRuleManager({
 
   function editRule(rule: WebhookRuleRecord) {
     setDetailRuleId(null);
+    setEditorTestPreview(null);
     setEditingId(rule.id);
     setName(rule.name);
     setEnabled(rule.enabled);
     setExpression(rule.expression);
     setTarget(rule.target);
     setBodyTemplate(rule.body_template);
+    setSigningSecret("");
+    setClearSigningSecret(false);
     setCooldownSecs(String(rule.cooldown_secs));
     setNotes(rule.notes ?? "");
     setStatus(`editing ${rule.name}`);
@@ -6010,6 +6331,8 @@ export function WebhookRuleManager({
       expression: rule.expression,
       target: rule.target,
       body_template: rule.body_template,
+      signing_secret: null,
+      clear_signing_secret: false,
       cooldown_secs: rule.cooldown_secs,
       notes: rule.notes,
       confirmed: true,
@@ -6018,6 +6341,7 @@ export function WebhookRuleManager({
   }
 
   function reviewSubmit() {
+    const nextSigningSecret = signingSecret.trim();
     setSaveSnapshot({
       request: {
         id: editingId ?? undefined,
@@ -6026,6 +6350,9 @@ export function WebhookRuleManager({
         expression: expression.trim(),
         target: target.trim(),
         body_template: bodyTemplate,
+        signing_secret:
+          clearSigningSecret || !nextSigningSecret ? null : nextSigningSecret,
+        clear_signing_secret: clearSigningSecret,
         cooldown_secs: optionalInteger(cooldownSecs),
         notes: notes.trim() || null,
         confirmed: true,
@@ -6044,6 +6371,8 @@ export function WebhookRuleManager({
     try {
       const rule = await onUpsert(snapshot.request);
       setEditingId(rule.id);
+      setSigningSecret("");
+      setClearSigningSecret(false);
       setEditorOpen(true);
       setSaveSnapshot(null);
       setStatus(`saved ${rule.name}`);
@@ -6131,9 +6460,14 @@ export function WebhookRuleManager({
     setStatus("rendering webhook dry run");
     try {
       const preview = await onDryRun(request);
+      if (!rule) {
+        setEditorTestPreview(preview);
+      }
       onPreviewDryRun(preview);
       onPreviewRows(preview.delivery ? [preview.delivery] : []);
-      onOpenDeliveries();
+      if (!focusedEditorOpen) {
+        onOpenDeliveries();
+      }
       setStatus(`dry run matched ${preview.matched_vps.length}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "dry run failed");
@@ -6155,13 +6489,26 @@ export function WebhookRuleManager({
     clearWebhookQueueReview();
   }
 
-  async function dispatch(dryRunMode: boolean, openConfirmation = false) {
-    setStatus(dryRunMode ? "matching webhook rules" : "queueing webhooks");
+  async function dispatch(
+    dryRunMode: boolean,
+    openConfirmation = false,
+    rule?: WebhookRuleRecord,
+  ) {
+    setStatus(
+      dryRunMode
+        ? rule
+          ? `matching webhook rule ${rule.name}`
+          : "matching webhook rules"
+        : rule
+          ? `queueing webhook test for ${rule.name}`
+          : "queueing webhooks",
+    );
     if (!dryRunMode) {
       setQueuePending(true);
     }
     try {
       const rows = await onDispatch({
+        rule_id: rule?.id ?? null,
         event_kind: eventKind.trim(),
         event_id: eventId.trim() || null,
         limit: 50,
@@ -6174,15 +6521,13 @@ export function WebhookRuleManager({
           onOpenDeliveries();
         }
         if (openConfirmation) {
-          const previewHash = reviewedDeliveryHash(
-            rows,
-            "Webhook dispatch",
-          );
+          const previewHash = reviewedDeliveryHash(rows, "Webhook dispatch");
           const frozenEventKind = eventKind.trim();
           const frozenEventId = eventId.trim();
           setQueueSnapshot({
             action: "dispatch",
             request: {
+              rule_id: rule?.id ?? null,
               event_kind: frozenEventKind,
               event_id: frozenEventId || null,
               limit: 50,
@@ -6192,7 +6537,7 @@ export function WebhookRuleManager({
             },
             previewHash,
             reviewedRows: rows.length,
-            eventLabel: `${frozenEventKind || "event"}${frozenEventId ? ` / ${frozenEventId}` : ""}`,
+            eventLabel: `${rule ? `${rule.name} / ` : ""}${frozenEventKind || "event"}${frozenEventId ? ` / ${frozenEventId}` : ""}`,
           });
           setQueueConfirmation("dispatch");
         }
@@ -6209,15 +6554,26 @@ export function WebhookRuleManager({
     }
   }
 
-  async function process(dryRunMode: boolean, openConfirmation = false) {
-    setStatus(dryRunMode ? "previewing webhook queue" : "delivering webhooks");
+  async function process(
+    dryRunMode: boolean,
+    openConfirmation = false,
+    deliveryStatus: NonNullable<WebhookRuleProcessRequest["status"]> = "queued",
+  ) {
+    const isRetry = deliveryStatus === "failed";
+    setStatus(
+      dryRunMode
+        ? `previewing ${isRetry ? "failed" : "queued"} webhook deliveries`
+        : isRetry
+          ? "retrying failed webhooks"
+          : "delivering webhooks",
+    );
     if (!dryRunMode) {
       setQueuePending(true);
     }
     try {
       const rows = await onProcess({
         limit: 50,
-        status: "queued",
+        status: deliveryStatus,
         dry_run: dryRunMode,
         confirmed: !dryRunMode,
       });
@@ -6232,19 +6588,21 @@ export function WebhookRuleManager({
             action: "process",
             request: {
               limit: 50,
-              status: "queued",
+              status: deliveryStatus,
               dry_run: false,
               confirmed: true,
               preview_hash: previewHash,
             },
             previewHash,
             reviewedRows: rows.length,
-            eventLabel: "queued deliveries",
+            eventLabel: isRetry ? "failed deliveries" : "queued deliveries",
           });
           setQueueConfirmation("process");
         }
       }
-      setStatus(`${dryRunMode ? "previewed" : "processed"} ${rows.length}`);
+      setStatus(
+        `${dryRunMode ? "previewed" : isRetry ? "retried" : "processed"} ${rows.length}`,
+      );
     } catch (error) {
       setStatus(
         error instanceof Error ? error.message : "webhook processing failed",
@@ -6313,17 +6671,23 @@ export function WebhookRuleManager({
       onSelect: (rows) => rows[0] && editRule(rows[0]),
     },
     {
-      label: "Review rule",
+      label: configurationQueue ? "Send test" : "Review rule",
       description: (rows) =>
         actionTargetDescription(
-          "Review",
+          configurationQueue ? "Send test for" : "Review",
           "webhook rule",
           rows[0]?.name,
-          "Runs a dry-run with the current preview event.",
+          configurationQueue
+            ? "Reviews a rule-scoped test event before queueing event webhook deliveries."
+            : "Runs a dry-run with the current preview event.",
         ),
       disabled: (rows) => rows.length !== 1,
       icon: <Eye size={14} />,
-      onSelect: (rows) => rows[0] && void dryRun(rows[0]),
+      onSelect: (rows) =>
+        rows[0] &&
+        (configurationQueue
+          ? void dispatch(true, true, rows[0])
+          : void dryRun(rows[0])),
     },
     {
       label: "Enable",
@@ -6363,31 +6727,33 @@ export function WebhookRuleManager({
   return (
     <div className="consoleCrudPanel">
       <div className="consoleResourceLayout fullWidth">
-        <ConsoleDataGrid
-          actions={ruleActions}
-          columns={ruleColumns}
-          defaultPageSize={10}
-          empty="No webhook rules saved."
-          getRowId={(rule) => rule.id}
-          itemLabel="rules"
-          renderExpandedRow={(rule) => <WebhookRuleDetailGrid rule={rule} />}
-          rowActions={ruleActions}
-          rows={rules}
-          searchPlaceholder="Search webhook rules by name, expression, target, or notes"
-          storageKey="vpsman.grid.fleet.webhookRules.v2"
-          title="Webhook rules"
-          toolbarActions={
-            <button
-              className="primaryAction compactAction"
-              onClick={createRule}
-              type="button"
-            >
-              <Plus size={16} />
-              <span>Create rule</span>
-            </button>
-          }
-        />
-        {detailRuleId && !editorOpen ? (
+        {showRuleList ? (
+          <ConsoleDataGrid
+            actions={ruleActions}
+            columns={ruleColumns}
+            defaultPageSize={10}
+            empty="No webhook rules saved."
+            getRowId={(rule) => rule.id}
+            itemLabel="rules"
+            renderExpandedRow={(rule) => <WebhookRuleDetailGrid rule={rule} />}
+            rowActions={ruleActions}
+            rows={rules}
+            searchPlaceholder="Search webhook rules by name, expression, target, or notes"
+            storageKey="vpsman.grid.fleet.webhookRules.v2"
+            title="Webhook rules"
+            toolbarActions={
+              <button
+                className="primaryAction compactAction"
+                onClick={createRule}
+                type="button"
+              >
+                <Plus size={16} />
+                <span>Create rule</span>
+              </button>
+            }
+          />
+        ) : null}
+        {showRuleList && detailRuleId && !editorOpen ? (
           <ConsoleDetailPanel
             actions={
               <>
@@ -6399,11 +6765,15 @@ export function WebhookRuleManager({
                       (candidate) => candidate.id === detailRuleId,
                     );
                     if (rule) {
-                      void dryRun(rule);
+                      if (configurationQueue) {
+                        void dispatch(true, true, rule);
+                      } else {
+                        void dryRun(rule);
+                      }
                     }
                   }}
                 >
-                  Review rule
+                  {configurationQueue ? "Send test" : "Review rule"}
                 </button>
                 <button
                   className="secondaryAction"
@@ -6446,25 +6816,37 @@ export function WebhookRuleManager({
                   type="button"
                   onClick={() => void dryRun()}
                 >
-                  Review rule
+                  {focusedEditorMode ? "Test" : "Review rule"}
                 </button>
                 <button
                   className="primaryAction"
                   type="button"
                   onClick={reviewSubmit}
                 >
-                  {editingId ? "Review update" : "Review create"}
+                  {focusedEditorMode
+                    ? editingId
+                      ? "Update rule"
+                      : "Create rule"
+                    : editingId
+                      ? "Review update"
+                      : "Review create"}
                 </button>
-                <button
-                  className="secondaryAction"
-                  type="button"
-                  onClick={createRule}
-                >
-                  New rule
-                </button>
+                {!focusedEditorMode ? (
+                  <button
+                    className="secondaryAction"
+                    type="button"
+                    onClick={createRule}
+                  >
+                    New rule
+                  </button>
+                ) : null}
               </>
             }
-            description="Webhook rules are saved expression records with explicit preview and delivery operations."
+            description={
+              focusedEditorMode
+                ? "Test the event match and rendered payload before saving the event webhook rule."
+                : "Webhook rules are saved expression records with explicit preview and delivery operations."
+            }
             onClose={() => setEditorOpen(false)}
             title={editingId ? "Edit webhook rule" : "Create webhook rule"}
           >
@@ -6483,7 +6865,13 @@ export function WebhookRuleManager({
                     onChange={(event) => setEnabled(event.target.checked)}
                     type="checkbox"
                   />
-                  <span>Evaluate rule</span>
+                  <span>
+                    {focusedEditorMode
+                      ? editingId
+                        ? "Rule enabled"
+                        : "Enable after creation"
+                      : "Evaluate rule"}
+                  </span>
                 </label>
               </ConsoleField>
               <ConsoleField label="Cooldown seconds">
@@ -6515,6 +6903,44 @@ export function WebhookRuleManager({
                   onChange={(event) => setTarget(event.target.value)}
                 />
               </ConsoleField>
+              <ConsoleField
+                label="Signing secret"
+                className="fieldFull"
+                hint={
+                  existingSecretConfigured
+                    ? "Secret is configured. Leave blank to keep it, type a new value to rotate, or clear it explicitly."
+                    : "Optional HMAC secret. Deliveries include X-Vpsman-Webhook-Signature."
+                }
+              >
+                <input
+                  aria-label="Webhook signing secret"
+                  autoComplete="new-password"
+                  disabled={clearSigningSecret}
+                  placeholder={
+                    existingSecretConfigured
+                      ? "Configured; leave blank to keep"
+                      : "Optional HMAC secret"
+                  }
+                  type="password"
+                  value={signingSecret}
+                  onChange={(event) => setSigningSecret(event.target.value)}
+                />
+                {existingSecretConfigured ? (
+                  <label className="checkLine inlineCheck">
+                    <input
+                      checked={clearSigningSecret}
+                      onChange={(event) => {
+                        setClearSigningSecret(event.target.checked);
+                        if (event.target.checked) {
+                          setSigningSecret("");
+                        }
+                      }}
+                      type="checkbox"
+                    />
+                    <span>Clear existing signing secret</span>
+                  </label>
+                ) : null}
+              </ConsoleField>
               <ConsoleField label="Preview event kind">
                 <input
                   aria-label="Webhook event kind"
@@ -6543,6 +6969,11 @@ export function WebhookRuleManager({
                   onChange={setBodyTemplate}
                 />
               </ConsoleField>
+              {focusedEditorMode ? (
+                <ConsoleField label="Sample payload" className="fieldFull">
+                  <WebhookRuleSamplePreview preview={editorTestPreview} />
+                </ConsoleField>
+              ) : null}
               <ConsoleField label="Local hint" className="fieldFull">
                 <span className="monoValue">
                   {selectedPreviewNames ||
@@ -6553,75 +6984,124 @@ export function WebhookRuleManager({
           </ConsoleDetailPanel>
         ) : null}
       </div>
-      <div className="consoleOperationsBar">
-        <span>
-          <strong>Webhook queue</strong>
-          <small>
-            Review first; retained deliveries stay in the Deliveries tab.
-          </small>
-        </span>
-        <div className="consoleOperationsActions">
-          <label className="consoleField">
-            <span>Event kind</span>
-            <input
-              aria-label="Webhook dispatch event kind"
-              value={eventKind}
-              onChange={(event) => setWebhookEventKind(event.target.value)}
-            />
-          </label>
-          <label className="consoleField">
-            <span>Event id</span>
-            <input
-              aria-label="Webhook dispatch event id"
-              value={eventId}
-              onChange={(event) => setWebhookEventId(event.target.value)}
-              placeholder="optional"
-            />
-          </label>
-          <button
-            className="secondaryAction"
-            disabled={queuePending}
-            type="button"
-            onClick={() => void dispatch(true)}
-          >
-            Review matches
-          </button>
-          <button
-            className="secondaryAction"
-            disabled={queuePending}
-            type="button"
-            onClick={() => void dispatch(true, true)}
-          >
-            Review queue dispatch
-          </button>
-          <button
-            className="secondaryAction"
-            disabled={queuePending}
-            type="button"
-            onClick={() => void process(true)}
-          >
-            Review queued deliveries
-          </button>
-          <button
-            className="primaryAction"
-            disabled={queuePending}
-            type="button"
-            onClick={() => void process(true, true)}
-          >
-            Review delivery
-          </button>
+      {!focusedEditorOpen ? (
+        <div className="consoleOperationsBar">
+          <span>
+            <strong>
+              {configurationQueue ? "Event webhook tests" : "Webhook queue"}
+            </strong>
+            <small>
+              {configurationQueue
+                ? "Send reviewed test events and retry failed event webhook deliveries."
+                : "Review first; retained deliveries stay in the Deliveries tab."}
+            </small>
+          </span>
+          <div className="consoleOperationsActions">
+            <label className="consoleField">
+              <span>Event kind</span>
+              <input
+                aria-label="Webhook dispatch event kind"
+                value={eventKind}
+                onChange={(event) => setWebhookEventKind(event.target.value)}
+              />
+            </label>
+            <label className="consoleField">
+              <span>Event id</span>
+              <input
+                aria-label="Webhook dispatch event id"
+                value={eventId}
+                onChange={(event) => setWebhookEventId(event.target.value)}
+                placeholder="optional"
+              />
+            </label>
+            {configurationQueue ? (
+              <>
+                <button
+                  className="secondaryAction"
+                  disabled={queuePending}
+                  type="button"
+                  onClick={() => void dispatch(true)}
+                >
+                  Preview event
+                </button>
+                <button
+                  className="primaryAction"
+                  disabled={queuePending}
+                  type="button"
+                  onClick={() => void dispatch(true, true)}
+                >
+                  Send test
+                </button>
+                <button
+                  className="secondaryAction"
+                  disabled={queuePending}
+                  type="button"
+                  onClick={() => void process(true, true, "failed")}
+                >
+                  Retry failed
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  className="secondaryAction"
+                  disabled={queuePending}
+                  type="button"
+                  onClick={() => void dispatch(true)}
+                >
+                  Review matches
+                </button>
+                <button
+                  className="secondaryAction"
+                  disabled={queuePending}
+                  type="button"
+                  onClick={() => void dispatch(true, true)}
+                >
+                  Review queue dispatch
+                </button>
+                <button
+                  className="secondaryAction"
+                  disabled={queuePending}
+                  type="button"
+                  onClick={() => void process(true)}
+                >
+                  Review queued deliveries
+                </button>
+                <button
+                  className="primaryAction"
+                  disabled={queuePending}
+                  type="button"
+                  onClick={() => void process(true, true)}
+                >
+                  Review delivery
+                </button>
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      ) : null}
       <ConfirmationPrompt
         confirmLabel={
           queueConfirmation === "dispatch"
-            ? "Queue dispatch"
-            : "Deliver queued"
+            ? configurationQueue
+              ? "Send test"
+              : "Queue dispatch"
+            : queueSnapshot?.action === "process" &&
+                queueSnapshot.request.status === "failed"
+              ? "Retry failed"
+              : configurationQueue
+                ? "Send queued"
+                : "Deliver queued"
         }
         detail={
           queueConfirmation === "dispatch"
-            ? "Queues webhook delivery records for matching rules and the selected event."
-            : "Processes queued webhook delivery records and may call external webhook endpoints."
+            ? configurationQueue
+              ? "Queues reviewed event webhook test deliveries for matching rules and the selected event."
+              : "Queues webhook delivery records for matching rules and the selected event."
+            : queueSnapshot?.action === "process" &&
+                queueSnapshot.request.status === "failed"
+              ? "Retries failed event webhook delivery records and may call external webhook endpoints."
+              : "Processes queued webhook delivery records and may call external webhook endpoints."
         }
         items={[
           {
@@ -6645,8 +7125,13 @@ export function WebhookRuleManager({
         pending={queuePending}
         title={
           queueConfirmation === "dispatch"
-            ? "Confirm webhook queue dispatch"
-            : "Confirm webhook delivery"
+            ? configurationQueue
+              ? "Confirm event webhook test"
+              : "Confirm webhook queue dispatch"
+            : queueSnapshot?.action === "process" &&
+                queueSnapshot.request.status === "failed"
+              ? "Confirm failed webhook retry"
+              : "Confirm webhook delivery"
         }
         tone={queueConfirmation === "process" ? "danger" : "normal"}
       />
@@ -6667,6 +7152,20 @@ export function WebhookRuleManager({
           {
             label: "State",
             value: saveSnapshot?.request.enabled ? "enabled" : "disabled",
+          },
+          {
+            label: "Signing",
+            value: saveSnapshot
+              ? saveSnapshot.request.clear_signing_secret
+                ? "clear existing secret"
+                : saveSnapshot.request.signing_secret
+                  ? existingSecretConfigured
+                    ? "rotate secret"
+                    : "set secret"
+                  : existingSecretConfigured
+                    ? "keep existing secret"
+                    : "not configured"
+              : "-",
           },
         ]}
         onCancel={() => setSaveSnapshot(null)}
@@ -6724,6 +7223,51 @@ export function WebhookDryRunNotice({
         <small>{preview.validation_errors.join(" · ")}</small>
       )}
       <small>{preview.rendered_message}</small>
+    </div>
+  );
+}
+
+function WebhookRuleSamplePreview({
+  preview,
+}: {
+  preview: WebhookRuleDryRunRecord | null;
+}) {
+  if (!preview) {
+    return (
+      <div className="consoleInlineNotice">
+        <strong>Test before saving</strong>
+        <small>
+          Run Test to render the body template, matched VPSs, and sample payload
+          for the selected event.
+        </small>
+      </div>
+    );
+  }
+  const matchedNames = preview.matched_vps
+    .slice(0, 6)
+    .map((agent) => formatVpsName(agent, "name"))
+    .join(", ");
+  const samplePayload = JSON.stringify(preview.payload_context, null, 2);
+  return (
+    <div className="webhookRuleSamplePreview">
+      <div className="consoleInlineNotice">
+        <strong>{preview.matched_vps.length} VPSs matched</strong>
+        <small>{matchedNames || "No VPSs matched this test event."}</small>
+        {preview.validation_errors.length > 0 ? (
+          <small>{preview.validation_errors.join(" · ")}</small>
+        ) : null}
+      </div>
+      <div className="webhookRuleSampleGrid">
+        <div>
+          <span>Rendered message</span>
+          <strong>{preview.rendered_message || "No message rendered"}</strong>
+        </div>
+        <div>
+          <span>Delivery status</span>
+          <strong>{preview.delivery?.status ?? "dry run only"}</strong>
+        </div>
+      </div>
+      <pre>{samplePayload}</pre>
     </div>
   );
 }
@@ -6917,7 +7461,8 @@ export function WebhookDeliveryMaintenancePanel({
         `${response.matched_count} matched / ${response.deleted_count} deleted`,
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : "rotation failed";
+      const message =
+        error instanceof Error ? error.message : "rotation failed";
       setRotationError(message);
       setStatus(message);
     } finally {
@@ -7492,7 +8037,9 @@ function formatUnixTime(value: number): string {
   return formatCompactTime(new Date(value * 1000).toISOString());
 }
 
-function fleetAlertActionLabel(action: FleetAlertStateRequest["action"] | undefined): string {
+function fleetAlertActionLabel(
+  action: FleetAlertStateRequest["action"] | undefined,
+): string {
   switch (action) {
     case "acknowledge":
       return "Acknowledge";
@@ -7581,6 +8128,17 @@ function formatLoad(value: number | undefined) {
   return typeof value === "number" ? value.toFixed(2) : "No rollup";
 }
 
+function formatLoadCompact(value: number | undefined) {
+  return typeof value === "number" ? value.toFixed(2) : "None";
+}
+
+function formatMemoryUsedCompact(
+  rollup: TelemetryRollupRecord | null | undefined,
+) {
+  const ratio = memoryUsedRatio(rollup);
+  return ratio === null ? "None" : `${Math.round(ratio)}%`;
+}
+
 function formatMemoryUsed(rollup: TelemetryRollupRecord | null | undefined) {
   if (!rollup || rollup.memory_total_bytes_max <= 0) {
     return "No rollup";
@@ -7591,6 +8149,13 @@ function formatMemoryUsed(rollup: TelemetryRollupRecord | null | undefined) {
   return `${percent}% (${formatBytes(used)} / ${formatBytes(rollup.memory_total_bytes_max)})`;
 }
 
+function formatDiskFreeCompact(
+  rollup: TelemetryRollupRecord | null | undefined,
+) {
+  const ratio = diskFreeRatio(rollup);
+  return ratio === null ? "None" : `${Math.round(ratio)}% free`;
+}
+
 function formatDiskFree(rollup: TelemetryRollupRecord | null | undefined) {
   if (!rollup || rollup.disk_total_bytes_max <= 0) {
     return "No rollup";
@@ -7599,6 +8164,26 @@ function formatDiskFree(rollup: TelemetryRollupRecord | null | undefined) {
     (rollup.disk_available_bytes_avg / rollup.disk_total_bytes_max) * 100,
   );
   return `${percent}% free (${formatBytes(rollup.disk_available_bytes_avg)} / ${formatBytes(rollup.disk_total_bytes_max)})`;
+}
+
+function formatRollupFreshness(
+  rollup: TelemetryRollupRecord | null | undefined,
+) {
+  return rollup ? `Telemetry ${formatCompactTime(rollup.latest_observed_at)}` : "No telemetry";
+}
+
+function formatConsoleStreamState(wsState: string) {
+  return `Console stream ${wsState || "unknown"}`;
+}
+
+function privilegeModeLabel(agent: AgentView) {
+  if (agent.capabilities.privilege_mode === "root") {
+    return "root";
+  }
+  if (agent.capabilities.privilege_mode === "unprivileged") {
+    return "unprivileged";
+  }
+  return "privilege unknown";
 }
 
 function formatNetworkBytes(rollup: TelemetryRollupRecord | null | undefined) {
@@ -7765,7 +8350,9 @@ function cycleUsageSummary(
     return "not configured";
   }
   if (traffic.cycle_percent == null) {
-    return traffic.state === "incomplete" ? "incomplete" : formatBytes(traffic.total_bytes);
+    return traffic.state === "incomplete"
+      ? "incomplete"
+      : formatBytes(traffic.total_bytes);
   }
   const quotaLabel =
     traffic.quota_total_bytes != null
@@ -7822,7 +8409,9 @@ function trafficStateTone(
   return "neutral";
 }
 
-function quotaSummary(traffic: TrafficAccountingRecord | null | undefined): string {
+function quotaSummary(
+  traffic: TrafficAccountingRecord | null | undefined,
+): string {
   if (!traffic) {
     return "not set";
   }
@@ -7840,7 +8429,9 @@ function quotaSummary(traffic: TrafficAccountingRecord | null | undefined): stri
   return parts.length > 0 ? parts.join(" · ") : "not set";
 }
 
-function resetDaySummary(traffic: TrafficAccountingRecord | null | undefined): string {
+function resetDaySummary(
+  traffic: TrafficAccountingRecord | null | undefined,
+): string {
   if (!traffic?.reset_day) {
     return "not set";
   }
@@ -7849,14 +8440,18 @@ function resetDaySummary(traffic: TrafficAccountingRecord | null | undefined): s
     : `${traffic.reset_day} UTC`;
 }
 
-function selectorSummary(traffic: TrafficAccountingRecord | null | undefined): string {
+function selectorSummary(
+  traffic: TrafficAccountingRecord | null | undefined,
+): string {
   if (!traffic || traffic.selectors.length === 0) {
     return "not set";
   }
   return traffic.selectors.join(", ");
 }
 
-function activePolicyAlertSummary(alerts: PolicyAlertRecord[] | null | undefined): string {
+function activePolicyAlertSummary(
+  alerts: PolicyAlertRecord[] | null | undefined,
+): string {
   const rows = alerts ?? [];
   if (rows.length === 0) {
     return "0";
@@ -8121,7 +8716,10 @@ function NetworkRateList({
       <Network size={18} />
       <div>
         <strong>Interfaces</strong>
-        <span>{rates.length} latest interface rate bucket{rates.length === 1 ? "" : "s"}</span>
+        <span>
+          {rates.length} latest interface rate bucket
+          {rates.length === 1 ? "" : "s"}
+        </span>
         <div className="networkInterfaceList">
           {rates
             .slice()
@@ -8129,7 +8727,10 @@ function NetworkRateList({
               left.interface.localeCompare(right.interface),
             )
             .map((rate) => (
-              <div className="networkInterfaceRow telemetryInterfaceRow" key={rate.interface}>
+              <div
+                className="networkInterfaceRow telemetryInterfaceRow"
+                key={rate.interface}
+              >
                 <TelemetryStack
                   detail={rateBucketDetail(rate)}
                   main={rate.interface}
@@ -8169,7 +8770,9 @@ function TunnelList({ tunnels }: { tunnels: TelemetryTunnelRecord[] }) {
       <Network size={18} />
       <div>
         <strong>Runtime tunnels</strong>
-        <span>{tunnels.length} latest tunnel report{tunnels.length === 1 ? "" : "s"}</span>
+        <span>
+          {tunnels.length} latest tunnel report{tunnels.length === 1 ? "" : "s"}
+        </span>
         <div className="networkInterfaceList">
           {tunnels
             .slice()
@@ -8177,7 +8780,10 @@ function TunnelList({ tunnels }: { tunnels: TelemetryTunnelRecord[] }) {
               left.interface.localeCompare(right.interface),
             )
             .map((tunnel) => (
-              <div className={`networkInterfaceRow telemetryTunnelRow ${tunnelRowClass(tunnel)}`} key={tunnel.interface}>
+              <div
+                className={`networkInterfaceRow telemetryTunnelRow ${tunnelRowClass(tunnel)}`}
+                key={tunnel.interface}
+              >
                 <TelemetryStack
                   detail={`${tunnel.kind}; observed ${formatCompactTime(tunnel.observed_at)}`}
                   main={tunnel.interface}
@@ -8224,10 +8830,16 @@ function TelemetryStack({
 }
 
 function tunnelRowClass(tunnel: TelemetryTunnelRecord): string {
-  if (tunnel.latency_status === "down" || tunnel.auto_ospf_status === "failed") {
+  if (
+    tunnel.latency_status === "down" ||
+    tunnel.auto_ospf_status === "failed"
+  ) {
     return "telemetryRowCritical";
   }
-  if (tunnel.latency_status === "missed" || tunnel.auto_ospf_status === "report_only") {
+  if (
+    tunnel.latency_status === "missed" ||
+    tunnel.auto_ospf_status === "report_only"
+  ) {
     return "telemetryRowWarn";
   }
   return "";
@@ -8241,49 +8853,79 @@ function formatTunnelRuntime(tunnel: TelemetryTunnelRecord): string {
 
 function formatTunnelLatencyMain(tunnel: TelemetryTunnelRecord): string {
   const status = latencyStatusLabel(tunnel.latency_status);
-  const metric = typeof tunnel.latency_avg_ms === "number" ? ` / ${tunnel.latency_avg_ms.toFixed(1)} ms` : "";
-  const loss = typeof tunnel.packet_loss_ratio === "number" ? ` / ${(tunnel.packet_loss_ratio * 100).toFixed(1)}% loss` : "";
+  const metric =
+    typeof tunnel.latency_avg_ms === "number"
+      ? ` / ${tunnel.latency_avg_ms.toFixed(1)} ms`
+      : "";
+  const loss =
+    typeof tunnel.packet_loss_ratio === "number"
+      ? ` / ${(tunnel.packet_loss_ratio * 100).toFixed(1)}% loss`
+      : "";
   return `Latency ${status}${metric}${loss}`;
 }
 
 function formatTunnelLatencyDetail(tunnel: TelemetryTunnelRecord): string {
-  const checked = typeof tunnel.latency_checked_unix === "number"
-    ? formatCompactTime(new Date(tunnel.latency_checked_unix * 1000).toISOString())
-    : "not checked";
+  const checked =
+    typeof tunnel.latency_checked_unix === "number"
+      ? formatCompactTime(
+          new Date(tunnel.latency_checked_unix * 1000).toISOString(),
+        )
+      : "not checked";
   const windows = [
-    typeof tunnel.latency_healthy_windows === "number" ? `ok ${tunnel.latency_healthy_windows}` : "",
-    typeof tunnel.latency_missed_windows === "number" ? `miss ${tunnel.latency_missed_windows}` : "",
-  ].filter(Boolean).join(", ");
+    typeof tunnel.latency_healthy_windows === "number"
+      ? `ok ${tunnel.latency_healthy_windows}`
+      : "",
+    typeof tunnel.latency_missed_windows === "number"
+      ? `miss ${tunnel.latency_missed_windows}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
   return [
     addressFamilyLabel(tunnel.latency_primary_family),
     tunnel.latency_target ?? "target n/a",
     `checked ${checked}`,
     windows || "windows n/a",
     telemetryReasonLabel(tunnel.latency_reason),
-  ].filter(Boolean).join("; ");
+  ]
+    .filter(Boolean)
+    .join("; ");
 }
 
 function formatTunnelOspfMain(tunnel: TelemetryTunnelRecord): string {
-  const status = ospfStatusLabel(tunnel.auto_ospf_status, tunnel.auto_ospf_enabled);
-  const cost = tunnel.auto_ospf_current_cost || tunnel.auto_ospf_recommended_cost
-    ? ` ${tunnel.auto_ospf_current_cost ?? "?"}->${tunnel.auto_ospf_recommended_cost ?? "?"}`
-    : "";
+  const status = ospfStatusLabel(
+    tunnel.auto_ospf_status,
+    tunnel.auto_ospf_enabled,
+  );
+  const cost =
+    tunnel.auto_ospf_current_cost || tunnel.auto_ospf_recommended_cost
+      ? ` ${tunnel.auto_ospf_current_cost ?? "?"}->${tunnel.auto_ospf_recommended_cost ?? "?"}`
+      : "";
   return `OSPF ${status}${cost}`;
 }
 
 function formatTunnelOspfDetail(tunnel: TelemetryTunnelRecord): string {
   const enabled = tunnel.auto_ospf_enabled ? "enabled" : "disabled";
-  const updated = typeof tunnel.auto_ospf_updated_unix === "number"
-    ? `updated ${formatCompactTime(new Date(tunnel.auto_ospf_updated_unix * 1000).toISOString())}`
-    : "no update";
-  return [enabled, updated, telemetryReasonLabel(tunnel.auto_ospf_reason)].filter(Boolean).join("; ");
+  const updated =
+    typeof tunnel.auto_ospf_updated_unix === "number"
+      ? `updated ${formatCompactTime(new Date(tunnel.auto_ospf_updated_unix * 1000).toISOString())}`
+      : "no update";
+  return [enabled, updated, telemetryReasonLabel(tunnel.auto_ospf_reason)]
+    .filter(Boolean)
+    .join("; ");
 }
 
-function latencyTone(status: string | null | undefined): "critical" | "neutral" | "ok" | "warn" {
+function latencyTone(
+  status: string | null | undefined,
+): "critical" | "neutral" | "ok" | "warn" {
   if (status === "down") {
     return "critical";
   }
-  if (status === "missed" || status === "unconfigured" || status === "disabled") {
+  if (
+    status === "missed" ||
+    status === "unconfigured" ||
+    status === "disabled"
+  ) {
     return "warn";
   }
   if (status === "healthy") {
@@ -8292,11 +8934,17 @@ function latencyTone(status: string | null | undefined): "critical" | "neutral" 
   return "neutral";
 }
 
-function ospfTone(status: string | null | undefined): "critical" | "neutral" | "ok" | "warn" {
+function ospfTone(
+  status: string | null | undefined,
+): "critical" | "neutral" | "ok" | "warn" {
   if (status === "failed") {
     return "critical";
   }
-  if (status === "report_only" || status === "stabilizing" || status === "monitoring_only") {
+  if (
+    status === "report_only" ||
+    status === "stabilizing" ||
+    status === "monitoring_only"
+  ) {
     return "warn";
   }
   if (status === "stable" || status === "updated" || status === "disabled") {
@@ -8309,7 +8957,9 @@ function formatTunnelPolicy(tunnel: TelemetryTunnelRecord) {
   const adapterHealth = formatAdapterHealth(tunnel);
   const traffic = formatTunnelTraffic(tunnel);
   if (tunnel.plan_correlation === "matched_saved_plan") {
-    const manager = runtimeManagerLabel(tunnel.plan_runtime_manager ?? tunnel.ownership_mode);
+    const manager = runtimeManagerLabel(
+      tunnel.plan_runtime_manager ?? tunnel.ownership_mode,
+    );
     if (tunnel.mutation_policy === "observe_only_saved_plan") {
       return tunnel.plan_name
         ? `saved observed plan ${tunnel.plan_name} (${manager})${adapterHealth}${traffic}`
@@ -8336,7 +8986,8 @@ function formatAdapterHealth(tunnel: TelemetryTunnelRecord) {
   if (health.success) {
     return " adapter healthy";
   }
-  const reason = telemetryReasonLabel(health.reason) || readableAdapterStatus(health.status);
+  const reason =
+    telemetryReasonLabel(health.reason) || readableAdapterStatus(health.status);
   return ` adapter ${reason}`;
 }
 

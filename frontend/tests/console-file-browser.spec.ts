@@ -14,7 +14,7 @@ async function activate(locator: Locator) {
 
 async function unlockPrivilege(page: Page, subpage: string) {
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Jobs", subpage);
+  await openConsoleSubpage(page, "Remote Operations", subpage);
 }
 
 test("browses a VPS filesystem and saves a highlighted text file", async ({ page }, testInfo) => {
@@ -24,6 +24,8 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await page.evaluate(() => localStorage.removeItem("vpsman.fileBrowser.state"));
   await openConsoleSubpage(page, "Remote Operations", "Files");
   await expect(page.getByRole("heading", { name: "File browser", exact: true })).toBeVisible();
+  await expect(page.getByText("Select a VPS and file to begin.")).toBeVisible();
+  await expect(page.locator(".codeMirrorShell")).toHaveCount(0);
   await unlockPrivilege(page, "Files");
   const targetPicker = page.getByRole("combobox", { name: "File browser target VPS" });
   await expect(targetPicker).toHaveValue("edge-sfo-01 (fo01)");
@@ -47,12 +49,18 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
   await activate(page.getByRole("button", { name: "Review save", exact: true }));
   const savePrompt = page.locator(".confirmationPrompt").last();
   await expect(savePrompt.getByRole("button", { name: "Save file", exact: true })).toBeVisible();
+  await expect(savePrompt).toContainText("Diff");
+  await expect(savePrompt.locator(".fileDiffPreview")).toContainText("+ listen=8443");
   await activate(
     savePrompt.getByRole("button", { name: "Save file", exact: true }),
   );
 
   await expect(page.getByText("Save /etc/app.conf completed", { exact: true })).toBeVisible();
-  await page.locator(".fileDetailsToolbar .iconButton").nth(1).click();
+  await activate(
+    page
+      .getByLabel("Selected file actions")
+      .getByRole("button", { name: "Upload here" }),
+  );
   await page.getByLabel("Single file upload").setInputFiles({
     name: "upload.conf",
     mimeType: "text/plain",
@@ -167,6 +175,29 @@ test("single-file operation confirmation closes on operation edits", async ({ pa
   });
 });
 
+test("mobile file browser opens text files as a focused editor", async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.includes("mobile"), "mobile editor behavior is covered only on mobile");
+
+  await page.goto("/");
+  await page.evaluate(() => localStorage.removeItem("vpsman.fileBrowser.state"));
+  await openConsoleSubpage(page, "Remote Operations", "Files");
+  await expect(page.getByText("Select a VPS and file to begin.")).toBeVisible();
+  await expect(page.locator(".codeMirrorShell")).toHaveCount(0);
+  await unlockPrivilege(page, "Files");
+  await activate(page.getByRole("button", { name: "Refresh", exact: true }));
+  await page.getByRole("button", { name: /app\.conf/ }).dblclick();
+
+  const workspace = page.locator(".fileBrowserWorkspace.editorOpen");
+  await expect(workspace).toBeVisible();
+  await expect(workspace.locator(".fileTreePane")).toBeHidden();
+  await expect(workspace.locator(".fileDetailsPane")).toBeHidden();
+  await expect(page.getByRole("button", { name: "Back to files" })).toBeVisible();
+  await expect(page.locator(".codeMirrorShell")).toContainText("listen=443");
+
+  await activate(page.getByRole("button", { name: "Back to files" }));
+  await expect(page.getByText("Select a VPS and file to begin.")).toBeVisible();
+});
+
 test("runs bulk file download and upload workflows with grouped summaries", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "bulk file workflow is covered in desktop layout");
 
@@ -183,24 +214,26 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
   await expect(preflight).toContainText("Remote matched-file size is only known after agents read the path");
   await expect(preflight).toContainText("Retry and retention");
   await expect(page.getByLabel("Bulk file path")).toHaveValue("");
-  await expect(preflight).toContainText("Enter an absolute path before reviewing download.");
+  await expect(preflight).toContainText("Enter an absolute path before running download.");
   await page.getByLabel("Bulk file path").fill("/");
   await expect(page.getByText("Filesystem root selected")).toBeVisible();
-  await activate(page.getByRole("button", { name: "Review download" }));
+  await activate(page.getByRole("button", { name: "Run download" }));
   await expect(preflight).toContainText("Root path is blocked until you explicitly allow filesystem root operations.");
   await page.getByLabel("Allow filesystem root path").check();
-  await activate(page.getByRole("button", { name: "Review download" }));
+  await activate(page.getByRole("button", { name: "Run download" }));
   await expect(page.getByLabel("Confirm bulk file operation")).toContainText("Root path");
-  await expect(page.getByLabel("Confirm bulk file operation")).toContainText("Explicitly allowed before review");
+  await expect(page.getByLabel("Confirm bulk file operation")).toContainText("Explicitly allowed before run");
   await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Cancel" }));
 
-  await activate(page.getByRole("button", { name: "Review targets" }));
+  await activate(page.getByRole("button", { name: "Refresh scope" }));
   await expect(page.getByText("3 VPSs resolved")).toBeVisible();
+  await expect(page.getByLabel("Bulk file live match summary")).toContainText("3 resolved · 2 ready");
+  await expect(page.getByLabel("Bulk file attention targets")).toContainText("backup-nyc-03");
   await expect(preflight).toContainText("Server target preview");
   await expect(preflight).toContainText("3 resolved (2 online, 1 stale)");
   await expect(preflight).toContainText("1 stale");
   await page.getByLabel("Bulk file path").fill("/etc/app.conf");
-  await activate(page.getByRole("button", { name: "Review download" }));
+  await activate(page.getByRole("button", { name: "Run download" }));
   await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
   await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
 
@@ -222,7 +255,7 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
   await expect(preflight).toContainText("12 B per target");
   await expect(preflight).toContainText("36 B estimated dispatch across 3 VPSs");
   await page.getByLabel("Existing file").selectOption("skip");
-  await activate(page.getByRole("button", { name: "Review upload" }));
+  await activate(page.getByRole("button", { name: "Run upload" }));
   await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
   await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Upload file" }));
 
@@ -256,12 +289,12 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
   await advancedAction.selectOption("copy");
   await expect(page.getByLabel("Destination path")).toBeVisible();
   await expect(page.getByLabel("Policy")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Review copy" })).toHaveClass(/secondaryAction/);
+  await expect(page.getByRole("button", { name: "Run copy" })).toHaveClass(/secondaryAction/);
 
   await advancedAction.selectOption("delete");
   await page.getByLabel("Recursive").check();
-  await expect(page.getByRole("button", { name: "Review delete" })).toHaveClass(/dangerAction/);
-  await activate(page.getByRole("button", { name: "Review delete" }));
+  await expect(page.getByRole("button", { name: "Run delete" })).toHaveClass(/dangerAction/);
+  await activate(page.getByRole("button", { name: "Run delete" }));
   const confirmation = page.locator(".confirmationPrompt.danger");
   await expect(confirmation).toBeVisible();
   await expect(confirmation).toContainText("Delete paths on 3 VPSs");

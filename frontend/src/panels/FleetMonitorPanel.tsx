@@ -9,6 +9,7 @@ import {
   TerminalSquare,
 } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
+import { agentDisplayState, type AgentDisplayState } from "../agentDisplayState";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import type {
   AgentView,
@@ -61,7 +62,7 @@ const monitorSortOptions: Array<{ label: string; value: FleetMonitorSort }> = [
 export function FleetMonitorPanel({
   agents,
   ariaLabel = "VPS monitor cards",
-  description = "Komari-style cards for fast VPS scanning; destructive operations stay in reviewed workflows.",
+  description = "Compact VPS health cards for scanning state, resources, network, and alerts before opening terminal or file workflows.",
   embedded = false,
   backups = [],
   failedJobCount,
@@ -229,12 +230,16 @@ export function VpsMonitorCard({
   signals,
   tunnels,
 }: VpsMonitorCardProps) {
-  const statusTone = monitorStatusTone(agent);
+  const displayState = agentDisplayState(agent);
+  const statusTone = monitorStatusTone(agent, displayState);
   const provider = tagValue(agent.tags, "provider") ?? "provider unset";
   const region = tagValue(agent.tags, "country") ?? tagValue(agent.tags, "region") ?? "region unset";
   const visibleTags = agent.tags.slice(0, density === "compact" ? 2 : 4);
   const hiddenTagCount = Math.max(0, agent.tags.length - visibleTags.length);
-  const networkBps = rates.reduce((total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg, 0);
+  const networkBps =
+    rates.length > 0
+      ? rates.reduce((total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg, 0)
+      : null;
   const latency = averageLatency(tunnels);
   const memoryUsed = rollup
     ? percent(rollup.memory_total_bytes_max - rollup.memory_available_bytes_avg, rollup.memory_total_bytes_max)
@@ -242,17 +247,22 @@ export function VpsMonitorCard({
   const diskUsed = rollup
     ? percent(rollup.disk_total_bytes_max - rollup.disk_available_bytes_avg, rollup.disk_total_bytes_max)
     : null;
-  const freshness = rollup?.latest_observed_at ?? agent.last_seen_at ?? agent.stale_since ?? null;
+  const telemetryFreshness = latestTimestamp([
+    rollup?.latest_observed_at,
+    ...rates.map((rate) => rate.bucket_start),
+    ...tunnels.map((tunnel) => tunnel.observed_at),
+  ]);
+  const lastContact = agent.last_seen_at ?? agent.stale_since ?? null;
 
   return (
     <article
-      aria-label={`${displayNameOrUnnamed(agent.display_name)} ${agent.status} monitor card`}
+      aria-label={`${displayNameOrUnnamed(agent.display_name)} ${displayState.label} monitor card`}
       className={`vpsMonitorCard ${statusTone} ${density}`}
     >
       <button className="vpsMonitorCardMain" onClick={() => onOpenVpsDetail(agent)} type="button">
         <span className="vpsMonitorStatus">
           <span aria-hidden="true" />
-          {agent.status}
+          {displayState.label}
         </span>
         <strong>{displayNameOrUnnamed(agent.display_name)}</strong>
         <small>{provider} / {region}</small>
@@ -269,15 +279,20 @@ export function VpsMonitorCard({
         <MonitorMetric icon={<Gauge size={15} />} label="CPU" value={rollup ? rollup.cpu_load_1_avg.toFixed(2) : "n/a"} />
         <MonitorMetric icon={<Activity size={15} />} label="Memory" value={memoryUsed ?? "n/a"} />
         <MonitorMetric icon={<Server size={15} />} label="Disk" value={diskUsed ?? "n/a"} />
-        <MonitorMetric icon={<Network size={15} />} label="Network" value={formatRate(networkBps)} />
+        <MonitorMetric
+          icon={<Network size={15} />}
+          label="Network"
+          value={networkBps === null ? "n/a" : formatRate(networkBps)}
+        />
       </div>
       <div className="vpsMonitorEvidence">
         <span>{latency === null ? "Latency n/a" : `${latency.toFixed(1)} ms avg`}</span>
-        <span>{freshness ? `Telemetry ${formatTime(freshness)}` : "Telemetry not reported"}</span>
+        <span>{formatMonitorContactEvidence(agent, displayState, lastContact)}</span>
+        <span>{telemetryFreshness ? `Telemetry ${formatTime(telemetryFreshness)}` : "Telemetry not reported"}</span>
+        <span>{signals.fleetJobText}</span>
         <span>{agent.stale_reason ?? signals.statusText}</span>
       </div>
       <div className="vpsMonitorSignals" aria-label={`Operational signals for ${displayNameOrUnnamed(agent.display_name)}`}>
-        <MonitorSignal tone={signals.jobTone} label="Jobs" value={signals.jobText} />
         <MonitorSignal tone={signals.alertTone} label="Alerts" value={signals.alertText} />
         <MonitorSignal tone={signals.backupTone} label="Backup" value={signals.backupText} />
         <MonitorSignal tone={signals.transferTone} label="Transfer" value={signals.transferText} />
@@ -291,16 +306,16 @@ export function VpsMonitorCard({
           <FolderOpen size={15} />
           <span>Files</span>
         </button>
-        <button onClick={() => onOpenProcesses(agent)} title="Open process supervisor workflow" type="button">
-          <Activity size={15} />
-          <span>Processes</span>
-        </button>
         <details className="vpsMonitorMore">
           <summary aria-label={`More actions for ${displayNameOrUnnamed(agent.display_name)}`}>
             <MoreHorizontal size={15} />
             <span>More</span>
           </summary>
           <div className="vpsMonitorMoreMenu">
+            <button onClick={() => onOpenProcesses(agent)} title="Open process supervisor workflow" type="button">
+              <Activity size={15} />
+              <span>Processes</span>
+            </button>
             <button onClick={() => onOpenBackup(agent)} title="Open backup workflow" type="button">
               <DatabaseBackup size={15} />
               <span>Backup</span>
@@ -360,8 +375,7 @@ export type VpsMonitorCardSignal = {
   alertTone: "critical" | "warning" | "info" | "ok" | "neutral";
   backupText: string;
   backupTone: "critical" | "warning" | "info" | "ok" | "neutral";
-  jobText: string;
-  jobTone: "critical" | "warning" | "info" | "ok" | "neutral";
+  fleetJobText: string;
   statusText: string;
   transferText: string;
   transferTone: "critical" | "warning" | "info" | "ok" | "neutral";
@@ -441,20 +455,25 @@ function buildClientSignal({
   const failedBackups = backups.filter((backup) => isFailedBackupStatus(backup.status)).length;
   const failedTransfers = transfers.filter((transfer) => isFailedTransferStatus(transfer.status)).length;
   const activeTransfers = transfers.filter((transfer) => isActiveTransferStatus(transfer.status)).length;
+  const fleetJobText =
+    failedJobs > 0
+      ? `Fleet jobs: ${failedJobs} failed fleet-wide`
+      : runningJobs > 0
+        ? `Fleet jobs: ${runningJobs} running fleet-wide`
+        : "Fleet jobs: idle";
   return {
     alertText:
       criticalAlerts > 0 ? `${criticalAlerts} critical` : warningAlerts > 0 ? `${warningAlerts} warning` : "Clear",
-    alertTone: criticalAlerts > 0 ? "critical" : warningAlerts > 0 ? "warning" : "ok",
+    alertTone: criticalAlerts > 0 ? "critical" : warningAlerts > 0 ? "warning" : "neutral",
     backupText: failedBackups > 0 ? `${failedBackups} failed` : backups.length > 0 ? `${backups.length} recorded` : "No run",
-    backupTone: failedBackups > 0 ? "critical" : backups.length > 0 ? "ok" : "neutral",
-    jobText: failedJobs > 0 ? `${failedJobs} failed` : runningJobs > 0 ? `${runningJobs} running` : "Idle",
-    jobTone: failedJobs > 0 ? "critical" : runningJobs > 0 ? "info" : "ok",
+    backupTone: failedBackups > 0 ? "critical" : "neutral",
+    fleetJobText,
     statusText:
-      criticalAlerts > 0 || warningAlerts > 0
-        ? `${criticalAlerts} critical / ${warningAlerts} warning signals`
-        : "No card-local warnings",
+      criticalAlerts > 0 || warningAlerts > 0 || failedBackups > 0 || failedTransfers > 0
+        ? `${criticalAlerts} critical / ${warningAlerts} warning alerts; ${failedBackups} backup failures; ${failedTransfers} transfer failures`
+        : "No card-local alert, backup, or transfer warnings",
     transferText: failedTransfers > 0 ? `${failedTransfers} failed` : activeTransfers > 0 ? `${activeTransfers} active` : "Clear",
-    transferTone: failedTransfers > 0 ? "critical" : activeTransfers > 0 ? "info" : "ok",
+    transferTone: failedTransfers > 0 ? "critical" : activeTransfers > 0 ? "info" : "neutral",
   };
 }
 
@@ -571,7 +590,6 @@ function monitorWarningRank(agent: AgentView, signals: CardSignalContext) {
   return (
     monitorStatusRank(agent) * 10 +
     signalToneRank(localSignals.alertTone) +
-    signalToneRank(localSignals.jobTone) +
     signalToneRank(localSignals.backupTone) +
     signalToneRank(localSignals.transferTone)
   );
@@ -586,17 +604,20 @@ function signalToneRank(tone: VpsMonitorCardSignal["alertTone"]) {
 }
 
 function monitorStatusRank(agent: AgentView) {
-  if (agent.status !== "online") return 3;
-  if (agent.stale_since || agent.stale_reason) return 2;
+  const displayState = agentDisplayState(agent);
+  if (displayState.label === "Offline") return 3;
+  if (displayState.tone === "warning" || agent.stale_since || agent.stale_reason) return 2;
   if (agent.capabilities.privilege_mode === "unknown") return 1;
   return 0;
 }
 
-function monitorStatusTone(agent: AgentView) {
-  if (agent.status !== "online") return "offline";
-  if (agent.stale_since || agent.stale_reason) return "stale";
+function monitorStatusTone(agent: AgentView, displayState = agentDisplayState(agent)) {
+  if (displayState.label === "Online") return "online";
+  if (displayState.label === "Stale") return "stale";
+  if (displayState.label === "Offline") return "offline";
+  if (displayState.tone === "warning" || agent.stale_since || agent.stale_reason) return "warning";
   if (agent.capabilities.privilege_mode === "unknown") return "warning";
-  return "online";
+  return "offline";
 }
 
 function tagValue(tags: string[], key: string) {
@@ -619,6 +640,28 @@ function averageLatency(tunnels: TelemetryTunnelRecord[]) {
     return null;
   }
   return values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+function formatMonitorContactEvidence(
+  agent: AgentView,
+  displayState: AgentDisplayState,
+  lastContact: string | null,
+) {
+  if (displayState.label === "Contact unknown") {
+    return "Contact unknown; no gateway timestamp";
+  }
+  if (lastContact) {
+    return `Last contact ${formatTime(lastContact)}`;
+  }
+  return displayState.detail;
+}
+
+function latestTimestamp(values: Array<string | null | undefined>) {
+  const latest = values
+    .map((value) => (value ? Date.parse(value) : Number.NaN))
+    .filter((value) => Number.isFinite(value))
+    .sort((left, right) => right - left)[0];
+  return latest === undefined ? null : new Date(latest).toISOString();
 }
 
 function formatRate(value: number) {

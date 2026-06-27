@@ -149,6 +149,7 @@ CREATE TABLE gateway_sessions (
     gateway_id TEXT NOT NULL,
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     noise_public_key_hex TEXT,
+    remote_ip INET,
     status TEXT NOT NULL,
     started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),

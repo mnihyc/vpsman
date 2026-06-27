@@ -468,6 +468,7 @@ async fn async_agent_update_activation_output_records_lifecycle_audit() {
         session_id: gateway_session_id,
         noise_public_key_hex: None,
         remote_ip: None,
+        agent_version: Some("test".to_string()),
         reason: None,
     })
     .await
@@ -707,6 +708,7 @@ async fn active_update_check_verification_fixture(
         session_id: gateway_session_id,
         noise_public_key_hex: None,
         remote_ip: None,
+        agent_version: Some("test".to_string()),
         reason: None,
     })
     .await

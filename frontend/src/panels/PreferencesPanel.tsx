@@ -31,6 +31,7 @@ import {
 import type { OperatorPreferences, OperatorView, TagView } from "../types";
 
 type PreferencesPanelProps = {
+  onSelectView: (view: "Access" | "System", subpage?: string) => void;
   operator: OperatorView | null;
   tags: TagView[];
 };
@@ -47,7 +48,13 @@ const COMMON_TIMEZONES = [
 
 const DASHBOARD_TOP_LIMIT_OPTIONS = [3, 5, 8, 12, 16];
 
-export function PreferencesPanel({ operator, tags }: PreferencesPanelProps) {
+type PreferenceScopeTab = "browser" | "personal" | "system";
+
+export function PreferencesPanel({
+  onSelectView,
+  operator,
+  tags,
+}: PreferencesPanelProps) {
   const {
     preferences,
     preferencesError,
@@ -59,6 +66,8 @@ export function PreferencesPanel({ operator, tags }: PreferencesPanelProps) {
   const [localSelectionMessage, setLocalSelectionMessage] = useState<
     string | null
   >(null);
+  const [activeScope, setActiveScope] =
+    useState<PreferenceScopeTab>("personal");
   const [tagVisibilityFilter, setTagVisibilityFilter] = useState("");
   const browserTimezone = useMemo(
     () =>
@@ -167,15 +176,7 @@ export function PreferencesPanel({ operator, tags }: PreferencesPanelProps) {
     }));
   }
 
-  const operationalDefaultCount = [
-    draft.gateway_server_public_key_hex,
-    draft.gateway_endpoints.trim(),
-    draft.tunnel_ipv4_allocation_pool_cidr.trim(),
-    draft.tunnel_ipv6_allocation_pool_cidr.trim(),
-    normalizeCurveExclusions(draft.dashboard_curve_exclusions).length > 0
-      ? "curves"
-      : "",
-  ].filter(Boolean).length;
+  const changedPreferenceCount = preferenceChangedCount(draft, preferences);
 
   return (
     <div className="workspace singleColumn preferencesWorkspace">
@@ -186,8 +187,7 @@ export function PreferencesPanel({ operator, tags }: PreferencesPanelProps) {
             <span>
               {operator
                 ? `${operator.username} / ${operator.role}`
-                : "Current authenticated operator"}{" "}
-              / Console build {FRONTEND_BUILD_NUMBER}
+                : "Current authenticated operator"}
             </span>
           </div>
           <span
@@ -200,28 +200,77 @@ export function PreferencesPanel({ operator, tags }: PreferencesPanelProps) {
         </div>
 
         <form className="preferencesForm" onSubmit={savePreferences}>
-          <section className="preferenceScopeOverview" aria-label="Preferences scope overview">
+          <section
+            className="preferenceScopeOverview"
+            aria-label="Preferences scope overview"
+          >
             <PreferenceScopeTile
-              detail="Timezone, language, display labels, flags, sidebar behavior, review prompt display, tag visibility, and output comparison affect this operator's console experience."
+              active={activeScope === "personal"}
+              detail="Timezone, language, display labels, flags, sidebar behavior, review prompt display, tag visibility, Home chart presentation, and output comparison affect this operator's console experience."
               label="Personal display"
-              value="Operator scoped"
+              onSelect={() => setActiveScope("personal")}
+              value="Personal — stored for this operator"
             />
             <PreferenceScopeTile
+              active={activeScope === "browser"}
               detail="Saved views, table layouts, Home telemetry selectors, and expanded panels are browser-local and can be cleared without changing server preferences."
               label="Browser state"
-              value="Local only"
+              onSelect={() => setActiveScope("browser")}
+              value="Browser — stored on this device"
             />
             <PreferenceScopeTile
-              detail={`${operationalDefaultCount} operational default groups are temporarily stored per operator until backend fleet/system settings own shared defaults.`}
-              label="Fleet/system defaults"
-              value="Needs shared scope"
+              active={activeScope === "system"}
+              detail="Gateway install material and tunnel allocation pools belong to shared system workflows, not personal display preferences."
+              label="System-linked defaults"
+              onSelect={() => setActiveScope("system")}
+              value="System — shared workflow settings"
             />
           </section>
 
-          <PreferenceSection
-            description="Personal operator presentation choices. These should not change fleet behavior or another operator's console."
-            title="Personal display preferences"
+          <section
+            className={`preferenceStickySaveBar ${dirty ? "dirty" : ""}`}
+            aria-label="Preferences sticky save bar"
           >
+            <div>
+              <strong>
+                {dirty
+                  ? `${changedPreferenceCount} changed setting${changedPreferenceCount === 1 ? "" : "s"}`
+                  : "No preference changes"}
+              </strong>
+              <span>
+                {activeScope === "system"
+                  ? "System-linked defaults are routed to Suite Config and Access workflows."
+                  : dirty
+                    ? "Save applies only the operator preference draft."
+                    : "Personal and browser-local controls are separated from shared system defaults."}
+              </span>
+            </div>
+            <div className="buttonCluster">
+              <button
+                className="secondaryAction compactAction"
+                disabled={!dirty || preferencesSaving}
+                onClick={resetPreferences}
+                type="button"
+              >
+                <RotateCcw size={16} />
+                <span>Reset draft</span>
+              </button>
+              <button
+                className="primaryAction compactAction"
+                disabled={!dirty || preferencesSaving}
+                type="submit"
+              >
+                <Save size={16} />
+                <span>{preferencesSaving ? "Saving" : "Save changes"}</span>
+              </button>
+            </div>
+          </section>
+
+          {activeScope === "personal" && (
+            <PreferenceSection
+              description="Personal operator presentation choices. These do not change fleet behavior or another operator's console."
+              title="Personal display preferences"
+            >
             <PreferenceGroup
               description="Controls how VPS labels are rendered in tables, drawers, and action previews."
               icon={<ServerCog size={18} />}
@@ -561,12 +610,111 @@ export function PreferencesPanel({ operator, tags }: PreferencesPanelProps) {
                 </span>
               </div>
             </PreferenceGroup>
-          </PreferenceSection>
 
-          <PreferenceSection
-            description="Browser-only state that affects this device, not the operator record or other consoles."
-            title="Local browser state"
-          >
+            <PreferenceGroup
+              description="Controls this operator's Home resource/network curve ranking and exclusions. Fleet-wide observability policy belongs in shared system settings, not here."
+              icon={<Activity size={18} />}
+              onReset={() =>
+                resetDraftPatch({
+                  dashboard_curve_exclusions:
+                    DEFAULT_OPERATOR_PREFERENCES.dashboard_curve_exclusions,
+                  dashboard_network_top_limit:
+                    DEFAULT_OPERATOR_PREFERENCES.dashboard_network_top_limit,
+                  dashboard_resource_top_limit:
+                    DEFAULT_OPERATOR_PREFERENCES.dashboard_resource_top_limit,
+                })
+              }
+              resetDisabled={
+                draft.dashboard_network_top_limit ===
+                  DEFAULT_OPERATOR_PREFERENCES.dashboard_network_top_limit &&
+                draft.dashboard_resource_top_limit ===
+                  DEFAULT_OPERATOR_PREFERENCES.dashboard_resource_top_limit &&
+                draft.dashboard_curve_exclusions.length === 0
+              }
+              scope="Personal"
+              title="Home chart presentation"
+            >
+              <div className="preferenceInlineControls">
+                <label>
+                  <span>Resource top count</span>
+                  <select
+                    aria-label="Resource curve top count"
+                    value={draft.dashboard_resource_top_limit}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        dashboard_resource_top_limit: Number(event.target.value),
+                      }))
+                    }
+                  >
+                    {DASHBOARD_TOP_LIMIT_OPTIONS.map((value) => (
+                      <option key={value} value={value}>
+                        {value}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Network top count</span>
+                  <select
+                    aria-label="Network top count"
+                    value={draft.dashboard_network_top_limit}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        dashboard_network_top_limit: Number(event.target.value),
+                      }))
+                    }
+                  >
+                    {DASHBOARD_TOP_LIMIT_OPTIONS.map((value) => (
+                      <option key={value} value={value}>
+                        {value}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <label>
+                <span>Curve exclusions</span>
+                <textarea
+                  aria-label="Home telemetry curve exclusions"
+                  onChange={(event) =>
+                    setDraft((current) => ({
+                      ...current,
+                      dashboard_curve_exclusions: splitCurveExclusions(
+                        event.target.value,
+                      ),
+                    }))
+                  }
+                  placeholder={
+                    "provider:test\ncountry:lab\nname:lab\nid:agent-dev-"
+                  }
+                  rows={5}
+                  value={draft.dashboard_curve_exclusions.join("\n")}
+                />
+              </label>
+              <div className="preferenceHint">
+                <strong>
+                  {
+                    normalizeCurveExclusions(draft.dashboard_curve_exclusions)
+                      .length
+                  }{" "}
+                  exclusions
+                </strong>
+                <span>
+                  Applied before this operator's top-N resource and network
+                  curves are selected.
+                </span>
+              </div>
+            </PreferenceGroup>
+          </PreferenceSection>
+          )}
+
+          {activeScope === "browser" && (
+            <PreferenceSection
+              description="Browser-only state that affects this device, not the operator record or other consoles."
+              title="Local browser state"
+            >
             <PreferenceGroup
               description="Clears browser-only console state such as Home telemetry selectors, saved fleet views, table layout, paging, column visibility, and expanded panels."
               icon={<Trash2 size={18} />}
@@ -597,225 +745,33 @@ export function PreferencesPanel({ operator, tags }: PreferencesPanelProps) {
               )}
             </PreferenceGroup>
           </PreferenceSection>
+          )}
 
-          <PreferenceSection
-            description="Operational defaults currently stored per operator. These affect generated commands, topology workflows, or Home telemetry ranking and should move to shared fleet/system settings when backend scopes exist."
-            title="Fleet and system defaults"
-          >
-            <PreferenceGroup
-              description="Used to compose the one-line agent install command after identity import. Endpoints are label=host:port=priority, one per line."
-              icon={<Wifi size={18} />}
-              onReset={() =>
-                resetDraftPatch({
-                  gateway_endpoints:
-                    DEFAULT_OPERATOR_PREFERENCES.gateway_endpoints,
-                  gateway_server_public_key_hex:
-                    DEFAULT_OPERATOR_PREFERENCES.gateway_server_public_key_hex,
-                })
-              }
-              resetDisabled={
-                draft.gateway_endpoints ===
-                  DEFAULT_OPERATOR_PREFERENCES.gateway_endpoints &&
-                draft.gateway_server_public_key_hex ===
-                  DEFAULT_OPERATOR_PREFERENCES.gateway_server_public_key_hex
-              }
-              scope="Fleet/system"
-              title="Gateway install defaults"
+          {activeScope === "system" && (
+            <PreferenceSection
+              description="Shared defaults are managed in operational workflows. Preferences links here, but does not edit them as personal display settings."
+              title="System-linked defaults"
             >
-              <PreferenceOperationalNotice>
-                These are operator-stored defaults for install-command
-                generation. Shared gateway endpoints and server keys belong in
-                Suite config or fleet settings once backend scope is available.
-              </PreferenceOperationalNotice>
-              <label>
-                <span>Server public key hex</span>
-                <input
-                  aria-label="Gateway server public key hex"
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      gateway_server_public_key_hex:
-                        event.target.value.trim() || null,
-                    }))
-                  }
-                  placeholder="64 hex characters"
-                  value={draft.gateway_server_public_key_hex ?? ""}
-                />
-              </label>
-              <label className="wideField">
-                <span>Endpoints</span>
-                <textarea
-                  aria-label="Gateway install endpoints"
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      gateway_endpoints: event.target.value,
-                    }))
-                  }
-                  placeholder={"primary=gw.example.com:9443=10\nbackup=gw2.example.com:9443=20"}
-                  rows={3}
-                  value={draft.gateway_endpoints}
-                />
-              </label>
-            </PreferenceGroup>
-
-            <PreferenceGroup
-              description="Used to prefill tunnel endpoint allocation pools. Empty fields keep allocation manual."
-              icon={<Route size={18} />}
-              onReset={() =>
-                resetDraftPatch({
-                  tunnel_ipv4_allocation_pool_cidr:
-                    DEFAULT_OPERATOR_PREFERENCES.tunnel_ipv4_allocation_pool_cidr,
-                  tunnel_ipv6_allocation_pool_cidr:
-                    DEFAULT_OPERATOR_PREFERENCES.tunnel_ipv6_allocation_pool_cidr,
-                })
-              }
-              resetDisabled={
-                draft.tunnel_ipv4_allocation_pool_cidr ===
-                  DEFAULT_OPERATOR_PREFERENCES.tunnel_ipv4_allocation_pool_cidr &&
-                draft.tunnel_ipv6_allocation_pool_cidr ===
-                  DEFAULT_OPERATOR_PREFERENCES.tunnel_ipv6_allocation_pool_cidr
-              }
-              scope="Fleet/system"
-              title="Tunnel allocation"
-            >
-              <PreferenceOperationalNotice>
-                These pools prefill topology workflows. They are not personal
-                display settings; shared pool policy should move to fleet
-                topology settings when available.
-              </PreferenceOperationalNotice>
-              <label>
-                <span>IPv4 pool CIDR</span>
-                <input
-                  aria-label="Tunnel IPv4 allocation pool CIDR"
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      tunnel_ipv4_allocation_pool_cidr: event.target.value,
-                    }))
-                  }
-                  placeholder="No default; enter IPv4 pool CIDR"
-                  value={draft.tunnel_ipv4_allocation_pool_cidr}
-                />
-              </label>
-              <label>
-                <span>IPv6 pool CIDR</span>
-                <input
-                  aria-label="Tunnel IPv6 allocation pool CIDR"
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      tunnel_ipv6_allocation_pool_cidr: event.target.value,
-                    }))
-                  }
-                  placeholder="No default; enter IPv6 pool CIDR"
-                  value={draft.tunnel_ipv6_allocation_pool_cidr}
-                />
-              </label>
-            </PreferenceGroup>
-
-            <PreferenceGroup
-              description="Controls shared Home telemetry curve limits and exclusions. Selectors support *, provider:*, country:*, tag:*, name:*, id:*, or a raw tag."
-              icon={<Activity size={18} />}
-              onReset={() =>
-                resetDraftPatch({
-                  dashboard_curve_exclusions:
-                    DEFAULT_OPERATOR_PREFERENCES.dashboard_curve_exclusions,
-                  dashboard_network_top_limit:
-                    DEFAULT_OPERATOR_PREFERENCES.dashboard_network_top_limit,
-                  dashboard_resource_top_limit:
-                    DEFAULT_OPERATOR_PREFERENCES.dashboard_resource_top_limit,
-                })
-              }
-              resetDisabled={
-                draft.dashboard_network_top_limit ===
-                  DEFAULT_OPERATOR_PREFERENCES.dashboard_network_top_limit &&
-                draft.dashboard_resource_top_limit ===
-                  DEFAULT_OPERATOR_PREFERENCES.dashboard_resource_top_limit &&
-                draft.dashboard_curve_exclusions.length === 0
-              }
-              scope="Fleet/system"
-              title="Home telemetry curves"
-            >
-              <PreferenceOperationalNotice>
-                These choices change shared Home telemetry ranking for this
-                operator. Shared observability policy belongs in fleet settings
-                once backend support exists.
-              </PreferenceOperationalNotice>
-              <div className="preferenceInlineControls">
-              <label>
-                <span>Resource top count</span>
-                <select
-                  aria-label="Resource curve top count"
-                  value={draft.dashboard_resource_top_limit}
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      dashboard_resource_top_limit: Number(event.target.value),
-                    }))
-                  }
-                >
-                  {DASHBOARD_TOP_LIMIT_OPTIONS.map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span>Network top count</span>
-                <select
-                  aria-label="Network top count"
-                  value={draft.dashboard_network_top_limit}
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      dashboard_network_top_limit: Number(event.target.value),
-                    }))
-                  }
-                >
-                  {DASHBOARD_TOP_LIMIT_OPTIONS.map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <label>
-              <span>Curve exclusions</span>
-              <textarea
-                aria-label="Home telemetry curve exclusions"
-                onChange={(event) =>
-                  setDraft((current) => ({
-                    ...current,
-                    dashboard_curve_exclusions: splitCurveExclusions(
-                      event.target.value,
-                    ),
-                  }))
-                }
-                placeholder={
-                  "provider:test\ncountry:lab\nname:lab\nid:agent-dev-"
-                }
-                rows={5}
-                value={draft.dashboard_curve_exclusions.join("\n")}
+              <SystemLinkedPreferenceRow
+                icon={<Wifi size={18} />}
+                title="Gateway install material"
+                scope="System / Access"
+                detail="Gateway bind, API forwarding, gateway identity, and gateway key file live in Suite Config. Agent install commands are reviewed from Access / VPS identities after gateway material is configured."
+                primaryAction="Open Suite Config"
+                onPrimary={() => onSelectView("System", "suite_config")}
+                secondaryAction="Open VPS identities"
+                onSecondary={() => onSelectView("Access", "vps_identities")}
               />
-            </label>
-            <div className="preferenceHint">
-              <strong>
-                {
-                  normalizeCurveExclusions(draft.dashboard_curve_exclusions)
-                    .length
-                }{" "}
-                exclusions
-              </strong>
-              <span>
-                Applied by the control plane before top-N resource and network curves are
-                selected.
-              </span>
-            </div>
-            </PreferenceGroup>
-          </PreferenceSection>
+              <SystemLinkedPreferenceRow
+                icon={<Route size={18} />}
+                title="Tunnel allocation pools"
+                scope="System / Suite Config"
+                detail="IPv4 and IPv6 tunnel allocation pools are shared topology defaults. Edit `network.tunnel_ipv4_allocation_pool_cidr` and `network.tunnel_ipv6_allocation_pool_cidr` in Suite Config."
+                primaryAction="Open Suite Config"
+                onPrimary={() => onSelectView("System", "suite_config")}
+              />
+            </PreferenceSection>
+          )}
 
           {(localError || preferencesError) && (
             <p className="preferencesError">{localError ?? preferencesError}</p>
@@ -840,6 +796,9 @@ export function PreferencesPanel({ operator, tags }: PreferencesPanelProps) {
               <span>{preferencesSaving ? "Saving" : "Save preferences"}</span>
             </button>
           </div>
+          <p className="preferenceBuildNote">
+            Console build {FRONTEND_BUILD_NUMBER}
+          </p>
         </form>
       </section>
     </div>
@@ -879,13 +838,14 @@ function PreferenceGroup({
         {onReset && (
           <button
             aria-label={`Reset ${title} to default`}
-            className="iconOnlyButton preferenceCardReset"
+            className="secondaryAction compactAction preferenceCardReset"
             disabled={resetDisabled}
             onClick={onReset}
             title={`Reset ${title} to default`}
             type="button"
           >
             <RotateCcw size={15} />
+            <span>Reset</span>
           </button>
         )}
       </div>
@@ -915,30 +875,91 @@ function PreferenceSection({
 }
 
 function PreferenceScopeTile({
+  active,
   detail,
   label,
+  onSelect,
   value,
 }: {
+  active: boolean;
   detail: string;
   label: string;
+  onSelect: () => void;
   value: string;
 }) {
   return (
-    <div className="preferenceScopeTile">
+    <button
+      aria-pressed={active}
+      className={`preferenceScopeTile ${active ? "active" : ""}`}
+      onClick={onSelect}
+      type="button"
+    >
       <small>{label}</small>
       <strong>{value}</strong>
       <p>{detail}</p>
-    </div>
+    </button>
   );
 }
 
-function PreferenceOperationalNotice({ children }: { children: ReactNode }) {
+function SystemLinkedPreferenceRow({
+  detail,
+  icon,
+  onPrimary,
+  onSecondary,
+  primaryAction,
+  scope,
+  secondaryAction,
+  title,
+}: {
+  detail: string;
+  icon: ReactNode;
+  onPrimary: () => void;
+  onSecondary?: () => void;
+  primaryAction: string;
+  scope: string;
+  secondaryAction?: string;
+  title: string;
+}) {
   return (
-    <div className="preferenceOperationalNotice">
-      <ServerCog size={15} />
-      <span>{children}</span>
-    </div>
+    <article className="systemLinkedPreferenceRow">
+      <span className="preferenceIcon">{icon}</span>
+      <div>
+        <div className="preferenceTitleRow">
+          <h3>{title}</h3>
+          <span className="preferenceScopeBadge operational">{scope}</span>
+        </div>
+        <p>{detail}</p>
+      </div>
+      <div className="systemLinkedPreferenceActions">
+        <button
+          className="primaryAction compactAction"
+          onClick={onPrimary}
+          type="button"
+        >
+          {primaryAction}
+        </button>
+        {secondaryAction && onSecondary ? (
+          <button
+            className="secondaryAction compactAction"
+            onClick={onSecondary}
+            type="button"
+          >
+            {secondaryAction}
+          </button>
+        ) : null}
+      </div>
+    </article>
   );
+}
+
+function preferenceChangedCount(
+  draft: OperatorPreferences,
+  saved: OperatorPreferences,
+): number {
+  return (Object.keys(DEFAULT_OPERATOR_PREFERENCES) as Array<
+    keyof OperatorPreferences
+  >).filter((key) => JSON.stringify(draft[key]) !== JSON.stringify(saved[key]))
+    .length;
 }
 
 function scopeClass(scope: "Browser" | "Fleet/system" | "Personal"): string {

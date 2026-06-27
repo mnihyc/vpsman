@@ -3,7 +3,7 @@ use chrono::{DateTime, Duration, Utc};
 use reqwest::Url;
 use serde_json::json;
 use sqlx::{types::Json as SqlJson, Row};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use vpsman_common::{
     payload_hash, validate_template, WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED,
@@ -31,6 +31,7 @@ const MAX_EXPRESSION_BYTES: usize = 4096;
 const MAX_TARGET_BYTES: usize = 512;
 const MAX_TEMPLATE_BYTES: usize = 4096;
 const MAX_NOTES_BYTES: usize = 1024;
+const MAX_SIGNING_SECRET_BYTES: usize = 1024;
 
 impl Repository {
     pub(crate) async fn list_webhook_rules(
@@ -68,6 +69,7 @@ impl Repository {
                         expression,
                         target,
                         body_template,
+                        signing_secret,
                         cooldown_secs,
                         notes,
                         actor_id,
@@ -113,6 +115,15 @@ impl Repository {
                     stored.expression = candidate.expression.clone();
                     stored.target = candidate.target.clone();
                     stored.body_template = candidate.body_template.clone();
+                    stored.signing_secret = if request.clear_signing_secret {
+                        None
+                    } else {
+                        candidate
+                            .signing_secret
+                            .clone()
+                            .or_else(|| stored.signing_secret.clone())
+                    };
+                    stored.signing_secret_set = stored.signing_secret.is_some();
                     stored.cooldown_secs = candidate.cooldown_secs;
                     stored.notes = candidate.notes.clone();
                     stored.actor_id = candidate.actor_id;
@@ -149,17 +160,23 @@ impl Repository {
                         expression,
                         target,
                         body_template,
+                        signing_secret,
                         cooldown_secs,
                         notes,
                         actor_id
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                     ON CONFLICT (id) DO UPDATE SET
                         name = EXCLUDED.name,
                         enabled = EXCLUDED.enabled,
                         expression = EXCLUDED.expression,
                         target = EXCLUDED.target,
                         body_template = EXCLUDED.body_template,
+                        signing_secret = CASE
+                            WHEN $11 THEN NULL
+                            WHEN $7::text IS NOT NULL THEN EXCLUDED.signing_secret
+                            ELSE webhook_rules.signing_secret
+                        END,
                         cooldown_secs = EXCLUDED.cooldown_secs,
                         notes = EXCLUDED.notes,
                         actor_id = EXCLUDED.actor_id,
@@ -171,6 +188,7 @@ impl Repository {
                         expression,
                         target,
                         body_template,
+                        signing_secret,
                         cooldown_secs,
                         notes,
                         actor_id,
@@ -184,9 +202,11 @@ impl Repository {
                 .bind(&candidate.expression)
                 .bind(&candidate.target)
                 .bind(&candidate.body_template)
+                .bind(&candidate.signing_secret)
                 .bind(candidate.cooldown_secs)
                 .bind(&candidate.notes)
                 .bind(operator.operator.id)
+                .bind(request.clear_signing_secret)
                 .fetch_one(&mut *tx)
                 .await?;
                 let rule = webhook_rule_from_row(row)?;
@@ -261,6 +281,7 @@ impl Repository {
                         expression,
                         target,
                         body_template,
+                        signing_secret,
                         cooldown_secs,
                         notes,
                         actor_id,
@@ -642,19 +663,19 @@ impl Repository {
         let id_set = delivery_ids.iter().copied().collect::<HashSet<_>>();
         match self {
             Self::Memory(memory) => {
-                let enabled_rule_ids = memory
+                let enabled_rule_secrets = memory
                     .webhook_rules
                     .read()
                     .await
                     .iter()
                     .filter(|rule| rule.enabled)
-                    .map(|rule| rule.id)
-                    .collect::<HashSet<_>>();
+                    .map(|rule| (rule.id, rule.signing_secret.clone()))
+                    .collect::<HashMap<_, _>>();
                 let mut deliveries = memory.webhook_rule_deliveries.write().await;
                 let mut claimed = Vec::new();
                 for delivery in deliveries.iter_mut() {
                     if !id_set.contains(&delivery.id)
-                        || !enabled_rule_ids.contains(&delivery.rule_id)
+                        || !enabled_rule_secrets.contains_key(&delivery.rule_id)
                         || !matches!(
                             delivery.status.as_str(),
                             WEBHOOK_RULE_DELIVERY_STATUS_QUEUED
@@ -666,6 +687,10 @@ impl Repository {
                     delivery.status = WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS.to_string();
                     delivery.error = None;
                     delivery.next_attempt_at = None;
+                    delivery.signing_secret = enabled_rule_secrets
+                        .get(&delivery.rule_id)
+                        .cloned()
+                        .flatten();
                     claimed.push(delivery.clone());
                 }
                 Ok(claimed)
@@ -677,7 +702,7 @@ impl Repository {
                         SELECT unnest($1::uuid[]) AS id
                     ),
                     claim AS (
-                        SELECT delivery.id
+                        SELECT delivery.id, rule.signing_secret
                         FROM webhook_rule_deliveries delivery
                         JOIN requested ON requested.id = delivery.id
                         JOIN webhook_rules rule
@@ -708,6 +733,7 @@ impl Repository {
                         delivery.payload,
                         delivery.matched_vps,
                         delivery.message,
+                        claim.signing_secret,
                         delivery.error,
                         delivery.cooldown_until_unix,
                         delivery.attempt_count,
@@ -981,6 +1007,14 @@ pub(crate) fn webhook_rule_from_request(
     operator: &AuthContext,
 ) -> Result<WebhookRuleView> {
     anyhow::ensure!(request.confirmed, "webhook_rule_confirmation_required");
+    anyhow::ensure!(
+        !(request.clear_signing_secret
+            && request
+                .signing_secret
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())),
+        "webhook rule signing secret cannot be set and cleared together"
+    );
     validate_required_text(&request.name, MAX_NAME_BYTES, "webhook rule name")?;
     validate_required_text(
         &request.expression,
@@ -1009,6 +1043,7 @@ pub(crate) fn webhook_rule_from_request(
         MAX_NOTES_BYTES,
         "webhook rule notes",
     )?;
+    let signing_secret = normalize_signing_secret(request.signing_secret.as_deref())?;
     Ok(WebhookRuleView {
         id: request.id.unwrap_or_else(Uuid::new_v4),
         name: request.name.trim().to_string(),
@@ -1016,6 +1051,8 @@ pub(crate) fn webhook_rule_from_request(
         expression: request.expression.trim().to_string(),
         target: request.target.trim().to_string(),
         body_template: request.body_template.trim().to_string(),
+        signing_secret_set: signing_secret.is_some(),
+        signing_secret,
         cooldown_secs,
         notes: request
             .notes
@@ -1106,6 +1143,7 @@ fn insert_delivery_query(
 }
 
 fn webhook_rule_from_row(row: sqlx::postgres::PgRow) -> Result<WebhookRuleView> {
+    let signing_secret: Option<String> = row.try_get("signing_secret")?;
     Ok(WebhookRuleView {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
@@ -1113,6 +1151,8 @@ fn webhook_rule_from_row(row: sqlx::postgres::PgRow) -> Result<WebhookRuleView> 
         expression: row.try_get("expression")?,
         target: row.try_get("target")?,
         body_template: row.try_get("body_template")?,
+        signing_secret_set: signing_secret.is_some(),
+        signing_secret,
         cooldown_secs: row.try_get("cooldown_secs")?,
         notes: row.try_get("notes")?,
         actor_id: row.try_get("actor_id")?,
@@ -1124,6 +1164,10 @@ fn webhook_rule_from_row(row: sqlx::postgres::PgRow) -> Result<WebhookRuleView> 
 fn webhook_delivery_from_row(row: sqlx::postgres::PgRow) -> Result<WebhookRuleDeliveryView> {
     let payload: SqlJson<serde_json::Value> = row.try_get("payload")?;
     let matched_vps: SqlJson<Vec<AgentView>> = row.try_get("matched_vps")?;
+    let signing_secret = row
+        .try_get::<Option<String>, _>("signing_secret")
+        .ok()
+        .flatten();
     Ok(WebhookRuleDeliveryView {
         id: row.try_get("id")?,
         rule_id: row.try_get("rule_id")?,
@@ -1136,6 +1180,7 @@ fn webhook_delivery_from_row(row: sqlx::postgres::PgRow) -> Result<WebhookRuleDe
         payload: payload.0,
         matched_vps: matched_vps.0,
         message: row.try_get("message")?,
+        signing_secret,
         error: row.try_get("error")?,
         cooldown_until_unix: row.try_get("cooldown_until_unix")?,
         attempt_count: row.try_get("attempt_count")?,
@@ -1164,6 +1209,7 @@ fn webhook_delivery_from_candidate(
         payload: candidate.payload.clone(),
         matched_vps: candidate.matched_vps.clone(),
         message: candidate.message.clone(),
+        signing_secret: candidate.signing_secret.clone(),
         error: None,
         cooldown_until_unix: candidate.cooldown_until_unix,
         attempt_count: 0,
@@ -1320,6 +1366,17 @@ fn validate_optional_text(value: Option<&str>, max_bytes: usize, label: &str) ->
         );
     }
     Ok(())
+}
+
+fn normalize_signing_secret(value: Option<&str>) -> Result<Option<String>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        value.len() <= MAX_SIGNING_SECRET_BYTES && !value.as_bytes().contains(&0),
+        "webhook rule signing secret is invalid"
+    );
+    Ok(Some(value.to_string()))
 }
 
 pub(crate) async fn ensure_webhook_event_partition(
@@ -1567,6 +1624,8 @@ mod tests {
             expression: "status = stale && tag:edge".to_string(),
             target: "https://hooks.example/vpsman".to_string(),
             body_template: "{vps.name} stale".to_string(),
+            signing_secret: None,
+            clear_signing_secret: false,
             cooldown_secs: Some(60),
             notes: None,
             confirmed: true,

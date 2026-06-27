@@ -218,6 +218,10 @@ export function formatCompactTime(
   if (Number.isNaN(date.getTime())) {
     return value;
   }
+  const relative = formatRelativeTime(date, new Date());
+  if (relative) {
+    return relative;
+  }
   return safeLocaleString(date, {
     day: "numeric",
     hour: "numeric",
@@ -225,6 +229,74 @@ export function formatCompactTime(
     month: "numeric",
     ...(timeZone ? { timeZone } : {}),
   });
+}
+
+export function formatFullTime(
+  value: string,
+  timeZone = preferredTimeZone,
+): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return safeLocaleString(date, {
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    month: "numeric",
+    second: "2-digit",
+    timeZoneName: "short",
+    year: "numeric",
+    ...(timeZone ? { timeZone } : {}),
+  });
+}
+
+function formatRelativeTime(date: Date, now: Date): string | null {
+  const deltaMs = date.getTime() - now.getTime();
+  const absSeconds = Math.round(Math.abs(deltaMs) / 1000);
+  if (absSeconds < 45) {
+    return "just now";
+  }
+
+  const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+    ["year", 365 * 24 * 60 * 60],
+    ["month", 30 * 24 * 60 * 60],
+    ["week", 7 * 24 * 60 * 60],
+    ["day", 24 * 60 * 60],
+    ["hour", 60 * 60],
+    ["minute", 60],
+  ];
+  const [unit, secondsPerUnit] =
+    units.find(([, secondsPerUnit]) => absSeconds >= secondsPerUnit) ??
+    ["minute", 60];
+  const count = Math.max(1, Math.round(absSeconds / secondsPerUnit));
+  const signedCount = deltaMs < 0 ? -count : count;
+  try {
+    return new Intl.RelativeTimeFormat(undefined, {
+      numeric: "always",
+      style: "narrow",
+    }).format(signedCount, unit);
+  } catch {
+    const suffix = signedCount < 0 ? "ago" : "from now";
+    return `${count}${relativeUnitSuffix(unit)} ${suffix}`;
+  }
+}
+
+function relativeUnitSuffix(unit: Intl.RelativeTimeFormatUnit): string {
+  switch (unit) {
+    case "year":
+      return "y";
+    case "month":
+      return "mo";
+    case "week":
+      return "w";
+    case "day":
+      return "d";
+    case "hour":
+      return "h";
+    default:
+      return "m";
+  }
 }
 
 function isBrowserTimeZoneSupported(timeZone: string): boolean {

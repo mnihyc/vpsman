@@ -707,6 +707,14 @@ async fn postgres_artifact_cleanup_job_persists_reviewed_artifact_identity() {
         .await
         .unwrap();
     assert_eq!(preview.matched_count, 1);
+    assert_eq!(preview.retained_count, 1);
+    assert_eq!(preview.reference_protected_count, 0);
+    assert_eq!(
+        preview.representative_objects[0].object_key,
+        "job-output/test-reviewed-artifact"
+    );
+    assert!(preview.oldest_created_at.is_some());
+    assert!(preview.newest_created_at.is_some());
     let job = db
         .repo
         .create_artifact_cleanup_job(

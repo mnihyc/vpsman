@@ -148,6 +148,18 @@ function writeLocalString(key: string, value: string) {
   }
 }
 
+function visibleDispatchSelector(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed === "id:*" || trimmed === "*") {
+    return "";
+  }
+  return value;
+}
+
+function normalizedDispatchSelector(value: string): string {
+  return value.trim() || "id:*";
+}
+
 type DispatchConfirmationSnapshot = {
   operationLabel: string;
   forceUnprivileged: boolean;
@@ -209,18 +221,18 @@ async function loadUploadSourceArtifactFile(
 ): Promise<File> {
   const artifact = sources.find((source) => source.id === sourceArtifactId);
   if (!artifact) {
-    throw new Error("Select a source artifact");
+    throw new Error("Select a reusable source");
   }
   const blob = await downloadSource(artifact.download_path);
   const bytes = new Uint8Array(await blob.arrayBuffer());
   if (bytes.byteLength !== artifact.size_bytes) {
-    throw new Error(`Source artifact size mismatch for ${artifact.name}`);
+    throw new Error(`Reusable source size mismatch for ${artifact.name}`);
   }
   const actualSha256Hex = await sha256Hex(bytes);
   if (actualSha256Hex !== artifact.sha256_hex) {
-    throw new Error(`Source artifact SHA-256 mismatch for ${artifact.name}`);
+    throw new Error(`Reusable source SHA-256 mismatch for ${artifact.name}`);
   }
-  return new File([bytes], artifact.name || "source-artifact.bin", {
+  return new File([bytes], artifact.name || "reusable-source.bin", {
     type: blob.type || "application/octet-stream",
   });
 }
@@ -348,7 +360,9 @@ export function JobDispatchPanel({
   const [supervisorCwd, setSupervisorCwd] = useState("");
   const [supervisorEnv, setSupervisorEnv] = useState("");
   const [supervisorLogBytes, setSupervisorLogBytes] = useState(65536);
-  const [selectorExpression, setSelectorExpression] = useState(() => readLocalString(JOB_SELECTOR_STORAGE_KEY));
+  const [selectorExpression, setSelectorExpression] = useState(() =>
+    visibleDispatchSelector(readLocalString(JOB_SELECTOR_STORAGE_KEY)),
+  );
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useState("");
   const [forceUnprivileged, setForceUnprivileged] = useState(false);
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
@@ -369,7 +383,11 @@ export function JobDispatchPanel({
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
-  const selectorParse = useMemo(() => parseSearchExpression(selectorExpression), [selectorExpression]);
+  const normalizedSelectorExpression = normalizedDispatchSelector(selectorExpression);
+  const selectorParse = useMemo(
+    () => parseSearchExpression(normalizedSelectorExpression),
+    [normalizedSelectorExpression],
+  );
   const terminalSurface = surface === "terminal";
 
   function setMode(nextMode: DispatchMode) {
@@ -398,7 +416,7 @@ export function JobDispatchPanel({
     }
     setModeState(fixedMode ?? dispatchPreset.mode);
     if (dispatchPreset.selectorExpression !== undefined) {
-      setSelectorExpression(dispatchPreset.selectorExpression);
+      setSelectorExpression(visibleDispatchSelector(dispatchPreset.selectorExpression));
     }
     if (dispatchPreset.commandTemplateId) {
       applyCommandTemplate(dispatchPreset.commandTemplateId);
@@ -440,6 +458,7 @@ export function JobDispatchPanel({
     if (dispatchPreset.mode === "file_transfer_upload") {
       setFilePushPath(dispatchPreset.filePushPath ?? "");
       setFilePushMode(dispatchPreset.filePushMode ?? "0644");
+      setFilePushSource(dispatchPreset.fileTransferUploadFile ?? null);
       setFileTransferUploadSourceKind(dispatchPreset.fileTransferUploadSourceKind ?? "local-file");
       setFileTransferSourceArtifactId(dispatchPreset.fileTransferSourceArtifactId ?? "");
       setFileTransferSessionId(dispatchPreset.fileTransferSessionId ?? "");
@@ -593,12 +612,6 @@ export function JobDispatchPanel({
   ]);
 
   useEffect(() => {
-    if (!selectorExpression.trim()) {
-      setSelectorVerification("neutral");
-      setSelectorVerificationMessage(null);
-      setPreview(null);
-      return;
-    }
     if (selectorParse.error) {
       setSelectorVerification("invalid");
       setSelectorVerificationMessage("Invalid");
@@ -610,7 +623,7 @@ export function JobDispatchPanel({
     setSelectorVerificationMessage("Checking");
     const timeout = window.setTimeout(() => {
       void onResolveTargets({
-        selector_expression: selectorExpression.trim(),
+        selector_expression: normalizedSelectorExpression,
       })
         .then((response) => {
           if (disposed) {
@@ -633,7 +646,7 @@ export function JobDispatchPanel({
       disposed = true;
       window.clearTimeout(timeout);
     };
-  }, [agents.length, mode, onResolveTargets, selectorExpression, selectorParse.error]);
+  }, [agents.length, mode, normalizedSelectorExpression, onResolveTargets, selectorParse.error]);
 
   const parsedArgv = useMemo(() => {
     try {
@@ -681,8 +694,8 @@ export function JobDispatchPanel({
                                   ? backupReady
                                   : true;
   const expressionTargets = useMemo(
-    () => (selectorParse.error ? [] : agentsMatchingExpression(agents, selectorExpression)),
-    [agents, selectorExpression, selectorParse.error],
+    () => (selectorParse.error ? [] : agentsMatchingExpression(agents, normalizedSelectorExpression)),
+    [agents, normalizedSelectorExpression, selectorParse.error],
   );
   const impactMode = targetImpactModeForDispatch(mode);
   const supportsForceUnprivileged = impactMode !== "generic";
@@ -690,7 +703,7 @@ export function JobDispatchPanel({
   const impactTargets = preview?.targets ?? expressionTargets;
   const activeDispatchConfirmation = dispatchPromptOpen ? dispatchConfirmation : null;
   const dispatchConfirmationSelector =
-    activeDispatchConfirmation?.selectorExpression ?? selectorExpression.trim();
+    activeDispatchConfirmation?.selectorExpression ?? normalizedSelectorExpression;
   const dispatchConfirmationTargets =
     activeDispatchConfirmation?.targets ?? preview?.targets ?? expressionTargets;
   const dispatchConfirmationMaxTimeoutSecs =
@@ -817,10 +830,6 @@ export function JobDispatchPanel({
       setActionError(selectorParse.error);
       return;
     }
-    if (!selectorExpression.trim()) {
-      setActionError("Select at least one VPS or tag target");
-      return;
-    }
     if (!operationReady) {
       setActionError("Complete the selected operation before dispatching");
       return;
@@ -828,7 +837,7 @@ export function JobDispatchPanel({
     blurActiveElement();
     const reviewGeneration = captureReviewGeneration();
     const selection = targetSelection();
-    setReviewStatus("Preparing dispatch review");
+    setReviewStatus("Preparing dispatch confirmation");
     try {
       await runPanelAction(setPending, setActionError, async () => {
         await waitForReviewRender();
@@ -858,7 +867,7 @@ export function JobDispatchPanel({
     if (!privilegeMaterial) {
       throw new Error("Privilege unlock is locked");
     }
-    const selector = selectorExpression.trim();
+    const selector = normalizedSelectorExpression;
     const maxTimeoutOverride = parseOptionalJobMaxTimeoutSecs(maxTimeoutSecs);
     const maxTimeout = maxTimeoutOverride ?? effectiveJobMaxTimeoutSecs(maxTimeoutSecs);
     const frozenForceUnprivileged = supportsForceUnprivileged ? forceUnprivileged : false;
@@ -1361,7 +1370,7 @@ export function JobDispatchPanel({
 
   function targetSelection(): JobTargetSelection {
     return {
-      selector_expression: selectorExpression.trim(),
+      selector_expression: normalizedSelectorExpression,
     };
   }
 
@@ -1386,96 +1395,106 @@ export function JobDispatchPanel({
         {!terminalSurface && (
           <>
             <div className="templateToolbar" aria-label="Command template controls">
-              <label>
-                <span>Template</span>
-                <select
-                  aria-label="Template selector"
-                  onChange={(event) => applyCommandTemplate(event.target.value)}
-                  value={selectedTemplateId}
-                >
-                  <option value="">Select template</option>
-                  {builtinTemplates.length > 0 && (
-                    <optgroup label="Built-in templates">
-                      {builtinTemplates.map((template) => (
-                        <option key={template.id} value={template.id}>
-                          {template.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  )}
-                  {userTemplates.length > 0 && (
-                    <>
-                      <option disabled value="__user_template_separator">
-                        ────────── User-defined templates ──────────
-                      </option>
-                      <optgroup label="User-defined templates">
-                        {userTemplates.map((template) => (
+              <div className="templateToolbarPrimary">
+                <label>
+                  <span>Template</span>
+                  <select
+                    aria-label="Template selector"
+                    onChange={(event) => applyCommandTemplate(event.target.value)}
+                    value={selectedTemplateId}
+                  >
+                    <option value="">Select template</option>
+                    {builtinTemplates.length > 0 && (
+                      <optgroup label="Built-in templates">
+                        {builtinTemplates.map((template) => (
                           <option key={template.id} value={template.id}>
-                            {template.name} · {template.scope_kind}
-                            {template.scope_value ? `:${template.scope_value}` : ""}
+                            {template.name}
                           </option>
                         ))}
                       </optgroup>
-                    </>
-                  )}
-                </select>
-              </label>
-              <label>
-                <span>Name</span>
-                <input
-                  aria-label="Command template name"
-                  onChange={(event) => setTemplateName(event.target.value)}
-                  placeholder="provider-health-check"
-                  value={templateName}
-                />
-              </label>
-              <label>
-                <span>Scope</span>
-                <select
-                  aria-label="Command template scope"
-                  onChange={(event) => setTemplateScopeKind(event.target.value as typeof templateScopeKind)}
-                  value={templateScopeKind}
-                >
-                  <option value="global">Global</option>
-                  <option value="provider">Provider</option>
-                  <option value="tag">Tag</option>
-                  <option value="client">Client</option>
-                </select>
-              </label>
-              <label>
-                <span>Scope value</span>
-                <input
-                  aria-label="Command template scope value"
-                  disabled={templateScopeKind === "global"}
-                  onChange={(event) => setTemplateScopeValue(event.target.value)}
-                  placeholder={templateScopeKind}
-                  value={templateScopeKind === "global" ? "" : templateScopeValue}
-                />
-              </label>
-              <div className="templateToolbarActions">
-                <button
-                  className="secondaryAction"
-                  disabled={templatePending}
-                  onClick={() => void reviewCommandTemplateSave()}
-                  type="button"
-                >
-                  {selectedTemplate?.built_in ? "Review copy" : "Review save"}
-                </button>
-                <button
-                  className="secondaryAction dangerAction"
-                  disabled={templatePending || !selectedTemplate || selectedTemplate.built_in}
-                  onClick={() => {
-                    if (!selectedTemplate || selectedTemplate.built_in) {
-                      return;
-                    }
-                    setDeleteTemplateSnapshot(selectedTemplate);
-                    setTemplateConfirmation("delete");
-                  }}
-                  type="button"
-                >
-                  Delete
-                </button>
+                    )}
+                    {userTemplates.length > 0 && (
+                      <>
+                        <option disabled value="__user_template_separator">
+                          User-defined templates
+                        </option>
+                        <optgroup label="User-defined templates">
+                          {userTemplates.map((template) => (
+                            <option key={template.id} value={template.id}>
+                              {template.name} · {template.scope_kind}
+                              {template.scope_value ? `:${template.scope_value}` : ""}
+                            </option>
+                          ))}
+                        </optgroup>
+                      </>
+                    )}
+                  </select>
+                </label>
+                <span className="templateToolbarStatus">
+                  {selectedTemplate ? `${selectedTemplate.scope_kind}${selectedTemplate.scope_value ? `:${selectedTemplate.scope_value}` : ""}` : "Optional"}
+                </span>
               </div>
+              <details className="templateManageDrawer">
+                <summary>Manage templates</summary>
+                <div className="templateManageGrid">
+                  <label>
+                    <span>Name</span>
+                    <input
+                      aria-label="Command template name"
+                      onChange={(event) => setTemplateName(event.target.value)}
+                      placeholder="provider-health-check"
+                      value={templateName}
+                    />
+                  </label>
+                  <label>
+                    <span>Scope</span>
+                    <select
+                      aria-label="Command template scope"
+                      onChange={(event) => setTemplateScopeKind(event.target.value as typeof templateScopeKind)}
+                      value={templateScopeKind}
+                    >
+                      <option value="global">Global</option>
+                      <option value="provider">Provider</option>
+                      <option value="tag">Tag</option>
+                      <option value="client">Client</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Scope value</span>
+                    <input
+                      aria-label="Command template scope value"
+                      disabled={templateScopeKind === "global"}
+                      onChange={(event) => setTemplateScopeValue(event.target.value)}
+                      placeholder={templateScopeKind}
+                      value={templateScopeKind === "global" ? "" : templateScopeValue}
+                    />
+                  </label>
+                  <div className="templateToolbarActions">
+                    <button
+                      className="secondaryAction"
+                      disabled={templatePending}
+                      onClick={() => void reviewCommandTemplateSave()}
+                      type="button"
+                    >
+                      {selectedTemplate?.built_in ? "Review copy" : "Review save"}
+                    </button>
+                    <button
+                      className="secondaryAction dangerAction"
+                      disabled={templatePending || !selectedTemplate || selectedTemplate.built_in}
+                      onClick={() => {
+                        if (!selectedTemplate || selectedTemplate.built_in) {
+                          return;
+                        }
+                        setDeleteTemplateSnapshot(selectedTemplate);
+                        setTemplateConfirmation("delete");
+                      }}
+                      type="button"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              </details>
             </div>
             <ConfirmationPrompt
               confirmLabel={templateSaveSnapshot?.title ?? "Save template"}
@@ -1582,6 +1601,7 @@ export function JobDispatchPanel({
           terminalSessionId={terminalSessionId}
           filePushMode={filePushMode}
           filePushPath={filePushPath}
+          filePushSource={filePushSource}
           fileTransferDownloadSink={fileTransferDownloadSink}
           fileTransferDownloadName={fileTransferDownloadName}
           fileTransferChunkSize={fileTransferChunkSize}
@@ -1679,21 +1699,30 @@ export function JobDispatchPanel({
           mode={impactMode}
           targets={impactTargets}
         />
-        {supportsForceUnprivileged && (
-          <label className="checkLine">
-            <input
-              aria-label="Force unprivileged job best effort"
-              checked={forceUnprivileged}
-              onChange={(event) => setForceUnprivileged(event.target.checked)}
-              type="checkbox"
+        <details className="dispatchExecutionOptions">
+          <summary>Execution options</summary>
+          <div className="dispatchExecutionOptionsGrid">
+            {supportsForceUnprivileged && (
+              <label className="checkLine">
+                <input
+                  aria-label="Force unprivileged job best effort"
+                  checked={forceUnprivileged}
+                  onChange={(event) => setForceUnprivileged(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Force unprivileged best effort</span>
+              </label>
+            )}
+            <DispatchOptions
+              setMaxTimeoutSecs={setMaxTimeoutSecs}
+              maxTimeoutSecs={maxTimeoutSecs}
             />
-            <span>Force unprivileged best effort</span>
-          </label>
-        )}
-        <DispatchOptions
-          setMaxTimeoutSecs={setMaxTimeoutSecs}
-          maxTimeoutSecs={maxTimeoutSecs}
-        />
+            <div className="dispatchOptionNote">
+              <strong>Rollout controls</strong>
+              <span>Per-job controls stored here are timeout and privilege mode. Fleet concurrency uses the system dispatcher policy; canary and stop-after-failure are not recorded by this job request.</span>
+            </div>
+          </div>
+        </details>
 
         <ConfirmationPrompt
           confirmLabel="Dispatch job"
@@ -1723,20 +1752,20 @@ export function JobDispatchPanel({
           <div className="dispatchActions">
             <button
               className="secondaryAction"
-              disabled={pending || !selectorExpression.trim()}
+              disabled={pending}
               onClick={previewTargets}
               type="button"
             >
               <CheckCircle2 size={17} />
-              Review targets
+              Refresh target preview
             </button>
             <button
               className="primaryAction"
-              disabled={pending || !operationReady || !selectorExpression.trim() || !privilegeMaterial}
+              disabled={pending || !operationReady || !privilegeMaterial}
               type="submit"
             >
               <Play size={17} />
-              Review dispatch
+              Dispatch
             </button>
           </div>
         )}

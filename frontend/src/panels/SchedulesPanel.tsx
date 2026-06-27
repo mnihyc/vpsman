@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
+  ChevronDown,
   ClipboardList,
   Clock3,
   Pencil,
@@ -230,11 +232,11 @@ export function SchedulesPanel({
     {
       label: "Operation",
       value: pendingScheduleSnapshot
-        ? pendingScheduleSnapshot.selectedTemplateName ??
-          operationSummary(pendingScheduleSnapshot.operation)
+        ? (pendingScheduleSnapshot.selectedTemplateName ??
+          operationSummary(pendingScheduleSnapshot.operation))
         : selectedTemplate
-        ? selectedTemplate.name
-        : operationSummary(scheduleOperation),
+          ? selectedTemplate.name
+          : operationSummary(scheduleOperation),
     },
     {
       label: "Cron",
@@ -261,9 +263,8 @@ export function SchedulesPanel({
     },
     {
       label: "State",
-      value: (pendingScheduleSnapshot?.enabled ?? enabled)
-        ? "Enabled"
-        : "Disabled",
+      value:
+        (pendingScheduleSnapshot?.enabled ?? enabled) ? "Enabled" : "Disabled",
     },
   ];
 
@@ -286,11 +287,17 @@ export function SchedulesPanel({
       {
         id: "operation",
         header: "Operation",
-        size: 110,
-        minSize: 95,
+        size: 210,
+        minSize: 170,
         sortValue: (schedule) => schedule.command_type,
-        searchValue: (schedule) => schedule.command_type,
-        cell: (schedule) => schedule.command_type,
+        searchValue: (schedule) =>
+          `${schedule.command_type} ${operationSummary(schedule.operation)}`,
+        cell: (schedule) => (
+          <span className="historyPrimary">
+            <strong>{operationSummary(schedule.operation)}</strong>
+            <small>{scheduleCommandTypeLabel(schedule.command_type)}</small>
+          </span>
+        ),
       },
       {
         id: "targets",
@@ -316,51 +323,73 @@ export function SchedulesPanel({
       },
       {
         id: "cron",
-        header: "Schedule",
-        size: 190,
-        minSize: 160,
+        header: "Human cadence",
+        size: 210,
+        minSize: 170,
         sortValue: (schedule) => schedule.cron_expr,
         searchValue: (schedule) =>
           `${schedule.cron_expr} ${describeCronExpression(schedule.cron_expr)} ${schedule.timezone}`,
         cell: (schedule) => (
-          <span className="historyPrimary scheduleCadenceCell" title={`${schedule.cron_expr} ${schedule.timezone}`}>
+          <span
+            className="historyPrimary scheduleCadenceCell"
+            title={`${schedule.cron_expr} ${schedule.timezone}`}
+          >
             <strong>{describeCronExpression(schedule.cron_expr)}</strong>
-            <small>{schedule.cron_expr} · {schedule.timezone}</small>
-          </span>
-        ),
-      },
-      {
-        id: "policy",
-        header: "Policy",
-        size: 170,
-        minSize: 150,
-        sortValue: (schedule) => schedule.catch_up_policy,
-        searchValue: (schedule) =>
-          `${schedule.catch_up_policy} ${schedule.retry_delay_secs}`,
-        cell: (schedule) => (
-          <span className="historyPrimary" title={describeSchedulePolicy(schedule)}>
-            <strong>{formatCatchUpPolicy(schedule.catch_up_policy)}</strong>
-            <small>{describeSchedulePolicy(schedule)}</small>
+            <small>
+              {schedule.cron_expr} · {schedule.timezone}
+            </small>
           </span>
         ),
       },
       {
         id: "nextRun",
-        header: "Next runs",
-        size: 230,
-        minSize: 190,
+        header: "Next run / Overdue",
+        size: 210,
+        minSize: 175,
         sortValue: (schedule) => schedule.next_run_at,
         searchValue: (schedule) =>
           `${schedule.next_run_at} ${schedule.next_runs.join(" ")} ${schedule.last_run_at ?? ""}`,
+        cell: (schedule) => {
+          const timing = scheduleRunTiming(schedule);
+          return (
+            <span className="scheduleRunsCell">
+              {timing.futureRuns.length > 0 ? (
+                <span className="historyPrimary">
+                  <strong title={formatTime(timing.futureRuns[0])}>
+                    {formatCompactTime(timing.futureRuns[0])}
+                  </strong>
+                  {timing.futureRuns.length > 1 ? (
+                    <small>
+                      {Math.min(5, timing.futureRuns.length)} scheduled runs in
+                      details
+                    </small>
+                  ) : null}
+                </span>
+              ) : (
+                <span className={`status ${timing.tone}`}>{timing.label}</span>
+              )}
+              <small>{timing.detail}</small>
+            </span>
+          );
+        },
+      },
+      {
+        id: "lastResult",
+        header: "Last result",
+        size: 160,
+        minSize: 135,
+        sortValue: (schedule) => schedule.last_run_at ?? "",
+        searchValue: (schedule) =>
+          `${schedule.last_run_at ?? ""} ${schedule.last_error ?? ""} ${schedule.failure_count}`,
         cell: (schedule) => (
-          <span className="scheduleRunsCell">
-            <span className="scheduleRunChips">
-              {nextRunList(schedule).slice(0, 5).map((run) => (
-                <span className="targetChip" key={run}>{formatCompactTime(run)}</span>
-              ))}
+          <span className="historyPrimary">
+            <span className={`status ${scheduleLastResultTone(schedule)}`}>
+              {scheduleLastResultLabel(schedule)}
             </span>
             <small>
-              Last {schedule.last_run_at ? formatCompactTime(schedule.last_run_at) : "never"}
+              {schedule.last_run_at
+                ? formatCompactTime(schedule.last_run_at)
+                : "No execution yet"}
             </small>
           </span>
         ),
@@ -368,8 +397,8 @@ export function SchedulesPanel({
       {
         id: "state",
         header: "State",
-        size: 120,
-        minSize: 105,
+        size: 170,
+        minSize: 145,
         sortValue: (schedule) =>
           `${schedule.enabled ? "enabled" : "disabled"} ${schedule.failure_count}`,
         searchValue: (schedule) =>
@@ -377,8 +406,13 @@ export function SchedulesPanel({
         cell: (schedule) => (
           <span className="historyPrimary">
             <span className={schedule.enabled ? "status ok" : "status neutral"}>
-              {schedule.enabled ? "enabled" : "disabled"}
+              {schedule.enabled ? "Enabled" : "Disabled"}
             </span>
+            <small>
+              {schedule.enabled
+                ? "Automatic runs authorized"
+                : "Automatic runs paused"}
+            </small>
             {schedule.failure_count > 0 && (
               <small>
                 {schedule.failure_count}/{schedule.max_failures} failures
@@ -784,47 +818,7 @@ export function SchedulesPanel({
       description: (rows) =>
         describeScheduleAction(
           rows,
-          "Edit",
-          "Opens the schedule composer.",
-        ),
-      disabled: (rows) => rows.length !== 1,
-      icon: <Pencil size={14} />,
-      label: "Edit",
-      onSelect: (rows) => rows[0] && editSchedule(rows[0]),
-    },
-    {
-      description: (rows) =>
-        describeScheduleAction(
-          rows,
-          "Enable",
-          "Automatic runs will resume.",
-        ),
-      label: "Review enable",
-      disabled: (rows) => rows.length !== 1 || rows[0]?.enabled === true,
-      icon: <Power size={14} />,
-      onSelect: (rows) =>
-        rows[0] &&
-        openScheduleAction({ type: "enable", schedule: rows[0] }),
-    },
-    {
-      description: (rows) =>
-        describeScheduleAction(
-          rows,
-          "Disable",
-          "Automatic runs will stop.",
-        ),
-      label: "Review disable",
-      disabled: (rows) => rows.length !== 1 || rows[0]?.enabled === false,
-      icon: <PowerOff size={14} />,
-      onSelect: (rows) =>
-        rows[0] &&
-        openScheduleAction({ type: "disable", schedule: rows[0] }),
-    },
-    {
-      description: (rows) =>
-        describeScheduleAction(
-          rows,
-          "Apply",
+          "Run",
           "Dispatches one job from the saved fixed target snapshot.",
           " now",
         ),
@@ -832,6 +826,32 @@ export function SchedulesPanel({
       disabled: (rows) => rows.length !== 1 || rows[0]?.enabled !== true,
       icon: <Play size={14} />,
       onSelect: (rows) => rows[0] && reviewApplyNow(rows[0]),
+    },
+    {
+      description: (rows) =>
+        describeScheduleAction(rows, "Enable", "Automatic runs will resume."),
+      label: "Review enable",
+      disabled: (rows) => rows.length !== 1 || rows[0]?.enabled === true,
+      icon: <Power size={14} />,
+      onSelect: (rows) =>
+        rows[0] && openScheduleAction({ type: "enable", schedule: rows[0] }),
+    },
+    {
+      description: (rows) =>
+        describeScheduleAction(rows, "Disable", "Automatic runs will stop."),
+      label: "Review disable",
+      disabled: (rows) => rows.length !== 1 || rows[0]?.enabled === false,
+      icon: <PowerOff size={14} />,
+      onSelect: (rows) =>
+        rows[0] && openScheduleAction({ type: "disable", schedule: rows[0] }),
+    },
+    {
+      description: (rows) =>
+        describeScheduleAction(rows, "Edit", "Opens the schedule composer."),
+      disabled: (rows) => rows.length !== 1,
+      icon: <Pencil size={14} />,
+      label: "Edit",
+      onSelect: (rows) => rows[0] && editSchedule(rows[0]),
     },
     {
       description: (rows) => describeScheduleTargetUpdate(rows),
@@ -868,8 +888,7 @@ export function SchedulesPanel({
       disabled: (rows) => rows.length !== 1,
       icon: <Trash2 size={14} />,
       onSelect: (rows) =>
-        rows[0] &&
-        openScheduleAction({ type: "delete", schedule: rows[0] }),
+        rows[0] && openScheduleAction({ type: "delete", schedule: rows[0] }),
       tone: "danger",
     },
     {
@@ -881,19 +900,56 @@ export function SchedulesPanel({
       label: "Copy fixed target IDs",
       onSelect: (rows) =>
         void copyText(
-          rows
-            .flatMap((schedule) => fixedTargetIds(schedule))
-            .join("\n"),
+          rows.flatMap((schedule) => fixedTargetIds(schedule)).join("\n"),
         ),
     },
     {
       label: "Copy audit selectors",
       onSelect: (rows) =>
         void copyText(
-          rows
-            .map((schedule) => schedule.selector_expression)
-            .join("\n"),
+          rows.map((schedule) => schedule.selector_expression).join("\n"),
         ),
+    },
+  ];
+  const scheduleRowActions: ConsoleDataGridAction<ScheduleRecord>[] = [
+    {
+      description: (rows) =>
+        describeScheduleAction(
+          rows,
+          "Run",
+          "Dispatches one job from the saved fixed target snapshot.",
+          " now",
+        ),
+      label: "Run now",
+      disabled: (rows) => rows.length !== 1 || rows[0]?.enabled !== true,
+      icon: <Play size={14} />,
+      onSelect: (rows) => rows[0] && reviewApplyNow(rows[0]),
+    },
+    {
+      description: (rows) =>
+        describeScheduleAction(rows, "Enable", "Automatic runs will resume."),
+      label: "Enable",
+      disabled: (rows) => rows.length !== 1 || rows[0]?.enabled === true,
+      icon: <Power size={14} />,
+      onSelect: (rows) =>
+        rows[0] && openScheduleAction({ type: "enable", schedule: rows[0] }),
+    },
+    {
+      description: (rows) =>
+        describeScheduleAction(rows, "Disable", "Automatic runs will stop."),
+      label: "Disable",
+      disabled: (rows) => rows.length !== 1 || rows[0]?.enabled === false,
+      icon: <PowerOff size={14} />,
+      onSelect: (rows) =>
+        rows[0] && openScheduleAction({ type: "disable", schedule: rows[0] }),
+    },
+    {
+      description: (rows) =>
+        describeScheduleAction(rows, "Edit", "Opens the schedule composer."),
+      disabled: (rows) => rows.length !== 1,
+      icon: <Pencil size={14} />,
+      label: "Edit",
+      onSelect: (rows) => rows[0] && editSchedule(rows[0]),
     },
   ];
 
@@ -927,6 +983,17 @@ export function SchedulesPanel({
             </button>
           </div>
         </div>
+        <div
+          className="scheduleExecutionPolicy"
+          aria-label="Schedule execution policy"
+        >
+          <Clock3 size={16} />
+          <span>
+            Enabled schedules automatically dispatch future jobs from their
+            saved target snapshot. Use <strong>Run now</strong> for one manual
+            dispatch; approval work is separate in Jobs / Approvals.
+          </span>
+        </div>
         <ConsoleDataGrid
           actions={scheduleActions}
           columns={scheduleColumns}
@@ -936,7 +1003,10 @@ export function SchedulesPanel({
               <div className="emptyState compactEmpty">
                 <Clock3 size={22} />
                 <strong>No schedules yet</strong>
-                <span>Create a schedule below to run a command template on a fixed target snapshot.</span>
+                <span>
+                  Create a schedule below to run a command template on a fixed
+                  target snapshot.
+                </span>
               </div>
             ) : (
               <div className="emptyState compactEmpty">
@@ -947,30 +1017,17 @@ export function SchedulesPanel({
           getRowId={(schedule) => schedule.id}
           itemLabel="schedules"
           renderExpandedRow={(schedule) => (
-            <div className="gridDetailLine">
-              <strong>{schedule.command_type}</strong>
-              <span>{fixedTargetIds(schedule).length} fixed targets</span>
-              <span className="monoCell">
-                audit: {schedule.selector_expression || "none"}
-              </span>
-              <span>
-                next {formatCompactTime(schedule.next_run_at)}
-              </span>
-              <span>
-                last{" "}
-                {schedule.last_run_at
-                  ? formatTime(schedule.last_run_at)
-                  : "never"}
-              </span>
-              <span>{describeSchedulePolicy(schedule)}</span>
-            </div>
+            <ScheduleExpandedDetail schedule={schedule} />
           )}
-          rowActions={scheduleActions}
+          rowActions={scheduleRowActions}
           rows={schedules}
           storageKey="vpsman.grid.schedules"
           title="Schedule records"
         />
-        <div className={`privilegeGateBox ${privilegeMaterial ? "ready" : ""}`} aria-label="Schedule lifecycle privilege gate">
+        <div
+          className={`privilegeGateBox ${privilegeMaterial ? "ready" : ""}`}
+          aria-label="Schedule lifecycle privilege gate"
+        >
           <ShieldCheck size={16} />
           <span>
             {privilegeMaterial
@@ -978,7 +1035,11 @@ export function SchedulesPanel({
               : "Open Privilege Vault to enable apply now, target updates, enable, disable, and delete"}
           </span>
           {!privilegeMaterial && (
-            <button className="secondaryAction compactAction" onClick={onOpenPrivilegeUnlock} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={onOpenPrivilegeUnlock}
+              type="button"
+            >
               Open Privilege Vault
             </button>
           )}
@@ -1039,7 +1100,9 @@ export function SchedulesPanel({
         )}
         <ConfirmationPrompt
           confirmLabel={
-            scheduleAction ? actionConfirmLabel(scheduleAction.type) : "Run schedule action"
+            scheduleAction
+              ? actionConfirmLabel(scheduleAction.type)
+              : "Run schedule action"
           }
           detail={scheduleAction ? actionDetail(scheduleAction) : ""}
           error={scheduleActionError}
@@ -1073,7 +1136,11 @@ export function SchedulesPanel({
           forceOpenKey={editingScheduleId}
           defaultOpen={schedules.length === 0}
           storageKey="vpsman.panel.schedules.create"
-          summary={schedules.length === 0 ? "Create the first recurring job" : `${selectedTargetCount} matching VPSs in local preview`}
+          summary={
+            schedules.length === 0
+              ? "Create the first recurring job"
+              : `${selectedTargetCount} matching VPSs in local preview`
+          }
           title={editingScheduleId ? "Modify schedule" : "Create schedule"}
         >
           <form className="dispatchForm" onSubmit={submitSchedule}>
@@ -1568,6 +1635,19 @@ function formatCatchUpPolicy(policy: string): string {
   return "skip missed";
 }
 
+function scheduleCommandTypeLabel(commandType: string): string {
+  switch (commandType) {
+    case "shell_argv":
+      return "Shell command";
+    case "scheduled_shell_argv":
+      return "Scheduled shell command";
+    case "backup":
+      return "Backup";
+    default:
+      return commandType.replace(/_/g, " ");
+  }
+}
+
 function describeSchedulePolicy(schedule: ScheduleRecord): string {
   const retry = `retry after ${formatInterval(schedule.retry_delay_secs)}`;
   if (schedule.catch_up_policy === "run_all_limited") {
@@ -1579,7 +1659,171 @@ function describeSchedulePolicy(schedule: ScheduleRecord): string {
   return `Skip missed runs; ${retry}`;
 }
 
+function scheduleLastResultTone(
+  schedule: ScheduleRecord,
+): "neutral" | "ok" | "warn" {
+  if (schedule.last_error || schedule.failure_count > 0) {
+    return "warn";
+  }
+  if (schedule.last_run_at) {
+    return "ok";
+  }
+  return "neutral";
+}
+
+function scheduleLastResultLabel(schedule: ScheduleRecord): string {
+  if (schedule.last_error || schedule.failure_count > 0) {
+    return "Needs review";
+  }
+  if (schedule.last_run_at) {
+    return "Succeeded";
+  }
+  return "Never run";
+}
+
+function ScheduleFutureRunsMenu({ runs }: { runs: string[] }) {
+  const boundedRuns = runs.slice(0, 5);
+  return (
+    <DropdownMenu.Root>
+      <DropdownMenu.Trigger asChild>
+        <button
+          className="scheduleNextRunsTrigger"
+          title="Show the next scheduled run times"
+          type="button"
+        >
+          <Clock3 size={13} />
+          <span>View {boundedRuns.length}</span>
+          <ChevronDown size={12} />
+        </button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content
+          align="start"
+          className="consoleMenu scheduleRunMenu"
+          collisionPadding={12}
+          sideOffset={6}
+        >
+          <DropdownMenu.Label className="consoleMenuLabel">
+            Next runs
+          </DropdownMenu.Label>
+          <div className="scheduleRunMenuList" role="list">
+            {boundedRuns.map((run, index) => (
+              <div className="scheduleRunMenuItem" key={run} role="listitem">
+                <strong>{index === 0 ? "Next" : `#${index + 1}`}</strong>
+                <span title={formatTime(run)}>{formatCompactTime(run)}</span>
+              </div>
+            ))}
+          </div>
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>
+  );
+}
+
+function ScheduleExpandedDetail({ schedule }: { schedule: ScheduleRecord }) {
+  const timing = scheduleRunTiming(schedule);
+  return (
+    <div className="consoleInlineDetailGrid">
+      <span>
+        <strong>Operation</strong>
+        <span>{operationSummary(schedule.operation)}</span>
+        <span>{scheduleCommandTypeLabel(schedule.command_type)}</span>
+      </span>
+      <span>
+        <strong>Targets</strong>
+        <span>{fixedTargetIds(schedule).length} fixed VPSs</span>
+        <span>{schedule.selector_expression || "No audit selector"}</span>
+      </span>
+      <span>
+        <strong>Future runs</strong>
+        <span>
+          {timing.futureRuns.length > 0
+            ? timing.futureRuns
+                .slice(0, 5)
+                .map((run) => `${formatCompactTime(run)} (${formatTime(run)})`)
+                .join(" · ")
+            : timing.label}
+        </span>
+        <span>{timing.detail}</span>
+      </span>
+      <span>
+        <strong>Last result</strong>
+        <span>
+          {schedule.last_run_at ? formatTime(schedule.last_run_at) : "Never"}
+        </span>
+        <span>{schedule.last_error || "No error reported"}</span>
+      </span>
+      <span>
+        <strong>Execution policy</strong>
+        <span>
+          {schedule.enabled
+            ? "Enabled schedules authorize future runs automatically"
+            : "Disabled schedules do not dispatch future runs"}
+        </span>
+        <span>{describeSchedulePolicy(schedule)}</span>
+      </span>
+    </div>
+  );
+}
+
+type ScheduleRunTiming = {
+  detail: string;
+  futureRuns: string[];
+  label: string;
+  staleRuns: string[];
+  tone: "info" | "neutral" | "ok" | "warn";
+};
+
+function scheduleRunTiming(schedule: ScheduleRecord): ScheduleRunTiming {
+  const runs = parseScheduleRuns(schedule);
+  const now = Date.now();
+  const futureRuns = runs
+    .filter((run) => run.time > now)
+    .map((run) => run.value);
+  const staleRuns = runs
+    .filter((run) => run.time <= now)
+    .map((run) => run.value);
+  if (futureRuns.length > 0) {
+    const staleDetail =
+      staleRuns.length > 0
+        ? `; ${staleRuns.length} stale ${staleRuns.length === 1 ? "time hidden" : "times hidden"}`
+        : "";
+    return {
+      detail: `${futureRuns.length} future ${futureRuns.length === 1 ? "run" : "runs"} returned${staleDetail}`,
+      futureRuns,
+      label: "Scheduled",
+      staleRuns,
+      tone: "ok",
+    };
+  }
+  if (staleRuns.length > 0) {
+    const latestStale = staleRuns[staleRuns.length - 1];
+    return {
+      detail: `Schedule calculation stale; latest returned time was ${formatCompactTime(latestStale)}`,
+      futureRuns,
+      label: schedule.enabled ? "Overdue" : "No future runs",
+      staleRuns,
+      tone: schedule.enabled ? "warn" : "neutral",
+    };
+  }
+  return {
+    detail: schedule.enabled
+      ? "Schedule calculation stale; no valid future run returned"
+      : "No future runs while disabled",
+    futureRuns,
+    label: schedule.enabled ? "Schedule stale" : "Disabled",
+    staleRuns,
+    tone: schedule.enabled ? "warn" : "neutral",
+  };
+}
+
 function nextRunList(schedule: ScheduleRecord): string[] {
+  return parseScheduleRuns(schedule).map((run) => run.value);
+}
+
+function parseScheduleRuns(
+  schedule: ScheduleRecord,
+): Array<{ time: number; value: string }> {
   const runs = Array.isArray(schedule.next_runs) ? schedule.next_runs : [];
   const unique = new Set<string>();
   if (schedule.next_run_at) {
@@ -1590,7 +1834,10 @@ function nextRunList(schedule: ScheduleRecord): string[] {
       unique.add(run);
     }
   }
-  return Array.from(unique);
+  return Array.from(unique)
+    .map((value) => ({ time: Date.parse(value), value }))
+    .filter((run) => Number.isFinite(run.time))
+    .sort((left, right) => left.time - right.time);
 }
 
 function describeCronExpression(expr: string): string {
@@ -1599,7 +1846,13 @@ function describeCronExpression(expr: string): string {
     return "Invalid schedule";
   }
   const [minute, hour, dom, month, dow] = fields;
-  if (minute.startsWith("*/") && hour === "*" && dom === "*" && month === "*" && dow === "*") {
+  if (
+    minute.startsWith("*/") &&
+    hour === "*" &&
+    dom === "*" &&
+    month === "*" &&
+    dow === "*"
+  ) {
     const interval = Number(minute.slice(2));
     return Number.isInteger(interval) && interval > 0
       ? `Every ${interval} minutes`

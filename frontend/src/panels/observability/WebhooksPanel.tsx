@@ -1,4 +1,3 @@
-import { RadioTower, RefreshCw, Webhook } from "lucide-react";
 import { useState } from "react";
 import {
   DeliveryPreviewSection,
@@ -19,6 +18,8 @@ import type {
   WebhookRuleRecord,
   WebhookRuleRequest,
 } from "../../types";
+
+type WebhookConfigTab = "rules" | "deliveries" | "maintenance";
 
 type WebhooksPanelProps = {
   agents: AgentView[];
@@ -45,6 +46,8 @@ export function WebhooksPanel({
   webhookRuleDeliveries,
   webhookRules,
 }: WebhooksPanelProps) {
+  const [activeTab, setActiveTab] = useState<WebhookConfigTab>("rules");
+  const [ruleEditorOpen, setRuleEditorOpen] = useState(false);
   const [previewRows, setPreviewRows] = useState<WebhookRuleDeliveryRecord[]>([]);
   const [dryRunPreview, setDryRunPreview] = useState<WebhookRuleDryRunRecord | null>(null);
   const disabledRules = webhookRules.filter((rule) => !rule.enabled).length;
@@ -54,19 +57,24 @@ export function WebhooksPanel({
   const queuedDeliveries = webhookRuleDeliveries.filter((delivery) => delivery.status === "queued").length;
 
   function openDeliveryEvidence() {
+    setActiveTab("deliveries");
     const target = document.getElementById("observability-webhook-deliveries");
-    target?.scrollIntoView({ block: "start", behavior: "smooth" });
+    window.requestAnimationFrame(() => {
+      target?.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
   }
 
   function previewDeliveries(rows: WebhookRuleDeliveryRecord[]) {
     setPreviewRows(rows);
-    window.requestAnimationFrame(openDeliveryEvidence);
+    if (!ruleEditorOpen) {
+      openDeliveryEvidence();
+    }
   }
 
   function previewDryRun(preview: WebhookRuleDryRunRecord | null) {
     setDryRunPreview(preview);
-    if (preview) {
-      window.requestAnimationFrame(openDeliveryEvidence);
+    if (preview && !ruleEditorOpen) {
+      openDeliveryEvidence();
     }
   }
 
@@ -78,12 +86,14 @@ export function WebhooksPanel({
   return (
     <section className="workspace singleColumn observabilityWebhooksWorkspace">
       <div className="fleetPanel observabilityWebhooksPanel">
-        <div className="sectionHeader">
-          <div>
-            <h2>Webhooks</h2>
-            <span>Expression webhook rules, dispatch previews, delivery evidence, and retention maintenance.</span>
+        {!ruleEditorOpen ? (
+          <div className="sectionHeader">
+            <div>
+              <h2>Event webhooks</h2>
+              <span>Event webhooks are independent from alert notification destinations.</span>
+            </div>
           </div>
-        </div>
+        ) : null}
 
         {apiError ? (
           <div className="panelError observabilityMetricsError" role="alert">
@@ -91,73 +101,118 @@ export function WebhooksPanel({
           </div>
         ) : null}
 
-        <div className="metricGrid observabilityMetricsSummary" aria-label="Webhook routing summary">
-          <MetricTile detail={`${disabledRules} disabled rules`} label="Webhook rules" value={String(webhookRules.length)} />
-          <MetricTile detail="Queued delivery rows awaiting processing" label="Queued" value={String(queuedDeliveries)} />
-          <MetricTile detail="Failed or permanently failed retained rows" label="Failures" value={String(failedDeliveries)} />
-          <MetricTile detail="Retained webhook delivery history rows" label="Deliveries" value={String(webhookRuleDeliveries.length)} />
-        </div>
-
-        <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-webhook-rules-title">
-          <div className="dashboardSectionHeader">
-            <div>
-              <h2 id="observability-webhook-rules-title">Webhook rules</h2>
-              <span>Author expressions, templates, preview events, and reviewed queue/delivery actions from the Webhooks page.</span>
+        {!ruleEditorOpen ? (
+          <>
+            <div className="metricGrid observabilityMetricsSummary" aria-label="Webhook routing summary">
+              <MetricTile actionLabel="Rules" detail={`${disabledRules} disabled rules`} label="Event webhook rules" onAction={() => setActiveTab("rules")} value={String(webhookRules.length)} />
+              <MetricTile actionLabel="Deliveries" detail="Queued event webhook rows awaiting processing" label="Queued" onAction={openDeliveryEvidence} value={String(queuedDeliveries)} />
+              <MetricTile actionLabel="Retry failed" detail="Failed event webhook deliveries, separate from alert notification failures" label="Failures" onAction={() => setActiveTab("rules")} value={String(failedDeliveries)} />
+              <MetricTile actionLabel="History" detail="Retained event webhook delivery rows" label="Deliveries" onAction={openDeliveryEvidence} value={String(webhookRuleDeliveries.length)} />
             </div>
-            <Webhook size={18} />
-          </div>
-          <WebhookRuleManager
-            agents={agents}
-            onDelete={onDeleteWebhookRule}
-            onDispatch={onDispatchWebhookRules}
-            onDryRun={onDryRunWebhookRule}
-            onOpenDeliveries={openDeliveryEvidence}
-            onPreviewDryRun={previewDryRun}
-            onPreviewRows={previewDeliveries}
-            onProcess={onProcessWebhookRuleDeliveries}
-            onUpsert={onUpsertWebhookRule}
-            rules={webhookRules}
-          />
-        </section>
 
-        <section className="dashboardSection observabilityGroupSection" id="observability-webhook-deliveries" aria-labelledby="observability-webhook-deliveries-title">
-          <div className="dashboardSectionHeader">
-            <div>
-              <h2 id="observability-webhook-deliveries-title">Webhook deliveries</h2>
-              <span>Dry-run previews, queue previews, retained status, target, attempts, and delivery errors.</span>
+            <div className="observabilityWorkflowTabs" role="tablist" aria-label="Event webhook sections">
+              {[
+                ["rules", "Rules", "Create rules, send tests, and retry failed deliveries"],
+                ["deliveries", "Deliveries", "Previewed, queued, failed, and retained event webhooks"],
+                ["maintenance", "Maintenance", "Reviewed retention cleanup"],
+              ].map(([id, label, detail]) => (
+                <button
+                  aria-selected={activeTab === id}
+                  className={activeTab === id ? "active" : ""}
+                  key={id}
+                  onClick={() => setActiveTab(id as WebhookConfigTab)}
+                  role="tab"
+                  type="button"
+                >
+                  <strong>{label}</strong>
+                  <span>{detail}</span>
+                </button>
+              ))}
             </div>
-            <RadioTower size={18} />
-          </div>
-          {dryRunPreview || previewRows.length > 0 ? (
-            <DeliveryPreviewSection count={previewRows.length} onClear={clearPreview} title="Webhook delivery preview">
-              {dryRunPreview ? <WebhookDryRunNotice agents={agents} preview={dryRunPreview} /> : null}
-              <WebhookDeliveryHistoryGrid deliveries={previewRows} preview />
-            </DeliveryPreviewSection>
-          ) : null}
-          <WebhookDeliveryHistoryGrid deliveries={webhookRuleDeliveries} preview={false} />
-        </section>
+          </>
+        ) : null}
 
-        <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-webhook-maintenance-title">
-          <div className="dashboardSectionHeader">
-            <div>
-              <h2 id="observability-webhook-maintenance-title">Webhook delivery maintenance</h2>
-              <span>Review retained delivery cleanup by age, status, and rule before deleting history rows.</span>
+        {activeTab === "rules" ? (
+          <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-webhook-rules-title">
+            <div className="dashboardSectionHeader">
+              <div>
+                <h2 id="observability-webhook-rules-title">Event webhook rules</h2>
+                <span>Create event webhook rules, preview matching events, send reviewed tests, and retry failed deliveries without mixing alert notification channels into this workflow.</span>
+              </div>
             </div>
-            <RefreshCw size={18} />
-          </div>
-          <WebhookDeliveryMaintenancePanel onRotate={onRotateWebhookDeliveryHistory} rules={webhookRules} />
-        </section>
+            <WebhookRuleManager
+              agents={agents}
+              onDelete={onDeleteWebhookRule}
+              onDispatch={onDispatchWebhookRules}
+              onDryRun={onDryRunWebhookRule}
+              onOpenDeliveries={openDeliveryEvidence}
+              onPreviewDryRun={previewDryRun}
+              onPreviewRows={previewDeliveries}
+              onProcess={onProcessWebhookRuleDeliveries}
+              onUpsert={onUpsertWebhookRule}
+              editorMode="focused"
+              onEditorOpenChange={setRuleEditorOpen}
+              queueMode="configuration"
+              rules={webhookRules}
+            />
+          </section>
+        ) : null}
+
+        {activeTab === "deliveries" ? (
+          <section className="dashboardSection observabilityGroupSection" id="observability-webhook-deliveries" aria-labelledby="observability-webhook-deliveries-title">
+            <div className="dashboardSectionHeader">
+              <div>
+                <h2 id="observability-webhook-deliveries-title">Event webhook deliveries</h2>
+                <span>Dry-run previews, queued tests, retained status, target, attempts, and event webhook errors. Alert notification deliveries stay on Alerts.</span>
+              </div>
+            </div>
+            {dryRunPreview || previewRows.length > 0 ? (
+              <DeliveryPreviewSection count={previewRows.length} onClear={clearPreview} title="Event webhook delivery preview">
+                {dryRunPreview ? <WebhookDryRunNotice agents={agents} preview={dryRunPreview} /> : null}
+                <WebhookDeliveryHistoryGrid deliveries={previewRows} preview />
+              </DeliveryPreviewSection>
+            ) : null}
+            <WebhookDeliveryHistoryGrid deliveries={webhookRuleDeliveries} preview={false} />
+          </section>
+        ) : null}
+
+        {activeTab === "maintenance" ? (
+          <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-webhook-maintenance-title">
+            <div className="dashboardSectionHeader">
+              <div>
+                <h2 id="observability-webhook-maintenance-title">Event webhook maintenance</h2>
+                <span>Review retained event webhook cleanup by age, status, and rule before deleting delivery history rows.</span>
+              </div>
+            </div>
+            <WebhookDeliveryMaintenancePanel onRotate={onRotateWebhookDeliveryHistory} rules={webhookRules} />
+          </section>
+        ) : null}
       </div>
     </section>
   );
 }
 
-function MetricTile({ detail, label, value }: { detail: string; label: string; value: string }) {
+function MetricTile({
+  actionLabel,
+  detail,
+  label,
+  onAction,
+  value,
+}: {
+  actionLabel: string;
+  detail: string;
+  label: string;
+  onAction: () => void;
+  value: string;
+}) {
   return (
     <div className="metricCard">
       <span>{label}</span>
       <strong>{value}</strong>
       <small>{detail}</small>
+      <button className="linkButton metricCardAction" onClick={onAction} type="button">
+        {actionLabel}
+      </button>
     </div>
   );
 }

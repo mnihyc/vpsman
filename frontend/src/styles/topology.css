@@ -63,16 +63,21 @@
 }
 
 .networkWorkflowText small,
-.networkWorkflowMetric,
+.networkWorkflowAction,
 .networkOverviewEvidence span {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
 }
 
-.networkWorkflowMetric {
+.networkWorkflowAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   justify-self: end;
   white-space: nowrap;
+  color: var(--primary-text);
+  font-weight: 600;
 }
 
 .networkOverviewEvidence {
@@ -124,6 +129,32 @@
   background: var(--canvas);
 }
 
+.topologyGraphPanel .sectionHeader h2 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.topologyFreshnessBadge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid var(--info-border);
+  border-radius: 999px;
+  background: var(--info-soft);
+  color: var(--info-text);
+  padding: 3px 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.topologyFreshnessBadge.stale {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
 .topologyGraphViewport {
   position: relative;
   min-width: 0;
@@ -150,13 +181,17 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
+  gap: 6px;
+  min-width: 32px;
   height: 32px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
   color: var(--text-secondary);
   cursor: pointer;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .topologyGraphViewportControls button:disabled {
@@ -165,12 +200,17 @@
   background: var(--surface-neutral);
 }
 
-.topologyGraphViewportControls span {
+.topologyGraphViewportControls > span {
   min-width: 42px;
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
   text-align: right;
+}
+
+.topologyGraphViewportControls button span {
+  color: inherit;
+  font: inherit;
 }
 
 .compactSearch {
@@ -192,6 +232,29 @@
   border: 0;
   outline: 0;
   color: var(--text);
+}
+
+.topologyFilterSelect {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.topologyFilterSelect select {
+  min-width: 128px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  outline: 0;
 }
 
 .segmentedControl {
@@ -392,6 +455,10 @@
 
 .topologyGraphMinimap circle.attention {
   fill: var(--warning-text);
+}
+
+.topologyMobileGraphToggle {
+  display: none;
 }
 
 .topologyGraphSummary {
@@ -680,6 +747,38 @@
   min-width: 0;
 }
 
+.topologyOspfPreviewInline {
+  align-self: end;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 10px;
+  min-width: 0;
+  min-height: 38px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  padding: 7px 10px;
+}
+
+.topologyOspfPreviewInline span,
+.topologyOspfPreviewInline small {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.topologyOspfPreviewInline strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.topologyOspfPreviewInline small {
+  grid-column: 1 / -1;
+}
+
 .topologyPlanWorkbenchRail {
   display: flex;
   flex-wrap: wrap;
@@ -724,6 +823,54 @@
 .tunnelPlansRegistryPanel .gridToolbarActions {
   flex: 1 1 100%;
   max-width: 100%;
+}
+
+.tunnelPlansRegistryPanel .gridCellContent {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.tunnelPlansRegistryPanel .historyPrimary strong,
+.tunnelPlansRegistryPanel .historyPrimary small {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.tunnelPlansRegistryPanel .historyPrimary strong {
+  overflow-wrap: break-word;
+}
+
+.tunnelPlansRegistryPanel .historyPrimary small {
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.tunnelPlansRegistryPanel .status {
+  line-height: 1.2;
+  white-space: normal;
+}
+
+.topologyPlanActionHint {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tunnelPlanRowActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tunnelPlanRowActions .compactAction {
+  justify-content: center;
+  min-width: 94px;
 }
 
 .topologyPlanModelNote > div {
@@ -795,6 +942,37 @@
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
   gap: 12px;
   min-width: 0;
+}
+
+.ospfRecommendationObject {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr));
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.ospfRecommendationObject span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ospfRecommendationObject small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.ospfRecommendationObject strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
 }
 
 .topologyNetworkReviewStrip,
@@ -971,6 +1149,69 @@
   text-transform: uppercase;
 }
 
+.topologyNetworkSingleSample {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 156px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.topologyNetworkSingleSample > strong {
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.topologyNetworkSingleSample > strong.attention {
+  color: var(--warning-text);
+}
+
+.topologyNetworkSingleSample > span,
+.topologyNetworkSingleSample p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.topologyNetworkSingleSample dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.topologyNetworkSingleSample dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 6px;
+}
+
+.topologyNetworkSingleSample dt,
+.topologyNetworkSingleSample dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.topologyNetworkSingleSample dt {
+  color: var(--muted);
+}
+
+.topologyNetworkSingleSample dd {
+  color: var(--text);
+  font-weight: 700;
+  text-align: right;
+}
+
 .topologyPlanComposer > .tunnelPlanWizardStrip,
 .topologyPreview > .generatedConfigReviewStrip {
   padding: 0 18px 12px;
@@ -1033,6 +1274,45 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 
+.topologyEvidenceGroup {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.topologyEvidenceGroup:last-child {
+  border-bottom: 0;
+}
+
+.topologyEvidenceGroupHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.topologyEvidenceGroupHeader strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.topologyEvidenceGroupHeader span {
+  max-width: 72ch;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.topologyEvidenceGroup > .latencyCurve,
+.topologyEvidenceGroup .latencyCurveGroups {
+  padding: 0;
+  border-bottom: 0;
+}
+
 .ospfSnippetGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
@@ -1060,7 +1340,9 @@
   background: var(--canvas);
   color: var(--text);
   padding: 10px;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family:
+    ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono",
+    monospace;
   font-size: 12px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -1142,6 +1424,70 @@
 }
 
 @media (max-width: 760px) {
+  .tunnelPlansRegistryPanel.mobileWorkflowFocused {
+    display: none;
+  }
+
+  .tunnelPlansRegistryPanel .gridToolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .tunnelPlansRegistryPanel .gridSearch,
+  .tunnelPlansRegistryPanel .gridToolbarActions {
+    flex: none;
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+  }
+
+  .tunnelPlansRegistryPanel .gridSearch {
+    height: 34px;
+    min-height: 34px;
+  }
+
+  .tunnelPlansRegistryPanel .gridToolbarActions {
+    align-items: stretch;
+    justify-content: flex-start;
+  }
+
+  .tunnelPlansRegistryPanel .gridToolbarActions .compactAction {
+    flex: 1 1 min(100%, 150px);
+    justify-content: center;
+  }
+
+  .tunnelPlansRegistryPanel .topologyPlanActionHint {
+    flex: 1 1 100%;
+  }
+
+  .topologyMobileGraphToggle {
+    display: grid;
+    gap: 8px;
+    margin: 0 14px 10px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--surface-subtle);
+    padding: 10px;
+  }
+
+  .topologyMobileGraphToggle span {
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .topologyGraphViewport {
+    display: none;
+  }
+
+  .topologyGraphPanel.mobileGraphOpen .topologyGraphViewport {
+    display: block;
+  }
+
+  .topologyGraphPanel.mobileGraphOpen .topologyGraphCanvas {
+    min-height: 320px;
+  }
+
   .topologyGraphSummary {
     gap: 8px;
     max-height: none;

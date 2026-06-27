@@ -2,8 +2,8 @@ use std::net::IpAddr;
 
 use anyhow::{Context, Result};
 use vpsman_common::{
-    BandwidthTier, OspfCostPolicy, RuntimeTunnelManager, TunnelAddressFamily, TunnelAddressPair,
-    TunnelKind, TunnelPlanInput,
+    BandwidthMbps, OspfCostPolicy, RuntimeTunnelManager, TunnelAddressFamily, TunnelAddressPair,
+    TunnelKind, TunnelPlanInput, MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS,
 };
 
 use crate::network_runtime_args::{
@@ -35,7 +35,7 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     let mut left_tunnel_ipv6_cidr = None::<String>;
     let mut right_tunnel_ipv6_cidr = None::<String>;
     let mut latency_primary_family = TunnelAddressFamily::Ipv4;
-    let mut bandwidth = None::<BandwidthTier>;
+    let mut bandwidth = None::<BandwidthMbps>;
     let mut latency_ms = None::<f64>;
     let mut packet_loss_ratio = 0.0_f64;
     let mut preference = 1.0_f64;
@@ -239,12 +239,19 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
                 reserved_addresses.extend(split_csv_values(flag_value(value, "--reserved=")));
                 index += 1;
             }
-            "--bandwidth" => {
-                bandwidth = Some(parse_bandwidth(next_value(tokens, index, "--bandwidth")?)?);
+            "--bandwidth-mbps" => {
+                bandwidth = Some(parse_bandwidth_mbps(next_value(
+                    tokens,
+                    index,
+                    "--bandwidth-mbps",
+                )?)?);
                 index += 2;
             }
-            value if value.starts_with("--bandwidth=") => {
-                bandwidth = Some(parse_bandwidth(flag_value(value, "--bandwidth="))?);
+            value if value.starts_with("--bandwidth-mbps=") => {
+                bandwidth = Some(parse_bandwidth_mbps(flag_value(
+                    value,
+                    "--bandwidth-mbps=",
+                ))?);
                 index += 1;
             }
             "--latency-ms" => {
@@ -528,7 +535,7 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
             "IPv6",
         )?,
         latency_primary_family,
-        bandwidth: required(bandwidth, "--bandwidth")?,
+        bandwidth_mbps: required(bandwidth, "--bandwidth-mbps")?,
         latency_ms: required(latency_ms, "--latency-ms")?,
         packet_loss_ratio,
         preference,
@@ -655,12 +662,12 @@ fn parse_tunnel_kind(value: &str) -> Result<TunnelKind> {
     }
 }
 
-fn parse_bandwidth(value: &str) -> Result<BandwidthTier> {
-    match value {
-        "10m" | "m10" => Ok(BandwidthTier::M10),
-        "100m" | "m100" => Ok(BandwidthTier::M100),
-        "1000m" | "m1000" => Ok(BandwidthTier::M1000),
-        _ => anyhow::bail!("--bandwidth must be one of 10m, 100m, 1000m"),
+fn parse_bandwidth_mbps(value: &str) -> Result<BandwidthMbps> {
+    let parsed = parse_u32(value, "--bandwidth-mbps")?;
+    if (MIN_TUNNEL_BANDWIDTH_MBPS..=MAX_TUNNEL_BANDWIDTH_MBPS).contains(&parsed) {
+        Ok(parsed)
+    } else {
+        anyhow::bail!("--bandwidth-mbps must be between 10 and 10000")
     }
 }
 
@@ -699,7 +706,7 @@ fn parse_u8(value: &str, flag: &str) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::parse_vty_tunnel_plan;
-    use vpsman_common::{BandwidthTier, RuntimeTunnelManager, TunnelAddressFamily, TunnelKind};
+    use vpsman_common::{BandwidthMbps, RuntimeTunnelManager, TunnelAddressFamily, TunnelKind};
 
     #[test]
     fn parses_vty_tunnel_plan_for_local_render() {
@@ -721,8 +728,8 @@ mod tests {
             "--right-tunnel-ipv4-cidr=10.255.0.1/31",
             "--reserved-address",
             "10.255.0.2,10.255.0.3",
-            "--bandwidth",
-            "1000m",
+            "--bandwidth-mbps",
+            "1000",
             "--latency-ms",
             "138",
             "--packet-loss-ratio=0.002",
@@ -742,7 +749,7 @@ mod tests {
             request.input.reserved_addresses,
             vec!["10.255.0.2", "10.255.0.3"]
         );
-        assert_eq!(request.input.bandwidth, BandwidthTier::M1000);
+        assert_eq!(request.input.bandwidth_mbps, 1000);
         assert_eq!(request.input.latency_ms, 138.0);
         assert_eq!(request.input.packet_loss_ratio, 0.002);
         assert_eq!(request.input.preference, 1.2);
@@ -767,7 +774,7 @@ mod tests {
             "--left-tunnel-ipv4-cidr=10.255.10.0/31",
             "--right-tunnel-ipv4-cidr=10.255.10.1/31",
             "--reserved=10.255.10.2",
-            "--bandwidth=100m",
+            "--bandwidth-mbps=100m",
             "--latency-ms=20",
             "--fou-port=6655",
             "--fou-peer-port=7755",
@@ -781,7 +788,7 @@ mod tests {
         assert!(request.enabled);
         assert!(request.confirmed);
         assert_eq!(request.input.kind, TunnelKind::Fou);
-        assert_eq!(request.input.bandwidth, BandwidthTier::M100);
+        assert_eq!(request.input.bandwidth_mbps, 100);
         assert_eq!(request.input.packet_loss_ratio, 0.0);
         assert_eq!(request.input.preference, 1.0);
         assert_eq!(request.input.runtime_control.fou.port, 6655);
@@ -804,7 +811,7 @@ mod tests {
             "--left-tunnel-ipv6-cidr=fd7a:115c:a1e0::20/127",
             "--right-tunnel-ipv6-cidr=fd7a:115c:a1e0::21/127",
             "--latency-primary-family=ipv6",
-            "--bandwidth=1000m",
+            "--bandwidth-mbps=1000m",
             "--latency-ms=87.5",
         ])
         .unwrap();
@@ -837,7 +844,7 @@ mod tests {
             "--pool-cidr=10.255.10.0/29",
             "--left-tunnel-ipv4-cidr=10.255.10.0/31",
             "--right-tunnel-ipv4-cidr=10.255.10.1/31",
-            "--bandwidth=100m",
+            "--bandwidth-mbps=100m",
             "--latency-ms=20",
             "--runtime-manager=adapter",
             "--runtime-startup-argv=/usr/local/libexec/vpsman-openvpn-adapter,start,{interface}",
@@ -884,7 +891,7 @@ mod tests {
             "--left-underlay=198.51.100.10",
             "--right-underlay=203.0.113.20",
             "--pool-cidr=10.255.10.0/29",
-            "--bandwidth=100m",
+            "--bandwidth-mbps=100m",
             "--latency-ms=20",
         ])
         .is_err());
@@ -897,7 +904,7 @@ mod tests {
             "--left-underlay=198.51.100.10",
             "--right-underlay=203.0.113.20",
             "--pool-cidr=10.255.10.0/29",
-            "--bandwidth=1g",
+            "--bandwidth-mbps=1g",
             "--latency-ms=20",
         ])
         .is_err());
@@ -910,7 +917,7 @@ mod tests {
             "--left-underlay=198.51.100.10",
             "--right-underlay=203.0.113.20",
             "--left-tunnel-ipv6-cidr=fd7a:115c:a1e0::20/127",
-            "--bandwidth=100m",
+            "--bandwidth-mbps=100m",
             "--latency-ms=20",
         ])
         .is_err());
@@ -923,7 +930,7 @@ mod tests {
             "--left-underlay=198.51.100.10",
             "--right-underlay=203.0.113.20",
             "--pool-cidr=10.255.10.0/29",
-            "--bandwidth=100m",
+            "--bandwidth-mbps=100m",
             "--latency-ms=20",
         ])
         .is_err());

@@ -1,7 +1,7 @@
 use uuid::Uuid;
 use vpsman_common::{
     plan_tunnel, AgentCapabilitySnapshot, AgentPrivilegeMode, AgentRuntimeConfig,
-    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, BandwidthTier, OspfCostPolicy,
+    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, OspfCostPolicy,
     ProcessResourceLimits, ProcessRunPolicy, TunnelAddressPair, TunnelKind, TunnelPlanInput,
 };
 
@@ -465,6 +465,14 @@ fn capability_split_allows_config_read_for_unprivileged_targets() {
 }
 
 #[test]
+fn unprivileged_submission_allowlist_includes_config_read_only() {
+    assert!(job_allows_unprivileged_submission(&JobCommand::ConfigRead));
+    assert!(!job_allows_unprivileged_submission(
+        &mutating_runtime_config_sync_command()
+    ));
+}
+
+#[test]
 fn capability_split_allows_runtime_config_sync_for_unprivileged_targets() {
     let command = JobCommand::RuntimeConfigSync {
         desired_version: 1,
@@ -656,7 +664,7 @@ fn mutating_runtime_config_sync_command() -> JobCommand {
         ipv6_address_pool_cidr: None,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
-        bandwidth: BandwidthTier::M100,
+        bandwidth_mbps: 100,
         latency_ms: 18.0,
         packet_loss_ratio: 0.0,
         preference: 1.0,
