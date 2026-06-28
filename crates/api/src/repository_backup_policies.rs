@@ -525,6 +525,35 @@ pub(crate) struct BackupPolicyPruneCandidate {
     created_at: String,
 }
 
+impl BackupPolicyPruneCandidate {
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        request_id: Uuid,
+        artifact_id: Uuid,
+        client_id: String,
+        object_key: String,
+        created_at: String,
+    ) -> Self {
+        Self {
+            request_id,
+            artifact_id,
+            client_id,
+            object_key,
+            created_at,
+        }
+    }
+
+    pub(crate) fn preview_hash_key(&self) -> serde_json::Value {
+        serde_json::json!({
+            "request_id": self.request_id,
+            "artifact_id": self.artifact_id,
+            "client_id": &self.client_id,
+            "object_key": &self.object_key,
+            "created_at": &self.created_at,
+        })
+    }
+}
+
 async fn list_postgres_backup_policy_prune_candidates(
     pool: &sqlx::PgPool,
     schedule_id: Uuid,

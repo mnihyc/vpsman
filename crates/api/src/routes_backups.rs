@@ -39,6 +39,7 @@ use crate::{
         SchedulePrivilegeIntent, SchedulePrivilegeIntentInput,
     },
     repository_backup_artifacts::backup_server_artifact,
+    repository_backup_policies::BackupPolicyPruneCandidate,
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
     routes_schedules::validate_schedule_request,
     security::{operator_has_scope, SCOPE_BACKUPS_READ},
@@ -56,6 +57,7 @@ const BACKUP_ARCHIVE_MANIFEST_PATH: &str = "vpsman-backup/manifest.json";
 const MAX_BACKUP_ARCHIVE_MANIFEST_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES: usize = 24 * 1024 * 1024;
 pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
+const RETENTION_DAY_SECS: u64 = 86_400;
 
 pub(crate) async fn list_backup_requests(
     State(state): State<AppState>,
@@ -197,10 +199,12 @@ pub(crate) async fn prune_backup_policies(
             "backup_policy_prune_object_store_required",
         ));
     }
-    let preview_outputs = collect_backup_policy_prune_outputs(&state, &request, false).await?;
+    let plan = backup_policy_prune_plan(&state, &request).await?;
+    let preview_outputs = backup_policy_prune_preview_outputs(&state, &plan, metadata_only);
     let preview_hash = backup_policy_prune_preview_hash(
         request.schedule_id,
         request.metadata_only,
+        &plan,
         &preview_outputs,
     )?;
     if request.dry_run {
@@ -220,7 +224,7 @@ pub(crate) async fn prune_backup_policies(
             "backup_policy_prune_preview_hash_mismatch",
         ));
     }
-    let outputs = collect_backup_policy_prune_outputs(&state, &request, true).await?;
+    let outputs = execute_backup_policy_prune_plan(&state, plan, metadata_only).await?;
     state
         .repo
         .record_backup_policy_prune_audit(
@@ -238,17 +242,16 @@ pub(crate) async fn prune_backup_policies(
     }))
 }
 
-async fn collect_backup_policy_prune_outputs(
+struct BackupPolicyPrunePlan {
+    policy: BackupPolicyView,
+    cutoff_unix: u64,
+    candidates: Vec<BackupPolicyPruneCandidate>,
+}
+
+async fn backup_policy_prune_plan(
     state: &AppState,
     request: &BackupPolicyPruneRequest,
-    execute: bool,
-) -> Result<Vec<crate::model::BackupPolicyPrunePolicyView>, ApiError> {
-    let metadata_only = request.metadata_only.unwrap_or(false);
-    if execute && !metadata_only && state.backup_object_store.is_none() {
-        return Err(ApiError::bad_request(
-            "backup_policy_prune_object_store_required",
-        ));
-    }
+) -> Result<Vec<BackupPolicyPrunePlan>, ApiError> {
     let mut policies = state.repo.list_backup_policies().await?;
     if let Some(schedule_id) = request.schedule_id {
         policies.retain(|policy| policy.schedule_id == schedule_id);
@@ -256,17 +259,66 @@ async fn collect_backup_policy_prune_outputs(
     if policies.is_empty() {
         return Err(ApiError::bad_request("backup_policy_not_found"));
     }
-    let mut outputs = Vec::new();
+    let mut plan = Vec::new();
     for policy in policies {
-        let cutoff_unix = unix_now().saturating_sub(policy.retention_days.max(1) as u64 * 86_400);
+        let cutoff_unix = retention_cutoff_unix(policy.retention_days);
         let candidates = state
             .repo
             .list_backup_policy_prune_candidates(&policy, cutoff_unix)
             .await?;
-        let matched_rows = candidates.len() as i64;
+        plan.push(BackupPolicyPrunePlan {
+            policy,
+            cutoff_unix,
+            candidates,
+        });
+    }
+    Ok(plan)
+}
+
+fn backup_policy_prune_preview_outputs(
+    state: &AppState,
+    plan: &[BackupPolicyPrunePlan],
+    metadata_only: bool,
+) -> Vec<crate::model::BackupPolicyPrunePolicyView> {
+    plan.iter()
+        .map(|policy_plan| {
+            let object_keys = policy_plan
+                .candidates
+                .iter()
+                .map(|candidate| candidate.object_key.clone())
+                .collect::<Vec<_>>();
+            state.repo.backup_policy_prune_view(
+                &policy_plan.policy,
+                policy_plan.cutoff_unix,
+                policy_plan.candidates.len() as i64,
+                0,
+                object_keys,
+                false,
+                Vec::new(),
+                metadata_only,
+                "dry_run",
+            )
+        })
+        .collect()
+}
+
+async fn execute_backup_policy_prune_plan(
+    state: &AppState,
+    plan: Vec<BackupPolicyPrunePlan>,
+    metadata_only: bool,
+) -> Result<Vec<crate::model::BackupPolicyPrunePolicyView>, ApiError> {
+    if !metadata_only && state.backup_object_store.is_none() {
+        return Err(ApiError::bad_request(
+            "backup_policy_prune_object_store_required",
+        ));
+    }
+    let mut outputs = Vec::new();
+    for policy_plan in plan {
+        let matched_rows = policy_plan.candidates.len() as i64;
         let mut pruned_rows = 0_i64;
-        let mut object_keys = if !execute || metadata_only {
-            candidates
+        let mut object_keys = if metadata_only {
+            policy_plan
+                .candidates
                 .iter()
                 .map(|candidate| candidate.object_key.clone())
                 .collect::<Vec<_>>()
@@ -275,53 +327,46 @@ async fn collect_backup_policy_prune_outputs(
         };
         let mut object_delete_attempted = false;
         let mut object_delete_errors = Vec::new();
-        if execute {
-            if metadata_only {
-                pruned_rows = state
-                    .repo
-                    .prune_backup_policy_candidates_metadata(&candidates)
-                    .await?;
-            } else if !candidates.is_empty() {
-                object_delete_attempted = true;
-                if let Some(store) = state.backup_object_store.as_ref() {
-                    for candidate in &candidates {
-                        if !state
-                            .repo
-                            .begin_backup_policy_candidate_object_delete(candidate)
-                            .await?
-                        {
-                            continue;
+        if metadata_only {
+            pruned_rows = state
+                .repo
+                .prune_backup_policy_candidates_metadata(&policy_plan.candidates)
+                .await?;
+        } else if !policy_plan.candidates.is_empty() {
+            object_delete_attempted = true;
+            if let Some(store) = state.backup_object_store.as_ref() {
+                for candidate in &policy_plan.candidates {
+                    if !state
+                        .repo
+                        .begin_backup_policy_candidate_object_delete(candidate)
+                        .await?
+                    {
+                        continue;
+                    }
+                    object_keys.push(candidate.object_key.clone());
+                    match store.delete_confirmed(&candidate.object_key).await {
+                        Ok(()) => {
+                            let rows = state
+                                .repo
+                                .finalize_backup_policy_candidate_object_delete(candidate)
+                                .await?;
+                            pruned_rows += rows;
                         }
-                        object_keys.push(candidate.object_key.clone());
-                        match store.delete_confirmed(&candidate.object_key).await {
-                            Ok(()) => {
-                                let rows = state
-                                    .repo
-                                    .finalize_backup_policy_candidate_object_delete(candidate)
-                                    .await?;
-                                pruned_rows += rows;
-                            }
-                            Err(error) => {
-                                let error_text = error.to_string();
-                                state
-                                    .repo
-                                    .mark_backup_policy_candidate_delete_failed(
-                                        candidate,
-                                        &error_text,
-                                    )
-                                    .await?;
-                                object_delete_errors
-                                    .push(format!("{}: {error_text}", candidate.object_key));
-                                break;
-                            }
+                        Err(error) => {
+                            let error_text = error.to_string();
+                            state
+                                .repo
+                                .mark_backup_policy_candidate_delete_failed(candidate, &error_text)
+                                .await?;
+                            object_delete_errors
+                                .push(format!("{}: {error_text}", candidate.object_key));
+                            break;
                         }
                     }
                 }
             }
         }
-        let status = if !execute {
-            "dry_run"
-        } else if !object_delete_errors.is_empty() {
+        let status = if !object_delete_errors.is_empty() {
             "partial_error"
         } else if pruned_rows == 0 {
             "no_matches"
@@ -329,8 +374,8 @@ async fn collect_backup_policy_prune_outputs(
             "pruned"
         };
         let output = state.repo.backup_policy_prune_view(
-            &policy,
-            cutoff_unix,
+            &policy_plan.policy,
+            policy_plan.cutoff_unix,
             matched_rows,
             pruned_rows,
             object_keys,
@@ -347,27 +392,157 @@ async fn collect_backup_policy_prune_outputs(
 fn backup_policy_prune_preview_hash(
     schedule_id: Option<uuid::Uuid>,
     metadata_only: Option<bool>,
+    plan: &[BackupPolicyPrunePlan],
     outputs: &[crate::model::BackupPolicyPrunePolicyView],
 ) -> Result<String, ApiError> {
+    if plan.len() != outputs.len() {
+        return Err(ApiError::from(anyhow!(
+            "backup_policy_prune_preview_hash_failed: plan_output_length_mismatch"
+        )));
+    }
     let payload = serde_json::to_vec(&serde_json::json!({
         "version": 1,
         "schedule_id": schedule_id,
         "metadata_only_requested": metadata_only,
-        "policies": outputs.iter().map(|policy| {
+        "policies": plan.iter().zip(outputs.iter()).map(|(policy_plan, policy)| {
             serde_json::json!({
                 "schedule_id": policy.schedule_id,
                 "retention_days": policy.retention_days,
                 "keep_last": policy.keep_last,
-                "cutoff_unix": policy.cutoff_unix,
+                "cutoff_day": retention_cutoff_day(policy.cutoff_unix),
                 "matched_rows": policy.matched_rows,
-                "object_keys": policy.object_keys,
+                "object_keys": &policy.object_keys,
+                "candidate_keys": backup_policy_prune_candidate_hash_keys(&policy_plan.candidates),
                 "metadata_only": policy.metadata_only,
-                "status": policy.status,
+                "status": &policy.status,
             })
         }).collect::<Vec<_>>(),
     }))
     .map_err(|error| ApiError::from(anyhow!("backup_policy_prune_preview_hash_failed: {error}")))?;
     Ok(payload_hash(&payload))
+}
+
+fn backup_policy_prune_candidate_hash_keys(
+    candidates: &[BackupPolicyPruneCandidate],
+) -> Vec<serde_json::Value> {
+    candidates
+        .iter()
+        .map(BackupPolicyPruneCandidate::preview_hash_key)
+        .collect()
+}
+
+fn retention_cutoff_unix(retention_days: i32) -> u64 {
+    let today_start = unix_now() / RETENTION_DAY_SECS * RETENTION_DAY_SECS;
+    today_start.saturating_sub(retention_days.max(1) as u64 * RETENTION_DAY_SECS)
+}
+
+fn retention_cutoff_day(cutoff_unix: u64) -> u64 {
+    cutoff_unix / RETENTION_DAY_SECS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backup_policy_prune_preview_hash_ignores_moving_cutoff() {
+        let schedule_id = uuid::Uuid::new_v4();
+        let plan = vec![BackupPolicyPrunePlan {
+            policy: BackupPolicyView {
+                schedule_id,
+                name: "nightly".to_string(),
+                enabled: true,
+                selector_expression: "id:edge-a".to_string(),
+                target_client_ids: vec!["edge-a".to_string()],
+                paths: vec!["/etc".to_string()],
+                include_config: true,
+                follow_symlinks: false,
+                retention_days: 7,
+                keep_last: 2,
+                rotation_generation: None,
+                cron_expr: "0 3 * * *".to_string(),
+                timezone: "UTC".to_string(),
+                next_runs: Vec::new(),
+                catch_up_policy: "skip_missed".to_string(),
+                catch_up_limit: 1,
+                retry_delay_secs: 120,
+                max_failures: 3,
+                failure_count: 0,
+                last_error: None,
+                next_run_at: String::new(),
+                last_run_at: None,
+                created_at: "0".to_string(),
+                updated_at: "0".to_string(),
+            },
+            cutoff_unix: 1_000,
+            candidates: vec![
+                BackupPolicyPruneCandidate::for_test(
+                    uuid::Uuid::new_v4(),
+                    uuid::Uuid::new_v4(),
+                    "edge-a".to_string(),
+                    "backups/a.tar".to_string(),
+                    "0".to_string(),
+                ),
+                BackupPolicyPruneCandidate::for_test(
+                    uuid::Uuid::new_v4(),
+                    uuid::Uuid::new_v4(),
+                    "edge-a".to_string(),
+                    "backups/b.tar".to_string(),
+                    "1".to_string(),
+                ),
+            ],
+        }];
+        let mut policy = crate::model::BackupPolicyPrunePolicyView {
+            schedule_id,
+            name: "nightly".to_string(),
+            enabled: true,
+            retention_days: 7,
+            keep_last: 2,
+            cutoff_unix: 1_000,
+            matched_rows: 2,
+            pruned_rows: 0,
+            object_keys: vec!["backups/a.tar".to_string(), "backups/b.tar".to_string()],
+            object_delete_attempted: false,
+            object_delete_errors: Vec::new(),
+            metadata_only: true,
+            status: "dry_run".to_string(),
+        };
+
+        let first = backup_policy_prune_preview_hash(
+            Some(schedule_id),
+            Some(true),
+            &plan,
+            &[policy.clone()],
+        )
+        .expect("first prune preview hash");
+        policy.cutoff_unix += 60;
+        let same_candidates = backup_policy_prune_preview_hash(
+            Some(schedule_id),
+            Some(true),
+            &plan,
+            &[policy.clone()],
+        )
+        .expect("second prune preview hash");
+        assert_eq!(first, same_candidates);
+
+        policy.cutoff_unix += RETENTION_DAY_SECS;
+        let next_day = backup_policy_prune_preview_hash(
+            Some(schedule_id),
+            Some(true),
+            &plan,
+            &[policy.clone()],
+        )
+        .expect("next-day prune preview hash");
+        assert_ne!(first, next_day);
+
+        policy.cutoff_unix -= RETENTION_DAY_SECS;
+        policy.object_keys.push("backups/c.tar".to_string());
+        policy.matched_rows += 1;
+        let changed_candidates =
+            backup_policy_prune_preview_hash(Some(schedule_id), Some(true), &plan, &[policy])
+                .expect("changed prune preview hash");
+        assert_ne!(first, changed_candidates);
+    }
 }
 
 pub(crate) async fn create_backup_request(
