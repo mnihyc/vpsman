@@ -278,7 +278,7 @@ function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
       <span>{cluster.kind}</span>
       <strong>{cluster.label}</strong>
       <small>
-        {cluster.online}/{cluster.total} online, {cluster.warnings} warning observations, {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} retained traffic
+        {cluster.online}/{cluster.total} reported reachable, {cluster.warnings} warning observations, {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} retained traffic
       </small>
     </div>
   );

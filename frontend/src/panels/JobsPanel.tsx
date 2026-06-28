@@ -1,5 +1,4 @@
 import {
-  lazy,
   Suspense,
   useCallback,
   useEffect,
@@ -9,6 +8,7 @@ import {
 import {
   Download,
   ExternalLink,
+  History,
   Server,
   ShieldCheck,
   TerminalSquare,
@@ -64,8 +64,9 @@ import {
   shortId,
 } from "../utils";
 import { parseLatestFileStatus } from "../fileBrowser";
+import { retryableLazy } from "../lazyImport";
 
-const JobDispatchPanel = lazy(() =>
+const JobDispatchPanel = retryableLazy(() =>
   import("./JobDispatchPanel").then((module) => ({
     default: module.JobDispatchPanel,
   })),
@@ -379,6 +380,7 @@ export function JobsPanel({
   const scheduleRunJobs = jobs.filter((job) =>
     job.command_type.startsWith("scheduled_"),
   );
+  const historicalJobsBanner = jobHistoryFreshnessBanner(jobs);
   const scheduleById = useMemo(
     () => new Map(schedules.map((schedule) => [schedule.id, schedule])),
     [schedules],
@@ -786,15 +788,6 @@ export function JobsPanel({
             {job.target_count} target{job.target_count === 1 ? "" : "s"}
           </button>
         ),
-      },
-      {
-        id: "due",
-        header: "Due",
-        size: 140,
-        minSize: 120,
-        sortValue: (job) => job.created_at,
-        searchValue: () => "not reported",
-        cell: () => <span className="mutedValue">Not reported</span>,
       },
       {
         id: "started",
@@ -1442,6 +1435,16 @@ export function JobsPanel({
                   ))}
                 </span>
               </div>
+              {historicalJobsBanner ? (
+                <div
+                  className="vpsDetailNotice warning"
+                  aria-label="Job history freshness"
+                  role="status"
+                >
+                  <History size={16} />
+                  <span>{historicalJobsBanner}</span>
+                </div>
+              ) : null}
               <ConsoleDataGrid
                 actions={[
                   {
@@ -2330,6 +2333,20 @@ async function copyText(value: string) {
     return;
   }
   await navigator.clipboard?.writeText(value);
+}
+
+function jobHistoryFreshnessBanner(jobs: JobHistoryRecord[]): string | null {
+  const timestamps = jobs
+    .map((job) => Date.parse(job.created_at))
+    .filter(Number.isFinite);
+  if (timestamps.length === 0) {
+    return null;
+  }
+  const newestMs = Math.max(...timestamps);
+  if (Date.now() - newestMs < 7 * 24 * 60 * 60 * 1000) {
+    return null;
+  }
+  return `Showing historical jobs from ${formatCompactTime(new Date(newestMs).toISOString())}; refresh or open live workflow pages for current operation state.`;
 }
 
 function matchesOutputPayloadStream(stream: string): boolean {

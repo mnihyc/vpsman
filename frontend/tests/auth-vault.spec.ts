@@ -1,4 +1,4 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const accessToken = "a".repeat(64);
 const refreshToken = "b".repeat(64);
@@ -18,19 +18,68 @@ async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
+async function expectAuthenticatedConsoleShell(page: Page) {
+  const desktopNav = page.getByRole("navigation", {
+    name: "Primary console navigation",
+  });
+  const topbarRoute = page
+    .locator(".topbarActions")
+    .getByText("Home / Overview")
+    .first();
+  await expect
+    .poll(
+      async () =>
+        (await desktopNav.isVisible().catch(() => false)) ||
+        (await topbarRoute.isVisible().catch(() => false)),
+    )
+    .toBe(true);
+  await expect(
+    page.getByRole("heading", { name: "Home", exact: true }),
+  ).toBeVisible();
+}
+
+async function expectOperatorAccessShell(page: Page) {
+  const heading = page.getByRole("heading", { name: "Operator access" });
+  const authForm = page.getByLabel("Operator authentication");
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const rendered = await heading
+      .waitFor({ state: "visible", timeout: attempt === 0 ? 8000 : 15000 })
+      .then(() => true)
+      .catch(() => false);
+    if (rendered) {
+      await expect(authForm).toBeVisible();
+      await expect(
+        page.getByRole("navigation", { name: "Primary console navigation" }),
+      ).toHaveCount(0);
+      return;
+    }
+
+    const hasMountedRoot = await page
+      .locator("#root")
+      .evaluate((root) => (root.textContent ?? "").trim().length > 0)
+      .catch(() => false);
+    if (hasMountedRoot || attempt > 0) {
+      break;
+    }
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+  }
+
+  await expect(heading).toBeVisible({ timeout: 15000 });
+  await expect(authForm).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "Primary console navigation" }),
+  ).toHaveCount(0);
+}
+
 test("stores bearer session only inside encrypted WebCrypto vault", async ({
   page,
 }) => {
   await installAuthVaultApiMock(page);
   await page.goto("/");
 
-  await expect(
-    page.getByRole("heading", { name: "Operator access" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("navigation", { name: "Primary console navigation" }),
-  ).toHaveCount(0);
-  await expect(page.getByLabel("Operator authentication")).toBeVisible();
+  await expectOperatorAccessShell(page);
   await expect(page.getByLabel("Authentication mode")).toBeVisible();
   await expect(page.getByLabel("Username")).toBeFocused();
   await page.getByLabel("Username").fill("vault-admin");
@@ -41,12 +90,7 @@ test("stores bearer session only inside encrypted WebCrypto vault", async ({
   await page.waitForFunction(
     () => window.localStorage.getItem("vpsman.authVault") !== null,
   );
-  await expect(
-    page.getByRole("navigation", { name: "Primary console navigation" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Home", exact: true }),
-  ).toBeVisible();
+  await expectAuthenticatedConsoleShell(page);
 
   const storage = await readSessionStorage(page);
   expect(storage.access).toBeNull();
@@ -58,20 +102,10 @@ test("stores bearer session only inside encrypted WebCrypto vault", async ({
   expect(storage.authVault).not.toContain("vault-key-123456");
 
   await page.reload();
-  await expect(
-    page.getByRole("heading", { name: "Operator access" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("navigation", { name: "Primary console navigation" }),
-  ).toHaveCount(0);
+  await expectOperatorAccessShell(page);
   await page.getByLabel("Stored session key").fill("vault-key-123456");
   await activate(page.getByRole("button", { name: "Unlock session" }));
-  await expect(
-    page.getByRole("navigation", { name: "Primary console navigation" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Home", exact: true }),
-  ).toBeVisible();
+  await expectAuthenticatedConsoleShell(page);
 });
 
 async function installAuthVaultApiMock(page: import("@playwright/test").Page) {

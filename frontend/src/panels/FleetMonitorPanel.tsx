@@ -457,10 +457,10 @@ function buildClientSignal({
   const activeTransfers = transfers.filter((transfer) => isActiveTransferStatus(transfer.status)).length;
   const fleetJobText =
     failedJobs > 0
-      ? `Fleet jobs: ${failedJobs} failed fleet-wide`
+      ? `Fleet-wide jobs: ${failedJobs} failed`
       : runningJobs > 0
-        ? `Fleet jobs: ${runningJobs} running fleet-wide`
-        : "Fleet jobs: idle";
+        ? `Fleet-wide jobs: ${runningJobs} running`
+        : "Fleet-wide jobs: idle";
   return {
     alertText:
       criticalAlerts > 0 ? `${criticalAlerts} critical` : warningAlerts > 0 ? `${warningAlerts} warning` : "Clear",

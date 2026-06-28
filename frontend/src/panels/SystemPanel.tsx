@@ -788,7 +788,7 @@ function FieldLabel({ help, label }: { help: string; label: string }) {
   );
 }
 
-function SystemUsersPanel({
+export function SystemUsersPanel({
   authEvents,
   currentOperator,
   onClearOperatorTotp,
@@ -875,10 +875,10 @@ function SystemUsersPanel({
   const selectedAccessSummary = selectedOperator
     ? accessSummaries[selectedOperator.id]
     : null;
-  const activeOperators = operators.filter(
+  const visibleOperators = operators.filter(
     (operator) => operator.status !== "deleted",
   );
-  const adminOperators = activeOperators.filter(
+  const adminOperators = visibleOperators.filter(
     (operator) => operator.role === "admin",
   );
   const adminWithoutMfaCount = adminOperators.filter(
@@ -892,25 +892,26 @@ function SystemUsersPanel({
       Math.max(max, secondsToDays(operator.session_refresh_ttl_secs)),
     0,
   );
-  const explicitScopeUsers = activeOperators.filter(
+  const explicitScopeUsers = visibleOperators.filter(
     (operator) => operator.scopes.length > 0,
   ).length;
   const visibleRoles = Array.from(
-    new Set(activeOperators.map((operator) => operator.role)),
+    new Set(visibleOperators.map((operator) => operator.role)),
   ).sort();
   const customRoles = visibleRoles.filter(
     (role) => !operatorRoleOptions.includes(role),
   );
-  const activeSessionCount = sessions.filter(
-    (session) => !session.revoked,
+  const activeSessionCount = sessions.filter(isOperatorSessionUsable).length;
+  const expiredSessionCount = sessions.filter(
+    (session) => !session.revoked && isOperatorSessionExpired(session),
   ).length;
   const revokableSessionCount = sessions.filter(
-    (session) => !session.current && !session.revoked,
+    (session) => !session.current && isOperatorSessionUsable(session),
   ).length;
   const authFailureEvents = authEvents.filter(
     (event) => event.result !== "success",
   );
-  const knownAuthFailureCount = activeOperators.reduce(
+  const knownAuthFailureCount = visibleOperators.reduce(
     (count, operator) =>
       count + (accessSummaries[operator.id]?.failedLogins ?? 0),
     0,
@@ -962,7 +963,7 @@ function SystemUsersPanel({
         cell: (row) => (
           <span className="operatorRecordName">
             <strong>{row.username}</strong>
-            <small>{shortId(row.id)}</small>
+            <small title={row.id}>{shortId(row.id)}</small>
           </span>
         ),
         searchValue: (row) => row.username,
@@ -1511,14 +1512,14 @@ function SystemUsersPanel({
             }
           />
           <SystemPostureTile
-            detail={`${activeOperators.length} active operators. Standard roles are Viewer, Operator, and Admin; ${explicitScopeUsers} operators have explicit scope overrides${customRoles.length > 0 ? `, and ${customRoles.length} custom roles are loaded` : ""}.`}
+            detail={`${visibleOperators.length} visible operator records. Standard roles are Viewer, Operator, and Admin; ${explicitScopeUsers} operators have explicit scope overrides${customRoles.length > 0 ? `, and ${customRoles.length} custom roles are loaded` : ""}.`}
             icon={<LockKeyhole size={18} />}
             label="Role model"
             tone={customRoles.length > 0 ? "warning" : "info"}
             value={`${operatorRoleOptions.length} standard roles`}
           />
           <SystemPostureTile
-            detail={`${revokableSessionCount} non-current active sessions can be revoked here or reviewed in Audit / Sessions.`}
+            detail={`${revokableSessionCount} non-current active bearer sessions can be revoked here or reviewed in Audit / Sessions; ${expiredSessionCount} expired bearer session${expiredSessionCount === 1 ? "" : "s"} excluded from active counts.`}
             icon={<Activity size={18} />}
             label="Bearer sessions"
             tone={activeSessionCount > 0 ? "info" : "neutral"}
@@ -1546,7 +1547,7 @@ function SystemUsersPanel({
         </div>
         <div className="operatorRoleMatrix" aria-label="RBAC role model">
           {operatorRoleOptions.map((role) => {
-            const roleCount = activeOperators.filter(
+            const roleCount = visibleOperators.filter(
               (operator) => operator.role === role,
             ).length;
             return (
@@ -1566,7 +1567,7 @@ function SystemUsersPanel({
             );
           })}
           {customRoles.map((role) => {
-            const roleCount = activeOperators.filter(
+            const roleCount = visibleOperators.filter(
               (operator) => operator.role === role,
             ).length;
             return (
@@ -2067,7 +2068,10 @@ function SystemSessionsPanel({
       ),
     [authEvents, authFilter, failureGroups],
   );
-  const activeSessions = sessions.filter((session) => !session.revoked);
+  const activeSessions = sessions.filter(isOperatorSessionUsable);
+  const expiredSessions = sessions.filter(
+    (session) => !session.revoked && isOperatorSessionExpired(session),
+  );
   const currentSessions = activeSessions.filter(
     (session) => session.current,
   ).length;
@@ -2103,7 +2107,7 @@ function SystemSessionsPanel({
         cell: (row) => (
           <span className="sessionIdentityCell">
             <strong>{row.operator_username}</strong>
-            <small>{shortId(row.id)}</small>
+            <small title={row.id}>{shortId(row.id)}</small>
           </span>
         ),
         searchValue: (row) => `${row.operator_username} ${row.id}`,
@@ -2171,14 +2175,11 @@ function SystemSessionsPanel({
         id: "state",
         header: "State",
         cell: (row) => (
-          <span
-            className={`status ${row.current ? "info" : row.revoked ? "warn" : "ok"}`}
-          >
-            {row.current ? "current" : row.revoked ? "revoked" : "active"}
+          <span className={`status ${operatorSessionStateTone(row)}`}>
+            {operatorSessionStateLabel(row)}
           </span>
         ),
-        searchValue: (row) =>
-          row.current ? "current" : row.revoked ? "revoked" : "active",
+        searchValue: (row) => operatorSessionStateLabel(row),
       },
       {
         id: "risk",
@@ -2196,7 +2197,12 @@ function SystemSessionsPanel({
           <button
             aria-label={`Revoke session for ${row.operator_username}`}
             className="secondaryAction compactAction sessionInlineRevoke"
-            disabled={reviewPending || pending || row.current || row.revoked}
+            disabled={
+              reviewPending ||
+              pending ||
+              row.current ||
+              !isOperatorSessionUsable(row)
+            }
             onClick={(event) => {
               event.stopPropagation();
               void requestSessionRevoke([row]);
@@ -2206,7 +2212,9 @@ function SystemSessionsPanel({
                 ? "Current session cannot be revoked from this table."
                 : row.revoked
                   ? "Session is already revoked."
-                  : `Revoke ${row.operator_username}'s bearer session.`
+                  : !isOperatorSessionUsable(row)
+                    ? "Expired bearer sessions are retained as evidence and excluded from active revoke controls."
+                    : `Revoke ${row.operator_username}'s active bearer session.`
             }
             type="button"
           >
@@ -2267,7 +2275,11 @@ function SystemSessionsPanel({
       {
         id: "session",
         header: "Session",
-        cell: (row) => shortId(row.session_id),
+        cell: (row) => (
+          <span title={row.session_id ?? "No session ID"}>
+            {shortId(row.session_id)}
+          </span>
+        ),
         searchValue: (row) => row.session_id,
       },
     ],
@@ -2282,7 +2294,7 @@ function SystemSessionsPanel({
 
   async function requestSessionRevoke(rows: OperatorSessionRecord[]) {
     const sessionsToRevoke = rows.filter(
-      (session) => !session.current && !session.revoked,
+      (session) => !session.current && isOperatorSessionUsable(session),
     );
     if (sessionsToRevoke.length === 0) {
       return;
@@ -2401,7 +2413,7 @@ function SystemSessionsPanel({
           </div>
           <div className="systemPostureGrid sessionPostureGrid">
             <SystemPostureTile
-              detail={`${currentSessions} current browser session; ${revokableSessions} non-current sessions can be revoked without ending the current console session.`}
+              detail={`${currentSessions} current usable browser session; ${revokableSessions} non-current active bearer sessions can be revoked without ending the current console session; ${expiredSessions.length} expired bearer session${expiredSessions.length === 1 ? "" : "s"} excluded.`}
               icon={<Activity size={18} />}
               label="Active sessions"
               tone={activeSessions.length > 0 ? "info" : "neutral"}
@@ -2415,7 +2427,7 @@ function SystemSessionsPanel({
               value={`${adminSessions} admin`}
             />
             <SystemPostureTile
-              detail={`${enrichedSessions} active sessions have login-event IP and user-agent evidence; missing evidence is flagged per row.`}
+              detail={`${enrichedSessions} active bearer sessions have login-event IP and user-agent evidence; missing evidence is flagged per row.`}
               icon={<Network size={18} />}
               label="IP/device evidence"
               tone={
@@ -3030,9 +3042,7 @@ function SessionDetailGrid({
       </span>
       <span>
         <strong>State</strong>
-        <span>
-          {session.current ? "current" : session.revoked ? "revoked" : "active"}
-        </span>
+        <span>{operatorSessionStateLabel(session)}</span>
       </span>
       <span>
         <strong>Created</strong>
@@ -3058,10 +3068,13 @@ function SessionDetailGrid({
 
 function SessionSelectionPanel({ rows }: { rows: OperatorSessionRecord[] }) {
   const revokable = rows.filter(
-    (session) => !session.current && !session.revoked,
+    (session) => !session.current && isOperatorSessionUsable(session),
   ).length;
   const current = rows.filter((session) => session.current).length;
   const revoked = rows.filter((session) => session.revoked).length;
+  const expired = rows.filter(
+    (session) => !session.revoked && isOperatorSessionExpired(session),
+  ).length;
   return (
     <div className="gridSelectionSummary">
       <span>
@@ -3079,6 +3092,10 @@ function SessionSelectionPanel({ rows }: { rows: OperatorSessionRecord[] }) {
       <span>
         <strong>{revoked}</strong>
         revoked
+      </span>
+      <span>
+        <strong>{expired}</strong>
+        expired
       </span>
     </div>
   );
@@ -3153,7 +3170,7 @@ function buildOperatorAccessSummaries(
   }
   for (const session of sessions) {
     const summary = summaries[session.operator_id];
-    if (!summary || session.revoked) {
+    if (!summary || !isOperatorSessionUsable(session)) {
       continue;
     }
     summary.activeSessions += 1;
@@ -3385,6 +3402,14 @@ function sessionRisk(
       tone: "neutral",
     };
   }
+  if (isOperatorSessionExpired(session)) {
+    return {
+      detail:
+        "This bearer session is expired and excluded from active-session and active-revoke counts.",
+      label: "Expired bearer",
+      tone: "neutral",
+    };
+  }
   if (!authEvent) {
     return {
       detail: "No matching successful login event was loaded for this session.",
@@ -3472,6 +3497,44 @@ function operatorStatusLabel(status: string): string {
   return status.trim() || "Unknown";
 }
 
+function operatorSessionStateLabel(session: OperatorSessionRecord): string {
+  if (session.revoked) {
+    return "revoked";
+  }
+  if (isPastTime(session.refresh_expires_at)) {
+    return "refresh expired";
+  }
+  if (isPastTime(session.expires_at)) {
+    return "access expired";
+  }
+  return session.current ? "current" : "active";
+}
+
+function operatorSessionStateTone(session: OperatorSessionRecord): string {
+  if (session.revoked) {
+    return "warn";
+  }
+  if (isOperatorSessionExpired(session)) {
+    return "neutral";
+  }
+  return session.current ? "info" : "ok";
+}
+
+function isOperatorSessionUsable(session: OperatorSessionRecord): boolean {
+  return !session.revoked && !isOperatorSessionExpired(session);
+}
+
+function isOperatorSessionExpired(session: OperatorSessionRecord): boolean {
+  return (
+    isPastTime(session.expires_at) || isPastTime(session.refresh_expires_at)
+  );
+}
+
+function isPastTime(value: string): boolean {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp <= Date.now();
+}
+
 function operatorMfaState(operator: OperatorView): {
   detail: string;
   label: string;
@@ -3489,7 +3552,7 @@ function operatorMfaState(operator: OperatorView): {
   if (operator.role === "admin") {
     return {
       detail:
-        "Admin account has no TOTP enrollment. The UI can recommend MFA, but backend policy enforcement is not exposed.",
+        "Admin account has no TOTP enrollment. Enroll TOTP before long-lived access or privileged workflows.",
       label: "Policy recommends MFA",
       statusClass: "warn",
       tone: "warning",
@@ -3869,8 +3932,6 @@ function SystemDashboardPanel({
     series.length > 0
       ? `${series.length} rollup series; latest sample ${formatCompactTime(dashboard?.generated_at ?? "")}`
       : "No durable metric samples in this range";
-  const gatewayDeliverySignals =
-    gatewayDropped + gatewayRetries + gatewayRejected + gatewayCriticalFailures;
   return (
     <div className="workspace singleColumn systemWorkspace">
       <div className="workspaceStack">
@@ -3956,7 +4017,7 @@ function SystemDashboardPanel({
               value={`${dbPressurePercent}% in use`}
             />
             <SystemPostureTile
-              detail={`${valueOrNotConfigured(dispatcherInFlight)} in-flight limit / ${valueOrNotConfigured(dispatcherBatch)} batch. Detailed capacity thresholds live in System / Capacity.`}
+              detail="Dispatch health summarized from current queue depth; configured limits live in System / Capacity."
               icon={<Activity size={18} />}
               label="Control-plane queue"
               tone={dispatchTone}
@@ -3975,113 +4036,6 @@ function SystemDashboardPanel({
               label="Gateway"
               tone={gatewayTone}
               value={gatewayEvents?.status ?? "Not configured"}
-            />
-          </div>
-
-          <div className="dashboardCardGrid operationalGrid systemOverviewKpis">
-            <SystemStatusTile
-              icon={<Database size={18} />}
-              label="DB pool"
-              value={`${dashboard?.current.db_pool.in_use_connections ?? 0}/${dashboard?.current.db_pool.max_connections ?? 0}`}
-            />
-            <SystemStatusTile
-              icon={<Activity size={18} />}
-              label="Dispatch queue"
-              value={`${queueDepth} queued`}
-            />
-            <SystemStatusTile
-              icon={<Network size={18} />}
-              label="Gateway delivery"
-              value={`${gatewayDeliverySignals} signals`}
-            />
-            <SystemStatusTile
-              icon={<TimerReset size={18} />}
-              label="Worker timeouts"
-              value={`${lifecycleFailures} in 24h`}
-            />
-          </div>
-
-          <div
-            className="systemSubsystemGrid"
-            aria-label="System overview subsystem states"
-          >
-            <SystemSubsystemDetails
-              items={[
-                {
-                  label: "Connections",
-                  value: `${dashboard?.current.db_pool.in_use_connections ?? 0} in use / ${dashboard?.current.db_pool.open_connections ?? 0} open`,
-                },
-                {
-                  label: "Pool limit",
-                  value: valueOrNotConfigured(
-                    dashboard?.current.db_pool.max_connections,
-                  ),
-                },
-              ]}
-              label="Database"
-              tone={dbTone}
-              value={`${dbPressurePercent}% in use`}
-            />
-            <SystemSubsystemDetails
-              items={[
-                {
-                  label: "Active jobs",
-                  value: String(dashboard?.current.dispatch.active_jobs ?? 0),
-                },
-                {
-                  label: "Active targets",
-                  value: String(dashboard?.current.targets.active ?? 0),
-                },
-                {
-                  label: "Configured limit",
-                  value: `${valueOrNotConfigured(dispatcherInFlight)} in-flight`,
-                },
-              ]}
-              label="Dispatch"
-              tone={dispatchTone}
-              value={`${queueDepth} queued`}
-            />
-            <SystemSubsystemDetails
-              items={[
-                {
-                  label: "Queue",
-                  value: `${gatewayQueueDepth} queued / ${gatewayOldestAgeLabel}`,
-                },
-                {
-                  label: "Retries and drops",
-                  value: `${gatewayRetries} retries / ${gatewayDropped} dropped`,
-                },
-                {
-                  label: "Rejected connects",
-                  value: valueOrNotConfigured(gatewayRejected),
-                },
-              ]}
-              label="Gateway"
-              tone={gatewayTone}
-              value={gatewayEvents?.status ?? "Not configured"}
-            />
-            <SystemSubsystemDetails
-              items={[
-                {
-                  label: "Active expired",
-                  value: String(
-                    dashboard?.current.targets.deadline_expired_active ?? 0,
-                  ),
-                },
-                {
-                  label: "24h timeout/loss",
-                  value: String(lifecycleFailures),
-                },
-                {
-                  label: "Schedule job timeout",
-                  value: secondsOrNotConfigured(
-                    dashboard?.capacity.worker_schedule_job_max_timeout_secs,
-                  ),
-                },
-              ]}
-              label="Worker"
-              tone={deadlineTone}
-              value={`${lifecycleFailures} failures`}
             />
           </div>
 
@@ -4170,19 +4124,6 @@ function SystemDashboardPanel({
               label: "Retried targets",
               value: String(dashboard?.current.dispatch.retried_targets ?? 0),
             },
-          ]}
-          thresholds={[
-            {
-              label: "Capacity",
-              tone: "info",
-              value: `${valueOrUnset(dispatcherInFlight)} in-flight`,
-            },
-            {
-              label: "Batch",
-              tone: "info",
-              value: `${valueOrUnset(dispatcherBatch)} max`,
-            },
-            { label: "Attention", tone: "warning", value: "queue persists" },
           ]}
           lines={chartLines(series, [
             "dispatch.queue_depth",
@@ -4883,40 +4824,6 @@ function CapacityFactorGrid({
   );
 }
 
-function SystemSubsystemDetails({
-  items,
-  label,
-  tone,
-  value,
-}: {
-  items: Array<{ label: string; value: string }>;
-  label: string;
-  tone: SystemHealthTone;
-  value: string;
-}) {
-  return (
-    <details className={`systemSubsystemDisclosure ${tone}`}>
-      <summary>
-        <span>
-          <strong>{label}</strong>
-          <small>{value}</small>
-        </span>
-        <ConsoleStatusBadge tone={tone}>
-          {systemToneLabel(tone)}
-        </ConsoleStatusBadge>
-      </summary>
-      <div>
-        {items.map((item) => (
-          <span key={item.label}>
-            <small>{item.label}</small>
-            <strong>{item.value}</strong>
-          </span>
-        ))}
-      </div>
-    </details>
-  );
-}
-
 function SystemDiagnosticsRow({
   detail,
   label,
@@ -4967,26 +4874,6 @@ function SystemAttentionRow({ item }: { item: SystemAttentionItem }) {
       <strong>{item.label}</strong>
       <b>{item.value}</b>
       <p>{item.detail}</p>
-    </div>
-  );
-}
-
-function SystemStatusTile({
-  icon,
-  label,
-  value,
-}: {
-  icon: ReactNode;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="dashboardMetricCard neutral staticCard">
-      <span className="dashboardMetricIcon">{icon}</span>
-      <span>
-        <small>{label}</small>
-        <strong>{value}</strong>
-      </span>
     </div>
   );
 }

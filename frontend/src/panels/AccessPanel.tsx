@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Save,
   ShieldCheck,
+  TerminalSquare,
   UsersRound,
   Trash2,
   Wifi,
@@ -28,6 +29,7 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
+import { SystemUsersPanel } from "./SystemPanel";
 import {
   useReviewGenerationGuard,
   waitForReviewRender,
@@ -40,6 +42,7 @@ import { scrollIntoViewWithMotion } from "../motion";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import type {
   GatewaySessionRecord,
+  OperatorAuthEventRecord,
   OperatorView,
   OperatorSessionRecord,
   TotpSetupResponse,
@@ -51,6 +54,7 @@ import type {
   KeyLifecycleReportView,
   UpsertAgentIdentityRequest,
 } from "../typesAccess";
+import type { TerminalSessionRecord } from "../typesTerminal";
 import {
   buildPrivilegeAssertion,
   canonicalDbPrivilegeIntent,
@@ -68,6 +72,7 @@ import {
 
 const accessSubpages = [
   "Overview",
+  "Operators",
   "VPS identities",
   "Gateway sessions",
   "Privilege vault",
@@ -76,6 +81,7 @@ const accessSubpages = [
 type AccessSubpage = (typeof accessSubpages)[number];
 type AccessReleaseSubpage =
   | "overview"
+  | "operators"
   | "vps_identities"
   | "gateway_sessions"
   | "privilege_vault";
@@ -124,36 +130,79 @@ type AccessPanelProps = {
   lastLiveEvent: string;
   loading: boolean;
   onClearSession: () => void;
+  onClearOperatorTotp: (
+    operatorId: string,
+    adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
   onConfirmTotp: (password: string, code: string) => Promise<void>;
+  onCreateOperator: (
+    username: string,
+    role: string,
+    password: string,
+    scopes: string[],
+    sessionRefreshTtlSecs: number,
+    adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
   onDisableTotp: (password: string, code: string) => Promise<void>;
+  onOpenPrivilegeUnlock: () => void;
   onOpenSystemConfig: () => void;
-  onOpenSystemPreferences: () => void;
   onOpenSystemSessions: () => void;
-  onOpenSystemUsers: () => void;
+  onOpenTerminalSessions: () => void;
   onRefresh: () => Promise<void>;
+  onResetOperatorPassword: (
+    operatorId: string,
+    password: string,
+    adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
   onRevokeClientKey: (
     clientId: string,
     reason: string | null,
     confirmed: boolean,
     privilegeAssertion: PrivilegeAssertion | null,
   ) => Promise<void>;
+  onRevokeOperatorSession: (
+    sessionId: string,
+    adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
   onSetupTotp: (password: string) => Promise<TotpSetupResponse | null>;
   onSelectSubpage: (subpage: AccessReleaseSubpage) => void;
+  onSetOperatorStatus: (
+    operatorId: string,
+    status: "active" | "disabled" | "deleted",
+    adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
+  onUpdateOperator: (
+    operatorId: string,
+    role: string,
+    scopes: string[],
+    sessionRefreshTtlSecs: number,
+    adminRiskAcknowledged: boolean,
+    privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
   onUpsertAgentIdentity: (
     request: UpsertAgentIdentityRequest,
   ) => Promise<AgentIdentityView>;
   operator: OperatorView | null;
+  operatorAuthEvents: OperatorAuthEventRecord[];
   operatorSessions: OperatorSessionRecord[];
   operators: OperatorView[];
   clientKeyRevocations: ClientKeyRevocationView[];
   keyLifecycleReport: KeyLifecycleReportView | null;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
+  terminalSessions: TerminalSessionRecord[];
   wsState: string;
 };
 
 function accessSubpageFromRoute(subpage: string): AccessSubpage {
   switch (subpage) {
+    case "operators":
+      return "Operators";
     case "privilege":
     case "privilege_vault":
       return "Privilege vault";
@@ -170,6 +219,8 @@ function accessSubpageFromRoute(subpage: string): AccessSubpage {
 
 function accessRouteForSubpage(subpage: AccessSubpage): AccessReleaseSubpage {
   switch (subpage) {
+    case "Operators":
+      return "operators";
     case "VPS identities":
       return "vps_identities";
     case "Gateway sessions":
@@ -186,6 +237,12 @@ function accessPanelHeader(subpage: AccessSubpage): {
   description: string;
 } {
   switch (subpage) {
+    case "Operators":
+      return {
+        title: "Operators",
+        description:
+          "Human operator accounts, MFA posture, scopes, and session revocation",
+      };
     case "VPS identities":
       return {
         title: "VPS identity registry",
@@ -215,29 +272,38 @@ function accessPanelHeader(subpage: AccessSubpage): {
 
 export function AccessPanel({
   activeSubpage: routeSubpage,
+  apiToken,
   error,
   gatewaySessions,
   lastLiveEvent,
   loading,
   onClearSession,
+  onClearOperatorTotp,
   onConfirmTotp,
+  onCreateOperator,
   onDisableTotp,
+  onOpenPrivilegeUnlock,
   onOpenSystemConfig,
-  onOpenSystemPreferences,
   onOpenSystemSessions,
-  onOpenSystemUsers,
+  onOpenTerminalSessions,
   onRefresh,
+  onResetOperatorPassword,
   onRevokeClientKey,
+  onRevokeOperatorSession,
   onSetupTotp,
   onSelectSubpage,
+  onSetOperatorStatus,
+  onUpdateOperator,
   onUpsertAgentIdentity,
   operator,
+  operatorAuthEvents,
   operatorSessions,
   operators,
   clientKeyRevocations,
   keyLifecycleReport,
   privilegeMaterial,
   setPrivilegeMaterial,
+  terminalSessions,
   wsState,
 }: AccessPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -293,13 +359,9 @@ export function AccessPanel({
     : vaultAvailable
       ? "Saved local privilege vault"
       : "No saved local vault";
-  const currentSession =
+  const currentBearerSession =
     operatorSessions.find((session) => session.current) ?? operatorSessions[0];
   const adminMfaRisk = operator?.role === "admin" && !operator.totp_enabled;
-  const gatewayInstallDefaultsReady = Boolean(
-    operator?.preferences.gateway_endpoints.trim() &&
-    operator.preferences.gateway_server_public_key_hex?.trim(),
-  );
   const lifecycleClients = keyLifecycleReport?.clients ?? [];
   const lifecycleVpsOptions = useMemo(
     () =>
@@ -320,6 +382,7 @@ export function AccessPanel({
   const activeGatewaySessions = gatewaySessions.filter(
     (session) => !session.ended_at,
   ).length;
+  const gatewayInstallDefaultsNeedReview = activeGatewaySessions === 0;
   const activeOperatorSessions = operatorSessions.filter(
     isOperatorSessionActive,
   ).length;
@@ -332,9 +395,36 @@ export function AccessPanel({
   const blockedOrPendingClientCount = lifecycleClients.filter((client) =>
     ["blocked", "pending", "revoked"].includes(identityStatus(client)),
   ).length;
-  const currentSessionState = currentSession
-    ? operatorSessionStateLabel(currentSession)
+  const currentBearerSessionState = currentBearerSession
+    ? operatorSessionStateLabel(currentBearerSession)
     : "Not listed";
+  const openTerminalSessions = terminalSessions.filter(isTerminalOpen).length;
+  const replayableTerminalSessions = terminalSessions.filter(
+    (session) => session.output_next_seq !== null,
+  ).length;
+  const consoleSessionActive = Boolean(operator || apiToken);
+  const consoleSessionValue = operator
+    ? `Active as ${operator.username}`
+    : apiToken
+      ? "Local token loaded"
+      : "Not authenticated";
+  const consoleSessionDetail = operator
+    ? `This browser is operating as ${operator.username}; console stream ${wsState || "unknown"}. Bearer-session inventory is separate.`
+    : apiToken
+      ? `This browser has a local API token loaded; console stream ${wsState || "unknown"}. Bearer-session inventory is separate.`
+      : "This browser has no loaded operator or local API token; bearer-session inventory cannot prove an active console.";
+  const bearerSessionValue =
+    operatorSessions.length === 0
+      ? "0 listed"
+      : `${activeOperatorSessions} active / ${expiredOperatorSessions} expired`;
+  const bearerSessionDetail =
+    operatorSessions.length === 0
+      ? "No API bearer-session inventory is listed for this operator account."
+      : `${activeOperatorSessions} active API bearer session${activeOperatorSessions === 1 ? "" : "s"} after expiry validation; current bearer record ${currentBearerSessionState}. Console, privilege, terminal, and gateway scopes are separate.`;
+  const terminalSessionDetail =
+    terminalSessions.length === 0
+      ? "No terminal session records are loaded; terminal shells are managed in Remote Operations and audited separately."
+      : `${replayableTerminalSessions} replayable terminal session${replayableTerminalSessions === 1 ? "" : "s"}; shell streams stay in Remote Operations and audit evidence.`;
   const canUpsertIdentity =
     canManageOperators &&
     !identityPending &&
@@ -917,18 +1007,18 @@ export function AccessPanel({
           value: `${blockedOrPendingClientCount} need review`,
         }
       : null,
-    gatewayInstallDefaultsReady
-      ? null
-      : {
-          action: "Open Preferences",
+    gatewayInstallDefaultsNeedReview
+      ? {
+          action: "Open Suite Config",
           detail:
-            "Gateway endpoints and server public key are needed for generated agent install commands.",
+            "Gateway endpoints and server public key are system settings. Review Suite Config before generating agent install commands.",
           icon: <Wifi size={16} />,
           label: "Gateway install defaults",
-          onClick: onOpenSystemPreferences,
+          onClick: onOpenSystemConfig,
           tone: "attention",
-          value: "Missing",
-        },
+          value: "Review",
+        }
+      : null,
     privilegeMaterial
       ? null
       : {
@@ -948,15 +1038,15 @@ export function AccessPanel({
   const accessResponsibilityRows: AccessOverviewItem[] = [
     {
       action: "Open Operators",
-      detail: `${operators.length} operators; ${activeOperatorSessions} active session${activeOperatorSessions === 1 ? "" : "s"} after expiry validation; current session ${currentSessionState}.`,
+      detail: `${operators.length} operator account${operators.length === 1 ? "" : "s"}; MFA is ${adminMfaRisk ? "recommended for this admin" : "covered by loaded policy evidence"}. Bearer sessions are listed under Session scopes.`,
       icon: <UsersRound size={16} />,
-      label: "Operators and active sessions",
-      onClick: onOpenSystemUsers,
+      label: "Operators",
+      onClick: () => openAccessSubpage("Operators"),
       tone:
-        operators.length === 0 || expiredOperatorSessions > 0 || adminMfaRisk
+        operators.length === 0 || adminMfaRisk
           ? "attention"
           : "ready",
-      value: `${operators.length} operators / ${activeOperatorSessions} active`,
+      value: `${operators.length} operators`,
     },
     {
       action: "Open identities",
@@ -967,31 +1057,65 @@ export function AccessPanel({
       tone: blockedOrPendingClientCount > 0 ? "attention" : "ready",
       value: `${keyLifecycleReport?.direct_identity_client_count ?? lifecycleClients.length} registered`,
     },
+  ];
+
+  const accessSessionScopeRows: AccessOverviewItem[] = [
     {
-      action: "Open sessions",
-      detail: gatewayInstallDefaultsReady
-        ? `${gatewaySessions.length} recent gateway sessions; install defaults configured.`
-        : "Gateway install defaults are missing endpoint or server-key settings.",
-      icon: <Wifi size={16} />,
-      label: "Gateway sessions",
-      onClick: () => openAccessSubpage("Gateway sessions"),
-      tone: gatewayInstallDefaultsReady ? "ready" : "attention",
-      value: `${activeGatewaySessions} active / ${gatewaySessions.length} recent`,
+      action: "Refresh access",
+      detail: consoleSessionDetail,
+      icon: <KeyRound size={16} />,
+      label: "Console/browser session",
+      onClick: () => void onRefresh(),
+      tone: consoleSessionActive ? "ready" : "attention",
+      value: consoleSessionValue,
+    },
+    {
+      action: "Open evidence",
+      detail: bearerSessionDetail,
+      icon: <Clock size={16} />,
+      label: "API bearer sessions",
+      onClick: onOpenSystemSessions,
+      tone:
+        operatorSessions.length === 0 || expiredOperatorSessions > 0
+          ? "attention"
+          : "ready",
+      value: bearerSessionValue,
     },
     {
       action: privilegeMaterial ? "Open vault" : "Unlock",
       detail: privilegeMaterial
-        ? "Privilege material is local-only and used for request-bound assertions."
-        : "No saved local vault; enter privilege secret when needed.",
+        ? "Privilege material is local-only and used for request-bound assertions in this browser tab."
+        : "Privilege unlock is local; locking it does not revoke console, bearer, terminal, or gateway sessions.",
       icon: <LockKeyhole size={16} />,
-      label: "Privilege state",
+      label: "Privilege unlock",
       onClick: () => openAccessSubpage("Privilege vault"),
       tone: privilegeMaterial
         ? "ready"
         : vaultAvailable
           ? "neutral"
           : "attention",
-      value: privilegeMaterial ? "Unlocked for this browser" : vaultState,
+      value: privilegeMaterial ? "Unlocked" : vaultState,
+    },
+    {
+      action: "Open terminal",
+      detail: terminalSessionDetail,
+      icon: <TerminalSquare size={16} />,
+      label: "Terminal sessions",
+      onClick: onOpenTerminalSessions,
+      tone: openTerminalSessions > 0 ? "ready" : "neutral",
+      value: `${openTerminalSessions} open / ${terminalSessions.length} recent`,
+    },
+    {
+      action: "Open sessions",
+      detail:
+        activeGatewaySessions > 0
+          ? `${gatewaySessions.length} recent gateway sessions; install defaults are owned by Suite Config.`
+          : "No active gateway sessions. Configure gateway endpoint and server key in Suite Config.",
+      icon: <Wifi size={16} />,
+      label: "Gateway sessions",
+      onClick: () => openAccessSubpage("Gateway sessions"),
+      tone: activeGatewaySessions > 0 ? "ready" : "attention",
+      value: `${activeGatewaySessions} active / ${gatewaySessions.length} recent`,
     },
   ];
   const activePanelHeader = accessPanelHeader(activeSubpage);
@@ -1033,6 +1157,23 @@ export function AccessPanel({
           ))}
         </nav>
 
+        {activeSubpage === "Operators" && (
+          <SystemUsersPanel
+            authEvents={operatorAuthEvents}
+            currentOperator={operator}
+            onClearOperatorTotp={onClearOperatorTotp}
+            onCreateOperator={onCreateOperator}
+            onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+            onResetOperatorPassword={onResetOperatorPassword}
+            onRevokeOperatorSession={onRevokeOperatorSession}
+            onSetOperatorStatus={onSetOperatorStatus}
+            onUpdateOperator={onUpdateOperator}
+            operators={operators}
+            privilegeMaterial={privilegeMaterial}
+            sessions={operatorSessions}
+          />
+        )}
+
         {activeSubpage === "Overview" && (
           <div className="workspaceSection accessOverviewFocus">
             <section
@@ -1073,12 +1214,29 @@ export function AccessPanel({
               <div className="sectionHeader compact">
                 <h2>Access responsibilities</h2>
                 <span>
-                  Operators and sessions, VPS identities, gateway sessions, and
-                  privilege state.
+                  Operator accounts and VPS identity lifecycle; live authority
+                  scopes are separated below.
                 </span>
               </div>
               <div className="accessOverviewRows">
                 {accessResponsibilityRows.map((item) => (
+                  <AccessOverviewRow item={item} key={item.label} />
+                ))}
+              </div>
+            </section>
+            <section
+              className="controlPanel accessOverviewPanel"
+              aria-label="Access session scopes"
+            >
+              <div className="sectionHeader compact">
+                <h2>Session scopes</h2>
+                <span>
+                  Browser console, API bearer, privilege unlock, terminal, and
+                  gateway state are independent evidence domains.
+                </span>
+              </div>
+              <div className="accessOverviewRows">
+                {accessSessionScopeRows.map((item) => (
                   <AccessOverviewRow item={item} key={item.label} />
                 ))}
               </div>
@@ -1439,6 +1597,7 @@ export function AccessPanel({
         className={`fleetPanel accessInspector${activeSubpage === "VPS identities" ? " identityWorkflowPanel" : ""}`}
         hidden={
           activeSubpage === "Overview" ||
+          activeSubpage === "Operators" ||
           activeSubpage === "Gateway sessions" ||
           activeSubpage === "Privilege vault" ||
           (activeSubpage === "VPS identities" && identityWorkflow === null)
@@ -1652,8 +1811,8 @@ export function AccessPanel({
           {createdIdentity && privateKeyHex && (
             <InstallCommand
               clientId={createdIdentity.client_id}
+              onOpenSystemConfig={onOpenSystemConfig}
               privateKeyHex={privateKeyHex}
-              preferences={operator?.preferences ?? null}
             />
           )}
         </form>
@@ -2066,7 +2225,13 @@ function CopyableHash({ label, value }: { label: string; value: string }) {
 }
 
 function identityStatus(client: KeyLifecycleClientView): string {
-  return client.current_key_revoked ? "blocked" : client.status;
+  if (client.current_key_revoked) {
+    return "blocked";
+  }
+  if (client.status === "online") {
+    return "Identity active";
+  }
+  return client.status;
 }
 
 function gatewaySessionStateLabel(status: string): string {
@@ -2080,6 +2245,10 @@ function gatewaySessionStateLabel(status: string): string {
 
 function isOperatorSessionActive(session: OperatorSessionRecord): boolean {
   return !session.revoked && !isOperatorSessionExpired(session);
+}
+
+function isTerminalOpen(session: TerminalSessionRecord): boolean {
+  return !session.session_exited && session.state !== "closed";
 }
 
 function isOperatorSessionExpired(session: OperatorSessionRecord): boolean {
@@ -2147,59 +2316,52 @@ function scrollIntoViewSoon(element: HTMLElement | null) {
 
 function InstallCommand({
   clientId,
+  onOpenSystemConfig,
   privateKeyHex,
-  preferences,
 }: {
   clientId: string;
+  onOpenSystemConfig: () => void;
   privateKeyHex: string;
-  preferences: {
-    gateway_server_public_key_hex: string | null;
-    gateway_endpoints: string;
-  } | null;
 }) {
-  const endpoints = (preferences?.gateway_endpoints ?? "").trim();
-  const gatewayKey = (preferences?.gateway_server_public_key_hex ?? "").trim();
-
-  if (!endpoints || !gatewayKey) {
-    return (
-      <div className="formNote mutedNote">
-        <span>
-          Gateway endpoint or server key settings are not configured, so the
-          panel cannot generate a complete install command yet.
-        </span>
-      </div>
-    );
-  }
-
-  const command = [
-    "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \\",
-    "  VPSMAN_INSTALL_MODE=root \\",
+  const installMaterial = [
     `  VPSMAN_AGENT_CLIENT_ID=${clientId} \\`,
     `  VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=${privateKeyHex} \\`,
-    `  VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=${gatewayKey} \\`,
-    `  VPSMAN_GATEWAY_ENDPOINTS='${endpoints}' \\`,
-    "  bash",
   ].join("\n");
 
   function handleCopy() {
-    navigator.clipboard.writeText(command).catch(() => {});
+    navigator.clipboard.writeText(installMaterial).catch(() => {});
   }
 
   return (
     <div className="installCommandBlock">
       <div className="sectionHeader compact">
-        <strong>Install command</strong>
-        <button
-          className="secondaryAction compact"
-          onClick={handleCopy}
-          type="button"
-        >
-          <Copy size={15} />
-          Copy
-        </button>
+        <strong>Install material</strong>
+        <div className="sectionActions">
+          <button
+            className="secondaryAction compact"
+            onClick={onOpenSystemConfig}
+            type="button"
+          >
+            <Save size={15} />
+            Open Suite Config
+          </button>
+          <button
+            className="secondaryAction compact"
+            onClick={handleCopy}
+            type="button"
+          >
+            <Copy size={15} />
+            Copy agent material
+          </button>
+        </div>
       </div>
+      <p>
+        Gateway endpoints and server public key are system settings. Combine
+        this agent material with the Suite Config gateway settings when running
+        the install script.
+      </p>
       <pre>
-        <code>{command}</code>
+        <code>{installMaterial}</code>
       </pre>
     </div>
   );

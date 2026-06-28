@@ -161,7 +161,10 @@ test("renders an operational cloud-console fleet workspace", async ({
     page.getByRole("heading", { name: "Fleet command home" }),
   ).toBeVisible();
   await expect(page.getByLabel("Home quick actions")).toBeVisible();
-  await expect(page.getByLabel("Home posture strip")).toContainText("Online");
+  const homePosture = page.getByLabel("Home posture strip");
+  await expect(homePosture).toContainText("Live VPS");
+  await expect(homePosture).toContainText("0 live, 2 contact unknown");
+  await expect(homePosture).not.toContainText("visible online");
   await expect(
     page.getByRole("heading", { name: "Running work" }),
   ).toBeVisible();
@@ -195,35 +198,48 @@ test("renders an operational cloud-console fleet workspace", async ({
   await expect(
     page.getByRole("heading", { name: "Fleet instances" }),
   ).toBeVisible();
+  const fleetInstancesHeader = page.locator(".fleetInstancesHeader");
+  await expect(fleetInstancesHeader).toContainText("0 live / 3 total");
+  await expect(fleetInstancesHeader).not.toContainText("2 online / 3 total");
   if (testInfo.project.name.includes("desktop")) {
     await expect(
       page.getByRole("searchbox", { name: "Search fleet" }),
     ).toBeVisible();
   }
   const fleetGrid = page.getByLabel("VPS instance records data grid");
-  const edgeRow = fleetGrid
-    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
-    .first();
+  const edgeRow = testInfo.project.name.includes("mobile")
+    ? fleetGrid.getByLabel("VPS instance records mobile card agent-sfo-01")
+    : fleetGrid
+      .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+      .first();
   await expect(edgeRow).toBeVisible();
   await expect(edgeRow).toContainText("edge-sfo-01 (fo01)");
-  for (const column of [
-    "VPS",
-    "State",
-    "IP",
-    "Last contact",
-    "Agent",
-    "CPU",
-    "Memory",
-    "Disk",
-    "Alerts",
-    "Action",
-  ]) {
-    await expect(
-      fleetGrid
-        .locator(".gridHeaderCell")
-        .filter({ hasText: new RegExp(`^${column}$`) })
-        .first(),
-    ).toBeVisible();
+  if (testInfo.project.name.includes("mobile")) {
+    for (const label of ["IP", "Last contact", "Agent", "CPU", "Memory", "Disk", "Alerts"]) {
+      await expect(edgeRow).toContainText(label);
+    }
+    await expect(edgeRow.getByRole("button", { name: /Open VPS/ })).toBeVisible();
+  } else {
+    for (const column of [
+      "VPS",
+      "State",
+      "IP",
+      "Country",
+      "Last contact",
+      "Agent",
+      "CPU",
+      "Memory",
+      "Disk",
+      "Alerts",
+      "Action",
+    ]) {
+      await expect(
+        fleetGrid
+          .locator(".gridHeaderCell")
+          .filter({ hasText: new RegExp(`^${column}$`) })
+          .first(),
+      ).toBeVisible();
+    }
   }
   await expect(page.getByText("Console stream connected")).toBeVisible();
   await expect(edgeRow).not.toContainText("alpha");
@@ -284,6 +300,14 @@ test("renders an operational cloud-console fleet workspace", async ({
       bulk_output_compare_mode: "text",
       vps_name_display_mode: "name",
     });
+    expect(savedPreferences).not.toHaveProperty("gateway_endpoints");
+    expect(savedPreferences).not.toHaveProperty("gateway_server_public_key_hex");
+    expect(savedPreferences).not.toHaveProperty(
+      "tunnel_ipv4_allocation_pool_cidr",
+    );
+    expect(savedPreferences).not.toHaveProperty(
+      "tunnel_ipv6_allocation_pool_cidr",
+    );
     await nav.getByRole("button", { name: "Fleet", exact: true }).click();
     await expect(edgeRow).toContainText("edge-sfo-01");
     await expect(edgeRow).not.toContainText("(fo01)");
@@ -296,7 +320,7 @@ test("renders an operational cloud-console fleet workspace", async ({
     await nav.getByRole("button", { name: "Fleet", exact: true }).click();
   }
   await expect(
-    page.locator(".consoleHeader").getByText("0 online / 3 total"),
+    page.locator(".consoleHeader").getByText("0 live / 3 total"),
   ).toBeVisible();
   await expect(page.getByText("VPS instances")).toBeVisible();
   await expect(fleetGrid).toContainText("Contact unknown");
@@ -311,10 +335,16 @@ test("renders an operational cloud-console fleet workspace", async ({
     await openConsoleSubpage(page, "Fleet", "Instances");
   }
 
-  const coreRow = fleetGrid
-    .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
-    .first();
-  await activate(coreRow);
+  const coreRecord = testInfo.project.name.includes("mobile")
+    ? fleetGrid.getByLabel("VPS instance records mobile card agent-fra-02")
+    : fleetGrid
+      .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
+      .first();
+  if (testInfo.project.name.includes("mobile")) {
+    await activate(coreRecord.getByRole("button", { name: /Open VPS/ }));
+  } else {
+    await activate(coreRecord);
+  }
   await expect(
     page.getByRole("heading", { level: 1, name: "Instance detail" }),
   ).toBeVisible();
@@ -326,7 +356,11 @@ test("renders an operational cloud-console fleet workspace", async ({
     "Registered as online, but no last contact has been reported by the gateway.",
   );
 
-  await activate(coreDetail.getByRole("tab", { name: "Network" }));
+  if (testInfo.project.name.includes("mobile")) {
+    await coreDetail.getByLabel("VPS detail section").selectOption("Network");
+  } else {
+    await activate(coreDetail.getByRole("tab", { name: "Network" }));
+  }
   await expect(
     coreDetail.getByRole("tabpanel", { name: "Network tab" }),
   ).toBeVisible();
@@ -393,7 +427,7 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
     fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }),
   ).toHaveCount(0);
   await expect(
-    page.locator(".consoleHeader").getByText("0 online / 2 total"),
+    page.locator(".consoleHeader").getByText("0 live / 2 total"),
   ).toBeVisible();
 
   const deleteRequest = await page.evaluate(() => {
@@ -481,7 +515,7 @@ test("reviews notification and webhook queue mutations before commit", async ({
   await activate(notifications.getByRole("tab", { name: /Destinations/ }));
 
   await activate(
-    notifications.getByRole("button", { name: "Review queue dispatch" }),
+    notifications.getByRole("button", { name: "Queue dispatch" }),
   );
   await expect(
     notifications.getByLabel("Confirm notification queue dispatch"),
@@ -507,7 +541,7 @@ test("reviews notification and webhook queue mutations before commit", async ({
     .toMatchObject({ confirmed: true, dry_run: false });
 
   await activate(
-    notifications.getByRole("button", { name: "Review delivery" }),
+    notifications.getByRole("button", { name: "Deliver queued" }),
   );
   await expect(
     notifications.getByLabel("Confirm notification delivery"),
@@ -551,7 +585,7 @@ test("reviews notification and webhook queue mutations before commit", async ({
     page.getByRole("option", { name: /^interval\.30sec$/ }),
   ).toBeVisible();
   await page.keyboard.press("Enter");
-  await expect(webhookExpression).toContainText("interval.30sec");
+  await expect(webhookExpression).toHaveValue("interval.30sec");
   await activate(webhooks.getByLabel("Close detail panel"));
 
   await activate(
@@ -724,14 +758,18 @@ test("supports interactive fleet data grid controls", async ({
   await expect(grid.getByText("3 of 3 instances")).toBeVisible();
   await grid.getByLabel("VPS instance records search").fill("fra");
   await expect(grid.getByText("1 of 3 instances")).toBeVisible();
-  await expect(
-    grid.locator("[role=row]", { hasText: "core-fra-02" }),
-  ).toBeVisible();
+  const mobileFleetGrid = testInfo.project.name.includes("mobile");
+  const visibleCoreRecord = mobileFleetGrid
+    ? grid.getByLabel("VPS instance records mobile card agent-fra-02")
+    : grid.locator("[role=row]", { hasText: "core-fra-02" });
+  await expect(visibleCoreRecord).toBeVisible();
   await grid.getByLabel("VPS instance records search").fill("");
 
-  const coreRow = grid
-    .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
-    .first();
+  const coreRow = mobileFleetGrid
+    ? grid.getByLabel("VPS instance records mobile card agent-fra-02")
+    : grid
+      .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
+      .first();
   await coreRow.getByLabel("Select VPS instance records row").check();
   await expect(grid.getByText("1 selected", { exact: true })).toBeVisible();
   await grid
@@ -744,18 +782,28 @@ test("supports interactive fleet data grid controls", async ({
   await page.keyboard.press("Escape");
 
   await grid.getByLabel("VPS instance records columns").click();
-  await expect(
-    grid.getByRole("columnheader", { name: /Provider/ }),
-  ).toHaveCount(0);
+  if (!mobileFleetGrid) {
+    await expect(
+      grid.getByRole("columnheader", { name: /Provider/ }),
+    ).toHaveCount(0);
+  }
   await page.getByRole("menuitemcheckbox", { name: "Provider" }).click();
-  await expect(
-    grid.getByRole("columnheader", { name: /Provider/ }),
-  ).toBeVisible();
+  if (!mobileFleetGrid) {
+    await expect(
+      grid.getByRole("columnheader", { name: /Provider/ }),
+    ).toBeVisible();
+  } else {
+    await expect(coreRow).toContainText("core-fra-02");
+  }
   await page.keyboard.press("Escape");
 
-  await coreRow.click({ button: "right" });
-  await expect(page.getByText("Row actions")).toBeVisible();
-  await page.getByRole("menuitem", { name: "Open detail" }).click();
+  if (mobileFleetGrid) {
+    await coreRow.getByRole("button", { name: /Open VPS/ }).click();
+  } else {
+    await coreRow.click({ button: "right" });
+    await expect(page.getByText("Row actions")).toBeVisible();
+    await page.getByRole("menuitem", { name: "Open detail" }).click();
+  }
   await expect(
     page.getByRole("heading", { level: 1, name: "Instance detail" }),
   ).toBeVisible();
@@ -884,8 +932,11 @@ test("supports Config VPS Rules dry-run, confirm, and explicit unset", async ({
     .click();
   const previewBlock = page.locator(".vpsRulesPreviewBlock");
   await expect(
-    previewBlock.getByText("No changes detected", { exact: true }),
+    previewBlock.getByText("No changes detected", { exact: true }).first(),
   ).toBeVisible();
+  await expect(
+    page.getByLabel("VPS rules preview final action"),
+  ).toContainText("Apply is disabled");
   await expect(
     page.locator(".confirmationPrompt", { hasText: "Confirm VPS rule write" }),
   ).toHaveCount(0);
@@ -901,8 +952,19 @@ test("supports Config VPS Rules dry-run, confirm, and explicit unset", async ({
   await expect(previewGrid).toContainText("traffic.quota.total");
   await expect(previewGrid).not.toContainText("traffic.reset_day");
   await expect(previewGrid).not.toContainText("traffic.selectors");
-  await expect(page.getByText("Confirm VPS rule write")).toBeVisible();
-  await page.getByRole("button", { name: "Apply 1 change" }).click();
+  const finalAction = page.getByLabel("VPS rules preview final action");
+  await expect(finalAction).toContainText("Apply 1 change");
+  await expect(finalAction).toContainText("1 effective change");
+  await expect(finalAction).toContainText("2 no-ops hidden");
+  await expect(
+    page.locator(".confirmationPrompt", { hasText: "Confirm VPS rule write" }),
+  ).toHaveCount(0);
+  await finalAction.getByRole("button", { name: "Apply 1 change" }).click();
+  const applyPrompt = page.locator(".confirmationPrompt", {
+    hasText: "Confirm VPS rule write",
+  });
+  await expect(applyPrompt).toBeVisible();
+  await applyPrompt.getByRole("button", { name: "Apply 1 change" }).click();
   await expect(page.getByText("applied 1 VPS rule changes")).toBeVisible();
 
   await editor.getByRole("button", { name: "Unset values" }).click();
@@ -913,6 +975,7 @@ test("supports Config VPS Rules dry-run, confirm, and explicit unset", async ({
   const unsetPrompt = page.locator(".confirmationPrompt", {
     hasText: "Confirm VPS rule write",
   });
+  await finalAction.getByRole("button", { name: "Apply 1 change" }).click();
   await expect(unsetPrompt).toBeVisible();
   await expect(unsetPrompt.getByTitle("unset")).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
@@ -946,7 +1009,7 @@ test("opens manual update check dispatch from fleet selection", async ({
   ).toBeVisible();
   await expect(
     page.getByRole("searchbox", { name: "Bulk target selector expression" }),
-  ).toContainText("id:agent-fra-02");
+  ).toHaveValue("id:agent-fra-02");
   await expect(
     page.getByLabel("Agent update version manifest URL"),
   ).toHaveValue(DEFAULT_UPDATE_VERSION_URL);
@@ -982,13 +1045,15 @@ test("opens dispatch from fleet selection with selected VPS ids", async ({
   ).toBeVisible();
   await expect(
     page.getByRole("searchbox", { name: "Bulk target selector expression" }),
-  ).toContainText("id:agent-fra-02");
+  ).toHaveValue("id:agent-fra-02");
   await expect(page.getByRole("button", { name: "Argv" })).toHaveClass(
     /selected/,
   );
 });
 
-test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
+test("keeps fleet alert policy actions selection-scoped", async ({
+  page,
+}, testInfo) => {
   await page.goto("/");
   await openConsoleSubpage(page, "Observability", "Alerts");
 
@@ -1005,16 +1070,26 @@ test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
   await page.keyboard.type("enabled");
   await expect(page.getByRole("option", { name: /^enabled$/ })).toBeVisible();
   await page.keyboard.press("Enter");
-  await expect(policySearch).toContainText("enabled");
+  await expect(policySearch).toHaveValue("enabled");
   await policySearch.fill("");
 
-  const policyRow = grid
-    .locator(".gridBody [role=row]", { hasText: "edge-resource-policy" })
+  const mobilePolicyCard = grid
+    .getByLabel(/Policy groups mobile card/)
+    .filter({ hasText: "edge-resource-policy" })
     .first();
-  await checkControl(policyRow.getByLabel("Select Policy groups row"));
-  await grid.getByRole("button", { name: "Action" }).click();
-  await expect(page.getByRole("menuitem", { name: "Details" })).toBeVisible();
-  await page.getByRole("menuitem", { name: "Details" }).click();
+  const policyRow = testInfo.project.name.includes("mobile")
+    ? mobilePolicyCard
+    : grid
+      .locator(".gridBody [role=row]", { hasText: "edge-resource-policy" })
+      .first();
+  if (testInfo.project.name.includes("mobile")) {
+    await activate(policyRow.getByRole("button", { name: "Details" }).first());
+  } else {
+    await checkControl(policyRow.getByLabel("Select Policy groups row"));
+    await grid.getByRole("button", { name: "Action" }).click();
+    await expect(page.getByRole("menuitem", { name: "Details" })).toBeVisible();
+    await page.getByRole("menuitem", { name: "Details" }).click();
+  }
   await expect(
     page.locator(".consoleDetailPanelHeader strong", {
       hasText: "Alert policy details",
@@ -1028,22 +1103,28 @@ test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
   await page.getByLabel("Close detail panel").click();
   await expect(page.getByText("Alert policy details")).toHaveCount(0);
 
-  await policyRow.getByLabel("Expand Policy groups row").click();
-  const inlineDetail = grid.locator(".gridExpandedRow");
-  await expect(inlineDetail).toContainText("edge-resource-policy");
-  await expect(inlineDetail).toContainText("traffic.cycle.total");
-  await policyRow.getByLabel("Collapse Policy groups row").click();
-  await expect(inlineDetail).toHaveCount(0);
+  if (!testInfo.project.name.includes("mobile")) {
+    await policyRow.getByLabel("Expand Policy groups row").click();
+    const inlineDetail = grid.locator(".gridExpandedRow");
+    await expect(inlineDetail).toContainText("edge-resource-policy");
+    await expect(inlineDetail).toContainText("traffic.cycle.total");
+    await policyRow.getByLabel("Collapse Policy groups row").click();
+    await expect(inlineDetail).toHaveCount(0);
+  }
 
-  await checkControl(policyRow.getByLabel("Select Policy groups row"));
-  await grid.getByRole("button", { name: "Action" }).click();
-  await page.getByRole("menuitem", { name: "Edit" }).click();
+  if (testInfo.project.name.includes("mobile")) {
+    await activate(policyRow.getByRole("button", { name: "Edit" }));
+  } else {
+    await checkControl(policyRow.getByLabel("Select Policy groups row"));
+    await grid.getByRole("button", { name: "Action" }).click();
+    await page.getByRole("menuitem", { name: "Edit" }).click();
+  }
   const editor = page.locator(".consoleDetailPanel", {
     hasText: "Edit alert policy",
   });
   await expect(
     editor.getByLabel("Policy VPS selector expression"),
-  ).toContainText("tag:edge");
+  ).toHaveValue("tag:edge");
   await expect(editor.getByLabel("Rule condition expression")).toHaveValue(
     "traffic.cycle.total >= traffic.quota.total * 0.8",
   );
@@ -1057,10 +1138,14 @@ test("keeps fleet alert policy actions selection-scoped", async ({ page }) => {
   await expect(page.getByText("saved edge-resource-policy")).toBeVisible();
   await page.getByLabel("Close detail panel").click();
 
-  await policyRow.click({ button: "right" });
-  await expect(page.getByText("Row actions")).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "Details" })).toBeVisible();
-  await page.keyboard.press("Escape");
+  if (testInfo.project.name.includes("mobile")) {
+    await expect(policyRow.getByRole("button", { name: "Details" }).first()).toBeVisible();
+  } else {
+    await policyRow.click({ button: "right" });
+    await expect(page.getByText("Row actions")).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: "Details" })).toBeVisible();
+    await page.keyboard.press("Escape");
+  }
 });
 
 test("shows issued policy alerts in Fleet Alerts and webhook rule fixtures", async ({
@@ -1137,9 +1222,26 @@ test("keeps console layout usable on desktop and mobile widths", async ({
     await expect(
       page.getByRole("button", { name: "Clear fleet scope" }),
     ).toBeDisabled();
-    await page
-      .getByRole("combobox", { name: "Console page" })
-      .selectOption("Config::templates");
+    await expect(page.locator(".topbarActions > .savedViewControls")).toBeHidden();
+    const mobileSavedViews = page.locator(".mobileSavedViewMenu");
+    await expect(mobileSavedViews).toBeVisible();
+    const mobileSavedViewSelect = mobileSavedViews.getByRole("combobox", {
+      name: "Saved fleet view",
+      exact: true,
+    });
+    await expect(mobileSavedViewSelect).toBeHidden();
+    await mobileSavedViews.getByLabel("Open saved fleet views menu").click();
+    await expect(mobileSavedViewSelect).toBeVisible();
+    const mobilePageMenu = page.locator(".mobilePageMenu");
+    await expect(mobilePageMenu).toBeVisible();
+    const mobilePageSelector = page.getByRole("combobox", {
+      name: "Console page",
+      exact: true,
+    });
+    await expect(mobilePageSelector).toBeHidden();
+    await mobilePageMenu.getByLabel("Open mobile page navigation").click();
+    await expect(mobilePageSelector).toBeVisible();
+    await mobilePageSelector.selectOption("Config::templates");
     await expect(
       page.getByRole("heading", { name: "Config", exact: true }),
     ).toBeVisible();
@@ -1180,6 +1282,8 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   await expect(systemOverview).toContainText("Worker");
   await expect(systemOverview).toContainText("What needs attention");
   await expect(systemOverview).toContainText("Diagnostics");
+  await expect(systemOverview.locator(".systemOverviewKpis")).toHaveCount(0);
+  await expect(systemOverview.locator(".systemSubsystemGrid")).toHaveCount(0);
   await expect(systemOverview).not.toContainText("Capacity forecast");
   await expect(systemOverview).not.toContainText("Drilldown coverage");
   await expect(
@@ -1188,6 +1292,9 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
       exact: true,
     }),
   ).toBeVisible();
+  await expect(
+    page.getByLabel("Selected chart - Dispatch queue thresholds"),
+  ).toHaveCount(0);
   await expect(
     page.getByRole("heading", { name: "Gateway Events", exact: true }),
   ).toHaveCount(0);
@@ -1409,20 +1516,25 @@ test("surfaces operator users under Access and session evidence under Audit", as
   await expect(governance).toContainText("Operator");
   await expect(governance).toContainText("Admin");
   await expect(governance).toContainText("Bearer sessions");
-  await expect(governance).toContainText("2 active");
+  await expect(governance).toContainText("0 active");
+  await expect(governance).toContainText(
+    "2 expired bearer sessions excluded from active counts",
+  );
   await expect(governance).toContainText("Auth failures in loaded history");
   await expect(governance).toContainText("2 loaded failures");
   await expect(governance).toContainText(
     "Per-user counts below use the same loaded auth history",
   );
   await expect(governance).toContainText("Policy evidence boundary");
-  await expect(page.getByText("Last login").first()).toBeVisible();
-  await expect(page.getByText("Actions").first()).toBeVisible();
+  const operatorGrid = page.getByLabel("Operator accounts data grid");
   await expect(
-    page.getByRole("button", { name: "Manage" }).first(),
+    operatorGrid.getByRole("row", { name: /Last login/ }).first(),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Revoke sessions" }).first(),
+    operatorGrid.getByRole("button", { name: "Manage" }).first(),
+  ).toBeVisible();
+  await expect(
+    operatorGrid.getByRole("button", { name: "Revoke sessions" }).first(),
   ).toBeVisible();
   await selectGridRow(
     page,
@@ -1439,16 +1551,13 @@ test("surfaces operator users under Access and session evidence under Audit", as
   await expect(adminEvidence).toContainText(
     "not exposed by the current operator API",
   );
-  await activate(
-    adminEvidence.getByRole("button", { name: "Revoke sessions" }),
-  );
-  const userSessionRevokePrompt = page.getByLabel("Confirm admin user action");
-  await expect(userSessionRevokePrompt).toBeVisible();
-  await expect(userSessionRevokePrompt).toContainText(
-    "Revoke 1 non-current active sessions",
-  );
-  await activate(
-    userSessionRevokePrompt.getByRole("button", { name: "Cancel" }),
+  const revokeAdminSessions = adminEvidence.getByRole("button", {
+    name: "Revoke sessions",
+  });
+  await expect(revokeAdminSessions).toBeDisabled();
+  await expect(revokeAdminSessions).toHaveAttribute(
+    "title",
+    /No non-current active sessions/,
   );
   await activate(page.getByRole("button", { name: "Disable" }));
   await expect(page.getByText("Preparing review")).toBeVisible();
@@ -1616,6 +1725,8 @@ test("manages template assignments from automation source templates", async ({
   );
 
   await page.goto("/");
+  await openConsoleSubpage(page, "Automation", "Source templates");
+  await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Automation", "Source templates");
 
   const panel = page.locator(".sourceTemplatePanel");
@@ -1797,6 +1908,81 @@ test("manages template assignments from automation source templates", async ({
     selector_expression: "(provider:alpha && country:US) || id:agent-fra-02",
     target_client_ids: ["agent-fra-02", "agent-sfo-01"],
   });
+});
+
+test("keeps source template assignment review while unlocking privilege inline", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "dense template management is covered in the desktop console layout",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Automation", "Source templates");
+
+  const templatePanel = page.locator(".sourceTemplatePanel");
+  const templateRows = templatePanel
+    .getByLabel("Template registry data grid")
+    .locator(".gridBody .gridRow");
+  await activate(
+    templateRows.filter({ hasText: "shared:vnstat-json" }).first(),
+  );
+  await templatePanel
+    .getByLabel("Assignment domain")
+    .selectOption("runtime_traffic_accounting_source");
+  await templatePanel
+    .getByLabel("Template assignment template")
+    .selectOption("11111111-1111-4111-8111-111111111111");
+  await templatePanel
+    .getByRole("searchbox", {
+      name: "Template assignment target expression",
+    })
+    .fill("(provider:alpha && country:US) || id:agent-fra-02");
+  await activate(
+    templatePanel.getByRole("button", { name: "Review assignment" }),
+  );
+
+  const prompt = templatePanel.locator(".confirmationPrompt").last();
+  const applyButton = prompt.getByRole("button", {
+    name: "Apply template assignment",
+  });
+  await expect(prompt).toContainText("Confirm template assignment");
+  await expect(prompt).toContainText("2 resolved and frozen");
+  await expect(applyButton).toBeDisabled();
+  await expect(prompt.locator(".privilegeManager")).toContainText(
+    "Local-only privilege material",
+  );
+
+  await prompt
+    .getByLabel("Source templates privilege secret")
+    .fill("local-super-password");
+  await prompt
+    .getByLabel("Source templates privilege salt")
+    .fill("00112233445566778899aabbccddeeff");
+  await activate(
+    prompt.getByRole("button", { name: "Unlock source template apply" }),
+  );
+  await expect(applyButton).toBeEnabled();
+  await activate(applyButton);
+
+  const request = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { sourceTemplateAssignments: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.sourceTemplateAssignments.at(-1);
+  });
+  expect(request).toMatchObject({
+    confirmed: true,
+    domain: "runtime_traffic_accounting_source",
+    preview_hash: "8".repeat(64),
+    selector_expression: "(provider:alpha && country:US) || id:agent-fra-02",
+    target_client_ids: ["agent-fra-02", "agent-sfo-01"],
+    template_id: "11111111-1111-4111-8111-111111111111",
+  });
+  expectPrivilegeAssertion(request);
 });
 
 test("prefills registered agent update shortcuts into dispatch", async ({
@@ -2015,7 +2201,7 @@ test("creates a cron schedule from a command template with target preview", asyn
   await expect(scheduledRunsGrid).toContainText("edge-health-hourly");
   await expect(scheduledRunsGrid).toContainText("Hourly at minute 0");
   await expect(scheduledRunsGrid).toContainText("Scheduled shell command");
-  await expect(scheduledRunsGrid).toContainText("Not reported");
+  await expect(scheduledRunsGrid).toContainText("4w ago");
   await expect(page.getByText("due not exposed")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
   await activate(page.getByRole("button", { name: "Open schedule registry" }));
@@ -2044,13 +2230,17 @@ test("creates a cron schedule from a command template with target preview", asyn
     .selectOption("46464646-5656-4789-8abc-defdefdefdef");
   await page.getByLabel("Schedule cron expression").fill("*/15 * * * *");
   await page.getByLabel("Schedule target expression").fill("country:US");
-  await expect(page.getByText("2 VPSs in local preview")).toBeVisible();
+  await expect(
+    page.getByText("2 VPSs in local preview; server resolves before save"),
+  ).toBeVisible();
   await expect(
     page.getByText(/UTC schedule, displayed in browser timezone/),
   ).toBeVisible();
   await expect(page.getByText("Every 15 minutes")).toBeVisible();
   await expect(
-    page.getByText(/2 matching VPSs in local preview; edge-health-check/),
+    page.getByText(
+      /2 matching VPSs in local preview; server resolves before save; edge-health-check/,
+    ),
   ).toBeVisible();
   await activate(
     page.getByRole("button", { name: "Review save", exact: true }),
@@ -2206,20 +2396,37 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
   await expect(actions).toContainText("Expired bearer sessions");
   await expect(actions).toContainText("2 expired");
   await expect(actions).toContainText("Gateway install defaults");
+  await expect(actions).toContainText("Suite Config");
   await expect(actions).toContainText("Privilege state");
   await expect(actions).toContainText(
     "No saved local vault; enter privilege secret when needed.",
   );
+  await activate(actions.getByRole("button", { name: "Open Suite Config" }));
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Suite Config" }),
+  ).toBeVisible();
+  await openConsoleSubpage(page, "Access", "Overview");
 
   const responsibilities = page.getByLabel("Access overview responsibilities");
-  await expect(responsibilities).toContainText("Operators and active sessions");
-  await expect(responsibilities).toContainText("2 operators / 0 active");
+  await expect(responsibilities).toContainText("Operators");
+  await expect(responsibilities).toContainText("2 operators");
   await expect(responsibilities).toContainText(
-    "after expiry validation; current session Expired",
+    "Bearer sessions are listed under Session scopes.",
   );
   await expect(responsibilities).toContainText("VPS identities");
-  await expect(responsibilities).toContainText("Gateway sessions");
-  await expect(responsibilities).toContainText("Privilege state");
+  await expect(responsibilities).not.toContainText("current session Expired");
+
+  const sessionScopes = page.getByLabel("Access session scopes");
+  await expect(sessionScopes).toContainText("Console/browser session");
+  await expect(sessionScopes).toContainText("Active as console-admin");
+  await expect(sessionScopes).toContainText("console stream");
+  await expect(sessionScopes).toContainText("API bearer sessions");
+  await expect(sessionScopes).toContainText("0 active / 2 expired");
+  await expect(sessionScopes).toContainText("current bearer record Expired");
+  await expect(sessionScopes).toContainText("Privilege unlock");
+  await expect(sessionScopes).toContainText("Terminal sessions");
+  await expect(sessionScopes).toContainText("Gateway sessions");
+  await expect(sessionScopes).not.toContainText("current session Expired");
 
   await activate(actions.getByRole("button", { name: "Set up MFA" }));
   await expect(
@@ -2482,6 +2689,9 @@ test("shows topology network evidence, speed metrics, and probe latency history"
     page.getByRole("heading", { level: 1, name: "Network evidence" }),
   ).toBeVisible();
   const evidence = page.locator(".topologyEvidence");
+  await expect(evidence.getByLabel("Network evidence freshness")).toContainText(
+    /Evidence set is .* old\./,
+  );
   const timeline = evidence.getByLabel("Network evidence timeline");
   await expect(timeline.getByText("Evidence timeline")).toBeVisible();
   await expect(
@@ -2512,6 +2722,9 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(
     evidence.getByRole("button", { name: "Compare to previous" }),
   ).toBeVisible();
+  await expect(evidence.getByLabel("Measurement evidence")).toContainText(
+    "Stale sample · degraded throughput",
+  );
   await expect(
     evidence.getByRole("button", { name: "Open OSPF" }),
   ).toBeVisible();
@@ -2540,7 +2753,18 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   ).toBeVisible();
   const observationTable = evidence.locator(".observationTable");
   await expect(observationTable.getByText("Network speed test")).toBeVisible();
-  await expect(observationTable.getByText("10.1 Mbps")).toBeVisible();
+  const speedObservationRow = observationTable
+    .locator(".historyRow")
+    .filter({ hasText: "Network speed test" });
+  await expect(observationTable).toContainText(
+    "Stale sample · degraded throughput",
+  );
+  await expect(
+    speedObservationRow.getByText("Healthy", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    speedObservationRow.getByText("10.1 Mbps", { exact: true }),
+  ).toBeVisible();
   await expect(observationTable.getByText("12.4 ms")).toBeVisible();
   await expect(observationTable.getByText("0.25% loss")).toBeVisible();
   await expect(
@@ -2552,12 +2776,20 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(
     observationTable.getByText("Adapter status failed"),
   ).toBeVisible();
+  await expect(evidence.getByLabel("Related command jobs")).toContainText(
+    "Stale sample · degraded throughput",
+  );
   await expect(evidence.getByText("Managed blocks match")).toBeVisible();
   await activate(evidence.getByRole("button", { name: "Open OSPF" }));
   await expect(
     page.getByRole("heading", { level: 1, name: "Network OSPF" }),
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Apply cost" })).toBeVisible();
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
+  await activate(page.getByRole("button", { name: "Latency and auto OSPF" }));
+  const automationGrid = page.getByLabel("Automation state data grid");
+  await expect(automationGrid).toContainText("14->22");
+  await expect(automationGrid).not.toContainText("14->21");
 });
 
 test("authors custom adapter tunnel plans from the topology panel", async ({
@@ -2607,6 +2839,9 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
     planGrid.getByRole("button", { name: "Health", exact: true }),
   ).toBeVisible();
   await expect(
+    planGrid.getByRole("button", { name: "Evidence age", exact: true }),
+  ).toBeVisible();
+  await expect(
     planGrid.getByRole("button", { name: "OSPF cost", exact: true }),
   ).toBeVisible();
   await expect(
@@ -2620,7 +2855,7 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
     .first();
   await expect(savedPlanRow.getByText("100 Mbps target")).toBeVisible();
   await expect(savedPlanRow.getByText("Runtime sync allowed")).toBeVisible();
-  await expect(savedPlanRow.getByText("Both endpoints applied")).toBeVisible();
+  await expect(savedPlanRow.getByText("Stale evidence").first()).toBeVisible();
   await savedPlanRow.getByRole("button", { name: "Disable" }).click();
   await expect(page.getByText("Confirm tunnel plan lifecycle")).toBeVisible();
   await confirmVisiblePrompt(page, "Disable plans");
@@ -2645,14 +2880,29 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
   ]);
 
   await page.getByRole("button", { name: "Create tunnel plan" }).click();
+  await expect(planGrid).toBeHidden();
   const composer = page.locator(".scheduleComposer", {
     has: page.getByRole("heading", { name: "Create tunnel plan" }),
   });
   await composer.scrollIntoViewIfNeeded();
+  const savePlanButton = composer.getByRole("button", { name: "Save plan" });
+  await expect(savePlanButton).toBeVisible();
+  expect(
+    await savePlanButton.evaluate(
+      (element) => getComputedStyle(element).position,
+    ),
+  ).toBe("sticky");
   await expect(composer.getByLabel("OSPF cost preview")).toContainText(
     "OSPF cost",
   );
   await expect(composer.getByLabel("Bandwidth Mbps")).toBeVisible();
+  await expect(composer.getByLabel("IPv4 pool override")).toHaveValue("");
+  await expect(composer.getByLabel("IPv6 pool override")).toHaveValue("");
+  await expect(
+    composer.locator(
+      '[title="Uses Suite Config pools unless overridden here. Reserved addresses are comma-separated; repeated allocation appends current endpoint IPs before requesting another suggestion."]',
+    ),
+  ).toBeVisible();
   const tunnelWizard = composer.locator('[aria-label="Tunnel plan wizard"]');
   await expect(tunnelWizard).toContainText("1 Endpoints & type");
   await expect(tunnelWizard).toContainText("missing inputs");
@@ -3146,7 +3396,7 @@ test("generates local privilege assertions before dispatching a privileged job",
     page.getByRole("option", { name: /edge-sfo-01.*Name.*agent-sfo-01/ }),
   ).toBeVisible();
   await page.keyboard.press("Enter");
-  await expect(targetExpression).toContainText("name:edge-sfo-01");
+  await expect(targetExpression).toHaveValue("name:edge-sfo-01");
   await targetExpression.fill("");
   await targetExpression.click();
   await page.keyboard.type("fo01");
@@ -3154,7 +3404,7 @@ test("generates local privilege assertions before dispatching a privileged job",
     page.getByRole("option", { name: /edge-sfo-01.*ID.*agent-sfo-01/ }),
   ).toBeVisible();
   await page.keyboard.press("Enter");
-  await expect(targetExpression).toContainText("id:agent-sfo-01");
+  await expect(targetExpression).toHaveValue("id:agent-sfo-01");
   await targetExpression.fill("");
   await targetExpression.click();
   await page.keyboard.type("status:on");
@@ -3162,7 +3412,7 @@ test("generates local privilege assertions before dispatching a privileged job",
     page.getByRole("option", { name: /^status:online$/ }),
   ).toBeVisible();
   await page.keyboard.press("Enter");
-  await expect(targetExpression).toContainText("status:online");
+  await expect(targetExpression).toHaveValue("status:online");
   await targetExpression.fill("");
   await targetExpression.click();
   await page.keyboard.type("vps.status:on");
@@ -3170,19 +3420,19 @@ test("generates local privilege assertions before dispatching a privileged job",
     page.getByRole("option", { name: /^vps\.status:online$/ }),
   ).toBeVisible();
   await page.keyboard.press("Enter");
-  await expect(targetExpression).toContainText("vps.status:online");
+  await expect(targetExpression).toHaveValue("vps.status:online");
   await targetExpression.fill("");
   await targetExpression.click();
   await page.keyboard.type("role:e");
   await expect(page.getByRole("option", { name: /^role:edge$/ })).toBeVisible();
   await page.keyboard.press("Enter");
-  await expect(targetExpression).toContainText("role:edge");
+  await expect(targetExpression).toHaveValue("role:edge");
   await targetExpression.fill("");
   await targetExpression.click();
   await page.keyboard.type("*");
   await expect(page.getByRole("option", { name: /^\*$/ })).toBeVisible();
   await page.keyboard.press("Enter");
-  await expect(targetExpression).toContainText("*");
+  await expect(targetExpression).toHaveValue("*");
   await targetExpression.fill("");
   await page
     .getByLabel("Bulk target selector expression")
@@ -3258,6 +3508,9 @@ test("keeps long search expressions horizontally editable and inspectable", asyn
     .toBeGreaterThan(20);
 
   await page.getByLabel("Command argv").click();
+  const expressionInput = page.locator(".searchExpressionInput", {
+    has: expression,
+  });
   await expect
     .poll(() =>
       expression.evaluate((element) =>
@@ -3268,12 +3521,15 @@ test("keeps long search expressions horizontally editable and inspectable", asyn
     )
     .toBe(true);
   await expect(
-    expression.locator(".searchExpressionChip").first(),
+    expressionInput.locator(".searchExpressionChip").first(),
   ).toBeVisible();
   await expression.evaluate((element) => {
     element.scrollLeft = 0;
   });
-  await expression.hover();
+  await expressionInput.evaluate((element) =>
+    element.scrollIntoView({ block: "center", inline: "nearest" }),
+  );
+  await expressionInput.hover();
   await page.mouse.wheel(0, 500);
   await expect
     .poll(() => expression.evaluate((element) => element.scrollLeft))
@@ -3303,6 +3559,7 @@ test("dispatches terminal session control operations with local privilege unlock
   await terminalComposer
     .getByLabel("New terminal user policy")
     .selectOption("root");
+  await terminalComposer.getByText("Advanced terminal options").click();
   await terminalComposer.getByLabel("New terminal columns").fill("100");
   await terminalComposer.getByLabel("New terminal rows").fill("30");
   await activate(
@@ -3801,10 +4058,10 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await openConsoleSubpage(page, "Network", "Tests");
 
   await expect(
-    page.getByRole("heading", { name: "Network tests" }),
+    page.getByRole("heading", { level: 1, name: "Network tests" }),
   ).toBeVisible();
   const networkTestsPanel = page.locator(".fleetPanel", {
-    has: page.getByRole("heading", { name: "Network tests" }),
+    has: page.getByRole("heading", { level: 2, name: "Network tests" }),
   });
   await expect(networkTestsPanel).toContainText("Required privilege");
   await expect(networkTestsPanel).toContainText("Inspect available");

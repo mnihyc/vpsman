@@ -20,14 +20,46 @@ async function chooseVpsBySearch(
   query: string,
   optionName: RegExp,
 ) {
-  await root.getByRole("combobox", { name: label }).fill(query);
+  const combobox = root.getByRole("combobox", { name: label });
+  await combobox.fill(query);
   const option = root.getByRole("option", { name: optionName });
   await expect(option).toBeVisible();
-  await option.dispatchEvent("mousedown", {
-    bubbles: true,
-    button: 0,
-    cancelable: true,
+  const selectedLabel = (await option.locator("strong").innerText()).trim();
+  await option.click();
+  await expect(combobox).toHaveValue(selectedLabel);
+}
+
+async function includeBulkTagReviewTargets(page: Page) {
+  const includeReviewTargets = page.getByLabel("Include targets needing review");
+  await expect(includeReviewTargets).toBeVisible();
+  await includeReviewTargets.check();
+  await expect(includeReviewTargets).toBeChecked();
+}
+
+async function reviewBulkTagMutation(page: Page) {
+  await activate(
+    page.locator(".bulkTagApplyGrid").getByRole("button", {
+      name: /maintenance:test/,
+    }),
+  );
+}
+
+async function openSourceTemplateWorkflow(
+  page: Page,
+  tab: "Assign" | "Render" = "Assign",
+) {
+  const panel = page.locator(".sourceTemplatePanel");
+  const row = panel
+    .locator(".gridBody [role=row]", { hasText: "shared:vnstat-json" })
+    .first();
+  await expect(row).toBeVisible();
+  await row.click();
+  const drawer = page.getByRole("complementary", {
+    name: "shared:vnstat-json",
   });
+  await expect(drawer).toBeVisible();
+  await activate(drawer.getByRole("tab", { name: tab }));
+  return drawer;
 }
 
 async function unlockPrivilege(page: Page, subpage: string) {
@@ -262,16 +294,15 @@ test("bulk tag mutation requires a fresh preview after selector edits", async ({
   await page
     .getByRole("searchbox", { name: "Bulk tag selector expression" })
     .fill("id:agent-sfo-01");
-  await activate(page.getByRole("button", { name: "Preview targets" }));
+  await includeBulkTagReviewTargets(page);
+  await reviewBulkTagMutation(page);
   await expect(page.locator(".bulkTagPreview")).toContainText("edge-sfo-01");
+  await expect(page.getByText("Confirm tag mutation")).toBeVisible();
   await page
     .getByRole("searchbox", { name: "Bulk tag selector expression" })
     .fill("id:agent-fra-02");
-  await expect(
-    page.getByRole("button", { name: "Review mutation" }),
-  ).toBeDisabled();
-  await activate(page.getByRole("button", { name: "Preview targets" }));
-  await activate(page.getByRole("button", { name: "Review mutation" }));
+  await expect(page.getByText("Confirm tag mutation")).toBeHidden();
+  await reviewBulkTagMutation(page);
   await expect(page.getByText("Confirm tag mutation")).toBeVisible();
   await activate(page.getByRole("button", { name: "Apply tag mutation" }));
 
@@ -354,15 +385,15 @@ test("bulk tag async preview ignores stale selector edits", async ({
     name: "Bulk tag selector expression",
   });
   await selector.fill("id:agent-sfo-01");
-  await activate(page.getByRole("button", { name: "Preview targets" }));
-  await expect(page.getByText("Preparing tag preview")).toBeVisible();
+  await includeBulkTagReviewTargets(page);
+  await reviewBulkTagMutation(page);
+  await expect(page.getByText("Confirm tag mutation")).toBeVisible();
   await selector.fill("id:agent-fra-02");
-  await expect(page.getByText("Preparing tag preview")).toBeHidden();
+  await expect(page.getByText("Confirm tag mutation")).toBeHidden();
   await expect(page.locator(".bulkTagPreview")).toHaveCount(0);
 
-  await activate(page.getByRole("button", { name: "Preview targets" }));
+  await reviewBulkTagMutation(page);
   await expect(page.locator(".bulkTagPreview")).toContainText("core-fra-02");
-  await activate(page.getByRole("button", { name: "Review mutation" }));
   await expect(page.getByText("Confirm tag mutation")).toBeVisible();
   await activate(page.getByRole("button", { name: "Apply tag mutation" }));
 
@@ -467,7 +498,7 @@ test("backup policy review submits a frozen target list and privilege assertion"
   await openConsoleSubpage(page, "Backups", "Policies");
   await unlockPrivilegeFor(page, "Backups", "Policies");
 
-  await activate(page.getByRole("button", { name: "Open policy editor" }));
+  await activate(page.getByRole("button", { name: "Create policy" }).first());
   const policySelector = page.getByRole("searchbox", {
     name: "Backup policy target expression",
   });
@@ -543,7 +574,7 @@ test("template render preview follows the selected VPS without submitting apply 
   await openConsoleSubpage(page, "Automation", "Source templates");
   await unlockPrivilegeFor(page, "Automation", "Source templates");
 
-  const panel = page.locator(".sourceTemplatePanel");
+  const panel = await openSourceTemplateWorkflow(page, "Render");
   await chooseVpsBySearch(
     panel,
     "Template runtime config preview VPS",
@@ -634,7 +665,7 @@ test("template assignment async review ignores stale selector edits", async ({
   await openConsoleSubpage(page, "Automation", "Source templates");
   await unlockPrivilegeFor(page, "Automation", "Source templates");
 
-  const panel = page.locator(".sourceTemplatePanel");
+  const panel = await openSourceTemplateWorkflow(page, "Assign");
   const selector = panel.getByRole("searchbox", {
     name: "Template assignment target expression",
   });
@@ -648,19 +679,15 @@ test("template assignment async review ignores stale selector edits", async ({
     page.getByText("Preparing template assignment review"),
   ).toBeHidden();
   await expect(
-    panel
-      .locator(".confirmationPrompt")
-      .getByText("Confirm template assignment"),
+    page.getByRole("region", { name: "Confirm template assignment" }),
   ).toBeHidden();
 
   await activate(panel.getByRole("button", { name: "Review assignment" }));
   await expect(
-    panel
-      .locator(".confirmationPrompt")
-      .getByText("Confirm template assignment"),
+    page.getByRole("region", { name: "Confirm template assignment" }),
   ).toBeVisible();
   await activate(
-    panel.locator(".confirmationPrompt").getByRole("button", {
+    page.getByRole("region", { name: "Confirm template assignment" }).getByRole("button", {
       name: "Apply template assignment",
       exact: true,
     }),
@@ -694,6 +721,7 @@ test("access key lifecycle async reviews ignore stale field edits", async ({
   await unlockPrivilegeFor(page, "Access", "VPS identities");
 
   const inspector = page.locator(".accessInspector");
+  await activate(page.getByRole("button", { name: "Register VPS" }));
   await inspector.getByLabel("Agent identity client ID").fill("agent-tokyo-04");
   await inspector
     .getByLabel("Agent identity public key hex")
@@ -702,7 +730,7 @@ test("access key lifecycle async reviews ignore stale field edits", async ({
     .getByLabel("Agent identity display name")
     .fill("edge-tokyo-a");
   await activate(
-    inspector.getByRole("button", { name: "Import gateway identity" }),
+    inspector.getByRole("button", { name: "Review registration" }),
   );
   await expect(inspector.getByText("Preparing review")).toBeVisible();
   await inspector
@@ -710,19 +738,19 @@ test("access key lifecycle async reviews ignore stale field edits", async ({
     .fill("edge-tokyo-b");
   await expect(inspector.getByText("Preparing review")).toBeHidden();
   await expect(
-    page.getByLabel("Confirm direct gateway identity import"),
+    page.getByLabel("Confirm VPS identity registration"),
   ).toBeHidden();
 
   await activate(
-    inspector.getByRole("button", { name: "Import gateway identity" }),
+    inspector.getByRole("button", { name: "Review registration" }),
   );
   await expect(
-    page.getByLabel("Confirm direct gateway identity import"),
+    page.getByLabel("Confirm VPS identity registration"),
   ).toBeVisible();
   await activate(
     page
-      .getByLabel("Confirm direct gateway identity import")
-      .getByRole("button", { name: "Import identity" }),
+      .getByLabel("Confirm VPS identity registration")
+      .getByRole("button", { name: "Register VPS" }),
   );
   const identityRequest = await page.evaluate(() => {
     const requests = (
@@ -737,12 +765,18 @@ test("access key lifecycle async reviews ignore stale field edits", async ({
     display_name: "edge-tokyo-b",
   });
 
-  await chooseVpsBySearch(
-    inspector,
-    "VPS identity revoke VPS ID",
-    "sfo",
-    /edge-sfo-01.*agent-sfo-01/,
-  );
+  const identityGrid = page.getByLabel("VPS identities data grid");
+  await identityGrid
+    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+    .first()
+    .click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Prepare revoke" }).click();
+  await expect(
+    inspector.getByRole("heading", { name: "Revoke VPS key" }),
+  ).toBeVisible();
+  await expect(
+    inspector.getByRole("combobox", { name: "VPS identity revoke VPS ID" }),
+  ).toHaveValue(/edge-sfo-01/);
   await inspector.getByLabel("VPS identity revoke reason").fill("reason-a");
   await activate(inspector.getByRole("button", { name: "Revoke current key" }));
   await expect(inspector.getByText("Preparing review")).toBeVisible();
@@ -789,14 +823,20 @@ test("fleet delete review clears on selection changes and ignores stale review c
     .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
     .first();
   await backupRow.getByLabel("Select VPS instance records row").check();
-  await fleetGrid.getByRole("button", { name: "Action" }).click();
+  await fleetGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions" })
+    .click();
   await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
   await sfoRow.getByLabel("Select VPS instance records row").check();
   await page.waitForTimeout(180);
   await expect(page.getByText("Delete VPS from panel")).toBeHidden();
 
   await backupRow.getByLabel("Select VPS instance records row").uncheck();
-  await fleetGrid.getByRole("button", { name: "Action" }).click();
+  await fleetGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions" })
+    .click();
   await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
   const prompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
   await expect(prompt.getByText("Delete VPS from panel")).toBeVisible();
@@ -1183,7 +1223,7 @@ test("single config applies one-VPS override from a frozen exact target", async 
   await activate(panel.getByRole("button", { name: "Read current config" }));
   await expect(editor).toHaveValue(/client_id = "agent-fra-02"/);
   await expect(panel.getByLabel("One-VPS config override guard")).toContainText(
-    "bbbbbbbb",
+    "Current base",
   );
   await panel
     .getByLabel("One-VPS runtime config override TOML")
@@ -1251,8 +1291,8 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
   await page.goto("/");
   await openConsoleSubpage(page, "Backups", "Restore");
   await unlockPrivilegeFor(page, "Backups", "Restore");
-  await activate(page.getByRole("button", { name: "Open restore workflow" }));
-  const restoreWorkflow = page.getByLabel("Open restore workflow");
+  await activate(page.getByRole("button", { name: "Choose restore artifact" }));
+  const restoreWorkflow = page.getByLabel("Choose restore artifact");
 
   await restoreWorkflow
     .getByLabel("Restore source backup request")
@@ -1264,20 +1304,26 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     /core-fra-02.*agent-fra-02/,
   );
   await restoreWorkflow.getByLabel("Restore note").fill("restore-a");
-  await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
+  await activate(
+    restoreWorkflow.getByRole("button", { name: "Review draft restore" }),
+  );
   await expect(
-    restoreWorkflow.getByLabel("Confirm restore plan"),
+    restoreWorkflow.getByLabel("Confirm draft restore"),
   ).toBeVisible();
   await restoreWorkflow.getByLabel("Restore note").fill("restore-b");
-  await expect(restoreWorkflow.getByLabel("Confirm restore plan")).toBeHidden();
-  await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
   await expect(
-    restoreWorkflow.getByLabel("Confirm restore plan"),
+    restoreWorkflow.getByLabel("Confirm draft restore"),
+  ).toBeHidden();
+  await activate(
+    restoreWorkflow.getByRole("button", { name: "Review draft restore" }),
+  );
+  await expect(
+    restoreWorkflow.getByLabel("Confirm draft restore"),
   ).toBeVisible();
   await activate(
     restoreWorkflow
-      .getByLabel("Confirm restore plan")
-      .getByRole("button", { name: "Create restore plan" }),
+      .getByLabel("Confirm draft restore")
+      .getByRole("button", { name: "Save draft restore" }),
   );
 
   const restorePlanRequest = await page.evaluate(() => {
@@ -1300,17 +1346,17 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
   await expect(stagedArchive).toHaveAttribute("title", archivePath);
   await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("120");
   await activate(
-    restoreWorkflow.getByRole("button", { name: "Review restore" }),
+    restoreWorkflow.getByRole("button", { name: "Review live restore" }),
   );
-  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
+  await expect(restoreWorkflow.getByLabel("Confirm restore")).toBeVisible();
   await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("45");
-  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeHidden();
+  await expect(restoreWorkflow.getByLabel("Confirm restore")).toBeHidden();
   await activate(
-    restoreWorkflow.getByRole("button", { name: "Review restore" }),
+    restoreWorkflow.getByRole("button", { name: "Review live restore" }),
   );
-  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
+  await expect(restoreWorkflow.getByLabel("Confirm restore")).toBeVisible();
   const restoreRunConfirmation = restoreWorkflow.getByLabel(
-    "Confirm restore run",
+    "Confirm restore",
   );
   await expect(
     restoreRunConfirmation.locator("dd", { hasText: archivePath }),
@@ -1322,7 +1368,7 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
   ).toHaveAttribute("title", archiveSha256Hex);
   await activate(
     restoreWorkflow
-      .getByLabel("Confirm restore run")
+      .getByLabel("Confirm restore")
       .getByRole("button", { name: "Run restore" }),
   );
 
@@ -1364,8 +1410,8 @@ test("backup restore async review preparation ignores stale edits", async ({
   await page.goto("/");
   await openConsoleSubpage(page, "Backups", "Restore");
   await unlockPrivilegeFor(page, "Backups", "Restore");
-  await activate(page.getByRole("button", { name: "Open restore workflow" }));
-  const restoreWorkflow = page.getByLabel("Open restore workflow");
+  await activate(page.getByRole("button", { name: "Choose restore artifact" }));
+  const restoreWorkflow = page.getByLabel("Choose restore artifact");
 
   await restoreWorkflow
     .getByLabel("Restore source backup request")
@@ -1377,20 +1423,24 @@ test("backup restore async review preparation ignores stale edits", async ({
     /core-fra-02.*agent-fra-02/,
   );
   await restoreWorkflow.getByLabel("Restore note").fill("restore-stale-a");
-  await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
-  await expect(page.getByText("Preparing restore plan review")).toBeVisible();
+  await activate(
+    restoreWorkflow.getByRole("button", { name: "Review draft restore" }),
+  );
+  await expect(page.getByText("Preparing draft restore review")).toBeVisible();
   await restoreWorkflow.getByLabel("Restore note").fill("restore-stale-b");
-  await expect(page.getByText("Preparing restore plan review")).toBeHidden();
-  await expect(restoreWorkflow.getByLabel("Confirm restore plan")).toBeHidden();
+  await expect(page.getByText("Preparing draft restore review")).toBeHidden();
+  await expect(restoreWorkflow.getByLabel("Confirm draft restore")).toBeHidden();
 
-  await activate(restoreWorkflow.getByRole("button", { name: "Review plan" }));
+  await activate(
+    restoreWorkflow.getByRole("button", { name: "Review draft restore" }),
+  );
   await expect(
-    restoreWorkflow.getByLabel("Confirm restore plan"),
+    restoreWorkflow.getByLabel("Confirm draft restore"),
   ).toBeVisible();
   await activate(
     restoreWorkflow
-      .getByLabel("Confirm restore plan")
-      .getByRole("button", { name: "Create restore plan" }),
+      .getByLabel("Confirm draft restore")
+      .getByRole("button", { name: "Save draft restore" }),
   );
 
   await expect(restoreWorkflow.getByLabel("Staged archive")).toHaveValue(
@@ -1398,20 +1448,20 @@ test("backup restore async review preparation ignores stale edits", async ({
   );
   await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("150");
   await activate(
-    restoreWorkflow.getByRole("button", { name: "Review restore" }),
+    restoreWorkflow.getByRole("button", { name: "Review live restore" }),
   );
   await expect(page.getByText("Preparing restore run review")).toBeVisible();
   await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("55");
   await expect(page.getByText("Preparing restore run review")).toBeHidden();
-  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeHidden();
+  await expect(restoreWorkflow.getByLabel("Confirm restore")).toBeHidden();
 
   await activate(
-    restoreWorkflow.getByRole("button", { name: "Review restore" }),
+    restoreWorkflow.getByRole("button", { name: "Review live restore" }),
   );
-  await expect(restoreWorkflow.getByLabel("Confirm restore run")).toBeVisible();
+  await expect(restoreWorkflow.getByLabel("Confirm restore")).toBeVisible();
   await activate(
     restoreWorkflow
-      .getByLabel("Confirm restore run")
+      .getByLabel("Confirm restore")
       .getByRole("button", { name: "Run restore" }),
   );
 

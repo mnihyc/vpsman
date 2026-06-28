@@ -874,20 +874,50 @@ pub(crate) fn source_template_update(
         Uuid::parse_str(&options.template_id).context("invalid --template-id UUID")?;
     let definition = template_definition(options.definition_json, options.definition_file)?;
     let keep_description = options.description.is_none() && !options.clear_description;
-    println!(
-        "{}",
-        http_post_json(
-            api_url,
-            &format!("/api/v1/source-templates/{template_id}/update"),
-            token,
-            &serde_json::json!({
-                "description": options.description,
-                "definition": definition,
-                "confirmed": options.confirmed,
-                "keep_description": keep_description,
-            }),
-        )?
-    );
+    let path = format!("/api/v1/source-templates/{template_id}/update");
+    let mut body = serde_json::json!({
+        "description": options.description,
+        "definition": definition,
+        "confirmed": options.confirmed,
+        "keep_description": keep_description,
+    });
+    if options.confirmed {
+        let mut preview_body = body.clone();
+        preview_body["confirmed"] = Value::Bool(false);
+        let preview_raw = http_post_json(api_url, &path, token, &preview_body)?;
+        let preview = parse_preview_response(&preview_raw)?;
+        if !preview
+            .get("confirmation_required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            println!("{preview_raw}");
+            return Ok(());
+        }
+        let preview_hash = required_preview_hash(&preview, "source-template-update")?;
+        let affected_client_ids = string_array_field(&preview, "affected_client_ids")?;
+        body["preview_hash"] = Value::String(preview_hash.clone());
+        if !affected_client_ids.is_empty() {
+            let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+            let salt_hex = load_super_salt_hex(None)?;
+            let target = source_template_privilege_target(template_id);
+            let privilege_assertion = build_privilege_for_db(
+                DbPrivilegeRequest {
+                    action: "source_template.update",
+                    target: &target,
+                    selector_expression: None,
+                    resolved_targets: &affected_client_ids,
+                    confirmed: true,
+                    payload_hash: Some(&preview_hash),
+                },
+                &password,
+                &salt_hex,
+                300,
+            )?;
+            body["privilege_assertion"] = serde_json::to_value(privilege_assertion)?;
+        }
+    }
+    println!("{}", http_post_json(api_url, &path, token, &body)?);
     Ok(())
 }
 
@@ -1559,22 +1589,79 @@ pub(crate) fn source_template_assign(
         Uuid::parse_str(&options.template_id).context("invalid --template-id UUID")?;
     let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
     let target_client_ids = resolve_target_ids(api_url, token, &options.clients, &options.tags)?;
-    println!(
-        "{}",
-        http_post_json(
+    let mut body = serde_json::json!({
+        "domain": options.domain.clone(),
+        "template_id": template_id,
+        "selector_expression": selector_expression.clone(),
+        "target_client_ids": target_client_ids.clone(),
+        "confirmed": options.confirmed,
+    });
+    if options.confirmed {
+        let mut preview_body = body.clone();
+        preview_body["confirmed"] = Value::Bool(false);
+        let preview_raw = http_post_json(
             api_url,
             "/api/v1/source-template-assignments",
             token,
-            &serde_json::json!({
-                "domain": options.domain,
-                "template_id": template_id,
-                "selector_expression": selector_expression,
-                "target_client_ids": target_client_ids,
-                "confirmed": options.confirmed,
-            }),
-        )?
+            &preview_body,
+        )?;
+        let preview = parse_preview_response(&preview_raw)?;
+        let preview_hash = required_preview_hash(&preview, "source-template-assign")?;
+        let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+        let salt_hex = load_super_salt_hex(None)?;
+        let target = source_template_privilege_target(template_id);
+        let privilege_assertion = build_privilege_for_db(
+            DbPrivilegeRequest {
+                action: "source_template.assign",
+                target: &target,
+                selector_expression: Some(&selector_expression),
+                resolved_targets: &target_client_ids,
+                confirmed: true,
+                payload_hash: Some(&preview_hash),
+            },
+            &password,
+            &salt_hex,
+            300,
+        )?;
+        body["preview_hash"] = Value::String(preview_hash);
+        body["privilege_assertion"] = serde_json::to_value(privilege_assertion)?;
+    }
+    println!(
+        "{}",
+        http_post_json(api_url, "/api/v1/source-template-assignments", token, &body,)?
     );
     Ok(())
+}
+
+pub(crate) fn source_template_privilege_target(template_id: Uuid) -> String {
+    format!("source_template:{template_id}")
+}
+
+pub(crate) fn parse_preview_response(raw: &str) -> Result<Value> {
+    serde_json::from_str(raw).context("failed to parse preview response")
+}
+
+pub(crate) fn required_preview_hash(value: &Value, action: &str) -> Result<String> {
+    value
+        .get("preview_hash")
+        .and_then(Value::as_str)
+        .filter(|hash| !hash.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .with_context(|| format!("{action} preview response missing preview_hash"))
+}
+
+pub(crate) fn string_array_field(value: &Value, field: &str) -> Result<Vec<String>> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .with_context(|| format!("preview response missing {field}"))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(ToOwned::to_owned)
+                .with_context(|| format!("preview response {field} item is not a string"))
+        })
+        .collect()
 }
 
 fn template_definition(

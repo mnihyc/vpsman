@@ -5,6 +5,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use serde::Serialize;
 
 use crate::{
     error::ApiError,
@@ -425,24 +426,80 @@ pub(crate) async fn update_source_template(
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
     validate_source_template_candidate(&request.description, &request.definition)?;
-    let response = state
+    if request.confirmed {
+        let mut preview_request = request.clone();
+        preview_request.confirmed = false;
+        preview_request.preview_hash = None;
+        preview_request.privilege_assertion = None;
+        let mut preview = state
+            .repo
+            .update_source_template(template_id, &preview_request, &operator)
+            .await
+            .map_err(source_template_lifecycle_error)?;
+        let affected = source_template_assigned_client_ids(
+            &state,
+            preview.template.id,
+            &preview.template.domain,
+        )
+        .await?;
+        let preview_hash = source_template_update_preview_hash(&preview.diff, &affected)?;
+        preview.affected_client_ids = affected.clone();
+        if !preview.confirmation_required {
+            return Ok(Json(preview));
+        }
+        require_matching_preview_hash(
+            request.preview_hash.as_deref(),
+            &preview_hash,
+            "source_template_update_preview_hash_required",
+            "source_template_update_preview_hash_mismatch",
+        )?;
+        if !affected.is_empty() {
+            let target = source_template_privilege_target(template_id);
+            let intent = DbPrivilegeIntent::new(
+                "source_template.update",
+                &target,
+                None,
+                &affected,
+                true,
+                Some(&preview_hash),
+            );
+            verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+        }
+        let mut response = state
+            .repo
+            .update_source_template(template_id, &request, &operator)
+            .await
+            .map_err(source_template_lifecycle_error)?;
+        response.affected_client_ids = affected.clone();
+        response.preview_hash = Some(preview_hash);
+        if response.affected_client_count > 0 {
+            let _sync_jobs = push_runtime_config_for_clients(
+                &state,
+                &operator,
+                affected,
+                "source_template_updated",
+            )
+            .await?;
+        }
+        return Ok(Json(response));
+    }
+    let mut response = state
         .repo
         .update_source_template(template_id, &request, &operator)
         .await
         .map_err(source_template_lifecycle_error)?;
-    if !response.confirmation_required && response.affected_client_count > 0 {
-        let assignments = state
-            .repo
-            .list_source_template_assignments(None, Some(&response.template.domain))
-            .await?;
-        let affected = assignments
-            .into_iter()
-            .filter(|assignment| assignment.template_id == response.template.id)
-            .map(|assignment| assignment.client_id)
-            .collect::<Vec<_>>();
-        let _sync_jobs =
-            push_runtime_config_for_clients(&state, &operator, affected, "source_template_updated")
-                .await?;
+    let affected = source_template_assigned_client_ids(
+        &state,
+        response.template.id,
+        &response.template.domain,
+    )
+    .await?;
+    response.affected_client_ids = affected.clone();
+    if response.confirmation_required {
+        response.preview_hash = Some(source_template_update_preview_hash(
+            &response.diff,
+            &affected,
+        )?);
     }
     Ok(Json(response))
 }
@@ -614,10 +671,48 @@ pub(crate) async fn assign_source_template(
         "source_template_assignment_targets_not_found",
     )
     .await?;
-    let response = state
+    let mut confirmed_preview_hash = None;
+    if request.confirmed {
+        let mut preview_request = request.clone();
+        preview_request.confirmed = false;
+        preview_request.preview_hash = None;
+        preview_request.privilege_assertion = None;
+        let preview = state
+            .repo
+            .assign_source_template(&preview_request, &operator)
+            .await?;
+        let preview_hash = source_template_assignment_preview_hash(&request, &preview)?;
+        require_matching_preview_hash(
+            request.preview_hash.as_deref(),
+            &preview_hash,
+            "source_template_assignment_preview_hash_required",
+            "source_template_assignment_preview_hash_mismatch",
+        )?;
+        let target = source_template_privilege_target(request.template_id);
+        let selector_expression = request.selector_expression.trim().to_string();
+        let selector_for_intent =
+            (!selector_expression.is_empty()).then_some(selector_expression.as_str());
+        let intent = DbPrivilegeIntent::new(
+            "source_template.assign",
+            &target,
+            selector_for_intent,
+            &request.target_client_ids,
+            true,
+            Some(&preview_hash),
+        );
+        verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
+        confirmed_preview_hash = Some(preview_hash);
+    }
+    let mut response = state
         .repo
         .assign_source_template(&request, &operator)
         .await?;
+    response.preview_hash = match confirmed_preview_hash {
+        Some(preview_hash) => Some(preview_hash),
+        None => Some(source_template_assignment_preview_hash(
+            &request, &response,
+        )?),
+    };
     if !response.confirmation_required && response.target_count > 0 {
         let affected = response
             .assignments
@@ -749,6 +844,88 @@ fn require_matching_preview_hash(
         return Err(ApiError::conflict(mismatch_code));
     }
     Ok(())
+}
+
+async fn source_template_assigned_client_ids(
+    state: &AppState,
+    template_id: uuid::Uuid,
+    domain: &str,
+) -> Result<Vec<String>, ApiError> {
+    let mut client_ids = state
+        .repo
+        .list_source_template_assignments(None, Some(domain))
+        .await?
+        .into_iter()
+        .filter(|assignment| assignment.template_id == template_id)
+        .map(|assignment| assignment.client_id)
+        .collect::<Vec<_>>();
+    client_ids.sort();
+    client_ids.dedup();
+    Ok(client_ids)
+}
+
+fn source_template_privilege_target(template_id: uuid::Uuid) -> String {
+    format!("source_template:{template_id}")
+}
+
+#[derive(Serialize)]
+struct SourceTemplateUpdatePreviewPayload<'a> {
+    version: u8,
+    action: &'static str,
+    diff: &'a SourceTemplateDiffView,
+    affected_client_ids: Vec<&'a str>,
+}
+
+#[derive(Serialize)]
+struct SourceTemplateAssignmentPreviewPayload<'a> {
+    version: u8,
+    action: &'static str,
+    domain: &'a str,
+    template_id: String,
+    selector_expression: &'a str,
+    target_client_ids: Vec<&'a str>,
+    assignments: &'a [SourceTemplateAssignmentView],
+}
+
+fn source_template_update_preview_hash(
+    diff: &SourceTemplateDiffView,
+    affected_client_ids: &[String],
+) -> Result<String, ApiError> {
+    let payload = SourceTemplateUpdatePreviewPayload {
+        version: 1,
+        action: "source_template.update",
+        diff,
+        affected_client_ids: sorted_str_refs(affected_client_ids),
+    };
+    preview_payload_hash(&payload)
+}
+
+fn source_template_assignment_preview_hash(
+    request: &AssignSourceTemplateRequest,
+    response: &crate::model::AssignSourceTemplateResponse,
+) -> Result<String, ApiError> {
+    let payload = SourceTemplateAssignmentPreviewPayload {
+        version: 1,
+        action: "source_template.assign",
+        domain: request.domain.trim(),
+        template_id: request.template_id.to_string(),
+        selector_expression: request.selector_expression.trim(),
+        target_client_ids: sorted_str_refs(&request.target_client_ids),
+        assignments: &response.assignments,
+    };
+    preview_payload_hash(&payload)
+}
+
+fn preview_payload_hash<T: Serialize>(payload: &T) -> Result<String, ApiError> {
+    let bytes =
+        serde_json::to_vec(payload).map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    Ok(payload_hash(&bytes))
+}
+
+fn sorted_str_refs(values: &[String]) -> Vec<&str> {
+    let mut values = values.iter().map(String::as_str).collect::<Vec<_>>();
+    values.sort_unstable();
+    values
 }
 
 fn validate_create_source_template(request: &CreateSourceTemplateRequest) -> Result<(), ApiError> {

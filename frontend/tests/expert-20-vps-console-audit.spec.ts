@@ -213,7 +213,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
 
   await openConsoleSubpage(page, "Fleet", "Instances");
   await expect(
-    page.getByRole("heading", { name: "Fleet overview" }),
+    page.getByRole("heading", { name: "Fleet instances" }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "VPS instances" }),
@@ -222,18 +222,25 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await expect(
     fleetGrid.getByText("ams-payments-edge-01").first(),
   ).toBeVisible();
-  await expect(fleetGrid.getByText("Last seen").first()).toBeVisible();
+  await expect(fleetGrid.getByText("Last contact").first()).toBeVisible();
   await expect(fleetGrid.getByText("never seen").first()).toBeVisible();
   await expect(fleetGrid.getByText("stale").first()).toBeVisible();
   await expect(fleetGrid.locator(".countryFlag").first()).toBeVisible();
   await activate(fleetGrid.getByText("ams-payments-edge-01").first());
-  const embeddedDetail = fleetGrid.locator(".gridExpandedRow").first();
-  await expect(embeddedDetail.getByText("Last seen")).toBeVisible();
-  await expect(embeddedDetail).toContainText("acmecloud");
-  await expect(embeddedDetail).toContainText("75% (12 GiB / 16 GiB)");
-  await expect(embeddedDetail.getByText("Overview curves")).toBeVisible();
-  await expect(embeddedDetail.getByLabel("VPS detail sections")).toBeVisible();
-  await expect(embeddedDetail.getByLabel("Fleet inline tag")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Instance detail" }),
+  ).toBeVisible();
+  const canonicalDetail = page.getByLabel("Canonical VPS detail");
+  await expect(
+    canonicalDetail.getByText("Last contact", { exact: true }),
+  ).toBeVisible();
+  await expect(canonicalDetail).toContainText("acmecloud");
+  await expect(canonicalDetail).toContainText("country:NL");
+  await expect(canonicalDetail).toContainText("Memory used");
+  await expect(canonicalDetail).toContainText("75%");
+  await expect(canonicalDetail.getByLabel("VPS detail tabs")).toBeVisible();
+
+  await openConsoleSubpage(page, "Fleet", "Instances");
 
   const rowChecks = fleetGrid.getByRole("checkbox", {
     name: /Select VPS instance records row/,
@@ -293,12 +300,14 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   ).toHaveAttribute("title", "pay-prod-ams-edge-01");
   await expect(impact.getByText(/more/)).toBeVisible();
 
+  await activate(composer.locator(".dispatchExecutionOptions > summary"));
+  await expect(composer.getByLabel("Max timeout seconds")).toBeVisible();
   await composer.getByLabel("Max timeout seconds").fill("120");
   await activate(composer.getByRole("button", { name: "Dispatch", exact: true }));
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
   await expect(composer.locator(".dispatchActions")).toHaveCount(0);
   await expect(
-    composer.getByText("24 resolved (21 online, 1 stale, 2 unavailable)"),
+    composer.getByText("24 resolved (20 online, 1 stale, 3 unavailable)"),
   ).toBeVisible();
   await expect(composer.getByText("Unlocked locally")).toBeVisible();
   await activate(
@@ -325,7 +334,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     resultPanel
       .locator(".executionResultStats span")
       .filter({ hasText: "unavailable" })
-      .filter({ hasText: "2" }),
+      .filter({ hasText: "3" }),
   ).toBeVisible();
   await expect(
     resultPanel.getByText(/partial success: 20 completed, 4 unsuccessful/),
@@ -360,10 +369,12 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   });
 
   await openConsoleSubpage(page, "Access", "VPS identities");
-  const inspector = page.locator(".accessInspector");
   await expect(
-    page.getByRole("heading", { name: "VPS identities" }),
+    page.getByRole("heading", { level: 1, name: "VPS identities" }),
   ).toBeVisible();
+  await activate(page.getByRole("button", { name: "Register VPS" }));
+  const inspector = page.locator(".accessInspector:not([hidden])");
+  await expect(inspector).toBeVisible();
   await inspector
     .getByLabel("Agent identity client ID")
     .fill("agent-sin-payments-25");
@@ -377,12 +388,12 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     .getByLabel("Agent identity tags")
     .fill("provider:acmecloud,country:SG,payments,edge,env:prod");
   await activate(
-    inspector.getByRole("button", { name: "Import gateway identity" }),
+    inspector.getByRole("button", { name: "Review registration" }),
   );
   await activate(
     page
-      .getByLabel("Confirm direct gateway identity import")
-      .getByRole("button", { name: "Import identity" }),
+      .getByLabel("Confirm VPS identity registration")
+      .getByRole("button", { name: "Register VPS" }),
   );
   await expect(inspector.getByText("sin-payments-edge-25")).toBeVisible();
 
@@ -732,7 +743,8 @@ async function collectLayoutSignals(page: Page, scopeSelector: string) {
         rect.width > 0 &&
         rect.height > 0 &&
         style.display !== "none" &&
-        style.visibility !== "hidden"
+        style.visibility !== "hidden" &&
+        Number.parseFloat(style.opacity || "1") > 0.01
       );
     };
     const label = (element: Element) => ({
@@ -769,6 +781,9 @@ async function collectLayoutSignals(page: Page, scopeSelector: string) {
       ) {
         const left = rects[leftIndex];
         const right = rects[rightIndex];
+        if (left.element.contains(right.element) || right.element.contains(left.element)) {
+          continue;
+        }
         const separated =
           left.rect.right <= right.rect.left + 1 ||
           right.rect.right <= left.rect.left + 1 ||

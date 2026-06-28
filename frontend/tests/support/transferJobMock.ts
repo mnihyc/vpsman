@@ -36,8 +36,8 @@ export async function installTransferJobApiMock(page: Page) {
       targetCountsFromStatuses(Array.from({ length: total }, () => "completed"));
     const downloadFixtureBytes = new TextEncoder().encode("resumable browser download payload");
     const selectorAgents = [
-      { display_name: "edge-sfo-01", id: "agent-sfo-01", status: "online", tags: ["provider:alpha", "country:US", "edge"] },
-      { display_name: "core-fra-02", id: "agent-fra-02", status: "online", tags: ["country:DE", "bgp", "bird2"] },
+      { display_name: "edge-sfo-01", id: "agent-sfo-01", last_seen_at: "2026-06-27T08:00:00.000Z", status: "online", tags: ["provider:alpha", "country:US", "edge"] },
+      { display_name: "core-fra-02", id: "agent-fra-02", last_seen_at: "2026-06-27T08:00:00.000Z", status: "online", tags: ["country:DE", "bgp", "bird2"] },
       { display_name: "backup-nyc-03", id: "agent-nyc-03", status: "stale", tags: ["country:US"] },
     ];
     type SelectorAgent = (typeof selectorAgents)[number];

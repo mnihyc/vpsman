@@ -25,6 +25,7 @@ import {
 import { useReviewGenerationGuard, waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { usePanelDisplaySettings } from "../panelDisplay";
+import { agentDisplayState } from "../agentDisplayState";
 import type {
   AgentView,
   BulkResolveResponse,
@@ -171,12 +172,12 @@ export function FleetGroupsPanel({
 
 type GroupSummary = {
   assignedVpsCount: number;
+  contactReviewCount: number;
   countryGroupCount: number;
   customGroupCount: number;
   offlineCount: number;
-  onlineCount: number;
   providerGroupCount: number;
-  staleCount: number;
+  reachableCount: number;
   totalAssignments: number;
 };
 
@@ -204,8 +205,8 @@ function GroupSummaryStrip({ summary }: { summary: GroupSummary }) {
         <small>assigned VPSs</small>
       </span>
       <span>
-        <strong>{summary.onlineCount}/{summary.staleCount}/{summary.offlineCount}</strong>
-        <small>online/stale/offline</small>
+        <strong>{summary.reachableCount}/{summary.contactReviewCount}/{summary.offlineCount}</strong>
+        <small>reachable/review/offline</small>
       </span>
     </div>
   );
@@ -230,14 +231,20 @@ function buildGroupSummary(tags: TagView[], agents: AgentView[]): GroupSummary {
     }
   }
   const groupNameList = Array.from(groupNames);
+  const displayStates = agents.map((agent) => agentDisplayState(agent));
   return {
     assignedVpsCount: assignedVpsIds.size,
+    contactReviewCount: displayStates.filter(
+      (state) =>
+        state.label !== "Online" &&
+        state.label !== "Offline" &&
+        (state.tone === "warning" || state.tone === "critical"),
+    ).length,
     countryGroupCount: groupNameList.filter((tag) => isCountryGroup(tag)).length,
     customGroupCount: groupNameList.filter((tag) => !isProviderGroup(tag) && !isCountryGroup(tag)).length,
-    offlineCount: agents.filter((agent) => agent.status === "offline").length,
-    onlineCount: agents.filter((agent) => agent.status === "online").length,
+    offlineCount: displayStates.filter((state) => state.label === "Offline").length,
     providerGroupCount: groupNameList.filter((tag) => isProviderGroup(tag)).length,
-    staleCount: agents.filter((agent) => agent.status === "stale").length,
+    reachableCount: displayStates.filter((state) => state.label === "Online").length,
     totalAssignments: assignments.size,
   };
 }
@@ -364,33 +371,66 @@ function dependencySummaryText(summary: GroupDependencySummary) {
 type TargetStatusCounts = {
   offline: number;
   ready: number;
-  stale: number;
+  review: number;
+  eligible: number;
   total: number;
 };
 
-function targetStatusCounts(targets: AgentView[]): TargetStatusCounts {
-  const ready = targets.filter((target) => target.status === "online").length;
-  const stale = targets.filter((target) => target.status === "stale").length;
-  const offline = targets.filter((target) => target.status === "offline").length;
+function targetStatusCounts(
+  targets: AgentView[],
+  includeReviewTargets = false,
+): TargetStatusCounts {
+  const states = targets.map((target) => agentDisplayState(target));
+  const ready = states.filter((state) => state.label === "Online").length;
+  const review = states.filter(
+    (state) =>
+      state.label !== "Offline" &&
+      (state.tone === "warning" || state.tone === "critical"),
+  ).length;
+  const offline = states.filter((state) => state.label === "Offline").length;
   return {
+    eligible: ready + (includeReviewTargets ? review : 0),
     offline,
     ready,
-    stale,
+    review,
     total: targets.length,
   };
 }
 
-function targetStatusText(prefix: string, targets: AgentView[]) {
-  const counts = targetStatusCounts(targets);
+function targetStatusText(
+  prefix: string,
+  targets: AgentView[],
+  includeReviewTargets = false,
+) {
+  const counts = targetStatusCounts(targets, includeReviewTargets);
   const parts = [
     `${prefix} ${bulkVpsCountLabel(counts.total)}`,
     `${counts.ready} ready`,
-    `${counts.stale} stale`,
+    `${counts.review} needs review`,
   ];
   if (counts.offline > 0) {
     parts.push(`${counts.offline} offline`);
   }
+  if (counts.review > 0 && !includeReviewTargets) {
+    parts.push("review targets excluded");
+  }
+  if (includeReviewTargets && counts.review > 0) {
+    parts.push(`${counts.eligible} included`);
+  }
   return parts.join(" · ");
+}
+
+function tagMutationEligibleTargets(
+  targets: AgentView[],
+  includeReviewTargets: boolean,
+) {
+  return targets.filter((target) => {
+    const state = agentDisplayState(target);
+    if (state.label === "Online") {
+      return true;
+    }
+    return includeReviewTargets && state.label !== "Offline";
+  });
 }
 
 function bulkVpsCountLabel(count: number) {
@@ -979,11 +1019,24 @@ function TagAssignments({
         sortValue: (agent) => formatVpsName(agent, vpsNameDisplayMode),
       },
       {
-        cell: (agent) => agent.status,
-        header: "Status",
+        cell: (agent) => {
+          const state = agentDisplayState(agent);
+          return (
+            <span className="historyPrimary">
+              <strong className={`status ${groupReachabilityToneClass(state.tone)}`}>
+                {state.label}
+              </strong>
+              <small title={state.detail}>{state.detail}</small>
+            </span>
+          );
+        },
+        header: "Reachability",
         id: "status",
-        searchValue: (agent) => agent.status,
-        sortValue: (agent) => agent.status,
+        searchValue: (agent) => {
+          const state = agentDisplayState(agent);
+          return `${state.label} ${state.detail}`;
+        },
+        sortValue: (agent) => agentDisplayState(agent).label,
       },
       {
         cell: (agent) => (
@@ -1097,8 +1150,8 @@ function TagAssignments({
             <strong>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
             <span>Client ID</span>
             <strong>{agent.id}</strong>
-            <span>Status</span>
-            <strong>{agent.status}</strong>
+            <span>Reachability</span>
+            <strong>{agentDisplayState(agent).label}</strong>
             <span>Groups</span>
             <strong>{agent.tags.join(", ") || "None"}</strong>
           </div>
@@ -1116,6 +1169,15 @@ function TagAssignments({
       </datalist>
     </>
   );
+}
+
+function groupReachabilityToneClass(
+  tone: ReturnType<typeof agentDisplayState>["tone"],
+): "info" | "neutral" | "ok" | "warn" {
+  if (tone === "warning" || tone === "critical") {
+    return "warn";
+  }
+  return tone;
 }
 
 function BulkTagPanel({
@@ -1156,6 +1218,7 @@ function BulkTagPanel({
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [mutationSnapshot, setMutationSnapshot] = useState<BulkTagMutationSnapshot | null>(null);
   const [previewStatus, setPreviewStatus] = useState<string | null>(null);
+  const [includeReviewTargets, setIncludeReviewTargets] = useState(false);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -1171,14 +1234,25 @@ function BulkTagPanel({
         : [],
     [agents, selectorParse.error, trimmedSelector],
   );
+  const eligibleLocalTargets = useMemo(
+    () => tagMutationEligibleTargets(localTargets, includeReviewTargets),
+    [includeReviewTargets, localTargets],
+  );
+  const eligibleResolvedTargets = useMemo(
+    () =>
+      resolvedTargets
+        ? tagMutationEligibleTargets(resolvedTargets.targets, includeReviewTargets)
+        : null,
+    [includeReviewTargets, resolvedTargets],
+  );
   const targetCountForAction =
     action === "delete"
       ? (preview?.target_count ?? 0)
-      : (resolvedTargets?.target_count ?? localTargets.length);
+      : (eligibleResolvedTargets?.length ?? eligibleLocalTargets.length);
   const canReviewMutation = Boolean(
     trimmedTag &&
       (action === "delete" ||
-        (trimmedSelector && !selectorParse.error && localTargets.length > 0)),
+        (trimmedSelector && !selectorParse.error && eligibleLocalTargets.length > 0)),
   );
 
   useEffect(() => writeLocalString(TAG_BULK_SELECTOR_STORAGE_KEY, selectorExpression), [selectorExpression]);
@@ -1195,6 +1269,7 @@ function BulkTagPanel({
   async function reviewMutation() {
     const reviewGeneration = captureReviewGeneration();
     const frozenAction = action;
+    const frozenIncludeReviewTargets = includeReviewTargets;
     const frozenTag = trimmedTag;
     const frozenSelector = trimmedSelector;
     setPreviewStatus(frozenAction === "delete" ? "Preparing delete preview" : "Resolving targets and preparing preview");
@@ -1225,9 +1300,16 @@ function BulkTagPanel({
           return;
         }
         setResolvedTargets(resolved);
-        const targetClientIds = resolved.targets.map((target) => target.id);
+        const targetClientIds = tagMutationEligibleTargets(
+          resolved.targets,
+          frozenIncludeReviewTargets,
+        ).map((target) => target.id);
         if (!targetClientIds.length) {
-          throw new Error("Bulk group action resolved no VPSs");
+          throw new Error(
+            frozenIncludeReviewTargets
+              ? "Bulk group action resolved no eligible VPSs"
+              : "Bulk group action has no ready VPSs; include review targets to apply anyway",
+          );
         }
         const nextPreview = await onBulkMutateTags({
           action: frozenAction,
@@ -1311,6 +1393,14 @@ function BulkTagPanel({
   const previewAgents = preview?.affected ?? [];
   const confirmationSnapshot = confirmOpen ? mutationSnapshot : null;
   const confirmationPreview = confirmationSnapshot?.preview ?? preview;
+  const reviewButtonLabel =
+    action !== "delete" &&
+    trimmedTag &&
+    localTargets.length > 0 &&
+    eligibleLocalTargets.length === 0 &&
+    !includeReviewTargets
+      ? `Include review targets to apply ${trimmedTag}`
+      : previewStatus ?? bulkMutationPrimaryLabel(action, trimmedTag, targetCountForAction);
 
   return (
     <div className="configApplyGrid bulkTagApplyGrid">
@@ -1363,22 +1453,36 @@ function BulkTagPanel({
               showMatchCount
               value={selectorExpression}
               verification={selectorParse.error ? "invalid" : selectorExpression.trim() ? "valid" : "neutral"}
-              verificationMessage={selectorParse.error ?? (selectorExpression.trim() ? targetStatusText("Local match", localTargets) : undefined)}
+              verificationMessage={selectorParse.error ?? (selectorExpression.trim() ? targetStatusText("Local match", localTargets, includeReviewTargets) : undefined)}
             />
             <div className="bulkTargetResolution" aria-label="Bulk group target resolution">
               <span>
                 {selectorExpression.trim()
                   ? selectorParse.error
                     ? selectorParse.error
-                    : targetStatusText("Local match", localTargets)
+                    : targetStatusText("Local match", localTargets, includeReviewTargets)
                   : "Enter a selector to estimate local matches."}
               </span>
               <span>
                 {resolvedTargets
-                  ? targetStatusText("Server resolved", resolvedTargets.targets)
+                  ? targetStatusText("Server resolved", resolvedTargets.targets, includeReviewTargets)
                   : "Server resolution runs before confirmation."}
               </span>
             </div>
+            <label
+              className="inlineCheck tightCheck"
+              title="Default excludes contact-unknown, stale, and degraded targets from the final mutation. Enable only when you intentionally want those targets included."
+            >
+              <input
+                checked={includeReviewTargets}
+                onChange={(event) => {
+                  setIncludeReviewTargets(event.target.checked);
+                  clearMutationPreview();
+                }}
+                type="checkbox"
+              />
+              <span>Include targets needing review</span>
+            </label>
           </>
         )}
         <div className={`privilegeGateBox ${privilegeMaterial ? "ready" : ""}`}>
@@ -1394,10 +1498,15 @@ function BulkTagPanel({
           className="primaryAction"
           disabled={pending || !canReviewMutation}
           onClick={() => void reviewMutation()}
+          title={
+            canReviewMutation
+              ? "Review the server-resolved target snapshot before final apply."
+              : reviewButtonLabel
+          }
           type="button"
         >
           <Tag size={16} />
-          {previewStatus ?? bulkMutationPrimaryLabel(action, trimmedTag, targetCountForAction)}
+          {reviewButtonLabel}
         </button>
       </div>
       {(preview || previewStatus) && (

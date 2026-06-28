@@ -819,15 +819,16 @@ function registryModelForPolicy(policy: {
   }
   return {
     confirmDetail:
-      "This records release metadata. Confirm suite config before treating the registry as an enforcement gate.",
-    detail: policy.detail,
-    label: "Registry policy unknown",
+      "This records release metadata. Enforcement is unverified, so this does not approve, enforce, or start an update.",
+    detail:
+      "Registry records help operators pick known artifacts. Enforcement is unverified, so this page treats them as advisory release metadata.",
+    label: "Release registry advisory",
     postureDetail:
-      "The page cannot prove whether registered update hashes are enforced. Treat the registry as metadata until config is available.",
+      "The registry is advisory release metadata until Suite Config proves registered-update enforcement is enabled.",
     registrationDetail:
-      "Record metadata for audit and prefills, then confirm suite config before depending on enforcement.",
-    registrationLabel: "Policy not verified",
-    value: policy.value,
+      "Recording metadata improves auditability and update prefills, but enforcement is not verified here.",
+    registrationLabel: "Metadata record, enforcement unverified",
+    value: "Advisory metadata",
   };
 }
 

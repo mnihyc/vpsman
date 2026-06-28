@@ -2116,6 +2116,11 @@ export function BackupsPanel({
             clientLabel={clientLabel}
             error={error}
             migrationLinks={migrationLinks}
+            onCreatePolicy={
+              backupSubpage === "policies"
+                ? () => setWorkflowOpen(true)
+                : undefined
+            }
             onOpenRequestArtifact={openBackupRequestArtifact}
             onPlanRestoreSource={openBackupRestore}
             onRetryBackup={retryBackupRequest}

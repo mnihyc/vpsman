@@ -106,7 +106,7 @@ export function WebhooksPanel({
             <div className="metricGrid observabilityMetricsSummary" aria-label="Webhook routing summary">
               <MetricTile actionLabel="Rules" detail={`${disabledRules} disabled rules`} label="Event webhook rules" onAction={() => setActiveTab("rules")} value={String(webhookRules.length)} />
               <MetricTile actionLabel="Deliveries" detail="Queued event webhook rows awaiting processing" label="Queued" onAction={openDeliveryEvidence} value={String(queuedDeliveries)} />
-              <MetricTile actionLabel="Retry failed" detail="Failed event webhook deliveries, separate from alert notification failures" label="Failures" onAction={() => setActiveTab("rules")} value={String(failedDeliveries)} />
+              <MetricTile actionLabel="Open failed deliveries" detail="Failed event webhook deliveries, separate from alert notification failures" label="Failures" onAction={openDeliveryEvidence} value={String(failedDeliveries)} />
               <MetricTile actionLabel="History" detail="Retained event webhook delivery rows" label="Deliveries" onAction={openDeliveryEvidence} value={String(webhookRuleDeliveries.length)} />
             </div>
 

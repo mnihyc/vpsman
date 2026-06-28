@@ -275,6 +275,41 @@ nav {
   min-width: min(100%, 334px);
 }
 
+.mobilePageMenu,
+.mobileSavedViewMenu {
+  display: none;
+}
+
+.mobilePageMenu summary,
+.mobileSavedViewMenu summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  list-style: none;
+  padding: 0 10px;
+}
+
+.mobilePageMenu summary::-webkit-details-marker,
+.mobileSavedViewMenu summary::-webkit-details-marker {
+  display: none;
+}
+
+.mobilePageMenu[open] summary,
+.mobileSavedViewMenu[open] summary {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
 .savedViewControls select,
 .savedViewControls input {
   min-width: 0;
@@ -538,6 +573,7 @@ nav {
 }
 
 .searchExpressionBody {
+  position: relative;
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
@@ -551,18 +587,54 @@ nav {
   flex: 1 1 auto;
   min-width: 0;
   height: 24px;
+  border: 0;
+  background: transparent;
+  box-sizing: border-box;
   overflow-x: auto;
   overflow-y: hidden;
   outline: 0;
+  padding: 0;
   scrollbar-width: none;
   white-space: nowrap;
   color: var(--text);
   font-size: 13px;
+  font-family: inherit;
   line-height: 22px;
 }
 
-.searchExpressionEditor:empty::before {
-  content: attr(data-placeholder);
+.searchExpressionInput.previewing.hasTokens .searchExpressionEditor {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  z-index: 1;
+  opacity: 0;
+  pointer-events: auto;
+}
+
+.searchExpressionPreview {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.searchExpressionPreview::-webkit-scrollbar {
+  display: none;
+}
+
+.searchExpressionPreview button {
+  pointer-events: auto;
+}
+
+.searchExpressionEditor::placeholder {
   color: var(--placeholder);
 }
 

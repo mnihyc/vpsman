@@ -1233,7 +1233,7 @@ function FleetInstancesPanel({
           </span>
         </div>
         <span className="sectionContext">
-          {summary.online} online / {summary.total} total ·{" "}
+          {summary.online} live / {summary.total} total ·{" "}
           {formatConsoleStreamState(wsState)}
         </span>
       </div>
@@ -1242,7 +1242,6 @@ function FleetInstancesPanel({
         actions={actions}
         columns={columns}
         defaultColumnVisibility={{
-          country: false,
           cycle_usage: false,
           provider: false,
           quota: false,
@@ -1258,7 +1257,7 @@ function FleetInstancesPanel({
           <div className="emptyState">
             <Server size={22} />
             <strong>
-              {scopeActive ? "No VPS match this view" : "No agents online"}
+              {scopeActive ? "No VPS match this view" : "No live agents"}
             </strong>
             <span>
               {apiError ??
@@ -1794,7 +1793,7 @@ function FleetInstanceDetail({
             <DetailLine
               icon={<Gauge size={18} />}
               label="Fleet position"
-              value={`${summary.online} online / ${summary.total} total`}
+              value={`${summary.online} live / ${summary.total} total`}
             />
           </>
         )}
@@ -5811,7 +5810,7 @@ export function FleetAlertNotificationManager({
           <strong>Alert delivery queue</strong>
           <small>
             {queueMode === "configuration"
-              ? "Preview matching alerts, send or retry queued delivery records, or open delivery evidence."
+              ? "Preview matching alerts, queue or deliver reviewed records, or open delivery evidence."
               : "Review matching or process queued deliveries without leaving the registry."}
           </small>
         </span>
@@ -5823,7 +5822,7 @@ export function FleetAlertNotificationManager({
             onClick={() => void dispatch(true)}
           >
             {queueMode === "configuration"
-              ? "Preview matches"
+              ? "Preview match"
               : "Review matches"}
           </button>
           <button
@@ -5832,7 +5831,7 @@ export function FleetAlertNotificationManager({
             type="button"
             onClick={() => void dispatch(true, true)}
           >
-            Review queue dispatch
+            Queue dispatch
           </button>
           {queueMode === "full" ? (
             <>
@@ -5852,7 +5851,7 @@ export function FleetAlertNotificationManager({
               type="button"
               onClick={onOpenDeliveries}
             >
-              Open deliveries
+              Open delivery
             </button>
           )}
           <button
@@ -5861,7 +5860,7 @@ export function FleetAlertNotificationManager({
             type="button"
             onClick={() => void process(true, true)}
           >
-            Review delivery
+            Deliver queued
           </button>
         </div>
       </div>
@@ -7001,7 +7000,7 @@ export function WebhookRuleManager({
             </strong>
             <small>
               {configurationQueue
-                ? "Send reviewed test events and retry failed event webhook deliveries."
+                ? "Preview and send reviewed test events, or retry failed event webhook deliveries."
                 : "Review first; retained deliveries stay in the Deliveries tab."}
             </small>
           </span>
@@ -7031,7 +7030,7 @@ export function WebhookRuleManager({
                   type="button"
                   onClick={() => void dispatch(true)}
                 >
-                  Preview event
+                  Preview match
                 </button>
                 <button
                   className="primaryAction"
@@ -7066,7 +7065,7 @@ export function WebhookRuleManager({
                   type="button"
                   onClick={() => void dispatch(true, true)}
                 >
-                  Review queue dispatch
+                  Queue dispatch
                 </button>
                 <button
                   className="secondaryAction"
@@ -7074,7 +7073,7 @@ export function WebhookRuleManager({
                   type="button"
                   onClick={() => void process(true)}
                 >
-                  Review queued deliveries
+                  Preview queued
                 </button>
                 <button
                   className="primaryAction"
@@ -7082,7 +7081,7 @@ export function WebhookRuleManager({
                   type="button"
                   onClick={() => void process(true, true)}
                 >
-                  Review delivery
+                  Deliver queued
                 </button>
               </>
             )}
@@ -8533,7 +8532,7 @@ function NetworkInterfacesPanel({
   selectedAgent: AgentView | null;
   snapshot: NetworkInterfacesSnapshot | null;
 }) {
-  const online = selectedAgent?.status === "online";
+  const live = selectedAgent ? agentDisplayState(selectedAgent).label === "Online" : false;
   const status =
     error ??
     (pending
@@ -8562,7 +8561,7 @@ function NetworkInterfacesPanel({
         <div className="interfaceActions">
           <button
             className="secondaryAction compactAction"
-            disabled={pending || !selectedAgent || !privilegeReady || !online}
+            disabled={pending || !selectedAgent || !privilegeReady || !live}
             onClick={onRefresh}
             type="button"
           >

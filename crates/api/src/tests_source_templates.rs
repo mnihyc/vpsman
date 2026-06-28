@@ -68,6 +68,8 @@ async fn source_templates_assign_defaults_and_shared_custom_templates() {
                 selector_expression: "id:client-a || id:client-b".to_string(),
                 target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
                 confirmed: false,
+                preview_hash: None,
+                privilege_assertion: None,
             },
             &operator,
         )
@@ -88,6 +90,8 @@ async fn source_templates_assign_defaults_and_shared_custom_templates() {
                 selector_expression: "id:client-a || id:client-b".to_string(),
                 target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
                 confirmed: true,
+                preview_hash: None,
+                privilege_assertion: None,
             },
             &operator,
         )
@@ -223,6 +227,8 @@ async fn curated_builtin_source_templates_are_selectable_not_default() {
                 selector_expression: "id:edge-a".to_string(),
                 target_client_ids: vec!["edge-a".to_string()],
                 confirmed: true,
+                preview_hash: None,
+                privilege_assertion: None,
             },
             &operator,
         )
@@ -305,6 +311,8 @@ async fn source_template_lifecycle_updates_the_shared_model() {
             selector_expression: "id:client-a || id:client-b".to_string(),
             target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
             confirmed: true,
+            preview_hash: None,
+            privilege_assertion: None,
         },
         &operator,
     )
@@ -350,6 +358,8 @@ async fn source_template_lifecycle_updates_the_shared_model() {
                 definition: candidate.clone(),
                 confirmed: false,
                 keep_description: false,
+                preview_hash: None,
+                privilege_assertion: None,
             },
             &operator,
         )
@@ -370,6 +380,8 @@ async fn source_template_lifecycle_updates_the_shared_model() {
                 definition: candidate.clone(),
                 confirmed: true,
                 keep_description: false,
+                preview_hash: None,
+                privilege_assertion: None,
             },
             &operator,
         )
@@ -384,6 +396,240 @@ async fn source_template_lifecycle_updates_the_shared_model() {
         .unwrap()
         .iter()
         .any(|audit| audit.action == "source_template.updated"));
+}
+
+#[tokio::test]
+async fn source_template_update_route_binds_confirmed_apply_to_preview() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        for client_id in ["client-a", "client-b"] {
+            upsert_memory_agent(
+                &memory.agents,
+                &AgentHello {
+                    client_id: client_id.to_string(),
+                    process_incarnation_id: uuid::Uuid::new_v4(),
+                    agent_version: "test".to_string(),
+                    os_release: "test".to_string(),
+                    arch: "x86_64".to_string(),
+                    update_heartbeat: None,
+                    internal_build_number: 1,
+                    capabilities: Default::default(),
+                },
+            )
+            .await;
+        }
+    }
+    let mut state = source_template_test_state(repo.clone(), None);
+    state.gateway = GatewayDispatchClient::test_privilege_auto_approve();
+    let headers = crate::test_auth_headers(&state).await;
+    let operator = memory_admin();
+    let template = repo
+        .create_source_template(
+            &CreateSourceTemplateRequest {
+                domain: "runtime_traffic_accounting_source".to_string(),
+                name: "shared:traffic-route-preview".to_string(),
+                scope: "shared".to_string(),
+                owner_client_id: None,
+                description: Some("default traffic source".to_string()),
+                definition: serde_json::json!({"source": "interface_counters"}),
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    repo.assign_source_template(
+        &AssignSourceTemplateRequest {
+            domain: "runtime_traffic_accounting_source".to_string(),
+            template_id: template.id,
+            selector_expression: "id:client-a || id:client-b".to_string(),
+            target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
+            confirmed: true,
+            preview_hash: None,
+            privilege_assertion: None,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let candidate = serde_json::json!({
+        "source": "vnstat",
+        "vnstat_argv": ["/usr/bin/vnstat", "--json"]
+    });
+    let axum::Json(preview) = routes_inventory::update_source_template(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(template.id),
+        axum::Json(UpdateSourceTemplateRequest {
+            description: Some("provider image uses vnstat".to_string()),
+            definition: candidate.clone(),
+            confirmed: false,
+            keep_description: false,
+            preview_hash: None,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(preview.confirmation_required);
+    assert_eq!(
+        preview.affected_client_ids,
+        vec!["client-a".to_string(), "client-b".to_string()]
+    );
+    let preview_hash = preview.preview_hash.clone().unwrap();
+
+    let error = routes_inventory::update_source_template(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(template.id),
+        axum::Json(UpdateSourceTemplateRequest {
+            description: Some("provider image uses vnstat".to_string()),
+            definition: candidate.clone(),
+            confirmed: true,
+            keep_description: false,
+            preview_hash: None,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(error.code, "source_template_update_preview_hash_required");
+    let unchanged = repo
+        .list_source_templates(Some("runtime_traffic_accounting_source"))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.id == template.id)
+        .unwrap();
+    assert_eq!(
+        unchanged.definition,
+        serde_json::json!({"source": "interface_counters"})
+    );
+
+    let axum::Json(updated) = routes_inventory::update_source_template(
+        axum::extract::State(state),
+        headers,
+        axum::extract::Path(template.id),
+        axum::Json(UpdateSourceTemplateRequest {
+            description: Some("provider image uses vnstat".to_string()),
+            definition: candidate.clone(),
+            confirmed: true,
+            keep_description: false,
+            preview_hash: Some(preview_hash.clone()),
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!updated.confirmation_required);
+    assert_eq!(updated.preview_hash.as_deref(), Some(preview_hash.as_str()));
+    assert_eq!(updated.template.definition, candidate);
+}
+
+#[tokio::test]
+async fn source_template_assignment_route_binds_confirmed_apply_to_preview() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        for client_id in ["client-a", "client-b"] {
+            upsert_memory_agent(
+                &memory.agents,
+                &AgentHello {
+                    client_id: client_id.to_string(),
+                    process_incarnation_id: uuid::Uuid::new_v4(),
+                    agent_version: "test".to_string(),
+                    os_release: "test".to_string(),
+                    arch: "x86_64".to_string(),
+                    update_heartbeat: None,
+                    internal_build_number: 1,
+                    capabilities: Default::default(),
+                },
+            )
+            .await;
+        }
+    }
+    let mut state = source_template_test_state(repo.clone(), None);
+    state.gateway = GatewayDispatchClient::test_privilege_auto_approve();
+    let headers = crate::test_auth_headers(&state).await;
+    let template = repo
+        .create_source_template(
+            &CreateSourceTemplateRequest {
+                domain: "runtime_traffic_accounting_source".to_string(),
+                name: "shared:traffic-assignment-preview".to_string(),
+                scope: "shared".to_string(),
+                owner_client_id: None,
+                description: Some("vnstat traffic source".to_string()),
+                definition: serde_json::json!({"source": "vnstat"}),
+            },
+            &memory_admin(),
+        )
+        .await
+        .unwrap();
+
+    let axum::Json(preview) = routes_inventory::assign_source_template(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::Json(AssignSourceTemplateRequest {
+            domain: "runtime_traffic_accounting_source".to_string(),
+            template_id: template.id,
+            selector_expression: "id:client-a || id:client-b".to_string(),
+            target_client_ids: vec!["client-b".to_string(), "client-a".to_string()],
+            confirmed: false,
+            preview_hash: None,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(preview.confirmation_required);
+    assert_eq!(preview.target_count, 2);
+    let preview_hash = preview.preview_hash.clone().unwrap();
+
+    let error = routes_inventory::assign_source_template(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::Json(AssignSourceTemplateRequest {
+            domain: "runtime_traffic_accounting_source".to_string(),
+            template_id: template.id,
+            selector_expression: "id:client-a || id:client-b".to_string(),
+            target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
+            confirmed: true,
+            preview_hash: None,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(
+        error.code,
+        "source_template_assignment_preview_hash_required"
+    );
+
+    let axum::Json(assigned) = routes_inventory::assign_source_template(
+        axum::extract::State(state),
+        headers,
+        axum::Json(AssignSourceTemplateRequest {
+            domain: "runtime_traffic_accounting_source".to_string(),
+            template_id: template.id,
+            selector_expression: "id:client-a || id:client-b".to_string(),
+            target_client_ids: vec!["client-a".to_string(), "client-b".to_string()],
+            confirmed: true,
+            preview_hash: Some(preview_hash.clone()),
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(!assigned.confirmation_required);
+    assert_eq!(
+        assigned.preview_hash.as_deref(),
+        Some(preview_hash.as_str())
+    );
+    assert!(assigned
+        .assignments
+        .iter()
+        .all(|assignment| assignment.template_id == template.id));
 }
 
 #[tokio::test]
@@ -471,6 +717,8 @@ async fn vps_local_source_template_only_assigns_to_owner() {
                 selector_expression: "id:client-b".to_string(),
                 target_client_ids: vec!["client-b".to_string()],
                 confirmed: true,
+                preview_hash: None,
+                privilege_assertion: None,
             },
             &operator,
         )
@@ -488,6 +736,8 @@ async fn vps_local_source_template_only_assigns_to_owner() {
                 selector_expression: "id:client-a".to_string(),
                 target_client_ids: vec!["client-a".to_string()],
                 confirmed: true,
+                preview_hash: None,
+                privilege_assertion: None,
             },
             &operator,
         )
@@ -617,6 +867,8 @@ async fn template_runtime_config_renders_selected_templates() {
                 selector_expression: "id:edge-a".to_string(),
                 target_client_ids: vec!["edge-a".to_string()],
                 confirmed: true,
+                preview_hash: None,
+                privilege_assertion: None,
             },
             &operator,
         )
@@ -864,6 +1116,8 @@ async fn source_status_links_selected_templates_to_live_source_evidence() {
             selector_expression: "id:edge-a".to_string(),
             target_client_ids: vec!["edge-a".to_string()],
             confirmed: true,
+            preview_hash: None,
+            privilege_assertion: None,
         },
         &operator,
     )

@@ -294,12 +294,36 @@ impl From<TunnelAddressFamilyArg> for TunnelAddressFamily {
 pub(crate) struct TunnelOspfCostUpdateCommand {
     #[arg(long)]
     pub(crate) plan_id: String,
+    #[arg(long, help = "Recommendation ID from network-ospf-update-plans")]
+    pub(crate) recommendation_id: String,
     #[arg(long)]
     pub(crate) current_ospf_cost: u16,
     #[arg(long)]
     pub(crate) recommended_ospf_cost: u16,
+    #[arg(
+        long,
+        value_enum,
+        default_value = "apply",
+        help = "Apply the reviewed recommendation or roll back using the same stale-check guard"
+    )]
+    pub(crate) mutation_intent: TunnelOspfMutationIntentArg,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum TunnelOspfMutationIntentArg {
+    Apply,
+    Rollback,
+}
+
+impl TunnelOspfMutationIntentArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+            Self::Rollback => "rollback",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -433,6 +457,10 @@ pub(crate) fn tunnel_ospf_cost_update(
         "tunnel-ospf-cost-update requires --confirmed"
     );
     anyhow::ensure!(
+        !request.recommendation_id.trim().is_empty(),
+        "tunnel-ospf-cost-update requires --recommendation-id"
+    );
+    anyhow::ensure!(
         request.current_ospf_cost != request.recommended_ospf_cost,
         "tunnel-ospf-cost-update requires a changed OSPF cost"
     );
@@ -443,8 +471,10 @@ pub(crate) fn tunnel_ospf_cost_update(
             &format!("/api/v1/tunnel-plans/{}/ospf-cost", request.plan_id),
             token,
             &serde_json::json!({
+                "recommendation_id": request.recommendation_id,
                 "current_ospf_cost": request.current_ospf_cost,
                 "recommended_ospf_cost": request.recommended_ospf_cost,
+                "mutation_intent": request.mutation_intent.as_str(),
                 "confirmed": request.confirmed,
             }),
         )?

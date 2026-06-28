@@ -25,6 +25,91 @@
   min-width: 0;
 }
 
+.workspaceRouteError {
+  align-items: start;
+}
+
+.workspaceErrorPanel {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-soft);
+  padding: 16px;
+  color: var(--text);
+}
+
+.workspaceErrorIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--warning-text);
+}
+
+.workspaceErrorCopy {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.workspaceErrorCopy h2,
+.workspaceErrorCopy p,
+.workspaceErrorCopy span {
+  margin: 0;
+}
+
+.workspaceErrorCopy h2 {
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.3;
+}
+
+.workspaceErrorCopy p {
+  color: var(--warning-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.workspaceErrorCopy span {
+  max-width: 72ch;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.workspaceErrorCopy code {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--warning-border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.workspaceErrorActions {
+  justify-content: flex-end;
+  margin-top: 0;
+}
+
+@media (max-width: 720px) {
+  .workspaceErrorPanel {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workspaceErrorActions {
+    justify-content: flex-start;
+  }
+}
+
 .dashboardWorkspace {
   grid-template-columns: minmax(0, 1fr) 360px;
   align-items: start;
@@ -4209,6 +4294,12 @@ button.vpsDetailRecord:hover {
 .timeSeriesHover strong {
   color: var(--text);
   font-size: 12px;
+}
+
+.timeSeriesHover small {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .timeSeriesHover b {

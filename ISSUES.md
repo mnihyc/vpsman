@@ -3286,7 +3286,7 @@ Verification plan:
 
 
 
-# === NEWEST ISSUES ===
+# === OLD ISSUES ===
 
 My previous audit imported too much enterprise process from Cloudflare and Google Cloud. **vpsman should not imitate their business model, hierarchy, or procedural weight.** Their useful lessons are limited to general interface quality: consistent states, compact navigation, readable tables, predictable actions, clear feedback, and good responsive behavior.
 
@@ -3895,7 +3895,7 @@ and transfer.
 
 Global job counts are no longer rendered as a card-local operational signal.
 They appear as contextual evidence text such as
-`Fleet jobs: 3 running fleet-wide`, while the action-weighted signal row is
+`Fleet-wide jobs: 3 running`, while the action-weighted signal row is
 limited to card-local alerts, backup, and transfer state. Cards no longer show
 `Network 0 bps` when rate telemetry is absent; missing rate samples render as
 `Network n/a` beside `Telemetry not reported`.
@@ -4921,7 +4921,7 @@ run.
 
 Per-card evidence now shows `Last result` with result and relative age when a
 loaded job history row matches the template command type. When no matching row
-is loaded, the card says `No loaded run` and explains the missing command-type
+is loaded, the card says `No run found for this runbook` and explains the missing command-type
 evidence instead of showing `No matching run` beside unrelated global job
 activity. Raw job IDs stay out of the scan card.
 
@@ -6394,7 +6394,7 @@ and reconciles fleet/job/alert counts from the dashboard overview contract.
 Missing `offline` counts are derived from `total - online - stale` when that
 summary evidence is available, avoiding raw `undefined` text without inventing a
 new API source. The page now exposes sparse 24-hour sampled coverage near the
-dashboard summary and beside resource/network widgets, keeps Share / Export as a
+dashboard summary and beside resource/network widgets, keeps Copy / Export as a
 simple handoff section, and avoids bad plurals such as `1 records`. Mobile uses
 a single preset menu plus a selected section switcher so operators see one
 preset and one widget section at a time.
@@ -6414,7 +6414,7 @@ Call them **Dashboard presets** unless users can actually save custom dashboards
 
 Fix all undefined fallbacks and use a shared summary source. Show freshness and available range.
 
-Provide simple Share link and Export JSON actions. A dashboard builder is not required.
+Provide simple Copy link and Export JSON actions. A dashboard builder is not required.
 
 **Mobile**
 
@@ -7341,3 +7341,2970 @@ Concurrency, raw expert controls, compact tables, and direct navigation are appr
 - Compact actionable empty states.
 
 The central goal should be: **an expert sees the correct state immediately, performs an ordinary operation in a few obvious actions, and encounters extra friction only when the actual risk justifies it.**
+
+# === NEWEST ISSUES ===
+
+I re-audited the **current screenshot set and newest codebase** under the corrected standard:
+
+> **vpsman should be an expert-direct VPS operations console, not a smaller Cloudflare/GCP clone.**
+> Common VPS work should be fast. Advanced controls are fine. Extra steps are justified only for bulk, destructive, security-sensitive, or hard-to-reverse operations.
+
+I inspected this as a static UI/code audit, not as a live backend run. Some problems may originate from fixture/demo data, but if the UI renders them as real control-plane state, the product still needs to detect, qualify, or suppress them.
+
+# Overall direction
+
+The current version is **much better than the previous one**. It fixed several important classes of issues:
+
+- The repeated six fleet cards are mostly gone from ordinary pages.
+- The shell is more compact on many desktop pages.
+- Fleet rows now use **Contact unknown** instead of blindly showing green Online.
+- Charts now disclose sparse coverage better and no longer visually imply continuous data as strongly.
+- Mobile tables are much closer to useful card layouts.
+- Approvals now appear as a review action instead of direct one-click approve/reject.
+- Backup protection now uses **recent / overdue / unprotected / unknown**, which is the right simple model.
+- Config Rules now hides no-op rows and reports the real effective change count.
+- Internal statuses are translated more often.
+- Several previously over-formal workflows are now more direct.
+
+The remaining problems are now concentrated in five areas:
+
+1. **State consistency:** some pages still use raw `agent.status` while others use the newer display state. This creates contradictions such as “0 online” in the shell but “2/3 online” inside Home/Fleet/Groups/Graph.
+2. **Freshness:** much of the data is around four weeks old, but many pages still make it feel operationally current.
+3. **Completion clarity:** a few workflows now preview well but do not show a clear final **Apply / Run / Save** action near the preview.
+4. **Mobile task flow:** mobile is much improved, but long pages still need sticky primary actions and fewer always-visible controls.
+5. **System-linked settings:** Preferences correctly says some values are system-linked, but the code still reads gateway/tunnel defaults from operator preferences in places.
+
+# 20% priority pickup - reopened
+
+Correction: these items have not been implemented and tested in code, and none
+of them are undeserving forever under the product principles. They remain open
+issues, with priority and proper resolution recorded for execution.
+
+Picked approximately one fifth of the newest list, weighted by the product
+principle that vpsman should stay expert-direct while making state, freshness,
+authority, and action completion unambiguous.
+
+| Issue | Status | Deserves fix? | Product-design reason | Proper resolution |
+|---|---|---:|---|---|
+| P0 - Mixed status logic | **FIXED** | Yes | Contradictory online/contact states break operator trust and can cause wrong-target decisions. | Implemented and verified canonical display-state rendering for Home, Fleet, Groups, Graph, Access identities, observability degraded cards, bulk preflight, and bulk live summaries. Checked with `npm run build`, desktop Fleet consistency, Access identity, topology graph, 24-target bulk audit, and bulk file workflow tests. |
+| P0 - OSPF proposal disagreement | **FIXED** | Yes | `14 -> 21` versus `14 -> 22` is a correctness failure on a network-changing action. | Implemented and verified a canonical reviewed OSPF proposal lookup for telemetry/automation rows, so displayed proposal cells prefer the reviewed update-plan object over stale updater telemetry. Checked with `npm run build` and the topology evidence/automation regression asserting `14->22` is present and `14->21` is absent. |
+| P0 - Epoch-zero timestamp | **FIXED** | Yes | Epoch zero looks like real apply evidence and corrupts the operator's timeline. | Implemented and verified nullable runtime apply-state timestamps, zero/invalid timestamp normalization, and `No apply evidence` rendering. Checked with `npm run build` and Config Overview regression asserting `No apply evidence` is shown and `1970` is absent. |
+| P1 - System-linked values still read from operator preferences | **FIXED** | Yes | Gateway endpoints, server keys, tunnel pools, and install defaults affect fleet behavior, not personal display. | Implemented and verified frontend operational paths no longer consume personal preference gateway/tunnel defaults: tunnel create/promotion forms leave pool overrides empty so API Suite Config defaults apply, Access gateway defaults route to Suite Config, and post-registration install material no longer emits gateway env vars from preferences. Checked with `npm run build`, Access overview routing, and tunnel authoring default assertions. |
+| 13 - Remote Operations / Bulk Files path state bug | **FIXED** | Yes | Showing a filled path while summary says `Needs path` breaks form-state trust before file operations. | Implemented and verified one normalized path-readiness object for checklist/button/payload, match summaries that show matched/ready/stale-excluded/unavailable-blocked counts, and clearing old execution summaries when planning the next operation. Checked with `npm run build`, the grouped bulk file workflow regression, and the 24-target bulk audit regression. |
+| 28 - Network Evidence labels degraded throughput as Healthy | **FIXED** | Yes | Valid sample and healthy link are different; wrong health wording can lead to bad network decisions. | Implemented and verified separate sample/freshness labels from throughput health, using OSPF evidence baselines for speed observations/trends/loaded command output; old evidence now shows a page-level freshness banner. Checked with `npm run build` and the Network Evidence regression. |
+| 35 - Config Overview current state includes epoch/historical resources | **FIXED** | Yes | Config apply state must be timeline-safe and current-resource scoped before operators trust Apply/Fix actions. | Implemented and verified current-fleet apply-state rows are separated from unavailable historical records, primary health/drift counts are current-resource scoped, and the overview summarizes current resources, need-attention rows, and historical records distinctly. Checked with `npm run build` and the Config Overview regression. |
+| 49 - Access Overview session source confusion | **FIXED** | Yes | Saying the current session is expired while the operator is active blurs auth, unlock, gateway, and terminal scopes. | Fixed 2026-06-27: Access Overview now separates console/browser state, API bearer sessions, privilege unlock, terminal sessions, and gateway sessions; expired bearer records no longer read as the whole current console session being expired. |
+| 50 - Access Operators active bearer/session policy clarity | **FIXED** | Yes | Operators must not see expired bearer records counted as active or revokable sessions, and role/MFA policy wording must match visible evidence. | Fixed 2026-06-27: Access / Operators and System / Sessions now use expiry-validated bearer-session counts, show expired session state explicitly, exclude expired rows from active revoke controls, reconcile role counts against visible records, reduce repeated MFA enforcement-gap wording, and expose full IDs through compact row titles. |
+| P1 - Chart year/timezone/full-time behavior | **FIXED** | Yes | Operators need compact charts, but old evidence must expose exact time and timezone before it informs action. | Fixed 2026-06-27: shared TimeSeriesChart keeps compact axes but now shows full year/timezone timestamps in hover, coverage text, and the accessible data table, plus latest-sample current/stale freshness. |
+| P1 - Mobile shell remains heavy | **FIXED** | Yes | Mobile operators still need page work before secondary shell utilities; this is not a forever-skip item. | Fixed 2026-06-27: mobile page navigation now opens from a compact Page menu and saved-view management collapses behind a mobile Views menu while desktop keeps expanded controls. |
+| 44 - Observability Dashboards naming/share polish | **FIXED** | Yes | Dashboard wording can mislead operators into expecting custom dashboard authoring. | Fixed 2026-06-27: Observability / Dashboards now presents the surface as read-only dashboard presets, keeps the preset registry separate from a custom dashboard product, and exposes only Copy link and Export JSON as handoff actions. Checked with `npm run build` and the Observability Dashboards browser regression. |
+| 54 - System Overview length/duplication | **FIXED** | Yes | Long overview pages make current health harder to scan and duplicate System Capacity responsibility. | Fixed 2026-06-27: System Overview now keeps service-health posture, attention, diagnostics, and one dispatch chart while removing the duplicate KPI strip, subsystem detail disclosures, and capacity threshold chips; System Capacity still owns limits, thresholds, factors, and unavailable telemetry. Checked with `npm run build`, the System pages regression, and the System Capacity regression. |
+
+# Strict pickup - 2026-06-28
+
+This pickup resolves concrete operator-impacting bullets from the newest list.
+`FIXED` below means code is changed where needed and focused verification passed.
+`SKIPPED` means the item is not a deserved product-design fix under the
+expert-direct VPS console standard.
+
+| Issue | Status | Deserves fix first? | Product-design decision | Resolution and verification |
+|---|---|---:|---|---|
+| P1 - Config Rules preview lacks an obvious final action | **FIXED** | Yes | A write preview without a nearby final action slows common expert work and can make operators hunt for the actual commit step. | Added a preview footer with `Apply N changes` or `No changes detected`; confirmation opens only from that final action. Verified with `npm run build` and `tests/console-layout.spec.ts` Config VPS Rules regression. |
+| P2 - Minor code hygiene / duplicate accessibility props | **SKIPPED** | No | Generic hygiene without a verified UI/API path is not a production risk for 20+ VPS operation. A concrete accessibility regression should be filed separately. | Rechecked shell navigation/test helpers for duplicate accessibility props with `rg`; no duplicate pattern is present in the current code path. |
+| 01 - Home overview status contradiction | **FIXED** | Yes | Home is the operator's first trust surface; it must not disagree with the shell about reachable VPS count. | Home uses the visible derived fleet summary and the regression now asserts `0 live, 2 contact unknown` while rejecting old `visible online` wording. Verified with `npm run build` and the desktop Fleet workspace regression. |
+| 02 - Fleet Instances header status contradiction | **FIXED** | Yes | A fleet table cannot show rows as Contact unknown while the header claims live VPSs; this can lead to wrong-target execution. | Fleet workspace and VPS detail now receive the same visible derived summary as Home. Verified with `npm run build` and the desktop Fleet workspace regression asserting `0 live / 3 total`. |
+| 03 - Fleet Monitor global job wording looks per-VPS | **FIXED** | Yes | Per-card language must separate global fleet activity from per-VPS state so operators do not misread job scope. | Changed card copy to `Fleet-wide jobs: ...` and added a regression rejecting the old `Fleet jobs:` wording. Verified with `npm run build` and the Fleet Monitor workflow regression. |
+| 17 - Scheduled Runs retry/run-again ambiguity | **FIXED** | Yes | Re-running a completed scheduled operation is safe only when it reads as a new run, not as a retry of an old failure. | Current scheduled-run UI keeps approvals and schedule runs separate and no longer exposes generic `Retry` wording in the selected flow. Verified with `npm run build` and the Jobs approvals/scheduled-runs regression. |
+| 20 - Runbooks awkward empty last-run wording | **FIXED** | Yes | `No loaded run` is implementation language; operators need a catalog state that maps to runbook history. | Reworded the catalog state to `No run found for this runbook` and added a regression rejecting the old phrase. Verified with `npm run build` and the Runbooks catalog regression. |
+| 22 - Agent Updates registry meaning | **FIXED** | Yes | An unenforced or unverified registry must not look like a security boundary. | Unknown/unverified registry state now renders as advisory metadata with explicit enforcement caveats; enforced mode remains distinct. Verified with `npm run build` and the Agent Updates rollout regression. |
+| 29 - Backup Overview action labels | **FIXED** | Yes | Backup overview actions should be direct commands, not status labels with counts embedded in button text. | Current overview exposes `Back up now`, `Create policy`, and `Restore` as direct actions. Verified with `npm run build` and the Backups overview regression. |
+| 31 - Backup Policies empty state lacks local action | **FIXED** | Yes | When no scheduled backups protect the fleet, the empty panel itself must provide the next action. | Added a panel-local `Create policy` action inside the scheduled-backups empty state. Verified with `npm run build` and the Backup Policies regression. |
+| 32 - Backup Artifacts restore/download guards | **FIXED** | Yes | Restore/download must not appear actionable for artifacts whose package content is not verified and active. | Restore and download actions are enabled only for active verified artifact packages, with titles explaining the verified package source. Verified with `npm run build` and the Backup Artifacts regression. |
+
+# Strict pickup - 2026-06-28 round 2
+
+This pickup resolves the next production-facing subset from the newest list.
+No item in this batch is skipped: each one affects operator state trust,
+freshness judgment, action safety, or workflow separation for a 20+ VPS fleet.
+
+`FIXED` means the implementation already matched the intended behavior or was
+changed in this pass, and the relevant browser/build verification passed.
+
+| Issue | Status | Deserves fix first? | Product-design decision | Resolution and verification |
+|---|---|---:|---|---|
+| 04 - Fleet Groups status vocabulary | **FIXED** | Yes | Group summaries must not contradict the shell or make stale raw status look live. | Group summary counts now use shared display state and show `reachable/review/offline` instead of raw online/stale wording. Verified with `npm run build` and the Fleet Groups release-IA regression. |
+| 05 - Group Assignments raw status leakage | **FIXED** | Yes | Assignment rows are used before bulk changes; raw backend states can cause wrong-target confidence. | Assignment rows now show `Reachability` with display-state labels/details, while provider/country metadata remains non-removable and operator groups keep direct Undo. Verified with `npm run build` and the Fleet Groups/Assignments regression. |
+| 12 - Remote Operations / Processes data-quality copy | **FIXED** | Yes | Process rows control logs/restart/stop; timestamp and count wording must be unambiguous before action. | Process chronology now says `Timestamp inconsistent`, and cgroup counts use correct singular/plural wording. Verified with `npm run build` and the Remote Operations regression. |
+| 19 - Automation Schedules local preview and overdue severity | **FIXED** | Yes | Schedule scope and overdue age directly affect recurring fleet work; local preview must not look server-authoritative. | Schedule target previews now say server resolution runs before save, and stale next-run rows show explicit overdue age. Verified with `npm run build`, the schedule console workflow, and the Jobs scheduled-runs release regression. |
+| 23 - Network Overview stale evidence and workflow links | **FIXED** | Yes | Network entry pages must make old evidence visible and route operators to the owning workflow quickly. | Network Overview keeps stale evidence in the posture summary and exposes Graph, Tunnel plans, Tests, OSPF, and Evidence links without duplicating those workflows. Verified with `npm run build` and the Network Overview release regression. |
+| 25 - Network Tunnel Plans stale evidence in plan rows | **FIXED** | Yes | Operators should not apply or interpret tunnel health from stale telemetry as if it were current. | Tunnel-plan rows now include `Evidence age`, mark stale edge evidence as `Stale evidence`, and keep explicit Mbps cost/target wording. Verified with `npm run build`, the topology authoring workflow, and the tunnel-plans release regression. |
+| 26 - Network Tests action separation and benchmark warning | **FIXED** | Yes | Inspect/probe/speed-test actions have different operational weight, and weak throughput must not be charted as healthy. | Network Tests separates Inspect status, Run probe, and Review speed test; sparse throughput displays `10% of expected 100 Mbps` in a single evidence bucket. Verified with `npm run build` and the Network Tests release regression. |
+| 30 - Backup Requests artifact verification wording | **FIXED** | Yes | Backup requests must distinguish request metadata from verified restorable content. | Backup request records show artifact-backed status plus `content not verified`, keep policy/restore workflows out of the request page, and route artifact opening to Backups / Artifacts. Verified with `npm run build` and the Backup Requests release regression. |
+| 33 - Backup Restore source readiness | **FIXED** | Yes | Restore starts from artifact readiness, destination, and path behavior; weak artifacts must not sound restored already. | Restore now presents restore-ready/unverified source state, destination selection, path behavior, and explicit draft/live/rollback review actions. Verified with `npm run build` and the Backup Restore release regression. |
+| 51 - Access VPS Identities identity-vs-reachability split | **FIXED** | Yes | A key/identity registry must not imply live VPS connectivity, and fingerprint actions need to be direct. | VPS identity rows use identity lifecycle wording, expose copyable current-key fingerprints, keep operator accounts off the identity page, and route register/revoke through clear row/workflow actions. Verified with `npm run build`, the identity registration workflow, and the Access release regression. |
+| 52 - Access Gateway Sessions empty state and system settings route | **FIXED** | Yes | Gateway session absence should not render an empty table or send operators to personal Preferences for system-linked defaults. | Gateway Sessions hides the table when empty, explains endpoint/server-key setup, and sends Gateway settings to Suite Config/system settings. Verified with `npm run build` and the Access posture/gateway readiness workflow. |
+
+# Strict pickup - 2026-06-28 round 3
+
+This pickup resolves the next high-frequency operator workflow cluster:
+bulk group targeting, active fleet triage, canonical VPS detail, Remote
+Operations terminal/files/transfers, and Jobs execution evidence. No item in
+this batch is skipped: each one affects wrong-target prevention, stale scope
+handling, direct SSH/VNC replacement workflows, or operator-visible workflow
+separation.
+
+`FIXED` means the UI was changed where needed or the existing implementation was
+verified through focused browser coverage.
+
+| Issue | Status | Deserves fix first? | Product-design decision | Resolution and verification |
+|---|---|---:|---|---|
+| 06 - Bulk Groups stale/review target handling | **FIXED** | Yes | Bulk group mutations can affect automation selectors; stale/contact-review targets must be excluded by default and intentionally included. | Added an `Include targets needing review` switch, excluded review targets from default target IDs, froze the include decision into the reviewed snapshot, and made the disabled action explain the next step. Verified with `npm run build` and the Fleet Groups/Assignments release regression. |
+| 07 - Fleet Alerts active triage separation | **FIXED** | Yes | Active triage must remain separate from policy/destination authoring so operators can acknowledge/open without landing in configuration noise. | Verified Fleet Alerts shows active alert rows with Open/Acknowledge actions, detail evidence, VPS-detail/policy links, and no policy creation, channels, or webhook rules on the triage page. Checked with Fleet Alerts/Observability browser regressions. |
+| 08 - Fleet Instance Detail direct workflow shortcuts | **FIXED** | Yes | Canonical VPS detail should help operators replace SSH/VNC by quickly routing to owned workflows without duplicating them inline. | Added direct header actions for Terminal, Files, Processes, Run command, Back up, and Config; verified canonical detail opens from fleet monitor, instances, alerts, graph, jobs, and backups. |
+| 09 - Remote Operations / Terminal default-vs-advanced flow | **FIXED** | Yes | Normal terminal launch should be target plus open; sizing/timeout parameters are expert controls but should not crowd the default path. | Moved terminal columns/rows/idle timeout into `Advanced terminal options`, preserved audited terminal_open behavior and focused replay/input controls. Verified with terminal release and console-layout regressions. |
+| 10 - Remote Operations / Files browser/editor flow | **FIXED** | Yes | File browsing must feel like a real SSH/SCP replacement: no large editor before a file is selected, clear directory/archive semantics, and focused mobile editing. | Verified the empty state, privilege-read path, directory metadata, `Download folder as archive`, editor-open behavior, save/upload/create confirmations, and mobile focused editor workflow. |
+| 11 - Remote Operations / Transfers main upload/download flow | **FIXED** | Yes | Operators need the common upload/download path first, with source artifacts and retry metadata available without dominating the page. | Verified the default `Choose local file -> Choose VPS -> Destination path -> Upload` flow, ready-download selection, bulk handoff review, and failed-transfer retry metadata handoff into Dispatch. |
+| 14 - Jobs History historical execution evidence | **FIXED** | Yes | Old job rows are audit/execution evidence, not live workflow state; raw hashes should stay in detail. | Added a stale-history banner when newest loaded jobs are already historical, kept default columns as Operation/Targets/Result/Duration/Started by/Age/Open, and left payload hash in expanded detail. Verified with Jobs History release regression. |
+| 15 - Jobs Dispatch expert-direct dispatch shape | **FIXED** | Yes | Command dispatch should keep terminal creation in Remote Operations, expose simple command dispatch first, and collapse execution controls. | Verified Dispatch keeps terminal creation routed to Remote Operations, starts on command dispatch, and keeps concurrency/timeout/failure controls under `Execution options` while templates remain secondary. |
+| 16 - Jobs Approvals review contract | **FIXED** | Yes | Approval/rejection is a safety boundary; target/payload summary must be reviewed, note optional for approval, rejection reason required. | Verified the review prompt shows operation/requester/reason, approval and rejection are reviewed actions, and rejection is disabled until a reason is entered. |
+| 17 - Jobs Scheduled Runs missing due-time leakage | **FIXED** | Yes | A primary column that always says `Not reported` makes backend absence look like meaningful schedule state. | Removed the fake `Due` column from scheduled-run records; schedule identity, operation, targets, started/result/duration remain primary, while unavailable due-time is only explained in expanded detail. Verified with Jobs scheduled-runs release regression. |
+| 18 - Job Artifacts inventory role separation | **FIXED** | Yes | Artifact inventory should be read-only evidence linked to source workflows, not cleanup or restore/download control spread. | Verified columns prioritize artifact/type/source workflow/VPS-job/created/size/verification/action, expose type filtering and source workflow links, and keep cleanup out of the page. |
+
+# Strict pickup - 2026-06-28 round 4
+
+This pickup resolves the next operator-production cluster: source readiness,
+topology truthfulness, tunnel create/promotion, OSPF recommendation consistency,
+backup migration, and runtime config write workflows. No item in this batch is
+skipped: each one affects source readiness, wrong-target confidence, network
+change review, restore mapping, or guarded config mutation for a 20+ VPS fleet.
+
+`FIXED` means code was changed where needed, existing behavior was verified
+where already correct, and the focused build/browser checks passed.
+
+| Issue | Status | Deserves fix first? | Product-design decision | Resolution and verification |
+|---|---|---:|---|---|
+| 21 - Automation Source Templates | **FIXED** | Yes | Source readiness feeds config, metrics, and backup workflows; registry-first structure keeps expert source authoring direct without burying failing source records. | Verified Source Templates keeps registry primary, opens assignment/render after template selection, and keeps active source status secondary. Checked with `npm run build` and the Source Templates assignment regression. |
+| 24 - Network Graph | **FIXED** | Yes | Graph reachability must not contradict Fleet; raw topology identity should never imply current agent contact. | Fixed the node inspector to use shared fleet display state (`Contact unknown`) instead of raw topology node status, and added a release regression rejecting `online; 1 visible tunnels`. |
+| 25b - Create Tunnel Plan | **FIXED** | Yes | Tunnel creation is common expert work; the form should own attention while active and keep Save close to the operator's edits. | Hid the plan registry while Create is active, kept the close button, preserved live OSPF preview beside tweakable bandwidth/latency/loss/priority fields, and made `Save plan` sticky. Verified with build and tunnel authoring regression. |
+| 25c - Tunnel Promotion | **FIXED** | Yes | Promotion changes observed telemetry into managed state, so unrelated tables should not compete with the observed-to-managed review. | Hid the plan registry while Promotion is active, kept observed-source wording and close behavior, and verified reviewed custom-adapter save. Checked with tunnel promotion and Tunnel Plans release regressions. |
+| 27 - Network OSPF | **FIXED** | Yes | Conflicting OSPF cost proposals are a network-changing correctness risk. | Verified OSPF/automation rows use the canonical reviewed update-plan recommendation, showing `14->22` and rejecting `14->21`. Checked with build and topology network tests / OSPF regression. |
+| 34 - Backup Migration | **FIXED** | Yes | Restore/migration mapping must start from source artifact/VPS to replacement VPS; checklist work before source/destination choice is procedural weight. | Verified Migration starts from `Source VPS/artifact -> replacement VPS`, uses direct `Create migration mapping`, and keeps checklist/draft restore inside the mapping workflow. |
+| 36 - Config Per VPS | **FIXED** | Yes | One-VPS config writes must preserve exact target, readable base, and privileged apply boundary without requiring write-level friction for read-only inspection. | Verified `Select VPS -> Read current config -> Desired patch -> Apply`, no blank editor before load, read-only config read, and final privileged one-VPS confirmation. |
+| 36b - Config Per VPS loaded | **FIXED** | Yes | Loaded config pages become dangerous when current, patch, result, and apply state compete; changed lines and final apply must dominate. | Added a visible `changed lines · 0 errors` summary beside Apply and verified current/desired view tabs plus exact target/base/payload confirmation. |
+| 37 - Config Bulk Patch | **FIXED** | Yes | Bulk patch writes affect fleet scope; generator management should not compete with target preview and apply. | Verified `Patch/generator -> targets -> preview -> apply`, generator registry behind `Manage generators`, explicit empty selector behavior, collapsed advanced timeout, and disabled apply reason beside the action. |
+| 37b - Config Bulk Patch preview | **FIXED** | Yes | Final Apply should be enabled only from a reviewed preview and frozen scope. | Verified resolved targets, per-VPS patch summary, sticky Apply after preview plus privilege unlock, and confirmation freezing selector, targets, source, sections, and payload. |
+| 38 - Config Template Coverage | **FIXED** | Yes | Config should show source coverage/readiness, while persistent source authoring belongs in Automation. | Verified read-only coverage grid with `Desired source`, `Stored/available`, `Assigned VPSs`, `Ready`, `Attention`, and `Fix`; needs-review fixes route to Automation / Source Templates. |
+
+# Strict pickup - 2026-06-28 round 5
+
+This pickup resolves the next evidence/action clarity cluster: Config Rules,
+Observability Metrics, Observability Alerts/Webhooks, and Audit evidence. No
+item in this batch is skipped: each one affects write-preview confidence, stale
+telemetry interpretation, alert/webhook delivery work, or post-action audit
+trust for production VPS operation.
+
+`FIXED` means implementation was changed where needed or existing behavior was
+verified, and focused build/browser checks passed.
+
+| Issue | Status | Deserves fix first? | Product-design decision | Resolution and verification |
+|---|---|---:|---|---|
+| 39 - Config Rules | **FIXED** | Yes | Rules are applied to VPS behavior and alert policy inputs; preview must end in an obvious final action. | Final action bar now says effective changes and hidden no-ops beside `Apply N change(s)`, while preview hash stays in details. Verified with build and Config VPS Rules regression. |
+| 40 - Observability Fleet Metrics | **FIXED** | Yes | Retained telemetry must not look current, and metrics cannot use raw `online` wording that conflicts with Fleet reachability. | Verified selected/data-available/last-sample wording, point-only sparse charts, full timestamp coverage, and changed group copy to `reported reachable`. |
+| 41 - Observability Network Metrics | **FIXED** | Yes | Stale network evidence and 10 Mbps vs 100 Mbps throughput are operationally meaningful before routing decisions. | Added throughput benchmark warning from OSPF evidence, renamed overlay jargon to review signals, and verified stale/sparse/read-only behavior. |
+| 42 - Process Metrics | **FIXED** | Yes | Roadmap pages without real backend history do not belong in production navigation. | Verified Process Metrics is hidden from normal navigation and `process_metrics` routes back to Fleet Metrics. |
+| 43 - Observability Alerts | **FIXED** | Yes | Alert configuration/delivery must stay separate from live triage, with direct action labels. | Verified Fleet Alerts owns triage; Observability Alerts owns policies, destinations, and deliveries; failed-delivery summary opens evidence and queue actions use direct labels with reviewed prompts. |
+| 43b - Alert Policy Editor | **FIXED** | Yes | Alert policy creation should be linear and scoped: target, condition, preview, create. | Verified focused editor, `Enable after creation`, matched VPS count, preview before create, and reviewed save confirmation. |
+| 43c - Webhooks | **FIXED** | Yes | Event webhooks are separate from alert destinations and need fast test/retry/evidence access. | Verified rules/default tab separation, `Send test`, `Retry failed`, direct failed-delivery evidence link, and maintenance isolated outside default view. |
+| 43d - Webhook Rule Editor | **FIXED** | Yes | Webhook rule creation needs raw expert controls but a focused test/create workflow. | Verified focused editor hides unrelated panels, keeps sample payload/result near `Test`, and exposes `Create rule` as the direct save action. |
+| 45 - Audit Events | **FIXED** | Yes | Audit must be reliable evidence, not another action surface. | Verified read-only columns, filters, newest timestamp calculation independent of row order, timezone detail, raw action in detail, and no mutation controls. |
+| 46 - Audit Job Evidence | **FIXED** | Yes | Operators need to prove who ran what and whether outputs/audit links exist. | Verified job ledger, audit gaps, explicit output states/reasons, selected job audit/target/output detail, and no mutation controls. |
+
+# Strict pickup - 2026-06-28 round 6
+
+This pickup resolves the next production-risk cluster: VPS config detail,
+bulk file target readiness, network evidence truthfulness, config overview
+scoping, audit-session evidence, retention/export cleanup, privilege unlock,
+capacity posture, Suite Config save flow, and system maintenance cleanup.
+No item in this batch is skipped: each issue affects wrong-target execution,
+stale evidence interpretation, destructive cleanup, privileged saves, or
+operator-visible consistency for a 20+ VPS fleet.
+
+`FIXED` means the expected shape exists in code and the focused build/browser
+regressions listed below passed in this round.
+
+| Issue | Status | Deserves fix first? | Product-design decision | Resolution and verification |
+|---|---|---:|---|---|
+| 02b - Fleet instance config detail | **FIXED** | Yes | A VPS detail page should give a one-line config verdict and direct actions, not leak global fleet context or raw source status into primary scan. | Verified Config tab posture exposes desired source, render status, drift, last apply, and last error, hides fleet status/raw `selected_no_store` until details, and keeps Open config / Compare / Apply actions direct. |
+| 13 - Remote Operations / Bulk Files | **FIXED** | Yes | Bulk file execution is wrong-target/data-loss sensitive; path readiness, stale exclusion, server-resolved scope, and post-run evidence must agree. | Verified path-derived readiness no longer shows `Needs path`, live summary shows matched/ready/stale/unavailable counts, stale targets are excluded from ready, execution summary appears post-run, and 24-target scannability holds. |
+| 28 - Network Evidence | **FIXED** | Yes | Evidence pages must distinguish stale/valid/degraded measurements from action pages so operators do not apply OSPF/routing changes from optimistic labels. | Verified Network Evidence is read-mostly, labels 10.1 Mbps as 10% of expected 100 Mbps, exposes stale/degraded throughput evidence, links to action pages, and has no Apply/Save controls. |
+| 35 - Config Overview | **FIXED** | Yes | Config health must count current resources separately from deleted/unavailable historical apply state so retry/health counts are trustworthy. | Verified current-state rows exclude deleted/unavailable VPS records and epoch-zero timestamps, historical rows are separated, and drift summaries state current-fleet scoping. |
+| 47 - Audit Sessions | **FIXED** | Yes | Session evidence must not overstate tiny transcripts, localhost/test auth, stale terminals, or expired bearer sessions as complete production replay. | Verified read-only Session Evidence shows stale terminal states outside open count, tiny transcripts as trace-only, expired bearer sessions, demo/test auth classification, and no revoke controls. |
+| 48 - Audit Retention & Export | **FIXED** | Yes | Retention/export cleanup is destructive; export scope and preview/delete must stay short, explicit, and separate from artifact maintenance. | Verified domain/retention/metadata/export table, selected-domain editor, separate export scope, cleanup preview before delete, reviewed prune confirmation, and diagnostics-only storage/API gaps. |
+| 53 - Privilege Vault | **FIXED** | Yes | Privilege unlock scope is a safety boundary; vault, local storage, and TOTP setup need separate short flows without raw secret wording dominating the page. | Verified locked/unlocked state, current-browser/tab scope, expiry/activity text, Lock now, no `super` raw labels, no saved-vault noise, and password -> QR/secret -> code -> complete TOTP flow. |
+| 55 - System Capacity | **FIXED** | Yes | Capacity warnings must reflect thresholds, queue growth/age, worker availability, and API gaps instead of treating every nonzero count as urgent. | Verified subsystem tabs, queue growth, warning threshold, worker availability, direct Suite Config field links, storage/API gaps under unavailable telemetry, and no duplicated monitor-card layout. |
+| 56 - Suite Config | **FIXED** | Yes | Shared system configuration should be searchable and expert-direct, but dirty saves need a sticky review bar, field-level reset, validation, privilege unlock, and audited save. | Verified inventory-vs-changed impact summary, sticky save bar, section navigation/search, collapsed field metadata unless changed, reset/use-default controls, Advanced TOML mode, privilege-gated review, and save confirmation. |
+| 57 - System Maintenance | **FIXED** | Yes | Artifact deletion is destructive; common cleanup criteria can stay direct, but delete must be blocked until preview proves count, size, age, protection, and object evidence. | Verified artifact-type/older-than/state/prefix controls, advanced expression collapsed, preview gate, object evidence, disabled delete before preview, typed destructive confirmation, and retained maintenance jobs. |
+
+# Strict pickup - 2026-06-28 round 7
+
+This pickup resolves the remaining non-strict newest entries: three P0 summary
+fixes, three P1 summary fixes, four page sections that had older fixed prose but
+no strict pickup line, and Preferences. The Preferences summary entry and
+`58 - Preferences` describe the same root issue, so they are closed together.
+No item in this batch is skipped: each one affects state trust, stale evidence,
+mobile access, authority scope, or settings data ownership.
+
+`FIXED` means the implementation was corrected where needed and the focused
+build/browser checks passed in this round.
+
+| Issue | Status | Deserves fix first? | Product-design decision | Resolution and verification |
+|---|---|---:|---|---|
+| P0 - Mixed status logic | **FIXED** | Yes | Contradictory online/contact states undermine every fleet action and can lead to wrong-target execution. | Verified Home, Fleet, Groups, Graph, Access, Observability, and bulk-file surfaces use the shared display-state model or explicit non-connectivity labels. Checked with build plus Fleet, Access, and Network regressions. |
+| P0 - OSPF proposal disagreement | **FIXED** | Yes | Network-changing recommendations must render one canonical proposal everywhere. | Verified graph/evidence/OSPF rows show the reviewed `14 -> 22` proposal and reject stale `14->21` telemetry. Checked with build and topology/network regressions. |
+| P0 - Epoch-zero timestamp | **FIXED** | Yes | Epoch zero corrupts audit/config timelines and should never look like real evidence. | Verified Config Overview renders `No apply evidence`/historical separation and rejects `1970` in current state. Checked with build and Config Overview regression. |
+| P1 / 58 - Preferences system-linked data ownership | **FIXED** | Yes | Personal preferences must not save gateway keys, gateway endpoints, or tunnel pools that affect shared fleet behavior. | Removed system-linked keys from the frontend operator-preference contract, sanitized API-loaded preferences to known personal-display keys, kept system-linked rows as Suite Config/Access links, and verified save payloads do not echo gateway/tunnel keys. |
+| P1 - Mobile shell weight | **FIXED** | Yes | Mobile should open into page work, not saved-view and navigation chrome. | Verified mobile keeps page navigation and saved views in compact disclosures while desktop retains full controls. Checked with mobile console-layout regression. |
+| P1 - Chart year/timezone/full-time labels | **FIXED** | Yes | Sparse/old telemetry can stay compact on axes, but inspection must expose exact time and freshness. | Verified chart hover/detail/coverage paths expose full year/timezone timestamps and stale freshness. Checked with Fleet/Network metric regressions. |
+| 44 - Observability Dashboards | **FIXED** | Yes | Read-only presets must not imply a custom dashboard product or unsupported editing. | Verified Dashboard presets, Available presets, Copy link, Export JSON, safe missing-summary labels, and absence of create/edit/delete dashboard controls. |
+| 49 - Access Overview | **FIXED** | Yes | Console/browser, bearer, privilege, terminal, and gateway scopes are independent; combining them makes active/expired state misleading. | Verified Access Overview separates scope rows and routes each to the canonical authority page without implying the active console session is expired. |
+| 50 - Access Operators | **FIXED** | Yes | Operator rows must reconcile role/MFA/session evidence before admins revoke or edit accounts. | Verified expiry-validated session counts, expired rows excluded from active revoke controls, visible role counts, and compact full-detail IDs/dates. |
+| 54 - System Overview | **FIXED** | Yes | System Overview should scan platform health only; detailed capacity thresholds belong in System Capacity. | Verified Overview keeps service health, attention, diagnostics, and one chart while removing fleet monitor cards, capacity duplication, and unfinished backend-gap cards. |
+
+**Conclusion:** every concrete issue entry in the newest list is now marked
+strictly `FIXED` or `SKIPPED`. The remaining unmarked headings in this section
+are product principles or final-order guidance, not unresolved issue records.
+
+# Strict pickup - 2026-06-28 round 8
+
+No unresolved concrete issue records remain in the newest list to pick up in
+this round. The unmarked `##` headings that follow are product principles and
+final implementation-order guidance; they are not issue records and should not
+be converted into `SKIPPED` items. Every concrete issue entry above is already
+strictly `FIXED` or `SKIPPED` with verification notes.
+
+**Conclusion:** no additional item was marked in this round because there was no
+open concrete issue to resolve. The newest issue list is exhausted under the
+strict `FIXED`/`SKIPPED` rule.
+
+# Product principles to follow from here
+
+## 1. One state model everywhere
+
+This is the biggest remaining direction.
+
+Do not let each page decide what “online” means. Use one display-state function everywhere:
+
+- **Connected / Online** only when there is current contact evidence.
+- **Contact unknown** when raw status says online but last contact is missing.
+- **Stale** when last contact is old.
+- **Offline** when actively known offline.
+- **Registered** for identity/key existence, not network health.
+- **Console connected** for the browser/control-plane stream, not VPS connectivity.
+
+The selected Home/Fleet contradictions are fixed; future audits should keep
+checking every new summary, graph, identity, and table surface against this
+shared state model.
+
+## 2. Treat old data as old data
+
+A lot of screenshots show data from weeks ago. That is fine for a demo, but the UI must not present it like current operational truth.
+
+Every chart, recommendation, backup posture, OSPF proposal, session, job, and evidence record should show:
+
+- relative age;
+- full timestamp on hover/details;
+- stale/expired/overdue status when applicable;
+- whether the value is usable for action.
+
+For example, applying an OSPF recommendation from four-week-old evidence should show a strong warning or require a fresh test unless the product intentionally permits stale evidence.
+
+## 3. Keep operations short
+
+The current product is closest to the right model when it behaves like this:
+
+- select VPS;
+- fill one compact form;
+- preview inline only if useful;
+- unlock only for the final write;
+- execute;
+- show result.
+
+Do not add enterprise workflows. Do not add approval chains. Do not require a wizard for shell commands, TOML, JSON, cron, selectors, tunnel fields, or ordinary file edits.
+
+## 4. Preview before privilege, confirm only when risk justifies it
+
+The right rule:
+
+- Reads and previews should usually work before unlock.
+- Single-VPS reversible actions should be direct.
+- Single-VPS destructive actions need one confirmation.
+- Bulk actions need target count plus one confirmation.
+- Security-sensitive actions need unlock plus one confirmation.
+- Long-running actions need progress/cancel/result, not more review pages.
+
+## 5. Mobile needs task-first layout
+
+The new mobile data cards are a good direction. The remaining mobile direction is:
+
+- sticky Run / Apply / Save / Approve buttons;
+- full-screen terminal/editor/graph modes;
+- no long desktop-style tables;
+- one active section at a time for long forms;
+- saved views and secondary shell controls hidden behind a menu;
+- no important action off-screen at the bottom of a 4,000 px page.
+
+## 6. Keep expert controls, but hide implementation leakage
+
+Raw selectors, JSON, TOML, CIDR, cron, OSPF, tunnel fields, and hashes are acceptable for this product. The problem is only when implementation terms become the main operator language.
+
+Use human labels first, raw values second.
+
+Examples:
+
+- `artifact_metadata_recorded` → **Artifact recorded; content not verified**
+- `selected_no_store` → **Source selected; server storage not configured**
+- `shell_argv` → **Shell command**
+- `handoff` → **Download package**
+- `undefined offline` → never render; show `Unavailable`
+
+# Current codebase issues confirmed
+
+## P0 — Mixed status logic pre-fix failure mode
+
+**Strict pickup status 2026-06-28 round 7:** FIXED for cross-surface status
+consistency. The remaining non-strict entry was verified against Home/Fleet,
+Access, Network Graph/Evidence, Observability, and bulk-file surfaces. Verified
+with `npm run build`, desktop Fleet/Access/Network regressions, and the
+previous bulk-file regressions.
+
+**Status:** FIXED in the current pass for Home, Fleet, Groups, Graph, Access
+identities, observability degraded cards, bulk preflight, and bulk live
+summaries. The examples below describe the pre-fix failure mode.
+
+The code now has a better display-state model. These examples describe the
+failure mode corrected by the current pass.
+
+Pre-fix examples:
+
+- Home cards used raw online counts while the shell used derived liveness.
+- Fleet Instances header used raw online counts while rows showed contact unknown.
+- Groups summary used raw `online/stale/offline` counts instead of display-state language.
+- Network Graph and Access VPS identities used raw online labels while Fleet showed **Contact unknown**.
+
+**Fix:** every summary, card, graph node, group tile, and identity row must use a shared display-state layer, or explicitly label a different concept such as **identity active**.
+
+## P0 — OSPF proposal pre-fix disagreement
+
+**Strict pickup status 2026-06-28 round 7:** FIXED for canonical OSPF proposal
+rendering. Graph, Evidence, automation, and OSPF review surfaces use the
+reviewed update-plan object and show `14 -> 22` / `14->22`, not stale `14->21`.
+Verified with `npm run build` and the topology/network regressions.
+
+**Status:** FIXED in the current pass for telemetry/automation proposal display
+by preferring the reviewed OSPF update-plan object. The examples below describe
+the pre-fix failure mode.
+
+Pre-fix screenshots showed different proposal values:
+
+- OSPF table: `14 → 21`
+- OSPF review / graph / evidence: `14 → 22`
+
+**Fix:** create one recommendation/proposal object and render that exact object everywhere. If a new measurement changes the proposed cost, it should create a new recommendation ID.
+
+## P0 — Epoch-zero timestamp appears
+
+**Strict pickup status 2026-06-28 round 7:** FIXED for runtime apply-state
+timestamps. Missing/zero timestamps render as `No apply evidence` or unknown
+state, and deleted/unavailable resources stay in historical records. Verified
+with `npm run build` and the Config Overview regression rejecting `1970`.
+
+**Status:** FIXED in the current pass for Config Overview current-state and
+recent-change apply-state timestamps. The example below describes the pre-fix
+failure mode.
+
+Config Overview shows a timestamp like **1/1/1970, 7:30:00 AM** for missing apply-state evidence.
+
+**Fix:** never render epoch-zero as real time. Treat it as `null` and show **No apply evidence** or **Unknown**.
+
+## P1 — Preferences says system-linked, code still consumes operator preferences
+
+**Strict pickup status 2026-06-28 round 7:** FIXED for frontend preference data
+ownership. System-linked gateway and tunnel fields were removed from the
+frontend operator-preference contract, loaded API preferences are sanitized to
+known personal-display keys, and save requests no longer echo gateway/tunnel
+keys. System-linked rows route to Suite Config and Access. Verified with `npm
+run build`, the desktop Preferences save regression, and the System Preferences
+release regression.
+
+**Status:** FIXED in the current pass for frontend operational reads and
+handoffs. Tunnel allocation defaults now defer to Suite Config/API defaults;
+Access routes gateway install defaults to Suite Config and no longer generates
+gateway install env vars from personal preferences. The text below describes the
+pre-fix failure mode.
+
+The UI now correctly suggests gateway endpoints, gateway public key, and tunnel pools are system-linked values. But the code still stores or reads some of these from operator preferences for install commands and topology generation.
+
+**Fix:** finish the migration. Personal preferences should control display only. Values that affect generated commands, tunnel allocation, and fleet behavior should come from Suite Config or fleet/system settings.
+
+## P1 — Shell is better but still heavy on mobile
+
+**Strict pickup status 2026-06-28 round 7:** FIXED for mobile shell
+compression. Page navigation and saved-view management stay in compact mobile
+disclosures, while desktop keeps full controls. Verified with `npm run build`
+and the mobile console-layout regression.
+
+Desktop is much improved. Mobile still shows scope, search, page selector, command, unlock, saved views, and view icons before page work.
+
+**Fix:** on mobile, saved views should move into a menu. Page navigation should be a drawer. The first screen should show page title, critical state, and the primary action.
+
+**Status:** FIXED 2026-06-27.
+
+The high-impact mobile shell fix is complete: page navigation moved from an always-visible full-width selector into a native mobile page disclosure, and saved-view management moved from an always-visible mobile row into a native mobile `Views` disclosure menu. Desktop still renders the full saved-view controls. Mobile keeps deterministic select-based navigation once the Page menu is opened and removes the saved-view select/name/save/delete/clear cluster from first-screen chrome.
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/console-layout.spec.ts --project=mobile-chrome -g "keeps console layout usable"'`
+- `bash -ic 'npx playwright test tests/release-ia-navigation.spec.ts --project=mobile-chrome -g "release IA reaches every configured page"'`
+- `bash -ic 'npx playwright test tests/console-layout.spec.ts --project=desktop-chrome -g "keeps console layout usable"'`
+
+## P1 — Chart time labels still need stronger year/timezone/full-time behavior
+
+**Strict pickup status 2026-06-28 round 7:** FIXED for full inspection
+timestamps and freshness. Chart axes remain compact, while hover, coverage
+copy, and accessible data tables expose year/timezone details and
+current/stale freshness. Verified with `npm run build` and the Fleet/Network
+metric regressions.
+
+Sparse-data disclosure is much better, but chart labels still often show compact month/day/time without year/timezone.
+
+**Fix:** dense axis labels can stay compact, but hover/details should always show year and timezone. Old data should always get a stale badge.
+
+**Status:** FIXED 2026-06-27.
+
+`TimeSeriesChart` now preserves compact axis labels while exposing full timestamp details everywhere an operator inspects data:
+
+- Hover shows the compact label plus full year/timezone timestamp.
+- Visible coverage text uses full year/timezone timestamps for sample range.
+- Coverage text includes latest-sample current/stale freshness.
+- The screen-reader data table uses full timestamps instead of compact labels.
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/release-ia-navigation.spec.ts --project=desktop-chrome -g "observability fleet metrics owns"'`
+- `bash -ic 'npx playwright test tests/release-ia-navigation.spec.ts --project=desktop-chrome -g "observability network metrics"'`
+
+## P1 — Some final action buttons are not obvious after preview
+
+**Strict pickup status 2026-06-28:** FIXED for Config Rules.
+
+Config Rules previews now end with a visible final action:
+
+- `Apply N change(s)` opens the existing review prompt for changed previews.
+- `No changes detected` disables apply when the preview is a no-op.
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/console-layout.spec.ts --project=desktop-chrome -g "supports Config VPS Rules dry-run"'`
+
+## P2 — Minor code hygiene
+
+**Strict pickup status 2026-06-28:** SKIPPED.
+
+This is not a deserved product-design fix as written. Rechecked shell
+navigation and console navigation helpers for duplicate accessibility props;
+no duplicate pattern is present in the current code path. Generic hygiene
+without a verified UI/API path is not a 20+ VPS production risk. Future
+concrete accessibility regressions should be filed as specific issues.
+
+# Page-by-page issues and fixes
+
+## 01 — Home overview
+
+**Strict pickup status 2026-06-28:** FIXED for the shell/Home reachable-count
+contradiction.
+
+**Current state:** much better as an action-oriented overview. The selected
+state-consistency defect is fixed; remaining observations are around stale data
+and density.
+
+**Issues**
+
+- Recent/attention items are mostly around four weeks old, but the page still feels like a live operations dashboard.
+- Some per-VPS cards mix “no telemetry/current contact unknown” with old network or job values.
+- The page is still long on mobile.
+- Some subsystem cards are useful, but Home still tries to summarize too many domains.
+
+**Fix**
+
+Home should answer only:
+
+- What needs attention now?
+- What is currently running?
+- Which VPSs are reachable?
+- What recently failed?
+- What are the common actions?
+
+Use the same Contact unknown/stale logic as Fleet. Add a strong stale-data line when most data is old:
+
+> Most visible data is 4w old. Refresh agents or check gateway connectivity.
+
+Keep quick actions near the top.
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/console-layout.spec.ts --project=desktop-chrome -g "renders an operational cloud-console fleet workspace"'`
+
+------
+
+## 02 — Fleet Instances
+
+**Strict pickup status 2026-06-28:** FIXED for the page-header reachable-count
+contradiction.
+
+**Current state:** better row status, and the selected header/summary conflict
+is fixed. Remaining field-priority comments are product polish.
+
+**Issues**
+
+- “Console stream connected” can be mistaken for agent/VPS connectivity.
+- Important operational columns are still weaker than expected: IP, agent version, contact age, CPU, memory, disk, alert count.
+- Tags still take more visual space than some health facts.
+
+**Fix**
+
+Use:
+
+```
+3 VPS · 0 reachable · 2 contact unknown · 1 stale
+```
+
+Rename browser connection state to:
+
+> Console stream connected
+
+and keep it visually separate from agent status.
+
+Default table should prioritize:
+
+```
+VPS · Reachability · Last contact · IP · Agent · CPU · Memory · Disk · Alerts · Open
+```
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/console-layout.spec.ts --project=desktop-chrome -g "renders an operational cloud-console fleet workspace"'`
+
+------
+
+## 02b — Fleet instance config detail
+
+**Strict pickup status 2026-06-28 round 6:** FIXED for the compact config
+verdict and direct actions. The VPS detail Config tab now exposes desired
+source, render status, drift state, last apply, and last error in one posture
+strip, keeps raw source status in details, omits global fleet status, and
+provides Open config / Compare / Apply actions. Verified with `npm run build`
+and the fleet instance config detail release regression.
+
+**Current state:** much improved; statuses are more human-readable.
+
+**Issues**
+
+- The page still inherits fleet/contact inconsistency.
+- Config source, readiness, selected source, storage state, and drift are still too spread out.
+- A VPS detail page still shows some global fleet context that is not needed.
+- Raw backend source concepts are improved but still need a one-line verdict.
+
+**Fix**
+
+At the top of the Config detail tab, show one compact verdict:
+
+> Source selected · server storage missing · no rendered config · last apply unknown
+
+Then expose details below.
+
+Keep actions direct:
+
+- Open config
+- Compare
+- Apply
+- Fix source
+
+------
+
+## 03 — Fleet Monitor
+
+**Strict pickup status 2026-06-28:** FIXED for global-job wording inside each
+VPS card.
+
+**Current state:** much better operational cards. The selected copy issue is
+fixed; stale sample treatment remains the main product concern.
+
+**Issues**
+
+- The card status says **Contact unknown**, but still shows network values from old samples.
+- Some cards show old evidence without a strong stale badge.
+- There is still too much equal-weight subsystem information per VPS.
+
+**Fix**
+
+Use this card hierarchy:
+
+1. VPS name and contact state.
+2. Last contact / stale reason.
+3. CPU/memory/disk only if fresh.
+4. Alerts.
+5. Two primary actions: Terminal and Files.
+6. More menu.
+
+Show old network data as:
+
+> Last network sample: 4w ago
+
+not as if it is current throughput.
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/release-ia-navigation.spec.ts --project=desktop-chrome -g "fleet monitor renders VPS card workflow actions"'`
+
+------
+
+## 04 — Fleet Groups
+
+**Strict pickup status 2026-06-28 round 2:** FIXED for shared display-state
+summary vocabulary. Group counts now render `reachable/review/offline` instead
+of raw online/stale wording, so the page no longer contradicts shell reachability
+state. Verified with `npm run build` and the Fleet Groups release-IA regression.
+
+**Current state:** simpler and better than before.
+
+**Issues**
+
+- Summary still uses raw online/stale/offline counts and conflicts with shell.
+- The page mixes “groups” and “tags” terminology.
+- Display order management still receives more prominence than its operational importance.
+- System-derived labels and operator-created groups are not strongly separated.
+
+**Fix**
+
+Choose visible terminology:
+
+- **Groups** if they are operator-managed collections.
+- **Labels** if they are key/value metadata.
+
+Separate:
+
+- system labels: provider, country, source;
+- operator groups: edge, bgp, database, etc.
+
+Move display ordering to a small manage action.
+
+------
+
+## 05 — Group Assignments
+
+**Strict pickup status 2026-06-28 round 2:** FIXED for raw status leakage in
+assignment rows. The table now labels the column as `Reachability`, renders the
+shared display-state label/detail, and keeps managed provider/country metadata
+visibly separate from operator-removable groups. Verified with `npm run build`
+and the Fleet Groups/Assignments regression.
+
+**Current state:** good direction; the “used by schedule” hint is helpful.
+
+**Issues**
+
+- Rows still show raw online states inconsistent with Contact unknown.
+- Removing a chip can be too implicit if the group affects automation.
+- System and user groups look too similar.
+- Add-group controls could use stronger autocomplete and validation.
+- Mobile cards are better, but still need clear primary action per VPS.
+
+**Fix**
+
+Use direct removal with Undo for ordinary groups:
+
+> Removed `edge` from `edge-sfo-01` — Undo
+
+For groups used by automation, show one small warning:
+
+> Used by 1 schedule
+
+No large dependency workflow is needed.
+
+------
+
+## 06 — Bulk Groups
+
+**Strict pickup status 2026-06-28 round 3:** FIXED for stale/contact-review
+target handling. Bulk group mutations now exclude targets needing review by
+default, expose an `Include targets needing review` switch, freeze that include
+decision into the preview snapshot, and disable final review with a clear reason
+when no ready targets remain. Verified with `npm run build` and the Fleet
+Groups/Assignments release regression.
+
+**Current state:** much better target preview model.
+
+**Issues**
+
+- The screen still makes it feel like privilege unlock may be required before the operator can fully validate the target result.
+- Target preview and final mutation are close, but not yet perfectly linear.
+- “Stale target” is shown, but the action path for excluding it is not obvious.
+- Empty/disabled states still take some space.
+
+**Fix**
+
+Order should be:
+
+```
+Choose group → choose add/remove → selector → live match count → apply
+```
+
+Show:
+
+> 3 matched · 2 ready · 1 stale excluded
+
+Add a simple checkbox:
+
+> Include stale targets
+
+default off.
+
+Unlock only for final Apply.
+
+------
+
+## 07 — Fleet Alerts
+
+**Strict pickup status 2026-06-28 round 3:** FIXED for active-triage
+separation. Fleet Alerts now verifies active alert rows, Open/Acknowledge
+actions, detail evidence, VPS-detail and policy links, and absence of policy,
+destination, or webhook authoring on the triage page. Verified with Fleet
+Alerts/Observability browser regressions.
+
+**Current state:** better active triage.
+
+**Issues**
+
+- Alert rows are still dense.
+- Target/action details can truncate.
+- Active Fleet Alerts overlaps with Observability Alerts configuration.
+- The distinction between alert state and operator state can still be clearer.
+- Mobile cards still need immediate Acknowledge/Open actions.
+
+**Fix**
+
+Fleet Alerts should be active triage only:
+
+```
+Severity · Summary · VPS · Age · State · Open · Acknowledge
+```
+
+Move policies, destinations, and delivery history to Observability.
+
+Use one alert detail drawer for evidence and policy link.
+
+------
+
+## 08 — Fleet Instance Detail
+
+**Strict pickup status 2026-06-28 round 3:** FIXED for direct workflow
+shortcuts and canonical routing. VPS detail now exposes Terminal, Files,
+Processes, Run command, Back up, and Config actions in the header while keeping
+reviewed workflows in their owning pages. Verified from fleet monitor,
+instances, alerts, graph, jobs, and backups entry paths.
+
+**Current state:** much improved resource page.
+
+**Issues**
+
+- Still inherits stale/contact contradictions.
+- Some old job/network/backup data appears current.
+- Global fleet-level context still leaks into a VPS-focused page.
+- Raw job names and backup states appear in some places.
+- Resource state and actual action shortcuts should be stronger.
+
+**Fix**
+
+Header should be:
+
+```
+VPS name · Contact unknown · Last contact never · Agent unknown · IP · Alerts
+```
+
+Then direct actions:
+
+Terminal, Files, Run command, Back up, Config.
+
+Old records should show age strongly:
+
+> Last job: 4w ago
+
+------
+
+## 09 — Remote Operations / Terminal
+
+**Strict pickup status 2026-06-28 round 3:** FIXED for default-vs-advanced
+terminal launch shape. Normal launch now stays target/profile/run-as plus Open,
+while columns, rows, and idle timeout sit under `Advanced terminal options`.
+Verified with `npm run build`, the terminal release regression, and the terminal
+console-layout dispatch regression.
+
+**Current state:** substantially improved. This is closer to a usable terminal page.
+
+**Issues**
+
+- Opening a normal terminal still exposes advanced PTY/session parameters too prominently.
+- Global Unlock and local unlock/request controls can feel duplicated.
+- Sequence/replay labels such as `Seq 1–3 retained, next 4` are implementation-heavy.
+- Session metadata is dense.
+- Page is still long on mobile.
+- If a session is selected, the terminal itself should dominate the page sooner.
+
+**Fix**
+
+Default terminal flow:
+
+```
+Select VPS → Open terminal
+```
+
+Advanced fields hidden by default:
+
+- rows/columns;
+- idle timeout;
+- replay options;
+- retained sequence details.
+
+New sessions should default to live follow.
+
+Use named actions:
+
+- Follow
+- Reconnect
+- Close
+- Download transcript
+
+Mobile should open the terminal in full-screen mode.
+
+------
+
+## 10 — Remote Operations / Files
+
+**Strict pickup status 2026-06-28 round 3:** FIXED for selected browse/editor
+workflow issues. Verified empty state before browse, no editor shell before file
+selection, explicit folder archive download wording, directory metadata, save,
+upload, create, and mobile focused-editor behavior with the File Browser
+regressions.
+
+**Current state:** better than before; empty state is clearer.
+
+**Issues**
+
+- A large file-manager area still appears before files are loaded.
+- Disabled action buttons take space before the operator can act.
+- Browsing, editing, download, upload, and symlink options still compete visually.
+- Directory download semantics need to be explicit.
+- File metadata is still not prominent enough.
+
+**Fix**
+
+Before browse:
+
+> Select VPS and unlock file access to browse.
+
+After browse, show:
+
+```
+Name · Type · Size · Owner · Mode · Modified · Action
+```
+
+For directories, label actions explicitly:
+
+> Download folder as archive
+
+Only show editor after selecting a file.
+
+Mobile should be list → full-screen editor, not a compressed split view.
+
+------
+
+## 11 — Remote Operations / Transfers
+
+**Strict pickup status 2026-06-28 round 3:** FIXED for main upload/download
+workflow prominence and retry handoff clarity. Verified the default local-file
+upload flow, ready-download bulk selection/review, and failed-transfer retry
+metadata handoff to Dispatch with the transfer handoff regressions.
+
+**Current state:** much better; direct upload/download is visible.
+
+**Issues**
+
+- Native file picker looks visually inconsistent.
+- Some implementation terms remain, such as reusable artifact / metadata review.
+- Active transfer state, artifact state, and failed session state are close together.
+- Some chips truncate.
+- Common upload should remain visually more important than reusable source artifacts.
+
+**Fix**
+
+Main flow:
+
+```
+Choose file → VPS → destination path → Upload
+```
+
+Advanced:
+
+- reusable source artifact;
+- artifact retention;
+- metadata review.
+
+Transfer rows should show:
+
+```
+Direction · VPS · Path · Size · Progress · Speed · State · Retry/Cancel
+```
+
+------
+
+## 12 — Remote Operations / Processes
+
+**Strict pickup status 2026-06-28 round 2:** FIXED for the selected data-quality
+and grammar issues. Invalid chronology renders as `Timestamp inconsistent`, and
+cgroup evidence uses correct process/PID count wording. Verified with
+`npm run build` and the Remote Operations regression.
+
+**Current state:** simple and appropriate.
+
+**Issues**
+
+- Some process timestamps are marked inconsistent. That is good, but should be treated as a data-quality warning.
+- CPU/memory are present, but logs/restart/stop need clearer actions.
+- Process source values can still feel internal.
+- Grammar such as “1 processes” needs cleanup.
+- The removed/hidden Process Metrics page should remain hidden until backed by real data.
+
+**Fix**
+
+Columns/cards:
+
+```
+Process · VPS · State · CPU · Memory · Uptime · Restarts · Last exit · Logs · Restart · Stop
+```
+
+Invalid chronology should show:
+
+> Timestamp inconsistent
+
+and not be used in uptime calculations.
+
+------
+
+## 13 — Remote Operations / Bulk Files
+
+**Strict pickup status 2026-06-28 round 6:** FIXED for path-derived readiness
+and pre-run summary shape. The path input, checklist, review-button title, and
+job payload use the same normalized readiness object; changing a planned
+operation clears old execution summaries; the live match line shows matched,
+ready, stale-excluded-from-ready, and unavailable-blocked counts. Verified with
+`npm run build`, the grouped bulk file workflow regression, and the 24-target
+bulk audit regression.
+
+**Current state:** good direct workflow, but one visible state bug remains.
+
+**Issues**
+
+- Path field shows `/etc/app.conf`, but Live match summary says **Needs path**.
+- This makes the operator doubt whether the form state is real.
+- Preview and final execution are still a little redundant.
+- Stale targets are listed, but exclusion behavior should be clearer.
+- Execution summary appears before execution.
+
+**Fix**
+
+Fix the path-derived state first.
+
+Then use:
+
+```
+Targets → path/files → match summary → Run
+```
+
+Show:
+
+> 3 matched · 2 ready · 1 stale excluded
+
+Only show execution summary after the operation starts or completes.
+
+------
+
+## 14 — Jobs History
+
+**Strict pickup status 2026-06-28 round 3:** FIXED for historical-evidence
+treatment and default columns. Jobs History now shows a freshness banner when
+loaded jobs are historical, keeps raw IDs/hashes in detail, and keeps the
+default grid centered on operation, target, result, duration, actor, age, and
+open action. Verified with `npm run build` and the Jobs History release
+regression.
+
+**Current state:** much better human operation names.
+
+**Issues**
+
+- Rows are mostly old, but the page does not strongly say this is historical.
+- Some raw IDs/hashes still dominate detail areas.
+- Target names and failure reasons should be more immediately visible.
+- “Privileged” chip is useful but should not crowd the result.
+- Row open action should be more obvious.
+
+**Fix**
+
+Default columns:
+
+```
+Operation · Target · Result · Duration · Started by · Age · Open
+```
+
+Put payload hash, job ID, raw command, and audit IDs in detail.
+
+Add a filter or banner:
+
+> Showing historical jobs from 4w ago
+
+when relevant.
+
+------
+
+## 15 — Jobs Dispatch
+
+**Strict pickup status 2026-06-28 round 3:** FIXED for selected dispatch shape
+and terminal ownership. Dispatch keeps terminal creation routed to Remote
+Operations, starts on command dispatch, and keeps execution options behind an
+advanced disclosure with templates as secondary management. Verified with the
+Jobs Dispatch release regression.
+
+**Current state:** much closer to the desired product style.
+
+**Issues**
+
+- Operation type selection is still a bit heavy.
+- Template management competes with dispatch.
+- If a target needs review/stale handling, the path to exclude it is not obvious.
+- Advanced execution controls should remain collapsed for single-VPS operations.
+- The dispatch button and unlock relationship should be more direct.
+
+**Fix**
+
+For simple command dispatch:
+
+```
+Targets · command · Run
+```
+
+For multiple targets, show collapsed **Execution options**:
+
+- concurrency;
+- timeout;
+- stop after N failures;
+- optional canary.
+
+Template management should be a secondary menu.
+
+If target state blocks execution, show:
+
+> 1 stale target excluded
+> Include stale target
+
+------
+
+## 16 — Jobs Approvals
+
+**Strict pickup status 2026-06-28 round 3:** FIXED for the approval review
+contract. The queue opens a review prompt with operation/requester/reason
+context, approval note remains optional, and rejection is disabled until a
+reason is entered. Verified with the Jobs Approvals/Scheduled Runs release
+regression.
+
+**Current state:** fixed in the right direction.
+
+**Issues**
+
+- Review action is now appropriate, but the review card/dialog should ensure target and payload summary are visible without opening raw JSON.
+- Approval note should be optional.
+- Rejection reason should be required.
+- Expiry or age should be visible if the request can become stale.
+- On mobile, Review must remain a visible primary action.
+
+**Fix**
+
+Keep it simple:
+
+```
+Requester · operation · targets · age · risk · Review
+```
+
+Review dialog:
+
+- Approve with optional note.
+- Reject with required reason.
+- No multi-level approval.
+
+This page is now mostly aligned with the desired model.
+
+------
+
+## 17 — Jobs Scheduled Runs
+
+**Strict pickup status 2026-06-28:** FIXED for the selected retry/run-again
+ambiguity in the verified scheduled-runs flow.
+
+**Strict pickup status 2026-06-28 round 3:** FIXED for missing due-time leakage.
+Scheduled-run records no longer render a primary `Due` column that always says
+`Not reported`; unavailable due-time remains explained only in the expanded
+detail. Verified with `npm run build` and the Jobs Approvals/Scheduled Runs
+release regression.
+
+**Current state:** better, but backend gaps still leak.
+
+**Issues**
+
+- Due time often says **Not reported**.
+- If due time is unavailable from API, it should not be a primary column.
+- Schedule name should be more visible than schedule/job ID.
+- Runs need clearer relation to automation schedule.
+
+**Fix**
+
+Use:
+
+```
+Schedule · Operation · Targets · Started · Result · Duration · Open
+```
+
+If due time is missing, hide the Due column or show a small tooltip:
+
+> Due time unavailable from server
+
+Rename Retry on successful jobs to:
+
+> Run again
+
+------
+
+## 18 — Job Artifacts
+
+**Strict pickup status 2026-06-28 round 3:** FIXED for read-only inventory
+shape and workflow links. Job Artifacts now verifies artifact/type/source
+workflow/VPS-job/created/size/verification/action columns, type filtering,
+source-workflow links, and no cleanup controls. Verified with the Job Artifacts
+release regression.
+
+**Current state:** better artifact separation.
+
+**Issues**
+
+- Artifact names and hashes still dominate.
+- Verification/expiry status should be clearer.
+- Backup/transfer/update artifacts are in one list; this is okay, but type filters should be easy.
+- Restore/download actions should consider verification state.
+- Mobile remains long.
+
+**Fix**
+
+Default view:
+
+```
+Artifact · Type · Source · VPS/job · Created · Size · Verification · Action
+```
+
+Raw URL/hash in details with Copy.
+
+For unverified backup artifacts, Restore should be disabled or produce one clear warning.
+
+------
+
+## 19 — Automation Schedules
+
+**Strict pickup status 2026-06-28 round 2:** FIXED for selected local-preview
+and overdue-severity issues. Create/audit previews now state that server
+resolution runs before save, and stale schedule timing shows an explicit overdue
+age. Verified with `npm run build`, the schedule console workflow, and the Jobs
+scheduled-runs release regression.
+
+**Current state:** good and simple.
+
+**Issues**
+
+- A schedule that last ran four weeks ago but is hourly is only shown as **Overdue**; the severity should be stronger.
+- “3 matching VPSs in local preview” is useful, but should clearly say whether this is current server-resolved scope.
+- Create schedule controls are not as prominent as the main schedule list.
+- Human cadence is good; next run should show one next value, with the rest in details.
+- If schedules require approvals, that needs to be explicit per schedule.
+
+**Fix**
+
+Show:
+
+> Overdue by 4w
+
+or
+
+> Schedule worker not producing runs
+
+Use row fields:
+
+```
+Name · Operation · Targets · Cadence · Next/Overdue · Last result · State · Run now
+```
+
+Do not overbuild scheduling. Keep it direct.
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/release-ia-navigation.spec.ts --project=desktop-chrome -g "jobs approvals and scheduled runs"'`
+
+------
+
+## 20 — Automation Runbooks
+
+**Strict pickup status 2026-06-28:** FIXED for the selected empty last-run
+copy.
+
+**Current state:** one of the better pages.
+
+**Issues**
+
+- Edit/duplicate/delete are not obvious enough.
+- Parameter summary can become verbose.
+- Global job activity may make “no loaded run” feel contradictory.
+- Mobile should keep runbook cards compact.
+
+**Fix**
+
+Use:
+
+```
+Runbook · Operation · Parameters · Last result · Run
+```
+
+Overflow menu:
+
+- Edit
+- Duplicate
+- Delete
+
+If no run is loaded:
+
+> No run found for this runbook
+
+------
+
+## 21 — Automation Source Templates
+
+**Strict pickup status 2026-06-28 round 4:** FIXED for registry-first source
+management. Source Templates now keeps the template registry primary, exposes
+active source status as a secondary review surface, opens assignment/render
+controls only after selecting a template, and sends failing source fixes to the
+canonical Source Templates workflow. Verified with `npm run build` and the
+Automation Source Templates assignment regression.
+
+**Current state:** significantly improved.
+
+**Issues**
+
+- Registry, source status, assignment, and render/test workflows still make the page long.
+- “Needs review” should link directly to the exact failing source.
+- Built-in/shared/VPS-local source concepts are good but need consistent short labels.
+- Some readiness counts are still not immediately reconcilable.
+- Mobile should show registry first and selected-template detail second.
+
+**Fix**
+
+Primary page should be the registry.
+
+Selecting a template opens details:
+
+- assigned VPSs;
+- render status;
+- latest test;
+- clone/update/diff actions.
+
+Keep raw source states only in details.
+
+**Verification**
+
+- `bash -ic 'npm run build'` from `frontend/`
+- `bash -ic 'npx playwright test tests/console-layout.spec.ts --project=desktop-chrome -g "manages template assignments"'`
+
+------
+
+## 22 — Automation Agent Updates
+
+**Strict pickup status 2026-06-28:** FIXED for registry product meaning.
+
+**Current state:** more honest now, especially about registry advisory behavior.
+
+**Issues**
+
+- Current fleet version inventory is missing or weak.
+- “Check update on a canary selector” is suggested, but the selector path is not immediate enough.
+- Disabled update/rollback actions need very clear reasons.
+- Registry enforcement setting should link directly to Suite Config.
+
+**Fix**
+
+Choose one product meaning:
+
+- **Release registry is advisory metadata**, or
+- **Release registry is enforced security policy**.
+
+For a simple product, advisory is acceptable, but say:
+
+> Registry records help operators pick known artifacts. Enforcement is disabled.
+
+Primary flow:
+
+```
+Check version · choose targets · update · progress · rollback if available
+```
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/release-ia-navigation.spec.ts --project=desktop-chrome -g "automation owns agent update"'`
+
+------
+
+## 23 — Network Overview
+
+**Strict pickup status 2026-06-28 round 2:** FIXED for stale-evidence posture
+and workflow routing. The compact overview shows stale evidence and links
+directly to Graph, Tunnel plans, Tests, OSPF, and Evidence without duplicating
+their workflows. Verified with `npm run build` and the Network Overview release
+regression.
+
+**Current state:** good compact network entry point.
+
+**Issues**
+
+- Latest evidence is old and should be treated as stale when it informs actions.
+- Workflow cards should be clearly clickable.
+- OSPF and promotion terms still need small help text.
+- Create tunnel action is good; keep it visible.
+- Network overview should not duplicate all graph/evidence details.
+
+**Fix**
+
+Keep the page compact:
+
+- Network health
+- Latest stale/fresh evidence
+- Tunnel plans
+- Graph
+- Tests
+- OSPF
+
+Add stale badge:
+
+> Latest evidence 4w ago
+
+------
+
+## 24 — Network Graph
+
+**Strict pickup status 2026-06-28 round 4:** FIXED for graph reachability
+truthfulness and workflow separation. The graph node inspector now uses the
+shared fleet display state (`Contact unknown` with detail) instead of raw
+topology node status, while topology freshness remains separate and graph view
+does not expose mutation panels. Verified with `npm run build` and the Network
+Graph release regression.
+
+**Current state:** visually much better.
+
+**Issues**
+
+- Graph/table show nodes as **online** while fleet state says Contact unknown.
+- OSPF cost value conflicts with OSPF page.
+- Evidence is stale; the page has a stale badge, which is good, but apply/review paths should respect it.
+- Bottom table truncates values.
+- Some graph controls are icon-heavy.
+
+**Fix**
+
+Use distinct labels:
+
+- **Identity active** for key/identity records.
+- **Contact unknown** for agent reachability.
+- **Topology observed 4w ago** for graph evidence.
+
+Resolve OSPF value source.
+
+Add tooltips to graph controls and keep raw edge metadata in a side panel.
+
+Mobile should default to list mode with optional full-screen graph.
+
+------
+
+## 25 — Network Tunnel Plans
+
+**Strict pickup status 2026-06-28 round 2:** FIXED for selected stale-evidence
+row health. Tunnel plan rows now include `Evidence age`, render stale telemetry
+as `Stale evidence`, and keep explicit Mbps target/cost wording. Verified with
+`npm run build`, the topology authoring workflow, and the tunnel-plans release
+regression.
+
+**Current state:** improved.
+
+**Issues**
+
+- Desired state and runtime state are still not separated strongly enough.
+- Cost values and health depend on stale evidence.
+- Some row actions are not immediately obvious.
+- “Manual speed tests only” / monitoring mode language can be confusing.
+- Units should always be explicit.
+
+**Fix**
+
+Rows:
+
+```
+Plan · Endpoints · Desired state · Runtime state · Evidence age · Cost · Health · Open
+```
+
+Use `100 Mbps`, not `100m`.
+
+If evidence is stale, health should say:
+
+> Stale evidence
+
+not simply healthy/degraded.
+
+------
+
+## 25b — Create Tunnel Plan
+
+**Strict pickup status 2026-06-28 round 4:** FIXED for focused create flow.
+The existing tunnel-plan registry is hidden while Create is active, the
+workflow has an explicit close button, the form keeps the three-step wizard and
+live OSPF preview beside operator-tweakable bandwidth/latency/loss/priority
+values, and `Save plan` is sticky. Verified with `npm run build` and the
+topology tunnel authoring regression.
+
+**Current state:** much better than previous; no major mobile break now.
+
+**Issues**
+
+- Still long for a common network operation.
+- Status cards take space before the form.
+- Save button is far below on desktop/mobile.
+- Some fields need inline validation rather than separate readiness cards.
+- Existing plan table should not distract during create mode.
+- Mobile needs sticky Create.
+
+**Fix**
+
+Use three compact sections:
+
+1. endpoints and type;
+2. addresses/routing;
+3. review and save.
+
+Keep Create/Save sticky at bottom.
+
+Do not mark a section complete until its fields are valid.
+
+------
+
+## 25c — Tunnel Promotion
+
+**Strict pickup status 2026-06-28 round 4:** FIXED for focused promotion flow.
+Promotion is owned inside Tunnel Plans, has an explicit close button, hides the
+competing plan registry while active, shows observed-source to managed-plan
+language, and keeps the final custom-adapter save behind a reviewed prompt.
+Verified with `npm run build`, the tunnel promotion regression, and the Tunnel
+Plans release regression.
+
+**Current state:** improved but still lengthy.
+
+**Issues**
+
+- Existing plans table and promotion form compete.
+- Selecting observed telemetry should prefill more visibly.
+- Relationship between observed plan and saved plan is still a bit abstract.
+- Save action is far below the context.
+- Mobile should hide unrelated tables while promoting.
+
+**Fix**
+
+When promotion starts, show:
+
+```
+Observed tunnel → proposed managed plan
+```
+
+Hide the plans table unless the operator expands it.
+
+Show missing/conflicting fields only.
+
+Primary action:
+
+> Save managed plan
+
+Optional:
+
+> Enable after save
+
+------
+
+## 26 — Network Tests
+
+**Strict pickup status 2026-06-28 round 2:** FIXED for action separation and
+benchmark warning. Inspect, probe, and speed-test actions are visibly separate,
+and sparse throughput is presented as `10% of expected 100 Mbps` in a single
+evidence bucket. Verified with `npm run build` and the Network Tests release
+regression.
+
+**Current state:** clearer than before.
+
+**Issues**
+
+- Read-only inspect and active network tests should not feel equally privileged.
+- Sparse single-sample results are still charted heavily.
+- 10 Mbps against 100 Mbps baseline should be treated as a stronger warning.
+- Test target / disabled reasons need clearer inline messages.
+- Stale evidence should be visible beside each result.
+
+**Fix**
+
+Split interaction:
+
+- Inspect status: immediate read.
+- Probe: one action.
+- Speed test: one confirmation showing expected duration/data.
+
+For one sample, show a numeric result, not a trend chart.
+
+Show:
+
+> 10.1 Mbps · 10% of expected 100 Mbps · 4w old
+
+------
+
+## 27 — Network OSPF
+
+**Strict pickup status 2026-06-28 round 4:** FIXED for the P0 recommendation
+correctness issue. OSPF-facing rows use the canonical reviewed update-plan
+recommendation, so the same practical recommendation no longer appears as both
+`14->21` and `14->22`; the verified UI shows `14->22` only. Verified with
+`npm run build` and the topology network tests / OSPF update regression.
+
+**Current state:** fixed for canonical recommendation display.
+
+**Issues**
+
+- `14 → 21` and `14 → 22` appear for the same practical recommendation.
+- Stale evidence is around four weeks old.
+- Apply action should not look routine when the evidence is stale.
+- Rollback/apply relationship should be tied to an actual applied change.
+- The meaning of updater report, monitoring, and proposed cost is still compact.
+
+**Fix**
+
+Use one recommendation object:
+
+```
+Recommendation ID · current cost · proposed cost · evidence age · confidence · apply state
+```
+
+If evidence is stale:
+
+> Refresh evidence before applying
+
+or at least:
+
+> Applying stale recommendation
+
+Keep one confirmation; do not build a large approval process.
+
+------
+
+## 28 — Network Evidence
+
+**Strict pickup status 2026-06-28 round 6:** FIXED for speed-test evidence
+wording and stale evidence disclosure. Network / Evidence separates sample
+freshness/validity from throughput health, derives speed-test baseline health
+from the same OSPF evidence baseline, labels old degraded samples as
+`Stale sample · degraded throughput`, remains read-mostly, and links to action
+pages instead of embedding Apply controls. Verified with `npm run build` and
+the Network Evidence regression.
+
+**Current state:** much better evidence organization, but still too optimistic.
+
+**Issues**
+
+- Speed test evidence is labelled **Healthy** even when measured throughput is about 10% of expected.
+- If the row means “valid sample,” say that instead of Healthy.
+- Evidence is old, but repeated row ages are not as strong as a page-level stale banner.
+- Output/load states still need clearer labels.
+- Page is very long, especially mobile.
+
+**Fix**
+
+Separate:
+
+- sample validity;
+- link health;
+- recommendation confidence.
+
+Use:
+
+> Valid sample · degraded throughput
+
+or
+
+> Stale sample · not enough current evidence
+
+Add page-level banner:
+
+> Evidence set is 4w old.
+
+Mobile should be a chronological list.
+
+------
+
+## 29 — Backups Overview
+
+**Strict pickup status 2026-06-28:** FIXED for selected primary action labels.
+
+**Current state:** much improved and honest.
+
+**Issues**
+
+- No recent backups is correctly shown, but the page still has many explanatory sections.
+- Artifact recorded is still a weak state and should not imply backup availability.
+- Migration state appears even when migration is irrelevant.
+- Mobile still long.
+
+**Fix**
+
+Primary top:
+
+```
+0 recent · 3 need backup · 0 verified artifacts
+```
+
+Actions:
+
+- Back up now
+- Create policy
+- Restore
+
+Do not include counts in action labels unless they are clearly status badges.
+
+Migration can be a separate lower card.
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/release-ia-navigation.spec.ts --project=desktop-chrome -g "backups overview explains"'`
+
+------
+
+## 30 — Backup Requests
+
+**Strict pickup status 2026-06-28 round 2:** FIXED for artifact verification
+wording and page-role separation. Backup request rows distinguish recorded
+artifact metadata from content verification and do not embed policy/restore
+workflows. Verified with `npm run build` and the Backup Requests release
+regression.
+
+**Current state:** good.
+
+**Issues**
+
+- Old request from four weeks ago needs stronger stale/historical treatment.
+- Artifact state should distinguish metadata recorded from content verified.
+- Request ID/artifact ID can still dominate over VPS/path/result.
+- Open artifact is good, but restoration should depend on verification.
+- Posture summary should stay compact.
+
+**Fix**
+
+Row:
+
+```
+VPS · Paths · State · Artifact verification · Age · Size · Open
+```
+
+For metadata-only artifact:
+
+> Artifact metadata recorded; content not verified
+
+------
+
+## 31 — Backup Policies
+
+**Strict pickup status 2026-06-28:** FIXED for the panel-local empty-state
+action.
+
+**Current state:** clear empty state.
+
+**Issues**
+
+- If no scheduled backups exist, the warning should be stronger.
+- Approval-required scheduled backup language should only appear if intentionally configured.
+- Frequency/retention model should remain simple.
+
+**Fix**
+
+Empty state:
+
+> No scheduled backups protect this fleet.
+> Create policy or run a manual backup.
+
+Policy rows later should be:
+
+```
+Name · Targets · Frequency · Retention · Next run · Last result · State
+```
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/release-ia-navigation.spec.ts --project=desktop-chrome -g "backups policies keep"'`
+
+------
+
+## 32 — Backup Artifacts
+
+**Strict pickup status 2026-06-28:** FIXED for selected restore/download
+guards.
+
+**Current state:** better artifact inventory.
+
+**Issues**
+
+- Artifact age and verification should be more prominent than hash/path.
+- Retention/expiry is still not visible enough.
+- Download/restore should be direct but guarded by artifact state.
+- Mobile is long.
+
+**Fix**
+
+Default columns/cards:
+
+```
+Artifact · VPS · Created · Size · Verification · Expires · Restore · Download
+```
+
+If not verified:
+
+> Restore unavailable until artifact content is verified
+
+or one explicit warning if restore is technically allowed.
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/release-ia-navigation.spec.ts --project=desktop-chrome -g "backups artifacts keep"'`
+
+------
+
+## 33 — Backup Restore
+
+**Strict pickup status 2026-06-28 round 2:** FIXED for selected restore-source
+readiness and destination clarity. Restore starts from artifact readiness,
+destination, path behavior, and explicit draft/live/rollback review actions.
+Verified with `npm run build` and the Backup Restore release regression.
+
+**Current state:** appropriately simple.
+
+**Issues**
+
+- Restore candidate list can include weak/unverified artifacts.
+- Destination/overwrite behavior needs to be prominent before confirmation.
+- If restore is metadata-plan only, avoid language that makes it sound like actual restore has happened.
+- Empty or unavailable states should guide the operator directly.
+
+**Fix**
+
+Simple flow:
+
+```
+Artifact → destination → path behavior → restore
+```
+
+If artifact is unverified:
+
+> Cannot safely restore: content not verified
+
+or
+
+> Restore anyway
+
+with one warning, depending on product policy.
+
+------
+
+## 34 — Backup Migration
+
+**Strict pickup status 2026-06-28 round 4:** FIXED for source-to-replacement
+mapping shape. Migration now starts from `Source VPS/artifact -> replacement
+VPS`, keeps optional checklist/draft restore controls behind the mapping
+workflow, and uses direct `Create migration mapping` wording. Verified with
+`npm run build` and the Backup Migration release regression.
+
+**Current state:** simple and acceptable.
+
+**Issues**
+
+- Source/replacement relationship should be visually stronger.
+- Mapping creation depends on artifact/source readiness, but disabled reasons should be clearer.
+- “Migration mapping” language is better than old “links,” but still needs direct operator wording.
+- Checklist should not appear before source/destination are chosen.
+
+**Fix**
+
+Start with:
+
+```
+Source VPS or artifact → replacement VPS
+```
+
+Then show optional checklist.
+
+Primary action:
+
+> Create migration mapping
+
+Disabled reason directly beside button.
+
+------
+
+## 35 — Config Overview
+
+**Strict pickup status 2026-06-28 round 6:** FIXED for current-resource scoping
+and historical apply-state separation. Config Overview keeps visible fleet
+apply-state rows in the primary current-state section, moves unavailable VPS IDs
+to a separate historical apply-state block, scopes retry/health/drift counts to
+current resources, suppresses epoch-zero timestamps, and summarizes current
+resources, need-attention rows, and historical records distinctly. Verified with
+`npm run build` and the Config Overview regression.
+
+**Current state:** better lifecycle summary, but one major timestamp bug.
+
+**Issues**
+
+- Epoch timestamp **1/1/1970** is rendered.
+- Deleted/unavailable VPS rows appear in the main current-state list and may confuse normal operators.
+- Current/stale/failed/source-check counts are hard to reconcile when unavailable resources are included.
+- Old queued/apply records need stale/lost handling.
+- Some grammar remains awkward.
+
+**Fix**
+
+Never render epoch zero.
+
+Use:
+
+> No apply evidence
+
+Separate current resources from deleted/unavailable historical resources.
+
+Show:
+
+```
+Current VPSs: 1 current · 2 need attention`
+`Historical/unavailable: 1
+```
+
+------
+
+## 36 — Config Per VPS
+
+**Strict pickup status 2026-06-28 round 4:** FIXED for the guarded one-VPS
+override workflow. The page starts with `Select VPS -> Read current config`,
+keeps redacted read inspection separate from privileged write, hides the editor
+until a target/base is loaded, and opens final apply only after preview and
+privilege unlock. Verified with `npm run build` and the Per-VPS config release
+regression.
+
+**Current state:** good compact empty state.
+
+**Issues**
+
+- Read and write privilege distinction could be clearer.
+- Blank editor is now better, but loaded mode still needs strong changed-line diff.
+- Timeout/advanced apply options should remain collapsed.
+- Applying config should be one clear action after preview.
+- Mobile needs full-screen editor mode.
+
+**Fix**
+
+Flow:
+
+```
+Select VPS → load config → edit/patch → preview changed lines → apply
+```
+
+If redacted read is safe, do not require the same unlock as write. If it is sensitive, say:
+
+> Runtime config read requires privilege
+
+------
+
+## 36b — Config Per VPS loaded
+
+**Strict pickup status 2026-06-28 round 4:** FIXED for loaded-state apply
+clarity. Current base and desired patch are selectable views, the desired patch
+pane now shows a dominant `changed lines · 0 errors` summary beside Apply, and
+the final confirmation carries exact target, base hash, sections, payload, and
+timeout. Verified with `npm run build` and the Per-VPS config release
+regression.
+
+**Current state:** improved loaded view.
+
+**Issues**
+
+- Current config, patch, preview, result, and apply state make a dense page.
+- Changed lines are not visually dominant enough.
+- Apply/Save should remain close to preview.
+- Execution result can be misread as final config state.
+- Mobile editor experience is still long.
+
+**Fix**
+
+After preview, show:
+
+```
+3 changed lines · 0 errors · Apply
+```
+
+Current and desired config should be selectable views, not all equally heavy on small screens.
+
+------
+
+## 37 — Config Bulk Patch
+
+**Strict pickup status 2026-06-28 round 4:** FIXED for bulk patch flow
+separation. Bulk Patch now follows `patch/generator -> targets -> preview ->
+apply`, keeps generator management behind `Manage generators`, shows selector
+resolution before apply, keeps advanced timeout collapsed, and explains the
+disabled apply state beside the sticky action. Verified with `npm run build`
+and the Config Bulk Patch release regression.
+
+**Current state:** good structure.
+
+**Issues**
+
+- Generator management still competes with applying a patch.
+- Target preview should appear earlier and more directly.
+- Empty selector behavior needs explicit text.
+- Timeout/concurrency should be under Advanced.
+- If Apply is disabled, the reason should be beside the button.
+
+**Fix**
+
+Main flow:
+
+```
+Patch/generator · targets · preview · apply
+```
+
+Generator registry should be secondary:
+
+> Manage generators
+
+Show:
+
+> All 3 scoped VPSs
+
+or matched count directly below selector.
+
+------
+
+## 37b — Config Bulk Patch preview
+
+**Strict pickup status 2026-06-28 round 4:** FIXED for preview-to-apply
+handoff. The preview renders exact resolved targets and per-VPS patch summary,
+the final sticky Apply action is enabled only after preview plus privilege
+unlock, and the confirmation freezes selector, targets, source, sections, and
+payload. Verified with `npm run build` and the Config Bulk Patch release
+regression.
+
+**Current state:** good preview direction.
+
+**Issues**
+
+- Final Apply action is still not visually strong enough.
+- Text about freezing/re-resolving selector is accurate but verbose.
+- Stale targets should be automatically excluded unless opted in.
+- Preview summary should show exact number of effective changes.
+- Mobile needs sticky Apply.
+
+**Fix**
+
+Preview result should end with:
+
+> Apply patch to 2 ready VPSs
+> 1 stale VPS excluded
+
+Then a single Apply button.
+
+------
+
+## 38 — Config Template Coverage
+
+**Strict pickup status 2026-06-28 round 4:** FIXED for coverage/readiness
+separation. Template Coverage is read-only in Config, uses the explicit
+`Desired source / Stored / Assigned / Ready / Attention / Fix` grid, links
+needs-review rows back to Automation / Source Templates, and keeps authoring
+out of Config. Verified with `npm run build` and the Config Template Coverage
+release regression.
+
+**Current state:** much better naming and structure.
+
+**Issues**
+
+- Page is still long.
+- `2/3 VPSs` style badges need more specific labels.
+- Source coverage by domain is useful but dense.
+- Needs-review items should link directly to fix.
+- Mobile should show one domain card at a time.
+
+**Fix**
+
+Use:
+
+```
+Domain · assigned · ready · attention · fix
+```
+
+Example:
+
+> Backup source: 2 of 3 VPSs assigned · server storage missing · Fix
+
+Keep source authoring in Automation Source Templates.
+
+------
+
+## 39 — Config Rules
+
+**Strict pickup status 2026-06-28 round 5:** FIXED for preview-to-apply
+clarity. The VPS Rules preview keeps backend preview hash under details, hides
+no-op rows from the main preview grid, and the persistent final action bar now
+states effective changes and hidden no-ops beside `Apply N change(s)`. Verified
+with `npm run build` and the Config VPS Rules regression.
+
+**Current state:** no-op handling is fixed; this is a major improvement.
+
+**Issues**
+
+- Preview says one effective change and two no-op rows hidden, which is good.
+- But the final **Apply 1 change** action is not obvious in the screenshot.
+- Preview hash/details still take some attention.
+- The page is very long on mobile.
+- Typed common rule cards and raw rule editor coexist, which is fine, but visual hierarchy should favor common cards.
+
+**Fix**
+
+After preview, show a persistent action bar:
+
+> 1 effective change · 2 no-ops hidden · Apply 1 change
+
+If locked:
+
+> Unlock to apply
+
+Keep preview hash under Details.
+
+------
+
+## 40 — Observability Fleet Metrics
+
+**Strict pickup status 2026-06-28 round 5:** FIXED for sparse/stale telemetry
+wording and reachability language. Fleet Metrics shows selected range, data
+availability, last sample age, point-only sparse chart handling, full timestamp
+coverage, and group summaries now say `reported reachable` instead of raw
+`online`. Verified with `npm run build` and the Fleet Metrics release
+regression.
+
+**Current state:** much more honest sparse-data presentation.
+
+**Issues**
+
+- Old 24h/4w sample ranges still make the page feel current unless the stale warning is strong.
+- Some summary counts may still come from raw agent status and conflict with shell.
+- Chart hover/axis should expose full timestamp with timezone.
+- Sparse samples should sometimes be numeric cards rather than charts.
+- Mobile is still long.
+
+**Fix**
+
+For stale data, show:
+
+> Selected 24h · available data 18m · last sample 4w ago
+
+When there are too few points, show values and age instead of a line chart.
+
+Use shared display-state counts.
+
+------
+
+## 41 — Observability Network Metrics
+
+**Strict pickup status 2026-06-28 round 5:** FIXED for stale/baseline warning
+and operator terminology. Network Metrics keeps stale evidence prominent,
+renames internal overlay language to `review signals`, and throughput view now
+shows measured throughput, expected bandwidth, degraded state, and sample age
+from OSPF evidence. Verified with `npm run build` and the Network Metrics
+release regression.
+
+**Current state:** more transparent but still very long.
+
+**Issues**
+
+- Evidence is stale.
+- Speed test health is too positive relative to baseline.
+- Single/few samples are still visually heavy.
+- Internal overlay/count terminology remains.
+- Mobile page is one of the longest.
+
+**Fix**
+
+Use strong stale and baseline warnings.
+
+Show:
+
+> Throughput 10.1 Mbps · expected 100 Mbps · degraded · sample 4w old
+
+Use charts only where there are enough samples.
+
+Mobile should use tabs or one selected tunnel/metric at a time.
+
+------
+
+## 42 — Process Metrics
+
+**Strict pickup status 2026-06-28 round 5:** FIXED by keeping unfinished
+Process Metrics out of normal production navigation. `process_metrics`
+normalizes back to Fleet Metrics, the nav does not expose Process Metrics, and
+no roadmap/release-status panel leaks into Observability. Verified with
+`npm run build` and the Process Metrics navigation regression.
+
+This page appears to have been removed or hidden from the current screenshot set. That is the right direction if backend history is not implemented.
+
+**Fix**
+
+Keep it hidden until it has real operator data. Do not expose implementation-roadmap pages inside production navigation.
+
+------
+
+## 43 — Observability Alerts
+
+**Strict pickup status 2026-06-28 round 5:** FIXED for alert configuration /
+delivery separation and direct action labels. Observability Alerts remains
+configuration/delivery focused, Fleet Alerts owns active triage, failed-delivery
+summary opens delivery evidence, and queue actions use direct labels while
+review prompts preserve the safety contract. Verified with `npm run build`,
+the Alerts/Webhooks release regression, and the notification queue regression.
+
+**Current state:** cleaner.
+
+**Issues**
+
+- Active alerts, policies, destinations, queues, and delivery history still share a lot of space.
+- Similar action names can still confuse: preview, dispatch, delivery, retry.
+- Alert triage overlaps with Fleet Alerts.
+- Destination failures need easier detail access.
+- Mobile remains long but acceptable.
+
+**Fix**
+
+Keep this page focused on alert configuration and delivery:
+
+- policies;
+- destinations;
+- delivery history.
+
+Fleet Alerts should remain the active triage list.
+
+Use simpler action names:
+
+- Test
+- Retry
+- Open delivery
+- Preview match
+
+------
+
+## 43b — Alert Policy Editor
+
+**Strict pickup status 2026-06-28 round 5:** FIXED for focused create/edit
+flow. The editor hides surrounding page context while open, uses
+`Enable after creation`, exposes preview before saving, shows matched VPS count,
+and keeps create/update behind a reviewed confirmation. Verified with
+`npm run build` and the Alert Policy Editor release regression.
+
+**Current state:** much more focused.
+
+**Issues**
+
+- Enabled/evaluate wording can still be clarified.
+- Raw target/condition fields are acceptable, but matched target count should always be visible.
+- Preview/Create/Enable states should be more linear.
+- The editor still sits among page context, but much better than before.
+- Mobile is now reasonable.
+
+**Fix**
+
+Use:
+
+```
+Targets · condition · severity · destination · preview · create
+```
+
+Show:
+
+> Matches 3 VPSs
+
+Use **Enable after creation** instead of “Evaluate policy” where applicable.
+
+------
+
+## 43c — Webhooks
+
+**Strict pickup status 2026-06-28 round 5:** FIXED for event-webhook
+separation and direct failure evidence. Event Webhooks is separate from alert
+destinations, rule rows keep `Send test` primary, failed-delivery summary opens
+delivery evidence, Retry remains explicit, and maintenance is isolated from the
+default rules tab. Verified with `npm run build`, the Alerts/Webhooks release
+regression, and webhook queue regression.
+
+**Current state:** good separation of event webhooks from alert destinations.
+
+**Issues**
+
+- Some delivery terms remain implementation-heavy.
+- Retry/test actions are good, but Send test should be visually primary for a webhook.
+- Failed delivery count should link directly to failed records.
+- Cleanup should not be prominent here.
+- Mobile should separate Rules and Deliveries.
+
+**Fix**
+
+Rule card:
+
+```
+Name · URL host · events · enabled · last result · Send test · Edit
+```
+
+Delivery history below.
+
+Keep cleanup in Maintenance or More.
+
+------
+
+## 43d — Webhook Rule Editor
+
+**Strict pickup status 2026-06-28 round 5:** FIXED for focused direct editor.
+The focused editor hides the surrounding registry while open, shows signing
+secret, sample payload, `Test before saving`, `Test`, and `Create rule`, and
+keeps test results close to the editor without exposing unrelated queue panels.
+Verified with `npm run build` and the Webhook Rule Editor release regression.
+
+**Current state:** good direct editor.
+
+**Issues**
+
+- Body template area can dominate.
+- Sample payload/result should be closer to Test.
+- Test should be primary before Create.
+- Enable state should be explicit.
+- Mobile should keep Test/Create sticky.
+
+**Fix**
+
+Flow:
+
+```
+Name · match expression · URL · secret · body template · sample · Test · Create
+```
+
+Keep raw template editing, but provide one compact sample-render panel.
+
+------
+
+## 44 — Observability Dashboards
+
+**Strict pickup status 2026-06-28 round 7:** FIXED for read-only preset naming
+and handoff actions. The page uses Dashboard presets / Available presets, keeps
+Copy link and Export JSON as the only handoff actions, handles missing summary
+counts safely, and exposes no dashboard create/edit/delete controls. Verified
+with `npm run build` and the Observability Dashboards release regressions.
+
+**Current state:** fixed and honest about read-only presets.
+
+**Fixed 2026-06-27 — preset naming and handoff actions**
+
+Observability / Dashboards now uses `Dashboard presets` as the page concept,
+renames the registry to `Available presets`, and replaces old share/export
+wording with the explicit actions `Copy link` and `Export JSON`. The handoff
+section is labeled `Copy / Export`, uses a `Dashboard copy and export details`
+landmark, and keeps the page read-only with no create/edit/delete dashboard
+controls. Verified with `npm run build` and the desktop Observability
+Dashboards Playwright regression.
+
+**Issues**
+
+- Page still uses “Saved dashboards,” which suggests user-custom dashboards.
+- Sparse/stale data warning needs to be stronger.
+- Share/export wording is more complex than needed.
+- Mobile is still long.
+
+**Fix**
+
+Rename to:
+
+> Dashboard presets
+
+Do not build a custom dashboard editor unless users ask for it.
+
+Use shared status counts and stale data banners.
+
+Actions:
+
+- Copy link
+- Export JSON
+
+------
+
+## 45 — Audit Events
+
+**Strict pickup status 2026-06-28 round 5:** FIXED for read-only audit
+reliability. Audit Events exposes the intended columns, newest visible event is
+derived from timestamps rather than row order, exact timestamps include timezone
+detail, raw metadata stays in detail, and no mutation controls appear on the
+events page. Verified with `npm run build` and the Audit Events regressions.
+
+**Current state:** much improved.
+
+**Issues**
+
+- Default sort may still not be newest-first in the visible table.
+- Coverage explanation is a bit implementation-heavy.
+- Some actions/targets are still raw/truncated.
+- Timestamps need timezone detail.
+- Sensitive operations should always have linked job/session/resource.
+
+**Fix**
+
+Default columns:
+
+```
+Time · Operator · Action · Target · Result · Related job/session
+```
+
+Newest-first default sort.
+
+Raw metadata in detail drawer.
+
+Keep audit simple but reliable.
+
+------
+
+## 46 — Audit Job Evidence
+
+**Strict pickup status 2026-06-28 round 5:** FIXED for job/audit/output
+correlation. Job Evidence shows job, operation, target/result, audit gaps,
+explicit output states such as `Not loaded` and unavailable output reason, and
+selected evidence links audit context, targets, and outputs without exposing
+mutation actions. Verified with `npm run build` and the Audit Job Evidence
+release regression.
+
+**Current state:** better correlation view.
+
+**Issues**
+
+- “Output unavailable” needs reason: empty, expired, not retained, not loaded, failed.
+- Jobs without audit link should be warned clearly.
+- Hashes and IDs still dominate.
+- Evidence should link back to the job and resource.
+- Mobile is long.
+
+**Fix**
+
+Use explicit output states:
+
+- Empty output
+- Output not retained
+- Retention expired
+- Not loaded
+- Unavailable
+
+Show:
+
+```
+Job · operation · target · result · audit · output
+```
+
+------
+
+## 47 — Audit Sessions
+
+**Strict pickup status 2026-06-28 round 6:** FIXED for session-evidence
+truthfulness and read-only scope. Session Evidence now treats tiny retained
+transcripts as trace-only, flags stale terminal state separately from open
+count, validates bearer-session expiry, marks localhost/documentation/test
+signals as demo/test evidence, keeps raw replay paths in details, and exposes no
+revoke controls. Verified with `npm run build` and the Audit Sessions browser
+regression.
+
+**Current state:** much better than earlier, but still dense.
+
+**Issues**
+
+- Some session evidence is very small, such as tiny transcript byte counts, but the page can make it feel more complete than it is.
+- Localhost/test-looking values appear as production evidence.
+- Session state needs careful validation against expiry.
+- Raw replay paths/IDs should remain in details.
+- Mobile is long.
+
+**Fix**
+
+Use:
+
+```
+Operator · resource · state · started · last activity · expiry · transcript · audit
+```
+
+For tiny transcript:
+
+> Transcript retained: 30 B
+
+Do not imply complete replay if only minimal data exists.
+
+------
+
+## 48 — Audit Retention & Export
+
+**Strict pickup status 2026-06-28 round 6:** FIXED for shorter retention,
+export, cleanup, and diagnostics separation. Retention rows use human domain /
+days / metadata / export columns; export has selected domain and all-retained
+range; cleanup requires preview before delete; storage/API limitations are
+under Diagnostics. Verified with `npm run build` and the Audit Retention &
+Export regressions.
+
+**Current state:** simpler than before.
+
+**Issues**
+
+- Some backend limitations still appear as ordinary product text.
+- Domain labels are better but can be more human.
+- Cleanup/export flows should be shorter.
+- Preview/delete actions should stay clearly separated.
+- Storage unknown should not appear as a major posture metric.
+
+**Fix**
+
+Retention:
+
+```
+Domain · retention · metadata only · export
+```
+
+Export:
+
+```
+domain · time range · export
+```
+
+Cleanup:
+
+```
+domain · older than · preview · delete
+```
+
+Diagnostics can contain implementation gaps.
+
+------
+
+## 49 — Access Overview
+
+**Strict pickup status 2026-06-28 round 7:** FIXED for authority-scope
+separation and canonical routing. Access Overview separates console/browser,
+API bearer, privilege unlock, terminal, and gateway session scopes; expired
+bearer evidence no longer implies the visible console session is expired; and
+Gateway settings route to Suite Config. Verified with `npm run build`, the
+Access posture regression, and the Access Overview route regression.
+
+**Current state:** improved but still has source-of-truth confusion.
+
+**Status:** FIXED 2026-06-27.
+
+Access Overview now has a separate Session scopes panel for:
+
+- Console/browser session
+- API bearer session inventory
+- Privilege unlock
+- Terminal sessions
+- Gateway sessions
+
+The operator/account responsibility row no longer combines operator count with bearer expiry, and the UI says `current bearer record Expired` instead of implying the actively operated console session is expired. Terminal session scope links to Remote Operations / Terminal; bearer evidence links to Audit / Sessions; gateway and privilege scopes continue to open their canonical Access pages.
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/console-layout.spec.ts --project=desktop-chrome -g "shows access posture"'`
+- `bash -ic 'npx playwright test tests/release-ia-navigation.spec.ts --project=desktop-chrome -g "access overview routes"'`
+
+**Issues**
+
+- Access says active sessions are zero or current session expired while the user is visibly operating the console.
+- This likely mixes bearer sessions, browser session, privileged unlock, and audit session concepts.
+- Gateway install defaults link to Preferences, but the UI now says these are system-linked.
+- MFA language must consistently distinguish recommended vs enforced.
+- Access overview still repeats several concepts.
+
+**Fix**
+
+Separate session types:
+
+- Console/browser session
+- API bearer session
+- Privilege unlock
+- Terminal session
+- Gateway session
+
+Do not call one expired if the operator is actively logged in through another mechanism.
+
+Gateway settings should link to Suite Config/system settings, not personal Preferences.
+
+------
+
+## 50 — Access Operators
+
+**Strict pickup status 2026-06-28 round 7:** FIXED for expiry-validated
+operator/session evidence. Active sessions count only usable bearer sessions,
+expired rows remain evidence but are excluded from active revocation, role
+counts reconcile with visible operators, MFA warnings are not repeated, and
+compact IDs/dates expose full detail. Verified with `npm run build` and the
+Access Operators / Audit Sessions regressions.
+
+**Current state:** much clearer.
+
+**Status:** FIXED 2026-06-27.
+
+Access / Operators now uses the same expiry-validated bearer-session model as Access Overview:
+
+- Active sessions count only non-revoked, unexpired access and refresh bearer sessions.
+- Expired bearer sessions remain visible evidence but show `access expired` or `refresh expired`.
+- Expired bearer sessions are excluded from active-session revoke controls and active-session summaries.
+- Operator role counts describe visible operator records, matching the role matrix.
+- Row-level MFA copy no longer repeats backend enforcement-gap wording already shown in the page-level MFA policy tile.
+- Compact operator/session IDs keep table density while exposing full IDs through hover titles; dates keep full-time title detail.
+
+**Verification**
+
+- `bash -ic 'npm run build'`
+- `bash -ic 'npx playwright test tests/console-layout.spec.ts --project=desktop-chrome -g "surfaces operator users"'`
+- `bash -ic 'npx playwright test tests/release-ia-navigation.spec.ts --project=desktop-chrome -g "audit sessions correlates"'`
+
+**Issues**
+
+- MFA recommended/not enforced language is good, but still too many warning cards.
+- Role counts and visible roles should reconcile.
+- Active session count confusion persists.
+- Long TTLs should be shown with clear policy explanation.
+- Dates/truncated IDs need better detail access.
+
+**Fix**
+
+Rows:
+
+```
+User · status · role · MFA · active sessions · last login · actions
+```
+
+Use:
+
+- MFA off
+- MFA enabled
+- MFA recommended
+- MFA enforced
+
+Only show enforcement gaps once, not repeatedly.
+
+------
+
+## 51 — Access VPS Identities
+
+**Strict pickup status 2026-06-28 round 2:** FIXED for identity-vs-reachability
+separation and copyable fingerprint actions. VPS identities use identity
+lifecycle wording, expose current-key fingerprint copy actions, and keep operator
+accounts out of the identity page. Verified with `npm run build`, the identity
+registration workflow, and the Access release regression.
+
+**Current state:** much better registry.
+
+**Issues**
+
+- VPS identities show **online**, conflicting with Fleet Contact unknown.
+- Identity online likely means identity/key active, not agent connected.
+- Register VPS flow still depends on gateway defaults that are partly stored as preferences.
+- Fingerprints should be copy-friendly.
+- Revoke/rotate should be clear row actions.
+
+**Fix**
+
+Rename identity status:
+
+- Active identity
+- Registered
+- Revoked
+- Blocked
+
+Do not use **online** unless it means live connectivity.
+
+Register flow:
+
+```
+Generate/import key · show install command · confirm
+```
+
+Use system gateway defaults.
+
+------
+
+## 52 — Access Gateway Sessions
+
+**Strict pickup status 2026-06-28 round 2:** FIXED for the empty state and
+system-settings route. The page hides the session table when no sessions exist,
+explains endpoint/server-key setup, and sends Gateway settings to Suite Config
+instead of personal Preferences. Verified with `npm run build` and the Access
+posture/gateway readiness workflow.
+
+**Current state:** good empty state.
+
+**Issues**
+
+- Gateway settings action should go to system configuration, not personal preferences.
+- Empty session table should stay hidden until there are rows.
+- “No panel-side endpoint lookup” type explanation should remain diagnostic only.
+- Gateway identity and VPS identity concepts need clear separation.
+- If sessions are absent because data source is unavailable, say so.
+
+**Fix**
+
+Empty state:
+
+> No active gateway sessions. Configure gateway endpoint and server key.
+
+Action:
+
+> Open gateway settings
+
+linked to Suite Config/system settings.
+
+------
+
+## 53 — Privilege Vault
+
+**Strict pickup status 2026-06-28 round 6:** FIXED for unlock scope visibility,
+local vault separation, and short TOTP setup. The page shows Locked/Unlocked,
+current browser/tab scope, activity/expiry state, Unlock / Lock now, clear local
+vault state, and a password -> QR/secret -> code -> complete TOTP sequence
+without raw `super` labels. Verified with `npm run build`, the Access posture
+regression, and the privilege handoff regression.
+
+**Current state:** improved and more understandable.
+
+**Issues**
+
+- Local vault, unlock, and TOTP setup still share one long page.
+- MFA required/recommended wording must match Operators and Access Overview.
+- Unlock scope/duration is not visible enough before/after unlock.
+- Raw salt/secret concepts should stay hidden unless advanced.
+- Mobile needs separated flows.
+
+**Fix**
+
+Primary card:
+
+```
+Locked / Unlocked · scope · expires · Unlock · Lock now
+```
+
+Local vault card:
+
+```
+Saved locally / not saved · clear local vault
+```
+
+TOTP setup should be its own short flow:
+
+```
+password → QR/secret → code → complete
+```
+
+------
+
+## 54 — System Overview
+
+**Strict pickup status 2026-06-28 round 7:** FIXED for compact platform-health
+scope. Overview now keeps service health, attention, diagnostics, and one
+dispatch chart while System Capacity owns pool limits, thresholds, factors, and
+unavailable telemetry. Verified with `npm run build`, the System Overview
+release regression, and System pages console-layout regression.
+
+**Current state:** fixed; overview is compact and capacity detail stays in System Capacity.
+
+**Fixed 2026-06-27 — duplicate overview blocks removed**
+
+System / Overview now keeps the intended production scan: service health for
+database, control-plane queue, worker, and gateway; the attention queue;
+Diagnostics; and one selected dispatch chart. The duplicate KPI strip,
+subsystem detail disclosures, and Overview chart capacity-threshold chips were
+removed so pool limits, dispatch thresholds, factor grids, and unavailable
+telemetry remain under System / Capacity. Verified with `npm run build`, the
+System pages Playwright regression, and the System Capacity regression.
+
+**Issues**
+
+- Old/sparse chart data still appears in system overview.
+- Some capacity details duplicate System Capacity.
+- “Not reported / unavailable” backend gaps are still visible in ordinary cards.
+- Warning meanings must be consistent with the global shell.
+- Mobile is still long.
+
+**Fix**
+
+System Overview should be:
+
+- control-plane health;
+- database;
+- worker/queue;
+- gateway;
+- attention items;
+- one or two key charts.
+
+Move detailed capacity metrics to System Capacity.
+
+Hide non-actionable backend gaps under Diagnostics.
+
+------
+
+## 55 — System Capacity
+
+**Strict pickup status 2026-06-28 round 6:** FIXED for capacity warning model
+and subsystem scanning. Capacity uses subsystem tabs, current value, configured
+threshold, queue growth/age factors where available, worker availability,
+sample-age context, direct Suite Config field links, and a compact unavailable
+telemetry banner for storage/API gaps. Verified with `npm run build` and the
+System Capacity regressions.
+
+**Current state:** better structured.
+
+**Issues**
+
+- Capacity warnings may be based on stale data.
+- Queue warnings should consider age/growth, not just non-zero counts.
+- Storage/worker missing metrics appear too prominently.
+- Dense chart legends become long on mobile.
+- Config links should go directly to the relevant Suite Config field.
+
+**Fix**
+
+Capacity warning model:
+
+- current value;
+- threshold;
+- oldest item age;
+- growth;
+- worker health;
+- last sample age.
+
+Mobile should use subsystem tabs:
+
+- Database
+- Dispatch
+- Gateway
+- Storage
+
+------
+
+## 56 — Suite Config
+
+**Strict pickup status 2026-06-28 round 6:** FIXED for sticky review/save,
+field metadata density, reset actions, and shared-system scope. Suite Config now
+distinguishes inventory from changed-field impact, keeps a sticky review bar
+when dirty, collapses current/default/impact metadata unless changed, exposes
+field reset/default buttons with tooltips, keeps Advanced TOML as a mode, and
+requires privilege-gated review before audited save. Verified with `npm run
+build` and the Suite Config browser regressions.
+
+**Current state:** massively improved from the previous very long version, but still heavy.
+
+**Issues**
+
+- Still long on desktop and mobile.
+- Inventory counts for hot reload/restart can still be mistaken for draft-change impact.
+- Field metadata repeats too much.
+- Review/save actions should be sticky when changes exist.
+- Search is useful; field reset should be more obvious.
+- “Require registered agent updates: Disabled” should link to Agent Updates and explain effect.
+- Advanced TOML should stay collapsed.
+
+**Fix**
+
+Before edits:
+
+> Configuration inventory: 13 hot-reload fields · 16 restart-required fields
+
+After edits:
+
+> 3 changed · 2 hot reload · 1 restart required
+
+Use sticky bar:
+
+```
+3 unsaved changes · Review changes · Discard
+```
+
+Collapse current/default/impact metadata unless field is focused or changed.
+
+------
+
+## 57 — System Maintenance
+
+**Strict pickup status 2026-06-28 round 6:** FIXED for destructive cleanup
+preview gating. Maintenance now uses common artifact type / older-than / state /
+prefix controls, keeps expression filtering collapsed as advanced, blocks
+delete until preview evidence includes count, size, age, protection, and object
+evidence, and uses typed confirmation before queueing deletion. Verified with
+`npm run build` and the System Maintenance browser regression.
+
+**Current state:** improved.
+
+**Issues**
+
+- Cleanup still depends partly on expression-style filtering.
+- Preview must expose enough evidence before deletion.
+- If object age/retention cannot be listed, deletion should remain blocked or strongly limited.
+- Domain/type labels can still be more human.
+- Empty maintenance-job area should collapse.
+
+**Fix**
+
+Common cleanup flow:
+
+```
+Artifact type · older than · state · preview · delete
+```
+
+Preview must show:
+
+- count;
+- total size;
+- oldest/newest;
+- protected/excluded count;
+- sample object list or downloadable full list.
+
+No delete without meaningful preview.
+
+------
+
+## 58 — Preferences
+
+**Strict pickup status 2026-06-28 round 7:** FIXED for preference scope,
+sticky save, reset affordances, and system-linked routing. Personal preferences
+now cover display only; browser-local controls are separate; gateway install
+material and tunnel pools route to Suite Config/Access; system-linked keys are
+sanitized out of frontend preference saves; the sticky save bar and per-card
+reset controls are visible and tested. Verified with `npm run build`, the
+desktop Preferences save regression, and the System Preferences release
+regression.
+
+**Current state:** conceptually improved.
+
+**Issues**
+
+- The page correctly separates personal/browser/system-linked settings, but code still reads some system-linked values from operator preferences.
+- Page remains long on mobile.
+- Save is too far from edited fields.
+- Reset controls need labels/tooltips.
+- Build/version notes are more prominent than necessary.
+- Some chart/home choices need clearer “personal display only” wording.
+
+**Fix**
+
+Finish the data-model migration:
+
+Personal/browser-local:
+
+- language;
+- timezone;
+- density;
+- table display;
+- chart display preferences.
+
+System/fleet configuration:
+
+- gateway endpoints;
+- gateway server key;
+- tunnel allocation pools;
+- generated install defaults.
+
+Add sticky save bar and per-section reset.
+
+# Final implementation order
+
+## 1. Fix consistency defects
+
+These should come before polish:
+
+- raw online vs Contact unknown conflicts;
+- OSPF `21/22` proposal disagreement;
+- epoch-zero timestamp;
+- graph/identity online labels;
+- stale evidence treated as healthy/current;
+- dashboard/fleet count mismatches.
+
+## 2. Finish the “expert-direct” action model
+
+- Preview before unlock.
+- Final Apply/Run button visible after every preview.
+- One confirmation only when risk justifies it.
+- Hide advanced fields by default.
+- Keep single-VPS operations very short.
+
+## 3. Finish mobile task flow
+
+- Mobile shell smaller.
+- Saved views in menu.
+- Sticky primary actions on long forms.
+- Full-screen terminal/editor/graph.
+- One active section at a time for long network/config/system pages.
+
+## 4. Complete system-linked settings migration
+
+- Move gateway/tunnel operational defaults out of personal preferences.
+- Link Agent Updates to the exact Suite Config enforcement setting.
+- Link Gateway Settings to Suite Config, not Preferences.
+
+## 5. Polish scanning and wording
+
+- Human labels first, raw values in details.
+- Relative age everywhere.
+- Full timestamp with timezone on hover/details.
+- Fewer repeated cards.
+- Tooltips for icon-only actions.
+- Stronger stale/overdue/invalid states.
+
+The current version is heading in the right direction. It should not become more enterprise-heavy. The next release should focus on **making the current simpler model internally consistent, visibly fresh or stale, and easier to complete on mobile and long pages**.

@@ -203,10 +203,11 @@ Apply a reviewed cost delta:
 
 ```sh
 cargo run -p vpsctl -- tunnel-ospf-cost-update \
-  --plan-file ./plan.json \
-  --side left \
+  --plan-id 00000000-0000-0000-0000-000000000001 \
+  --recommendation-id ospf-1234abcd5678ef90 \
   --current-ospf-cost 14 \
   --recommended-ospf-cost 22 \
+  --mutation-intent apply \
   --confirmed
 ```
 

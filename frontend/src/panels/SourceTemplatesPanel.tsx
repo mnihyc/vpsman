@@ -18,6 +18,7 @@ import {
   useReviewGenerationGuard,
   waitForReviewRender,
 } from "../hooks/useReviewGenerationGuard";
+import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { sourceReadinessStatusBadgeClass } from "../jobStatusPresentation";
@@ -27,6 +28,11 @@ import {
   agentsMatchingExpression,
   parseSearchExpression,
 } from "../searchExpression";
+import {
+  buildPrivilegeAssertion,
+  canonicalDbPrivilegeIntent,
+  type PrivilegeMaterial,
+} from "../privilege";
 import type {
   AgentView,
   AssignSourceTemplateRequest,
@@ -82,12 +88,15 @@ type SourceTemplateAssignmentSnapshot = {
   targetClientIds: string[];
   targets: AgentView[];
   assignments: AssignSourceTemplateResponse["assignments"];
+  previewHash: string;
 };
 
 type SourceTemplateLifecycleUpdateSnapshot = {
   assignedClientCount: number;
+  affectedClientIds: string[];
   description: string | null;
   definition: JsonValue;
+  previewHash: string;
   templateId: string;
   templateName: string;
 };
@@ -105,6 +114,8 @@ export function SourceTemplatePanel({
   onResolveBulk,
   onTestTemplate,
   onUpdateTemplate,
+  privilegeMaterial,
+  setPrivilegeMaterial,
   templates,
 }: {
   activeSubpage: "templates";
@@ -135,6 +146,8 @@ export function SourceTemplatePanel({
     templateId: string,
     request: UpdateSourceTemplateRequest,
   ) => Promise<UpdateSourceTemplateResponse>;
+  privilegeMaterial: PrivilegeMaterial | null;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
   templates: SourceTemplateRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -495,6 +508,10 @@ export function SourceTemplatePanel({
         setAssignmentSnapshot({
           assignments: preview.assignments,
           domain: frozenDomain,
+          previewHash: requirePreviewHash(
+            preview.preview_hash,
+            "Template assignment",
+          ),
           templateId: frozenTemplateId,
           templateName: preview.template.name,
           selectorExpression: frozenSelector,
@@ -518,15 +535,25 @@ export function SourceTemplatePanel({
           "Template assignment confirmation snapshot is missing; review the assignment again",
         );
       }
+      const privilegeAssertion = await buildSourceTemplatePrivilegeAssertion({
+        action: "source_template.assign",
+        previewHash: snapshot.previewHash,
+        selectorExpression: snapshot.selectorExpression,
+        targetClientIds: snapshot.targetClientIds,
+        templateId: snapshot.templateId,
+      });
       const response = await onAssignTemplate({
         confirmed: true,
         domain: snapshot.domain,
+        preview_hash: snapshot.previewHash,
+        privilege_assertion: privilegeAssertion,
         template_id: snapshot.templateId,
         selector_expression: snapshot.selectorExpression,
         target_client_ids: snapshot.targetClientIds,
       });
       setLastAssignment(response);
       setAssignmentSnapshot(null);
+      setPendingConfirmation(null);
     });
   }
 
@@ -603,33 +630,67 @@ export function SourceTemplatePanel({
     });
   }
 
-  function updateLifecycleTemplate() {
+  async function updateLifecycleTemplate() {
     if (!lifecycleTemplate || lifecycleTemplate.built_in) {
       return;
     }
-    setLifecycleUpdateSnapshot({
-      assignedClientCount: lifecycleTemplate.assigned_client_count,
-      description: lifecycleDescription.trim() || null,
-      definition: parseDefinition(lifecycleDefinitionText),
-      templateId: lifecycleTemplate.id,
-      templateName: lifecycleTemplate.name,
+    const template = lifecycleTemplate;
+    await runPanelAction(setPending, setActionError, async () => {
+      const description = lifecycleDescription.trim() || null;
+      const definition = parseDefinition(lifecycleDefinitionText);
+      const preview = await onUpdateTemplate(template.id, {
+        confirmed: false,
+        definition,
+        description,
+      });
+      setLastUpdate(preview);
+      setLastDiff(preview.diff);
+      setLastTest(null);
+      if (!preview.confirmation_required) {
+        setLifecycleUpdateSnapshot(null);
+        setPendingConfirmation(null);
+        return;
+      }
+      setLifecycleUpdateSnapshot({
+        affectedClientIds: preview.affected_client_ids,
+        assignedClientCount: preview.affected_client_count,
+        description,
+        definition,
+        previewHash: requirePreviewHash(
+          preview.preview_hash,
+          "Template update",
+        ),
+        templateId: template.id,
+        templateName: template.name,
+      });
+      setPendingConfirmation("lifecycle-update");
     });
-    setPendingConfirmation("lifecycle-update");
   }
 
   async function executeLifecycleTemplateUpdate(
     snapshot: SourceTemplateLifecycleUpdateSnapshot,
   ) {
     await runPanelAction(setPending, setActionError, async () => {
+      const privilegeAssertion = snapshot.affectedClientIds.length
+        ? await buildSourceTemplatePrivilegeAssertion({
+            action: "source_template.update",
+            previewHash: snapshot.previewHash,
+            targetClientIds: snapshot.affectedClientIds,
+            templateId: snapshot.templateId,
+          })
+        : null;
       const response = await onUpdateTemplate(snapshot.templateId, {
         confirmed: true,
         definition: snapshot.definition,
         description: snapshot.description,
+        preview_hash: snapshot.previewHash,
+        privilege_assertion: privilegeAssertion,
       });
       setLastUpdate(response);
       setLastDiff(response.diff);
       setLastTest(null);
       setLifecycleUpdateSnapshot(null);
+      setPendingConfirmation(null);
     });
   }
 
@@ -638,7 +699,6 @@ export function SourceTemplatePanel({
     if (!action) {
       return;
     }
-    setPendingConfirmation(null);
     if (action === "assignment") {
       if (!assignmentSnapshot) {
         setActionError(
@@ -707,7 +767,53 @@ export function SourceTemplatePanel({
             label: "Assigned",
             value: `${lifecycleUpdateSnapshot?.assignedClientCount ?? 0} VPSs`,
           },
-        ];
+      ];
+  const sourceTemplateConfirmationRequiresPrivilege =
+    pendingConfirmation === "assignment" ||
+    (pendingConfirmation === "lifecycle-update" &&
+      (lifecycleUpdateSnapshot?.affectedClientIds.length ?? 0) > 0);
+  const sourceTemplateConfirmationPreviewHash =
+    pendingConfirmation === "assignment"
+      ? assignmentSnapshot?.previewHash ?? null
+      : pendingConfirmation === "lifecycle-update"
+        ? lifecycleUpdateSnapshot?.previewHash ?? null
+        : null;
+
+  function requirePreviewHash(hash: string | null | undefined, action: string) {
+    if (!hash) {
+      throw new Error(`${action} preview expired; review again before applying`);
+    }
+    return hash;
+  }
+
+  async function buildSourceTemplatePrivilegeAssertion({
+    action,
+    previewHash,
+    selectorExpression,
+    targetClientIds,
+    templateId,
+  }: {
+    action: "source_template.assign" | "source_template.update";
+    previewHash: string;
+    selectorExpression?: string | null;
+    targetClientIds: string[];
+    templateId: string;
+  }) {
+    if (!privilegeMaterial) {
+      throw new Error("Privilege unlock is required before final apply");
+    }
+    return buildPrivilegeAssertion({
+      intent: canonicalDbPrivilegeIntent({
+        action,
+        confirmed: true,
+        payloadHash: previewHash,
+        resolvedTargets: targetClientIds,
+        selectorExpression,
+        target: sourceTemplatePrivilegeTarget(templateId),
+      }),
+      privilegeMaterial,
+    });
+  }
 
   function clearApplyConfirmation() {
     invalidateReviewGeneration();
@@ -798,6 +904,9 @@ export function SourceTemplatePanel({
               ? "Apply template assignment"
               : "Update template"
           }
+          confirmDisabled={
+            sourceTemplateConfirmationRequiresPrivilege && !privilegeMaterial
+          }
           detail={sourceTemplateConfirmationDetail}
           items={sourceTemplateConfirmationItems}
           onCancel={() => {
@@ -813,7 +922,17 @@ export function SourceTemplatePanel({
           pending={pending}
           title={sourceTemplateConfirmationTitle}
           tone="normal"
-        />
+        >
+          {sourceTemplateConfirmationRequiresPrivilege && !privilegeMaterial && (
+            <PrivilegeVaultBox
+              labelPrefix="Source templates"
+              lastPayloadHash={sourceTemplateConfirmationPreviewHash}
+              onPrivilegeMaterialChange={setPrivilegeMaterial}
+              privilegeMaterial={privilegeMaterial}
+              usePrivilegeLabel="Unlock source template apply"
+            />
+          )}
+        </ConfirmationPrompt>
       )}
 
       {showTemplateManagement && (
@@ -1350,7 +1469,7 @@ export function SourceTemplatePanel({
                         !lifecycleTemplate ||
                         lifecycleTemplate.built_in
                       }
-                      onClick={updateLifecycleTemplate}
+                      onClick={() => void updateLifecycleTemplate()}
                       type="button"
                     >
                       Review update
@@ -1407,6 +1526,10 @@ function defaultCloneName(name: string): string {
     return `shared:${name.slice("builtin:".length)}`;
   }
   return `${name}.copy`;
+}
+
+function sourceTemplatePrivilegeTarget(templateId: string) {
+  return `source_template:${templateId}`;
 }
 
 function parseDefinition(value: string): JsonValue {

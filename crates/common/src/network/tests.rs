@@ -293,9 +293,11 @@ fn ospf_cost_sanitizes_non_finite_inputs_before_clamping() {
 
 #[test]
 fn ospf_cost_orders_policy_bounds_before_clamping() {
-    let mut policy = OspfCostPolicy::default();
-    policy.min_cost = 100;
-    policy.max_cost = 20;
+    let policy = OspfCostPolicy {
+        min_cost: 100,
+        max_cost: 20,
+        ..OspfCostPolicy::default()
+    };
 
     assert_eq!(
         ospf_cost(

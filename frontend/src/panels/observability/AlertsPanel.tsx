@@ -117,7 +117,7 @@ export function AlertsPanel({
               <MetricTile actionLabel="Open triage" detail="Operational alert triage records live in Fleet / Alerts" label="Active fleet alerts" onAction={onOpenFleetAlerts} value={String(fleetAlerts.length)} />
               <MetricTile actionLabel="Policies" detail={`${urgentPolicyAlerts} warning or critical policy-issued alerts`} label="Policy alerts" onAction={() => setActiveTab("policies")} value={String(policyAlerts.length)} />
               <MetricTile actionLabel="Destinations" detail="Reviewed notification destinations, separate from event webhooks" label="Destinations" onAction={() => setActiveTab("destinations")} value={String(fleetAlertNotificationChannels.length)} />
-              <MetricTile actionLabel="Failed deliveries" detail={`${failedDeliveries} failed retained notification deliveries`} label="Delivery history" onAction={openDeliveryEvidence} value={String(fleetAlertNotifications.length)} />
+              <MetricTile actionLabel="Open failed deliveries" detail={`${failedDeliveries} failed retained notification deliveries`} label="Delivery history" onAction={openDeliveryEvidence} value={String(fleetAlertNotifications.length)} />
             </div>
 
             <div className="observabilityWorkflowTabs" role="tablist" aria-label="Alert configuration sections">

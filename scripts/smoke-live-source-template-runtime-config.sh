@@ -412,12 +412,16 @@ execution_preset_json="$(VPSMAN_API_TOKEN="$access_token" \
 execution_template_id="$(jq -r '.id' <<<"$execution_preset_json")"
 
 VPSMAN_API_TOKEN="$access_token" \
+VPSMAN_SUPER_PASSWORD="$super_password" \
+VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
   target/debug/vpsctl --api-url "$api_url" source-template-assign \
     --domain telemetry_metrics_source \
     --template-id "$template_id" \
     --clients "$client_id" \
     --confirmed >/dev/null
 VPSMAN_API_TOKEN="$access_token" \
+VPSMAN_SUPER_PASSWORD="$super_password" \
+VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
   target/debug/vpsctl --api-url "$api_url" source-template-assign \
     --domain command_execution_policy \
     --template-id "$execution_template_id" \

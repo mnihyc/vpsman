@@ -10,6 +10,7 @@ import {
   Gauge,
   History,
   Network,
+  Play,
   Server,
   TerminalSquare,
 } from "lucide-react";
@@ -249,6 +250,18 @@ export function VpsDetailPanel({
             <button className="secondaryAction compactAction" onClick={() => onOpenProcesses(agent)} type="button">
               <Activity size={14} />
               <span>Processes</span>
+            </button>
+            <button className="secondaryAction compactAction" onClick={onOpenJobs} type="button">
+              <Play size={14} />
+              <span>Run command</span>
+            </button>
+            <button className="secondaryAction compactAction" onClick={() => onOpenBackup(agent)} type="button">
+              <DatabaseBackup size={14} />
+              <span>Back up</span>
+            </button>
+            <button className="secondaryAction compactAction" onClick={() => onOpenConfig(agent)} type="button">
+              <FileCog size={14} />
+              <span>Config</span>
             </button>
           </div>
         </div>

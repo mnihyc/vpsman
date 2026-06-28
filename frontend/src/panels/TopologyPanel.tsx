@@ -65,7 +65,6 @@ import type {
   NetworkObservationTrendRecord,
   NetworkOspfRecommendationRecord,
   NetworkOspfUpdatePlanRecord,
-  OperatorPreferences,
   PromoteTelemetryTunnelRequest,
   RuntimeTunnelManager,
   RuntimeConfigApplyStateRecord,
@@ -75,6 +74,7 @@ import type {
   TunnelAddressFamily,
   TunnelAddressPair,
   TopologyGraph,
+  TopologyGraphEdge,
   TunnelKind,
   TunnelPlan,
   TunnelPlanRecord,
@@ -113,6 +113,7 @@ const runtimeManagers: RuntimeTunnelManager[] = [
 ];
 
 type AutomationRow = ReturnType<typeof buildAutomationRows>[number];
+type OspfProposalLookup = Map<string, NetworkOspfUpdatePlanRecord>;
 type TunnelPlanSaveSnapshot = {
   draftKey: string;
   request: CreateTunnelPlanRequest;
@@ -228,9 +229,9 @@ export function TopologyPanel({
   telemetryTunnels: TelemetryTunnelRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
-  const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [form, setForm] = useState<CreateTunnelPlanRequest>(() =>
-    initialTunnelPlanForm(preferences),
+    initialTunnelPlanForm(),
   );
   const [reservedText, setReservedText] = useState("");
   const [runtimeStartupArgv, setRuntimeStartupArgv] = useState("");
@@ -276,10 +277,24 @@ export function TopologyPanel({
   );
   const clientLabel = (clientId: string) =>
     clientDisplayNameFromMap(clientId, agentNameById);
+  const ospfProposalLookup = useMemo(
+    () => buildOspfProposalLookup(ospfUpdatePlans),
+    [ospfUpdatePlans],
+  );
+  const tunnelPlanEvidenceById = useMemo(
+    () => buildTunnelPlanEvidenceLookup(topologyGraph.edges),
+    [topologyGraph.edges],
+  );
   const automationRows = useMemo(
     () =>
-      buildAutomationRows(agents, telemetryTunnels, tunnelPlans, clientLabel),
-    [agents, telemetryTunnels, tunnelPlans, agentNameById],
+      buildAutomationRows(
+        agents,
+        telemetryTunnels,
+        tunnelPlans,
+        clientLabel,
+        ospfProposalLookup,
+      ),
+    [agents, telemetryTunnels, tunnelPlans, agentNameById, ospfProposalLookup],
   );
   const tunnelPlanColumns = useMemo<ConsoleDataGridColumn<TunnelPlanRecord>[]>(
     () => [
@@ -379,16 +394,46 @@ export function TopologyPanel({
         header: "Health",
         size: 180,
         minSize: 150,
-        sortValue: (plan) => tunnelPlanHealth(plan).label,
-        searchValue: (plan) => tunnelPlanHealth(plan).detail,
+        sortValue: (plan) =>
+          tunnelPlanHealth(plan, tunnelPlanEvidenceById.get(plan.id)).label,
+        searchValue: (plan) =>
+          tunnelPlanHealth(plan, tunnelPlanEvidenceById.get(plan.id)).detail,
         cell: (plan) => {
-          const health = tunnelPlanHealth(plan);
+          const health = tunnelPlanHealth(
+            plan,
+            tunnelPlanEvidenceById.get(plan.id),
+          );
           return (
             <span className="historyPrimary">
               <strong className={`status ${health.tone}`}>
                 {health.label}
               </strong>
               <small>{health.detail}</small>
+            </span>
+          );
+        },
+      },
+      {
+        id: "evidence_age",
+        header: "Evidence age",
+        size: 160,
+        minSize: 128,
+        sortValue: (plan) =>
+          tunnelPlanEvidenceById.get(plan.id)?.latest_observed_at ?? "",
+        searchValue: (plan) => {
+          const evidence = tunnelPlanEvidenceAge(
+            tunnelPlanEvidenceById.get(plan.id),
+          );
+          return `${evidence.label} ${evidence.detail}`;
+        },
+        cell: (plan) => {
+          const evidence = tunnelPlanEvidenceAge(
+            tunnelPlanEvidenceById.get(plan.id),
+          );
+          return (
+            <span className="historyPrimary">
+              <strong className={`status ${evidence.tone}`}>{evidence.label}</strong>
+              <small title={evidence.title}>{evidence.detail}</small>
             </span>
           );
         },
@@ -456,7 +501,7 @@ export function TopologyPanel({
         ),
       },
     ],
-    [agentNameById, tunnelPlanTogglePending],
+    [agentNameById, tunnelPlanEvidenceById, tunnelPlanTogglePending],
   );
   const tunnelPlanActions: ConsoleDataGridAction<TunnelPlanRecord>[] = [
     {
@@ -1056,6 +1101,7 @@ export function TopologyPanel({
 
       {topologySubpage === "graph" && (
         <TopologyGraphPanel
+          agents={agents}
           graph={topologyGraph}
           loading={loading}
           onOpenVpsDetail={onOpenVpsDetail}
@@ -1297,7 +1343,7 @@ export function TopologyPanel({
             </div>
             <details
               className="operationNote formSectionNote"
-              title="Uses Preferences pools unless overridden here. Reserved addresses are comma-separated; repeated allocation appends current endpoint IPs before requesting another suggestion."
+              title="Uses Suite Config pools unless overridden here. Reserved addresses are comma-separated; repeated allocation appends current endpoint IPs before requesting another suggestion."
             >
               <summary>Allocation overrides</summary>
               <div className="dispatchControls">
@@ -2309,9 +2355,7 @@ function autoUnderlayValue(
   return currentValue;
 }
 
-function initialTunnelPlanForm(
-  preferences: OperatorPreferences,
-): CreateTunnelPlanRequest {
+function initialTunnelPlanForm(): CreateTunnelPlanRequest {
   return {
     name: "",
     interface_name: "tun0",
@@ -2322,10 +2366,10 @@ function initialTunnelPlanForm(
     right_client_id: "",
     left_underlay: "",
     right_underlay: "",
-    address_pool_cidr: preferences.tunnel_ipv4_allocation_pool_cidr,
+    address_pool_cidr: "",
     reserved_addresses: [],
     ipv4_tunnel: null,
-    ipv6_address_pool_cidr: preferences.tunnel_ipv6_allocation_pool_cidr,
+    ipv6_address_pool_cidr: "",
     ipv6_tunnel: null,
     latency_primary_family: "ipv4",
     bandwidth_mbps: 100,
@@ -2477,14 +2521,14 @@ function AutomationGridDetail({ row }: { row: AutomationRow }) {
             tone={latencyTone(tunnel.latency_status)}
           />
           <TelemetryCell
-            detail={formatAutomationOspfShort(tunnel)}
+            detail={formatAutomationOspfShort(tunnel, row.ospfProposalLookup)}
             main={formatTunnelOspfSummary(tunnel)}
-            title={formatAutomationOspfDetail(tunnel)}
+            title={formatAutomationOspfDetail(tunnel, row.ospfProposalLookup)}
             tone={ospfTone(tunnel.auto_ospf_status)}
           />
           <TelemetryCell
             detail={`observed ${formatTime(tunnel.observed_at)}; ${tunnel.peer_client_id ?? "peer unknown"}`}
-            main={formatTunnelCostSummary(tunnel)}
+            main={formatTunnelCostSummary(tunnel, row.ospfProposalLookup)}
             title={`observed ${formatTime(tunnel.observed_at)}; peer ${tunnel.peer_client_id ?? "unknown"}`}
           />
         </div>
@@ -2498,6 +2542,7 @@ function buildAutomationRows(
   tunnels: TelemetryTunnelRecord[],
   tunnelPlans: TunnelPlanRecord[],
   clientLabel: (clientId: string) => string,
+  ospfProposalLookup: OspfProposalLookup,
 ) {
   return agents.map((agent) => {
     const endpointCount = tunnelPlans.filter(
@@ -2526,22 +2571,18 @@ function buildAutomationRows(
     const costs = owned
       .filter(
         (tunnel) =>
-          tunnel.auto_ospf_current_cost || tunnel.auto_ospf_recommended_cost,
+          ospfProposalForTunnel(tunnel, ospfProposalLookup) ||
+          tunnel.auto_ospf_current_cost ||
+          tunnel.auto_ospf_recommended_cost,
       )
-      .map((tunnel) =>
-        tunnel.auto_ospf_current_cost && tunnel.auto_ospf_recommended_cost
-          ? `${tunnel.auto_ospf_current_cost}->${tunnel.auto_ospf_recommended_cost}`
-          : String(
-              tunnel.auto_ospf_recommended_cost ??
-                tunnel.auto_ospf_current_cost,
-            ),
-      );
+      .map((tunnel) => formatTunnelCostPair(tunnel, ospfProposalLookup));
     const unreportedCount = Math.max(endpointCount - owned.length, 0);
     const latestObserved = latestIso(owned.map((tunnel) => tunnel.observed_at));
     return {
       clientId: agent.id,
       endpointCount,
       label: clientLabel(agent.id),
+      ospfProposalLookup,
       monitored:
         endpointCount === 0
           ? "No tunnel endpoints"
@@ -2569,13 +2610,17 @@ function buildAutomationRows(
       autoOspf: autoStates || "Monitoring only",
       autoOspfDetail:
         prioritized
-          .map(formatAutomationOspfShort)
+          .map((tunnel) =>
+            formatAutomationOspfShort(tunnel, ospfProposalLookup),
+          )
           .filter(Boolean)
           .slice(0, 2)
           .join(" · ") || "No updater report",
       autoOspfTitle:
         prioritized
-          .map(formatAutomationOspfDetail)
+          .map((tunnel) =>
+            formatAutomationOspfDetail(tunnel, ospfProposalLookup),
+          )
           .filter(Boolean)
           .slice(0, 4)
           .join(" | ") || "External updater not reporting",
@@ -2636,11 +2681,22 @@ function endpointRuntimeSummary(plan: TunnelPlanRecord): string {
   return `L ${readableTelemetryToken(plan.left_status)} / R ${readableTelemetryToken(plan.right_status)}`;
 }
 
-function tunnelPlanHealth(plan: TunnelPlanRecord): {
+function tunnelPlanHealth(
+  plan: TunnelPlanRecord,
+  evidence?: TopologyGraphEdge,
+): {
   detail: string;
   label: string;
   tone: "neutral" | "ok" | "warn";
 } {
+  const evidenceAge = tunnelPlanEvidenceAge(evidence);
+  if (evidenceAge.isStale) {
+    return {
+      detail: evidenceAge.detail,
+      label: "Stale evidence",
+      tone: "warn",
+    };
+  }
   if (plan.status.includes("partially")) {
     return {
       detail: endpointRuntimeSummary(plan),
@@ -2678,6 +2734,71 @@ function tunnelPlanHealth(plan: TunnelPlanRecord): {
     label: "Draft",
     tone: "neutral",
   };
+}
+
+function buildTunnelPlanEvidenceLookup(
+  edges: TopologyGraphEdge[],
+): Map<string, TopologyGraphEdge> {
+  const lookup = new Map<string, TopologyGraphEdge>();
+  for (const edge of edges) {
+    const current = lookup.get(edge.plan_id);
+    if (
+      !current ||
+      compareOptionalIso(edge.latest_observed_at, current.latest_observed_at) > 0
+    ) {
+      lookup.set(edge.plan_id, edge);
+    }
+  }
+  return lookup;
+}
+
+function tunnelPlanEvidenceAge(edge: TopologyGraphEdge | undefined): {
+  detail: string;
+  isStale: boolean;
+  label: string;
+  title: string;
+  tone: "neutral" | "ok" | "warn";
+} {
+  if (!edge?.latest_observed_at) {
+    return {
+      detail: "No topology observation is linked to this saved plan",
+      isStale: false,
+      label: "No evidence",
+      title: "No topology observation is linked to this saved plan",
+      tone: "neutral",
+    };
+  }
+  const isStale = tunnelEvidenceIsStale(edge.latest_observed_at);
+  return {
+    detail: `${isStale ? "Stale evidence" : "Latest evidence"}; ${countPhrase(edge.sample_count, "sample")}`,
+    isStale,
+    label: formatCompactTime(edge.latest_observed_at),
+    title: formatFullTime(edge.latest_observed_at),
+    tone: isStale ? "warn" : "ok",
+  };
+}
+
+function tunnelEvidenceIsStale(value: string): boolean {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return true;
+  }
+  return Date.now() - timestamp > 7 * 24 * 60 * 60 * 1000;
+}
+
+function compareOptionalIso(
+  left: string | null | undefined,
+  right: string | null | undefined,
+): number {
+  const leftTime = left ? Date.parse(left) : Number.NEGATIVE_INFINITY;
+  const rightTime = right ? Date.parse(right) : Number.NEGATIVE_INFINITY;
+  const safeLeft = Number.isFinite(leftTime) ? leftTime : Number.NEGATIVE_INFINITY;
+  const safeRight = Number.isFinite(rightTime) ? rightTime : Number.NEGATIVE_INFINITY;
+  return safeLeft - safeRight;
+}
+
+function countPhrase(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 function formatAddressPair(pair: TunnelAddressPair | null | undefined): string {
@@ -2757,11 +2878,86 @@ function formatTunnelOspfSummary(tunnel: TelemetryTunnelRecord): string {
   return ospfStatusLabel(tunnel.auto_ospf_status, tunnel.auto_ospf_enabled);
 }
 
-function formatTunnelCostSummary(tunnel: TelemetryTunnelRecord): string {
+function buildOspfProposalLookup(
+  plans: NetworkOspfUpdatePlanRecord[],
+): OspfProposalLookup {
+  const lookup: OspfProposalLookup = new Map();
+  for (const plan of plans) {
+    for (const key of ospfProposalKeys(
+      plan.plan_id,
+      plan.plan_name,
+      plan.interface_name,
+    )) {
+      lookup.set(key, plan);
+    }
+  }
+  return lookup;
+}
+
+function ospfProposalForTunnel(
+  tunnel: TelemetryTunnelRecord,
+  lookup: OspfProposalLookup,
+): NetworkOspfUpdatePlanRecord | null {
+  for (const key of ospfProposalKeys(
+    tunnel.plan_id,
+    tunnel.plan_name,
+    tunnel.interface,
+  )) {
+    const proposal = lookup.get(key);
+    if (proposal) {
+      return proposal;
+    }
+  }
+  return null;
+}
+
+function ospfProposalKeys(
+  planId: string | null | undefined,
+  planName: string | null | undefined,
+  interfaceName: string | null | undefined,
+): string[] {
+  const normalizedInterface = interfaceName?.trim();
+  if (!normalizedInterface) {
+    return [];
+  }
+  const keys: string[] = [];
+  const normalizedPlanId = planId?.trim();
+  if (normalizedPlanId) {
+    keys.push(`id:${normalizedPlanId}:${normalizedInterface}`);
+  }
+  const normalizedPlanName = planName?.trim();
+  if (normalizedPlanName) {
+    keys.push(`name:${normalizedPlanName}:${normalizedInterface}`);
+  }
+  return keys;
+}
+
+function formatTunnelCostSummary(
+  tunnel: TelemetryTunnelRecord,
+  ospfProposalLookup: OspfProposalLookup,
+): string {
+  const proposal = ospfProposalForTunnel(tunnel, ospfProposalLookup);
+  if (proposal) {
+    return `reviewed ${proposal.current_ospf_cost} -> ${proposal.recommended_ospf_cost}`;
+  }
   if (tunnel.auto_ospf_current_cost || tunnel.auto_ospf_recommended_cost) {
     return `updater ${tunnel.auto_ospf_current_cost ?? "?"} -> ${tunnel.auto_ospf_recommended_cost ?? "?"}`;
   }
   return "no updater cost";
+}
+
+function formatTunnelCostPair(
+  tunnel: TelemetryTunnelRecord,
+  ospfProposalLookup: OspfProposalLookup,
+): string {
+  const proposal = ospfProposalForTunnel(tunnel, ospfProposalLookup);
+  if (proposal) {
+    return `${proposal.current_ospf_cost}->${proposal.recommended_ospf_cost}`;
+  }
+  if (tunnel.auto_ospf_current_cost && tunnel.auto_ospf_recommended_cost) {
+    return `${tunnel.auto_ospf_current_cost}->${tunnel.auto_ospf_recommended_cost}`;
+  }
+  return String(tunnel.auto_ospf_recommended_cost ?? tunnel.auto_ospf_current_cost);
 }
 
 function compareTunnelUrgency(
@@ -2871,13 +3067,18 @@ function formatAutomationLatencyDetail(tunnel: TelemetryTunnelRecord): string {
   return `${tunnel.interface}: ${status}; ${metric}; ${loss}; ${target}; ${windows || "windows n/a"}; checked ${checked}${reason ? `; ${reason}` : ""}`;
 }
 
-function formatAutomationOspfDetail(tunnel: TelemetryTunnelRecord): string {
+function formatAutomationOspfDetail(
+  tunnel: TelemetryTunnelRecord,
+  ospfProposalLookup: OspfProposalLookup,
+): string {
   const status = ospfStatusLabel(
     tunnel.auto_ospf_status,
     tunnel.auto_ospf_enabled,
   );
-  const costs =
-    tunnel.auto_ospf_current_cost || tunnel.auto_ospf_recommended_cost
+  const proposal = ospfProposalForTunnel(tunnel, ospfProposalLookup);
+  const costs = proposal
+    ? `reviewed recommendation ${shortId(proposal.recommendation_id)} ${proposal.current_ospf_cost} -> ${proposal.recommended_ospf_cost}`
+    : tunnel.auto_ospf_current_cost || tunnel.auto_ospf_recommended_cost
       ? `observed updater ${tunnel.auto_ospf_current_cost ?? "?"} -> ${tunnel.auto_ospf_recommended_cost ?? "?"}`
       : "no updater cost";
   const updated =
@@ -2900,10 +3101,13 @@ function formatAutomationLatencyShort(tunnel: TelemetryTunnelRecord): string {
   return parts.join("; ") || "No latency detail";
 }
 
-function formatAutomationOspfShort(tunnel: TelemetryTunnelRecord): string {
+function formatAutomationOspfShort(
+  tunnel: TelemetryTunnelRecord,
+  ospfProposalLookup: OspfProposalLookup,
+): string {
   const parts = [
     tunnel.interface,
-    formatTunnelCostSummary(tunnel),
+    formatTunnelCostSummary(tunnel, ospfProposalLookup),
     shortTelemetryReasonLabel(tunnel.auto_ospf_reason),
   ].filter((part) => part && part !== "cost n/a");
   return parts.join("; ") || "No updater detail";

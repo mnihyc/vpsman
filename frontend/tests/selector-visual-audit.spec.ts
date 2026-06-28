@@ -69,7 +69,7 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
     name: "Policy VPS selector expression",
   });
   await policyExpression.fill("tag:edge && status:online");
-  await expect(policyExpression).toContainText("tag:edge && status:online");
+  await expect(policyExpression).toHaveValue("tag:edge && status:online");
   await capture(page, outputDir, manifest, "fleet-policy-expression-filter");
   await activate(policyEditor.getByLabel("Close detail panel"));
   const policyGrid = page.getByLabel("Policy groups data grid");
@@ -105,7 +105,7 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "name:s", /edge-sfo-01.*Name.*agent-sfo-01/);
   await capture(page, outputDir, manifest, "dispatch-expression-name-search");
   await page.keyboard.press("Enter");
-  await expect(dispatchComposer.getByRole("searchbox", { name: "Bulk target selector expression" })).toContainText("name:edge-sfo-01");
+  await expect(dispatchComposer.getByRole("searchbox", { name: "Bulk target selector expression" })).toHaveValue("name:edge-sfo-01");
   await capture(page, outputDir, manifest, "dispatch-expression-name-selected");
   await dispatchComposer.getByRole("searchbox", { name: "Bulk target selector expression" }).fill("");
   await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "fo01", /edge-sfo-01.*ID.*agent-sfo-01/);

@@ -493,17 +493,54 @@ pub(crate) fn submit_vty_inventory_command(
             confirmed,
         } => {
             let keep_description = description.is_none() && !clear_description;
-            http_post_json(
-                api_url,
-                &format!("/api/v1/source-templates/{template_id}/update"),
-                token,
-                &serde_json::json!({
-                    "description": description,
-                    "definition": definition,
-                    "confirmed": confirmed,
-                    "keep_description": keep_description,
-                }),
-            )
+            let template_uuid =
+                uuid::Uuid::parse_str(&template_id).context("invalid template UUID")?;
+            let path = format!("/api/v1/source-templates/{template_id}/update");
+            let mut body = serde_json::json!({
+                "description": description,
+                "definition": definition,
+                "confirmed": confirmed,
+                "keep_description": keep_description,
+            });
+            if confirmed {
+                let mut preview_body = body.clone();
+                preview_body["confirmed"] = serde_json::Value::Bool(false);
+                let preview_raw = http_post_json(api_url, &path, token, &preview_body)?;
+                let preview = commands_inventory::parse_preview_response(&preview_raw)?;
+                if !preview
+                    .get("confirmation_required")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return Ok(preview_raw);
+                }
+                let preview_hash =
+                    commands_inventory::required_preview_hash(&preview, "source-template-update")?;
+                let affected_client_ids =
+                    commands_inventory::string_array_field(&preview, "affected_client_ids")?;
+                body["preview_hash"] = serde_json::Value::String(preview_hash.clone());
+                if !affected_client_ids.is_empty() {
+                    let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+                    let salt_hex = load_super_salt_hex(None)?;
+                    let target =
+                        commands_inventory::source_template_privilege_target(template_uuid);
+                    let privilege_assertion = build_privilege_for_db(
+                        DbPrivilegeRequest {
+                            action: "source_template.update",
+                            target: &target,
+                            selector_expression: None,
+                            resolved_targets: &affected_client_ids,
+                            confirmed: true,
+                            payload_hash: Some(&preview_hash),
+                        },
+                        &password,
+                        &salt_hex,
+                        300,
+                    )?;
+                    body["privilege_assertion"] = serde_json::to_value(privilege_assertion)?;
+                }
+            }
+            http_post_json(api_url, &path, token, &body)
         }
         VtyInventoryCommand::SourceStatus { client_id, domain } => http_get(
             api_url,
@@ -894,20 +931,49 @@ pub(crate) fn submit_vty_inventory_command(
             confirmed,
         } => {
             let selector_expression = selector_expression_from_targets(&clients, &tags);
+            let template_uuid =
+                uuid::Uuid::parse_str(&template_id).context("invalid template UUID")?;
             let target_client_ids =
                 resolve_schedule_target_ids(api_url, token, &selector_expression)?;
-            http_post_json(
-                api_url,
-                "/api/v1/source-template-assignments",
-                token,
-                &serde_json::json!({
-                    "domain": domain,
-                    "template_id": template_id,
-                    "selector_expression": selector_expression,
-                    "target_client_ids": target_client_ids,
-                    "confirmed": confirmed,
-                }),
-            )
+            let mut body = serde_json::json!({
+                "domain": domain.clone(),
+                "template_id": template_id.clone(),
+                "selector_expression": selector_expression.clone(),
+                "target_client_ids": target_client_ids.clone(),
+                "confirmed": confirmed,
+            });
+            if confirmed {
+                let mut preview_body = body.clone();
+                preview_body["confirmed"] = serde_json::Value::Bool(false);
+                let preview_raw = http_post_json(
+                    api_url,
+                    "/api/v1/source-template-assignments",
+                    token,
+                    &preview_body,
+                )?;
+                let preview = commands_inventory::parse_preview_response(&preview_raw)?;
+                let preview_hash =
+                    commands_inventory::required_preview_hash(&preview, "source-template-assign")?;
+                let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+                let salt_hex = load_super_salt_hex(None)?;
+                let target = commands_inventory::source_template_privilege_target(template_uuid);
+                let privilege_assertion = build_privilege_for_db(
+                    DbPrivilegeRequest {
+                        action: "source_template.assign",
+                        target: &target,
+                        selector_expression: Some(&selector_expression),
+                        resolved_targets: &target_client_ids,
+                        confirmed: true,
+                        payload_hash: Some(&preview_hash),
+                    },
+                    &password,
+                    &salt_hex,
+                    300,
+                )?;
+                body["preview_hash"] = serde_json::Value::String(preview_hash);
+                body["privilege_assertion"] = serde_json::to_value(privilege_assertion)?;
+            }
+            http_post_json(api_url, "/api/v1/source-template-assignments", token, &body)
         }
         VtyInventoryCommand::BulkResolve { tags } => http_post_json(
             api_url,

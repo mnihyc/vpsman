@@ -565,7 +565,7 @@ function processStateEvidence(row: ProcessSupervisorInventoryRecord): {
   if (timing.tone === "warn") {
     return {
       detail: `Backend state ${displayToken(row.status)}; ${timing.issueLabel ?? timing.detail}`,
-      label: "Timeline inconsistent",
+      label: "Timestamp inconsistent",
       tone: "warn",
     };
   }
@@ -643,7 +643,7 @@ function formatCgroupEvidence(row: ProcessSupervisorInventoryRecord): string | n
   if (row.cgroup_status === "available") {
     const parts = [];
     if (row.cgroup_process_count !== null) {
-      parts.push(`${row.cgroup_process_count} processes`);
+      parts.push(countPhrase(row.cgroup_process_count, "process", "processes"));
     }
     if (row.cgroup_cpu_weight !== null) {
       parts.push(`CPU weight ${row.cgroup_cpu_weight}`);

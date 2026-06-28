@@ -44,7 +44,7 @@
     flex-wrap: wrap;
   }
 
-  .savedViewControls {
+  .topbarActions > .savedViewControls {
     order: 2;
     grid-column: 1 / -1;
     width: min(100%, 386px);
@@ -513,18 +513,59 @@
     width: 100%;
   }
 
-  .savedViewControls {
-    grid-template-columns: minmax(0, 1fr) repeat(3, 36px);
-    min-width: 0;
+  .mobilePageMenu {
+    display: block;
+    flex: 1 1 100%;
     width: 100%;
   }
 
-  .savedViewControls input {
+  .mobilePageMenu summary {
+    min-height: 44px;
+    width: 100%;
+  }
+
+  .mobilePageMenu .mobilePageSelector {
+    margin-top: 8px;
+  }
+
+  .topbarActions > .savedViewControls {
     display: none;
   }
 
-  .savedViewControls .iconButton {
-    width: 36px;
+  .mobileSavedViewMenu {
+    display: block;
+    flex: 0 0 auto;
+    max-width: 100%;
+  }
+
+  .mobileSavedViewMenu summary {
+    min-height: 44px;
+  }
+
+  .mobileSavedViewMenu[open] {
+    width: 100%;
+  }
+
+  .mobileSavedViewMenu .savedViewControls {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) repeat(3, 44px);
+    gap: 6px;
+    min-width: 0;
+    width: 100%;
+    margin-top: 8px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--surface-subtle);
+    padding: 8px;
+  }
+
+  .mobileSavedViewMenu .savedViewControls select,
+  .mobileSavedViewMenu .savedViewControls input,
+  .mobileSavedViewMenu .savedViewControls .iconButton {
+    height: 44px;
+  }
+
+  .mobileSavedViewMenu .savedViewControls .iconButton {
+    width: 44px;
   }
 
   .workspace {

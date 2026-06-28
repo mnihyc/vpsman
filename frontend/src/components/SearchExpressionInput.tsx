@@ -1,15 +1,17 @@
 import { Search, X } from "lucide-react";
 import {
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type ClipboardEvent,
   type KeyboardEvent,
   type MutableRefObject,
   type MouseEvent,
   type Ref,
+  type SyntheticEvent,
+  type WheelEvent,
 } from "react";
 import type { AgentView } from "../types";
 import { usePanelDisplaySettings } from "../panelDisplay";
@@ -56,9 +58,9 @@ export function SearchExpressionInput({
   verificationMessage,
 }: SearchExpressionInputProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const editorRef = useRef<HTMLDivElement | null>(null);
-  const wheelHandlerRef = useRef<((event: globalThis.WheelEvent) => void) | null>(null);
+  const editorRef = useRef<HTMLInputElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const previewRef = useRef<HTMLDivElement | null>(null);
   const [autocompleteOpen, setAutocompleteOpen] = useState(false);
   const [focused, setFocused] = useState(false);
   const [caretIndex, setCaretIndex] = useState(value.length);
@@ -71,21 +73,6 @@ export function SearchExpressionInput({
     [agents, caretIndex, suggestions, value, vpsNameDisplayMode],
   );
   const matchTitle = agents && !parsed.error ? agentListTitle(matchedAgents) : undefined;
-
-  useLayoutEffect(() => {
-    if (!focused || !editorRef.current) {
-      return;
-    }
-    if (cleanEditorText(editorRef.current.textContent ?? "") !== value) {
-      editorRef.current.textContent = value;
-    }
-    if (document.activeElement !== editorRef.current) {
-      editorRef.current.focus({ preventScroll: true });
-    }
-    const nextCaretIndex = Math.min(caretIndex, editorTextLength(editorRef.current));
-    setCaretOffset(editorRef.current, nextCaretIndex);
-    scrollCaretIndexIntoView(editorRef.current, nextCaretIndex);
-  }, [caretIndex, focused, value]);
 
   useEffect(() => {
     if (!focused && !autocompleteOpen) {
@@ -103,39 +90,40 @@ export function SearchExpressionInput({
     return () => document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
   }, [autocompleteOpen, focused]);
 
-  function bindEditor(element: HTMLDivElement | null) {
-    if (editorRef.current && wheelHandlerRef.current) {
-      editorRef.current.removeEventListener("wheel", wheelHandlerRef.current, true);
-      wheelHandlerRef.current = null;
-    }
+  useEffect(() => {
+    setCaretIndex((current) => Math.min(current, value.length));
+  }, [value]);
+
+  function bindEditor(element: HTMLInputElement | null) {
     editorRef.current = element;
     assignRef(inputRef, element);
-    if (element) {
-      const wheelHandler = (event: globalThis.WheelEvent) => {
-        if (scrollEditorByWheelDelta(element, event.deltaX, event.deltaY)) {
-          event.preventDefault();
-        }
-      };
-      element.addEventListener("wheel", wheelHandler, { capture: true, passive: false });
-      wheelHandlerRef.current = wheelHandler;
-    }
   }
 
-  function prepareEditorForTyping() {
-    const editor = editorRef.current;
-    if (editor && cleanEditorText(editor.textContent ?? "") !== value) {
-      editor.textContent = value;
-    }
+  function focusInputAt(nextCaretIndex: number) {
+    window.setTimeout(() => {
+      const editor = editorRef.current;
+      if (!editor) {
+        return;
+      }
+      const boundedCaret = Math.max(0, Math.min(nextCaretIndex, editor.value.length));
+      editor.focus({ preventScroll: true });
+      editor.setSelectionRange(boundedCaret, boundedCaret);
+      scrollCaretIndexIntoView(editor, boundedCaret);
+      setCaretIndex(boundedCaret);
+    }, 0);
   }
 
-  function commitEditorText() {
-    if (!editorRef.current) {
-      return;
-    }
-    const nextValue = cleanEditorText(editorRef.current.textContent ?? "");
-    const offset = Math.min(getCaretOffset(editorRef.current), nextValue.length);
-    setCaretIndex(nextValue !== value && nextValue.startsWith(value) ? nextValue.length : offset);
-    scrollCaretIndexIntoView(editorRef.current, offset);
+  function syncInputCaret(editor: HTMLInputElement) {
+    const nextCaretIndex = Math.min(editor.selectionStart ?? editor.value.length, editor.value.length);
+    setCaretIndex(nextCaretIndex);
+    scrollCaretIndexIntoView(editor, nextCaretIndex);
+  }
+
+  function commitInputValue(event: ChangeEvent<HTMLInputElement>) {
+    const editor = event.currentTarget;
+    const nextValue = cleanEditorText(editor.value);
+    const nextCaretIndex = Math.min(editor.selectionStart ?? nextValue.length, nextValue.length);
+    setCaretIndex(nextCaretIndex);
     setAutocompleteOpen(true);
     setFocused(true);
     if (nextValue !== value) {
@@ -143,14 +131,28 @@ export function SearchExpressionInput({
     }
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+      if (event.key === "Home") {
+        event.preventDefault();
+        focusInputAt(0);
+        return;
+      }
+      if (event.key === "End") {
+        event.preventDefault();
+        focusInputAt(event.currentTarget.value.length);
+        return;
+      }
+    }
     if (event.key === "Enter") {
       event.preventDefault();
       if (completion.filtered.length > 0 && completion.fragment.trim()) {
         applySuggestion(completion.filtered[0]);
       } else {
-        onChange(value.trim());
-        setCaretIndex(value.trim().length);
+        const nextValue = value.trim();
+        onChange(nextValue);
+        setCaretIndex(nextValue.length);
+        focusInputAt(nextValue.length);
       }
       return;
     }
@@ -161,27 +163,69 @@ export function SearchExpressionInput({
     }
   }
 
-  function handlePaste(event: ClipboardEvent<HTMLDivElement>) {
+  function handlePaste(event: ClipboardEvent<HTMLInputElement>) {
     event.preventDefault();
-    insertPlainText(cleanEditorText(event.clipboardData.getData("text/plain")));
-    commitEditorText();
+    const editor = event.currentTarget;
+    const start = editor.selectionStart ?? value.length;
+    const end = editor.selectionEnd ?? start;
+    const pastedText = cleanEditorText(event.clipboardData.getData("text/plain"));
+    const nextValue = cleanEditorText(`${value.slice(0, start)}${pastedText}${value.slice(end)}`);
+    const nextCaretIndex = Math.min(start + pastedText.length, nextValue.length);
+    setCaretIndex(nextCaretIndex);
+    setAutocompleteOpen(true);
+    setFocused(true);
+    if (nextValue !== value) {
+      onChange(nextValue);
+    }
+    focusInputAt(nextCaretIndex);
   }
 
-  function handlePointerUpdate(_: MouseEvent<HTMLDivElement>) {
-    window.setTimeout(() => {
-      if (editorRef.current) {
-        const nextCaretIndex = Math.min(getCaretOffset(editorRef.current), editorTextLength(editorRef.current));
-        setCaretIndex(nextCaretIndex);
-        scrollCaretIndexIntoView(editorRef.current, nextCaretIndex);
-      }
-    }, 0);
+  function handlePointerUpdate(event: MouseEvent<HTMLInputElement>) {
+    const editor = event.currentTarget;
+    window.setTimeout(() => syncInputCaret(editor), 0);
+  }
+
+  function handleSelectionUpdate(event: SyntheticEvent<HTMLInputElement>) {
+    syncInputCaret(event.currentTarget);
+  }
+
+  function handleWheel(event: WheelEvent<HTMLInputElement>) {
+    if (scrollExpressionViewsByWheelDelta(event.deltaX, event.deltaY)) {
+      event.preventDefault();
+    }
+  }
+
+  function handleContainerWheel(event: WheelEvent<HTMLDivElement>) {
+    if (event.defaultPrevented) {
+      return;
+    }
+    if (scrollExpressionViewsByWheelDelta(event.deltaX, event.deltaY)) {
+      event.preventDefault();
+    }
+  }
+
+  function scrollExpressionViewsByWheelDelta(deltaX: number, deltaY: number): boolean {
+    const editor = editorRef.current;
+    const preview = previewRef.current;
+    const editorScrolled = editor
+      ? scrollEditorByWheelDelta(editor, deltaX, deltaY)
+      : false;
+    const previewScrolled = preview
+      ? scrollEditorByWheelDelta(preview, deltaX, deltaY)
+      : false;
+    if (editor && preview) {
+      preview.scrollLeft = editor.scrollLeft;
+    }
+    return editorScrolled || previewScrolled;
   }
 
   function applySuggestion(suggestion: CompletionOption) {
     const nextValue = applyCompletion(value, completion, suggestion);
+    const nextCaretIndex = completion.start + suggestion.value.length;
     onChange(nextValue);
-    setCaretIndex(completion.start + suggestion.value.length + 1);
-    window.setTimeout(() => editorRef.current?.focus(), 0);
+    setCaretIndex(nextCaretIndex);
+    setAutocompleteOpen(false);
+    focusInputAt(nextCaretIndex);
   }
 
   return (
@@ -190,6 +234,7 @@ export function SearchExpressionInput({
         hasTokens ? "hasTokens" : "empty"
       }`.trim()}
       ref={containerRef}
+      onWheel={handleContainerWheel}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
           event.preventDefault();
@@ -199,11 +244,36 @@ export function SearchExpressionInput({
     >
       <Search size={16} />
       <div className="searchExpressionBody">
-        <div
+        {!focused && hasTokens && (
+          <div
+            className="searchExpressionPreview"
+            ref={previewRef}
+            onMouseDown={(event) => {
+              if ((event.target as Element).closest("button")) {
+                return;
+              }
+              event.preventDefault();
+              editorRef.current?.focus();
+            }}
+          >
+            {displayTokens.map((token, index) => (
+              <TokenFragment
+                agents={agents}
+                expression={value}
+                key={`${token.start}-${token.end}-${token.raw}`}
+                onChange={onChange}
+                token={token}
+                trailingSpace={index < displayTokens.length - 1}
+              />
+            ))}
+          </div>
+        )}
+        <input
           aria-label={ariaLabel}
+          autoCapitalize="none"
+          autoComplete="off"
+          autoCorrect="off"
           className="searchExpressionEditor"
-          contentEditable
-          data-placeholder={placeholder}
           id={inputId}
           onBlur={() =>
             window.setTimeout(() => {
@@ -213,45 +283,27 @@ export function SearchExpressionInput({
               }
             }, 120)
           }
+          onChange={commitInputValue}
           onClick={handlePointerUpdate}
-          onFocus={() => {
-            prepareEditorForTyping();
+          onFocus={(event) => {
             setAutocompleteOpen(true);
             setFocused(true);
-            if (editorRef.current) {
-              setCaretIndex(Math.min(getCaretOffset(editorRef.current), value.length));
-            }
+            syncInputCaret(event.currentTarget);
           }}
-          onInput={commitEditorText}
           onKeyDown={handleKeyDown}
-          onKeyUp={() => {
-            if (editorRef.current) {
-              const nextCaretIndex = Math.min(getCaretOffset(editorRef.current), editorTextLength(editorRef.current));
-              setCaretIndex(nextCaretIndex);
-              scrollCaretIndexIntoView(editorRef.current, nextCaretIndex);
-            }
-          }}
+          onKeyUp={handleSelectionUpdate}
           onMouseUp={handlePointerUpdate}
           onPaste={handlePaste}
+          onSelect={handleSelectionUpdate}
+          onWheel={handleWheel}
+          placeholder={placeholder}
           ref={bindEditor}
           role="searchbox"
           spellCheck={false}
-          suppressContentEditableWarning
           tabIndex={0}
-        >
-          {focused
-            ? null
-            : displayTokens.map((token, index) => (
-                <TokenFragment
-                  agents={agents}
-                  expression={value}
-                  key={`${token.start}-${token.end}-${token.raw}`}
-                  onChange={onChange}
-                  token={token}
-                  trailingSpace={index < displayTokens.length - 1}
-                />
-              ))}
-        </div>
+          type="text"
+          value={value}
+        />
       </div>
       {(focused || autocompleteOpen) && completion.filtered.length > 0 && completion.fragment.trim() && (
         <div className="searchExpressionAutocomplete" role="listbox">
@@ -441,7 +493,9 @@ function buildCompletion(
 }
 
 function applyCompletion(value: string, completion: CompletionState, suggestion: CompletionOption): string {
-  return cleanEditorText(`${value.slice(0, completion.start)}${suggestion.value} ${value.slice(completion.end)}`);
+  const suffix = value.slice(completion.end);
+  const separator = suffix && !/^\s/.test(suffix) ? " " : "";
+  return cleanEditorText(`${value.slice(0, completion.start)}${suggestion.value}${separator}${suffix}`);
 }
 
 function suggestionMatchesFragment(
@@ -675,66 +729,16 @@ function cleanEditorText(text: string): string {
   return text.replace(/\u00a0/g, " ").replace(/\s+/g, " ").trimStart();
 }
 
-function editorTextLength(editor: HTMLElement): number {
-  return cleanEditorText(editor.textContent ?? "").length;
-}
-
-function getCaretOffset(editor: HTMLElement): number {
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0) {
-    return editorTextLength(editor);
-  }
-  const range = selection.getRangeAt(0);
-  if (!editor.contains(range.endContainer)) {
-    return editorTextLength(editor);
-  }
-  const prefix = range.cloneRange();
-  prefix.selectNodeContents(editor);
-  prefix.setEnd(range.endContainer, range.endOffset);
-  return cleanEditorText(prefix.toString()).length;
-}
-
-function setCaretOffset(editor: HTMLElement, offset: number) {
-  const targetOffset = Math.max(0, offset);
-  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
-  let traversed = 0;
-  let node = walker.nextNode();
-  while (node) {
-    const text = node.textContent ?? "";
-    const nextTraversed = traversed + text.length;
-    if (targetOffset <= nextTraversed) {
-      const range = document.createRange();
-      range.setStart(node, Math.max(0, Math.min(text.length, targetOffset - traversed)));
-      range.collapse(true);
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-      return;
-    }
-    traversed = nextTraversed;
-    node = walker.nextNode();
-  }
-  const range = document.createRange();
-  range.selectNodeContents(editor);
-  range.collapse(false);
-  const selection = window.getSelection();
-  selection?.removeAllRanges();
-  selection?.addRange(range);
-}
-
-function scrollCaretIndexIntoView(editor: HTMLElement, caretIndex: number) {
+function scrollCaretIndexIntoView(editor: HTMLInputElement, caretIndex: number) {
   const maxScrollLeft = editor.scrollWidth - editor.clientWidth;
   if (maxScrollLeft <= 1) {
     editor.scrollLeft = 0;
     return;
   }
-  const caretX = caretInlineOffset(editor, caretIndex);
-  const leftGuard = editor.scrollLeft + 8;
-  const rightGuard = editor.scrollLeft + editor.clientWidth - 12;
-  if (caretX > rightGuard) {
-    editor.scrollLeft = Math.min(maxScrollLeft, caretX - editor.clientWidth + 18);
-  } else if (caretX < leftGuard) {
-    editor.scrollLeft = Math.max(0, caretX - 18);
+  if (caretIndex <= 1) {
+    editor.scrollLeft = 0;
+  } else if (caretIndex >= editor.value.length - 1) {
+    editor.scrollLeft = maxScrollLeft;
   }
 }
 
@@ -750,47 +754,6 @@ function scrollEditorByWheelDelta(editor: HTMLElement, deltaX: number, deltaY: n
   const previousScrollLeft = editor.scrollLeft;
   editor.scrollLeft = Math.max(0, Math.min(maxScrollLeft, previousScrollLeft + delta));
   return editor.scrollLeft !== previousScrollLeft;
-}
-
-function caretInlineOffset(editor: HTMLElement, caretIndex: number): number {
-  const text = cleanEditorText(editor.textContent ?? "");
-  if (!text) {
-    return 0;
-  }
-  const targetOffset = Math.max(0, Math.min(caretIndex, text.length));
-  const textNode = firstTextNode(editor);
-  if (!textNode) {
-    return Math.round((targetOffset / text.length) * editor.scrollWidth);
-  }
-  const range = document.createRange();
-  range.setStart(textNode, 0);
-  range.setEnd(textNode, Math.min(targetOffset, textNode.textContent?.length ?? 0));
-  const rect = range.getBoundingClientRect();
-  const editorRect = editor.getBoundingClientRect();
-  range.detach();
-  if (rect.width > 0 || targetOffset > 0) {
-    return Math.round(rect.right - editorRect.left + editor.scrollLeft);
-  }
-  return Math.round((targetOffset / text.length) * editor.scrollWidth);
-}
-
-function firstTextNode(root: HTMLElement): Text | null {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  const node = walker.nextNode();
-  return node instanceof Text ? node : null;
-}
-
-function insertPlainText(text: string) {
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0) {
-    return;
-  }
-  const range = selection.getRangeAt(0);
-  range.deleteContents();
-  range.insertNode(document.createTextNode(text));
-  range.collapse(false);
-  selection.removeAllRanges();
-  selection.addRange(range);
 }
 
 function assignRef<T>(ref: Ref<T> | undefined, value: T | null) {

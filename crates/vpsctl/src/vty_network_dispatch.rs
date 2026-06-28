@@ -119,7 +119,7 @@ pub(crate) fn submit_vty_network_dispatch_command(
                 Err(error) => {
                     println!("usage error: {error}");
                     println!(
-                        "usage: tunnel-ospf-cost-update --plan-id <uuid> --current-ospf-cost <1-65535> --recommended-ospf-cost <1-65535> --confirmed"
+                        "usage: tunnel-ospf-cost-update --plan-id <uuid> --recommendation-id <id> --current-ospf-cost <1-65535> --recommended-ospf-cost <1-65535> [--mutation-intent apply|rollback] --confirmed"
                     );
                     return Ok(());
                 }

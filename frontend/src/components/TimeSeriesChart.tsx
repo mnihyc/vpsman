@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import { consolePalette } from "../colorPalette";
+import { formatFullTime } from "../utils";
 import "uplot/dist/uPlot.min.css";
 
 export type TimeSeriesChartLine = {
@@ -10,6 +11,7 @@ export type TimeSeriesChartLine = {
 };
 
 type HoverState = {
+  fullTimeLabel: string;
   index: number;
   timeLabel: string;
   values: Array<{ color: string; label: string; value: number | null }>;
@@ -107,6 +109,7 @@ export function TimeSeriesChart({
                 return;
               }
               setHover({
+                fullTimeLabel: formatChartFullTime(unixTimes[index]),
                 index,
                 timeLabel: formatChartTime(unixTimes[index]),
                 values: sanitizedLines.map((line) => ({
@@ -168,6 +171,7 @@ export function TimeSeriesChart({
     return unixTimes.slice(firstIndex).map((time, offset) => {
       const sourceIndex = firstIndex + offset;
       return {
+        fullTimeLabel: formatChartFullTime(time),
         timeLabel: formatChartTime(time),
         values: sanitizedLines.map((line) => ({
           label: line.label,
@@ -215,7 +219,8 @@ export function TimeSeriesChart({
           )}
           {hover && (
             <div className="timeSeriesHover">
-              <strong>{hover.timeLabel}</strong>
+              <strong title={hover.fullTimeLabel}>{hover.timeLabel}</strong>
+              <small>{hover.fullTimeLabel}</small>
               {hover.values.map((entry) => (
                 <span key={`${hover.index}-${entry.label}`}>
                   <i style={{ background: entry.color }} />
@@ -240,7 +245,7 @@ export function TimeSeriesChart({
             <tbody>
               {accessibleRows.map((row, index) => (
                 <tr key={`${row.timeLabel}-${index}`}>
-                  <th scope="row">{row.timeLabel}</th>
+                  <th scope="row">{row.fullTimeLabel}</th>
                   {row.values.map((entry) => (
                     <td key={`${row.timeLabel}-${entry.label}`}>{entry.value}</td>
                   ))}
@@ -293,7 +298,8 @@ function chartCoverageLabel(
   return [
     `Data coverage: ${observedPoints}/${totalPoints} points present in selected range`,
     gapLabel,
-    `samples ${formatChartTime(unixTimes[firstObservedIndex])} to ${formatChartTime(unixTimes[lastObservedIndex])}`,
+    `samples ${formatChartFullTime(unixTimes[firstObservedIndex])} to ${formatChartFullTime(unixTimes[lastObservedIndex])}`,
+    latestSampleFreshnessLabel(unixTimes[lastObservedIndex]),
   ].join(" · ");
 }
 
@@ -304,6 +310,37 @@ function formatChartTime(unixTime: number): string {
     minute: "2-digit",
     month: "short",
   });
+}
+
+function formatChartFullTime(unixTime: number): string {
+  return formatFullTime(new Date(unixTime * 1000).toISOString());
+}
+
+function latestSampleFreshnessLabel(unixTime: number): string {
+  const ageMs = Date.now() - unixTime * 1000;
+  if (!Number.isFinite(ageMs)) {
+    return "latest sample time unknown";
+  }
+  if (ageMs < -5 * 60 * 1000) {
+    return `latest sample future-dated ${formatRelativeAge(Math.abs(ageMs))} ahead`;
+  }
+  const freshness =
+    ageMs > 24 * 60 * 60 * 1000 ? "latest sample stale" : "latest sample current";
+  return `${freshness} ${formatRelativeAge(Math.max(0, ageMs))} ago`;
+}
+
+function formatRelativeAge(ageMs: number): string {
+  const minuteMs = 60 * 1000;
+  const hourMs = 60 * minuteMs;
+  const dayMs = 24 * hourMs;
+  if (ageMs < hourMs) {
+    const minutes = Math.max(0, Math.round(ageMs / minuteMs));
+    return `${minutes}m`;
+  }
+  if (ageMs < dayMs) {
+    return `${Math.round(ageMs / hourMs)}h`;
+  }
+  return `${Math.round(ageMs / dayMs)}d`;
 }
 
 function formatAxisTicks(

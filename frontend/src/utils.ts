@@ -112,18 +112,59 @@ export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
-  gateway_endpoints: "",
-  gateway_server_public_key_hex: null,
   fleet_tag_visibility_overrides: {},
   language: "en",
   review_prompt_mode: "inline",
   show_country_flags: true,
   sidebar_subpanel_default: "active",
   timezone: null,
-  tunnel_ipv4_allocation_pool_cidr: "",
-  tunnel_ipv6_allocation_pool_cidr: "",
   vps_name_display_mode: DEFAULT_VPS_NAME_DISPLAY_MODE,
 };
+
+export function sanitizeOperatorPreferences(
+  preferences: Partial<OperatorPreferences> | null | undefined,
+): OperatorPreferences {
+  const source = preferences ?? {};
+  return {
+    bulk_output_compare_mode:
+      source.bulk_output_compare_mode ??
+      DEFAULT_OPERATOR_PREFERENCES.bulk_output_compare_mode,
+    dashboard_curve_exclusions: Array.isArray(
+      source.dashboard_curve_exclusions,
+    )
+      ? source.dashboard_curve_exclusions
+      : DEFAULT_OPERATOR_PREFERENCES.dashboard_curve_exclusions,
+    dashboard_network_top_limit:
+      source.dashboard_network_top_limit ??
+      DEFAULT_OPERATOR_PREFERENCES.dashboard_network_top_limit,
+    dashboard_resource_top_limit:
+      source.dashboard_resource_top_limit ??
+      DEFAULT_OPERATOR_PREFERENCES.dashboard_resource_top_limit,
+    fleet_tag_visibility_overrides:
+      source.fleet_tag_visibility_overrides &&
+      typeof source.fleet_tag_visibility_overrides === "object" &&
+      !Array.isArray(source.fleet_tag_visibility_overrides)
+        ? source.fleet_tag_visibility_overrides
+        : DEFAULT_OPERATOR_PREFERENCES.fleet_tag_visibility_overrides,
+    language: source.language ?? DEFAULT_OPERATOR_PREFERENCES.language,
+    review_prompt_mode:
+      source.review_prompt_mode ??
+      DEFAULT_OPERATOR_PREFERENCES.review_prompt_mode,
+    show_country_flags:
+      source.show_country_flags ??
+      DEFAULT_OPERATOR_PREFERENCES.show_country_flags,
+    sidebar_subpanel_default:
+      source.sidebar_subpanel_default ??
+      DEFAULT_OPERATOR_PREFERENCES.sidebar_subpanel_default,
+    timezone:
+      typeof source.timezone === "string" || source.timezone === null
+        ? source.timezone
+        : DEFAULT_OPERATOR_PREFERENCES.timezone,
+    vps_name_display_mode:
+      source.vps_name_display_mode ??
+      DEFAULT_OPERATOR_PREFERENCES.vps_name_display_mode,
+  };
+}
 
 export function displayNameOrUnnamed(
   displayName: string | null | undefined,
@@ -367,6 +408,8 @@ export function statusClass(status: string): string {
   if (
     lower === "ok" ||
     lower.startsWith("selected") ||
+    lower === "active" ||
+    lower.includes("identity active") ||
     lower.includes("running") ||
     lower.includes("complete") ||
     lower.includes("accepted") ||

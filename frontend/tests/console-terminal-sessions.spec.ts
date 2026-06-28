@@ -53,19 +53,19 @@ test("prepares terminal reconnect actions from retained session inventory", asyn
   await expect(composer.getByLabel("Terminal session id")).toHaveValue("61616161-2222-4333-8444-555555555555");
   await expect(composer.getByLabel("Terminal argv")).toHaveValue("/bin/sh -l");
   await expect(composer.getByLabel("Terminal replay from sequence")).toHaveValue("1");
-  await expect(composer.getByLabel("Bulk target selector expression")).toContainText("id:agent-sfo-01");
+  await expect(composer.getByLabel("Bulk target selector expression")).toHaveValue("id:agent-sfo-01");
 
   await activate(page.getByRole("button", { name: "Poll terminal session 61616161" }));
   await expect(composer.getByLabel("Terminal action")).toHaveValue("poll");
   await expect(composer.getByLabel("Terminal session id")).toHaveValue("61616161-2222-4333-8444-555555555555");
   await expect(composer.getByLabel("Terminal replay from sequence")).toHaveValue("1");
-  await expect(composer.getByLabel("Bulk target selector expression")).toContainText("id:agent-sfo-01");
+  await expect(composer.getByLabel("Bulk target selector expression")).toHaveValue("id:agent-sfo-01");
 
   await activate(page.getByRole("button", { name: "Input terminal session 61616161" }));
   await expect(composer.getByLabel("Terminal action")).toHaveValue("input");
   await expect(composer.getByLabel("Terminal session id")).toHaveValue("61616161-2222-4333-8444-555555555555");
   await expect(composer.getByLabel("Terminal input sequence")).toHaveCount(0);
-  await expect(composer.getByLabel("Bulk target selector expression")).toContainText("id:agent-sfo-01");
+  await expect(composer.getByLabel("Bulk target selector expression")).toHaveValue("id:agent-sfo-01");
 
   await composer.getByRole("textbox", { name: "Terminal input" }).fill("uptime\n");
   await dispatchWithPrompt(composer);
@@ -160,6 +160,7 @@ test("keeps terminal emulator resizable and target impact compact", async ({
     terminal.evaluate((element) => getComputedStyle(element).overflow),
   ).resolves.toBe("hidden");
 
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
   const impact = page.locator(".commandComposer .targetImpactPreview");
   await expect(impact.locator(".targetImpactGroup")).toHaveCount(3);
   await expect(impact.getByText("Ready", { exact: true })).toBeVisible();

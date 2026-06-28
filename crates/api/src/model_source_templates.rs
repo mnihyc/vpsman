@@ -64,7 +64,7 @@ pub(crate) struct TestSourceTemplateRequest {
     pub(crate) definition: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct UpdateSourceTemplateRequest {
     pub(crate) description: Option<String>,
     pub(crate) definition: serde_json::Value,
@@ -72,6 +72,10 @@ pub(crate) struct UpdateSourceTemplateRequest {
     pub(crate) confirmed: bool,
     #[serde(default)]
     pub(crate) keep_description: bool,
+    #[serde(default)]
+    pub(crate) preview_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -109,8 +113,10 @@ pub(crate) struct SourceTemplateTestView {
 pub(crate) struct UpdateSourceTemplateResponse {
     pub(crate) template: SourceTemplateView,
     pub(crate) diff: SourceTemplateDiffView,
+    pub(crate) affected_client_ids: Vec<String>,
     pub(crate) affected_client_count: i64,
     pub(crate) confirmation_required: bool,
+    pub(crate) preview_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,7 +136,7 @@ pub(crate) struct TemplateRuntimeConfigQuery {
     pub(crate) client_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AssignSourceTemplateRequest {
     pub(crate) domain: String,
@@ -140,6 +146,10 @@ pub(crate) struct AssignSourceTemplateRequest {
     pub(crate) target_client_ids: Vec<String>,
     #[serde(default)]
     pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) preview_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -148,6 +158,7 @@ pub(crate) struct AssignSourceTemplateResponse {
     pub(crate) target_count: usize,
     pub(crate) confirmation_required: bool,
     pub(crate) assignments: Vec<SourceTemplateAssignmentView>,
+    pub(crate) preview_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

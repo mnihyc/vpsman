@@ -23,7 +23,6 @@ import type {
   AgentView,
   AllocateTunnelEndpointsRequest,
   AllocateTunnelEndpointsResponse,
-  OperatorPreferences,
   PromoteTelemetryTunnelRequest,
   TelemetryTunnelRecord,
   TunnelAddressFamily,
@@ -100,9 +99,9 @@ export function TopologyPromotionPanel({
   telemetryTunnels: TelemetryTunnelRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
-  const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [promoteForm, setPromoteForm] = useState<PromoteTelemetryTunnelRequest>(
-    () => initialTelemetryPromotionForm(preferences),
+    () => initialTelemetryPromotionForm(),
   );
   const [reservedText, setReservedText] = useState("");
   const [adapterForm, setAdapterForm] = useState<AdapterPromotionForm>({
@@ -639,7 +638,7 @@ export function TopologyPromotionPanel({
           </div>
           <details
             className="operationNote formSectionNote"
-            title="Uses Preferences pools unless overridden here. Reserved addresses are comma-separated; repeated allocation appends current endpoint IPs before requesting another suggestion."
+            title="Uses Suite Config pools unless overridden here. Reserved addresses are comma-separated; repeated allocation appends current endpoint IPs before requesting another suggestion."
           >
             <summary>Allocation overrides</summary>
             <div className="dispatchControls">
@@ -1497,18 +1496,16 @@ function formatPromotionAddresses(form: PromoteTelemetryTunnelRequest): string {
   return "endpoint CIDRs required";
 }
 
-function initialTelemetryPromotionForm(
-  preferences: OperatorPreferences,
-): PromoteTelemetryTunnelRequest {
+function initialTelemetryPromotionForm(): PromoteTelemetryTunnelRequest {
   return {
     client_id: "",
     interface: "",
     peer_client_id: "",
     local_underlay: "",
     peer_underlay: "",
-    address_pool_cidr: preferences.tunnel_ipv4_allocation_pool_cidr,
+    address_pool_cidr: "",
     ipv4_tunnel: null,
-    ipv6_address_pool_cidr: preferences.tunnel_ipv6_allocation_pool_cidr,
+    ipv6_address_pool_cidr: "",
     ipv6_tunnel: null,
     latency_primary_family: "ipv4",
     side: "left",

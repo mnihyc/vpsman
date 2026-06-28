@@ -2892,6 +2892,25 @@
   padding-top: 10px;
 }
 
+.singleConfigApplySummary {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.singleConfigApplySummary strong {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.singleConfigApplySummary small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
 .tagScheduleImpactTable {
   display: grid;
   gap: 6px;
@@ -4547,6 +4566,36 @@
 .vpsRulesPreviewDetails .monoValue {
   display: block;
   margin-top: 4px;
+}
+
+.vpsRulesPreviewFinalAction {
+  align-items: center;
+  background: color-mix(in srgb, var(--success-soft) 64%, var(--surface));
+  border: 1px solid var(--success-border);
+  border-radius: 8px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+.vpsRulesPreviewFinalAction.neutral {
+  background: var(--surface-neutral);
+  border-color: var(--border-subtle);
+}
+
+.vpsRulesPreviewFinalAction > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.vpsRulesPreviewFinalAction strong,
+.vpsRulesPreviewFinalAction small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .trafficAccountingSummary {

@@ -4527,6 +4527,7 @@ export async function installConsoleApiMock(
             selector_expression?: string;
             target_client_ids?: string[];
             confirmed?: boolean;
+            preview_hash?: string | null;
           };
           const template =
             sourceTemplatesFixture.find(
@@ -4545,6 +4546,7 @@ export async function installConsoleApiMock(
           return jsonResponse({
             assignments: sourceTemplateAssignmentsFixture,
             confirmation_required: !request.confirmed,
+            preview_hash: request.preview_hash ?? "8".repeat(64),
             template,
             target_count: targetCount,
           });

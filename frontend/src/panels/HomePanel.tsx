@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { VpsCombobox } from "../components/VpsCombobox";
+import { agentDisplayState } from "../agentDisplayState";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import type {
   AgentView,
@@ -126,9 +127,17 @@ export function HomePanel({
 }: HomePanelProps) {
   const [quickTargetId, setQuickTargetId] = useState("");
   const quickTarget = agents.find((agent) => agent.id === quickTargetId) ?? agents[0] ?? null;
-  const visibleOnline = agents.filter((agent) => agent.status === "online").length;
-  const visibleStale = agents.filter((agent) => agent.status === "stale" || agent.stale_since).length;
-  const visibleOffline = agents.filter((agent) => agent.status === "offline").length;
+  const visibleDisplayStates = useMemo(
+    () => agents.map((agent) => agentDisplayState(agent)),
+    [agents],
+  );
+  const visibleOnline = visibleDisplayStates.filter((state) => state.label === "Online").length;
+  const visibleContactUnknown = visibleDisplayStates.filter((state) => state.label === "Contact unknown").length;
+  const visibleStale = visibleDisplayStates.filter((state) => state.label === "Stale").length;
+  const visibleOffline = visibleDisplayStates.filter((state) => state.label === "Offline").length;
+  const visibleReview = visibleDisplayStates.filter(
+    (state) => state.tone === "warning" || state.tone === "critical",
+  ).length;
   const runningJobs = jobs.filter((job) => isActiveJobStatus(job.status)).length || summary.running_jobs;
   const failedJobs = jobs.filter((job) => isFailedJobStatus(job.status)).length;
   const failedBackups = backups.filter((backup) => isFailedBackupStatus(backup.status)).length;
@@ -264,7 +273,7 @@ export function HomePanel({
             </p>
             <div className="homeInlineStatus" aria-label="Home fleet posture">
               <ConsoleStatusBadge tone={visibleOnline === agents.length && criticalAlerts === 0 ? "ok" : "warning"}>
-                {visibleOnline}/{agents.length} visible online
+                {visibleOnline}/{agents.length} visible live
               </ConsoleStatusBadge>
               <ConsoleStatusBadge tone={criticalAlerts > 0 ? "critical" : warningAlerts > 0 ? "warning" : "ok"}>
                 {criticalAlerts} critical / {warningAlerts} warning
@@ -343,16 +352,16 @@ export function HomePanel({
 
         <div className="homePostureStrip" aria-label="Home posture strip">
           <HomePostureMetric
-            detail={`${visibleOnline} visible / ${summary.online} fleet`}
-            label="Online"
+            detail={`${visibleOnline} live, ${visibleContactUnknown} contact unknown`}
+            label="Live VPS"
             tone={visibleOnline === agents.length ? "ok" : "warning"}
             value={`${visibleOnline}/${agents.length}`}
           />
           <HomePostureMetric
-            detail={`${visibleStale} stale, ${visibleOffline} offline`}
+            detail={`${visibleStale} stale, ${visibleContactUnknown} contact unknown, ${visibleOffline} offline`}
             label="Reachability gaps"
-            tone={visibleStale || visibleOffline ? "warning" : "ok"}
-            value={String(visibleStale + visibleOffline)}
+            tone={visibleReview || visibleOffline ? "warning" : "ok"}
+            value={String(visibleReview + visibleOffline)}
           />
           <HomePostureMetric
             detail={`${criticalAlerts} critical, ${warningAlerts} warning`}
@@ -597,15 +606,23 @@ function buildAttentionItems({
       } satisfies HomeActionItem;
     });
   const agentItems = agents
-    .filter((agent) => agent.status !== "online" || agent.stale_since || agent.capabilities.privilege_mode === "unknown")
-    .map((agent) => ({
-      detail: agent.stale_reason ?? `${agent.status}; privilege ${agent.capabilities.privilege_mode}`,
+    .map((agent) => ({ agent, displayState: agentDisplayState(agent) }))
+    .filter(
+      ({ agent, displayState }) =>
+        displayState.label !== "Online" ||
+        agent.stale_since ||
+        agent.capabilities.privilege_mode === "unknown",
+    )
+    .map(({ agent, displayState }) => ({
+      detail:
+        agent.stale_reason ??
+        `${displayState.detail}; privilege ${agent.capabilities.privilege_mode}`,
       id: `agent:${agent.id}`,
       label: `${displayNameOrUnnamed(agent.display_name)} needs review`,
       meta: agent.last_seen_at ? formatCompactTime(agent.last_seen_at) : "no heartbeat",
       metaTitle: agent.last_seen_at ? formatFullTime(agent.last_seen_at) : undefined,
       onOpen: () => onOpenVpsDetail(agent),
-      tone: agent.status === "offline" ? "critical" : "warning",
+      tone: displayState.label === "Offline" ? "critical" : "warning",
     }) satisfies HomeActionItem);
   const jobItems = jobs
     .filter((job) => isFailedJobStatus(job.status))

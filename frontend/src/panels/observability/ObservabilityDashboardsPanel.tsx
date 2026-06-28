@@ -114,9 +114,9 @@ const dashboardSections: Array<{
     label: "Widget layout",
   },
   {
-    description: "Link and JSON manifest for handoff",
+    description: "Copy link and JSON manifest",
     id: "handoff",
-    label: "Share / Export",
+    label: "Copy / Export",
   },
 ];
 
@@ -168,14 +168,14 @@ export function ObservabilityDashboardsPanel({
     setStatus(`Exported ${selectedPreset.label}`);
   }
 
-  async function copyShareLink() {
+  async function copyPresetLink() {
     const url = new URL(globalThis.window.location.href);
     url.hash = `observability/dashboards/${selectedPreset.id}`;
     url.searchParams.set("dashboard", selectedPreset.id);
     url.searchParams.set("window", window);
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(url.toString());
-      setStatus(`Copied ${selectedPreset.label} share link`);
+      setStatus(`Copied ${selectedPreset.label} link`);
       return;
     }
     setStatus("Clipboard is unavailable; use export JSON for handoff.");
@@ -186,7 +186,7 @@ export function ObservabilityDashboardsPanel({
       <div className="fleetPanel observabilityDashboardsPanel">
         <div className="sectionHeader">
           <div>
-            <h2>Dashboards</h2>
+            <h2>Dashboard presets</h2>
             <span>
               Read-only dashboard presets assembled from current overview data.
             </span>
@@ -206,11 +206,11 @@ export function ObservabilityDashboardsPanel({
             </button>
             <button
               className="secondaryAction compactAction"
-              onClick={() => void copyShareLink()}
+              onClick={() => void copyPresetLink()}
               type="button"
             >
               <Copy size={14} />
-              <span>Share link</span>
+              <span>Copy link</span>
             </button>
             <button
               className="secondaryAction compactAction"
@@ -267,13 +267,13 @@ export function ObservabilityDashboardsPanel({
           aria-labelledby="dashboard-presets-title"
         >
           <div className="dashboardSectionHeader">
-            <div>
-              <h2 id="dashboard-presets-title">Dashboard presets</h2>
-              <span>
-                Preset layouts are read-only until a custom dashboard API
-                exists.
-              </span>
-            </div>
+              <div>
+                <h2 id="dashboard-presets-title">Available presets</h2>
+                <span>
+                  Select a predefined layout; this page does not create, edit,
+                  or delete dashboards.
+                </span>
+              </div>
             <ConsoleStatusBadge tone="info">Read-only</ConsoleStatusBadge>
           </div>
           <label className="dashboardPresetMobileMenu">
@@ -391,16 +391,16 @@ export function ObservabilityDashboardsPanel({
           >
             <div className="dashboardSectionHeader">
               <div>
-                <h2 id="dashboard-handoff-title">Share / Export</h2>
-                <span>Share a link or export the current preset metadata.</span>
+                <h2 id="dashboard-handoff-title">Copy / Export</h2>
+                <span>Copy a preset link or export the current metadata.</span>
               </div>
             </div>
             <div
               className="dashboardHandoffPanel"
-              aria-label="Dashboard share and export details"
+              aria-label="Dashboard copy and export details"
             >
               <span>
-                <strong>Share scope</strong>
+                <strong>Link scope</strong>
                 <small>{dashboardScope}</small>
               </span>
               <span>
@@ -413,7 +413,8 @@ export function ObservabilityDashboardsPanel({
               <span>
                 <strong>Controls</strong>
                 <small>
-                  Read-only: refresh, share, export, and navigation only.
+                  Read-only: refresh, copy link, export JSON, and navigation
+                  only.
                 </small>
               </span>
             </div>
@@ -1150,7 +1151,7 @@ function dashboardAgentStatusLabel(status: string | null | undefined): string {
     return "Stale";
   }
   if (status === "online") {
-    return "Online";
+    return "Reported active";
   }
   return status.replace(/_/g, " ");
 }

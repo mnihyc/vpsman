@@ -392,10 +392,12 @@ function ConfigOverview({
     (row) => !isReadySourceStatus(row.status),
   );
   const sourceReadyRows = sourceStatus.length - sourceRiskRows.length;
-  const currentStateRows = buildConfigCurrentStateRows(
+  const allConfigStateRows = buildConfigCurrentStateRows(
     agents,
     runtimeConfigApplyStates,
   );
+  const currentStateRows = allConfigStateRows.filter((row) => row.resourceAvailable);
+  const historicalStateRows = allConfigStateRows.filter((row) => !row.resourceAvailable);
   const pendingSyncs = currentStateRows.filter(
     (row) => row.statusKind === "queued",
   ).length;
@@ -447,7 +449,7 @@ function ConfigOverview({
   const latestApplyStates = runtimeConfigApplyStates
     .slice()
     .sort((left, right) =>
-      configApplyStateTime(right).localeCompare(configApplyStateTime(left)),
+      configApplyStateSortValue(right) - configApplyStateSortValue(left),
     )
     .slice(0, 4);
   const recentChanges = [
@@ -457,7 +459,7 @@ function ConfigOverview({
       operation: "Apply state",
       status: runtimeConfigApplyStatusLabel(state),
       target: agentNameById.get(state.client_id) ?? state.client_id,
-      time: configApplyStateTime(state),
+      time: configApplyStateTime(state) ?? "",
       tone: runtimeConfigApplyTone(state),
     })),
     ...configJobs.map((job) => ({
@@ -527,19 +529,23 @@ function ConfigOverview({
             {configHealth.label}
           </ConsoleStatusBadge>
         </div>
-        <div className="configHealthSummary">
-          <span>
-            <strong>
-              {appliedClientIds.size}/{agents.length || 0}
-            </strong>
-            <small>VPSs current</small>
-          </span>
-          <span>
-            <strong>{failedSyncs + staleApplyRows}</strong>
-            <small>failed or stale applies</small>
-          </span>
-          <span>
-            <strong>
+          <div className="configHealthSummary">
+            <span>
+              <strong>
+                {appliedClientIds.size}/{currentStateRows.length || 0}
+              </strong>
+              <small>current resources</small>
+            </span>
+            <span>
+              <strong>{applyAttentionCount}</strong>
+              <small>need attention</small>
+            </span>
+            <span>
+              <strong>{historicalStateRows.length}</strong>
+              <small>historical records</small>
+            </span>
+            <span>
+              <strong>
               {sourceReadyRows}/{sourceStatus.length || 0}
             </strong>
             <small>source checks ready</small>
@@ -563,50 +569,38 @@ function ConfigOverview({
           <ConsoleStatusBadge
             tone={retryableApplyRows.length ? "warning" : "ok"}
           >
-            {retryableApplyRows.length} retryable
+            {applyAttentionCount} need attention
           </ConsoleStatusBadge>
         </div>
-        <div className="configCurrentStateList">
-          {currentStateRows.map((row) => (
-            <div
-              className={`configCurrentStateRow ${row.statusKind}`}
-              key={row.id}
-            >
-              <span className="configCurrentTarget">
-                <strong title={row.targetTitle}>{row.targetLabel}</strong>
-                <small>{row.targetDetail}</small>
-              </span>
-              <span>
-                <ConsoleStatusBadge tone={row.tone}>
-                  {row.statusLabel}
-                </ConsoleStatusBadge>
-                <small>{row.statusDetail}</small>
-              </span>
-              <span>
-                <strong>{row.ruleLabel}</strong>
-                <small>{row.ruleDetail}</small>
-              </span>
-              <span>
-                <strong>{formatTime(row.updatedAt)}</strong>
-                <small>{row.updatedDetail}</small>
-              </span>
-              {row.actionKind === "retry" || row.actionKind === "inspect" ? (
-                <button
-                  className="secondaryAction compactAction"
-                  onClick={() => openCurrentStateAction(row)}
-                  type="button"
-                >
-                  {row.actionLabel}
-                </button>
-              ) : (
-                <small className="configCurrentStateAction">
-                  {row.actionLabel}
-                </small>
-              )}
-            </div>
-          ))}
-        </div>
+        <ConfigCurrentStateRowsList
+          onOpenAction={openCurrentStateAction}
+          rows={currentStateRows}
+        />
       </section>
+
+      {historicalStateRows.length > 0 && (
+        <details
+          className="configOverviewBlock configHistoryDisclosure"
+          aria-label="Historical config apply state"
+          open
+        >
+          <summary className="configOverviewBlockHeader">
+            <h3>Historical apply-state records</h3>
+            <ConsoleStatusBadge tone="neutral">
+              {historicalStateRows.length} unavailable
+            </ConsoleStatusBadge>
+          </summary>
+          <p>
+            These apply-state records belong to VPS IDs not present in the
+            current fleet response. They stay visible for audit context but do
+            not affect current retry or health counts.
+          </p>
+          <ConfigCurrentStateRowsList
+            onOpenAction={openCurrentStateAction}
+            rows={historicalStateRows}
+          />
+        </details>
+      )}
 
       <div className="configOverviewColumns">
         <section
@@ -624,7 +618,7 @@ function ConfigOverview({
           </div>
           <div className="configRiskList">
             <ConfigOverviewRiskRow
-              detail={`${failedSyncs} failed, ${staleApplyRows} stale, ${pendingSyncs} queued, ${missingApplyStates} unknown; latest state per VPS only`}
+              detail={`${failedSyncs} failed, ${staleApplyRows} stale, ${pendingSyncs} queued, ${missingApplyStates} unknown; current fleet only, historical records separated`}
               label="Runtime apply state"
               tone={
                 failedSyncs
@@ -737,7 +731,7 @@ function ConfigOverview({
                 </ConsoleStatusBadge>
               </span>
               <span>{change.detail}</span>
-              <span>{formatTime(change.time)}</span>
+              <span>{change.time ? formatTime(change.time) : "No timestamp"}</span>
             </div>
           ))}
           {recentChanges.length === 0 && (
@@ -773,6 +767,59 @@ function ConfigOverviewRiskRow({
   );
 }
 
+function ConfigCurrentStateRowsList({
+  onOpenAction,
+  rows,
+}: {
+  onOpenAction: (row: ConfigCurrentStateRow) => void;
+  rows: ConfigCurrentStateRow[];
+}) {
+  return (
+    <div className="configCurrentStateList">
+      {rows.map((row) => (
+        <div
+          className={`configCurrentStateRow ${row.statusKind}`}
+          key={row.id}
+        >
+          <span className="configCurrentTarget">
+            <strong title={row.targetTitle}>{row.targetLabel}</strong>
+            <small>{row.targetDetail}</small>
+          </span>
+          <span>
+            <ConsoleStatusBadge tone={row.tone}>
+              {row.statusLabel}
+            </ConsoleStatusBadge>
+            <small>{row.statusDetail}</small>
+          </span>
+          <span>
+            <strong>{row.ruleLabel}</strong>
+            <small>{row.ruleDetail}</small>
+          </span>
+          <span>
+            <strong>
+              {row.updatedAt ? formatTime(row.updatedAt) : "No apply evidence"}
+            </strong>
+            <small>{row.updatedDetail}</small>
+          </span>
+          {row.actionKind === "retry" || row.actionKind === "inspect" ? (
+            <button
+              className="secondaryAction compactAction"
+              onClick={() => onOpenAction(row)}
+              type="button"
+            >
+              {row.actionLabel}
+            </button>
+          ) : (
+            <small className="configCurrentStateAction">
+              {row.actionLabel}
+            </small>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 type ConfigApplyStatusKind =
   | "current"
   | "failed"
@@ -795,7 +842,7 @@ type ConfigCurrentStateRow = {
   targetLabel: string;
   targetTitle: string;
   tone: "critical" | "warning" | "ok" | "info" | "neutral";
-  updatedAt: string;
+  updatedAt: string | null;
   updatedDetail: string;
 };
 
@@ -838,7 +885,7 @@ function latestRuntimeConfigApplyStateByClient(
     const current = latest.get(state.client_id);
     if (
       !current ||
-      configApplyStateTime(state) > configApplyStateTime(current)
+      configApplyStateSortValue(state) > configApplyStateSortValue(current)
     ) {
       latest.set(state.client_id, state);
     }
@@ -885,7 +932,7 @@ function buildConfigCurrentStateRow({
     targetLabel,
     targetTitle: resourceAvailable ? clientId : `Missing resource ${clientId}`,
     tone: status.tone,
-    updatedAt: state ? configApplyStateTime(state) : new Date(0).toISOString(),
+    updatedAt: state ? configApplyStateTime(state) : null,
     updatedDetail: status.updatedDetail,
   };
 }
@@ -920,8 +967,11 @@ function runtimeConfigApplyCurrentStatus(
   }
   if (state.pending_status === "queued") {
     if (runtimeConfigQueuedStateIsStale(state)) {
+      const queuedAt = configApplyStateTime(state);
       return {
-        detail: `Queued since ${formatTime(configApplyStateTime(state))}; treat as stale before retry`,
+        detail: queuedAt
+          ? `Queued since ${formatTime(queuedAt)}; treat as stale before retry`
+          : "Queued timestamp is missing; treat as stale before retry",
         kind: "stale",
         label: "Stale apply",
         tone: "warning",
@@ -960,7 +1010,8 @@ function runtimeConfigApplyCurrentStatus(
 function runtimeConfigQueuedStateIsStale(
   state: RuntimeConfigApplyStateRecord,
 ): boolean {
-  const updatedAt = Date.parse(configApplyStateTime(state));
+  const stateTime = configApplyStateTime(state);
+  const updatedAt = stateTime ? Date.parse(stateTime) : NaN;
   if (!Number.isFinite(updatedAt)) {
     return true;
   }
@@ -1627,8 +1678,37 @@ function configHealthStatus({
   };
 }
 
-function configApplyStateTime(state: RuntimeConfigApplyStateRecord): string {
-  return state.pending_updated_at ?? state.applied_at ?? state.updated_at;
+function configApplyStateTime(
+  state: RuntimeConfigApplyStateRecord,
+): string | null {
+  return (
+    normalizeConfigApplyTimestamp(state.pending_updated_at) ??
+    normalizeConfigApplyTimestamp(state.applied_at) ??
+    normalizeConfigApplyTimestamp(state.updated_at)
+  );
+}
+
+function configApplyStateSortValue(state: RuntimeConfigApplyStateRecord): number {
+  const time = configApplyStateTime(state);
+  if (!time) {
+    return 0;
+  }
+  const value = Date.parse(time);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function normalizeConfigApplyTimestamp(
+  value: string | null | undefined,
+): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const parsed = Date.parse(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return trimmed;
 }
 
 function runtimeConfigApplyStatusLabel(
@@ -2571,6 +2651,10 @@ function SingleVpsConfig({
       null,
     [clientId, runtimeConfigApplyStates],
   );
+  const overrideLineCount = useMemo(
+    () => countConfigPatchLines(overrideToml),
+    [overrideToml],
+  );
   const overrideReady = Boolean(
     singleTarget && privilegeMaterial && baseHash && overrideToml.trim(),
   );
@@ -3056,10 +3140,23 @@ function SingleVpsConfig({
               unlockRedirectLabel="Open Privilege Vault for runtime config apply"
             />
             <div className="configOverrideActions singleConfigStickyActions">
-              <span>
-                {privilegeMaterial
-                  ? "Privilege unlocked for final apply"
-                  : "Unlock only when ready to apply"}
+              <span
+                aria-label="One-VPS config change summary"
+                className="singleConfigApplySummary"
+              >
+                <strong>
+                  {overrideLineCount} changed{" "}
+                  {overrideLineCount === 1 ? "line" : "lines"}
+                </strong>
+                <small>
+                  {overrideValidation
+                    ? `${overrideValidation.sections.length} ${overrideValidation.sections.length === 1 ? "section" : "sections"} - 0 errors`
+                    : overrideToml.trim()
+                      ? "Validating sections and payload hash"
+                      : privilegeMaterial
+                        ? "Type a patch before apply"
+                        : "Unlock only when ready to apply"}
+                </small>
               </span>
               <button
                 className="primaryAction"
@@ -3522,6 +3619,7 @@ function VpsRulesPanel({
   const [preview, setPreview] = useState<VpsRulesOperatorPreview | null>(null);
   const [reviewSnapshot, setReviewSnapshot] =
     useState<VpsRulesReviewSnapshot | null>(null);
+  const [reviewPromptOpen, setReviewPromptOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const agentNameById = useMemo(
@@ -3756,10 +3854,12 @@ function VpsRulesPanel({
   useEffect(() => {
     writeLocalString(CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY, selectorExpression);
     setReviewSnapshot(null);
+    setReviewPromptOpen(false);
   }, [selectorExpression]);
 
   useEffect(() => {
     setReviewSnapshot(null);
+    setReviewPromptOpen(false);
   }, [valuesText, unsetKeys]);
 
   function parseSetValues(): Record<string, string> {
@@ -3794,6 +3894,7 @@ function VpsRulesPanel({
 
   async function dryRun(operation: "upsert" | "unset") {
     setPending(true);
+    setReviewPromptOpen(false);
     setStatus(
       operation === "upsert"
         ? "dry-running set values"
@@ -3870,6 +3971,7 @@ function VpsRulesPanel({
       setPreview(nextPreview);
       setReviewSnapshot(null);
       setStatus(`applied ${nextPreview.changed_row_count} VPS rule changes`);
+      setReviewPromptOpen(false);
     } catch (error) {
       setStatus(
         error instanceof Error ? error.message : "VPS rules apply failed",
@@ -4233,7 +4335,12 @@ function VpsRulesPanel({
           )}
         </div>
         {preview ? (
-          <VpsRulesPreviewTable columns={previewColumns} preview={preview} />
+          <VpsRulesPreviewTable
+            columns={previewColumns}
+            onRequestApply={() => setReviewPromptOpen(true)}
+            pending={pending}
+            preview={preview}
+          />
         ) : null}
         {status && <small className="fleetPolicyStatus">{status}</small>}
       </section>
@@ -4271,9 +4378,9 @@ function VpsRulesPanel({
             value: reviewSnapshot?.preview.no_op_row_count ?? 0,
           },
         ]}
-        onCancel={() => setReviewSnapshot(null)}
+        onCancel={() => setReviewPromptOpen(false)}
         onConfirm={() => void applyReview()}
-        open={reviewSnapshot !== null}
+        open={reviewPromptOpen && reviewSnapshot !== null}
         pending={pending}
         title="Confirm VPS rule write"
       />
@@ -4355,13 +4462,29 @@ function SingleConfigGuardAnchors({
   );
 }
 
+function countConfigPatchLines(toml: string): number {
+  return toml
+    .split(/\r?\n/)
+    .filter((line) => line.trim() && !line.trim().startsWith("#")).length;
+}
+
 function VpsRulesPreviewTable({
   columns,
+  onRequestApply,
+  pending,
   preview,
 }: {
   columns: ConsoleDataGridColumn<VpsRuleChangePreview>[];
+  onRequestApply: () => void;
+  pending: boolean;
   preview: VpsRulesOperatorPreview;
 }) {
+  const finalActionLabel = `Apply ${preview.changed_row_count} ${preview.changed_row_count === 1 ? "change" : "changes"}`;
+  const finalActionSummary = `${preview.changed_row_count} effective ${
+    preview.changed_row_count === 1 ? "change" : "changes"
+  } - ${preview.no_op_row_count} no-op${
+    preview.no_op_row_count === 1 ? "" : "s"
+  } hidden`;
   return (
     <div className="vpsRulesPreviewBlock">
       <div className="consoleInlineDetailGrid">
@@ -4408,6 +4531,37 @@ function VpsRulesPreviewTable({
         storageKey="vpsman.grid.config.vpsRules.preview"
         title="Preview changes"
       />
+      <div
+        className={
+          preview.changed_row_count === 0
+            ? "vpsRulesPreviewFinalAction neutral"
+            : "vpsRulesPreviewFinalAction"
+        }
+        aria-label="VPS rules preview final action"
+      >
+        <span>
+          <strong>
+            {preview.changed_row_count === 0
+              ? "No changes detected"
+              : finalActionLabel}
+          </strong>
+          <small>
+            {preview.changed_row_count === 0
+              ? `${preview.matched_vps_count} matched VPSs; Apply is disabled.`
+              : `${finalActionSummary}; final write uses this selector result for ${preview.matched_vps_count} matched VPSs.`}
+          </small>
+        </span>
+        {preview.changed_row_count > 0 ? (
+          <button
+            className="primaryAction compactAction"
+            disabled={pending}
+            onClick={onRequestApply}
+            type="button"
+          >
+            {finalActionLabel}
+          </button>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -4609,7 +4763,10 @@ function runtimeConfigApplyStateSummary(
       : "";
     const version = state.pending_version ? ` v${state.pending_version}` : "";
     if (runtimeConfigQueuedStateIsStale(state)) {
-      return `Runtime sync stale${version}${job}; queued since ${formatTime(configApplyStateTime(state))}`;
+      const queuedAt = configApplyStateTime(state);
+      return queuedAt
+        ? `Runtime sync stale${version}${job}; queued since ${formatTime(queuedAt)}`
+        : `Runtime sync stale${version}${job}; queued timestamp missing`;
     }
     return `Runtime sync pending${version}${job}`;
   }

@@ -423,16 +423,20 @@ impl Repository {
             return Ok(UpdateSourceTemplateResponse {
                 template,
                 affected_client_count: diff.affected_client_count,
+                affected_client_ids: Vec::new(),
                 confirmation_required: false,
                 diff,
+                preview_hash: None,
             });
         }
         if !request.confirmed {
             return Ok(UpdateSourceTemplateResponse {
                 template,
                 affected_client_count: diff.affected_client_count,
+                affected_client_ids: Vec::new(),
                 confirmation_required: true,
                 diff,
+                preview_hash: None,
             });
         }
 
@@ -494,8 +498,10 @@ impl Repository {
         Ok(UpdateSourceTemplateResponse {
             template: updated,
             affected_client_count: diff.affected_client_count,
+            affected_client_ids: Vec::new(),
             confirmation_required: false,
             diff,
+            preview_hash: None,
         })
     }
 
@@ -690,6 +696,7 @@ impl Repository {
                 target_count: targets.len(),
                 confirmation_required: true,
                 assignments,
+                preview_hash: None,
             });
         }
 
@@ -761,6 +768,7 @@ impl Repository {
             target_count: client_ids.len(),
             confirmation_required: false,
             assignments,
+            preview_hash: None,
         })
     }
 

@@ -526,9 +526,7 @@ fn side_label(side: TunnelEndpointSide) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vpsman_common::{
-        plan_tunnel, JobCommand, OspfCostPolicy, TunnelKind, TunnelPlanInput,
-    };
+    use vpsman_common::{plan_tunnel, JobCommand, OspfCostPolicy, TunnelKind, TunnelPlanInput};
 
     #[tokio::test]
     async fn loopback_speed_test_reports_client_and_server_metrics() {

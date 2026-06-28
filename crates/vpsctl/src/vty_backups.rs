@@ -4,14 +4,15 @@ use vpsman_common::{JobCommand, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS};
 
 use crate::{
     commands_backups::{
+        build_backup_metadata_privilege, build_restore_plan_privilege,
         restore_rollback_operation_from_api, restore_run_with_credentials,
         restore_scope_from_backup, RestoreRunWithCredentials,
     },
     commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
     http::http_post_json,
     privilege::{
-        build_privilege_for_job_command, build_privilege_for_schedule, load_super_password,
-        load_super_salt_hex, SchedulePrivilegeRequest,
+        build_privilege_for_schedule, load_super_password, load_super_salt_hex,
+        SchedulePrivilegeRequest,
     },
     vty_jobs::{
         vty_submit_operation, vty_submit_operation_with_force, VtyJobSelection, VtyPrivilegeContext,
@@ -658,17 +659,13 @@ pub(crate) fn submit_vty_backup_request(
     };
     let target_ids = vec![request.client_id.clone()];
     let selector_expression = selector_expression_from_targets(&target_ids, &[]);
-    let privilege = build_privilege_for_job_command(
+    let privilege_assertion = build_backup_metadata_privilege(
         &target_ids,
         &operation,
-        "backup",
         &selector_expression,
         password,
         salt_hex,
         300,
-        30,
-        false,
-        true,
     )?;
     http_post_json(
         api_url,
@@ -681,7 +678,7 @@ pub(crate) fn submit_vty_backup_request(
             "follow_symlinks": request.follow_symlinks,
             "confirmed": request.confirmed,
             "note": request.note,
-            "privilege_assertion": privilege.privilege_assertion,
+            "privilege_assertion": privilege_assertion,
         }),
     )
 }
@@ -804,17 +801,13 @@ pub(crate) fn submit_vty_restore_plan(
     };
     let target_ids = vec![request.target_client_id.clone()];
     let selector_expression = selector_expression_from_targets(&target_ids, &[]);
-    let privilege = build_privilege_for_job_command(
+    let privilege_assertion = build_restore_plan_privilege(
         &target_ids,
         &operation,
-        "restore",
         &selector_expression,
         password,
         salt_hex,
         300,
-        30,
-        false,
-        true,
     )?;
     http_post_json(
         api_url,
@@ -828,7 +821,7 @@ pub(crate) fn submit_vty_restore_plan(
             "destination_root": scope.destination_root,
             "confirmed": request.confirmed,
             "note": request.note,
-            "privilege_assertion": privilege.privilege_assertion,
+            "privilege_assertion": privilege_assertion,
         }),
     )
 }

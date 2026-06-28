@@ -1139,7 +1139,7 @@ export function SchedulesPanel({
           summary={
             schedules.length === 0
               ? "Create the first recurring job"
-              : `${selectedTargetCount} matching VPSs in local preview`
+              : `${selectedTargetCount} matching VPSs in local preview; server resolves before save`
           }
           title={editingScheduleId ? "Modify schedule" : "Create schedule"}
         >
@@ -1276,7 +1276,9 @@ export function SchedulesPanel({
             <div className="targetSelector">
               <div className="targetSelectorHeader">
                 <strong>Audit selector</strong>
-                <span>{selectedTargetCount} VPSs in local preview</span>
+                <span>
+                  {selectedTargetCount} VPSs in local preview; server resolves before save
+                </span>
               </div>
               <SearchExpressionInput
                 agents={agents}
@@ -1316,7 +1318,7 @@ export function SchedulesPanel({
                 ))}
               </div>
               <small>
-                {selectedTargetCount} matching VPSs in local preview;{" "}
+                {selectedTargetCount} matching VPSs in local preview; server resolves before save;{" "}
                 {selectedTemplate
                   ? selectedTemplate.name
                   : operationSummary(scheduleOperation)}
@@ -1798,8 +1800,9 @@ function scheduleRunTiming(schedule: ScheduleRecord): ScheduleRunTiming {
   }
   if (staleRuns.length > 0) {
     const latestStale = staleRuns[staleRuns.length - 1];
+    const overdueAge = scheduleOverdueAge(latestStale);
     return {
-      detail: `Schedule calculation stale; latest returned time was ${formatCompactTime(latestStale)}`,
+      detail: `${overdueAge}; schedule calculation stale; latest returned time was ${formatCompactTime(latestStale)}`,
       futureRuns,
       label: schedule.enabled ? "Overdue" : "No future runs",
       staleRuns,
@@ -1815,6 +1818,25 @@ function scheduleRunTiming(schedule: ScheduleRecord): ScheduleRunTiming {
     staleRuns,
     tone: schedule.enabled ? "warn" : "neutral",
   };
+}
+
+function scheduleOverdueAge(value: string): string {
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) {
+    return "Overdue age unknown";
+  }
+  const deltaMs = Math.max(0, Date.now() - ms);
+  const totalHours = Math.max(1, Math.round(deltaMs / 3_600_000));
+  const weeks = Math.floor(totalHours / (24 * 7));
+  const days = Math.floor((totalHours % (24 * 7)) / 24);
+  const hours = totalHours % 24;
+  if (weeks > 0) {
+    return days > 0 ? `Overdue by ${weeks}w ${days}d` : `Overdue by ${weeks}w`;
+  }
+  if (days > 0) {
+    return hours > 0 ? `Overdue by ${days}d ${hours}h` : `Overdue by ${days}d`;
+  }
+  return `Overdue by ${hours}h`;
 }
 
 function nextRunList(schedule: ScheduleRecord): string[] {

@@ -33,6 +33,7 @@ export function BackupHistoryTables({
   clientLabel,
   error,
   migrationLinks,
+  onCreatePolicy,
   onDownloadArtifact,
   onOpenRequestArtifact,
   onPlanRestoreSource,
@@ -47,6 +48,7 @@ export function BackupHistoryTables({
   clientLabel: (clientId: string) => string;
   error: string | null;
   migrationLinks: MigrationLinkRecord[];
+  onCreatePolicy?: () => void;
   onDownloadArtifact?: (
     artifact: BackupArtifactRecord,
     backup: BackupRequestRecord | null,
@@ -70,7 +72,12 @@ export function BackupHistoryTables({
   }
 
   if (activeSubpage === "policies") {
-    return <BackupPoliciesTable policies={backupPolicies} />;
+    return (
+      <BackupPoliciesTable
+        onCreatePolicy={onCreatePolicy}
+        policies={backupPolicies}
+      />
+    );
   }
   if (activeSubpage === "artifacts") {
     return (
@@ -116,7 +123,13 @@ export function BackupHistoryTables({
   );
 }
 
-function BackupPoliciesTable({ policies }: { policies: BackupPolicyRecord[] }) {
+function BackupPoliciesTable({
+  onCreatePolicy,
+  policies,
+}: {
+  onCreatePolicy?: () => void;
+  policies: BackupPolicyRecord[];
+}) {
   const columns: ConsoleDataGridColumn<BackupPolicyRecord>[] = [
     {
       id: "policy",
@@ -261,6 +274,14 @@ function BackupPoliciesTable({ policies }: { policies: BackupPolicyRecord[] }) {
         defaultPageSize={6}
         empty={
           <GridEmpty
+            action={
+              onCreatePolicy
+                ? {
+                    label: "Create policy",
+                    onClick: onCreatePolicy,
+                  }
+                : undefined
+            }
             icon={<CalendarClock size={20} />}
             title="No scheduled backups"
             text="Create a policy for automatic backups, or use Back up now in Requests for a one-time backup."
@@ -688,23 +709,26 @@ function ArtifactHistoryTable({
       header: "Restore",
       size: 115,
       minSize: 105,
-      sortValue: (artifact) => (backupForArtifact(artifact) ? "restore" : "disabled"),
-      searchValue: () => "restore",
+      sortValue: (artifact) =>
+        backupForArtifact(artifact) && artifactPackageReady(artifact)
+          ? "restore"
+          : "disabled",
+      searchValue: (artifact) =>
+        `restore ${artifactPackageReady(artifact) ? "available package" : "unverified package"}`,
       cell: (artifact) => {
         const backup = backupForArtifact(artifact);
+        const restoreReady = Boolean(backup && artifactPackageReady(artifact));
         return (
           <button
             className="secondaryAction compactAction"
-            disabled={!backup || !onRestoreArtifact}
+            disabled={!restoreReady || !onRestoreArtifact}
             onClick={(event) => {
               event.stopPropagation();
-              onRestoreArtifact?.(artifact, backup);
+              if (backup && restoreReady) {
+                onRestoreArtifact?.(artifact, backup);
+              }
             }}
-            title={
-              backup
-                ? "Open the restore workflow with this artifact source selected."
-                : "Restore requires a linked backup request."
-            }
+            title={artifactRestoreActionTitle(backup, restoreReady)}
             type="button"
           >
             <RotateCcw size={15} />
@@ -718,23 +742,26 @@ function ArtifactHistoryTable({
       header: "Download",
       size: 150,
       minSize: 130,
-      sortValue: (artifact) => (backupForArtifact(artifact) ? "download" : "disabled"),
-      searchValue: () => "download package transfer package",
+      sortValue: (artifact) =>
+        backupForArtifact(artifact) && artifactPackageReady(artifact)
+          ? "download"
+          : "disabled",
+      searchValue: (artifact) =>
+        `download package transfer package ${artifactPackageReady(artifact) ? "available package" : "unverified package"}`,
       cell: (artifact) => {
         const backup = backupForArtifact(artifact);
+        const downloadReady = Boolean(backup && artifactPackageReady(artifact));
         return (
           <button
             className="secondaryAction compactAction"
-            disabled={!backup || !onDownloadArtifact}
+            disabled={!downloadReady || !onDownloadArtifact}
             onClick={(event) => {
               event.stopPropagation();
-              onDownloadArtifact?.(artifact, backup);
+              if (backup && downloadReady) {
+                onDownloadArtifact?.(artifact, backup);
+              }
             }}
-            title={
-              backup
-                ? "Download the backup artifact package in this browser."
-                : "Download requires a linked backup request."
-            }
+            title={artifactDownloadActionTitle(backup, downloadReady)}
             type="button"
           >
             <Download size={15} />
@@ -800,6 +827,36 @@ function ArtifactHistoryTable({
       />
     </GridSection>
   );
+}
+
+function artifactPackageReady(artifact: BackupArtifactRecord): boolean {
+  return artifact.status === "active";
+}
+
+function artifactRestoreActionTitle(
+  backup: BackupRequestRecord | null,
+  restoreReady: boolean,
+): string {
+  if (!backup) {
+    return "Restore requires a linked backup request.";
+  }
+  if (!restoreReady) {
+    return "Restore disabled until artifact bytes are available and verified.";
+  }
+  return "Open the restore workflow with this verified package source selected.";
+}
+
+function artifactDownloadActionTitle(
+  backup: BackupRequestRecord | null,
+  downloadReady: boolean,
+): string {
+  if (!backup) {
+    return "Download requires a linked backup request.";
+  }
+  if (!downloadReady) {
+    return "Download disabled until artifact bytes are available and verified.";
+  }
+  return "Download the verified backup artifact package in this browser.";
 }
 
 function RestoreSourcesTable({
@@ -1236,10 +1293,12 @@ function GridSection({
 }
 
 function GridEmpty({
+  action,
   icon,
   text,
   title,
 }: {
+  action?: { label: string; onClick: () => void };
   icon: React.ReactNode;
   text: string;
   title: string;
@@ -1249,6 +1308,15 @@ function GridEmpty({
       {icon}
       <strong>{title}</strong>
       <span>{text}</span>
+      {action ? (
+        <button
+          className="primaryAction compactAction"
+          onClick={action.onClick}
+          type="button"
+        >
+          {action.label}
+        </button>
+      ) : null}
     </div>
   );
 }

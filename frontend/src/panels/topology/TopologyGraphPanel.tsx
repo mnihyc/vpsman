@@ -11,12 +11,14 @@ import {
 import { topologyEdgeHealthStatusBadgeClass } from "../../jobStatusPresentation";
 import { consolePalette } from "../../colorPalette";
 import { usePanelDisplaySettings } from "../../panelDisplay";
+import { agentDisplayState } from "../../agentDisplayState";
 import {
   OSPF_COST_MODEL_DETAIL,
   OSPF_COST_MODEL_SUMMARY,
   readableTelemetryToken,
 } from "../../topologyRuntime";
 import type {
+  AgentView,
   RuntimeConfigApplyStateRecord,
   TopologyGraph,
   TopologyGraphEdge,
@@ -61,12 +63,14 @@ const healthFilters: { label: string; value: HealthFilter }[] = [
 ];
 
 export function TopologyGraphPanel({
+  agents,
   graph,
   loading,
   onOpenVpsDetail,
   onRefresh,
   runtimeConfigApplyStates,
 }: {
+  agents: AgentView[];
   graph: TopologyGraph;
   loading: boolean;
   onOpenVpsDetail?: (clientId: string) => void;
@@ -80,6 +84,10 @@ export function TopologyGraphPanel({
   const [graphZoom, setGraphZoom] = useState(1);
   const [graphPan, setGraphPan] = useState<GraphPan>({ x: 0, y: 0 });
   const [mobileGraphOpen, setMobileGraphOpen] = useState(false);
+  const agentById = useMemo(
+    () => new Map(agents.map((agent) => [agent.id, agent])),
+    [agents],
+  );
   const filtered = useMemo(
     () => filterGraph(graph, query, healthFilter),
     [graph, healthFilter, query],
@@ -107,6 +115,9 @@ export function TopologyGraphPanel({
   );
   const selectedRuntimeState = selectedNode
     ? (runtimeStateByClientId.get(selectedNode.client_id) ?? null)
+    : null;
+  const selectedDisplayState = selectedNode
+    ? nodeDisplayState(selectedNode, agentById)
     : null;
   const showEdgeLabels = filtered.edges.length <= 14 && nodes.length <= 12;
   const graphTransform = graphTransformFor(graphZoom, graphPan, layout.height);
@@ -364,7 +375,7 @@ export function TopologyGraphPanel({
                 {nodes.map((node) => (
                   <g
                     aria-label={`Select ${nodeLabel(node, vpsNameDisplayMode)}`}
-                    className={`topologyGraphNode ${selectedNode?.client_id === node.client_id ? "selected" : ""} ${node.degraded_tunnel_count > 0 ? "degraded" : node.status}`}
+                    className={`topologyGraphNode ${selectedNode?.client_id === node.client_id ? "selected" : ""} ${node.degraded_tunnel_count > 0 ? "degraded" : nodeStatusClass(node, agentById)}`}
                     key={node.client_id}
                     onClick={() => setSelectedClientId(node.client_id)}
                     onKeyDown={(event) => {
@@ -375,7 +386,7 @@ export function TopologyGraphPanel({
                     role="button"
                     tabIndex={0}
                   >
-                    <title>{nodeHoverDetail(node, vpsNameDisplayMode)}</title>
+                    <title>{nodeHoverDetail(node, vpsNameDisplayMode, agentById)}</title>
                     <circle cx={node.x} cy={node.y} r="42" />
                     <text x={node.x} y={node.y - 8}>
                       {nodeLabel(node, vpsNameDisplayMode)}
@@ -436,7 +447,10 @@ export function TopologyGraphPanel({
               <span className="historyPrimary">
                 <strong>{nodeLabel(selectedNode, vpsNameDisplayMode)}</strong>
                 <small>
-                  {selectedNode.status}; {selectedEdges.length} visible tunnels
+                  {selectedDisplayState
+                    ? `${selectedDisplayState.label}; ${selectedDisplayState.detail}`
+                    : `Topology identity ${humanStatus(selectedNode.status)}`}
+                  ; {selectedEdges.length} visible tunnels
                 </small>
               </span>
               <span className="topologyTagList">
@@ -998,13 +1012,43 @@ function edgeEndpointLabel(
   return `${left ? nodeLabel(left, mode) : "Unknown VPS"} -> ${right ? nodeLabel(right, mode) : "Unknown VPS"}`;
 }
 
+function nodeDisplayState(
+  node: TopologyGraphNode,
+  agentById: Map<string, AgentView>,
+) {
+  const agent = agentById.get(node.client_id);
+  return agent ? agentDisplayState(agent) : null;
+}
+
+function nodeStatusClass(
+  node: TopologyGraphNode,
+  agentById: Map<string, AgentView>,
+): string {
+  const displayState = nodeDisplayState(node, agentById);
+  if (!displayState) {
+    return node.status || "unknown";
+  }
+  if (displayState.label === "Online") {
+    return "online";
+  }
+  if (displayState.label === "Offline") {
+    return "unknown";
+  }
+  return displayState.tone === "ok" ? "online" : "stale";
+}
+
 function nodeHoverDetail(
   node: TopologyGraphNode,
   mode: VpsNameDisplayMode,
+  agentById: Map<string, AgentView>,
 ): string {
+  const displayState = nodeDisplayState(node, agentById);
+  const statusDetail = displayState
+    ? `${displayState.label}; ${displayState.detail}; topology ${humanStatus(node.status)}`
+    : humanStatus(node.status);
   return [
     nodeLabel(node, mode),
-    `status ${humanStatus(node.status)}`,
+    `status ${statusDetail}`,
     `${node.applied_tunnel_count}/${node.tunnel_count} applied`,
     `${node.degraded_tunnel_count} degraded`,
     `region ${regionLabel(node)}`,

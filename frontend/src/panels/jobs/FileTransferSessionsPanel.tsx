@@ -4,6 +4,7 @@ import type { ArtifactDownloadMode } from "../../artifactDownload";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
+  type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { VpsCombobox } from "../../components/VpsCombobox";
@@ -139,6 +140,49 @@ export function FileTransferSessionsPanel({
     handoffError ??
     handoffProgress ??
     `${downloadTransfers.length} downloads, ${uploadTransfers.length} uploads tracked`;
+  const transferRowActions: ConsoleDataGridAction<FileTransferSessionRecord>[] = [
+    {
+      description: ([transfer]) =>
+        transfer ? handoffReadyTitle(transfer) : "Download retained transfer output",
+      disabled: ([transfer]) =>
+        transfer
+          ? handoffPendingKey === transferKey(transfer) || handoffPendingKey === "bulk"
+          : true,
+      hidden: ([transfer]) => !transfer || !canCreateHandoff(transfer),
+      icon: <Download size={14} />,
+      label: "Download",
+      onSelect: ([transfer]) => {
+        if (transfer) {
+          reviewHandoff(transfer);
+        }
+      },
+    },
+    {
+      description: () => "Review retry metadata and reopen the resumable transfer composer.",
+      hidden: ([transfer]) => !transfer || !canReviewRetry(transfer),
+      icon: <RotateCcw size={14} />,
+      label: "Retry",
+      onSelect: ([transfer]) => {
+        if (transfer) {
+          setRetrySnapshot(retryReviewSnapshot(transfer, clientLabel));
+        }
+      },
+    },
+    {
+      description: ([transfer]) =>
+        transfer
+          ? `Open the last job that updated transfer ${shortId(transfer.session_id)}.`
+          : "Open the last transfer job.",
+      hidden: () => !onOpenJobDetails,
+      icon: <ExternalLink size={14} />,
+      label: "Job",
+      onSelect: ([transfer]) => {
+        if (transfer) {
+          onOpenJobDetails?.(transfer.last_job_id);
+        }
+      },
+    },
+  ];
   const sourceColumns: ConsoleDataGridColumn<FileTransferSourceArtifactRecord>[] = [
     {
       cell: (source) => (
@@ -906,6 +950,7 @@ export function FileTransferSessionsPanel({
           </div>
         )}
         rows={transfers}
+        rowActions={transferRowActions}
         searchPlaceholder="Search transfers"
         selectable={false}
         mobileFieldLayout="stacked"

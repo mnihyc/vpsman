@@ -107,7 +107,7 @@ test("starts the default upload flow in resumable dispatch", async ({ page }, te
   await expect(page.getByRole("heading", { level: 1, name: "Command dispatch" })).toBeVisible();
   const composer = page.locator(".fleetPanel", { hasText: "Dispatch command" });
   await expect(composer.getByRole("button", { name: "Resumable upload", exact: true })).toHaveClass(/selected/);
-  await expect(composer.getByLabel("Bulk target selector expression")).toContainText("id:agent-sfo-01");
+  await expect(composer.getByLabel("Bulk target selector expression")).toHaveValue("id:agent-sfo-01");
   await expect(composer.getByLabel("Resumable upload path")).toHaveValue("/tmp/quick-upload.bin");
   await expect(composer.getByLabel("Resumable upload source").locator("..")).toContainText(
     "Selected quick-upload.bin",
@@ -151,7 +151,7 @@ test("opens failed transfer retry metadata in resumable dispatch", async ({ page
   await expect(page.getByRole("heading", { level: 1, name: "Command dispatch" })).toBeVisible();
   const composer = page.locator(".fleetPanel", { hasText: "Dispatch command" });
   await expect(composer.getByRole("button", { name: "Resumable download" })).toHaveClass(/selected/);
-  await expect(composer.getByLabel("Bulk target selector expression")).toContainText("id:agent-sfo-01");
+  await expect(composer.getByLabel("Bulk target selector expression")).toHaveValue("id:agent-sfo-01");
   await expect(composer.getByLabel("Resumable download path")).toHaveValue("/var/log/nginx/error.log");
   await expect(composer.getByLabel("Resumable download filename")).toHaveValue("error.log");
   await expect(composer.getByLabel("Resumable download chunk bytes")).toHaveValue("65536");

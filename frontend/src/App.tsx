@@ -1,5 +1,4 @@
 import {
-  lazy,
   Suspense,
   useCallback,
   useEffect,
@@ -10,6 +9,7 @@ import {
   ConsoleShell,
   type CommandPaletteItem,
 } from "./components/ConsoleShell";
+import { WorkspaceErrorBoundary } from "./components/WorkspaceErrorBoundary";
 import { AuthPanel } from "./panels/AuthPanel";
 import { FleetAlertsPanel } from "./panels/FleetAlertsPanel";
 import { FleetMonitorPanel } from "./panels/FleetMonitorPanel";
@@ -22,9 +22,9 @@ import type { ActiveView, AgentView, FleetSummary } from "./types";
 import type { PrivilegeMaterial } from "./privilege";
 import { defaultSubpages, normalizeSubpage, viewSubpages } from "./constants";
 import {
-  DEFAULT_OPERATOR_PREFERENCES,
   getPageDescription,
   getPageTitle,
+  sanitizeOperatorPreferences,
   setPreferredTimeZone,
   type VpsNameDisplayMode,
 } from "./utils";
@@ -35,6 +35,7 @@ import type {
   JobDispatchPreset,
   JobDispatchPresetInput,
 } from "./jobDispatchPreset";
+import { retryableLazy } from "./lazyImport";
 
 type ReleaseRouteTarget = AgentView | string;
 
@@ -48,114 +49,114 @@ type ReleaseRouteHelpers = {
   openVpsDetail: (target: ReleaseRouteTarget) => void;
 };
 
-const HomePanel = lazy(() =>
+const HomePanel = retryableLazy(() =>
   import("./panels/HomePanel").then((module) => ({
     default: module.HomePanel,
   })),
 );
-const FleetWorkspace = lazy(() =>
+const FleetWorkspace = retryableLazy(() =>
   import("./panels/FleetWorkspace").then((module) => ({
     default: module.FleetWorkspace,
   })),
 );
-const VpsDetailPanel = lazy(() =>
+const VpsDetailPanel = retryableLazy(() =>
   import("./panels/VpsDetailPanel").then((module) => ({
     default: module.VpsDetailPanel,
   })),
 );
-const ConfigPanel = lazy(() =>
+const ConfigPanel = retryableLazy(() =>
   import("./panels/ConfigPanel").then((module) => ({
     default: module.ConfigPanel,
   })),
 );
-const JobsPanel = lazy(() =>
+const JobsPanel = retryableLazy(() =>
   import("./panels/JobsPanel").then((module) => ({
     default: module.JobsPanel,
   })),
 );
-const RemoteOperationsPanel = lazy(() =>
+const RemoteOperationsPanel = retryableLazy(() =>
   import("./panels/RemoteOperationsPanel").then((module) => ({
     default: module.RemoteOperationsPanel,
   })),
 );
-const ServerJobsPanel = lazy(() =>
+const ServerJobsPanel = retryableLazy(() =>
   import("./panels/jobs/ServerJobsPanel").then((module) => ({
     default: module.ServerJobsPanel,
   })),
 );
-const FleetGroupsPanel = lazy(() =>
+const FleetGroupsPanel = retryableLazy(() =>
   import("./panels/FleetGroupsPanel").then((module) => ({
     default: module.FleetGroupsPanel,
   })),
 );
-const SchedulesPanel = lazy(() =>
+const SchedulesPanel = retryableLazy(() =>
   import("./panels/SchedulesPanel").then((module) => ({
     default: module.SchedulesPanel,
   })),
 );
-const SourceTemplatePanel = lazy(() =>
+const SourceTemplatePanel = retryableLazy(() =>
   import("./panels/SourceTemplatesPanel").then((module) => ({
     default: module.SourceTemplatePanel,
   })),
 );
-const AgentUpdateReleasesPanel = lazy(() =>
+const AgentUpdateReleasesPanel = retryableLazy(() =>
   import("./panels/automation/AgentUpdateReleasesPanel").then((module) => ({
     default: module.AgentUpdateReleasesPanel,
   })),
 );
-const RunbooksPanel = lazy(() =>
+const RunbooksPanel = retryableLazy(() =>
   import("./panels/automation/RunbooksPanel").then((module) => ({
     default: module.RunbooksPanel,
   })),
 );
-const FleetMetricsPanel = lazy(() =>
+const FleetMetricsPanel = retryableLazy(() =>
   import("./panels/observability/FleetMetricsPanel").then((module) => ({
     default: module.FleetMetricsPanel,
   })),
 );
-const NetworkMetricsPanel = lazy(() =>
+const NetworkMetricsPanel = retryableLazy(() =>
   import("./panels/observability/NetworkMetricsPanel").then((module) => ({
     default: module.NetworkMetricsPanel,
   })),
 );
-const AlertsPanel = lazy(() =>
+const AlertsPanel = retryableLazy(() =>
   import("./panels/observability/AlertsPanel").then((module) => ({
     default: module.AlertsPanel,
   })),
 );
-const WebhooksPanel = lazy(() =>
+const WebhooksPanel = retryableLazy(() =>
   import("./panels/observability/WebhooksPanel").then((module) => ({
     default: module.WebhooksPanel,
   })),
 );
-const ObservabilityDashboardsPanel = lazy(() =>
+const ObservabilityDashboardsPanel = retryableLazy(() =>
   import("./panels/observability/ObservabilityDashboardsPanel").then(
     (module) => ({
       default: module.ObservabilityDashboardsPanel,
     }),
   ),
 );
-const AccessPanel = lazy(() =>
+const AccessPanel = retryableLazy(() =>
   import("./panels/AccessPanel").then((module) => ({
     default: module.AccessPanel,
   })),
 );
-const AuditLogPanel = lazy(() =>
+const AuditLogPanel = retryableLazy(() =>
   import("./panels/AuditLogPanel").then((module) => ({
     default: module.AuditLogPanel,
   })),
 );
-const BackupsPanel = lazy(() =>
+const BackupsPanel = retryableLazy(() =>
   import("./panels/BackupsPanel").then((module) => ({
     default: module.BackupsPanel,
   })),
 );
-const TopologyPanel = lazy(() =>
+const TopologyPanel = retryableLazy(() =>
   import("./panels/TopologyPanel").then((module) => ({
     default: module.TopologyPanel,
   })),
 );
-const SystemPanel = lazy(() =>
+const SystemPanel = retryableLazy(() =>
   import("./panels/SystemPanel").then((module) => ({
     default: module.SystemPanel,
   })),
@@ -417,10 +418,7 @@ export function App() {
   const dashboard = useDashboardData(activeView);
   const fleetViews = useFleetViews(dashboard.agents);
   const operatorPreferences = useMemo(
-    () => ({
-      ...DEFAULT_OPERATOR_PREFERENCES,
-      ...(dashboard.operator?.preferences ?? {}),
-    }),
+    () => sanitizeOperatorPreferences(dashboard.operator?.preferences),
     [dashboard.operator?.preferences],
   );
   const visibleAgents = fleetViews.filteredAgents;
@@ -462,9 +460,9 @@ export function App() {
   }, [shellSummary.online, shellSummary.total]);
   const pageDescription =
     activeView === "Fleet" && hasFleetScope
-      ? `${visibleSummary.online} visible online / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
+      ? `${visibleSummary.online} visible live / ${visibleSummary.total} visible / ${dashboard.summary.total} total`
       : activeView === "Fleet"
-        ? `${visibleSummary.online} online / ${visibleSummary.total} total`
+        ? `${visibleSummary.online} live / ${visibleSummary.total} total`
         : getScopedPageDescription(activeView, activeSubpage);
 
   useEffect(() => {
@@ -761,7 +759,7 @@ export function App() {
         fleetAlerts={dashboard.fleetAlerts}
         jobs={dashboard.jobs}
         schedules={dashboard.schedules}
-        summary={dashboard.summary}
+        summary={visibleSummary}
         systemDashboard={dashboard.systemDashboard}
         telemetryNetworkRates={dashboard.telemetryNetworkRates}
         telemetryRollups={dashboard.telemetryRollups}
@@ -848,7 +846,7 @@ export function App() {
         onUpsertFleetAlertPolicy={dashboard.upsertFleetAlertPolicy}
         onUpsertWebhookRule={dashboard.upsertWebhookRule}
         selectedAgent={selectedAgent}
-        summary={dashboard.summary}
+        summary={visibleSummary}
         tags={dashboard.tags}
         targetAgents={dashboard.agents}
         telemetryNetworkRates={dashboard.telemetryNetworkRates}
@@ -927,7 +925,7 @@ export function App() {
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
         sourceStatus={dashboard.sourceStatus}
         sourceTemplateAssignments={dashboard.sourceTemplateAssignments}
-        summary={dashboard.summary}
+        summary={visibleSummary}
         telemetryNetworkRates={dashboard.telemetryNetworkRates}
         telemetryRollups={dashboard.telemetryRollups}
         telemetryTunnels={dashboard.telemetryTunnels}
@@ -1071,6 +1069,8 @@ export function App() {
           onResolveBulk={dashboard.resolveBulkPreview}
           onTestTemplate={dashboard.testSourceTemplate}
           onUpdateTemplate={dashboard.updateSourceTemplate}
+          privilegeMaterial={privilegeMaterial}
+          setPrivilegeMaterial={setPrivilegeMaterial}
           templates={dashboard.sourceTemplates}
         />
       </section>
@@ -1393,24 +1393,32 @@ export function App() {
         lastLiveEvent={dashboard.lastLiveEvent}
         loading={dashboard.accessLoading}
         onClearSession={dashboard.clearSession}
+        onClearOperatorTotp={dashboard.clearOperatorTotp}
         onConfirmTotp={dashboard.confirmTotp}
+        onCreateOperator={dashboard.createOperator}
         onUpsertAgentIdentity={dashboard.upsertAgentIdentity}
         onDisableTotp={dashboard.disableTotp}
+        onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenSystemConfig={() => selectView("System", "suite_config")}
-        onOpenSystemPreferences={() => selectView("System", "preferences")}
         onOpenSystemSessions={() => selectView("Audit", "sessions")}
-        onOpenSystemUsers={() => selectView("Access", "operators")}
+        onOpenTerminalSessions={() => selectView("Remote Operations", "terminal")}
         onRefresh={dashboard.loadCurrentOperator}
+        onResetOperatorPassword={dashboard.resetOperatorPassword}
         onRevokeClientKey={dashboard.revokeClientKey}
+        onRevokeOperatorSession={dashboard.revokeOperatorSession}
         onSelectSubpage={(subpage) => selectView("Access", subpage)}
+        onSetOperatorStatus={dashboard.setOperatorStatus}
         onSetupTotp={dashboard.setupTotp}
+        onUpdateOperator={dashboard.updateOperator}
         operator={dashboard.operator}
+        operatorAuthEvents={dashboard.operatorAuthEvents}
         operatorSessions={dashboard.operatorSessions}
         operators={dashboard.operators}
         privilegeMaterial={privilegeMaterial}
         clientKeyRevocations={dashboard.clientKeyRevocations}
         keyLifecycleReport={dashboard.keyLifecycleReport}
         setPrivilegeMaterial={setPrivilegeMaterial}
+        terminalSessions={dashboard.terminalSessions}
         wsState={dashboard.wsState}
       />
     );
@@ -1686,9 +1694,15 @@ export function App() {
         summary={shellSummary}
         summaryScopeLabel={summaryScopeLabel}
       >
-        <Suspense fallback={<ConsolePanelFallback view={activeView} />}>
-          {renderActivePanel()}
-        </Suspense>
+        <WorkspaceErrorBoundary
+          resetKey={`${activeView}:${activeSubpage}`}
+          subpageLabel={pageTitle}
+          viewLabel={activeView}
+        >
+          <Suspense fallback={<ConsolePanelFallback view={activeView} />}>
+            {renderActivePanel()}
+          </Suspense>
+        </WorkspaceErrorBoundary>
       </ConsoleShell>
     </PanelDisplayProvider>
   );

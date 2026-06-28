@@ -4,6 +4,7 @@ import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
+import { agentDisplayState } from "../../agentDisplayState";
 import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
 import {
   buildBulkJobProgress,
@@ -84,6 +85,14 @@ type BulkLiveMatchSummaryModel = {
   value: string;
 };
 
+type BulkPathReadiness = {
+  detail: string;
+  label: string;
+  normalizedPath: string | null;
+  shortLabel: string;
+  validationError: string | null;
+};
+
 export function MultiFileActionsPanel({
   agents,
   initialPath,
@@ -161,6 +170,7 @@ export function MultiFileActionsPanel({
     setLastOutputs([]);
     setLastOperation(null);
     setLastJobId(null);
+    setLastPayloadHash(null);
     setActionMessage(null);
   }
 
@@ -171,6 +181,7 @@ export function MultiFileActionsPanel({
   function invalidateBulkReview() {
     invalidateReviewGeneration();
     clearPendingConfirmation();
+    clearExecutionResults();
   }
 
   async function refreshPreview() {
@@ -230,7 +241,7 @@ export function MultiFileActionsPanel({
   }
 
   async function buildOperation(): Promise<JobOperation> {
-    const normalizedPath = normalizeBulkOperationPath(action, path, allowRootPath);
+    const normalizedPath = normalizedBulkPathOrThrow(pathReadiness);
     if (action === "download_files") {
       return {
         type: "file_download",
@@ -243,7 +254,7 @@ export function MultiFileActionsPanel({
       if (!uploadFile) {
         throw new Error("Choose a file to upload");
       }
-      return await buildUploadOperation(uploadFile, uploadDestinationPath(path, uploadFile.name), uploadMode, {
+      return await buildUploadOperation(uploadFile, uploadDestinationPath(path, normalizedPath, uploadFile.name), uploadMode, {
         existingPolicy: uploadExistingPolicy,
         owner: uploadOwner.trim() || null,
         group: uploadGroup.trim() || null,
@@ -388,7 +399,6 @@ export function MultiFileActionsPanel({
   }
 
   const visibleProgress = bulkProgress ?? lastRunProgress;
-  const pathValidationError = bulkPathValidationError(action, path, allowRootPath);
   const pathReadiness = bulkPathReadiness(action, path, allowRootPath);
   const preflightItems = buildBulkPreflightItems({
     action,
@@ -398,7 +408,6 @@ export function MultiFileActionsPanel({
     localMatches,
     overwrite,
     pathReadiness,
-    pathValidationError,
     policy,
     preview,
     privilegeMaterial,
@@ -419,9 +428,8 @@ export function MultiFileActionsPanel({
   });
   const reviewButtonTitle = bulkReviewButtonTitle({
     action,
-    allowRootPath,
     loading,
-    path,
+    pathReadiness,
     pending,
     privilegeMaterial,
   });
@@ -1437,12 +1445,12 @@ function parseMode(value: string): number {
   return parseFileMode(normalized);
 }
 
-function uploadDestinationPath(path: string, fileName: string): string {
+function uploadDestinationPath(path: string, normalizedPath: string, fileName: string): string {
   const trimmed = path.trim();
   if (trimmed.endsWith("/")) {
     return normalizeAbsolutePath(`${trimmed}${fileName}`);
   }
-  return normalizeAbsolutePath(trimmed);
+  return normalizedPath;
 }
 
 function initialBulkPath(initialPath: string): string {
@@ -1466,7 +1474,6 @@ function buildBulkPreflightItems({
   localMatches,
   overwrite,
   pathReadiness,
-  pathValidationError,
   policy,
   preview,
   privilegeMaterial,
@@ -1481,8 +1488,7 @@ function buildBulkPreflightItems({
   followSymlinks: boolean;
   localMatches: AgentView[];
   overwrite: boolean;
-  pathReadiness: { detail: string; label: string; shortLabel: string };
-  pathValidationError: string | null;
+  pathReadiness: BulkPathReadiness;
   policy: FileActionPolicy;
   preview: BulkResolveResponse | null;
   privilegeMaterial: PrivilegeMaterial | null;
@@ -1500,7 +1506,7 @@ function buildBulkPreflightItems({
       detail: pathReadiness.detail,
       key: "path",
       label: "Path readiness",
-      tone: pathValidationError ? "attention" : "ready",
+      tone: pathReadiness.validationError ? "attention" : "ready",
       value: pathReadiness.label,
     },
     {
@@ -1510,7 +1516,7 @@ function buildBulkPreflightItems({
       key: "targets",
       label: preview ? "Server target preview" : "Local selector estimate",
       tone: targetTone,
-      value: preview ? formatTargetAvailabilitySummary(targets) : `${localMatches.length}/${agentCount} local matches`,
+      value: preview ? formatTargetAvailabilitySummary(targets) : formatLocalAvailabilitySummary(localMatches, agentCount),
     },
     bulkTransferEstimateItem({
       action,
@@ -1556,12 +1562,16 @@ function buildBulkLiveMatchSummary({
   const attentionTargets = targets
     .filter((target) => target.status === "stale" || targetPreflightUnavailable(target))
     .slice(0, 6)
-    .map((target) => ({
-      id: target.id,
-      label: `${targetDisplayName(target)} ${target.status}`,
-      title: `${target.display_name || target.id} / ${target.id} / ${target.status}`,
-      tone: target.status === "stale" ? "stale" as const : "unavailable" as const,
-    }));
+    .map((target) => {
+      const displayState = agentDisplayState(target);
+      const isStale = displayState.label === "Stale";
+      return {
+        id: target.id,
+        label: `${targetDisplayName(target)} ${displayState.label}`,
+        title: `${target.display_name || target.id} / ${target.id} / ${displayState.detail}`,
+        tone: isStale ? "stale" as const : "unavailable" as const,
+      };
+    });
   const hiddenAttentionCount =
     availability.stale + availability.unavailable - attentionTargets.length;
   if (hiddenAttentionCount > 0) {
@@ -1579,7 +1589,7 @@ function buildBulkLiveMatchSummary({
         "This is the browser-side selector estimate. Run re-resolves the selector on the server immediately before confirmation; Refresh scope shows the server view earlier.",
       label: "Live match summary",
       tone: attentionTargets.length > 0 ? "attention" : "neutral",
-      value: `${localMatches.length}/${agentCount} local matches · ${ready} ready`,
+      value: formatBulkLiveMatchValue(localMatches.length, ready, availability),
     };
   }
   return {
@@ -1588,8 +1598,38 @@ function buildBulkLiveMatchSummary({
       "Server scope is previewed. Run still re-resolves before confirmation so stale cached target scope cannot execute.",
     label: "Live match summary",
     tone: attentionTargets.length > 0 ? "attention" : "ready",
-    value: `${preview.target_count} resolved · ${ready} ready`,
+    value: formatBulkLiveMatchValue(preview.target_count, ready, availability),
   };
+}
+
+function formatBulkLiveMatchValue(
+  matched: number,
+  ready: number,
+  availability: ReturnType<typeof targetAvailabilityCounts>,
+): string {
+  const parts = [`${matched} matched`, `${ready} ready`];
+  if (availability.stale > 0) {
+    parts.push(`${availability.stale} stale excluded from ready`);
+  }
+  if (availability.unavailable > 0) {
+    parts.push(`${availability.unavailable} unavailable blocked`);
+  }
+  return parts.join(" · ");
+}
+
+function formatLocalAvailabilitySummary(localMatches: AgentView[], agentCount: number): string {
+  const availability = targetAvailabilityCounts(localMatches);
+  if (availability.stale === 0 && availability.unavailable === 0) {
+    return `${localMatches.length}/${agentCount} local matches`;
+  }
+  const parts = [`${availability.online} live`];
+  if (availability.stale > 0) {
+    parts.push(`${availability.stale} stale`);
+  }
+  if (availability.unavailable > 0) {
+    parts.push(`${availability.unavailable} unavailable`);
+  }
+  return `${localMatches.length}/${agentCount} local matches (${parts.join(", ")})`;
 }
 
 function bulkTransferEstimateItem({
@@ -1709,16 +1749,11 @@ function buildBulkPostRunItems({
   ];
 }
 
-function normalizeBulkOperationPath(
-  action: MultiFileAction,
-  value: string,
-  allowRootPath: boolean,
-): string {
-  const validationError = bulkPathValidationError(action, value, allowRootPath);
-  if (validationError) {
-    throw new Error(validationError);
+function normalizedBulkPathOrThrow(pathReadiness: BulkPathReadiness): string {
+  if (!pathReadiness.normalizedPath) {
+    throw new Error(pathReadiness.validationError ?? pathReadiness.detail);
   }
-  return normalizeAbsolutePath(value);
+  return pathReadiness.normalizedPath;
 }
 
 function bulkPathValidationError(
@@ -1772,13 +1807,15 @@ function bulkPathReadiness(
   action: MultiFileAction,
   value: string,
   allowRootPath: boolean,
-): { detail: string; label: string; shortLabel: string } {
+): BulkPathReadiness {
   const validationError = bulkPathValidationError(action, value, allowRootPath);
   if (validationError) {
     return {
       detail: validationError,
       label: "Needs path",
+      normalizedPath: null,
       shortLabel: "enter a path",
+      validationError,
     };
   }
   const normalized = normalizeAbsolutePath(value);
@@ -1786,28 +1823,30 @@ function bulkPathReadiness(
     return {
       detail: "Filesystem root was explicitly approved for this run. Confirm target scope before executing.",
       label: "Root path explicitly allowed",
+      normalizedPath: normalized,
       shortLabel: "root path approved",
+      validationError: null,
     };
   }
   return {
-      detail: `${normalized} will be resolved again during Run with the latest target selector.`,
+    detail: `${normalized} will be resolved again during Run with the latest target selector.`,
     label: normalized,
+    normalizedPath: normalized,
     shortLabel: normalized,
+    validationError: null,
   };
 }
 
 function bulkReviewButtonTitle({
   action,
-  allowRootPath,
   loading,
-  path,
+  pathReadiness,
   pending,
   privilegeMaterial,
 }: {
   action: MultiFileAction;
-  allowRootPath: boolean;
   loading: boolean;
-  path: string;
+  pathReadiness: BulkPathReadiness;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
 }): string {
@@ -1820,7 +1859,7 @@ function bulkReviewButtonTitle({
   if (!privilegeMaterial) {
     return "Unlock privilege before running a bulk file operation.";
   }
-  return bulkPathValidationError(action, path, allowRootPath) ?? "Resolve the latest targets, preview impact, and open one confirmation.";
+  return pathReadiness.validationError ?? `Resolve the latest targets, preview impact, and open one ${bulkActionNoun(action)} confirmation.`;
 }
 
 function usesFileActionPolicy(action: MultiFileAction): boolean {

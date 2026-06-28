@@ -217,6 +217,58 @@ export function ConsoleShell({
       }
     }
   };
+  const renderSavedFleetViewControls = (className = "savedViewControls") => (
+    <div className={className} aria-label="Saved fleet views">
+      <select
+        aria-label="Saved fleet view"
+        onChange={(event) => onApplySavedFleetView(event.target.value)}
+        value={activeSavedFleetViewId ?? ""}
+      >
+        <option value="">Saved views</option>
+        {savedFleetViews.map((view) => (
+          <option key={view.id} value={view.id}>
+            {view.name}
+          </option>
+        ))}
+      </select>
+      <input
+        aria-label="Saved fleet view name"
+        onChange={(event) => onSavedFleetViewNameChange(event.target.value)}
+        placeholder="View name"
+        value={draftSavedFleetViewName}
+      />
+      <button
+        aria-label="Save current fleet view"
+        className="iconButton"
+        disabled={!fleetQuery.trim() && !draftSavedFleetViewName.trim()}
+        onClick={onSaveFleetView}
+        title="Save current fleet view"
+        type="button"
+      >
+        <BookmarkPlus size={18} />
+      </button>
+      <button
+        aria-label="Delete saved fleet view"
+        className="iconButton"
+        disabled={activeSavedFleetViewId === null}
+        onClick={onDeleteSavedFleetView}
+        title="Delete saved fleet view"
+        type="button"
+      >
+        <Trash2 size={18} />
+      </button>
+      <button
+        aria-label="Clear fleet view"
+        className="iconButton"
+        disabled={!hasFleetScope}
+        onClick={onClearFleetView}
+        title="Clear fleet view"
+        type="button"
+      >
+        <X size={18} />
+      </button>
+    </div>
+  );
 
   useEffect(() => {
     if (!operatorPreferencesReady) {
@@ -371,74 +423,40 @@ export function ConsoleShell({
             value={fleetQuery}
           />
           <div className="topbarActions">
-            <select
-              aria-label="Console page"
-              className="mobilePageSelector"
-              onChange={(event) => selectMobilePage(event.target.value)}
-              value={mobilePageValue}
-            >
-              {navSections.map((section) => (
-                <optgroup key={section.label} label={section.label}>
-                  {section.items.flatMap((item) =>
-                    (viewSubpages[item.view] ?? []).map((subpage) => (
-                      <option key={`${item.view}:${subpage.id}`} value={`${item.view}::${subpage.id}`}>
-                        {viewLabel(item.view)} / {subpage.label}
-                      </option>
-                    )),
-                  )}
-                </optgroup>
-              ))}
-            </select>
-            <div className="savedViewControls" aria-label="Saved fleet views">
+            <details className="mobilePageMenu">
+              <summary aria-label="Open mobile page navigation">
+                <FolderKanban size={17} />
+                <span>{activeViewLabel} / {activeSubpageLabel}</span>
+              </summary>
               <select
-                aria-label="Saved fleet view"
-                onChange={(event) => onApplySavedFleetView(event.target.value)}
-                value={activeSavedFleetViewId ?? ""}
+                aria-label="Console page"
+                className="mobilePageSelector"
+                onChange={(event) => selectMobilePage(event.target.value)}
+                value={mobilePageValue}
               >
-                <option value="">Saved views</option>
-                {savedFleetViews.map((view) => (
-                  <option key={view.id} value={view.id}>
-                    {view.name}
-                  </option>
+                {navSections.map((section) => (
+                  <optgroup key={section.label} label={section.label}>
+                    {section.items.flatMap((item) =>
+                      (viewSubpages[item.view] ?? []).map((subpage) => (
+                        <option key={`${item.view}:${subpage.id}`} value={`${item.view}::${subpage.id}`}>
+                          {viewLabel(item.view)} / {subpage.label}
+                        </option>
+                      )),
+                    )}
+                  </optgroup>
                 ))}
               </select>
-              <input
-                aria-label="Saved fleet view name"
-                onChange={(event) => onSavedFleetViewNameChange(event.target.value)}
-                placeholder="View name"
-                value={draftSavedFleetViewName}
-              />
-              <button
-                aria-label="Save current fleet view"
-                className="iconButton"
-                disabled={!fleetQuery.trim() && !draftSavedFleetViewName.trim()}
-                onClick={onSaveFleetView}
-                title="Save current fleet view"
-                type="button"
-              >
-                <BookmarkPlus size={18} />
-              </button>
-              <button
-                aria-label="Delete saved fleet view"
-                className="iconButton"
-                disabled={activeSavedFleetViewId === null}
-                onClick={onDeleteSavedFleetView}
-                title="Delete saved fleet view"
-                type="button"
-              >
-                <Trash2 size={18} />
-              </button>
-              <button
-                aria-label="Clear fleet view"
-                className="iconButton"
-                disabled={!hasFleetScope}
-                onClick={onClearFleetView}
-                title="Clear fleet view"
-                type="button"
-              >
-                <X size={18} />
-              </button>
-            </div>
+            </details>
+            {renderSavedFleetViewControls()}
+            <details className="mobileSavedViewMenu">
+              <summary aria-label="Open saved fleet views menu">
+                <BookmarkPlus size={17} />
+                <span>Views</span>
+              </summary>
+              {renderSavedFleetViewControls(
+                "savedViewControls mobileSavedViewControls",
+              )}
+            </details>
             <span className="controlPlanePill">
               <RadioTower size={17} />
               <span>Live control plane</span>

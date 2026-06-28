@@ -603,40 +603,45 @@ export function TerminalSessionsPanel({
               <option value="root-fallback">root, fallback to agent user</option>
             </select>
           </label>
-          <label title="Server-side idle timeout for the terminal session, clamped between 10 seconds and 24 hours.">
-            <span>Idle timeout</span>
-            <input
-              aria-label="New terminal idle timeout seconds"
-              max={86400}
-              min={10}
-              onChange={(event) => setLaunchIdleTimeoutSecs(Number(event.target.value))}
-              type="number"
-              value={launchIdleTimeoutSecs}
-            />
-          </label>
-          <label title="Initial terminal width in columns, clamped between 20 and 240. Resize later from session controls.">
-            <span>Columns</span>
-            <input
-              aria-label="New terminal columns"
-              max={240}
-              min={20}
-              onChange={(event) => setLaunchCols(Number(event.target.value))}
-              type="number"
-              value={launchCols}
-            />
-          </label>
-          <label title="Initial terminal height in rows, clamped between 5 and 120. Resize later from session controls.">
-            <span>Rows</span>
-            <input
-              aria-label="New terminal rows"
-              max={120}
-              min={5}
-              onChange={(event) => setLaunchRows(Number(event.target.value))}
-              type="number"
-              value={launchRows}
-            />
-          </label>
         </div>
+        <details className="terminalAdvancedOptions">
+          <summary>Advanced terminal options</summary>
+          <div className="terminalLaunchGrid">
+            <label title="Server-side idle timeout for the terminal session, clamped between 10 seconds and 24 hours.">
+              <span>Idle timeout</span>
+              <input
+                aria-label="New terminal idle timeout seconds"
+                max={86400}
+                min={10}
+                onChange={(event) => setLaunchIdleTimeoutSecs(Number(event.target.value))}
+                type="number"
+                value={launchIdleTimeoutSecs}
+              />
+            </label>
+            <label title="Initial terminal width in columns, clamped between 20 and 240. Resize later from session controls.">
+              <span>Columns</span>
+              <input
+                aria-label="New terminal columns"
+                max={240}
+                min={20}
+                onChange={(event) => setLaunchCols(Number(event.target.value))}
+                type="number"
+                value={launchCols}
+              />
+            </label>
+            <label title="Initial terminal height in rows, clamped between 5 and 120. Resize later from session controls.">
+              <span>Rows</span>
+              <input
+                aria-label="New terminal rows"
+                max={120}
+                min={5}
+                onChange={(event) => setLaunchRows(Number(event.target.value))}
+                type="number"
+                value={launchRows}
+              />
+            </label>
+          </div>
+        </details>
         <div className="terminalLaunchFooter">
           <span>
             {launchStatus ??

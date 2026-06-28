@@ -804,6 +804,10 @@
   overflow: hidden;
 }
 
+.tunnelPlansRegistryPanel.mobileWorkflowFocused {
+  display: none;
+}
+
 .tunnelPlansRegistryPanel .gridToolbar,
 .tunnelPlansRegistryPanel .gridToolbarActions {
   flex-wrap: wrap;
@@ -896,6 +900,13 @@
   grid-column: 1 / -1;
 }
 
+.topologyPlanComposer .primaryAction[type="submit"] {
+  position: sticky;
+  bottom: 14px;
+  z-index: var(--z-sticky);
+  justify-self: end;
+}
+
 .topologyLifecycleToggle {
   align-self: end;
   min-height: 38px;
@@ -984,6 +995,40 @@
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
   gap: 8px;
   min-width: 0;
+}
+
+.topologyEvidenceFreshness {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+}
+
+.topologyEvidenceFreshness.warning {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.topologyEvidenceFreshness strong,
+.topologyEvidenceFreshness span {
+  min-width: 0;
+}
+
+.topologyEvidenceFreshness strong {
+  color: var(--warning-text);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.topologyEvidenceFreshness span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .topologyNetworkReviewStrip > div,
@@ -1424,10 +1469,6 @@
 }
 
 @media (max-width: 760px) {
-  .tunnelPlansRegistryPanel.mobileWorkflowFocused {
-    display: none;
-  }
-
   .tunnelPlansRegistryPanel .gridToolbar {
     align-items: stretch;
     flex-direction: column;

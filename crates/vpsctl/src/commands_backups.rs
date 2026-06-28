@@ -10,7 +10,9 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use vpsman_common::{validate_absolute_file_path, JobCommand, RestoreRollbackFile};
+use vpsman_common::{
+    validate_absolute_file_path, JobCommand, RestoreRollbackFile, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+};
 
 use crate::{
     backup_artifact_validation::{
@@ -627,17 +629,13 @@ pub(crate) fn backup_request(
     };
     let target_ids = vec![client_id.clone()];
     let selector_expression = selector_expression_from_targets(&target_ids, &[]);
-    let privilege = build_privilege_for_job_command(
+    let privilege_assertion = build_backup_metadata_privilege(
         &target_ids,
         &operation,
-        "backup",
         &selector_expression,
         &password,
         &salt_hex,
         privilege_ttl_secs,
-        30,
-        false,
-        true,
     )?;
 
     println!(
@@ -653,11 +651,34 @@ pub(crate) fn backup_request(
                 "follow_symlinks": follow_symlinks,
                 "confirmed": confirmed,
                 "note": note,
-                "privilege_assertion": privilege.privilege_assertion,
+                "privilege_assertion": privilege_assertion,
             }),
         )?
     );
     Ok(())
+}
+
+pub(crate) fn build_backup_metadata_privilege(
+    target_ids: &[String],
+    operation: &JobCommand,
+    selector_expression: &str,
+    password: &str,
+    salt_hex: &str,
+    privilege_ttl_secs: u64,
+) -> Result<vpsman_common::PrivilegeAssertion> {
+    Ok(build_privilege_for_job_command(
+        target_ids,
+        operation,
+        "backup",
+        selector_expression,
+        password,
+        salt_hex,
+        privilege_ttl_secs,
+        DEFAULT_MAX_JOB_TIMEOUT_SECS,
+        false,
+        true,
+    )?
+    .privilege_assertion)
 }
 
 fn validate_backup_scope(paths: &[String], include_config: bool) -> Result<()> {
@@ -810,17 +831,13 @@ pub(crate) fn restore_plan(
     };
     let target_ids = vec![target_client_id.clone()];
     let selector_expression = selector_expression_from_targets(&target_ids, &[]);
-    let privilege = build_privilege_for_job_command(
+    let privilege_assertion = build_restore_plan_privilege(
         &target_ids,
         &operation,
-        "restore",
         &selector_expression,
         &password,
         &salt_hex,
         privilege_ttl_secs,
-        30,
-        false,
-        true,
     )?;
 
     println!(
@@ -837,11 +854,34 @@ pub(crate) fn restore_plan(
                 "destination_root": scope.destination_root,
                 "confirmed": confirmed,
                 "note": note,
-                "privilege_assertion": privilege.privilege_assertion,
+                "privilege_assertion": privilege_assertion,
             }),
         )?
     );
     Ok(())
+}
+
+pub(crate) fn build_restore_plan_privilege(
+    target_ids: &[String],
+    operation: &JobCommand,
+    selector_expression: &str,
+    password: &str,
+    salt_hex: &str,
+    privilege_ttl_secs: u64,
+) -> Result<vpsman_common::PrivilegeAssertion> {
+    Ok(build_privilege_for_job_command(
+        target_ids,
+        operation,
+        "restore",
+        selector_expression,
+        password,
+        salt_hex,
+        privilege_ttl_secs,
+        DEFAULT_MAX_JOB_TIMEOUT_SECS,
+        false,
+        true,
+    )?
+    .privilege_assertion)
 }
 
 pub(crate) fn restore_run(
@@ -1269,12 +1309,17 @@ pub(crate) fn restore_run_operation(
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_policy_prune_payload, generated_restore_destination_root_with_base,
-        restore_rollback_operation_from_outputs, JobOutputRecord, BASE64,
+        backup_policy_prune_payload, build_restore_plan_privilege,
+        generated_restore_destination_root_with_base, restore_rollback_operation_from_outputs,
+        JobOutputRecord, BASE64,
     };
     use base64::Engine as _;
     use uuid::Uuid;
-    use vpsman_common::JobCommand;
+    use vpsman_common::{
+        canonical_job_privilege_intent, derive_super_key, encode_json, payload_hash,
+        verify_privilege_assertion, JobCommand, JobPrivilegeIntentInput,
+        PrivilegeAssertionReplayCache, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    };
 
     const TEST_RESTORE_ARCHIVE_PATH: &str = "/etc/hostname";
     const TEST_RESTORE_DESTINATION_PATH: &str = "/restore/etc/hostname";
@@ -1329,6 +1374,133 @@ mod tests {
             Some(TEST_RESTORE_ROLLBACK_PATH)
         );
         assert_eq!(restored_files[1].rollback_path, None);
+    }
+
+    #[test]
+    fn restore_plan_privilege_uses_api_default_timeout() {
+        let source_backup_request_id =
+            Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
+        let operation = JobCommand::Restore {
+            source_backup_request_id,
+            archive_transfer_session_id: Uuid::nil(),
+            paths: vec!["/etc/hostname".to_string()],
+            include_config: true,
+            destination_root: Some("/restore".to_string()),
+            archive_path: None,
+            archive_size_bytes: None,
+            archive_sha256_hex: None,
+            dry_run: false,
+            post_restore_argv: Vec::new(),
+        };
+        let target_ids = vec!["client-b".to_string()];
+        let selector_expression = "id:client-b";
+        let assertion = build_restore_plan_privilege(
+            &target_ids,
+            &operation,
+            selector_expression,
+            "correct horse",
+            "01020304",
+            300,
+        )
+        .unwrap();
+        let command_hash = payload_hash(&encode_json(&operation).unwrap());
+        let api_intent = canonical_job_privilege_intent(JobPrivilegeIntentInput {
+            selector_expression,
+            command_type: "restore",
+            operation_payload_hash: &command_hash,
+            resolved_targets: &target_ids,
+            max_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+            force_unprivileged: false,
+            privileged: true,
+        })
+        .unwrap();
+        let stale_cli_intent = canonical_job_privilege_intent(JobPrivilegeIntentInput {
+            selector_expression,
+            command_type: "restore",
+            operation_payload_hash: &command_hash,
+            resolved_targets: &target_ids,
+            max_timeout_secs: 30,
+            force_unprivileged: false,
+            privileged: true,
+        })
+        .unwrap();
+        let verifier_key = derive_super_key("correct horse", &[1, 2, 3, 4]);
+
+        assert!(verify_privilege_assertion(
+            &verifier_key,
+            &api_intent,
+            &assertion,
+            assertion.issued_unix,
+            &mut PrivilegeAssertionReplayCache::default(),
+        )
+        .is_ok());
+        assert!(verify_privilege_assertion(
+            &verifier_key,
+            &stale_cli_intent,
+            &assertion,
+            assertion.issued_unix,
+            &mut PrivilegeAssertionReplayCache::default(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn backup_metadata_privilege_uses_api_default_timeout() {
+        let operation = JobCommand::Backup {
+            paths: vec!["/etc/hostname".to_string()],
+            include_config: false,
+            follow_symlinks: false,
+        };
+        let target_ids = vec!["client-a".to_string()];
+        let selector_expression = "id:client-a";
+        let assertion = super::build_backup_metadata_privilege(
+            &target_ids,
+            &operation,
+            selector_expression,
+            "correct horse",
+            "01020304",
+            300,
+        )
+        .unwrap();
+        let command_hash = payload_hash(&encode_json(&operation).unwrap());
+        let api_intent = canonical_job_privilege_intent(JobPrivilegeIntentInput {
+            selector_expression,
+            command_type: "backup",
+            operation_payload_hash: &command_hash,
+            resolved_targets: &target_ids,
+            max_timeout_secs: DEFAULT_MAX_JOB_TIMEOUT_SECS,
+            force_unprivileged: false,
+            privileged: true,
+        })
+        .unwrap();
+        let stale_cli_intent = canonical_job_privilege_intent(JobPrivilegeIntentInput {
+            selector_expression,
+            command_type: "backup",
+            operation_payload_hash: &command_hash,
+            resolved_targets: &target_ids,
+            max_timeout_secs: 30,
+            force_unprivileged: false,
+            privileged: true,
+        })
+        .unwrap();
+        let verifier_key = derive_super_key("correct horse", &[1, 2, 3, 4]);
+
+        assert!(verify_privilege_assertion(
+            &verifier_key,
+            &api_intent,
+            &assertion,
+            assertion.issued_unix,
+            &mut PrivilegeAssertionReplayCache::default(),
+        )
+        .is_ok());
+        assert!(verify_privilege_assertion(
+            &verifier_key,
+            &stale_cli_intent,
+            &assertion,
+            assertion.issued_unix,
+            &mut PrivilegeAssertionReplayCache::default(),
+        )
+        .is_err());
     }
 
     #[test]

@@ -23,7 +23,7 @@ test("shows restart and desired-only limit evidence in process supervisor invent
   await expect(summary.getByText("1 / 1")).toBeVisible();
   await expect(summary.getByText("Desired-only limits")).toBeVisible();
   await expect(summary.getByText("1 warning")).toBeVisible();
-  await expect(grid.getByText("Timeline inconsistent")).toBeVisible();
+  await expect(grid.getByText("Timestamp inconsistent")).toBeVisible();
   await expect(grid.getByText("Unknown", { exact: true })).toBeVisible();
   await expect(grid.getByText("started after observed").first()).toBeVisible();
   await expect(grid.getByText("CPU weight; Limits desired only")).toBeVisible();
@@ -118,7 +118,7 @@ test("renders process operation cards on mobile with resource usage and actions"
   const cards = page.getByLabel("Process supervisor mobile cards");
   await expect(cards).toBeVisible();
   await expect(cards.getByText("ospf-worker")).toBeVisible();
-  await expect(cards.getByText("Timeline inconsistent")).toBeVisible();
+  await expect(cards.getByText("Timestamp inconsistent")).toBeVisible();
   await expect(cards.getByText("39")).toBeVisible();
   await expect(cards.getByText("1.0 MiB")).toBeVisible();
   await expect(cards.getByText("Unknown")).toBeVisible();
@@ -135,7 +135,7 @@ async function expectProcessDispatchPreset(page: Page, action: string) {
   await expect(composer.getByRole("heading", { name: "Dispatch command" })).toBeVisible();
   await expect(composer.getByLabel("Supervisor action")).toHaveValue(action);
   await expect(composer.getByLabel("Supervisor process name")).toHaveValue("ospf-worker");
-  await expect(composer.getByLabel("Bulk target selector expression")).toContainText("id:agent-sfo-01");
+  await expect(composer.getByLabel("Bulk target selector expression")).toHaveValue("id:agent-sfo-01");
 }
 
 async function reviewProcessDispatch(page: Page, effect: string, execution: string) {

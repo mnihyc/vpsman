@@ -934,10 +934,6 @@ export type OperatorPreferences = {
   dashboard_resource_top_limit: number;
   dashboard_network_top_limit: number;
   bulk_output_compare_mode: JobOutputCompareMode;
-  gateway_server_public_key_hex: string | null;
-  gateway_endpoints: string;
-  tunnel_ipv4_allocation_pool_cidr: string;
-  tunnel_ipv6_allocation_pool_cidr: string;
 };
 
 export type OperatorSessionRecord = {
@@ -2464,13 +2460,17 @@ export type UpdateSourceTemplateRequest = {
   definition: JsonValue;
   confirmed: boolean;
   keep_description?: boolean;
+  preview_hash?: string | null;
+  privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type UpdateSourceTemplateResponse = {
   template: SourceTemplateRecord;
   diff: SourceTemplateDiffResponse;
+  affected_client_ids: string[];
   affected_client_count: number;
   confirmation_required: boolean;
+  preview_hash?: string | null;
 };
 
 export type AssignSourceTemplateRequest = {
@@ -2479,6 +2479,8 @@ export type AssignSourceTemplateRequest = {
   selector_expression: string;
   target_client_ids: string[];
   confirmed: boolean;
+  preview_hash?: string | null;
+  privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type AssignSourceTemplateResponse = {
@@ -2486,6 +2488,7 @@ export type AssignSourceTemplateResponse = {
   target_count: number;
   confirmation_required: boolean;
   assignments: SourceTemplateAssignmentRecord[];
+  preview_hash?: string | null;
 };
 
 export type TemplateRuntimeConfigResponse = {

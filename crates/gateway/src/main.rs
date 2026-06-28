@@ -693,6 +693,7 @@ async fn handle_agent(
             client_id,
             session_id,
             noise_public_key_hex,
+            agent_version: None,
             remote_ip: Some(remote_ip),
             reason: result.as_ref().err().map(session_end_reason),
         };

@@ -690,7 +690,7 @@ function lastRunEvidenceForTemplate(
   if (loadedJobCount > 0) {
     return {
       detail: `No ${operationTypeLabel(template.command_type).toLowerCase()} execution in loaded history`,
-      label: "No loaded run",
+      label: "No run found for this runbook",
       tone: "neutral",
     };
   }

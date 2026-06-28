@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ArtifactDownloadMode } from "../artifactDownload";
 import {
   JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE,
@@ -46,6 +46,7 @@ import {
   clientDisplayNameMap,
 } from "../utils";
 import type { TerminalComposerAction } from "./JobDispatchPanel";
+import { retryableLazy } from "../lazyImport";
 
 export type DirectTerminalOpenRequest = {
   maxTimeoutSecs: number;
@@ -55,32 +56,32 @@ export type DirectTerminalOpenRequest = {
   terminalUserPolicy: "fail" | "fallback";
 };
 
-const JobDispatchPanel = lazy(() =>
+const JobDispatchPanel = retryableLazy(() =>
   import("./JobDispatchPanel").then((module) => ({
     default: module.JobDispatchPanel,
   })),
 );
-const FileBrowserPanel = lazy(() =>
+const FileBrowserPanel = retryableLazy(() =>
   import("./jobs/FileBrowserPanel").then((module) => ({
     default: module.FileBrowserPanel,
   })),
 );
-const FileTransferSessionsPanel = lazy(() =>
+const FileTransferSessionsPanel = retryableLazy(() =>
   import("./jobs/FileTransferSessionsPanel").then((module) => ({
     default: module.FileTransferSessionsPanel,
   })),
 );
-const MultiFileActionsPanel = lazy(() =>
+const MultiFileActionsPanel = retryableLazy(() =>
   import("./jobs/MultiFileActionsPanel").then((module) => ({
     default: module.MultiFileActionsPanel,
   })),
 );
-const ProcessSupervisorInventoryPanel = lazy(() =>
+const ProcessSupervisorInventoryPanel = retryableLazy(() =>
   import("./jobs/ProcessSupervisorInventoryPanel").then((module) => ({
     default: module.ProcessSupervisorInventoryPanel,
   })),
 );
-const TerminalSessionsPanel = lazy(() =>
+const TerminalSessionsPanel = retryableLazy(() =>
   import("./jobs/TerminalSessionsPanel").then((module) => ({
     default: module.TerminalSessionsPanel,
   })),

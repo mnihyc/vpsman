@@ -41,6 +41,8 @@ cargo run -p vpsctl -- source-template-create \
 Then assign it to a tag:
 
 ```sh
+export VPSMAN_SUPER_PASSWORD='<local-super-password>'
+export VPSMAN_SUPER_SALT_HEX='<super-salt-hex>'
 cargo run -p vpsctl -- source-template-assign \
   --domain runtime_traffic_accounting_source \
   --template-id <template_uuid> \
@@ -120,6 +122,8 @@ cargo run -p vpsctl -- source-template-diff \
 Update the shared template only after the lab candidate is clean:
 
 ```sh
+export VPSMAN_SUPER_PASSWORD='<local-super-password>'
+export VPSMAN_SUPER_SALT_HEX='<super-salt-hex>'
 cargo run -p vpsctl -- source-template-update \
   --template-id <template_uuid> \
   --definition-json '{"source":"vnstat","runtime_vnstat_argv":["/usr/bin/vnstat"]}' \

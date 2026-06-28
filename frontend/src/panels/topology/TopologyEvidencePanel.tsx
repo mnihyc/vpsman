@@ -40,6 +40,8 @@ const networkCommands = new Set([
   "network_speed_test",
 ]);
 
+const NETWORK_EVIDENCE_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
 export function TopologyEvidencePanel({
   clientLabel,
   jobs,
@@ -85,6 +87,10 @@ export function TopologyEvidencePanel({
   >({});
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const throughputBaselines = useMemo(
+    () => buildThroughputBaselineLookup(ospfRecommendations, ospfUpdatePlans),
+    [ospfRecommendations, ospfUpdatePlans],
+  );
   const rows = networkJobs.map((job) => {
     const outputs = outputsByJob[job.id];
     return buildEvidenceRow(
@@ -92,6 +98,7 @@ export function TopologyEvidencePanel({
       outputs ?? [],
       clientLabel,
       outputs !== undefined,
+      throughputBaselines,
     );
   });
   const ospfUpdateRows = ospfUpdatePlans
@@ -102,13 +109,20 @@ export function TopologyEvidencePanel({
     .map(buildOspfRecommendationRow);
   const observationRows = observations
     .slice(0, 8)
-    .map((observation) => buildObservationRow(observation, clientLabel));
+    .map((observation) => buildObservationRow(observation, clientLabel, throughputBaselines));
   const trendRows = trends
     .slice(0, 6)
-    .map((trend) => buildTrendRow(trend, clientLabel));
+    .map((trend) => buildTrendRow(trend, clientLabel, throughputBaselines));
   const hasUnloadedOutput = rows.some((row) => row.metric === "Output not loaded");
   const hasTrendComparison = trendRows.length > 0;
   const hasPendingApproval = ospfUpdateRows.length > 0;
+  const freshness = buildNetworkEvidenceFreshness([
+    ...networkJobs.map((job) => job.created_at),
+    ...observations.map((observation) => observation.observed_at),
+    ...trends.map((trend) => trend.latest_observed_at),
+    ...ospfRecommendations.map((recommendation) => recommendation.latest_observed_at),
+    ...ospfUpdatePlans.map((plan) => plan.evidence.latest_observed_at),
+  ]);
   const timelineStages = buildTimelineStages({
     commandRows: rows,
     observationRows,
@@ -219,6 +233,16 @@ export function TopologyEvidencePanel({
           Refresh evidence
         </button>
       </div>
+      {freshness?.stale && (
+        <div
+          className="topologyEvidenceFreshness warning"
+          aria-label="Network evidence freshness"
+          title={freshness.latestTimestamp ? `Latest evidence: ${formatFullTime(freshness.latestTimestamp)}` : undefined}
+        >
+          <strong>Evidence set is {freshness.ageLabel} old.</strong>
+          <span>{freshness.detail}</span>
+        </div>
+      )}
       <div
         className="topologyEvidenceTimeline"
         aria-label="Network evidence timeline"
@@ -331,7 +355,7 @@ export function TopologyEvidencePanel({
                     className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
                     title={row.healthDetail}
                   >
-                    {humanStatus(row.signalStatus)}
+                    {row.signalLabel}
                   </span>
                   <span className="topologyMetric">
                     <strong>{row.metric}</strong>
@@ -366,7 +390,7 @@ export function TopologyEvidencePanel({
                     className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
                     title={row.healthDetail}
                   >
-                    {humanStatus(row.signalStatus)}
+                    {row.signalLabel}
                   </span>
                   <span className="topologyMetric">
                     <strong>{row.metric}</strong>
@@ -456,7 +480,7 @@ export function TopologyEvidencePanel({
                   <span
                     className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
                   >
-                    {humanStatus(row.signalStatus)}
+                    {row.signalLabel}
                   </span>
                   <span className="topologyMetric">
                     <strong>{row.metric}</strong>
@@ -495,7 +519,7 @@ export function TopologyEvidencePanel({
                 <span
                   className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
                 >
-                  {humanStatus(row.signalStatus)}
+                  {row.signalLabel}
                 </span>
                 <span className="topologyMetric">
                   <strong>{row.metric}</strong>
@@ -540,7 +564,7 @@ export function TopologyEvidencePanel({
                 ) : null}
               </span>
               <span className={`status ${evidenceStatusBadgeClass(row)}`}>
-                {humanStatus(row.signalStatus)}
+                {row.signalLabel ?? humanStatus(row.signalStatus)}
               </span>
               <span className="topologyMetric">
                 <strong>{row.metric}</strong>
@@ -609,6 +633,7 @@ type EvidenceRow = {
   job: JobHistoryRecord;
   kind: string;
   signalKind: "job" | "observation" | "runtime";
+  signalLabel?: string;
   signalStatus: JobStatus | TopologyObservationState | TopologyRuntimeState;
   metric: string;
   metricDetail: string;
@@ -633,6 +658,7 @@ type ObservationRow = {
   id: string;
   jobId: string;
   kind: string;
+  signalLabel: string;
   signalStatus: TopologyObservationState;
   metric: string;
   metricDetail: string;
@@ -645,6 +671,7 @@ type TrendRow = {
   id: string;
   kind: string;
   sampleCount: number;
+  signalLabel: string;
   signalStatus: TopologyObservationState;
   metric: string;
   metricDetail: string;
@@ -659,6 +686,7 @@ type OspfRecommendationRow = {
   id: string;
   planName: string;
   interfaceName: string;
+  signalLabel: string;
   signalStatus: TopologyObservationState;
   metric: string;
   metricDetail: string;
@@ -673,6 +701,7 @@ type OspfUpdatePlanRow = {
   id: string;
   planName: string;
   interfaceName: string;
+  signalLabel: string;
   signalStatus: TopologyObservationState;
   metric: string;
   metricDetail: string;
@@ -686,6 +715,25 @@ type TimelineStage = {
   label: string;
   tone?: "attention" | "ready";
   value: string;
+};
+
+type ThroughputBaseline = {
+  configuredBandwidthMbps: number;
+  effectiveBandwidthMbps: number;
+};
+
+type ThroughputBaselineIdentity = {
+  interfaceName?: string | null;
+  planId?: string | null;
+  planName?: string | null;
+  topologyIdentityHash?: string | null;
+};
+
+type NetworkEvidenceFreshness = {
+  ageLabel: string;
+  detail: string;
+  latestTimestamp: string | null;
+  stale: boolean;
 };
 
 function buildTimelineStages({
@@ -737,7 +785,7 @@ function buildTimelineStages({
     },
     {
       detail: speedTrend
-        ? `${speedTrend.metric}; ${speedTrend.metricDetail}`
+        ? `${speedTrend.signalLabel}; ${speedTrend.metric}; ${speedTrend.metricDetail}`
         : "Run speed tests to add measured throughput evidence",
       label: "Speed test",
       value: `${persistedSpeedCount} persisted`,
@@ -817,6 +865,7 @@ function buildOspfUpdatePlanRow(
     interfaceName: plan.interface_name,
     confidence: `Confidence ${humanStatus(plan.confidence)}`,
     healthDetail: bandwidthHealth.detail,
+    signalLabel: bandwidthHealth.label,
     signalStatus,
     metric: `${plan.current_ospf_cost} -> ${plan.recommended_ospf_cost}`,
     metricDetail: `${delta}; ${bandwidthHealth.summary}`,
@@ -866,6 +915,7 @@ function buildOspfRecommendationRow(
     interfaceName: recommendation.interface_name,
     confidence: `Confidence ${humanStatus(recommendation.confidence)}`,
     healthDetail: bandwidthHealth.detail,
+    signalLabel: bandwidthHealth.label,
     signalStatus,
     metric: `${recommendation.plan_ospf_cost} -> ${recommendation.recommended_ospf_cost}`,
     metricDetail: `${delta}; ${bandwidthHealth.summary}`,
@@ -885,6 +935,7 @@ function bandwidthEvidenceHealth({
   measuredThroughputMbps: number | null;
 }): {
   detail: string;
+  label: string;
   signalStatus: TopologyObservationState;
   summary: string;
 } {
@@ -896,6 +947,7 @@ function bandwidthEvidenceHealth({
   ) {
     return {
       detail: "Configured bandwidth baseline is unavailable.",
+      label: "Baseline unavailable",
       signalStatus: "recorded",
       summary: "baseline unavailable",
     };
@@ -910,9 +962,16 @@ function bandwidthEvidenceHealth({
     measuredThroughputMbps === null
       ? `effective ${formatBandwidthMbps(effectiveBandwidthMbps)}`
       : `effective ${formatBandwidthMbps(effectiveBandwidthMbps)}; measured ${formatMetric(measuredThroughputMbps)} Mbps avg`;
+  const signalStatus = percent < 80 ? "degraded" : "healthy";
   return {
     detail: `${summary}; ${effectiveDetail}`,
-    signalStatus: percent < 80 ? "degraded" : "healthy",
+    label:
+      signalStatus === "degraded"
+        ? "Degraded throughput"
+        : measuredThroughputMbps === null
+          ? "Configured bandwidth"
+          : "Throughput healthy",
+    signalStatus,
     summary,
   };
 }
@@ -931,16 +990,213 @@ function evidenceSampleSummary(
   return `${sampleCount} sample${sampleCount === 1 ? "" : "s"}${latest}`;
 }
 
+function buildThroughputBaselineLookup(
+  recommendations: NetworkOspfRecommendationRecord[],
+  updatePlans: NetworkOspfUpdatePlanRecord[],
+): Map<string, ThroughputBaseline> {
+  const lookup = new Map<string, ThroughputBaseline>();
+  for (const recommendation of recommendations) {
+    addThroughputBaseline(
+      lookup,
+      {
+        configuredBandwidthMbps: recommendation.configured_bandwidth_mbps,
+        effectiveBandwidthMbps: recommendation.effective_bandwidth_mbps,
+      },
+      {
+        interfaceName: recommendation.interface_name,
+        planId: recommendation.plan_id,
+        planName: recommendation.plan_name,
+      },
+    );
+  }
+  for (const plan of updatePlans) {
+    addThroughputBaseline(
+      lookup,
+      {
+        configuredBandwidthMbps: plan.evidence.configured_bandwidth_mbps,
+        effectiveBandwidthMbps: plan.evidence.effective_bandwidth_mbps,
+      },
+      {
+        interfaceName: plan.interface_name,
+        planId: plan.plan_id,
+        planName: plan.plan_name,
+      },
+    );
+  }
+  return lookup;
+}
+
+function addThroughputBaseline(
+  lookup: Map<string, ThroughputBaseline>,
+  baseline: ThroughputBaseline,
+  identity: ThroughputBaselineIdentity,
+) {
+  if (
+    !Number.isFinite(baseline.configuredBandwidthMbps) ||
+    !Number.isFinite(baseline.effectiveBandwidthMbps)
+  ) {
+    return;
+  }
+  for (const key of throughputBaselineKeys(identity)) {
+    if (!lookup.has(key)) {
+      lookup.set(key, baseline);
+    }
+  }
+}
+
+function throughputBaselineFor(
+  identity: ThroughputBaselineIdentity,
+  lookup: Map<string, ThroughputBaseline>,
+): ThroughputBaseline | null {
+  for (const key of throughputBaselineKeys(identity)) {
+    const baseline = lookup.get(key);
+    if (baseline) {
+      return baseline;
+    }
+  }
+  return null;
+}
+
+function throughputBaselineKeys(identity: ThroughputBaselineIdentity): string[] {
+  const keys: string[] = [];
+  if (identity.planId) {
+    keys.push(`plan-id:${identity.planId}`);
+  }
+  if (identity.topologyIdentityHash) {
+    keys.push(`topology:${identity.topologyIdentityHash}`);
+  }
+  if (identity.planName && identity.interfaceName) {
+    keys.push(`plan-interface:${identity.planName}:${identity.interfaceName}`);
+  }
+  if (identity.planName) {
+    keys.push(`plan-name:${identity.planName}`);
+  }
+  return keys;
+}
+
+function throughputSampleSignalLabel(
+  sampleStatus: TopologyObservationState,
+  observedAt: string,
+  throughputHealth: ReturnType<typeof bandwidthEvidenceHealth> | null,
+): string {
+  const sampleLabel = sampleFreshnessLabel(sampleStatus, observedAt);
+  if (throughputHealth?.signalStatus === "degraded") {
+    return `${sampleLabel} · degraded throughput`;
+  }
+  if (throughputHealth?.signalStatus === "healthy") {
+    return `${sampleLabel} · throughput within baseline`;
+  }
+  if (isEvidenceTimestampStale(observedAt)) {
+    return `${sampleLabel} · not enough current evidence`;
+  }
+  return sampleLabel;
+}
+
+function sampleFreshnessLabel(status: TopologyObservationState, observedAt: string): string {
+  if (isEvidenceTimestampStale(observedAt)) {
+    return status === "degraded" ? "Stale failed sample" : "Stale sample";
+  }
+  if (status === "healthy") {
+    return "Valid sample";
+  }
+  if (status === "degraded") {
+    return "Failed sample";
+  }
+  return "Recorded sample";
+}
+
+function buildNetworkEvidenceFreshness(
+  timestamps: Array<string | null | undefined>,
+): NetworkEvidenceFreshness | null {
+  const latestTimestamp = latestTimestampValue(timestamps);
+  if (!latestTimestamp) {
+    return null;
+  }
+  const latestMs = Date.parse(latestTimestamp);
+  const ageMs = Date.now() - latestMs;
+  const stale = Number.isFinite(ageMs) && ageMs > NETWORK_EVIDENCE_STALE_AFTER_MS;
+  return {
+    ageLabel: evidenceAgeLabel(ageMs),
+    detail: stale
+      ? `Latest retained evidence is ${formatCompactTime(latestTimestamp)}; refresh or run tests before applying network changes.`
+      : `Latest retained evidence is ${formatCompactTime(latestTimestamp)}.`,
+    latestTimestamp,
+    stale,
+  };
+}
+
+function latestTimestampValue(timestamps: Array<string | null | undefined>): string | null {
+  let latest: { timestamp: string; ms: number } | null = null;
+  for (const timestamp of timestamps) {
+    if (!timestamp) {
+      continue;
+    }
+    const ms = Date.parse(timestamp);
+    if (!Number.isFinite(ms)) {
+      continue;
+    }
+    if (!latest || ms > latest.ms) {
+      latest = { timestamp, ms };
+    }
+  }
+  return latest?.timestamp ?? null;
+}
+
+function isEvidenceTimestampStale(timestamp: string | null | undefined): boolean {
+  if (!timestamp) {
+    return false;
+  }
+  const ms = Date.parse(timestamp);
+  return Number.isFinite(ms) && Date.now() - ms > NETWORK_EVIDENCE_STALE_AFTER_MS;
+}
+
+function evidenceAgeLabel(ageMs: number): string {
+  if (!Number.isFinite(ageMs) || ageMs < 0) {
+    return "unknown age";
+  }
+  const dayMs = 24 * 60 * 60 * 1000;
+  const days = Math.max(1, Math.round(ageMs / dayMs));
+  if (days >= 21) {
+    return `${Math.round(days / 7)}w`;
+  }
+  if (days >= 7) {
+    return `${Math.floor(days / 7)}w ${days % 7}d`;
+  }
+  return `${days}d`;
+}
+
 function buildTrendRow(
   trend: NetworkObservationTrendRecord,
   clientLabel: (clientId: string) => string,
+  throughputBaselines: Map<string, ThroughputBaseline>,
 ): TrendRow {
-  const signalStatus =
+  const baseline = throughputBaselineFor(
+    {
+      interfaceName: trend.interface_name,
+      planId: trend.plan_id,
+      planName: trend.plan_name,
+      topologyIdentityHash: trend.topology_identity_hash,
+    },
+    throughputBaselines,
+  );
+  const throughputHealth =
+    trend.kind === "network_speed_test" && trend.throughput_avg_mbps !== null && baseline
+      ? bandwidthEvidenceHealth({
+          configuredBandwidthMbps: baseline.configuredBandwidthMbps,
+          effectiveBandwidthMbps: baseline.effectiveBandwidthMbps,
+          measuredThroughputMbps: trend.throughput_avg_mbps,
+        })
+      : null;
+  const sampleStatus =
     trend.degraded_count > 0
       ? "degraded"
       : trend.healthy_count > 0
         ? "healthy"
         : "recorded";
+  const signalStatus =
+    throughputHealth?.signalStatus === "degraded"
+      ? "degraded"
+      : sampleStatus;
   const metric =
     trend.throughput_avg_mbps !== null
       ? `${formatMetric(trend.throughput_avg_mbps)} Mbps avg`
@@ -949,7 +1205,7 @@ function buildTrendRow(
         : `${trend.sample_count} samples`;
   const metricDetail =
     trend.throughput_max_mbps !== null
-      ? `${formatMetric(trend.throughput_max_mbps)} Mbps max; ${formatBytes(trend.bytes_total)} total`
+      ? `${formatMetric(trend.throughput_max_mbps)} Mbps max; ${formatBytes(trend.bytes_total)} total${throughputHealth ? `; ${throughputHealth.summary}` : ""}`
       : trend.latency_min_ms !== null && trend.latency_max_ms !== null
         ? `${formatMetric(trend.latency_min_ms)}-${formatMetric(trend.latency_max_ms)} ms; ${formatLoss(trend.packet_loss_avg_ratio)} loss`
         : `${trend.healthy_count} healthy / ${trend.degraded_count} degraded`;
@@ -957,6 +1213,10 @@ function buildTrendRow(
     id: `${trend.kind}:${trend.plan_name ?? ""}:${trend.client_id}:${trend.peer_client_id ?? ""}`,
     kind: trend.kind,
     sampleCount: trend.sample_count,
+    signalLabel:
+      trend.kind === "network_speed_test"
+        ? throughputSampleSignalLabel(sampleStatus, trend.latest_observed_at, throughputHealth)
+        : humanStatus(signalStatus),
     signalStatus,
     metric,
     metricDetail,
@@ -973,6 +1233,7 @@ function buildTrendRow(
 function buildObservationRow(
   observation: NetworkObservationRecord,
   clientLabel: (clientId: string) => string,
+  throughputBaselines: Map<string, ThroughputBaseline>,
 ): ObservationRow {
   const signalStatus =
     observation.healthy === true
@@ -985,6 +1246,7 @@ function buildObservationRow(
       id: observation.id,
       jobId: observation.job_id,
       kind: observation.kind,
+      signalLabel: humanStatus(signalStatus),
       signalStatus,
       metric:
         observation.latency_avg_ms === null
@@ -1004,19 +1266,43 @@ function buildObservationRow(
     };
   }
   if (observation.kind === "network_speed_test") {
+    const baseline = throughputBaselineFor(
+      {
+        interfaceName: observation.interface_name,
+        planId: observation.plan_id,
+        planName: observation.plan_name,
+        topologyIdentityHash: observation.topology_identity_hash,
+      },
+      throughputBaselines,
+    );
+    const throughputHealth =
+      observation.throughput_mbps !== null && baseline
+        ? bandwidthEvidenceHealth({
+            configuredBandwidthMbps: baseline.configuredBandwidthMbps,
+            effectiveBandwidthMbps: baseline.effectiveBandwidthMbps,
+            measuredThroughputMbps: observation.throughput_mbps,
+          })
+        : null;
+    const speedSignalStatus =
+      throughputHealth?.signalStatus === "degraded"
+        ? "degraded"
+        : signalStatus;
     return {
       id: observation.id,
       jobId: observation.job_id,
       kind: observation.kind,
-      signalStatus,
+      signalLabel: throughputSampleSignalLabel(signalStatus, observation.observed_at, throughputHealth),
+      signalStatus: speedSignalStatus,
       metric:
         observation.throughput_mbps === null
           ? "No throughput"
           : `${formatMetric(observation.throughput_mbps)} Mbps`,
       metricDetail:
         observation.bytes === null
-          ? "bytes unavailable"
-          : `${formatBytes(observation.bytes)}`,
+          ? throughputHealth
+            ? `bytes unavailable; ${throughputHealth.summary}`
+            : "bytes unavailable"
+          : `${formatBytes(observation.bytes)}${throughputHealth ? `; ${throughputHealth.summary}` : ""}`,
       target: observation.target ?? "speed endpoint",
       targetDetail: `${observation.role ?? "role"} ${endpointLabel(observation.client_id, observation.peer_client_id, clientLabel)}`,
       observedAt: observation.observed_at,
@@ -1038,6 +1324,7 @@ function buildObservationRow(
     id: observation.id,
     jobId: observation.job_id,
     kind: observation.kind,
+    signalLabel: humanStatus(signalStatus),
     signalStatus,
     metric:
       observation.healthy === true && applied
@@ -1118,6 +1405,7 @@ function buildEvidenceRow(
   outputs: JobOutputRecord[],
   clientLabel: (clientId: string) => string,
   outputsLoaded: boolean,
+  throughputBaselines: Map<string, ThroughputBaseline>,
 ): EvidenceRow {
   const parsedStatus = parseStatusOutput(outputs);
   if (isProbeStatus(parsedStatus)) {
@@ -1128,6 +1416,7 @@ function buildEvidenceRow(
       job,
       kind: "network_probe",
       signalKind: "observation",
+      signalLabel: asBoolean(parsed.healthy) ? "Valid sample" : "Failed sample",
       signalStatus: asBoolean(parsed.healthy) ? "healthy" : "degraded",
       metric:
         latencyAvgMs === null
@@ -1198,17 +1487,42 @@ function buildEvidenceRow(
     const allSucceeded =
       speedStatuses.length >= 2 &&
       speedStatuses.every((status) => asBoolean(status.success));
+    const baseline = throughputBaselineFor(
+      {
+        interfaceName: asString(clientStatus.interface),
+        planName: asString(clientStatus.plan),
+      },
+      throughputBaselines,
+    );
+    const throughputHealth =
+      throughputMbps !== null && baseline
+        ? bandwidthEvidenceHealth({
+            configuredBandwidthMbps: baseline.configuredBandwidthMbps,
+            effectiveBandwidthMbps: baseline.effectiveBandwidthMbps,
+            measuredThroughputMbps: throughputMbps,
+          })
+        : null;
+    const sampleStatus: TopologyObservationState = allSucceeded ? "healthy" : "degraded";
+    const signalStatus =
+      throughputHealth?.signalStatus === "degraded"
+        ? "degraded"
+        : sampleStatus;
     return {
       job,
       kind: "network_speed_test",
       signalKind: "observation",
-      signalStatus: allSucceeded ? "healthy" : "degraded",
+      signalLabel: throughputSampleSignalLabel(sampleStatus, job.created_at, throughputHealth),
+      signalStatus,
       metric:
         throughputMbps === null
           ? "No throughput"
           : `${formatMetric(throughputMbps)} Mbps`,
       metricDetail:
-        bytes === null ? "bytes unavailable" : `${formatBytes(bytes)} sent`,
+        bytes === null
+          ? throughputHealth
+            ? `bytes unavailable; ${throughputHealth.summary}`
+            : "bytes unavailable"
+          : `${formatBytes(bytes)} sent${throughputHealth ? `; ${throughputHealth.summary}` : ""}`,
       target: `${asString(clientStatus.server_address) ?? "server"}:${asNumber(clientStatus.port) ?? "port"}`,
       targetDetail: endpointLabel(
         asString(clientStatus.client_id),

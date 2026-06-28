@@ -3,6 +3,7 @@ import {
   JOB_TARGET_STATUS_CLASS_BY_STATUS,
   JOB_TARGET_TERMINAL_STATUSES,
 } from "./generated/protocolContracts";
+import { agentDisplayState } from "./agentDisplayState";
 import type { AgentView, JobOutputRecord, JobTargetRecord } from "./types";
 import type {
   GeneratedJobTargetStatus,
@@ -283,13 +284,20 @@ export function bulkProgressLabel(progress: BulkJobProgress): string {
 }
 
 export function targetPreflightUnavailable(target: AgentView): boolean {
-  return ["deleted", "disconnected", "never", "offline", "revoked"].includes(target.status);
+  const displayState = agentDisplayState(target);
+  return (
+    !["Online", "Stale"].includes(displayState.label) ||
+    ["deleted", "disconnected", "never", "offline", "revoked"].includes(
+      target.status,
+    )
+  );
 }
 
 export function targetAvailabilityCounts(targets: AgentView[]): { online: number; stale: number; unavailable: number } {
+  const displayStates = targets.map((target) => agentDisplayState(target));
   return {
-    online: targets.filter((target) => target.status === "online").length,
-    stale: targets.filter((target) => target.status === "stale").length,
+    online: displayStates.filter((state) => state.label === "Online").length,
+    stale: displayStates.filter((state) => state.label === "Stale").length,
     unavailable: targets.filter(targetPreflightUnavailable).length,
   };
 }

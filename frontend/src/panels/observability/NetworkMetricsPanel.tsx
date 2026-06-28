@@ -48,6 +48,12 @@ type ObservationChartData = {
 };
 
 type NetworkChartMetric = "latency" | "loss" | "throughput";
+type ThroughputBenchmark = {
+  configuredBandwidthMbps: number;
+  latestObservedAt: string | null;
+  status: "degraded" | "ok";
+  throughputMbps: number;
+};
 
 export function NetworkMetricsPanel({
   networkObservations,
@@ -116,6 +122,7 @@ export function NetworkMetricsPanel({
     latestEvidence,
     selectedChart.chart,
   );
+  const throughputBenchmark = buildThroughputBenchmark(ospfRecommendations);
 
   return (
     <section className="workspace singleColumn observabilityNetworkMetricsWorkspace">
@@ -149,7 +156,7 @@ export function NetworkMetricsPanel({
           />
           <MetricTile detail="latency, loss, speed, and status records" label="Observations" value={String(observationCount)} />
           <MetricTile detail="trend groups plus endpoint health" label="Degraded signals" value={String(degradedCount)} />
-          <MetricTile detail="recommendations with non-zero cost delta" label="OSPF overlays" value={String(ospfDeltaCount)} />
+          <MetricTile detail="recommendations with non-zero cost delta" label="OSPF review" value={String(ospfDeltaCount)} />
         </div>
 
         {evidence.isStale && (
@@ -176,7 +183,7 @@ export function NetworkMetricsPanel({
         <NetworkCountDefinitions
           degradedCount={degradedCount}
           observationCount={observationCount}
-          overlayCount={overlays.length}
+          reviewSignalCount={overlays.length}
           samplePointCount={selectedChart.chart.observedPoints}
           selectedMetric={selectedChart.title}
         />
@@ -209,6 +216,9 @@ export function NetworkMetricsPanel({
               pointsOnly={evidence.isSparse}
               times={selectedChart.chart.times}
               title={selectedChart.title}
+              throughputBenchmark={
+                selectedMetric === "throughput" ? throughputBenchmark : null
+              }
               valueFormatter={selectedChart.valueFormatter}
             />
           </div>
@@ -280,11 +290,11 @@ export function NetworkMetricsPanel({
         <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-network-overlays-title">
           <div className="dashboardSectionHeader">
             <div>
-              <h2 id="observability-network-overlays-title">Alert overlays</h2>
-              <span>Derived from unhealthy observations, latency/adapter state, promotion requirements, and OSPF deltas.</span>
+              <h2 id="observability-network-overlays-title">Network review signals</h2>
+              <span>Derived from unhealthy observations, latency/adapter state, promotion requirements, and OSPF cost changes.</span>
             </div>
           </div>
-          <div className="observabilityOverlayList" aria-label="Network metrics alert overlays">
+          <div className="observabilityOverlayList" aria-label="Network metrics review signals">
             {overlays.map((overlay) => (
               <div className={`observabilityOverlayRow ${overlay.severity}`} key={overlay.key}>
                 <span>{overlay.source}</span>
@@ -295,8 +305,8 @@ export function NetworkMetricsPanel({
             {!overlays.length && (
               <div className="emptyState compactEmpty">
                 <Activity size={18} />
-                <strong>No overlays</strong>
-                <span>No unhealthy observations, pending promotions, or OSPF deltas are present.</span>
+                <strong>No review signals</strong>
+                <span>No unhealthy observations, pending promotions, or OSPF cost changes are present.</span>
               </div>
             )}
           </div>
@@ -313,6 +323,7 @@ function NetworkChartCard({
   pointsOnly,
   times,
   title,
+  throughputBenchmark,
   valueFormatter,
 }: {
   emptyLabel: string;
@@ -321,6 +332,7 @@ function NetworkChartCard({
   pointsOnly: boolean;
   times: string[];
   title: string;
+  throughputBenchmark: ThroughputBenchmark | null;
   valueFormatter: (value: number | null) => string;
 }) {
   return (
@@ -337,6 +349,19 @@ function NetworkChartCard({
           Sparse data: {evidence.pointLabel}. This chart shows points only; do not read it as a continuous trend.
         </p>
       )}
+      {throughputBenchmark ? (
+        <p
+          aria-label="Network throughput benchmark"
+          className="observabilitySparseNotice"
+        >
+          Throughput {formatMetric(throughputBenchmark.throughputMbps)} Mbps ·
+          expected {formatMetric(throughputBenchmark.configuredBandwidthMbps)} Mbps ·{" "}
+          {throughputBenchmark.status} · sample{" "}
+          {throughputBenchmark.latestObservedAt
+            ? formatCompactTime(throughputBenchmark.latestObservedAt)
+            : "age unknown"}
+        </p>
+      ) : null}
       <TimeSeriesChart
         ariaLabel={`Network metrics ${title.toLowerCase()} chart`}
         emptyLabel={emptyLabel}
@@ -348,6 +373,48 @@ function NetworkChartCard({
       />
     </article>
   );
+}
+
+function buildThroughputBenchmark(
+  recommendations: NetworkOspfRecommendationRecord[],
+): ThroughputBenchmark | null {
+  const candidates = recommendations.filter(
+    (recommendation) =>
+      typeof recommendation.throughput_avg_mbps === "number" &&
+      recommendation.configured_bandwidth_mbps > 0,
+  );
+  const recommendation = candidates.sort(
+    (left, right) =>
+      throughputRatio(left) - throughputRatio(right) ||
+      (right.cost_delta ?? 0) - (left.cost_delta ?? 0),
+  )[0];
+  if (!recommendation || recommendation.throughput_avg_mbps === null) {
+    return null;
+  }
+  const ratio =
+    recommendation.throughput_avg_mbps /
+    recommendation.configured_bandwidth_mbps;
+  return {
+    configuredBandwidthMbps: recommendation.configured_bandwidth_mbps,
+    latestObservedAt: recommendation.latest_observed_at,
+    status:
+      ratio < 0.8 ||
+      recommendation.degraded_count > 0 ||
+      recommendation.cost_delta !== 0
+        ? "degraded"
+        : "ok",
+    throughputMbps: recommendation.throughput_avg_mbps,
+  };
+}
+
+function throughputRatio(
+  recommendation: NetworkOspfRecommendationRecord,
+): number {
+  return recommendation.throughput_avg_mbps === null ||
+    recommendation.configured_bandwidth_mbps <= 0
+    ? Number.POSITIVE_INFINITY
+    : recommendation.throughput_avg_mbps /
+        recommendation.configured_bandwidth_mbps;
 }
 
 function MetricTile({ detail, label, value }: { detail: string; label: string; value: string }) {
@@ -371,13 +438,13 @@ type NetworkEvidence = {
 function NetworkCountDefinitions({
   degradedCount,
   observationCount,
-  overlayCount,
+  reviewSignalCount,
   samplePointCount,
   selectedMetric,
 }: {
   degradedCount: number;
   observationCount: number;
-  overlayCount: number;
+  reviewSignalCount: number;
   samplePointCount: number;
   selectedMetric: string;
 }) {
@@ -398,9 +465,9 @@ function NetworkCountDefinitions({
       value: String(degradedCount),
     },
     {
-      detail: "unhealthy observations, promotion needs, endpoint degradation, and OSPF deltas",
-      label: "Overlay rows",
-      value: String(overlayCount),
+      detail: "unhealthy observations, promotion needs, endpoint degradation, and OSPF cost changes",
+      label: "Review signals",
+      value: String(reviewSignalCount),
     },
   ];
 

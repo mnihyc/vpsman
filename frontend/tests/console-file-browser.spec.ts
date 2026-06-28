@@ -227,12 +227,17 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
 
   await activate(page.getByRole("button", { name: "Refresh scope" }));
   await expect(page.getByText("3 VPSs resolved")).toBeVisible();
-  await expect(page.getByLabel("Bulk file live match summary")).toContainText("3 resolved · 2 ready");
+  await expect(page.getByLabel("Bulk file live match summary")).toContainText("3 matched · 0 ready · 1 stale excluded from ready · 2 unavailable blocked");
   await expect(page.getByLabel("Bulk file attention targets")).toContainText("backup-nyc-03");
+  await expect(page.getByLabel("Bulk file attention targets")).toContainText("Contact unknown");
   await expect(preflight).toContainText("Server target preview");
-  await expect(preflight).toContainText("3 resolved (2 online, 1 stale)");
+  await expect(preflight).toContainText("3 resolved (0 online, 1 stale, 2 unavailable)");
   await expect(preflight).toContainText("1 stale");
+  await expect(preflight).toContainText("2 unavailable");
   await page.getByLabel("Bulk file path").fill("/etc/app.conf");
+  await expect(page.locator(".bulkSummaryPane h3")).toHaveText("Live match summary");
+  await expect(preflight).not.toContainText("Needs path");
+  await expect(preflight).toContainText("/etc/app.conf will be resolved again during Run");
   await activate(page.getByRole("button", { name: "Run download" }));
   await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
   await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
@@ -246,7 +251,9 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
   await expect(postRun).toContainText("2 downloadable");
 
   await activate(page.getByRole("button", { name: "Upload files" }));
+  await expect(page.locator(".bulkSummaryPane h3")).toHaveText("Live match summary");
   await page.getByLabel("Bulk file destination path").fill("/etc/app.conf");
+  await expect(preflight).not.toContainText("Needs path");
   await page.getByLabel("Bulk upload file").setInputFiles({
     name: "app.conf",
     mimeType: "text/plain",

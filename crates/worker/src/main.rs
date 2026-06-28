@@ -22,9 +22,8 @@ use vpsman_common::{
 };
 #[cfg(test)]
 use vpsman_common::{
-    expression_matches, parse_expression, plan_tunnel, BandwidthMbps, ExpressionContext,
-    OspfCostPolicy, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlanInput,
-    VpsMetadata,
+    expression_matches, parse_expression, plan_tunnel, ExpressionContext, OspfCostPolicy,
+    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlanInput, VpsMetadata,
 };
 use vpsman_object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use vpsman_server_core::{

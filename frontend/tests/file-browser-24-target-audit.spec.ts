@@ -20,7 +20,7 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await expect(page.getByText("24 VPSs resolved")).toBeVisible();
   const preflight = page.getByLabel("Bulk file preflight checks");
   await expect(preflight).toContainText("24 resolved (22 online, 1 stale, 1 unavailable)");
-  await expect(page.getByLabel("Bulk file live match summary")).toContainText("24 resolved · 22 ready");
+  await expect(page.getByLabel("Bulk file live match summary")).toContainText("24 matched · 22 ready · 1 stale excluded from ready · 1 unavailable blocked");
   await expect(page.getByLabel("Bulk file attention targets")).toContainText("edge-us-22");
   await expect(page.getByLabel("Bulk file attention targets")).toContainText("edge-us-23");
   await expect(preflight).toContainText("384.0 MiB");
@@ -110,6 +110,8 @@ async function installTwentyFourTargetFileMock(page: Page) {
       },
       display_name: `edge-us-${String(index).padStart(2, "0")}`,
       id: `a${String(index).padStart(7, "0")}-target-${String(index).padStart(2, "0")}`,
+      last_seen_at:
+        index < 22 ? "2026-06-27T08:00:00.000Z" : index === 22 ? "2026-06-26T08:00:00.000Z" : null,
       status: index === 22 ? "stale" : index === 23 ? "offline" : "online",
       tags: ["provider:alpha", "country:US", "edge"],
     }));
@@ -311,7 +313,13 @@ async function collectLayoutSignals(page: Page, scopeSelector: string) {
     const visible = (element: Element) => {
       const rect = element.getBoundingClientRect();
       const style = window.getComputedStyle(element);
-      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        Number.parseFloat(style.opacity || "1") > 0.01
+      );
     };
     const label = (element: Element) => ({
       className: element instanceof HTMLElement ? String(element.className) : "",

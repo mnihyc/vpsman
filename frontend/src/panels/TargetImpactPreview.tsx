@@ -27,6 +27,8 @@ type TargetImpactClassification =
   | "unavailable"
   | "unsupported";
 
+const COLLAPSED_TARGET_CHIP_LIMIT = 8;
+
 export function TargetImpactPreview({
   emptyText = "Review or select targets to classify capability impact",
   forceUnprivileged = false,
@@ -169,7 +171,7 @@ function TargetImpactChips({ agents, mode }: { agents: AgentView[]; mode: VpsNam
   if (agents.length === 0) {
     return <small>No targets</small>;
   }
-  const visible = expanded ? agents : agents.slice(0, 20);
+  const visible = expanded ? agents : agents.slice(0, COLLAPSED_TARGET_CHIP_LIMIT);
   const remaining = agents.length - visible.length;
   return (
     <div className="targetChipList impactTargetChips">

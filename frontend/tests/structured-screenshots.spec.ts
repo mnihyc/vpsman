@@ -2,7 +2,10 @@ import { expect, test } from "@playwright/test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
-import { openConsoleSubpage } from "./support/consoleNavigation";
+import {
+  openConsoleSubpage,
+  waitForConsoleShell,
+} from "./support/consoleNavigation";
 import type { ActiveView } from "../src/types";
 
 const SCREENSHOT_DIR = join(
@@ -534,7 +537,7 @@ const allViews: ScreenshotEntry[] = [
       "Source counts",
       "Range coverage",
       "Widget layout",
-      "Share / Export",
+      "Copy / Export",
     ],
   },
   {
@@ -596,7 +599,8 @@ const allViews: ScreenshotEntry[] = [
     requiredText: [
       "Actions required",
       "Policy recommends MFA",
-      "Operators and active sessions",
+      "Access responsibilities",
+      "Session scopes",
       "VPS identities",
       "Gateway sessions",
       "Privilege state",
@@ -907,6 +911,10 @@ async function navigateAndScreenshot(
     await expect(page.getByLabel("Preview changes data grid")).toBeVisible({
       timeout: 5_000,
     });
+    await page
+      .getByLabel("VPS rules preview final action")
+      .getByRole("button", { name: /Apply \d+ change/ })
+      .click();
     const prompt = page.locator(".confirmationPrompt", {
       hasText: "Confirm VPS rule write",
     });
@@ -1013,7 +1021,7 @@ batches.forEach((batch, batchIndex) => {
     mkdirSync(projectDir, { recursive: true });
 
     await page.goto("/");
-    await expect(page.locator(".shell")).toBeVisible({ timeout: 15_000 });
+    await waitForConsoleShell(page, 15_000);
 
     const results: Array<Record<string, unknown>> = [];
     const errors: string[] = [];
