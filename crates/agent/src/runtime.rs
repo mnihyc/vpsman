@@ -631,9 +631,12 @@ async fn apply_runtime_config_sync(
         cancel_token,
     )
     .await;
-    let removal_failed = removals
-        .iter()
-        .any(|removal| removal.get("status").and_then(serde_json::Value::as_str) == Some("failed"));
+    let removal_failed = removals.iter().any(|removal| {
+        matches!(
+            removal.get("status").and_then(serde_json::Value::as_str),
+            Some("failed" | "remove_unavailable")
+        )
+    });
     let reconcile_failed =
         reconcile.get("status").and_then(serde_json::Value::as_str) == Some("failed");
     let status = if removal_failed || reconcile_failed {
@@ -2543,6 +2546,61 @@ mod tests {
             .network
             .runtime_status_telemetry_plans
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_config_sync_blocks_status_only_adapter_removal() {
+        let root = std::env::temp_dir().join(format!(
+            "vpsman-runtime-sync-adapter-remove-unavailable-{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let mut plan = runtime_sync_test_plan("203.0.113.20", "10.255.0.0", "10.255.0.1");
+        plan.runtime_control = vpsman_common::RuntimeTunnelControl {
+            manager: vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
+            status: Some(vpsman_common::RuntimeTunnelCommand {
+                argv: vec!["/bin/echo".to_string(), "status".to_string()],
+                max_timeout_secs: 5,
+                max_output_bytes: 4096,
+            }),
+            ..Default::default()
+        };
+        let base = AgentConfig {
+            client_id: "left-a".to_string(),
+            network: vpsman_common::AgentNetworkConfig {
+                apply_enabled: true,
+                runtime_reconcile_enabled: true,
+                root_dir: root.to_string_lossy().to_string(),
+                runtime_ip_argv: vec!["/bin/echo".to_string()],
+                runtime_tc_argv: vec!["/bin/echo".to_string()],
+                runtime_unprivileged_mutation_policy:
+                    vpsman_common::AgentRuntimeUnprivilegedMutationPolicy::TryAll,
+                runtime_status_telemetry_plans: vec![runtime_sync_test_telemetry_plan(plan)],
+                ..Default::default()
+            },
+            ..AgentConfig::default()
+        };
+        let mut desired = AgentRuntimeConfig::from_agent_config(14, &base);
+        desired.network.runtime_status_telemetry_plans.clear();
+
+        let result = apply_runtime_config_sync(
+            uuid::Uuid::new_v4(),
+            &base,
+            &desired,
+            14,
+            "test-status-only-adapter-disabled",
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.outputs[0].exit_code, Some(1));
+        let body: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+        assert_eq!(body["status"], "failed");
+        assert_eq!(body["removed_tunnel_count"], 1);
+        assert_eq!(body["removals"][0]["plan_id"], "plan-a");
+        assert_eq!(body["removals"][0]["status"], "remove_unavailable");
+        assert!(result.applied_config.is_none());
     }
 
     #[tokio::test]

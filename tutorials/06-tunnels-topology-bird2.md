@@ -157,8 +157,10 @@ cargo run -p vpsctl -- tunnel-promote-custom-adapter \
 Custom adapters may provide startup, status, stop, cleanup, restart, and
 traffic-limit commands for OpenVPN, WireGuard helper scripts, TUN programs,
 provider scripts, or other custom adapter implementations. Status is required
-for custom adapters. Mutating commands run only through privilege-gated
-network jobs.
+for custom adapters. Stop or cleanup is required before an enabled custom
+adapter plan can be disabled through vpsman; otherwise the control plane cannot
+prove that the external tunnel was torn down. Mutating commands run only through
+privilege-gated network jobs.
 
 ## Probe And Speed Test
 

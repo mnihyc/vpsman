@@ -273,6 +273,8 @@ async fn mutate_tunnel_plan_enabled(
     if enabled {
         require_tunnel_endpoint_agents(&state, &existing.left_client_id, &existing.right_client_id)
             .await?;
+    } else {
+        require_tunnel_plan_disable_supported(&existing)?;
     }
     let view = state
         .repo
@@ -597,6 +599,17 @@ fn validate_custom_adapter_request(
         .is_some_and(|name| name.is_empty() || name.len() > 128)
     {
         return Err(ApiError::bad_request("invalid_tunnel_plan_name"));
+    }
+    Ok(())
+}
+
+fn require_tunnel_plan_disable_supported(plan: &TunnelPlanView) -> Result<(), ApiError> {
+    let control = &plan.plan.runtime_control;
+    if control.manager == RuntimeTunnelManager::ExternalManagedAdapter
+        && control.stop.is_none()
+        && control.cleanup.is_none()
+    {
+        return Err(ApiError::conflict("custom_adapter_remove_command_required"));
     }
     Ok(())
 }

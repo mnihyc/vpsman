@@ -485,24 +485,32 @@ export function TopologyPanel({
         enableHiding: false,
         sortValue: (plan) => (plan.enabled ? "disable" : "enable"),
         searchValue: (plan) => (plan.enabled ? "disable" : "enable"),
-        cell: (plan) => (
-          <div className="tunnelPlanRowActions">
-            <button
-              className="secondaryAction compactAction"
-              disabled={tunnelPlanTogglePending}
-              onClick={() => setTunnelPlanEnabledForRows([plan], !plan.enabled)}
-              title={
-                plan.enabled
-                  ? "Disable this saved desired state after confirmation."
-                  : "Enable this saved desired state after confirmation."
-              }
-              type="button"
-            >
-              {plan.enabled ? <PowerOff size={14} /> : <Power size={14} />}
-              <span>{plan.enabled ? "Disable" : "Enable"}</span>
-            </button>
-          </div>
-        ),
+        cell: (plan) => {
+          const disableBlocked =
+            plan.enabled && customAdapterRemoveUnavailable(plan);
+          return (
+            <div className="tunnelPlanRowActions">
+              <button
+                className="secondaryAction compactAction"
+                disabled={tunnelPlanTogglePending || disableBlocked}
+                onClick={() =>
+                  setTunnelPlanEnabledForRows([plan], !plan.enabled)
+                }
+                title={
+                  disableBlocked
+                    ? "Add a custom adapter stop or cleanup argv before disabling this runtime plan."
+                    : plan.enabled
+                      ? "Disable this saved desired state after confirmation."
+                      : "Enable this saved desired state after confirmation."
+                }
+                type="button"
+              >
+                {plan.enabled ? <PowerOff size={14} /> : <Power size={14} />}
+                <span>{plan.enabled ? "Disable" : "Enable"}</span>
+              </button>
+            </div>
+          );
+        },
       },
     ],
     [agentNameById, tunnelPlanEvidenceById, tunnelPlanTogglePending],
@@ -525,11 +533,19 @@ export function TopologyPanel({
       description: (rows) =>
         rows.length === 0
           ? "Select one or more tunnel plans first."
+          : rows.some(
+                (plan) => plan.enabled && customAdapterRemoveUnavailable(plan),
+              )
+            ? "Add stop or cleanup argv before disabling selected custom adapter tunnel plans."
           : rows.every((plan) => !plan.enabled)
             ? "Selected tunnel plans are already disabled."
             : `Disable ${rows.filter((plan) => plan.enabled).length} selected tunnel plan${rows.filter((plan) => plan.enabled).length === 1 ? "" : "s"}.`,
       disabled: (rows) =>
-        tunnelPlanTogglePending || rows.every((plan) => !plan.enabled),
+        tunnelPlanTogglePending ||
+        rows.every((plan) => !plan.enabled) ||
+        rows.some(
+          (plan) => plan.enabled && customAdapterRemoveUnavailable(plan),
+        ),
       icon: <PowerOff size={15} />,
       label: "Disable plan",
       onSelect: (rows) => void setTunnelPlanEnabledForRows(rows, false),
@@ -1866,6 +1882,15 @@ export function TopologyPanel({
       return;
     }
     setActionError(null);
+    if (!enabled) {
+      const blocked = targets.filter(customAdapterRemoveUnavailable);
+      if (blocked.length > 0) {
+        setActionError(
+          `Add stop or cleanup argv before disabling custom adapter plan${blocked.length === 1 ? "" : "s"}: ${blocked.map((plan) => plan.name).join(", ")}`,
+        );
+        return;
+      }
+    }
     const syncTargetLabels = Array.from(
       new Set(
         targets.flatMap((plan) => [
@@ -2389,6 +2414,15 @@ function autoUnderlayValue(
     return nextAuto;
   }
   return currentValue;
+}
+
+function customAdapterRemoveUnavailable(plan: TunnelPlanRecord): boolean {
+  const control = plan.plan.runtime_control;
+  return (
+    control?.manager === "external_managed_adapter" &&
+    !control.stop?.argv?.length &&
+    !control.cleanup?.argv?.length
+  );
 }
 
 function initialTunnelPlanForm(): CreateTunnelPlanRequest {

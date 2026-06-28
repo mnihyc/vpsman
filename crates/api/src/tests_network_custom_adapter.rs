@@ -113,6 +113,53 @@ async fn promote_disabled_tunnel_plan_to_custom_adapter_does_not_sync_runtime_co
 }
 
 #[tokio::test]
+async fn disable_status_only_custom_adapter_is_rejected_before_state_change() {
+    let repo = Repository::Memory(MemoryState::default());
+    let observed =
+        create_observed_plan(&repo, "observed-status-only", "wg62", TunnelKind::Wireguard).await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+
+    let Json(promoted) = crate::routes_network::promote_tunnel_plan_to_custom_adapter(
+        State(state.clone()),
+        headers.clone(),
+        Json(PromoteTunnelPlanToCustomAdapterRequest {
+            plan_id: observed.id,
+            runtime_control: status_only_adapter_control("/usr/local/libexec/wg-adapter"),
+            runtime_topology: None,
+            name: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(promoted.enabled);
+    let job_count_before_disable = repo.list_jobs(10).await.unwrap().len();
+
+    let error = crate::routes_network::disable_tunnel_plan(
+        State(state),
+        headers,
+        axum::extract::Path(promoted.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest { confirmed: true }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "custom_adapter_remove_command_required");
+    assert!(
+        repo.get_tunnel_plan(promoted.id)
+            .await
+            .unwrap()
+            .expect("promoted plan remains present")
+            .enabled
+    );
+    assert_eq!(
+        repo.list_jobs(10).await.unwrap().len(),
+        job_count_before_disable
+    );
+}
+
+#[tokio::test]
 async fn promote_tunnel_plan_to_custom_adapter_requires_confirmation_and_status_command() {
     let repo = Repository::Memory(MemoryState::default());
     let observed =
@@ -222,6 +269,17 @@ fn startup_only_adapter_control() -> RuntimeTunnelControl {
         manager: RuntimeTunnelManager::ExternalManagedAdapter,
         startup: Some(RuntimeTunnelCommand {
             argv: vec!["/usr/local/libexec/openvpn-adapter".to_string()],
+            ..RuntimeTunnelCommand::default()
+        }),
+        ..RuntimeTunnelControl::default()
+    }
+}
+
+fn status_only_adapter_control(binary: &str) -> RuntimeTunnelControl {
+    RuntimeTunnelControl {
+        manager: RuntimeTunnelManager::ExternalManagedAdapter,
+        status: Some(RuntimeTunnelCommand {
+            argv: vec![binary.to_string(), "status".to_string()],
             ..RuntimeTunnelCommand::default()
         }),
         ..RuntimeTunnelControl::default()
