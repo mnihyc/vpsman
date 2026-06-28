@@ -488,17 +488,24 @@ export function TopologyPanel({
         cell: (plan) => {
           const disableBlocked =
             plan.enabled && customAdapterRemoveUnavailable(plan);
+          const disableBlockedTitle =
+            "Add a custom adapter stop or cleanup argv before disabling this runtime plan.";
+          const disableBlockedHintId = disableBlocked
+            ? `tunnel-plan-disable-blocked-${plan.id}`
+            : undefined;
           return (
             <div className="tunnelPlanRowActions">
               <button
+                aria-describedby={disableBlockedHintId}
+                aria-disabled={disableBlocked ? true : undefined}
                 className="secondaryAction compactAction"
-                disabled={tunnelPlanTogglePending || disableBlocked}
+                disabled={tunnelPlanTogglePending}
                 onClick={() =>
                   setTunnelPlanEnabledForRows([plan], !plan.enabled)
                 }
                 title={
                   disableBlocked
-                    ? "Add a custom adapter stop or cleanup argv before disabling this runtime plan."
+                    ? disableBlockedTitle
                     : plan.enabled
                       ? "Disable this saved desired state after confirmation."
                       : "Enable this saved desired state after confirmation."
@@ -508,6 +515,11 @@ export function TopologyPanel({
                 {plan.enabled ? <PowerOff size={14} /> : <Power size={14} />}
                 <span>{plan.enabled ? "Disable" : "Enable"}</span>
               </button>
+              {disableBlocked ? (
+                <span className="srOnly" id={disableBlockedHintId}>
+                  {disableBlockedTitle}
+                </span>
+              ) : null}
             </div>
           );
         },

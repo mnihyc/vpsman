@@ -877,6 +877,18 @@
   min-width: 94px;
 }
 
+.tunnelPlanRowActions .secondaryAction[aria-disabled="true"] {
+  border-color: var(--border-subtle);
+  background: var(--surface-neutral);
+  color: var(--muted);
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.tunnelPlanRowActions .secondaryAction[aria-disabled="true"] svg {
+  color: var(--muted);
+}
+
 .topologyPlanModelNote > div {
   display: grid;
   gap: 4px;
