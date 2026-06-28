@@ -3545,6 +3545,25 @@ function reviewedDeliveryHash(
   return hashes[0];
 }
 
+function reviewedWebhookDispatchEventId(
+  rows: Array<{ event_id?: string | null }>,
+): string {
+  const eventIds = Array.from(
+    new Set(
+      rows
+        .map((row) => row.event_id?.trim())
+        .filter((eventId): eventId is string => Boolean(eventId)),
+    ),
+  );
+  if (rows.length === 0) {
+    throw new Error("Webhook dispatch matched no delivery rows");
+  }
+  if (eventIds.length !== 1) {
+    throw new Error("Webhook dispatch event ID is missing or inconsistent");
+  }
+  return eventIds[0];
+}
+
 function shortDeliveryError(error: string | null | undefined): string {
   const trimmed = error?.trim();
   if (!trimmed) {
@@ -6531,13 +6550,14 @@ export function WebhookRuleManager({
         if (openConfirmation) {
           const previewHash = reviewedDeliveryHash(rows, "Webhook dispatch");
           const frozenEventKind = eventKind.trim();
-          const frozenEventId = eventId.trim();
+          const frozenEventId =
+            eventId.trim() || reviewedWebhookDispatchEventId(rows);
           setQueueSnapshot({
             action: "dispatch",
             request: {
               rule_id: rule?.id ?? null,
               event_kind: frozenEventKind,
-              event_id: frozenEventId || null,
+              event_id: frozenEventId,
               limit: 50,
               dry_run: false,
               confirmed: true,

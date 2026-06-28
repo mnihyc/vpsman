@@ -290,6 +290,13 @@ fn validate_webhook_rule_dispatch_request(
             "webhook_rule_dispatch_preview_hash_required",
         ));
     }
+    if !request.dry_run.unwrap_or(false)
+        && request.event_id.as_deref().unwrap_or("").trim().is_empty()
+    {
+        return Err(ApiError::bad_request(
+            "webhook_rule_dispatch_event_id_required",
+        ));
+    }
     validate_required_text(&request.event_kind, 128, "webhook_rule_event_kind_invalid")?;
     if let Some(event_id) = request.event_id.as_deref() {
         validate_required_text(event_id, 256, "webhook_rule_event_id_invalid")?;

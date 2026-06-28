@@ -1014,6 +1014,105 @@ async fn webhook_rule_dispatch_can_be_scoped_to_one_rule() {
     assert_eq!(scoped_dispatch[0].status, "event_logged");
 }
 
+#[tokio::test]
+async fn webhook_rule_dispatch_generated_event_id_can_be_confirmed_when_reused() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.push(AgentView {
+            id: "edge-a".to_string(),
+            display_name: "Edge A".to_string(),
+            status: "online".to_string(),
+            tags: vec!["edge".to_string()],
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: AgentCapabilitySnapshot::default(),
+        });
+    }
+    repo.upsert_webhook_rule(
+        &crate::model_webhook_rules::CreateWebhookRuleRequest {
+            id: None,
+            name: "generated-event-webhook".to_string(),
+            enabled: true,
+            expression: "interval.30sec && tag:edge".to_string(),
+            target: "http://127.0.0.1:9/generated-event-webhook".to_string(),
+            body_template: "{rule.name} {event.id}".to_string(),
+            signing_secret: None,
+            clear_signing_secret: false,
+            cooldown_secs: Some(60),
+            notes: None,
+            confirmed: true,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let state = alert_test_state(repo);
+    let preview = state
+        .dispatch_webhook_rules(
+            &crate::model_webhook_rules::WebhookRuleDispatchRequest {
+                rule_id: None,
+                event_kind: "interval.30sec".to_string(),
+                event_id: None,
+                limit: Some(50),
+                dry_run: Some(true),
+                preview_hash: None,
+                confirmed: false,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.len(), 1);
+    let reviewed_event_id = preview[0].event_id.clone();
+    assert!(!reviewed_event_id.is_empty());
+    let reviewed_hash = preview[0].review_preview_hash.clone();
+
+    let missing_event_id_error = state
+        .dispatch_webhook_rules(
+            &crate::model_webhook_rules::WebhookRuleDispatchRequest {
+                rule_id: None,
+                event_kind: "interval.30sec".to_string(),
+                event_id: None,
+                limit: Some(50),
+                dry_run: Some(false),
+                preview_hash: reviewed_hash.clone(),
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(missing_event_id_error.contains("webhook_rule_dispatch_event_id_required"));
+
+    let dispatch = state
+        .dispatch_webhook_rules(
+            &crate::model_webhook_rules::WebhookRuleDispatchRequest {
+                rule_id: None,
+                event_kind: "interval.30sec".to_string(),
+                event_id: Some(reviewed_event_id.clone()),
+                limit: Some(50),
+                dry_run: Some(false),
+                preview_hash: reviewed_hash,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(dispatch.len(), 1);
+    assert_eq!(dispatch[0].event_id, reviewed_event_id);
+    assert_eq!(dispatch[0].status, "event_logged");
+}
+
 fn alert_test_state(repo: Repository) -> AppState {
     AppState {
         repo,

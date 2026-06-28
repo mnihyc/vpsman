@@ -99,10 +99,16 @@ impl AppState {
             "webhook_rule_dispatch_confirmation_required"
         );
         let event_kind = request.event_kind.trim();
-        let event_id = request
+        let event_id = match request
             .event_id
-            .clone()
-            .unwrap_or_else(|| format!("{event_kind}:{}", unix_now()));
+            .as_deref()
+            .map(str::trim)
+            .filter(|event_id| !event_id.is_empty())
+        {
+            Some(event_id) => event_id.to_string(),
+            None if dry_run => format!("{event_kind}:{}", unix_now()),
+            None => anyhow::bail!("webhook_rule_dispatch_event_id_required"),
+        };
         let rule_limit = if request.rule_id.is_some() {
             1000
         } else {
