@@ -1356,6 +1356,15 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
   );
   await expect(stagedArchive).toHaveAttribute("title", archivePath);
+  const dryRunToggle = restoreWorkflow.getByLabel("Dry-run rehearsal");
+  await expect(dryRunToggle).toBeChecked();
+  await expect(
+    restoreWorkflow.getByRole("button", { name: "Review dry run" }),
+  ).not.toHaveClass(/dangerPrimary/);
+  await dryRunToggle.setChecked(false);
+  await expect(
+    restoreWorkflow.getByRole("button", { name: "Review live restore" }),
+  ).toHaveClass(/dangerPrimary/);
   await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("120");
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review live restore" }),
@@ -1458,6 +1467,9 @@ test("backup restore async review preparation ignores stale edits", async ({
   await expect(restoreWorkflow.getByLabel("Staged archive")).toHaveValue(
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
   );
+  const dryRunToggle = restoreWorkflow.getByLabel("Dry-run rehearsal");
+  await expect(dryRunToggle).toBeChecked();
+  await dryRunToggle.setChecked(false);
   await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("150");
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review live restore" }),

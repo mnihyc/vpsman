@@ -240,6 +240,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             privilege_ttl_secs,
             max_timeout_secs,
             confirmed,
+            dry_run,
             force_unprivileged,
         } => {
             commands_backups::restore_run(
@@ -254,6 +255,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     privilege_ttl_secs,
                     max_timeout_secs,
                     confirmed,
+                    dry_run,
                     force_unprivileged,
                 },
             )?;
@@ -312,6 +314,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             privilege_ttl_secs,
             max_timeout_secs,
             confirmed,
+            dry_run,
             force_unprivileged,
         } => {
             commands_migrations::migration_run(
@@ -325,6 +328,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 privilege_ttl_secs,
                 max_timeout_secs,
                 confirmed,
+                dry_run,
                 force_unprivileged,
             )?;
             Ok(None)

@@ -223,7 +223,7 @@ const FILE_TRANSFER_DOWNLOAD_USAGE: &str = concat!(
 const RESTORE_RUN_USAGE: &str = concat!(
     "usage: restore-run <backup_uuid> <target_client_id> ",
     "--archive-transfer-session-id <uuid> [--max-timeout <secs>] ",
-    "[--force-unprivileged] --confirmed"
+    "[--dry-run] [--force-unprivileged] --confirmed"
 );
 
 const RESTORE_ROLLBACK_USAGE: &str = concat!(
@@ -234,7 +234,7 @@ const RESTORE_ROLLBACK_USAGE: &str = concat!(
 const MIGRATION_RUN_USAGE: &str = concat!(
     "usage: migration-run <restore_plan_uuid> --archive-transfer-session-id <uuid> ",
     "[--note <text>] ",
-    "[--max-timeout <secs>] [--force-unprivileged] --confirmed"
+    "[--max-timeout <secs>] [--dry-run] [--force-unprivileged] --confirmed"
 );
 
 fn render_vty_help() -> String {

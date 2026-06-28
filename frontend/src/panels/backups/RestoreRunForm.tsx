@@ -108,7 +108,7 @@ export function RestoreRunForm({
         </label>
         {!confirmationOpen && (
           <button
-            className="primaryAction dangerPrimary"
+            className={restoreDryRun ? "primaryAction" : "primaryAction dangerPrimary"}
             disabled={
               pending ||
               !privilegeReady ||

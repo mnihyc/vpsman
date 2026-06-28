@@ -103,6 +103,7 @@ pub(crate) fn migration_run(
     privilege_ttl_secs: u64,
     max_timeout_secs: u64,
     confirmed: bool,
+    dry_run: bool,
     force_unprivileged: bool,
 ) -> Result<()> {
     let restore_plan_id = Uuid::parse_str(&restore_plan_id).context("invalid restore plan UUID")?;
@@ -121,6 +122,7 @@ pub(crate) fn migration_run(
         privilege_ttl_secs,
         max_timeout_secs,
         confirmed,
+        dry_run,
         force_unprivileged,
     )?;
     println!("{response}");
@@ -138,9 +140,13 @@ pub(crate) fn migration_run_with_credentials(
     privilege_ttl_secs: u64,
     max_timeout_secs: u64,
     confirmed: bool,
+    dry_run: bool,
     force_unprivileged: bool,
 ) -> Result<String> {
-    anyhow::ensure!(confirmed, "migration-run requires --confirmed");
+    anyhow::ensure!(
+        confirmed,
+        "migration-run requires --confirmed because it records the migration relationship"
+    );
     let plan = find_restore_plan(api_url, token, restore_plan_id)?;
     anyhow::ensure!(
         plan.status == "planned_metadata_only",
@@ -170,6 +176,7 @@ pub(crate) fn migration_run_with_credentials(
             privilege_ttl_secs,
             max_timeout_secs,
             confirmed: true,
+            dry_run,
             force_unprivileged,
         },
     )?;

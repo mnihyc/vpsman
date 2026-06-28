@@ -976,6 +976,8 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = false)]
         confirmed: bool,
         #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        #[arg(long, default_value_t = false)]
         force_unprivileged: bool,
     },
     RestoreRun {
@@ -995,6 +997,8 @@ pub(crate) enum Command {
         max_timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
         #[arg(long, default_value_t = false)]
         force_unprivileged: bool,
     },

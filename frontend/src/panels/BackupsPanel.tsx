@@ -369,7 +369,7 @@ export function BackupsPanel({
   const [restoreTargetId, setRestoreTargetId] = useState("");
   const [restoreNote, setRestoreNote] = useState("");
   const [restoreArchiveTransferKey, setRestoreArchiveTransferKey] = useState("");
-  const [restoreDryRun, setRestoreDryRun] = useState(false);
+  const [restoreDryRun, setRestoreDryRun] = useState(true);
   const [restorePostRestoreArgv, setRestorePostRestoreArgv] = useState("");
   const [restoreMaxTimeoutSecs, setRestoreMaxTimeoutSecs] = useState(60);
   const [restoreForceUnprivileged, setRestoreForceUnprivileged] =

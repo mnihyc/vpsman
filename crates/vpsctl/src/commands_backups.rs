@@ -59,6 +59,7 @@ pub(crate) struct RestoreRunOptions {
     pub(crate) privilege_ttl_secs: u64,
     pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
+    pub(crate) dry_run: bool,
     pub(crate) force_unprivileged: bool,
 }
 
@@ -74,6 +75,7 @@ pub(crate) struct RestoreRunWithCredentials<'a> {
     pub(crate) privilege_ttl_secs: u64,
     pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
+    pub(crate) dry_run: bool,
     pub(crate) force_unprivileged: bool,
 }
 
@@ -889,7 +891,10 @@ pub(crate) fn restore_run(
     token: Option<&str>,
     options: RestoreRunOptions,
 ) -> Result<()> {
-    anyhow::ensure!(options.confirmed, "restore-run requires --confirmed");
+    anyhow::ensure!(
+        options.dry_run || options.confirmed,
+        "restore-run requires --confirmed unless --dry-run is set"
+    );
     let source_backup_request_id = Uuid::parse_str(&options.source_backup_request_id)
         .context("invalid source backup request UUID")?;
     let archive_transfer_session_id = Uuid::parse_str(&options.archive_transfer_session_id)
@@ -919,6 +924,7 @@ pub(crate) fn restore_run(
                 privilege_ttl_secs: options.privilege_ttl_secs,
                 max_timeout_secs: options.max_timeout_secs,
                 confirmed: options.confirmed,
+                dry_run: options.dry_run,
                 force_unprivileged: options.force_unprivileged,
             },
         )?
@@ -940,7 +946,10 @@ pub(crate) fn restore_run_request_with_credentials(
     token: Option<&str>,
     request: RestoreRunWithCredentials<'_>,
 ) -> Result<serde_json::Value> {
-    anyhow::ensure!(request.confirmed, "restore-run requires --confirmed");
+    anyhow::ensure!(
+        request.dry_run || request.confirmed,
+        "restore-run requires --confirmed unless --dry-run is set"
+    );
     let archive = resolve_restore_archive_transfer(
         api_url,
         token,
@@ -957,6 +966,7 @@ pub(crate) fn restore_run_request_with_credentials(
         request.paths,
         request.include_config,
         request.destination_root,
+        request.dry_run,
     )?;
     let target_ids = vec![request.target_client_id.clone()];
     let selector_expression = selector_expression_from_targets(&target_ids, &[]);
@@ -980,7 +990,7 @@ pub(crate) fn restore_run_request_with_credentials(
         "selector_expression": selector_expression,
         "target_client_ids": target_ids,
         "privileged": true,
-        "destructive": true,
+        "destructive": !request.dry_run,
         "confirmed": request.confirmed,
         "force_unprivileged": request.force_unprivileged,
         "max_timeout_secs": request.max_timeout_secs,
@@ -1239,6 +1249,7 @@ pub(crate) fn restore_run_operation(
     paths: Vec<String>,
     include_config: bool,
     destination_root: Option<String>,
+    dry_run: bool,
 ) -> Result<JobCommand> {
     anyhow::ensure!(
         include_config || !paths.is_empty(),
@@ -1301,7 +1312,7 @@ pub(crate) fn restore_run_operation(
         archive_path: Some(archive_path),
         archive_size_bytes: Some(archive_size_bytes),
         archive_sha256_hex: Some(archive_sha256_hex),
-        dry_run: false,
+        dry_run,
         post_restore_argv: Vec::new(),
     })
 }
@@ -1311,7 +1322,7 @@ mod tests {
     use super::{
         backup_policy_prune_payload, build_restore_plan_privilege,
         generated_restore_destination_root_with_base, restore_rollback_operation_from_outputs,
-        JobOutputRecord, BASE64,
+        restore_run_operation, JobOutputRecord, BASE64,
     };
     use base64::Engine as _;
     use uuid::Uuid;
@@ -1374,6 +1385,27 @@ mod tests {
             Some(TEST_RESTORE_ROLLBACK_PATH)
         );
         assert_eq!(restored_files[1].rollback_path, None);
+    }
+
+    #[test]
+    fn restore_run_operation_preserves_dry_run_mode() {
+        let operation = restore_run_operation(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "/var/lib/vpsman/restores/source.tar".to_string(),
+            128,
+            "ab".repeat(32),
+            vec!["/etc/hostname".to_string()],
+            false,
+            Some("/var/lib/vpsman/restores/target".to_string()),
+            true,
+        )
+        .unwrap();
+
+        match operation {
+            JobCommand::Restore { dry_run, .. } => assert!(dry_run),
+            other => panic!("unexpected restore operation: {other:?}"),
+        }
     }
 
     #[test]

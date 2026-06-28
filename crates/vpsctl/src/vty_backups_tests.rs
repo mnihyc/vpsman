@@ -153,7 +153,30 @@ fn parses_vty_restore_run_for_single_target_execution() {
     );
     assert_eq!(request.max_timeout_secs, 120);
     assert!(request.confirmed);
+    assert!(!request.dry_run);
     assert!(request.force_unprivileged);
+}
+
+#[test]
+fn parses_vty_restore_run_dry_run_without_confirmation() {
+    let source = Uuid::new_v4().to_string();
+    let archive_transfer_session_id = Uuid::new_v4();
+    let request = parse_vty_restore_run(&[
+        &source,
+        "client-b",
+        "--archive-transfer-session-id",
+        &archive_transfer_session_id.to_string(),
+        "--dry-run",
+    ])
+    .unwrap();
+
+    assert_eq!(request.source_backup_request_id.to_string(), source);
+    assert_eq!(
+        request.archive_transfer_session_id,
+        archive_transfer_session_id
+    );
+    assert!(request.dry_run);
+    assert!(!request.confirmed);
 }
 
 #[test]

@@ -19,6 +19,7 @@ pub(crate) struct VtyMigrationRunRequest {
     pub(crate) note: Option<String>,
     pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
+    pub(crate) dry_run: bool,
     pub(crate) force_unprivileged: bool,
 }
 
@@ -57,13 +58,14 @@ pub(crate) fn parse_vty_migration_link(tokens: &[&str]) -> Result<VtyMigrationLi
 pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRunRequest> {
     let restore_plan_id = tokens
         .first()
-        .context("usage: migration-run <restore_plan_uuid> --archive-transfer-session-id <uuid> [--note <text>] [--max-timeout <secs>] [--force-unprivileged] --confirmed")?;
+        .context("usage: migration-run <restore_plan_uuid> --archive-transfer-session-id <uuid> [--note <text>] [--max-timeout <secs>] [--dry-run] [--force-unprivileged] --confirmed")?;
     let mut request = VtyMigrationRunRequest {
         restore_plan_id: Uuid::parse_str(restore_plan_id).context("invalid restore plan UUID")?,
         archive_transfer_session_id: Uuid::nil(),
         note: None,
         max_timeout_secs: 60,
         confirmed: false,
+        dry_run: false,
         force_unprivileged: false,
     };
     let mut index = 1;
@@ -124,6 +126,10 @@ pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRun
                 request.confirmed = true;
                 index += 1;
             }
+            "--dry-run" => {
+                request.dry_run = true;
+                index += 1;
+            }
             other => anyhow::bail!("unknown migration-run flag {other}"),
         }
     }
@@ -135,7 +141,10 @@ pub(crate) fn parse_vty_migration_run(tokens: &[&str]) -> Result<VtyMigrationRun
         !request.archive_transfer_session_id.is_nil(),
         "migration-run requires --archive-transfer-session-id"
     );
-    anyhow::ensure!(request.confirmed, "migration-run requires --confirmed");
+    anyhow::ensure!(
+        request.confirmed,
+        "migration-run requires --confirmed because it records the migration relationship"
+    );
     Ok(request)
 }
 
@@ -174,6 +183,7 @@ pub(crate) fn submit_vty_migration_run(
         300,
         request.max_timeout_secs,
         request.confirmed,
+        request.dry_run,
         request.force_unprivileged,
     )
 }
@@ -215,6 +225,7 @@ mod tests {
             "cutover",
             "--max-timeout",
             "120",
+            "--dry-run",
             "--force-unprivileged",
             "--confirmed",
         ])
@@ -229,6 +240,7 @@ mod tests {
         );
         assert_eq!(request.note.as_deref(), Some("cutover"));
         assert_eq!(request.max_timeout_secs, 120);
+        assert!(request.dry_run);
         assert!(request.force_unprivileged);
         assert!(request.confirmed);
     }
@@ -236,5 +248,12 @@ mod tests {
     #[test]
     fn rejects_unconfirmed_vty_migration_run() {
         assert!(parse_vty_migration_run(&["49c7c3ea-0da8-40b6-b380-5543b1eb3adb"]).is_err());
+        assert!(parse_vty_migration_run(&[
+            "49c7c3ea-0da8-40b6-b380-5543b1eb3adb",
+            "--archive-transfer-session-id",
+            &uuid::Uuid::new_v4().to_string(),
+            "--dry-run",
+        ])
+        .is_err());
     }
 }

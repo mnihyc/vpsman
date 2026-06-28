@@ -4697,8 +4697,11 @@ test("backups restore starts from artifact readiness, destination, and confirmat
     drawer.getByRole("button", { name: "Review draft restore" }),
   ).toBeVisible();
   await expect(
-    drawer.getByRole("button", { name: "Review live restore" }),
-  ).toBeVisible();
+    drawer.getByLabel("Dry-run rehearsal"),
+  ).toBeChecked();
+  const dryRunReviewButton = drawer.getByRole("button", { name: "Review dry run" });
+  await expect(dryRunReviewButton).toBeVisible();
+  await expect(dryRunReviewButton).not.toHaveClass(/dangerPrimary/);
   await expect(
     drawer.getByRole("button", { name: "Review rollback" }),
   ).toBeVisible();

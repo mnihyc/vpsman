@@ -137,7 +137,7 @@ workflows=(
   'backup artifact upload|backup-artifact-upload|backup-artifact-upload|Upload artifact|frontend/src/panels/backups/ArtifactUploadForm.tsx'
   'backup artifact chunked upload|backup-artifact-upload-chunked|backup-artifact-upload-chunked|Chunked session|frontend/src/panels/backups/ArtifactUploadForm.tsx'
   'restore plan|restore-plan|restore-plan|Review draft restore|frontend/src/panels/backups/RestorePlanForm.tsx'
-  'restore run|restore-run|restore-run|Review live restore|frontend/src/panels/backups/RestoreRunForm.tsx'
+  'restore run|restore-run|restore-run|Review dry run|frontend/src/panels/backups/RestoreRunForm.tsx'
   'restore rollback|restore-rollback|restore-rollback|Review rollback|frontend/src/panels/backups/RestoreRollbackForm.tsx'
   'migration link|migration-link|migration-link|Review mapping|frontend/src/panels/backups/MigrationLinkForm.tsx'
   'migration run|migration-run|migration-run|Review cutover restore|frontend/src/panels/backups/MigrationLinkForm.tsx frontend/src/panels/BackupsPanel.tsx'

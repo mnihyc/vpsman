@@ -436,7 +436,7 @@ async fn create_job_inner(
     {
         return Err(ApiError::bad_request("terminal_input_route_required"));
     }
-    if !request.confirmed && job_command_requires_confirmation(&job_command) {
+    if !request.confirmed && job_command_requires_dispatch_confirmation(&job_command) {
         return Err(ApiError::conflict(confirmation_error_code(&job_command)));
     }
     let command_payload = encode_json(&job_command).map_err(|error| {
@@ -953,6 +953,13 @@ fn confirmation_error_code(command: &JobCommand) -> &'static str {
         | JobCommand::FileCopy { .. } => "file_operation_confirmation_required",
         _ => "command_confirmation_required",
     }
+}
+
+fn job_command_requires_dispatch_confirmation(command: &JobCommand) -> bool {
+    if matches!(command, JobCommand::Restore { dry_run: true, .. }) {
+        return false;
+    }
+    job_command_requires_confirmation(command)
 }
 
 pub(crate) fn request_fingerprint_for_job(

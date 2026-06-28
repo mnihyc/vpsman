@@ -371,6 +371,61 @@ async fn restore_job_accepts_matching_selected_archive_upload() {
 }
 
 #[tokio::test]
+async fn restore_dry_run_job_reaches_validation_without_confirmation() {
+    let repo = seeded_restore_repo().await;
+    let source_backup_id = Uuid::new_v4();
+    let archive_transfer_session_id = Uuid::new_v4();
+    let restore_operation = |dry_run| JobCommand::Restore {
+        source_backup_request_id: source_backup_id,
+        archive_transfer_session_id,
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        destination_root: Some("/restore".to_string()),
+        archive_path: Some("/var/lib/vpsman/restores/source.tar".to_string()),
+        archive_size_bytes: Some(128),
+        archive_sha256_hex: Some("a".repeat(64)),
+        dry_run,
+        post_restore_argv: Vec::new(),
+    };
+    let request_for = |operation, destructive| CreateJobRequest {
+        job_id: Some(Uuid::new_v4()),
+        selector_expression: "id:client-b".to_string(),
+        target_client_ids: vec!["client-b".to_string()],
+        destructive,
+        confirmed: false,
+        command: "restore".to_string(),
+        argv: Vec::new(),
+        operation: Some(operation),
+        max_timeout_secs: Some(60),
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: None,
+    };
+
+    let live_state = test_state_with_privilege_auto_approve(repo.clone());
+    let live_headers = crate::test_auth_headers(&live_state).await;
+    let live_error = create_job(
+        State(live_state),
+        live_headers,
+        Json(request_for(restore_operation(false), false)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(live_error.code, "command_confirmation_required");
+
+    let state = test_state_with_privilege_auto_approve(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let dry_run_error = create_job(
+        State(state),
+        headers,
+        Json(request_for(restore_operation(true), false)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(dry_run_error.code, "restore_source_backup_not_found");
+}
+
+#[tokio::test]
 async fn restore_rollback_degrades_unprivileged_target_without_gateway() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {

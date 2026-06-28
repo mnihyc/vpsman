@@ -44,6 +44,7 @@ pub(crate) struct VtyRestoreRunRequest {
     pub(crate) archive_transfer_session_id: Uuid,
     pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
+    pub(crate) dry_run: bool,
     pub(crate) force_unprivileged: bool,
 }
 
@@ -499,9 +500,9 @@ pub(crate) fn parse_vty_restore_plan(tokens: &[&str]) -> Result<VtyRestorePlanRe
 pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequest> {
     let source_backup_request_id = tokens
         .first()
-        .context("usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--max-timeout <secs>] [--force-unprivileged] --confirmed")?;
+        .context("usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--max-timeout <secs>] [--dry-run] [--force-unprivileged] --confirmed")?;
     let target_client_id = tokens.get(1).context(
-        "usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--max-timeout <secs>] [--force-unprivileged] --confirmed",
+        "usage: restore-run <source_backup_uuid> <target_client_id> --archive-transfer-session-id <uuid> [--max-timeout <secs>] [--dry-run] [--force-unprivileged] --confirmed",
     )?;
     let mut request = VtyRestoreRunRequest {
         source_backup_request_id: Uuid::parse_str(source_backup_request_id)
@@ -510,6 +511,7 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
         archive_transfer_session_id: Uuid::nil(),
         max_timeout_secs: 60,
         confirmed: false,
+        dry_run: false,
         force_unprivileged: false,
     };
     let mut index = 2;
@@ -547,6 +549,10 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
             }
             "--confirmed" => {
                 request.confirmed = true;
+                index += 1;
+            }
+            "--dry-run" => {
+                request.dry_run = true;
                 index += 1;
             }
             "--force-unprivileged" => {
@@ -590,7 +596,10 @@ pub(crate) fn parse_vty_restore_run(tokens: &[&str]) -> Result<VtyRestoreRunRequ
         (1..=MAX_CONFIGURABLE_JOB_TIMEOUT_SECS).contains(&request.max_timeout_secs),
         "restore timeout out of range"
     );
-    anyhow::ensure!(request.confirmed, "restore-run requires --confirmed");
+    anyhow::ensure!(
+        request.dry_run || request.confirmed,
+        "restore-run requires --confirmed unless --dry-run is set"
+    );
     Ok(request)
 }
 
@@ -853,6 +862,7 @@ pub(crate) fn submit_vty_restore_run(
             privilege_ttl_secs: 300,
             max_timeout_secs: request.max_timeout_secs,
             confirmed: request.confirmed,
+            dry_run: request.dry_run,
             force_unprivileged: request.force_unprivileged,
         },
     )

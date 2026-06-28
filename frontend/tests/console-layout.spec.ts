@@ -3868,6 +3868,15 @@ test("dispatches executable restores with agent-local archive metadata only", as
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
   );
   await expect(stagedArchive).toHaveAttribute("title", archivePath);
+  const dryRunToggle = restoreWorkflow.getByLabel("Dry-run rehearsal");
+  await expect(dryRunToggle).toBeChecked();
+  await expect(
+    restoreWorkflow.getByRole("button", { name: "Review dry run" }),
+  ).not.toHaveClass(/dangerPrimary/);
+  await dryRunToggle.setChecked(false);
+  await expect(
+    restoreWorkflow.getByRole("button", { name: "Review live restore" }),
+  ).toHaveClass(/dangerPrimary/);
   await restoreWorkflow.getByLabel("Restore max timeout seconds").fill("120");
   await activate(
     restoreWorkflow.getByRole("button", { name: "Review live restore" }),
