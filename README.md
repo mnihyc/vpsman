@@ -1,7 +1,5 @@
 # vpsman
 
-> This project is highly personalized and managed by AI agents.
-
 `vpsman` is a Rust-based VPS panel with extended special functions: lightweight
 headless agents, a raw TCP gateway, an HTTP control plane, a CLI/VTY operator
 tool, and a Vite-built web panel.
