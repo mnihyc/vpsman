@@ -2488,6 +2488,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_config_sync_removes_omitted_tunnel_plan() {
+        let root = std::env::temp_dir().join(format!(
+            "vpsman-runtime-sync-remove-{}",
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(root.join("sys/class/net/tunlr"))
+            .await
+            .unwrap();
+        let plan = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+            "203.0.113.20",
+            "10.255.0.0",
+            "10.255.0.1",
+        ));
+        let base = AgentConfig {
+            client_id: "left-a".to_string(),
+            network: vpsman_common::AgentNetworkConfig {
+                apply_enabled: true,
+                runtime_reconcile_enabled: true,
+                root_dir: root.to_string_lossy().to_string(),
+                runtime_ip_argv: vec!["/bin/echo".to_string()],
+                runtime_tc_argv: vec!["/bin/echo".to_string()],
+                runtime_unprivileged_mutation_policy:
+                    vpsman_common::AgentRuntimeUnprivilegedMutationPolicy::TryAll,
+                runtime_status_telemetry_plans: vec![plan],
+                ..Default::default()
+            },
+            ..AgentConfig::default()
+        };
+        let mut desired = AgentRuntimeConfig::from_agent_config(13, &base);
+        desired.network.runtime_status_telemetry_plans.clear();
+
+        let result = apply_runtime_config_sync(
+            uuid::Uuid::new_v4(),
+            &base,
+            &desired,
+            13,
+            "test-plan-disabled",
+            CommandCancelToken::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.outputs[0].exit_code, Some(0));
+        let body: serde_json::Value = serde_json::from_slice(&result.outputs[0].data).unwrap();
+        assert_eq!(body["status"], "applied");
+        assert_eq!(body["removed_tunnel_count"], 1);
+        assert_eq!(body["removals"][0]["plan_id"], "plan-a");
+        assert_eq!(body["removals"][0]["status"], "removed");
+        assert_eq!(body["reconcile"]["total"], 0);
+        assert!(result
+            .applied_config
+            .expect("disabled plan sync should apply")
+            .network
+            .runtime_status_telemetry_plans
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn runtime_config_sync_failure_does_not_return_config_update() {
         let root =
             std::env::temp_dir().join(format!("vpsman-runtime-sync-fail-{}", uuid::Uuid::new_v4()));
