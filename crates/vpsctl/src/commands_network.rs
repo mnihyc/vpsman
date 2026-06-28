@@ -4,14 +4,14 @@ use anyhow::{Context, Result};
 use clap::{ArgAction, Args, ValueEnum};
 use uuid::Uuid;
 use vpsman_common::{
-    plan_tunnel, render_tunnel_endpoint_config, BandwidthMbps, JobCommand, OspfCostPolicy,
-    TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlan,
-    TunnelPlanInput, DEFAULT_MAX_JOB_TIMEOUT_SECS, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
-    NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
-    NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
-    NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
-    NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
-    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
+    payload_hash, plan_tunnel, render_tunnel_endpoint_config, BandwidthMbps, JobCommand,
+    OspfCostPolicy, TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind,
+    TunnelPlan, TunnelPlanInput, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
+    NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
+    NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
+    NETWORK_SPEED_TEST_MIN_DURATION_SECS, NETWORK_SPEED_TEST_MIN_MAX_BYTES,
+    NETWORK_SPEED_TEST_MIN_PORT, NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
 };
 
 use crate::{
@@ -21,7 +21,10 @@ use crate::{
         build_runtime_control, build_runtime_topology, RuntimeControlArgs, RuntimeManagerArg,
         RuntimeTopologyArgs,
     },
-    privilege::{build_privilege_for_job_command, load_super_password, load_super_salt_hex},
+    privilege::{
+        build_privilege_for_db, build_privilege_for_job_command, load_super_password,
+        load_super_salt_hex, DbPrivilegeRequest,
+    },
 };
 
 #[derive(Debug, Args)]
@@ -309,6 +312,12 @@ pub(crate) struct TunnelOspfCostUpdateCommand {
     pub(crate) mutation_intent: TunnelOspfMutationIntentArg,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
+    #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
+    pub(crate) password_env: String,
+    #[arg(long)]
+    pub(crate) super_salt_hex: Option<String>,
+    #[arg(long, default_value_t = 300)]
+    pub(crate) privilege_ttl_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -464,6 +473,38 @@ pub(crate) fn tunnel_ospf_cost_update(
         request.current_ospf_cost != request.recommended_ospf_cost,
         "tunnel-ospf-cost-update requires a changed OSPF cost"
     );
+    let plan_id = Uuid::parse_str(&request.plan_id).context("invalid --plan-id UUID")?;
+    let plan_raw = http_get(
+        api_url,
+        &format!("/api/v1/tunnel-plans/{}/plan", request.plan_id),
+        token,
+    )?;
+    let plan: TunnelPlan =
+        serde_json::from_str(&plan_raw).context("failed to parse tunnel plan export")?;
+    let target_client_ids = tunnel_plan_client_ids(&plan)?;
+    let payload_hash = tunnel_ospf_cost_payload_hash(
+        plan_id,
+        &request.recommendation_id,
+        request.current_ospf_cost,
+        request.recommended_ospf_cost,
+        request.mutation_intent.as_str(),
+    );
+    let password = load_super_password(&request.password_env)?;
+    let salt_hex = load_super_salt_hex(request.super_salt_hex.as_deref())?;
+    let target = tunnel_plan_privilege_target(plan_id);
+    let privilege_assertion = build_privilege_for_db(
+        DbPrivilegeRequest {
+            action: tunnel_ospf_cost_action(request.mutation_intent.as_str()),
+            target: &target,
+            selector_expression: None,
+            resolved_targets: &target_client_ids,
+            confirmed: true,
+            payload_hash: Some(&payload_hash),
+        },
+        &password,
+        &salt_hex,
+        request.privilege_ttl_secs,
+    )?;
     println!(
         "{}",
         http_post_json(
@@ -476,10 +517,70 @@ pub(crate) fn tunnel_ospf_cost_update(
                 "recommended_ospf_cost": request.recommended_ospf_cost,
                 "mutation_intent": request.mutation_intent.as_str(),
                 "confirmed": request.confirmed,
+                "privilege_assertion": privilege_assertion,
             }),
         )?
     );
     Ok(())
+}
+
+pub(crate) fn tunnel_plan_client_ids(plan: &TunnelPlan) -> Result<Vec<String>> {
+    anyhow::ensure!(
+        !plan.left_client_id.trim().is_empty() && !plan.right_client_id.trim().is_empty(),
+        "tunnel plan export missing endpoint client IDs"
+    );
+    Ok(vec![
+        plan.left_client_id.trim().to_string(),
+        plan.right_client_id.trim().to_string(),
+    ])
+}
+
+pub(crate) fn tunnel_plan_privilege_target(plan_id: Uuid) -> String {
+    format!("tunnel_plan:{plan_id}")
+}
+
+pub(crate) fn tunnel_ospf_cost_action(mutation_intent: &str) -> &'static str {
+    if mutation_intent == "rollback" {
+        "network.ospf_cost.rollback"
+    } else {
+        "network.ospf_cost.apply"
+    }
+}
+
+pub(crate) fn tunnel_ospf_cost_payload_hash(
+    plan_id: Uuid,
+    recommendation_id: &str,
+    current_ospf_cost: u16,
+    recommended_ospf_cost: u16,
+    mutation_intent: &str,
+) -> String {
+    payload_hash(
+        tunnel_ospf_cost_payload_text(
+            plan_id,
+            recommendation_id,
+            current_ospf_cost,
+            recommended_ospf_cost,
+            mutation_intent,
+        )
+        .as_bytes(),
+    )
+}
+
+pub(crate) fn tunnel_ospf_cost_payload_text(
+    plan_id: Uuid,
+    recommendation_id: &str,
+    current_ospf_cost: u16,
+    recommended_ospf_cost: u16,
+    mutation_intent: &str,
+) -> String {
+    format!(
+        "v1|{}|{}|{}|{}|{}",
+        plan_id,
+        recommendation_id.trim(),
+        current_ospf_cost,
+        recommended_ospf_cost,
+        mutation_intent.trim()
+    )
 }
 
 pub(crate) fn tunnel_status(

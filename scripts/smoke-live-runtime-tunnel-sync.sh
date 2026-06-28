@@ -350,11 +350,17 @@ updated_ospf_cost="$((current_ospf_cost + 15))"
 wait_config_contains_plan "$client_id" "$current_ospf_cost"
 wait_config_contains_plan "$peer_client_id" "$current_ospf_cost"
 
+# This smoke verifies privileged runtime sync without generating probe/speed
+# recommendation evidence; rollback keeps the stale-current-cost guard active.
 updated_plan_json="$(VPSMAN_API_TOKEN="$access_token" \
+  VPSMAN_SUPER_PASSWORD="$super_password" \
+  VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
   target/debug/vpsctl --api-url "$api_url" tunnel-ospf-cost-update \
     --plan-id "$plan_id" \
+    --recommendation-id "runtime-tunnel-sync-manual" \
     --current-ospf-cost "$current_ospf_cost" \
     --recommended-ospf-cost "$updated_ospf_cost" \
+    --mutation-intent rollback \
     --confirmed)"
 jq -e --argjson updated "$updated_ospf_cost" '
   .recommended_ospf_cost == $updated and .plan.recommended_ospf_cost == $updated

@@ -586,6 +586,90 @@ async fn create_disabled_tunnel_plan_does_not_issue_runtime_sync() {
 }
 
 #[tokio::test]
+async fn ospf_cost_update_requires_privilege_before_saving_plan_cost() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        seed_online_agent(memory, "left-a").await;
+        seed_online_agent(memory, "right-b").await;
+    }
+    let input = test_plan_input();
+    let plan = plan_tunnel(&input).unwrap();
+    let view = repo
+        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
+        .await
+        .unwrap();
+    let current_cost = view.recommended_ospf_cost as u16;
+    let mut state = test_state(repo.clone());
+    state.gateway = GatewayDispatchClient::new(
+        Some("http://127.0.0.1:9".to_string()),
+        Some("internal-token".to_string()),
+    );
+    let headers = crate::test_auth_headers(&state).await;
+    let error = crate::routes_network::update_tunnel_plan_ospf_cost(
+        State(state),
+        headers,
+        axum::extract::Path(view.id),
+        Json(UpdateTunnelPlanOspfCostRequest {
+            recommendation_id: "manual-rollback-test".to_string(),
+            current_ospf_cost: current_cost,
+            recommended_ospf_cost: current_cost + 5,
+            mutation_intent: "rollback".to_string(),
+            confirmed: true,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "privilege_assertion_required");
+    let unchanged = repo.get_tunnel_plan(view.id).await.unwrap().unwrap();
+    assert_eq!(unchanged.recommended_ospf_cost, view.recommended_ospf_cost);
+}
+
+#[tokio::test]
+async fn ospf_cost_update_with_privilege_updates_plan_and_syncs_enabled_endpoints() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        seed_online_agent(memory, "left-a").await;
+        seed_online_agent(memory, "right-b").await;
+    }
+    let input = test_plan_input();
+    let plan = plan_tunnel(&input).unwrap();
+    let view = repo
+        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
+        .await
+        .unwrap();
+    let current_cost = view.recommended_ospf_cost as u16;
+    let state = test_state_with_privilege_auto_approve(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let Json(updated) = crate::routes_network::update_tunnel_plan_ospf_cost(
+        State(state),
+        headers,
+        axum::extract::Path(view.id),
+        Json(UpdateTunnelPlanOspfCostRequest {
+            recommendation_id: "manual-rollback-test".to_string(),
+            current_ospf_cost: current_cost,
+            recommended_ospf_cost: current_cost + 5,
+            mutation_intent: "rollback".to_string(),
+            confirmed: true,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(updated.recommended_ospf_cost, i32::from(current_cost + 5));
+    assert_eq!(updated.plan.recommended_ospf_cost, current_cost + 5);
+    let jobs = repo.list_jobs(10).await.unwrap();
+    assert_eq!(jobs.len(), 2);
+    let audits = repo.list_audit_logs(10).await.unwrap();
+    assert!(audits
+        .iter()
+        .any(|audit| audit.action == "network.tunnel_plan_ospf_cost_updated"));
+}
+
+#[tokio::test]
 async fn updating_enabled_tunnel_plan_pushes_old_and_new_endpoint_configs() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
@@ -1270,5 +1354,24 @@ fn test_state_with_privilege_auto_approve(repo: Repository) -> AppState {
     AppState {
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         ..test_state(repo)
+    }
+}
+
+fn network_test_operator() -> AuthContext {
+    AuthContext {
+        operator: OperatorView {
+            id: Uuid::nil(),
+            username: "network-operator".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            preferences: crate::model::OperatorPreferences::default(),
+            totp_enabled: false,
+            status: "active".to_string(),
+            session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+            created_at: crate::unix_now().to_string(),
+            disabled_at: None,
+            deleted_at: None,
+        },
+        session_id: Uuid::nil(),
     }
 }

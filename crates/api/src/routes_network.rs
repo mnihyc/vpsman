@@ -7,9 +7,10 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 use vpsman_common::{
-    allocate_tunnel_endpoints as allocate_tunnel_endpoint_pairs, plan_tunnel, NetworkPlanError,
-    OspfCostPolicy, RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelTopologyIntent,
-    TunnelAddressFamily, TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
+    allocate_tunnel_endpoints as allocate_tunnel_endpoint_pairs, payload_hash, plan_tunnel,
+    NetworkPlanError, OspfCostPolicy, RuntimeTunnelControl, RuntimeTunnelManager,
+    RuntimeTunnelTopologyIntent, TunnelAddressFamily, TunnelEndpointSide, TunnelKind, TunnelPlan,
+    TunnelPlanInput,
 };
 
 use crate::{
@@ -21,6 +22,7 @@ use crate::{
         TelemetryTunnelView, TunnelPlanView, UpdateTunnelPlanOspfCostRequest,
     },
     model_topology::TopologyGraphView,
+    privilege::{verify_privilege_intent, DbPrivilegeIntent},
     runtime_config::push_runtime_config_for_clients,
     security::{SCOPE_FLEET_READ, SCOPE_NETWORK_READ},
     state::AppState,
@@ -208,6 +210,26 @@ pub(crate) async fn update_tunnel_plan_ospf_cost(
             .await?;
     }
     validate_ospf_recommendation_contract(&state, plan_id, &request).await?;
+    let target_client_ids = vec![
+        existing.left_client_id.clone(),
+        existing.right_client_id.clone(),
+    ];
+    let target = tunnel_plan_privilege_target(plan_id);
+    let privilege_payload_hash = tunnel_plan_ospf_cost_payload_hash(plan_id, &request);
+    let privilege_intent = DbPrivilegeIntent::new(
+        tunnel_plan_ospf_cost_action(&request.mutation_intent),
+        &target,
+        None,
+        &target_client_ids,
+        true,
+        Some(&privilege_payload_hash),
+    );
+    verify_privilege_intent(
+        &state,
+        &privilege_intent,
+        request.privilege_assertion.clone(),
+    )
+    .await?;
     let view = state
         .repo
         .update_tunnel_plan_ospf_cost(
@@ -403,6 +425,51 @@ fn tunnel_plan_mutation_error(error: anyhow::Error) -> ApiError {
     } else {
         ApiError::from(error)
     }
+}
+
+fn tunnel_plan_privilege_target(plan_id: Uuid) -> String {
+    format!("tunnel_plan:{plan_id}")
+}
+
+fn tunnel_plan_ospf_cost_action(mutation_intent: &str) -> &'static str {
+    if mutation_intent == "rollback" {
+        "network.ospf_cost.rollback"
+    } else {
+        "network.ospf_cost.apply"
+    }
+}
+
+fn tunnel_plan_ospf_cost_payload_hash(
+    plan_id: Uuid,
+    request: &UpdateTunnelPlanOspfCostRequest,
+) -> String {
+    payload_hash(
+        tunnel_plan_ospf_cost_payload_text(
+            plan_id,
+            &request.recommendation_id,
+            request.current_ospf_cost,
+            request.recommended_ospf_cost,
+            &request.mutation_intent,
+        )
+        .as_bytes(),
+    )
+}
+
+fn tunnel_plan_ospf_cost_payload_text(
+    plan_id: Uuid,
+    recommendation_id: &str,
+    current_ospf_cost: u16,
+    recommended_ospf_cost: u16,
+    mutation_intent: &str,
+) -> String {
+    format!(
+        "v1|{}|{}|{}|{}|{}",
+        plan_id,
+        recommendation_id.trim(),
+        current_ospf_cost,
+        recommended_ospf_cost,
+        mutation_intent.trim()
+    )
 }
 
 pub(crate) async fn promote_tunnel_plan_to_custom_adapter(

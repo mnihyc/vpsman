@@ -22,6 +22,7 @@ type PrivilegeVaultBoxProps = {
   unlockRedirectLabel?: string;
   unlockLabel?: string;
   usePrivilegeLabel?: string;
+  showVaultClear?: boolean;
 };
 
 export function PrivilegeVaultBox({
@@ -36,6 +37,7 @@ export function PrivilegeVaultBox({
   unlockRedirectLabel = "Open Privilege Vault",
   unlockLabel = "Unlock",
   usePrivilegeLabel = "Unlock privilege",
+  showVaultClear = true,
 }: PrivilegeVaultBoxProps) {
   const [superPassword, setSuperPassword] = useState("");
   const [superSaltHex, setSuperSaltHex] = useState("");
@@ -189,7 +191,7 @@ export function PrivilegeVaultBox({
             <LockKeyhole size={17} />
             {lockPrivilegeLabel}
           </button>
-          {vaultClearButton(!vaultAvailable)}
+          {showVaultClear && vaultClearButton(!vaultAvailable)}
         </div>
         {clearVaultConfirmation()}
       </div>
@@ -334,7 +336,9 @@ export function PrivilegeVaultBox({
         </section>
       </div>
 
-      <div className="privilegeActionRow">{vaultClearButton(!vaultAvailable)}</div>
+      {showVaultClear && (
+        <div className="privilegeActionRow">{vaultClearButton(!vaultAvailable)}</div>
+      )}
       {clearVaultConfirmation()}
     </div>
   );

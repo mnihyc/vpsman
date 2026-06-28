@@ -120,8 +120,10 @@ type TunnelPlanSaveSnapshot = {
 };
 type TunnelPlanToggleSnapshot = {
   enabled: boolean;
+  endpointPairs: string[];
   planIds: string[];
   planNames: string[];
+  syncTargetLabels: string[];
 };
 type TunnelPlanReviewItem = {
   detail: string;
@@ -277,6 +279,8 @@ export function TopologyPanel({
   );
   const clientLabel = (clientId: string) =>
     clientDisplayNameFromMap(clientId, agentNameById);
+  const reviewedClientLabel = (clientId: string) =>
+    `${clientLabel(clientId)} (${shortId(clientId)})`;
   const ospfProposalLookup = useMemo(
     () => buildOspfProposalLookup(ospfUpdatePlans),
     [ospfUpdatePlans],
@@ -1033,6 +1037,23 @@ export function TopologyPanel({
                 (tunnelPlanToggleSnapshot.planNames.length > 4 ? " ..." : "")
               : "-",
           },
+          {
+            label: "Endpoint pairs",
+            title: tunnelPlanToggleSnapshot?.endpointPairs.join(" / "),
+            value: tunnelPlanToggleSnapshot
+              ? tunnelPlanToggleSnapshot.endpointPairs.slice(0, 3).join(", ") +
+                (tunnelPlanToggleSnapshot.endpointPairs.length > 3
+                  ? " ..."
+                  : "")
+              : "-",
+          },
+          {
+            label: "Runtime effect",
+            title: tunnelPlanToggleSnapshot?.syncTargetLabels.join(", "),
+            value: tunnelPlanToggleSnapshot
+              ? `${tunnelPlanToggleSnapshot.enabled ? "Push desired runtime config to" : "Remove runtime plan from"} ${tunnelPlanToggleSnapshot.syncTargetLabels.length} endpoint${tunnelPlanToggleSnapshot.syncTargetLabels.length === 1 ? "" : "s"}`
+              : "-",
+          },
         ]}
         onCancel={() => setTunnelPlanToggleSnapshot(null)}
         onConfirm={() => {
@@ -1703,6 +1724,8 @@ export function TopologyPanel({
             ospfUpdatePlans={ospfUpdatePlans}
             tunnelPlans={tunnelPlans}
             onUpdateTunnelPlanOspfCost={onUpdateTunnelPlanOspfCost}
+            privilegeMaterial={privilegeMaterial}
+            setPrivilegeMaterial={setPrivilegeMaterial}
           />
         </>
       )}
@@ -1843,10 +1866,23 @@ export function TopologyPanel({
       return;
     }
     setActionError(null);
+    const syncTargetLabels = Array.from(
+      new Set(
+        targets.flatMap((plan) => [
+          reviewedClientLabel(plan.left_client_id),
+          reviewedClientLabel(plan.right_client_id),
+        ]),
+      ),
+    );
     setTunnelPlanToggleSnapshot({
       enabled,
+      endpointPairs: targets.map(
+        (plan) =>
+          `${reviewedClientLabel(plan.left_client_id)} -> ${reviewedClientLabel(plan.right_client_id)}`,
+      ),
       planIds: targets.map((plan) => plan.id),
       planNames: targets.map((plan) => plan.name),
+      syncTargetLabels,
     });
   }
 

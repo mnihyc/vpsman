@@ -72,6 +72,15 @@ async function unlockPrivilegeFor(page: Page, view: string, subpage: string) {
   await openConsoleSubpage(page, view, subpage);
 }
 
+function expectPrivilegeAssertion(request: unknown) {
+  expect((request as { envelope?: unknown }).envelope).toBeUndefined();
+  expect((request as { envelopes?: unknown }).envelopes).toBeUndefined();
+  expect(
+    (request as { privilege_assertion?: { assertion_hex?: string } })
+      .privilege_assertion?.assertion_hex,
+  ).toMatch(/^[0-9a-f]+$/);
+}
+
 test("job dispatch submits backend-resolved targets when dashboard inventory is stale", async ({
   page,
 }, testInfo) => {
@@ -965,6 +974,7 @@ test("topology async review preparation ignores stale edits", async ({
       recommendation_id: "ospf-1234abcd5678ef90",
     },
   });
+  expectPrivilegeAssertion((ospfRequest as { body: unknown }).body);
 });
 
 test("privileged confirmation closes when the local assertion expires", async ({
@@ -1038,6 +1048,7 @@ test("OSPF cost update and rollback submit reviewed server-side plan mutations",
       recommended_ospf_cost: 22,
     },
   });
+  expectPrivilegeAssertion((request as { body: unknown }).body);
 
   await activate(page.getByRole("button", { name: "Rollback cost" }));
   const rollbackPrompt = page.locator(".confirmationPrompt").last();
@@ -1073,6 +1084,7 @@ test("OSPF cost update and rollback submit reviewed server-side plan mutations",
       recommended_ospf_cost: 14,
     },
   });
+  expectPrivilegeAssertion((rollbackRequest as { body: unknown }).body);
 });
 
 test("custom adapter submits a fresh snapshot after reopening review", async ({

@@ -202,6 +202,9 @@ cargo run -p vpsctl -- network-ospf-update-plans --limit 50
 Apply a reviewed cost delta:
 
 ```sh
+export VPSMAN_SUPER_PASSWORD='use your local super-password'
+export VPSMAN_SUPER_SALT_HEX='hex salt from the API/gateway privilege configuration'
+
 cargo run -p vpsctl -- tunnel-ospf-cost-update \
   --plan-id 00000000-0000-0000-0000-000000000001 \
   --recommendation-id ospf-1234abcd5678ef90 \
@@ -210,6 +213,11 @@ cargo run -p vpsctl -- tunnel-ospf-cost-update \
   --mutation-intent apply \
   --confirmed
 ```
+
+The CLI fetches the saved tunnel plan before submission and signs a scoped
+privilege assertion for both endpoint VPSs. Use `apply` only for current
+`network-ospf-update-plans` recommendations; use `rollback` to restore a
+previously applied cost while preserving the same stale-current-cost guard.
 
 The cost model prefers higher bandwidth when latency is tolerable and
 downgrades effective bandwidth when measured throughput falls below the

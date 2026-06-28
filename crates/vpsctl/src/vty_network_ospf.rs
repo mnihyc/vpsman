@@ -1,7 +1,17 @@
 use anyhow::{Context, Result};
 use uuid::Uuid;
+use vpsman_common::TunnelPlan;
 
-use crate::http::http_post_json;
+use crate::{
+    commands_network::{
+        tunnel_ospf_cost_action, tunnel_ospf_cost_payload_hash, tunnel_plan_client_ids,
+        tunnel_plan_privilege_target,
+    },
+    http::{http_get, http_post_json},
+    privilege::{
+        build_privilege_for_db, load_super_password, load_super_salt_hex, DbPrivilegeRequest,
+    },
+};
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct VtyTunnelOspfCostUpdateRequest {
@@ -119,6 +129,37 @@ pub(crate) fn submit_vty_tunnel_ospf_cost_update(
     token: Option<&str>,
     request: VtyTunnelOspfCostUpdateRequest,
 ) -> Result<String> {
+    let plan_raw = http_get(
+        api_url,
+        &format!("/api/v1/tunnel-plans/{}/plan", request.plan_id),
+        token,
+    )?;
+    let plan: TunnelPlan =
+        serde_json::from_str(&plan_raw).context("failed to parse tunnel plan export")?;
+    let target_client_ids = tunnel_plan_client_ids(&plan)?;
+    let payload_hash = tunnel_ospf_cost_payload_hash(
+        request.plan_id,
+        &request.recommendation_id,
+        request.current_ospf_cost,
+        request.recommended_ospf_cost,
+        &request.mutation_intent,
+    );
+    let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
+    let salt_hex = load_super_salt_hex(None)?;
+    let target = tunnel_plan_privilege_target(request.plan_id);
+    let privilege_assertion = build_privilege_for_db(
+        DbPrivilegeRequest {
+            action: tunnel_ospf_cost_action(&request.mutation_intent),
+            target: &target,
+            selector_expression: None,
+            resolved_targets: &target_client_ids,
+            confirmed: true,
+            payload_hash: Some(&payload_hash),
+        },
+        &password,
+        &salt_hex,
+        300,
+    )?;
     http_post_json(
         api_url,
         &format!("/api/v1/tunnel-plans/{}/ospf-cost", request.plan_id),
@@ -129,6 +170,7 @@ pub(crate) fn submit_vty_tunnel_ospf_cost_update(
             "recommended_ospf_cost": request.recommended_ospf_cost,
             "mutation_intent": request.mutation_intent,
             "confirmed": request.confirmed,
+            "privilege_assertion": privilege_assertion,
         }),
     )
 }

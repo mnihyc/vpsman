@@ -1,7 +1,14 @@
 import { useMemo, useState } from "react";
 import { Gauge, RotateCcw, ShieldCheck } from "lucide-react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
+import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
+import { sha256Hex } from "../../fileTransfer";
 import { usePanelDisplaySettings } from "../../panelDisplay";
+import {
+  buildPrivilegeAssertion,
+  canonicalDbPrivilegeIntent,
+  type PrivilegeMaterial,
+} from "../../privilege";
 import type {
   AgentView,
   NetworkOspfUpdatePlanRecord,
@@ -17,11 +24,15 @@ import {
 } from "../../utils";
 import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
 
+const ospfPrivilegeEncoder = new TextEncoder();
+
 export function TopologyOspfUpdateControls({
   agents,
   ospfUpdatePlans,
   tunnelPlans,
   onUpdateTunnelPlanOspfCost,
+  privilegeMaterial,
+  setPrivilegeMaterial,
 }: {
   agents: AgentView[];
   ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
@@ -30,6 +41,8 @@ export function TopologyOspfUpdateControls({
     planId: string,
     request: UpdateTunnelPlanOspfCostRequest,
   ) => Promise<void>;
+  privilegeMaterial: PrivilegeMaterial | null;
+  setPrivilegeMaterial: (material: PrivilegeMaterial | null) => void;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [selectedPlanId, setSelectedPlanId] = useState(
@@ -213,20 +226,28 @@ export function TopologyOspfUpdateControls({
       recommendationId: selectedUpdatePlan.recommendation_id,
       rollbackCost: currentCost,
       rollbackInterfaceName: selectedUpdatePlan.interface_name,
+      targetClientIds: [
+        selectedUpdatePlan.left_client_id,
+        selectedUpdatePlan.right_client_id,
+      ],
       title: "Confirm OSPF cost update",
     });
   }
 
   async function applySnapshot(next: OspfUpdateSnapshot) {
-    setSnapshot(null);
     let completed = false;
     await runPanelAction(setPending, setActionError, async () => {
-      await onUpdateTunnelPlanOspfCost(next.planId, next.request);
+      const privilegeAssertion = await buildOspfPrivilegeAssertion(next);
+      await onUpdateTunnelPlanOspfCost(next.planId, {
+        ...next.request,
+        privilege_assertion: privilegeAssertion,
+      });
       completed = true;
     });
     if (!completed) {
       return;
     }
+    setSnapshot(null);
     if (next.mode === "apply") {
       setAppliedRollback({
         appliedCost: next.appliedCost,
@@ -286,7 +307,32 @@ export function TopologyOspfUpdateControls({
       recommendationId: rollback.recommendationId,
       rollbackCost: rollback.appliedCost,
       rollbackInterfaceName: rollback.interfaceName,
+      targetClientIds: [plan.left_client_id, plan.right_client_id],
       title: "Confirm OSPF rollback",
+    });
+  }
+
+  async function buildOspfPrivilegeAssertion(snapshot: OspfUpdateSnapshot) {
+    if (!privilegeMaterial) {
+      throw new Error("Privilege unlock is required before final submission");
+    }
+    const payloadHash = await sha256Hex(
+      ospfPrivilegeEncoder.encode(
+        ospfCostPrivilegePayloadText(snapshot.planId, snapshot.request),
+      ),
+    );
+    return buildPrivilegeAssertion({
+      intent: canonicalDbPrivilegeIntent({
+        action:
+          snapshot.mode === "rollback"
+            ? "network.ospf_cost.rollback"
+            : "network.ospf_cost.apply",
+        target: `tunnel_plan:${snapshot.planId}`,
+        resolvedTargets: snapshot.targetClientIds,
+        confirmed: true,
+        payloadHash,
+      }),
+      privilegeMaterial,
     });
   }
 
@@ -421,6 +467,7 @@ export function TopologyOspfUpdateControls({
         )}
         <ConfirmationPrompt
           confirmLabel={snapshot?.confirmLabel ?? "Update cost"}
+          confirmDisabled={!privilegeMaterial}
           detail={snapshot?.detail ?? ""}
           items={snapshot?.items ?? []}
           onCancel={() => setSnapshot(null)}
@@ -429,7 +476,22 @@ export function TopologyOspfUpdateControls({
           pending={pending}
           title={snapshot?.title ?? "Confirm OSPF cost update"}
           tone="normal"
-        />
+        >
+          {snapshot && !privilegeMaterial && (
+            <PrivilegeVaultBox
+              labelPrefix="OSPF cost"
+              lastPayloadHash={null}
+              onPrivilegeMaterialChange={setPrivilegeMaterial}
+              privilegeMaterial={privilegeMaterial}
+              showVaultClear={false}
+              usePrivilegeLabel={
+                snapshot.mode === "rollback"
+                  ? "Unlock OSPF rollback"
+                  : "Unlock OSPF apply"
+              }
+            />
+          )}
+        </ConfirmationPrompt>
         <div className="dispatchActions">
           <button
             className="primaryAction"
@@ -479,6 +541,7 @@ type OspfUpdateSnapshot = {
   request: UpdateTunnelPlanOspfCostRequest;
   rollbackCost: number;
   rollbackInterfaceName: string;
+  targetClientIds: string[];
   title: string;
 };
 
@@ -493,6 +556,20 @@ type OspfAppliedRollback = {
 
 function formatCostChange(plan: NetworkOspfUpdatePlanRecord): string {
   return `${plan.current_ospf_cost} -> ${plan.recommended_ospf_cost} (${formatDelta(plan.cost_delta)})`;
+}
+
+function ospfCostPrivilegePayloadText(
+  planId: string,
+  request: UpdateTunnelPlanOspfCostRequest,
+): string {
+  return [
+    "v1",
+    planId,
+    request.recommendation_id.trim(),
+    String(request.current_ospf_cost),
+    String(request.recommended_ospf_cost),
+    request.mutation_intent.trim(),
+  ].join("|");
 }
 
 function formatDelta(delta: number): string {

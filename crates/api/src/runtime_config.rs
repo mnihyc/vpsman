@@ -168,15 +168,13 @@ async fn push_runtime_config_job(
     queue_pending_apply: bool,
 ) -> Result<CreateJobResponse, ApiError> {
     let job_id = Uuid::new_v4();
-    if queue_pending_apply {
-        let content_hash = runtime_config_content_hash(&config).map_err(|error| {
+    let pending_content_hash = if queue_pending_apply {
+        Some(runtime_config_content_hash(&config).map_err(|error| {
             ApiError::from(anyhow::anyhow!("runtime config hash failed: {error}"))
-        })?;
-        state
-            .repo
-            .queue_runtime_config_apply(&client_id, version, &content_hash, &config, job_id, reason)
-            .await?;
-    }
+        })?)
+    } else {
+        None
+    };
     let request = CreateJobRequest {
         job_id: Some(job_id),
         selector_expression: String::new(),
@@ -188,15 +186,16 @@ async fn push_runtime_config_job(
         operation: Some(JobCommand::RuntimeConfigSync {
             desired_version: version,
             reason: reason.to_string(),
-            config: Box::new(config),
+            config: Box::new(config.clone()),
         }),
         max_timeout_secs: Some(300),
         force_unprivileged: false,
         privileged: true,
         privilege_assertion: None,
     };
-    match create_job_from_internal_operator_mutation(state, operator, request).await {
-        Ok((_, response)) => Ok(response.0),
+    let response = match create_job_from_internal_operator_mutation(state, operator, request).await
+    {
+        Ok((_, response)) => response.0,
         Err(error) => {
             if queue_pending_apply {
                 let error_message = format!("{}: {}", error.code, error.error);
@@ -205,9 +204,16 @@ async fn push_runtime_config_job(
                     .mark_runtime_config_apply_job_create_failed(&client_id, job_id, &error_message)
                     .await;
             }
-            Err(error)
+            return Err(error);
         }
+    };
+    if let Some(content_hash) = pending_content_hash {
+        state
+            .repo
+            .queue_runtime_config_apply(&client_id, version, &content_hash, &config, job_id, reason)
+            .await?;
     }
+    Ok(response)
 }
 
 fn runtime_config_system_operator() -> AuthContext {

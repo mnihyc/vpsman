@@ -548,6 +548,8 @@ pub(crate) struct UpdateTunnelPlanOspfCostRequest {
     pub(crate) mutation_intent: String,
     #[serde(default)]
     pub(crate) confirmed: bool,
+    #[serde(default)]
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 fn default_ospf_cost_mutation_intent() -> String {

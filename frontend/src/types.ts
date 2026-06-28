@@ -2055,6 +2055,7 @@ export type UpdateTunnelPlanOspfCostRequest = {
   recommended_ospf_cost: number;
   mutation_intent: "apply" | "rollback";
   confirmed: boolean;
+  privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type AllocateTunnelEndpointsRequest = {

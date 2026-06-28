@@ -2858,11 +2858,25 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
   await expect(savedPlanRow.getByText("Stale evidence").first()).toBeVisible();
   await savedPlanRow.getByRole("button", { name: "Disable" }).click();
   await expect(page.getByText("Confirm tunnel plan lifecycle")).toBeVisible();
+  const tunnelLifecyclePrompt = page
+    .locator(".confirmationPrompt", {
+      hasText: "Confirm tunnel plan lifecycle",
+    })
+    .last();
+  await expect(tunnelLifecyclePrompt).toContainText("Endpoint pairs");
+  await expect(tunnelLifecyclePrompt).toContainText("edge-sfo-01");
+  await expect(tunnelLifecyclePrompt).toContainText("core-fra-02");
+  await expect(tunnelLifecyclePrompt).toContainText(
+    "Remove runtime plan from 2 endpoints",
+  );
   await confirmVisiblePrompt(page, "Disable plans");
   await expect(savedPlanRow.getByText("Disabled")).toBeVisible();
   await expect(savedPlanRow.getByText("Runtime sync off")).toBeVisible();
   await savedPlanRow.getByRole("button", { name: "Enable" }).click();
   await expect(page.getByText("Confirm tunnel plan lifecycle")).toBeVisible();
+  await expect(tunnelLifecyclePrompt).toContainText(
+    "Push desired runtime config to 2 endpoints",
+  );
   await confirmVisiblePrompt(page, "Enable plans");
   await expect(savedPlanRow.getByText("Enabled")).toBeVisible();
 
@@ -4293,6 +4307,7 @@ test("dispatches topology network tests and OSPF plan updates with local privile
       recommended_ospf_cost: ospfUpdatePlans[0].recommended_ospf_cost,
     },
   });
+  expectPrivilegeAssertion((ospfRequest as { body: unknown }).body);
 
   await activate(page.getByRole("button", { name: "Rollback cost" }));
   const rollbackPrompt = page.locator(".confirmationPrompt").last();
