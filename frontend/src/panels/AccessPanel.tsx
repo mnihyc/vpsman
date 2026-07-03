@@ -373,6 +373,10 @@ export function AccessPanel({
     operatorSessions.find((session) => session.current) ?? operatorSessions[0];
   const adminMfaRisk = operator?.role === "admin" && !operator.totp_enabled;
   const lifecycleClients = keyLifecycleReport?.clients ?? [];
+  const nextIdentityClientId = useMemo(
+    () => nextNumericalClientId(lifecycleClients),
+    [lifecycleClients],
+  );
   const lifecycleVpsOptions = useMemo(
     () =>
       lifecycleClients.map((client) => ({
@@ -691,7 +695,7 @@ export function AccessPanel({
     clearRevokeReview();
     setIdentityMode("register");
     setIdentityWorkflow("register");
-    setIdentityClientId("");
+    setIdentityClientId(nextIdentityClientId);
     setIdentityPublicKeyHex("");
     setIdentityDisplayName("");
     setIdentityTags("");
@@ -1697,10 +1701,17 @@ export function AccessPanel({
                 clearIdentityReview();
               }}
               placeholder={
-                identityMode === "rotate" ? "existing VPS ID" : "new VPS ID"
+                identityMode === "rotate"
+                  ? "existing VPS ID"
+                  : nextIdentityClientId
               }
               value={identityClientId}
             />
+            <small className="fieldHelp">
+              {identityMode === "rotate"
+                ? "Use the existing VPS ID. Only the current public key is replaced."
+                : `Defaults to the next numerical VPS ID (${nextIdentityClientId}). Editable for imported or legacy string IDs.`}
+            </small>
           </label>
           <label className="wideField">
             <span>Noise public key</span>
@@ -2311,6 +2322,21 @@ function parseListInput(value: string): string[] {
         .filter(Boolean),
     ),
   );
+}
+
+function nextNumericalClientId(clients: KeyLifecycleClientView[]): string {
+  let max = 0n;
+  for (const client of clients) {
+    const clientId = client.client_id.trim();
+    if (!/^\d+$/.test(clientId)) {
+      continue;
+    }
+    const value = BigInt(clientId);
+    if (value > max) {
+      max = value;
+    }
+  }
+  return (max + 1n).toString();
 }
 
 function isFixedHex32(value: string): boolean {

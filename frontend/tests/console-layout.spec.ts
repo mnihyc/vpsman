@@ -2640,6 +2640,10 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
   await expect(inspector).toContainText("Register VPS");
   await expect(inspector).toContainText("Private key material is shown once");
   await expect(inspector).toContainText("VPS client ID");
+  await expect(inspector.getByLabel("Agent identity client ID")).toHaveValue(
+    "1",
+  );
+  await expect(inspector).toContainText("next numerical VPS ID");
   await expect(inspector).toContainText("Noise public key");
   await inspector
     .getByRole("button", { name: "Close VPS identity workflow" })
