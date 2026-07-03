@@ -2639,6 +2639,7 @@ export async function installConsoleApiMock(
   page: Page,
   options: {
     agentListOverride?: typeof agents;
+    agentDeleteDelayMs?: number;
     auditLogsOverride?: AuditLogRecord[];
     dashboardSummaryOverride?: Partial<typeof dashboardOverview.summary>;
     fileTransferSourceArtifactsOverride?: typeof fileTransferSourceArtifacts;
@@ -2648,6 +2649,7 @@ export async function installConsoleApiMock(
   await page.addInitScript(
     ({
       agentListOverrideFixture,
+      agentDeleteDelayMsFixture,
       agentsFixture,
       agentUpdateReleasesFixture,
       auditLogsFixture,
@@ -3984,6 +3986,11 @@ export async function installConsoleApiMock(
           /^\/api\/v1\/agents\/([^/]+)\/delete$/,
         );
         if (deleteAgentMatch && method === "POST") {
+          if (agentDeleteDelayMsFixture > 0) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, agentDeleteDelayMsFixture),
+            );
+          }
           const body = await readJsonBody(input, init);
           requests.agentDeletes.push(body);
           const clientId = decodeURIComponent(deleteAgentMatch[1]);
@@ -5925,6 +5932,7 @@ export async function installConsoleApiMock(
     },
     {
       agentListOverrideFixture: options.agentListOverride ?? null,
+      agentDeleteDelayMsFixture: options.agentDeleteDelayMs ?? 0,
       agentsFixture: agents,
       agentUpdateReleasesFixture: agentUpdateReleases,
       auditLogsFixture: options.auditLogsOverride ?? auditLogs,

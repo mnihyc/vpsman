@@ -14,6 +14,18 @@ async function activate(locator: Locator) {
   await locator.evaluate((element) => (element as HTMLElement).click());
 }
 
+async function expectFocusInside(locator: Locator) {
+  await expect
+    .poll(
+      async () =>
+        locator.evaluate((element) =>
+          element.contains(document.activeElement),
+        ),
+      { message: "focus should remain inside the active modal" },
+    )
+    .toBe(true);
+}
+
 async function chooseVpsBySearch(
   root: Locator,
   label: string,
@@ -861,6 +873,60 @@ test("fleet delete review clears on selection changes and ignores stale review c
     confirmed: true,
     reason: "Deleted from fleet inventory selection action",
   });
+});
+
+test("overlay confirmations trap focus and close before accepted delete settles", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "overlay modal focus behavior is covered in desktop workflow tests",
+  );
+  await installConsoleApiMock(page, { agentDeleteDelayMs: 750 });
+  await page.goto("/");
+  await openConsoleSubpage(page, "System", "Preferences");
+  await page.getByLabel("Review prompt display mode").selectOption("overlay");
+  await page.getByRole("button", { name: "Save preferences" }).click();
+  await unlockPrivilegeFor(page, "Fleet", "Instances");
+
+  const fleetGrid = page.getByLabel("VPS instance records data grid");
+  const backupRow = fleetGrid
+    .locator(".gridBody [role=row]", { hasText: "backup-nyc-03" })
+    .first();
+  await backupRow.getByLabel("Select VPS instance records row").check();
+  await fleetGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions" })
+    .click();
+  await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Delete VPS from panel" });
+  await expect(dialog).toBeVisible();
+  await expect(page.locator(".confirmationPromptOverlay")).toBeVisible();
+  await expectFocusInside(dialog);
+  for (let index = 0; index < 6; index += 1) {
+    await page.keyboard.press("Tab");
+    await expectFocusInside(dialog);
+  }
+  await page.keyboard.press("Shift+Tab");
+  await expectFocusInside(dialog);
+
+  await activate(dialog.getByRole("button", { name: "Delete VPS" }));
+  await expect(dialog).toBeHidden();
+  await expect(page.locator(".confirmationPromptOverlay")).toBeHidden();
+
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const requests = (
+          window as unknown as {
+            __vpsmanTestRequests: { agentDeletes: unknown[] };
+          }
+        ).__vpsmanTestRequests;
+        return requests.agentDeletes.length;
+      }),
+    )
+    .toBe(1);
 });
 
 test("topology network test confirmation closes on edit and submits a fresh snapshot", async ({

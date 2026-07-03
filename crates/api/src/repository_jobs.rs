@@ -3571,6 +3571,7 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, &outcome).await?;
+                finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id).await?;
                 tx.commit().await?;
             }
         }
@@ -3891,6 +3892,8 @@ impl Repository {
                     let outcome = synthetic_terminal_outcome(status, &message, None, false);
                     enqueue_target_terminal_event_in_tx(&mut tx, job_id, &client_id, &outcome)
                         .await?;
+                    finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
+                        .await?;
                     expired.push(DeadlineExpiredJobTarget {
                         job_id,
                         client_id,
@@ -4103,6 +4106,7 @@ impl Repository {
                     enqueue_target_terminal_event_in_tx(&mut tx, job_id, &client_id, &outcome)
                         .await?;
                 }
+                finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id).await?;
                 let cancel_targets = active_rows
                     .into_iter()
                     .map(|row| row.try_get("client_id").map_err(Into::into))
@@ -4211,6 +4215,8 @@ impl Repository {
                     let outcome =
                         synthetic_terminal_outcome(TARGET_STATUS_CANCELED, message, None, accepted);
                     enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, &outcome)
+                        .await?;
+                    finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
                         .await?;
                 }
                 tx.commit().await?;

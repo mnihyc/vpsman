@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { AlertTriangle, X } from "lucide-react";
 import { scrollIntoViewWithMotion } from "../motion";
 import { usePanelDisplaySettings } from "../panelDisplay";
+
+type ModalSiblingState = {
+  ariaHidden: string | null;
+  element: HTMLElement;
+  inert: boolean;
+};
 
 export function ConfirmationPrompt({
   cancelLabel = "Cancel",
@@ -39,13 +46,26 @@ export function ConfirmationPrompt({
   tone?: "danger" | "normal";
 }) {
   const { preferences } = usePanelDisplaySettings();
+  const overlayRef = useRef<HTMLDivElement | null>(null);
   const promptRef = useRef<HTMLElement | null>(null);
+  const onCancelRef = useRef(onCancel);
+  const pendingRef = useRef(pending);
   const [typedConfirmation, setTypedConfirmation] = useState("");
   const typedConfirmationRequired = Boolean(typedConfirmationText);
   const typedConfirmationMatches =
     !typedConfirmationText || typedConfirmation.trim() === typedConfirmationText;
   const displayMode =
     preferences.review_prompt_mode === "overlay" ? "overlay" : "inline";
+  const confirmBlocked =
+    pending || confirmDisabled || !typedConfirmationMatches;
+
+  useEffect(() => {
+    onCancelRef.current = onCancel;
+  }, [onCancel]);
+
+  useEffect(() => {
+    pendingRef.current = pending;
+  }, [pending]);
 
   useEffect(() => {
     if (!open || !promptRef.current) {
@@ -70,6 +90,110 @@ export function ConfirmationPrompt({
   }, [open]);
 
   useEffect(() => {
+    if (!open || displayMode !== "overlay" || !overlayRef.current) {
+      return undefined;
+    }
+    const overlay = overlayRef.current;
+    const previousFocus =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    const siblings: ModalSiblingState[] = Array.from(
+      document.body.children,
+    ).flatMap((element) => {
+      if (!(element instanceof HTMLElement) || element === overlay) {
+        return [];
+      }
+      return [
+        {
+          ariaHidden: element.getAttribute("aria-hidden"),
+          element,
+          inert: element.inert,
+        },
+      ];
+    });
+    for (const sibling of siblings) {
+      sibling.element.inert = true;
+      sibling.element.setAttribute("aria-hidden", "true");
+    }
+    return () => {
+      for (const sibling of siblings) {
+        sibling.element.inert = sibling.inert;
+        if (sibling.ariaHidden === null) {
+          sibling.element.removeAttribute("aria-hidden");
+        } else {
+          sibling.element.setAttribute("aria-hidden", sibling.ariaHidden);
+        }
+      }
+      if (previousFocus?.isConnected) {
+        previousFocus.focus({ preventScroll: true });
+      }
+    };
+  }, [displayMode, open]);
+
+  useEffect(() => {
+    if (!open || displayMode !== "overlay") {
+      return undefined;
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      const element = promptRef.current;
+      if (!element) {
+        return;
+      }
+      if (event.key === "Escape") {
+        if (!pendingRef.current) {
+          event.preventDefault();
+          onCancelRef.current();
+        }
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const focusable = getFocusableElements(element);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        element.focus({ preventScroll: true });
+        return;
+      }
+      const activeElement = document.activeElement;
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      const focusInsideControls =
+        activeElement instanceof HTMLElement &&
+        activeElement !== element &&
+        element.contains(activeElement);
+      if (event.shiftKey) {
+        if (activeElement === first || !focusInsideControls) {
+          event.preventDefault();
+          last.focus({ preventScroll: true });
+        }
+        return;
+      }
+      if (activeElement === last || !focusInsideControls) {
+        event.preventDefault();
+        first.focus({ preventScroll: true });
+      }
+    }
+    function handleFocusIn(event: FocusEvent) {
+      const element = promptRef.current;
+      if (!element) {
+        return;
+      }
+      if (event.target instanceof Node && element.contains(event.target)) {
+        return;
+      }
+      element.focus({ preventScroll: true });
+    }
+    document.addEventListener("keydown", handleKeyDown, true);
+    document.addEventListener("focusin", handleFocusIn);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown, true);
+      document.removeEventListener("focusin", handleFocusIn);
+    };
+  }, [displayMode, open]);
+
+  useEffect(() => {
     if (open) {
       setTypedConfirmation("");
     }
@@ -90,6 +214,15 @@ export function ConfirmationPrompt({
 
   if (!open) {
     return null;
+  }
+  function handleConfirm() {
+    if (confirmBlocked) {
+      return;
+    }
+    if (displayMode === "overlay") {
+      onCancel();
+    }
+    onConfirm();
   }
   const prompt = (
     <section
@@ -159,7 +292,7 @@ export function ConfirmationPrompt({
               : "primaryAction compactAction"
           }
           disabled={pending || confirmDisabled || !typedConfirmationMatches}
-          onClick={onConfirm}
+          onClick={handleConfirm}
           type="button"
         >
           {confirmLabel}
@@ -168,9 +301,34 @@ export function ConfirmationPrompt({
     </section>
   );
   if (displayMode === "overlay") {
-    return <div className="confirmationPromptOverlay">{prompt}</div>;
+    const overlay = (
+      <div className="confirmationPromptOverlay" ref={overlayRef}>
+        {prompt}
+      </div>
+    );
+    return createPortal(overlay, document.body);
   }
   return prompt;
+}
+
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      [
+        "a[href]",
+        "button:not([disabled])",
+        "textarea:not([disabled])",
+        "input:not([disabled])",
+        "select:not([disabled])",
+        "[tabindex]:not([tabindex='-1'])",
+        "[contenteditable='true']",
+      ].join(", "),
+    ),
+  ).filter(
+    (element) =>
+      !element.hasAttribute("hidden") &&
+      element.getAttribute("aria-hidden") !== "true",
+  );
 }
 
 function confirmationItemTitle(value: ReactNode): string | undefined {

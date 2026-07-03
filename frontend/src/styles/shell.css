@@ -1134,7 +1134,7 @@ nav {
 .confirmationPromptOverlay {
   position: fixed;
   inset: 0;
-  z-index: var(--z-modal-backdrop);
+  z-index: var(--z-modal);
   display: grid;
   place-items: center;
   box-sizing: border-box;
@@ -1144,7 +1144,8 @@ nav {
 }
 
 .confirmationPrompt.overlayPrompt {
-  z-index: var(--z-modal);
+  position: relative;
+  z-index: 1;
   width: min(760px, calc(100vw - 32px));
   max-height: min(720px, calc(100vh - 32px));
   overflow: auto;
