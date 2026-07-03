@@ -43,6 +43,7 @@ import { usePanelDisplaySettings } from "../panelDisplay";
 import type {
   GatewaySessionRecord,
   OperatorAuthEventRecord,
+  OperatorPreferences,
   OperatorView,
   OperatorSessionRecord,
   TotpSetupResponse,
@@ -96,6 +97,11 @@ type AccessConfirmationAction =
   | "vault-clear";
 type AccessOverviewTone = "attention" | "neutral" | "ready";
 type IdentityWorkflow = "register" | "rotate" | "revoke" | null;
+type AgentInstallMode = "root" | "user" | "staged";
+
+const AGENT_INSTALL_SCRIPT_URL =
+  "https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh";
+const DEFAULT_AGENT_INSTALL_RELEASE = "latest";
 
 type AccessOverviewItem = {
   action: string;
@@ -183,6 +189,9 @@ type AccessPanelProps = {
     sessionRefreshTtlSecs: number,
     adminRiskAcknowledged: boolean,
     privilegeAssertion: PrivilegeAssertion,
+  ) => Promise<void>;
+  onUpdateOperatorPreferences: (
+    preferences: OperatorPreferences,
   ) => Promise<void>;
   onUpsertAgentIdentity: (
     request: UpsertAgentIdentityRequest,
@@ -294,6 +303,7 @@ export function AccessPanel({
   onSelectSubpage,
   onSetOperatorStatus,
   onUpdateOperator,
+  onUpdateOperatorPreferences,
   onUpsertAgentIdentity,
   operator,
   operatorAuthEvents,
@@ -1812,6 +1822,8 @@ export function AccessPanel({
             <InstallCommand
               clientId={createdIdentity.client_id}
               onOpenSystemConfig={onOpenSystemConfig}
+              onUpdateOperatorPreferences={onUpdateOperatorPreferences}
+              operatorPreferences={operator?.preferences ?? null}
               privateKeyHex={privateKeyHex}
             />
           )}
@@ -2317,29 +2329,127 @@ function scrollIntoViewSoon(element: HTMLElement | null) {
 function InstallCommand({
   clientId,
   onOpenSystemConfig,
+  onUpdateOperatorPreferences,
+  operatorPreferences,
   privateKeyHex,
 }: {
   clientId: string;
   onOpenSystemConfig: () => void;
+  onUpdateOperatorPreferences: (
+    preferences: OperatorPreferences,
+  ) => Promise<void>;
+  operatorPreferences: OperatorPreferences | null;
   privateKeyHex: string;
 }) {
-  const installMaterial = [
-    `  VPSMAN_AGENT_CLIENT_ID=${clientId} \\`,
-    `  VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=${privateKeyHex} \\`,
-  ].join("\n");
+  const [installMode, setInstallMode] = useState<AgentInstallMode>("root");
+  const [gatewayServerPublicKeyHex, setGatewayServerPublicKeyHex] = useState(
+    () => operatorPreferences?.gateway_server_public_key_hex ?? "",
+  );
+  const [gatewayEndpoints, setGatewayEndpoints] = useState(
+    () => operatorPreferences?.gateway_endpoints ?? "",
+  );
+  const [savePending, setSavePending] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const savedGatewayServerPublicKeyHex =
+    operatorPreferences?.gateway_server_public_key_hex ?? "";
+  const savedGatewayEndpoints = operatorPreferences?.gateway_endpoints ?? "";
+  const normalizedGatewayServerPublicKeyHex =
+    gatewayServerPublicKeyHex.trim();
+  const normalizedGatewayEndpoints = gatewayEndpoints.trim();
+  const gatewayKeyValid = isFixedHex32(normalizedGatewayServerPublicKeyHex);
+  const canBuildCommand =
+    gatewayKeyValid && normalizedGatewayEndpoints.length > 0;
+  const gatewayDefaultsDirty =
+    normalizedGatewayServerPublicKeyHex !==
+      savedGatewayServerPublicKeyHex.trim() ||
+    normalizedGatewayEndpoints !== savedGatewayEndpoints.trim();
+  const canSaveGatewayDefaults =
+    operatorPreferences !== null &&
+    gatewayDefaultsDirty &&
+    canBuildCommand &&
+    !savePending;
+  const saveGatewayDefaultsLabel = savePending
+    ? "Saving"
+    : operatorPreferences === null
+      ? "Defaults unavailable"
+      : gatewayDefaultsDirty
+        ? "Save defaults"
+        : "Defaults saved";
+  const saveGatewayDefaultsTitle = gatewayDefaultsDirty
+    ? "Save the reusable gateway key and endpoints for this operator."
+    : "The gateway key and endpoints already match the saved defaults.";
+  const installCommand = canBuildCommand
+    ? buildAgentInstallCommand({
+        clientId,
+        gatewayEndpoints: normalizedGatewayEndpoints,
+        gatewayServerPublicKeyHex: normalizedGatewayServerPublicKeyHex,
+        installMode,
+        privateKeyHex,
+      })
+    : [
+        "Enter the gateway server public key and endpoints to generate",
+        "the paste-ready latest-release agent install command.",
+      ].join(" ");
+
+  useEffect(() => {
+    setGatewayServerPublicKeyHex(
+      operatorPreferences?.gateway_server_public_key_hex ?? "",
+    );
+    setGatewayEndpoints(operatorPreferences?.gateway_endpoints ?? "");
+    setSaveError(null);
+  }, [
+    operatorPreferences?.gateway_endpoints,
+    operatorPreferences?.gateway_server_public_key_hex,
+  ]);
 
   function handleCopy() {
-    navigator.clipboard.writeText(installMaterial).catch(() => {});
+    if (!canBuildCommand) {
+      return;
+    }
+    navigator.clipboard.writeText(installCommand).catch(() => {});
+  }
+
+  async function handleSaveGatewayDefaults() {
+    if (!canSaveGatewayDefaults || operatorPreferences === null) {
+      return;
+    }
+    setSavePending(true);
+    setSaveError(null);
+    try {
+      await onUpdateOperatorPreferences({
+        ...operatorPreferences,
+        gateway_endpoints: normalizedGatewayEndpoints,
+        gateway_server_public_key_hex: normalizedGatewayServerPublicKeyHex,
+      });
+    } catch (error) {
+      setSaveError(
+        error instanceof Error
+          ? error.message
+          : "Gateway install defaults were not saved",
+      );
+    } finally {
+      setSavePending(false);
+    }
   }
 
   return (
-    <div className="installCommandBlock">
-      <div className="sectionHeader compact">
-        <strong>Install material</strong>
+    <div
+      aria-label="Agent install command"
+      className="installCommandBlock"
+    >
+      <div className="installCommandHeader">
+        <div>
+          <strong>Agent install command</strong>
+          <span>
+            Builds a paste-ready latest-release install line. The private key is
+            still shown once and is not saved.
+          </span>
+        </div>
         <div className="sectionActions">
           <button
             className="secondaryAction compact"
             onClick={onOpenSystemConfig}
+            title="Open shared suite configuration for gateway runtime settings."
             type="button"
           >
             <Save size={15} />
@@ -2347,22 +2457,122 @@ function InstallCommand({
           </button>
           <button
             className="secondaryAction compact"
+            disabled={!canSaveGatewayDefaults}
+            onClick={handleSaveGatewayDefaults}
+            title={saveGatewayDefaultsTitle}
+            type="button"
+          >
+            <Save size={15} />
+            {saveGatewayDefaultsLabel}
+          </button>
+          <button
+            className="secondaryAction compact"
+            disabled={!canBuildCommand}
             onClick={handleCopy}
+            title="Copy the complete one-line install command."
             type="button"
           >
             <Copy size={15} />
-            Copy agent material
+            Copy command
           </button>
         </div>
       </div>
-      <p>
-        Gateway endpoints and server public key are system settings. Combine
-        this agent material with the Suite Config gateway settings when running
-        the install script.
-      </p>
+      <div className="installCommandControls">
+        <label>
+          <span>Gateway public key</span>
+          <input
+            aria-label="Gateway server public key hex"
+            className="monospace"
+            onChange={(event) => {
+              setGatewayServerPublicKeyHex(event.target.value);
+              setSaveError(null);
+            }}
+            placeholder="64 hex characters"
+            title="Gateway server public key hex used by the agent to authenticate the gateway."
+            value={gatewayServerPublicKeyHex}
+          />
+        </label>
+        <label>
+          <span>Gateway endpoints</span>
+          <input
+            aria-label="Gateway endpoints"
+            onChange={(event) => {
+              setGatewayEndpoints(event.target.value);
+              setSaveError(null);
+            }}
+            placeholder="primary=gw.example.com:9443=10"
+            title="Comma-separated gateway endpoints accepted by the installer."
+            value={gatewayEndpoints}
+          />
+        </label>
+        <label>
+          <span>Install mode</span>
+          <select
+            aria-label="Install mode"
+            onChange={(event) =>
+              setInstallMode(event.target.value as AgentInstallMode)
+            }
+            title="Root service uses systemd by default; no systemd stages files without enabling a service."
+            value={installMode}
+          >
+            <option value="root">Root service</option>
+            <option value="user">User service</option>
+            <option value="staged">No systemd</option>
+          </select>
+        </label>
+      </div>
+      {!gatewayKeyValid && normalizedGatewayServerPublicKeyHex.length > 0 ? (
+        <small className="installCommandHint warn">
+          Gateway public key must be exactly 64 hex characters.
+        </small>
+      ) : null}
+      {normalizedGatewayEndpoints.length === 0 ? (
+        <small className="installCommandHint warn">
+          Gateway endpoints are required before copying the command.
+        </small>
+      ) : null}
+      {saveError ? (
+        <small className="installCommandHint warn">{saveError}</small>
+      ) : null}
       <pre>
-        <code>{installMaterial}</code>
+        <code>{installCommand}</code>
       </pre>
     </div>
   );
+}
+
+function buildAgentInstallCommand({
+  clientId,
+  gatewayEndpoints,
+  gatewayServerPublicKeyHex,
+  installMode,
+  privateKeyHex,
+}: {
+  clientId: string;
+  gatewayEndpoints: string;
+  gatewayServerPublicKeyHex: string;
+  installMode: AgentInstallMode;
+  privateKeyHex: string;
+}): string {
+  const installerMode = installMode === "staged" ? "unprivileged" : installMode;
+  const environment = [
+    ["VPSMAN_AGENT_RELEASE", DEFAULT_AGENT_INSTALL_RELEASE],
+    ["VPSMAN_INSTALL_MODE", installerMode],
+    ["VPSMAN_AGENT_CLIENT_ID", clientId],
+    ["VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX", privateKeyHex],
+    ["VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX", gatewayServerPublicKeyHex],
+    ["VPSMAN_GATEWAY_ENDPOINTS", gatewayEndpoints],
+  ];
+  if (installMode === "staged") {
+    environment.push(["VPSMAN_AGENT_ENABLE_SERVICE", "0"]);
+  }
+  return [
+    `curl -fsSL ${AGENT_INSTALL_SCRIPT_URL} | env`,
+    ...environment.map(([name, value]) => `${name}=${shellQuote(value)}`),
+    "bash",
+  ].join(" ");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
 }

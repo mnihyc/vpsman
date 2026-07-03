@@ -1410,6 +1410,7 @@ export function App() {
         onSetOperatorStatus={dashboard.setOperatorStatus}
         onSetupTotp={dashboard.setupTotp}
         onUpdateOperator={dashboard.updateOperator}
+        onUpdateOperatorPreferences={dashboard.updateOperatorPreferences}
         operator={dashboard.operator}
         operatorAuthEvents={dashboard.operatorAuthEvents}
         operatorSessions={dashboard.operatorSessions}

@@ -113,6 +113,8 @@ export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
   fleet_tag_visibility_overrides: {},
+  gateway_endpoints: "",
+  gateway_server_public_key_hex: null,
   language: "en",
   review_prompt_mode: "inline",
   show_country_flags: true,
@@ -146,6 +148,15 @@ export function sanitizeOperatorPreferences(
       !Array.isArray(source.fleet_tag_visibility_overrides)
         ? source.fleet_tag_visibility_overrides
         : DEFAULT_OPERATOR_PREFERENCES.fleet_tag_visibility_overrides,
+    gateway_endpoints:
+      typeof source.gateway_endpoints === "string"
+        ? source.gateway_endpoints
+        : DEFAULT_OPERATOR_PREFERENCES.gateway_endpoints,
+    gateway_server_public_key_hex:
+      typeof source.gateway_server_public_key_hex === "string" ||
+      source.gateway_server_public_key_hex === null
+        ? source.gateway_server_public_key_hex
+        : DEFAULT_OPERATOR_PREFERENCES.gateway_server_public_key_hex,
     language: source.language ?? DEFAULT_OPERATOR_PREFERENCES.language,
     review_prompt_mode:
       source.review_prompt_mode ??

@@ -119,6 +119,7 @@
 
 .accessInspector .sideForm > .wideField,
 .accessInspector .sideForm > .inlineSecret,
+.accessInspector .sideForm > .installCommandBlock,
 .accessInspector .sideForm > .formNote,
 .accessInspector .sideForm > .privilegeVaultBox {
   grid-column: 1 / -1;
@@ -257,6 +258,73 @@
   color: var(--muted);
   font-size: 0.78rem;
   line-height: 1.35;
+}
+
+.installCommandBlock {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.installCommandHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.installCommandHeader > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.installCommandHeader strong {
+  color: var(--text);
+  font-size: 0.84rem;
+  line-height: 1.25;
+}
+
+.installCommandHeader span,
+.installCommandHint {
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.installCommandHint.warn {
+  color: var(--warning-text);
+}
+
+.installCommandControls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 8px;
+  align-items: end;
+}
+
+.installCommandBlock pre {
+  max-width: 100%;
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.installCommandBlock code {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .accessInspector .sideForm label:not(.inlineCheck) {
@@ -1129,6 +1197,14 @@
 
   .accessPostureCard > button {
     grid-column: 1 / -1;
+  }
+
+  .installCommandHeader {
+    display: grid;
+  }
+
+  .installCommandHeader .sectionActions {
+    justify-content: flex-start;
   }
 
   .identityWorkflowPanel {

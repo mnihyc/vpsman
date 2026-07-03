@@ -928,6 +928,8 @@ export type OperatorPreferences = {
   language: "en";
   show_country_flags: boolean;
   fleet_tag_visibility_overrides: Record<string, boolean>;
+  gateway_endpoints: string;
+  gateway_server_public_key_hex: string | null;
   sidebar_subpanel_default: "active" | "all";
   review_prompt_mode: "inline" | "overlay";
   dashboard_curve_exclusions: string[];

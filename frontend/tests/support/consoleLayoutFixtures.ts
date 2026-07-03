@@ -938,8 +938,9 @@ const operatorPreferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
-  gateway_endpoints: "",
-  gateway_server_public_key_hex: null,
+  gateway_endpoints: "primary=gw.example.com:9443=10",
+  gateway_server_public_key_hex:
+    "1111111111111111111111111111111111111111111111111111111111111111",
   language: "en",
   review_prompt_mode: "inline",
   show_country_flags: true,

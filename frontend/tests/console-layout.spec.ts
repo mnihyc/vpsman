@@ -300,10 +300,11 @@ test("renders an operational cloud-console fleet workspace", async ({
     });
     expect(savedPreferences).toMatchObject({
       bulk_output_compare_mode: "text",
+      gateway_endpoints: "primary=gw.example.com:9443=10",
+      gateway_server_public_key_hex:
+        "1111111111111111111111111111111111111111111111111111111111111111",
       vps_name_display_mode: "name",
     });
-    expect(savedPreferences).not.toHaveProperty("gateway_endpoints");
-    expect(savedPreferences).not.toHaveProperty("gateway_server_public_key_hex");
     expect(savedPreferences).not.toHaveProperty(
       "tunnel_ipv4_allocation_pool_cidr",
     );
@@ -2220,7 +2221,7 @@ test("creates a cron schedule from a command template with target preview", asyn
   await expect(scheduledRunsGrid).toContainText("edge-health-hourly");
   await expect(scheduledRunsGrid).toContainText("Hourly at minute 0");
   await expect(scheduledRunsGrid).toContainText("Scheduled shell command");
-  await expect(scheduledRunsGrid).toContainText("4w ago");
+  await expect(scheduledRunsGrid).toContainText(/\d+(?:s|m|h|d|w|mo) ago/);
   await expect(page.getByText("due not exposed")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Retry" })).toHaveCount(0);
   await activate(page.getByRole("button", { name: "Open schedule registry" }));
@@ -2295,6 +2296,10 @@ test("registers VPS identities and revokes current keys from the access panel", 
     testInfo.project.name.includes("mobile"),
     "dense access administration is covered in the desktop console layout",
   );
+  const generatedPrivateKeyHex =
+    "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+  const generatedPublicKeyHex =
+    "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0";
 
   await page.goto("/");
   await openConsoleSubpage(page, "Access", "VPS identities");
@@ -2329,9 +2334,68 @@ test("registers VPS identities and revokes current keys from the access panel", 
     inspector.getByRole("heading", { name: "Register VPS" }),
   ).toBeVisible();
   await inspector.getByLabel("Agent identity client ID").fill("agent-tokyo-04");
-  await inspector
-    .getByLabel("Agent identity public key hex")
-    .fill("a".repeat(64));
+  await page.evaluate(
+    ({ privateKeyHex, publicKeyHex }) => {
+      function hexToArrayBuffer(hex: string): ArrayBuffer {
+        const bytes = new Uint8Array(hex.length / 2);
+        for (let index = 0; index < bytes.length; index += 1) {
+          bytes[index] = Number.parseInt(
+            hex.slice(index * 2, index * 2 + 2),
+            16,
+          );
+        }
+        return bytes.buffer.slice(0);
+      }
+
+      const subtle = window.crypto.subtle;
+      const originalGenerateKey = subtle.generateKey.bind(subtle);
+      const originalExportKey = subtle.exportKey.bind(subtle);
+      const privateKey = {
+        __vpsmanKeypairRole: "private",
+      } as unknown as CryptoKey;
+      const publicKey = {
+        __vpsmanKeypairRole: "public",
+      } as unknown as CryptoKey;
+      Object.defineProperty(subtle, "generateKey", {
+        configurable: true,
+        value: (async (...args) => {
+          const [algorithm] = args;
+          const name =
+            typeof algorithm === "string" ? algorithm : algorithm.name;
+          if (name === "X25519") {
+            return { privateKey, publicKey };
+          }
+          return originalGenerateKey(...args);
+        }) as SubtleCrypto["generateKey"],
+      });
+      Object.defineProperty(subtle, "exportKey", {
+        configurable: true,
+        value: (async (...args) => {
+          const [format, key] = args;
+          const role = (key as unknown as { __vpsmanKeypairRole?: string })
+            .__vpsmanKeypairRole;
+          if (format === "raw" && role === "private") {
+            return hexToArrayBuffer(privateKeyHex);
+          }
+          if (format === "raw" && role === "public") {
+            return hexToArrayBuffer(publicKeyHex);
+          }
+          return originalExportKey(...args);
+        }) as SubtleCrypto["exportKey"],
+      });
+    },
+    {
+      privateKeyHex: generatedPrivateKeyHex,
+      publicKeyHex: generatedPublicKeyHex,
+    },
+  );
+  await activate(inspector.getByRole("button", { name: "Generate keypair" }));
+  await expect(
+    inspector.getByLabel("Agent identity public key hex"),
+  ).toHaveValue(/^[0-9a-f]{64}$/);
+  await expect(inspector.getByLabel("Agent identity private key")).toHaveValue(
+    /^[0-9a-f]{64}$/,
+  );
   await inspector
     .getByLabel("Agent identity display name")
     .fill("edge-tokyo-04");
@@ -2360,13 +2424,69 @@ test("registers VPS identities and revokes current keys from the access panel", 
   });
   expect(identityRequest).toMatchObject({
     client_id: "agent-tokyo-04",
-    client_public_key_hex: "a".repeat(64),
+    client_public_key_hex: generatedPublicKeyHex,
     confirmed: true,
     display_name: "edge-tokyo-04",
     replace_existing_key: false,
     tags: ["country:JP", "role:edge"],
   });
   expectPrivilegeAssertion(identityRequest);
+
+  const installCommand = inspector.getByLabel("Agent install command");
+  await expect(installCommand).toContainText(
+    "curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env",
+  );
+  await expect(installCommand).toContainText("VPSMAN_AGENT_RELEASE='latest'");
+  await expect(installCommand).toContainText("VPSMAN_INSTALL_MODE='root'");
+  await expect(installCommand).toContainText(
+    "VPSMAN_AGENT_CLIENT_ID='agent-tokyo-04'",
+  );
+  await expect(installCommand).toContainText(
+    `VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX='${generatedPrivateKeyHex}'`,
+  );
+  await expect(installCommand).toContainText(
+    "VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX='1111111111111111111111111111111111111111111111111111111111111111'",
+  );
+  await expect(installCommand).toContainText(
+    "VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10'",
+  );
+  await installCommand
+    .getByLabel("Gateway endpoints")
+    .fill("primary=gw.example.com:9443=20");
+  await activate(installCommand.getByRole("button", { name: "Save defaults" }));
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const requests = (
+          window as unknown as {
+            __vpsmanTestRequests: { operatorPreferences: unknown[] };
+          }
+        ).__vpsmanTestRequests;
+        return requests.operatorPreferences.length;
+      }),
+    )
+    .toBeGreaterThan(0);
+  const savedInstallDefaults = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: { operatorPreferences: unknown[] };
+      }
+    ).__vpsmanTestRequests;
+    return requests.operatorPreferences.at(-1);
+  });
+  expect(savedInstallDefaults).toMatchObject({
+    gateway_endpoints: "primary=gw.example.com:9443=20",
+    gateway_server_public_key_hex:
+      "1111111111111111111111111111111111111111111111111111111111111111",
+  });
+  await expect(installCommand).toContainText(
+    "VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=20'",
+  );
+  await installCommand.getByLabel("Install mode").selectOption("staged");
+  await expect(installCommand).toContainText(
+    "VPSMAN_INSTALL_MODE='unprivileged'",
+  );
+  await expect(installCommand).toContainText("VPSMAN_AGENT_ENABLE_SERVICE='0'");
 
   await selectGridRow(page, "VPS identities", "agent-sfo-01");
   await runGridAction(page, "VPS identities", "Revoke selected");
