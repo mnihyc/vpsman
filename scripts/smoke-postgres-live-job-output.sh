@@ -527,8 +527,9 @@ assert_ospf_recommendations() {
       and .interface_name == "pgstat0"
       and .left_client_id == $client
       and .right_client_id == $peer
-      and .configured_bandwidth == "100m"
-      and (.effective_bandwidth == "10m" or .effective_bandwidth == "100m")
+      and .configured_bandwidth_mbps == 100
+      and .effective_bandwidth_mbps >= 10
+      and .effective_bandwidth_mbps <= 100
       and .confidence == "measured"
       and .latency_avg_ms != null
       and .throughput_avg_mbps != null

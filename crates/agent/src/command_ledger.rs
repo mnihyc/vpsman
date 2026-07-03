@@ -35,10 +35,7 @@ pub(crate) struct CommandLedgerEntry {
 
 impl CommandLedger {
     pub(crate) async fn open_default() -> Result<Self> {
-        let root = std::env::current_dir()
-            .context("failed to resolve agent working directory")?
-            .join("state")
-            .join("command-ledger");
+        let root = agent_state_dir()?.join("command-ledger");
         Self::open_at(root).await
     }
 
@@ -202,6 +199,18 @@ impl CommandLedger {
         }
         Ok(())
     }
+}
+
+fn agent_state_dir() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("VPSMAN_AGENT_STATE_DIR")
+        .or_else(|| std::env::var_os("VPSMAN_STATE_DIR"))
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(std::env::current_dir()
+        .context("failed to resolve agent working directory")?
+        .join("state"))
 }
 
 pub(crate) fn compact_ledger_terminal_output(

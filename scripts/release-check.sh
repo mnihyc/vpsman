@@ -163,7 +163,7 @@ if [[ "${VPSMAN_RELEASE_SKIP_SMOKES:-0}" == "1" ]]; then
   skip_step smoke-final-e2e "VPSMAN_RELEASE_SKIP_SMOKES=1"
 else
   run_step cargo-build-smoke-binaries \
-    cargo build -p vpsman-api -p vpsman-gateway -p vpsman-agent -p vpsctl
+    cargo build -p vpsman-api -p vpsman-gateway -p vpsman-agent -p vpsctl -p vpsman-worker
   run_step smoke-vpsctl-cli-help \
     env VPSMAN_SMOKE_SKIP_BUILD=1 bash scripts/smoke-vpsctl-cli-help.sh
   run_step smoke-ui-cli-vty-parity \

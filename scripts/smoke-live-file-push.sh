@@ -103,10 +103,11 @@ smoke_create_direct_agent_config \
   "$gateway_public_hex" \
   "primary=$gateway_addr=10"
 
-VPSMAN_AGENT_CONFIG="$agent_config" \
-RUST_LOG="vpsman_agent=warn" \
-  target/debug/vpsman-agent run >"$agent_log" 2>&1 &
-smoke_track_pid "$!"
+smoke_start_local_agent \
+  "$agent_config" \
+  "$agent_log" \
+  "$SMOKE_TMPDIR/agent-work" \
+  "vpsman_agent=warn"
 
 deadline=$((SECONDS + 30))
 status=""
@@ -121,13 +122,20 @@ until [[ "$status" == "online" ]]; do
   sleep 0.25
 done
 
+reject_job_id="$(python3 - <<'PY'
+import uuid
+print(uuid.uuid4())
+PY
+)"
 reject_body="$(jq -nc \
+  --arg job_id "$reject_job_id" \
   --arg client "$client_id" \
   --arg path "$destination_file" \
   --arg sha "$payload_sha" \
   --arg data "$payload_b64" \
   --argjson size "$payload_size" \
   '{
+    job_id: $job_id,
     command: "file_push",
     operation: {
       type: "file_push",

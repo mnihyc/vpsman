@@ -95,10 +95,11 @@ grep -q "server_public_key_hex = \"$gateway_public_hex\"" "$agent_config"
 grep -q "tcp_addr = \"$dead_addr\"" "$agent_config"
 grep -q "tcp_addr = \"$gateway_addr\"" "$agent_config"
 
-VPSMAN_AGENT_CONFIG="$agent_config" \
-RUST_LOG="vpsman_agent=info" \
-  target/debug/vpsman-agent run >"$agent_log" 2>&1 &
-smoke_track_pid "$!"
+smoke_start_local_agent \
+  "$agent_config" \
+  "$agent_log" \
+  "$SMOKE_TMPDIR/agent-work" \
+  "vpsman_agent=info"
 
 deadline=$((SECONDS + 45))
 status=""

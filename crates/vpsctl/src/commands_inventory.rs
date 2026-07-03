@@ -436,6 +436,7 @@ pub(crate) struct FleetAlertNotificationDispatchOptions {
     pub(crate) operator_state: Option<String>,
     pub(crate) include_muted: bool,
     pub(crate) dry_run: bool,
+    pub(crate) preview_hash: Option<String>,
     pub(crate) confirmed: bool,
 }
 
@@ -459,6 +460,7 @@ pub(crate) fn fleet_alert_notification_dispatch(
                 "operator_state": options.operator_state,
                 "include_muted": options.include_muted,
                 "dry_run": options.dry_run,
+                "preview_hash": options.preview_hash,
                 "confirmed": options.confirmed,
             }),
         )?
@@ -471,6 +473,7 @@ pub(crate) struct FleetAlertNotificationProcessOptions {
     pub(crate) status: Option<String>,
     pub(crate) delivery_kind: Option<String>,
     pub(crate) dry_run: bool,
+    pub(crate) preview_hash: Option<String>,
     pub(crate) confirmed: bool,
 }
 
@@ -491,6 +494,7 @@ pub(crate) fn fleet_alert_notification_process(
                 "status": options.status,
                 "delivery_kind": options.delivery_kind,
                 "dry_run": options.dry_run,
+                "preview_hash": options.preview_hash,
                 "confirmed": options.confirmed,
             }),
         )?
@@ -1458,6 +1462,15 @@ fn validate_fleet_alert_notification_dispatch(
         options.dry_run || options.confirmed,
         "fleet-alert-notification-dispatch requires --confirmed unless --dry-run is set"
     );
+    if !options.dry_run && options.confirmed {
+        anyhow::ensure!(
+            options
+                .preview_hash
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "fleet-alert-notification-dispatch requires --preview-hash when --confirmed is set"
+        );
+    }
     fleet_alerts_path(
         options.limit,
         options.client_id.as_deref(),
@@ -1476,6 +1489,15 @@ fn validate_fleet_alert_notification_process(
         options.dry_run || options.confirmed,
         "fleet-alert-notification-process requires --confirmed unless --dry-run is set"
     );
+    if !options.dry_run && options.confirmed {
+        anyhow::ensure!(
+            options
+                .preview_hash
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "fleet-alert-notification-process requires --preview-hash when --confirmed is set"
+        );
+    }
     anyhow::ensure!(
         (1..=200).contains(&options.limit),
         "--limit must be between 1 and 200"

@@ -377,10 +377,11 @@ smoke_create_direct_agent_config \
   "$gateway_public_hex" \
   "primary=$gateway_addr=10"
 
-VPSMAN_AGENT_CONFIG="$agent_config" \
-RUST_LOG="vpsman_agent=warn" \
-  target/debug/vpsman-agent run >"$agent_log" 2>&1 &
-smoke_track_pid "$!"
+smoke_start_local_agent \
+  "$agent_config" \
+  "$agent_log" \
+  "$SMOKE_TMPDIR/agent-work" \
+  "vpsman_agent=warn"
 wait_agent_online
 
 mkdir -p "$patch_proc_root" "$execution_cwd"

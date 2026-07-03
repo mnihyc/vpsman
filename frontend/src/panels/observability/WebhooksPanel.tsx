@@ -48,7 +48,7 @@ export function WebhooksPanel({
 }: WebhooksPanelProps) {
   const [activeTab, setActiveTab] = useState<WebhookConfigTab>("rules");
   const [ruleEditorOpen, setRuleEditorOpen] = useState(false);
-  const [previewRows, setPreviewRows] = useState<WebhookRuleDeliveryRecord[]>([]);
+  const [previewRows, setPreviewRows] = useState<WebhookRuleDeliveryRecord[] | null>(null);
   const [dryRunPreview, setDryRunPreview] = useState<WebhookRuleDryRunRecord | null>(null);
   const disabledRules = webhookRules.filter((rule) => !rule.enabled).length;
   const failedDeliveries = webhookRuleDeliveries.filter((delivery) =>
@@ -58,8 +58,8 @@ export function WebhooksPanel({
 
   function openDeliveryEvidence() {
     setActiveTab("deliveries");
-    const target = document.getElementById("observability-webhook-deliveries");
     window.requestAnimationFrame(() => {
+      const target = document.getElementById("observability-webhook-deliveries");
       target?.scrollIntoView({ block: "start", behavior: "smooth" });
     });
   }
@@ -79,7 +79,7 @@ export function WebhooksPanel({
   }
 
   function clearPreview() {
-    setPreviewRows([]);
+    setPreviewRows(null);
     setDryRunPreview(null);
   }
 
@@ -166,10 +166,10 @@ export function WebhooksPanel({
                 <span>Dry-run previews, queued tests, retained status, target, attempts, and event webhook errors. Alert notification deliveries stay on Alerts.</span>
               </div>
             </div>
-            {dryRunPreview || previewRows.length > 0 ? (
-              <DeliveryPreviewSection count={previewRows.length} onClear={clearPreview} title="Event webhook delivery preview">
+            {dryRunPreview || previewRows !== null ? (
+              <DeliveryPreviewSection count={previewRows?.length ?? 0} onClear={clearPreview} title="Event webhook delivery preview">
                 {dryRunPreview ? <WebhookDryRunNotice agents={agents} preview={dryRunPreview} /> : null}
-                <WebhookDeliveryHistoryGrid deliveries={previewRows} preview />
+                <WebhookDeliveryHistoryGrid deliveries={previewRows ?? []} preview />
               </DeliveryPreviewSection>
             ) : null}
             <WebhookDeliveryHistoryGrid deliveries={webhookRuleDeliveries} preview={false} />

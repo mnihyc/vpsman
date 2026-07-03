@@ -176,6 +176,7 @@ enum VtyInventoryCommand {
         operator_state: Option<String>,
         include_muted: bool,
         dry_run: bool,
+        preview_hash: Option<String>,
         confirmed: bool,
     },
     FleetAlertNotificationProcess {
@@ -183,6 +184,7 @@ enum VtyInventoryCommand {
         status: Option<String>,
         delivery_kind: Option<String>,
         dry_run: bool,
+        preview_hash: Option<String>,
         confirmed: bool,
     },
     SourceTemplateAssignments {
@@ -868,6 +870,7 @@ pub(crate) fn submit_vty_inventory_command(
             operator_state,
             include_muted,
             dry_run,
+            preview_hash,
             confirmed,
         } => http_post_json(
             api_url,
@@ -881,6 +884,7 @@ pub(crate) fn submit_vty_inventory_command(
                 "operator_state": operator_state,
                 "include_muted": include_muted,
                 "dry_run": dry_run,
+                "preview_hash": preview_hash,
                 "confirmed": confirmed,
             }),
         ),
@@ -889,6 +893,7 @@ pub(crate) fn submit_vty_inventory_command(
             status,
             delivery_kind,
             dry_run,
+            preview_hash,
             confirmed,
         } => http_post_json(
             api_url,
@@ -899,6 +904,7 @@ pub(crate) fn submit_vty_inventory_command(
                 "status": status,
                 "delivery_kind": delivery_kind,
                 "dry_run": dry_run,
+                "preview_hash": preview_hash,
                 "confirmed": confirmed,
             }),
         ),
@@ -2334,6 +2340,7 @@ fn parse_fleet_alert_notification_dispatch(parts: &[&str]) -> Result<VtyInventor
     let mut operator_state = None;
     let mut include_muted = false;
     let mut dry_run = false;
+    let mut preview_hash = None;
     let mut confirmed = false;
     let mut index = 1;
     while index < parts.len() {
@@ -2368,6 +2375,10 @@ fn parse_fleet_alert_notification_dispatch(parts: &[&str]) -> Result<VtyInventor
                 dry_run = true;
                 index += 1;
             }
+            "--preview-hash" => {
+                preview_hash = Some(next_arg(parts, index, "--preview-hash")?.to_string());
+                index += 2;
+            }
             "--confirmed" => {
                 confirmed = true;
                 index += 1;
@@ -2393,6 +2404,10 @@ fn parse_fleet_alert_notification_dispatch(parts: &[&str]) -> Result<VtyInventor
             }
             value if value.starts_with("--operator-state=") => {
                 operator_state = Some(value.trim_start_matches("--operator-state=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--preview-hash=") => {
+                preview_hash = Some(value.trim_start_matches("--preview-hash=").to_string());
                 index += 1;
             }
             value => anyhow::bail!("unexpected argument {value}"),
@@ -2424,6 +2439,14 @@ fn parse_fleet_alert_notification_dispatch(parts: &[&str]) -> Result<VtyInventor
         dry_run || confirmed,
         "fleet-alert-notification-dispatch requires --confirmed unless --dry-run is set"
     );
+    if !dry_run && confirmed {
+        anyhow::ensure!(
+            preview_hash
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "fleet-alert-notification-dispatch requires --preview-hash when --confirmed is set"
+        );
+    }
     Ok(VtyInventoryCommand::FleetAlertNotificationDispatch {
         limit,
         client_id,
@@ -2432,6 +2455,7 @@ fn parse_fleet_alert_notification_dispatch(parts: &[&str]) -> Result<VtyInventor
         operator_state,
         include_muted,
         dry_run,
+        preview_hash,
         confirmed,
     })
 }
@@ -2441,6 +2465,7 @@ fn parse_fleet_alert_notification_process(parts: &[&str]) -> Result<VtyInventory
     let mut status = None;
     let mut delivery_kind = None;
     let mut dry_run = false;
+    let mut preview_hash = None;
     let mut confirmed = false;
     let mut index = 1;
     while index < parts.len() {
@@ -2463,6 +2488,10 @@ fn parse_fleet_alert_notification_process(parts: &[&str]) -> Result<VtyInventory
                 dry_run = true;
                 index += 1;
             }
+            "--preview-hash" => {
+                preview_hash = Some(next_arg(parts, index, "--preview-hash")?.to_string());
+                index += 2;
+            }
             "--confirmed" => {
                 confirmed = true;
                 index += 1;
@@ -2480,6 +2509,10 @@ fn parse_fleet_alert_notification_process(parts: &[&str]) -> Result<VtyInventory
             }
             value if value.starts_with("--delivery-kind=") => {
                 delivery_kind = Some(value.trim_start_matches("--delivery-kind=").to_string());
+                index += 1;
+            }
+            value if value.starts_with("--preview-hash=") => {
+                preview_hash = Some(value.trim_start_matches("--preview-hash=").to_string());
                 index += 1;
             }
             value => anyhow::bail!("unexpected argument {value}"),
@@ -2505,11 +2538,20 @@ fn parse_fleet_alert_notification_process(parts: &[&str]) -> Result<VtyInventory
         dry_run || confirmed,
         "fleet-alert-notification-process requires --confirmed unless --dry-run is set"
     );
+    if !dry_run && confirmed {
+        anyhow::ensure!(
+            preview_hash
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            "fleet-alert-notification-process requires --preview-hash when --confirmed is set"
+        );
+    }
     Ok(VtyInventoryCommand::FleetAlertNotificationProcess {
         limit,
         status,
         delivery_kind,
         dry_run,
+        preview_hash,
         confirmed,
     })
 }

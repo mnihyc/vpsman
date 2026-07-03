@@ -206,6 +206,12 @@ vpsctl_json() {
 seed_agent() {
   local client_id="$1"
   local process_incarnation_id="33333333-3333-4333-8333-333333333333"
+  local gateway_session_id
+  case "$client_id" in
+    pg-agent-a) gateway_session_id="33333333-3333-4333-8333-33333333333a" ;;
+    pg-agent-b) gateway_session_id="33333333-3333-4333-8333-33333333333b" ;;
+    *) gateway_session_id="33333333-3333-4333-8333-33333333333f" ;;
+  esac
   local optional_hello_fields=""
   local noise_public_key_json="null"
   if [[ $# -ge 2 && -n "$2" ]]; then
@@ -219,6 +225,7 @@ seed_agent() {
     -H "Content-Type: application/json" \
     -d "{
       \"gateway_id\": \"postgres-persistence-gateway\",
+      \"gateway_session_id\": \"$gateway_session_id\",
       \"noise_public_key_hex\": $noise_public_key_json,
       \"hello\": {
         \"client_id\": \"$client_id\",
@@ -239,11 +246,20 @@ seed_telemetry() {
   local disk_available="$5"
   local network_rx="$6"
   local network_tx="$7"
+  local process_incarnation_id="33333333-3333-4333-8333-333333333333"
+  local gateway_session_id
+  case "$client_id" in
+    pg-agent-a) gateway_session_id="33333333-3333-4333-8333-33333333333a" ;;
+    pg-agent-b) gateway_session_id="33333333-3333-4333-8333-33333333333b" ;;
+    *) gateway_session_id="33333333-3333-4333-8333-33333333333f" ;;
+  esac
   curl -fsS \
     -H "Authorization: Bearer $internal_token" \
     -H "Content-Type: application/json" \
     -d "{
       \"gateway_id\": \"postgres-persistence-gateway\",
+      \"gateway_session_id\": \"$gateway_session_id\",
+      \"process_incarnation_id\": \"$process_incarnation_id\",
       \"telemetry\": {
         \"client_id\": \"$client_id\",
         \"metrics\": {
@@ -436,7 +452,7 @@ plan_json="$(api_post "/api/v1/tunnel-plans" '{
     "right": "10.251.0.1",
     "prefix_len": 31
   },
-  "bandwidth": "1000m",
+  "bandwidth_mbps": 1000,
   "latency_ms": 17,
   "packet_loss_ratio": 0,
   "preference": 1.5,
@@ -479,14 +495,14 @@ INSERT INTO fleet_alert_notification_channels (
 )
 VALUES (
   '$notification_channel_id',
-  'pg-worker-custom',
+  'pg-worker-webhook',
   'global',
   NULL,
   'warning',
   '["source_readiness"]'::jsonb,
   '["open"]'::jsonb,
-  'custom_pager',
-  'adapter:custom-pager',
+  'webhook',
+  'http://127.0.0.1:9/vpsman/postgres-persistence-worker',
   0,
   TRUE,
   'postgres persistence smoke'
@@ -516,14 +532,14 @@ INSERT INTO fleet_alert_notification_deliveries (
 VALUES (
   '$queued_notification_id',
   '$notification_channel_id',
-  'pg-worker-custom',
+  'pg-worker-webhook',
   'source_readiness:server:object_store',
   'warning',
   'source_readiness',
   'queued',
-  'custom_pager',
-  'adapter:custom-pager',
-  'pg-worker-custom-dedupe',
+  'webhook',
+  'http://127.0.0.1:9/vpsman/postgres-persistence-worker',
+  'pg-worker-webhook-dedupe',
   '{"schema":"vpsman.fleet_alert.notification.v1","alert":{"id":"source_readiness:server:object_store"}}'::jsonb,
   NULL,
   0,
@@ -557,13 +573,13 @@ INSERT INTO fleet_alert_notification_deliveries (
 VALUES (
   '$old_notification_id',
   '$notification_channel_id',
-  'pg-worker-custom',
+  'pg-worker-webhook',
   'source_readiness:server:old',
   'warning',
   'source_readiness',
   'delivered',
-  'audit_log',
-  'audit:fleet',
+  'webhook',
+  'http://127.0.0.1:9/vpsman/postgres-persistence-worker-old',
   'pg-worker-old-dedupe',
   '{"schema":"vpsman.fleet_alert.notification.v1","alert":{"id":"source_readiness:server:old"}}'::jsonb,
   NULL,
@@ -621,9 +637,9 @@ api_get "/api/v1/jobs/$scheduled_run_job_id/targets" | jq -e '
   (map(.client_id) | sort == ["pg-agent-a","pg-agent-b"]) and
   all(.[]; (.status == "queued" or .status == "dispatching") and .completed_at == null)
 ' >/dev/null
-notification_failed_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM fleet_alert_notification_deliveries WHERE id = '$queued_notification_id' AND status = 'failed' AND attempt_count = 1 AND error LIKE '%not configured%'")"
+notification_failed_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM fleet_alert_notification_deliveries WHERE id = '$queued_notification_id' AND status = 'failed' AND attempt_count = 1 AND error LIKE '%webhook request failed%'")"
 if [[ "$notification_failed_count" != "1" ]]; then
-  echo "expected worker to fail unsupported queued notification exactly once" >&2
+  echo "expected worker to fail unreachable webhook notification exactly once" >&2
   exit 1
 fi
 old_notification_count="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM fleet_alert_notification_deliveries WHERE id = '$old_notification_id'")"
@@ -660,13 +676,13 @@ INSERT INTO fleet_alert_notification_deliveries (
 VALUES (
   '$contended_notification_id',
   '$notification_channel_id',
-  'pg-worker-custom',
+  'pg-worker-webhook',
   'source_readiness:server:contended',
   'warning',
   'source_readiness',
   'queued',
-  'custom_pager',
-  'adapter:custom-pager',
+  'webhook',
+  'http://127.0.0.1:9/vpsman/postgres-persistence-contended',
   'pg-worker-contended-dedupe',
   '{"schema":"vpsman.fleet_alert.notification.v1","alert":{"id":"source_readiness:server:contended"}}'::jsonb,
   NULL,
@@ -722,17 +738,60 @@ jq -e '
   .rotation_generation == "keyring/v2"
 ' <<<"$backup_policy_json" >/dev/null
 
-artifact_json="$(vpsctl_json backup-artifact-record \
+artifact_payload_file="$SMOKE_TMPDIR/postgres-persistence-payload.bin"
+artifact_file="$SMOKE_TMPDIR/postgres-persistence-artifact.tar"
+printf 'synthetic plain backup bytes for Postgres persistence smoke %s\n' "$(date +%s%N)" >"$artifact_payload_file"
+python3 - "pg-agent-a" "$artifact_payload_file" "$artifact_file" <<'PY'
+import hashlib
+import io
+import json
+import sys
+import tarfile
+import time
+
+client_id, payload_path, artifact_path = sys.argv[1:]
+with open(payload_path, "rb") as handle:
+    payload = handle.read()
+created_unix = int(time.time())
+manifest = {
+    "format": "vpsman.backup_tar.v1",
+    "client_id": client_id,
+    "created_unix": created_unix,
+    "files": [{
+        "path": "/etc/hostname",
+        "source": "selected_path",
+        "tar_path": "vpsman-backup/files/0000.bin",
+        "mode": 0o644,
+        "size_bytes": len(payload),
+        "sha256_hex": hashlib.sha256(payload).hexdigest(),
+        "mtime_unix": created_unix,
+    }],
+}
+with tarfile.open(artifact_path, "w") as archive:
+    manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+    manifest_info = tarfile.TarInfo("vpsman-backup/manifest.json")
+    manifest_info.size = len(manifest_bytes)
+    manifest_info.mode = 0o600
+    manifest_info.mtime = created_unix
+    archive.addfile(manifest_info, fileobj=io.BytesIO(manifest_bytes))
+    payload_info = tarfile.TarInfo("vpsman-backup/files/0000.bin")
+    payload_info.size = len(payload)
+    payload_info.mode = 0o644
+    payload_info.mtime = created_unix
+    archive.addfile(payload_info, fileobj=io.BytesIO(payload))
+PY
+artifact_sha="$(sha256sum "$artifact_file" | awk '{print $1}')"
+artifact_size="$(wc -c <"$artifact_file" | tr -d ' ')"
+artifact_json="$(vpsctl_json backup-artifact-upload \
   --backup-request-id "$backup_id" \
   --object-key backups/pg-agent-a/postgres-persistence.tar \
-  --sha256-hex aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  --size-bytes 4096 \
+  --artifact-file "$artifact_file" \
   --confirmed)"
 artifact_id="$(jq -r '.id' <<<"$artifact_json")"
-jq -e '.client_id == "pg-agent-a" and .object_key == "backups/pg-agent-a/postgres-persistence.tar" and .size_bytes == 4096' \
+jq -e --argjson artifact_size "$artifact_size" '.client_id == "pg-agent-a" and .object_key == "backups/pg-agent-a/postgres-persistence.tar" and .size_bytes == $artifact_size' \
   <<<"$artifact_json" >/dev/null
-api_get "/api/v1/backup-artifacts?limit=10" | jq -e --arg artifact_id "$artifact_id" '
-  any(.[]; .id == $artifact_id and .client_id == "pg-agent-a" and .sha256_hex == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+api_get "/api/v1/backup-artifacts?limit=10" | jq -e --arg artifact_id "$artifact_id" --arg artifact_sha "$artifact_sha" '
+  any(.[]; .id == $artifact_id and .client_id == "pg-agent-a" and .sha256_hex == $artifact_sha)
 ' >/dev/null
 
 smoke_postgres_backup_policy_prune_evidence
@@ -934,8 +993,8 @@ api_get "/api/v1/schedules" | jq -e --arg schedule_id "$schedule_id" '
 api_get "/api/v1/backups?limit=10" | jq -e --arg backup_id "$backup_id" --arg artifact_id "$artifact_id" '
   any(.[]; .id == $backup_id and .client_id == "pg-agent-a" and .status == "artifact_metadata_recorded" and .include_config == true and .command_scope == "client:pg-agent-a" and .artifact_id == $artifact_id)
 ' >/dev/null
-api_get "/api/v1/backup-artifacts?limit=10" | jq -e --arg artifact_id "$artifact_id" '
-  any(.[]; .id == $artifact_id and .client_id == "pg-agent-a" and .object_key == "backups/pg-agent-a/postgres-persistence.tar" and .size_bytes == 4096)
+api_get "/api/v1/backup-artifacts?limit=10" | jq -e --arg artifact_id "$artifact_id" --argjson artifact_size "$artifact_size" '
+  any(.[]; .id == $artifact_id and .client_id == "pg-agent-a" and .object_key == "backups/pg-agent-a/postgres-persistence.tar" and .size_bytes == $artifact_size)
 ' >/dev/null
 api_get "/api/v1/backup-policies" | jq -e --arg schedule_id "$backup_policy_schedule_id" '
   any(.[]; .schedule_id == $schedule_id and .name == "pg-nightly-backup" and .retention_days == 45 and .keep_last == 12 and .rotation_generation == "keyring/v2")

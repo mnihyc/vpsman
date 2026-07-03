@@ -6,20 +6,24 @@ import { fileURLToPath } from "node:url";
 const apiTarget = process.env.VPSMAN_API_PROXY ?? "http://127.0.0.1:18080";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const frontendBuildNumber = readBuildNumber("frontend");
+const apiProxy = {
+  "/api": apiTarget,
+  "/health": apiTarget,
+  "/ws": {
+    target: apiTarget,
+    ws: true,
+  },
+};
 
 export default defineConfig({
   define: {
     __VPSMAN_FRONTEND_BUILD_NUMBER__: JSON.stringify(frontendBuildNumber),
   },
+  preview: {
+    proxy: apiProxy,
+  },
   server: {
-    proxy: {
-      "/api": apiTarget,
-      "/health": apiTarget,
-      "/ws": {
-        target: apiTarget,
-        ws: true,
-      },
-    },
+    proxy: apiProxy,
   },
 });
 

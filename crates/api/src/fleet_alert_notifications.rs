@@ -411,6 +411,15 @@ fn notification_dispatch_preview_hash(
     request: &FleetAlertNotificationDispatchRequest,
     candidates: &[FleetAlertNotificationCandidate],
 ) -> Result<String> {
+    let mut hash_candidates = candidates
+        .iter()
+        .map(notification_dispatch_hash_candidate)
+        .collect::<Vec<_>>();
+    hash_candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    let hash_candidates = hash_candidates
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>();
     let payload = serde_json::to_vec(&json!({
         "version": 1,
         "kind": "fleet_alert_notification_dispatch",
@@ -422,19 +431,53 @@ fn notification_dispatch_preview_hash(
             "operator_state": request.operator_state,
             "include_muted": request.include_muted,
         },
-        "candidates": candidates.iter().map(|candidate| {
-            json!({
-                "channel_id": candidate.channel_id,
-                "alert_id": candidate.alert_id,
-                "status": candidate.status,
-                "delivery_kind": candidate.delivery_kind,
-                "target": candidate.target,
-                "dedupe_key": candidate.dedupe_key,
-                "payload": candidate.payload,
-            })
-        }).collect::<Vec<_>>(),
+        "candidates": hash_candidates,
     }))?;
     Ok(payload_hash(&payload))
+}
+
+fn notification_dispatch_hash_candidate(
+    candidate: &FleetAlertNotificationCandidate,
+) -> (Vec<String>, serde_json::Value) {
+    let alert_target_kind = notification_payload_string(candidate, "/alert/target_kind");
+    let alert_target_id = notification_payload_string(candidate, "/alert/target_id");
+    let alert_client_id = notification_payload_string(candidate, "/alert/client_id");
+    let alert_status = notification_payload_string(candidate, "/alert/status");
+    let value = json!({
+        "channel_id": candidate.channel_id,
+        "alert_category": candidate.alert_category,
+        "alert_target_kind": alert_target_kind,
+        "alert_target_id": alert_target_id,
+        "alert_client_id": alert_client_id,
+        "alert_status": alert_status,
+        "delivery_status": candidate.status,
+        "delivery_kind": candidate.delivery_kind,
+        "target": candidate.target,
+    });
+    let key = vec![
+        candidate.channel_id.to_string(),
+        candidate.alert_category.clone(),
+        alert_target_kind,
+        alert_target_id,
+        alert_client_id,
+        alert_status,
+        candidate.status.clone(),
+        candidate.delivery_kind.clone(),
+        candidate.target.clone(),
+    ];
+    (key, value)
+}
+
+fn notification_payload_string(
+    candidate: &FleetAlertNotificationCandidate,
+    pointer: &str,
+) -> String {
+    candidate
+        .payload
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn notification_process_preview_hash(

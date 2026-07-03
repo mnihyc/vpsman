@@ -1,5 +1,5 @@
-import { useCallback, useState } from "react";
-import { apiDelete, apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
+import { useCallback, useRef, useState } from "react";
+import { apiDelete, apiGet, apiPost, apiPostPreview, apiPut, isApiUnauthorized } from "../api";
 import type {
   AssignSourceTemplateRequest,
   AssignSourceTemplateResponse,
@@ -40,47 +40,61 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   const [runtimeConfigPatchGenerators, setRuntimeConfigPatchGenerators] = useState<RuntimeConfigPatchGeneratorRecord[]>([]);
   const [tagsError, setTagsError] = useState<string | null>(null);
   const [tagsLoading, setTagsLoading] = useState(false);
+  const loadTagInventoryInFlight = useRef<Promise<void> | null>(null);
 
   const loadTagInventory = useCallback(async () => {
-    setTagsLoading(true);
-    setTagsError(null);
-    try {
-      const [
-        nextTags,
-        nextSourceTemplates,
-        nextSourceTemplateAssignments,
-        nextSourceStatus,
-        nextRuntimeConfigApplyStates,
-        nextPatchGenerators,
-      ] = await Promise.all([
-        apiGet<TagView[]>("/api/v1/tags", apiToken),
-        apiGet<SourceTemplateRecord[]>("/api/v1/source-templates", apiToken),
-        apiGet<SourceTemplateAssignmentRecord[]>("/api/v1/source-template-assignments", apiToken),
-        apiGet<SourceStatusRecord[]>("/api/v1/source-status", apiToken),
-        apiGet<RuntimeConfigApplyStateRecord[]>("/api/v1/runtime-config/apply-state", apiToken),
-        apiGet<RuntimeConfigPatchGeneratorRecord[]>("/api/v1/runtime-config/patch-generators", apiToken),
-      ]);
-      setTags(nextTags);
-      setSourceTemplates(nextSourceTemplates);
-      setSourceTemplateAssignments(nextSourceTemplateAssignments);
-      setSourceStatus(nextSourceStatus);
-      setRuntimeConfigApplyStates(nextRuntimeConfigApplyStates);
-      setRuntimeConfigPatchGenerators(nextPatchGenerators);
-    } catch (error) {
-      if (isApiUnauthorized(error)) {
-        onUnauthorized();
-        setTags([]);
-        setSourceTemplates([]);
-        setSourceTemplateAssignments([]);
-        setSourceStatus([]);
-        setRuntimeConfigApplyStates([]);
-        setRuntimeConfigPatchGenerators([]);
-        setTagsError("Operator login required");
-        return;
+    if (loadTagInventoryInFlight.current) {
+      return loadTagInventoryInFlight.current;
+    }
+    const request = (async () => {
+      setTagsLoading(true);
+      setTagsError(null);
+      try {
+        const [
+          nextTags,
+          nextSourceTemplates,
+          nextSourceTemplateAssignments,
+          nextSourceStatus,
+          nextRuntimeConfigApplyStates,
+          nextPatchGenerators,
+        ] = await Promise.all([
+          apiGet<TagView[]>("/api/v1/tags", apiToken),
+          apiGet<SourceTemplateRecord[]>("/api/v1/source-templates", apiToken),
+          apiGet<SourceTemplateAssignmentRecord[]>("/api/v1/source-template-assignments", apiToken),
+          apiGet<SourceStatusRecord[]>("/api/v1/source-status", apiToken),
+          apiGet<RuntimeConfigApplyStateRecord[]>("/api/v1/runtime-config/apply-state", apiToken),
+          apiGet<RuntimeConfigPatchGeneratorRecord[]>("/api/v1/runtime-config/patch-generators", apiToken),
+        ]);
+        setTags(nextTags);
+        setSourceTemplates(nextSourceTemplates);
+        setSourceTemplateAssignments(nextSourceTemplateAssignments);
+        setSourceStatus(nextSourceStatus);
+        setRuntimeConfigApplyStates(nextRuntimeConfigApplyStates);
+        setRuntimeConfigPatchGenerators(nextPatchGenerators);
+      } catch (error) {
+        if (isApiUnauthorized(error)) {
+          onUnauthorized();
+          setTags([]);
+          setSourceTemplates([]);
+          setSourceTemplateAssignments([]);
+          setSourceStatus([]);
+          setRuntimeConfigApplyStates([]);
+          setRuntimeConfigPatchGenerators([]);
+          setTagsError("Operator login required");
+          return;
+        }
+        setTagsError(error instanceof Error ? error.message : "Tag inventory unavailable");
+      } finally {
+        setTagsLoading(false);
       }
-      setTagsError(error instanceof Error ? error.message : "Tag inventory unavailable");
+    })();
+    loadTagInventoryInFlight.current = request;
+    try {
+      await request;
     } finally {
-      setTagsLoading(false);
+      if (loadTagInventoryInFlight.current === request) {
+        loadTagInventoryInFlight.current = null;
+      }
     }
   }, [apiToken, onUnauthorized]);
 
@@ -131,7 +145,11 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
 
   const bulkMutateTags = useCallback(
     async (request: BulkTagMutationRequest) => {
-      const response = await apiPost<TagMutationResponse>("/api/v1/tags/bulk", apiToken, request);
+      const response = await (request.confirmed ? apiPost : apiPostPreview)<TagMutationResponse>(
+        "/api/v1/tags/bulk",
+        apiToken,
+        request,
+      );
       if (!response.confirmation_required) {
         await Promise.all([onFleetChanged(), loadTagInventory()]);
       }
@@ -277,7 +295,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
 
   const resolveBulkPreview = useCallback(
     async (selectorExpression: string) =>
-      apiPost<BulkResolveResponse>("/api/v1/bulk/resolve", apiToken, {
+      apiPostPreview<BulkResolveResponse>("/api/v1/bulk/resolve", apiToken, {
         selector_expression: selectorExpression,
       }),
     [apiToken],
@@ -285,7 +303,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
 
   const resolveJobTargets = useCallback(
     async (selection: JobTargetSelection) =>
-      apiPost<BulkResolveResponse>("/api/v1/bulk/resolve", apiToken, selection),
+      apiPostPreview<BulkResolveResponse>("/api/v1/bulk/resolve", apiToken, selection),
     [apiToken],
   );
 

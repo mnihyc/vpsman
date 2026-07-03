@@ -14,6 +14,7 @@ if ((agent_count < 20)); then
   smoke_fail "VPSMAN_DOCKER_FLEET_AGENT_COUNT must be at least 20"
 fi
 gateway_command_output_ttl_secs="${VPSMAN_DOCKER_FLEET_COMMAND_OUTPUT_TTL_SECS:-86400}"
+alert_notification_dispatch_limit=200
 
 rollup_bucket_secs=60
 run_id="docker-fault-fuzz-$(date +%s%N)"
@@ -216,6 +217,7 @@ start_agent_container() {
     --cpus 0.5 \
     --pids-limit 96 \
     -e RUST_LOG=vpsman_agent=warn \
+    -e VPSMAN_AGENT_STATE_DIR="$dir/state" \
     -e VPSMAN_SUPERVISOR_DIR="$dir/supervisor" \
     -v "$ROOT_DIR:$ROOT_DIR" \
     -w "$ROOT_DIR" \
@@ -628,49 +630,65 @@ jq -e '
 ' <<<"$alert_policy_json" >/dev/null
 
 alert_notification_channel_json="$(vpsctl_json fleet-alert-notification-channel-upsert \
-  --name docker-resource-audit \
+  --name docker-resource-webhook \
   --scope-kind global \
   --min-severity warning \
   --categories resource \
   --operator-states open \
-  --delivery-kind audit_log \
-  --target audit:fleet \
+  --delivery-kind webhook \
+  --target http://127.0.0.1:9/vpsman/docker-resource \
   --cooldown-secs 600 \
   --notes docker-fault-fuzz-live-review \
   --confirmed)"
 alert_notification_channel_id="$(jq -r '.id' <<<"$alert_notification_channel_json")"
 jq -e '
-  .name == "docker-resource-audit" and
+  .name == "docker-resource-webhook" and
   .scope_kind == "global" and
-  .delivery_kind == "audit_log" and
+  .delivery_kind == "webhook" and
   .enabled == true
 ' <<<"$alert_notification_channel_json" >/dev/null
 
 alert_notification_custom_channel_json="$(vpsctl_json fleet-alert-notification-channel-upsert \
-  --name docker-resource-pager \
+  --name docker-resource-backup-webhook \
   --scope-kind global \
   --min-severity warning \
   --categories resource \
   --operator-states open \
-  --delivery-kind custom_pager \
-  --target adapter:docker-pager \
+  --delivery-kind webhook \
+  --target http://127.0.0.1:9/vpsman/docker-resource-backup \
   --cooldown-secs 600 \
   --notes docker-fault-fuzz-live-review-custom \
   --confirmed)"
 jq -e '
-  .name == "docker-resource-pager" and
-  .delivery_kind == "custom_pager" and
+  .name == "docker-resource-backup-webhook" and
+  .delivery_kind == "webhook" and
   .enabled == true
 ' <<<"$alert_notification_custom_channel_json" >/dev/null
+
+alert_notification_dry_run_json="$(vpsctl_json fleet-alert-notification-dispatch \
+  --category resource \
+  --include-muted \
+  --dry-run \
+  --limit "$alert_notification_dispatch_limit")"
+jq -e '
+  length >= 1 and
+  any(.[]; .channel_name == "docker-resource-webhook" and .status == "matched_dry_run")
+' <<<"$alert_notification_dry_run_json" >/dev/null
+alert_notification_dispatch_preview_hash="$(jq -r '.[0].review_preview_hash // empty' <<<"$alert_notification_dry_run_json")"
+if [[ ! "$alert_notification_dispatch_preview_hash" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "fleet alert notification dry run did not return a valid preview hash" >&2
+  exit 1
+fi
 
 alert_notification_dispatch_json="$(vpsctl_json fleet-alert-notification-dispatch \
   --category resource \
   --include-muted \
+  --preview-hash "$alert_notification_dispatch_preview_hash" \
   --confirmed \
-  --limit 50)"
+  --limit "$alert_notification_dispatch_limit")"
 jq -e --arg channel_id "$alert_notification_channel_id" '
   length >= 1 and
-  any(.[]; .channel_id == $channel_id and .status == "delivered")
+  any(.[]; .channel_id == $channel_id and .status == "queued" and .delivery_kind == "webhook")
 ' <<<"$alert_notification_dispatch_json" >/dev/null
 
 cleanup_expression='artifact.domain = "file_transfer_source"'
@@ -687,10 +705,19 @@ jq -e '
   (.sha256_hex | length) == 64
 ' <<<"$cleanup_source_json" >/dev/null
 
+frontend_test_host="${VPSMAN_FRONTEND_TEST_HOST:-localhost}"
+smoke_fleet_log "building frontend production assets for post-fault UI smoke"
+env \
+  VPSMAN_API_PROXY="$api_url" \
+  VPSMAN_FRONTEND_SMOKE_ROOT="$ROOT_DIR" \
+  bash -ic 'cd "$VPSMAN_FRONTEND_SMOKE_ROOT/frontend" && npm run build'
+
 if ! env \
   VPSMAN_API_PROXY="$api_url" \
   VPSMAN_FRONTEND_SMOKE_ROOT="$ROOT_DIR" \
+  VPSMAN_FRONTEND_TEST_HOST="$frontend_test_host" \
   VPSMAN_FRONTEND_TEST_PORT="$frontend_port" \
+  VPSMAN_FRONTEND_TEST_SERVER_COMMAND="npm run preview -- --host $frontend_test_host --port $frontend_port" \
   VPSMAN_DOCKER_FLEET_UI_SMOKE=1 \
   VPSMAN_DOCKER_FLEET_EXPECTED_TOTAL="$agent_count" \
   VPSMAN_DOCKER_FLEET_PROVIDER_ALPHA_COUNT="$provider_alpha_count" \
@@ -701,7 +728,7 @@ if ! env \
   VPSMAN_DOCKER_FLEET_USERNAME="$operator_username" \
   VPSMAN_DOCKER_FLEET_PASSWORD="$operator_password" \
   VPSMAN_DOCKER_FLEET_SCREENSHOT_DIR="$screenshot_dir" \
-  bash -ic 'cd "$VPSMAN_FRONTEND_SMOKE_ROOT/frontend" && npm run test:ui -- tests/live-docker-fleet.spec.ts --project desktop-chrome --project mobile-chrome'; then
+  bash -ic 'cd "$VPSMAN_FRONTEND_SMOKE_ROOT/frontend" && npm run test:ui -- tests/live-docker-fleet.spec.ts --project desktop-chrome --project mobile-chrome --workers=1'; then
   dump_docker_logs "post-fault live Docker fleet UI smoke failed"
   exit 1
 fi

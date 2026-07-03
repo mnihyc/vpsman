@@ -234,6 +234,7 @@ impl Repository {
                         client_id,
                         paths,
                         include_config,
+                        follow_symlinks,
                         status,
                         payload_hash,
                         command_scope,

@@ -160,6 +160,7 @@ Type=simple
 WorkingDirectory=$work_dir
 ExecStart=$install_dir/vpsman-agent --config $config_dir/agent.toml run
 Environment=VPSMAN_AGENT_RESTART_MODE=signal_only
+Environment=VPSMAN_AGENT_STATE_DIR=$state_dir
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
@@ -184,6 +185,7 @@ Type=simple
 WorkingDirectory=$work_dir
 ExecStart=$install_dir/vpsman-agent --config $config_dir/agent.toml run
 Environment=VPSMAN_AGENT_RESTART_MODE=signal_only
+Environment=VPSMAN_AGENT_STATE_DIR=$state_dir
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
@@ -211,9 +213,12 @@ write_sysv_init() {
 DAEMON="$install_dir/vpsman-agent"
 CONFIG="$config_dir/agent.toml"
 PIDFILE="$state_dir/vpsman-agent.pid"
+WORKDIR="$work_dir"
+export VPSMAN_AGENT_STATE_DIR="$state_dir"
 
 case "\$1" in
   start)
+    cd "\$WORKDIR" || exit 1
     start-stop-daemon --start --background --make-pidfile --pidfile "\$PIDFILE" --exec "\$DAEMON" -- --config "\$CONFIG" run
     ;;
   stop)
@@ -239,15 +244,21 @@ verify_service_assets() {
   if [[ "$install_mode" == "unprivileged" ]]; then
     grep -F "ExecStart=$install_dir/vpsman-agent --config $config_dir/agent.toml run" "$user_systemd_unit" >/dev/null \
       || fail "user systemd unit ExecStart verification failed"
+    grep -F "Environment=VPSMAN_AGENT_STATE_DIR=$state_dir" "$user_systemd_unit" >/dev/null \
+      || fail "user systemd unit state dir environment verification failed"
     grep -F "Restart=always" "$user_systemd_unit" >/dev/null \
       || fail "user systemd unit restart policy verification failed"
   else
     grep -F "ExecStart=$install_dir/vpsman-agent --config $config_dir/agent.toml run" "$systemd_unit" >/dev/null \
       || fail "systemd unit ExecStart verification failed"
+    grep -F "Environment=VPSMAN_AGENT_STATE_DIR=$state_dir" "$systemd_unit" >/dev/null \
+      || fail "systemd unit state dir environment verification failed"
     grep -F "Restart=always" "$systemd_unit" >/dev/null \
       || fail "systemd unit restart policy verification failed"
     grep -F 'start-stop-daemon --start' "$sysv_script" >/dev/null \
       || fail "sysv init start command verification failed"
+    grep -F "export VPSMAN_AGENT_STATE_DIR=\"$state_dir\"" "$sysv_script" >/dev/null \
+      || fail "sysv init state dir environment verification failed"
   fi
   info "service assets verified"
 }

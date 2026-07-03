@@ -287,6 +287,20 @@ smoke_track_pid() {
   SMOKE_PIDS+=("$1")
 }
 
+smoke_start_local_agent() {
+  local config_path="$1"
+  local log_path="$2"
+  local work_dir="$3"
+  local rust_log="${4:-vpsman_agent=warn}"
+  local agent_bin="${5:-$SMOKE_ROOT_DIR/target/debug/vpsman-agent}"
+
+  mkdir -p "$work_dir"
+  VPSMAN_AGENT_CONFIG="$config_path" \
+  RUST_LOG="$rust_log" \
+    bash -c 'cd "$1" && exec "$2" run' _ "$work_dir" "$agent_bin" >"$log_path" 2>&1 &
+  smoke_track_pid "$!"
+}
+
 smoke_track_container() {
   SMOKE_CONTAINERS+=("$1")
 }

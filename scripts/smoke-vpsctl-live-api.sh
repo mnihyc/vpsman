@@ -166,6 +166,12 @@ require_no_secret() {
 seed_agent() {
   local client_id="$1"
   local process_incarnation_id="11111111-1111-4111-8111-111111111111"
+  local gateway_session_id
+  case "$client_id" in
+    cli-agent-a) gateway_session_id="11111111-1111-4111-8111-11111111111a" ;;
+    cli-agent-b) gateway_session_id="11111111-1111-4111-8111-11111111111b" ;;
+    *) gateway_session_id="11111111-1111-4111-8111-11111111111f" ;;
+  esac
   local optional_hello_fields=""
   if [[ $# -ge 2 && -n "$2" ]]; then
     optional_hello_fields=", \"capabilities\": $2"
@@ -175,6 +181,7 @@ seed_agent() {
     -H "Content-Type: application/json" \
     -d "{
       \"gateway_id\": \"vpsctl-live-api-gateway\",
+      \"gateway_session_id\": \"$gateway_session_id\",
       \"noise_public_key_hex\": null,
       \"hello\": {
         \"client_id\": \"$client_id\",
@@ -202,7 +209,7 @@ assign_agent_tags() {
   shift
   local tag
   for tag in "$@"; do
-    vpsctl_auth agent-tag --client-id "$client_id" --tag "$tag" >/dev/null
+    vpsctl_auth agent-tag --client-id "$client_id" --tag "$tag" --confirmed >/dev/null
   done
 }
 
@@ -236,6 +243,8 @@ jq -e '.username == "vpsctl-smoke" and .role == "admin" and (.scopes | index("*"
 
 viewer_json="$(VPSMAN_API_URL="$api_url" \
   VPSMAN_API_TOKEN="$access_token" \
+  VPSMAN_SUPER_PASSWORD="$super_password" \
+  VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
   VPSMAN_NEW_OPERATOR_PASSWORD="$viewer_password" \
   "$bin" operator-create \
     --username vpsctl-viewer \
@@ -285,6 +294,8 @@ jq -e '.error == "invalid_bearer_token"' <<<"$viewer_me_body" >/dev/null
 
 scoped_json="$(VPSMAN_API_URL="$api_url" \
   VPSMAN_API_TOKEN="$access_token" \
+  VPSMAN_SUPER_PASSWORD="$super_password" \
+  VPSMAN_SUPER_SALT_HEX="$super_salt_hex" \
   VPSMAN_NEW_OPERATOR_PASSWORD="$scoped_password" \
   "$bin" operator-create \
     --username vpsctl-fleet-reader \
@@ -415,6 +426,7 @@ network_status_seed_job_json="$(vpsctl_auth job-shell \
   --privilege-ttl-secs 60 \
   --confirmed)"
 network_status_seed_job_id="$(jq -r '.job_id' <<<"$network_status_seed_job_json")"
+network_status_seed_payload_hash="$(docker exec "$container_name" psql -U vpsman -d vpsman -tAc "SELECT payload_hash FROM jobs WHERE id = '$network_status_seed_job_id'")"
 network_status_seed_data="$(python3 -c 'import json,sys; print(json.dumps(list(json.dumps({
   "type": "network_status",
   "plan": "cli-edge-a-cli-edge-b-gre",
@@ -444,8 +456,11 @@ curl -fsS \
   -H "Content-Type: application/json" \
   -d "{
     \"gateway_id\": \"vpsctl-live-api-gateway\",
+    \"gateway_session_id\": \"11111111-1111-4111-8111-11111111111a\",
+    \"process_incarnation_id\": \"11111111-1111-4111-8111-111111111111\",
     \"client_id\": \"cli-agent-a\",
     \"job_id\": \"$network_status_seed_job_id\",
+    \"payload_hash\": \"$network_status_seed_payload_hash\",
     \"seq\": 0,
     \"received_unix\": $(date +%s),
     \"output\": {
@@ -565,45 +580,45 @@ if [[ "$scoped_alert_policy_write_status" != "403" ]]; then
 fi
 jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_alert_policy_write_body" >/dev/null
 alert_notification_channel_json="$(vpsctl_auth fleet-alert-notification-channel-upsert \
-  --name source-readiness-audit \
+  --name source-readiness-webhook \
   --scope-kind global \
   --min-severity warning \
   --categories source_readiness \
   --operator-states open \
-  --delivery-kind audit_log \
-  --target audit:fleet \
+  --delivery-kind webhook \
+  --target http://127.0.0.1:9/vpsman/source-readiness \
   --cooldown-secs 600 \
   --notes live-smoke \
   --confirmed)"
 alert_notification_channel_id="$(jq -r '.id' <<<"$alert_notification_channel_json")"
 jq -e '
-  .name == "source-readiness-audit" and
+  .name == "source-readiness-webhook" and
   .scope_kind == "global" and
   .min_severity == "warning" and
   .categories == ["source_readiness"] and
   .operator_states == ["open"] and
-  .delivery_kind == "audit_log" and
+  .delivery_kind == "webhook" and
   .enabled == true
 ' <<<"$alert_notification_channel_json" >/dev/null
-alert_notification_channels_json="$(vpsctl_auth fleet-alert-notification-channels --delivery-kind audit_log --limit 20)"
-jq -e 'any(.[]; .name == "source-readiness-audit")' <<<"$alert_notification_channels_json" >/dev/null
-alert_notification_custom_channel_json="$(vpsctl_auth fleet-alert-notification-channel-upsert \
-  --name source-readiness-custom \
+alert_notification_channels_json="$(vpsctl_auth fleet-alert-notification-channels --delivery-kind webhook --limit 20)"
+jq -e 'any(.[]; .name == "source-readiness-webhook")' <<<"$alert_notification_channels_json" >/dev/null
+alert_notification_backup_channel_json="$(vpsctl_auth fleet-alert-notification-channel-upsert \
+  --name source-readiness-backup-webhook \
   --scope-kind global \
   --min-severity warning \
   --categories source_readiness \
   --operator-states open \
-  --delivery-kind custom_pager \
-  --target adapter:custom-pager \
+  --delivery-kind webhook \
+  --target http://127.0.0.1:9/vpsman/source-readiness-backup \
   --cooldown-secs 600 \
-  --notes live-smoke-custom \
+  --notes live-smoke-backup \
   --confirmed)"
-alert_notification_custom_channel_id="$(jq -r '.id' <<<"$alert_notification_custom_channel_json")"
+alert_notification_backup_channel_id="$(jq -r '.id' <<<"$alert_notification_backup_channel_json")"
 jq -e '
-  .name == "source-readiness-custom" and
-  .delivery_kind == "custom_pager" and
+  .name == "source-readiness-backup-webhook" and
+  .delivery_kind == "webhook" and
   .enabled == true
-' <<<"$alert_notification_custom_channel_json" >/dev/null
+' <<<"$alert_notification_backup_channel_json" >/dev/null
 alert_notification_dry_run_json="$(vpsctl_auth fleet-alert-notification-dispatch \
   --category source_readiness \
   --include-muted \
@@ -612,50 +627,61 @@ alert_notification_dry_run_json="$(vpsctl_auth fleet-alert-notification-dispatch
 jq -e '
   length >= 1 and
   all(.[]; .status == "matched_dry_run") and
-  any(.[]; .channel_name == "source-readiness-audit" and .alert_category == "source_readiness")
+  any(.[]; .channel_name == "source-readiness-webhook" and .alert_category == "source_readiness")
 ' <<<"$alert_notification_dry_run_json" >/dev/null
+alert_notification_dispatch_preview_hash="$(jq -r '.[0].review_preview_hash // empty' <<<"$alert_notification_dry_run_json")"
+if [[ ! "$alert_notification_dispatch_preview_hash" =~ ^[0-9a-f]{64}$ ]]; then
+  fail "fleet-alert-notification-dispatch dry run did not return a valid preview hash"
+fi
 alert_notification_dispatch_json="$(vpsctl_auth fleet-alert-notification-dispatch \
   --category source_readiness \
   --include-muted \
+  --preview-hash "$alert_notification_dispatch_preview_hash" \
   --confirmed \
   --limit 20)"
 jq -e '
   length >= 1 and
-  any(.[]; .channel_name == "source-readiness-audit" and .status == "delivered" and .delivery_kind == "audit_log")
+  any(.[]; .channel_name == "source-readiness-webhook" and .status == "queued" and .delivery_kind == "webhook")
 ' <<<"$alert_notification_dispatch_json" >/dev/null
 jq -e '
-  any(.[]; .channel_name == "source-readiness-custom" and .status == "queued" and .delivery_kind == "custom_pager")
+  any(.[]; .channel_name == "source-readiness-backup-webhook" and .status == "queued" and .delivery_kind == "webhook")
 ' <<<"$alert_notification_dispatch_json" >/dev/null
-alert_notifications_json="$(vpsctl_auth fleet-alert-notifications --status delivered --limit 20)"
+alert_notifications_json="$(vpsctl_auth fleet-alert-notifications --status queued --limit 20)"
 jq -e '
-  any(.[]; .channel_id == "'"$alert_notification_channel_id"'" and .status == "delivered")
+  any(.[]; .channel_id == "'"$alert_notification_channel_id"'" and .status == "queued")
 ' <<<"$alert_notifications_json" >/dev/null
 alert_notification_process_dry_run_json="$(vpsctl_auth fleet-alert-notification-process \
   --status queued \
-  --delivery-kind custom_pager \
+  --delivery-kind webhook \
   --dry-run \
   --limit 20)"
 jq -e '
   length >= 1 and
   all(.[]; .status == "delivery_dry_run") and
-  any(.[]; .channel_id == "'"$alert_notification_custom_channel_id"'")
+  any(.[]; .channel_id == "'"$alert_notification_backup_channel_id"'")
 ' <<<"$alert_notification_process_dry_run_json" >/dev/null
+alert_notification_process_preview_hash="$(jq -r '.[0].review_preview_hash // empty' <<<"$alert_notification_process_dry_run_json")"
+if [[ ! "$alert_notification_process_preview_hash" =~ ^[0-9a-f]{64}$ ]]; then
+  fail "fleet-alert-notification-process dry run did not return a valid preview hash"
+fi
 alert_notification_process_json="$(vpsctl_auth fleet-alert-notification-process \
   --status queued \
-  --delivery-kind custom_pager \
+  --delivery-kind webhook \
+  --preview-hash "$alert_notification_process_preview_hash" \
   --confirmed \
   --limit 20)"
 jq -e '
   length >= 1 and
-  any(.[]; .channel_id == "'"$alert_notification_custom_channel_id"'" and .status == "failed" and .attempt_count == 1 and (.error | contains("not configured")))
+  any(.[]; .channel_id == "'"$alert_notification_backup_channel_id"'" and .status == "failed" and .attempt_count == 1 and (.error | type == "string" and length > 0))
 ' <<<"$alert_notification_process_json" >/dev/null
 alert_notification_failed_json="$(vpsctl_auth fleet-alert-notifications --status failed --limit 20)"
 jq -e '
-  any(.[]; .channel_id == "'"$alert_notification_custom_channel_id"'" and .status == "failed" and .attempt_count == 1)
+  any(.[]; .channel_id == "'"$alert_notification_backup_channel_id"'" and .status == "failed" and .attempt_count == 1)
 ' <<<"$alert_notification_failed_json" >/dev/null
 alert_notification_duplicate_json="$(vpsctl_auth fleet-alert-notification-dispatch \
   --category source_readiness \
   --include-muted \
+  --preview-hash "$alert_notification_dispatch_preview_hash" \
   --confirmed \
   --limit 20)"
 jq -e 'length == 0' <<<"$alert_notification_duplicate_json" >/dev/null
@@ -680,7 +706,7 @@ jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_alert_notifications_
 scoped_alert_notification_write_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $scoped_access_token" \
   -H "Content-Type: application/json" \
-  -d '{"name":"denied-alert-notification","scope_kind":"global","delivery_kind":"audit_log","target":"audit:fleet","confirmed":true}' \
+  -d '{"name":"denied-alert-notification","scope_kind":"global","delivery_kind":"webhook","target":"http://127.0.0.1:9/denied","confirmed":true}' \
   "$api_url/api/v1/fleet-alert-notification-channels")"
 scoped_alert_notification_write_status="${scoped_alert_notification_write_response##*$'\n'}"
 scoped_alert_notification_write_body="${scoped_alert_notification_write_response%$'\n'*}"
@@ -694,9 +720,9 @@ jq -e '
   any(.[]; .name == "builtin:vnstat_json" and .built_in == true and .is_default == false)
 ' <<<"$traffic_templates_json" >/dev/null
 
-tag_json="$(vpsctl_auth tag-create --name cli-live-tag)"
+tag_json="$(vpsctl_auth tag-create --name cli-live-tag --confirmed)"
 jq -e '.name == "cli-live-tag"' <<<"$tag_json" >/dev/null
-vpsctl_auth agent-tag --client-id cli-agent-b --tag cli-live-tag >/dev/null
+vpsctl_auth agent-tag --client-id cli-agent-b --tag cli-live-tag --confirmed >/dev/null
 
 bulk_json="$(vpsctl_auth bulk-resolve \
   --clients cli-agent-a \

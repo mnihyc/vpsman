@@ -9,6 +9,7 @@ import { DEFAULT_UPDATE_VERSION_URL } from "../src/jobDispatchPreset";
 import {
   openConsoleSubpage,
   unlockPrivilegeFromTop,
+  waitForConsoleShell,
 } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
@@ -153,6 +154,7 @@ test("renders an operational cloud-console fleet workspace", async ({
   page,
 }, testInfo) => {
   await page.goto("/");
+  await waitForConsoleShell(page);
 
   await expect(
     page.getByRole("heading", { name: "Home", exact: true }),
@@ -343,7 +345,9 @@ test("renders an operational cloud-console fleet workspace", async ({
   if (testInfo.project.name.includes("mobile")) {
     await activate(coreRecord.getByRole("button", { name: /Open VPS/ }));
   } else {
-    await activate(coreRecord);
+    await activate(
+      coreRecord.getByRole("button", { name: /Open core-fra-02.*detail/ }),
+    );
   }
   await expect(
     page.getByRole("heading", { level: 1, name: "Instance detail" }),
@@ -679,6 +683,7 @@ test("clears browser-local console selections without deleting vault records", a
   const reloaded = page.waitForEvent("load");
   await page.getByRole("button", { name: "Clear local selections" }).click();
   await reloaded;
+  await waitForConsoleShell(page);
   await expect(
     page.getByRole("heading", { name: "Home", exact: true }),
   ).toBeVisible();
@@ -695,12 +700,24 @@ test("clears browser-local console selections without deleting vault records", a
     privilegeVault: window.localStorage.getItem("vpsman.privilegeVault"),
     sidebarSubpanels: window.localStorage.getItem("vpsman.sidebarSubpanels"),
   }));
+  expect(storage.authVault).toContain('"cipher":"AES-GCM"');
+  expect(storage.authVault).not.toContain(
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  );
+  expect(storage.authVault).not.toContain(
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  );
+  const sidebarSubpanels = storage.sidebarSubpanels
+    ? JSON.parse(storage.sidebarSubpanels)
+    : null;
   expect(storage).toMatchObject({
-    authVault: "preserved-auth",
     dashboardPreferences: null,
     grid: null,
     privilegeVault: "preserved-privilege",
-    sidebarSubpanels: null,
+  });
+  expect(sidebarSubpanels).toMatchObject({
+    defaultMode: "active",
+    state: {},
   });
 });
 
@@ -1178,6 +1195,7 @@ test("keeps console layout usable on desktop and mobile widths", async ({
   page,
 }, testInfo) => {
   await page.goto("/");
+  await waitForConsoleShell(page);
 
   const overflow = await page.evaluate(
     () =>
@@ -1253,6 +1271,7 @@ test("keeps console layout usable on desktop and mobile widths", async ({
 
 test("keeps control-plane metrics in System pages", async ({ page }) => {
   await page.goto("/");
+  await waitForConsoleShell(page);
 
   const dashboard = page.locator(".dashboardWorkspace");
   await expect(
@@ -2801,6 +2820,7 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
   );
 
   await page.goto("/");
+  await waitForConsoleShell(page);
   await page.getByLabel("Search fleet").fill("sfo");
   await openConsoleSubpage(page, "Network", "Tunnel plans");
   await expect(page.getByText("OSPF cost model")).toBeVisible();

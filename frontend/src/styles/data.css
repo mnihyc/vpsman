@@ -4151,6 +4151,35 @@
   min-width: 0;
 }
 
+.bulkPreviewFailure {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-soft);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 8px 10px;
+}
+
+.bulkPreviewFailure svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--warning-text);
+}
+
+.bulkPreviewFailure span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.bulkPreviewFailure strong {
+  color: var(--warning-text);
+}
+
 .bulkTargetResolution {
   display: grid;
   gap: 6px;

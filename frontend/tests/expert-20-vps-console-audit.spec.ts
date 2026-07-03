@@ -226,7 +226,14 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await expect(fleetGrid.getByText("never seen").first()).toBeVisible();
   await expect(fleetGrid.getByText("stale").first()).toBeVisible();
   await expect(fleetGrid.locator(".countryFlag").first()).toBeVisible();
-  await activate(fleetGrid.getByText("ams-payments-edge-01").first());
+  const primaryVpsRow = fleetGrid
+    .locator(".gridBody [role=row]", { hasText: "ams-payments-edge-01" })
+    .first();
+  await activate(
+    primaryVpsRow.getByRole("button", {
+      name: /Open ams-payments-edge-01.*detail/,
+    }),
+  );
   await expect(
     page.getByRole("heading", { level: 1, name: "Instance detail" }),
   ).toBeVisible();

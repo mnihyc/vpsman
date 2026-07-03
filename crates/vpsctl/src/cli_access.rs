@@ -471,6 +471,8 @@ pub(crate) struct FleetAlertNotificationDispatchCommand {
     pub(crate) include_muted: bool,
     #[arg(long, default_value_t = false)]
     pub(crate) dry_run: bool,
+    #[arg(long)]
+    pub(crate) preview_hash: Option<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }
@@ -485,6 +487,8 @@ pub(crate) struct FleetAlertNotificationProcessCommand {
     pub(crate) delivery_kind: Option<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) dry_run: bool,
+    #[arg(long)]
+    pub(crate) preview_hash: Option<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) confirmed: bool,
 }

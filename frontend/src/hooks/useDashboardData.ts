@@ -25,7 +25,7 @@ import { useTopologyData } from "./useTopologyData";
 
 export function useDashboardData(activeView: ActiveView) {
   const [apiToken, setApiToken] = useState("");
-  const [authRequired, setAuthRequired] = useState(false);
+  const [authRequired, setAuthRequired] = useState(true);
   const [authVaultAvailable, setAuthVaultAvailable] = useState(() =>
     hasAuthVault(),
   );
@@ -36,6 +36,8 @@ export function useDashboardData(activeView: ActiveView) {
   const [lastTerminalOutputEvent, setLastTerminalOutputEvent] =
     useState<WsTerminalOutputEvent | null>(null);
   const dashboardOverviewReloadTimer = useRef<number | null>(null);
+  const fleetReloadTimer = useRef<number | null>(null);
+  const inventoryReloadTimer = useRef<number | null>(null);
 
   const requireAuth = useCallback(() => {
     window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
@@ -68,17 +70,44 @@ export function useDashboardData(activeView: ActiveView) {
       void dashboardOverview.loadDashboardOverview();
     }, 250);
   }, [dashboardOverview.loadDashboardOverview]);
+  const scheduleFleetReload = useCallback(() => {
+    if (fleetReloadTimer.current !== null) {
+      return;
+    }
+    fleetReloadTimer.current = window.setTimeout(() => {
+      fleetReloadTimer.current = null;
+      void fleet.loadFleet();
+    }, 750);
+  }, [fleet.loadFleet]);
+  const scheduleInventoryReload = useCallback(() => {
+    if (inventoryReloadTimer.current !== null) {
+      return;
+    }
+    inventoryReloadTimer.current = window.setTimeout(() => {
+      inventoryReloadTimer.current = null;
+      void inventory.loadTagInventory();
+    }, 1_000);
+  }, [inventory.loadTagInventory]);
 
   useEffect(
     () => () => {
       if (dashboardOverviewReloadTimer.current !== null) {
         window.clearTimeout(dashboardOverviewReloadTimer.current);
       }
+      if (fleetReloadTimer.current !== null) {
+        window.clearTimeout(fleetReloadTimer.current);
+      }
+      if (inventoryReloadTimer.current !== null) {
+        window.clearTimeout(inventoryReloadTimer.current);
+      }
     },
     [],
   );
 
   useEffect(() => {
+    if (!apiToken) {
+      return;
+    }
     let disposed = false;
 
     async function loadIfActive() {
@@ -93,11 +122,11 @@ export function useDashboardData(activeView: ActiveView) {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [fleet.loadFleet]);
+  }, [apiToken, fleet.loadFleet]);
 
   useEffect(() => {
     if (
-      (authRequired && !apiToken) ||
+      !apiToken ||
       (activeView !== "Home" && activeView !== "Observability")
     ) {
       return;
@@ -128,13 +157,12 @@ export function useDashboardData(activeView: ActiveView) {
   }, [
     activeView,
     apiToken,
-    authRequired,
     dashboardOverview.dashboardPreferences.refreshIntervalSecs,
     dashboardOverview.loadDashboardOverview,
   ]);
 
   useEffect(() => {
-    if (authRequired && !apiToken) {
+    if (!apiToken) {
       return;
     }
     if (activeView === "Home") {
@@ -197,7 +225,6 @@ export function useDashboardData(activeView: ActiveView) {
     access.loadCurrentOperatorProfile,
     activeView,
     apiToken,
-    authRequired,
     audit.loadAudits,
     backups.loadBackups,
     inventory.loadTagInventory,
@@ -216,7 +243,7 @@ export function useDashboardData(activeView: ActiveView) {
   ]);
 
   useEffect(() => {
-    if (authRequired && !apiToken) {
+    if (!apiToken) {
       setWsState("auth required");
       return;
     }
@@ -251,7 +278,7 @@ export function useDashboardData(activeView: ActiveView) {
         event.type === "telemetry_updated" ||
         event.type === "job_rejected"
       ) {
-        void fleet.loadFleet();
+        scheduleFleetReload();
       }
       if (
         activeView === "Home" &&
@@ -261,11 +288,8 @@ export function useDashboardData(activeView: ActiveView) {
       ) {
         scheduleDashboardOverviewReload();
       }
-      if (
-        event.type === "agent_updated" ||
-        event.type === "telemetry_updated"
-      ) {
-        void inventory.loadTagInventory();
+      if (event.type === "agent_updated" && activeViewUsesInventoryData(activeView)) {
+        scheduleInventoryReload();
       }
       if (event.type === "job_rejected") {
         void jobs.loadJobs();
@@ -282,9 +306,12 @@ export function useDashboardData(activeView: ActiveView) {
         void jobs.loadTerminalSessions();
       }
       if (event.type === "job_finished") {
-        void fleet.loadFleet();
+        scheduleFleetReload();
         void jobs.loadJobs();
         void audit.loadAudits();
+        if (activeViewUsesInventoryData(activeView)) {
+          scheduleInventoryReload();
+        }
         if (activeView === "Home" || activeView === "Observability") {
           scheduleDashboardOverviewReload();
         }
@@ -303,17 +330,16 @@ export function useDashboardData(activeView: ActiveView) {
     };
   }, [
     apiToken,
-    authRequired,
     access.loadCurrentOperator,
     audit.loadAudits,
-    fleet.loadFleet,
     fleet.replaceFleetSnapshot,
     backups.loadBackups,
     dashboardOverview.loadDashboardOverview,
-    inventory.loadTagInventory,
     jobs.loadJobs,
     jobs.loadTerminalSessions,
     scheduleDashboardOverviewReload,
+    scheduleFleetReload,
+    scheduleInventoryReload,
     activeView,
   ]);
 
@@ -596,4 +622,17 @@ function dashboardRefreshIntervalMs(
   value: DashboardRefreshIntervalSecs,
 ): number {
   return value * 1000;
+}
+
+function activeViewUsesInventoryData(activeView: ActiveView): boolean {
+  return (
+    activeView === "Fleet" ||
+    activeView === "Config" ||
+    activeView === "Remote Operations" ||
+    activeView === "Jobs" ||
+    activeView === "Automation" ||
+    activeView === "Observability" ||
+    activeView === "Access" ||
+    activeView === "System"
+  );
 }

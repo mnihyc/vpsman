@@ -5,6 +5,9 @@ const host = process.env.VPSMAN_FRONTEND_TEST_HOST ?? "localhost";
 const baseURL = `http://${host}:${port}`;
 const channel = process.env.VPSMAN_PLAYWRIGHT_CHANNEL ?? "chrome";
 const executablePath = process.env.VPSMAN_PLAYWRIGHT_EXECUTABLE_PATH;
+const serverCommand =
+  process.env.VPSMAN_FRONTEND_TEST_SERVER_COMMAND ??
+  `npm run dev -- --host ${host} --port ${port}`;
 const launchArgs = ["--disable-enterprise-policy"];
 if (process.env.VPSMAN_PLAYWRIGHT_NO_SANDBOX === "1") {
   launchArgs.push("--no-sandbox");
@@ -15,7 +18,7 @@ export default defineConfig({
   timeout: 30_000,
   reporter: [["list"]],
   webServer: {
-    command: `npm run dev -- --host ${host} --port ${port}`,
+    command: serverCommand,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
     url: baseURL,

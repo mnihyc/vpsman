@@ -688,7 +688,6 @@ pub(crate) async fn skip_unstarted_queued_targets_for_client_in_tx(
             let outcome =
                 synthetic_terminal_outcome(TARGET_STATUS_SKIPPED, message, Some(0), false);
             enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome).await?;
-            let _ = finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(tx, job_id).await?;
             job_ids.push(job_id);
         }
     }
@@ -770,7 +769,6 @@ pub(crate) async fn mark_active_targets_agent_lost_for_client_in_tx(
         .await?;
         let outcome = synthetic_terminal_outcome(TARGET_STATUS_AGENT_LOST, message, None, false);
         enqueue_target_terminal_event_in_tx(tx, job_id, &target_client_id, &outcome).await?;
-        let _ = finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(tx, job_id).await?;
         sqlx::query(
             r#"
             INSERT INTO audit_logs (
@@ -1403,7 +1401,6 @@ impl Repository {
                         OR job_id::text ILIKE $3 ESCAPE '\'
                         OR status ILIKE $3 ESCAPE '\'
                         OR command_type ILIKE $3 ESCAPE '\'
-                        OR source_schedule_id::text ILIKE $3 ESCAPE '\'
                         OR selector_expression ILIKE $3 ESCAPE '\'
                         OR payload_hash ILIKE $3 ESCAPE '\'
                         OR request_fingerprint ILIKE $3 ESCAPE '\'
@@ -3409,7 +3406,6 @@ impl Repository {
             received_at: None,
             outputs: Vec::new(),
         };
-        let mut postgres_finished_status = None::<String>;
         match self {
             Self::Memory(memory) => {
                 let completed_at = unix_now().to_string();
@@ -3575,9 +3571,6 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, &outcome).await?;
-                postgres_finished_status =
-                    finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
-                        .await?;
                 tx.commit().await?;
             }
         }
@@ -3602,7 +3595,7 @@ impl Repository {
                     .await?;
                 Ok(status)
             }
-            Self::Postgres(_) => Ok(postgres_finished_status),
+            Self::Postgres(_) => Ok(self.refresh_job_status_from_targets(job_id).await?),
         }
     }
 
@@ -3898,9 +3891,6 @@ impl Repository {
                     let outcome = synthetic_terminal_outcome(status, &message, None, false);
                     enqueue_target_terminal_event_in_tx(&mut tx, job_id, &client_id, &outcome)
                         .await?;
-                    let _ =
-                        finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
-                            .await?;
                     expired.push(DeadlineExpiredJobTarget {
                         job_id,
                         client_id,
@@ -4117,11 +4107,6 @@ impl Repository {
                     .into_iter()
                     .map(|row| row.try_get("client_id").map_err(Into::into))
                     .collect::<Result<Vec<String>>>()?;
-                if pending_canceled > 0 {
-                    let _ =
-                        finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
-                            .await?;
-                }
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (
@@ -4227,9 +4212,6 @@ impl Repository {
                         synthetic_terminal_outcome(TARGET_STATUS_CANCELED, message, None, accepted);
                     enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, &outcome)
                         .await?;
-                    let _ =
-                        finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
-                            .await?;
                 }
                 tx.commit().await?;
             }
@@ -4459,8 +4441,6 @@ impl Repository {
                     .await?;
                 }
                 enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, outcome).await?;
-                let _ = finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
-                    .await?;
                 tx.commit().await?;
                 let update_lifecycle_operation = if outcome.status == TARGET_STATUS_COMPLETED
                     || agent_update_activation_failure_status(&outcome.status)

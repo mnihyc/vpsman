@@ -425,6 +425,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     operator_state: command.operator_state,
                     include_muted: command.include_muted,
                     dry_run: command.dry_run,
+                    preview_hash: command.preview_hash,
                     confirmed: command.confirmed,
                 },
             )?;
@@ -439,6 +440,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                     status: command.status,
                     delivery_kind: command.delivery_kind,
                     dry_run: command.dry_run,
+                    preview_hash: command.preview_hash,
                     confirmed: command.confirmed,
                 },
             )?;

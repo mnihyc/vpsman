@@ -68,7 +68,7 @@ export function AlertsPanel({
 }: AlertsPanelProps) {
   const [activeTab, setActiveTab] = useState<AlertConfigTab>("policies");
   const [policyEditorOpen, setPolicyEditorOpen] = useState(false);
-  const [previewRows, setPreviewRows] = useState<FleetAlertNotificationDeliveryRecord[]>([]);
+  const [previewRows, setPreviewRows] = useState<FleetAlertNotificationDeliveryRecord[] | null>(null);
   const failedDeliveries = fleetAlertNotifications.filter((delivery) =>
     ["failed", "permanently_failed"].includes(delivery.status),
   ).length;
@@ -76,8 +76,8 @@ export function AlertsPanel({
 
   function openDeliveryEvidence() {
     setActiveTab("deliveries");
-    const target = document.getElementById("observability-alert-deliveries");
     window.requestAnimationFrame(() => {
+      const target = document.getElementById("observability-alert-deliveries");
       target?.scrollIntoView({ block: "start", behavior: "smooth" });
     });
   }
@@ -198,8 +198,8 @@ export function AlertsPanel({
               </div>
               <RadioTower size={18} />
             </div>
-            {previewRows.length > 0 ? (
-              <DeliveryPreviewSection count={previewRows.length} onClear={() => setPreviewRows([])} title="Notification delivery preview">
+            {previewRows !== null ? (
+              <DeliveryPreviewSection count={previewRows.length} onClear={() => setPreviewRows(null)} title="Notification delivery preview">
                 <NotificationDeliveryHistoryGrid deliveries={previewRows} preview />
               </DeliveryPreviewSection>
             ) : null}

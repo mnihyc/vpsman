@@ -1217,6 +1217,7 @@ function BulkTagPanel({
   const [resolvedTargets, setResolvedTargets] = useState<BulkResolveResponse | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [mutationSnapshot, setMutationSnapshot] = useState<BulkTagMutationSnapshot | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewStatus, setPreviewStatus] = useState<string | null>(null);
   const [includeReviewTargets, setIncludeReviewTargets] = useState(false);
   const {
@@ -1263,6 +1264,7 @@ function BulkTagPanel({
     setResolvedTargets(null);
     setMutationSnapshot(null);
     setConfirmOpen(false);
+    setPreviewError(null);
     setPreviewStatus(null);
   }
 
@@ -1272,64 +1274,74 @@ function BulkTagPanel({
     const frozenIncludeReviewTargets = includeReviewTargets;
     const frozenTag = trimmedTag;
     const frozenSelector = trimmedSelector;
+    setPreviewError(null);
     setPreviewStatus(frozenAction === "delete" ? "Preparing delete preview" : "Resolving targets and preparing preview");
     try {
       await runAction(async () => {
-        await waitForReviewRender();
-        if (frozenAction !== "delete" && selectorParse.error) {
-          throw new Error(selectorParse.error);
-        }
-        if (frozenAction === "delete") {
-          const nextPreview = await onDeleteTag(frozenTag, false, null);
+        try {
+          await waitForReviewRender();
+          if (frozenAction !== "delete" && selectorParse.error) {
+            throw new Error(selectorParse.error);
+          }
+          if (frozenAction === "delete") {
+            const nextPreview = await onDeleteTag(frozenTag, false, null);
+            if (!isReviewGenerationCurrent(reviewGeneration)) {
+              return;
+            }
+            setPreview(nextPreview);
+            setResolvedTargets(null);
+            setMutationSnapshot({
+              action: frozenAction,
+              preview: nextPreview,
+              selectorExpression: "",
+              tag: frozenTag,
+            });
+            setConfirmOpen(true);
+            return;
+          }
+          const resolved = await onResolveBulk(frozenSelector);
+          if (!isReviewGenerationCurrent(reviewGeneration)) {
+            return;
+          }
+          setResolvedTargets(resolved);
+          const targetClientIds = tagMutationEligibleTargets(
+            resolved.targets,
+            frozenIncludeReviewTargets,
+          ).map((target) => target.id);
+          if (!targetClientIds.length) {
+            throw new Error(
+              frozenIncludeReviewTargets
+                ? "Bulk group action resolved no eligible VPSs"
+                : "Bulk group action has no ready VPSs; include review targets to apply anyway",
+            );
+          }
+          const nextPreview = await onBulkMutateTags({
+            action: frozenAction,
+            confirmed: false,
+            privilege_assertion: null,
+            selector_expression: frozenSelector,
+            target_client_ids: targetClientIds,
+            tag: frozenTag,
+          });
           if (!isReviewGenerationCurrent(reviewGeneration)) {
             return;
           }
           setPreview(nextPreview);
-          setResolvedTargets(null);
           setMutationSnapshot({
             action: frozenAction,
             preview: nextPreview,
-            selectorExpression: "",
+            selectorExpression: frozenSelector,
             tag: frozenTag,
           });
           setConfirmOpen(true);
-          return;
+        } catch (error) {
+          if (isReviewGenerationCurrent(reviewGeneration)) {
+            setMutationSnapshot(null);
+            setConfirmOpen(false);
+            setPreviewError(previewFailureMessage(error));
+          }
+          throw error;
         }
-        const resolved = await onResolveBulk(frozenSelector);
-        if (!isReviewGenerationCurrent(reviewGeneration)) {
-          return;
-        }
-        setResolvedTargets(resolved);
-        const targetClientIds = tagMutationEligibleTargets(
-          resolved.targets,
-          frozenIncludeReviewTargets,
-        ).map((target) => target.id);
-        if (!targetClientIds.length) {
-          throw new Error(
-            frozenIncludeReviewTargets
-              ? "Bulk group action resolved no eligible VPSs"
-              : "Bulk group action has no ready VPSs; include review targets to apply anyway",
-          );
-        }
-        const nextPreview = await onBulkMutateTags({
-          action: frozenAction,
-          confirmed: false,
-          privilege_assertion: null,
-          selector_expression: frozenSelector,
-          target_client_ids: targetClientIds,
-          tag: frozenTag,
-        });
-        if (!isReviewGenerationCurrent(reviewGeneration)) {
-          return;
-        }
-        setPreview(nextPreview);
-        setMutationSnapshot({
-          action: frozenAction,
-          preview: nextPreview,
-          selectorExpression: frozenSelector,
-          tag: frozenTag,
-        });
-        setConfirmOpen(true);
       });
     } finally {
       if (isReviewGenerationCurrent(reviewGeneration)) {
@@ -1508,6 +1520,15 @@ function BulkTagPanel({
           <Tag size={16} />
           {reviewButtonLabel}
         </button>
+        {previewError && (
+          <div className="bulkPreviewFailure" role="alert">
+            <X size={15} />
+            <span>
+              <strong>Preview failed.</strong> {previewError}. Retry review; final apply stays locked until a fresh
+              server preview succeeds.
+            </span>
+          </div>
+        )}
       </div>
       {(preview || previewStatus) && (
       <section className="bulkTagPreviewPanel" aria-label="Bulk tag target preview">
@@ -1592,6 +1613,10 @@ function BulkTagPanel({
       />
     </div>
   );
+}
+
+function previewFailureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Bulk group preview failed";
 }
 
 function ScheduleImpactTable({

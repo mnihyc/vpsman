@@ -270,12 +270,13 @@ fn parses_inventory_commands() {
             operator_state: None,
             include_muted: true,
             dry_run: true,
+            preview_hash: None,
             confirmed: false,
         }
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "fleet-alert-notification-process --limit 25 --status failed --delivery-kind webhook --confirmed"
+            "fleet-alert-notification-process --limit 25 --status failed --delivery-kind webhook --preview-hash 1111111111111111111111111111111111111111111111111111111111111111 --confirmed"
         )
         .unwrap(),
         VtyInventoryCommand::FleetAlertNotificationProcess {
@@ -283,6 +284,7 @@ fn parses_inventory_commands() {
             status: Some("failed".to_string()),
             delivery_kind: Some("webhook".to_string()),
             dry_run: false,
+            preview_hash: Some("1111111111111111111111111111111111111111111111111111111111111111".to_string()),
             confirmed: true,
         }
     );

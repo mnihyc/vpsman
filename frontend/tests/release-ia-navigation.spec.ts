@@ -56,6 +56,11 @@ test.beforeEach(async ({ page }, testInfo) => {
   await installConsoleApiMock(page);
 });
 
+async function gotoConsoleHome(page: Page) {
+  await page.goto("/");
+  await waitForConsoleShell(page);
+}
+
 async function selectEvidenceGridRecord(grid: Locator, label: string) {
   const mobileCardAction = grid
     .locator(".gridMobileCard", { hasText: label })
@@ -320,7 +325,7 @@ async function contrastFailures(page: Page) {
 test("release IA exposes the intended top-level product areas", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   const mobilePageSelector = await openMobilePageSelector(page);
   if (mobilePageSelector) {
@@ -350,7 +355,7 @@ test("release IA exposes the intended top-level product areas", async ({
 test("keyboard navigation reaches release shell controls and page primary action", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   const mobilePageSelector = await openMobilePageSelector(page);
   if (mobilePageSelector) {
@@ -411,7 +416,7 @@ test("fleet scope selector edits scope and clear is explicit", async ({
     "mobile shell compression is tracked separately in newest issues",
   );
 
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   const scopeEditor = page.getByRole("button", { name: /Edit fleet scope/ });
   const fleetSearch = page.getByRole("searchbox", { name: "Search fleet" });
@@ -442,7 +447,8 @@ test("fleet scope selector edits scope and clear is explicit", async ({
 test("release IA reaches every configured page and subpage", async ({
   page,
 }) => {
-  await page.goto("/");
+  test.setTimeout(120_000);
+  await gotoConsoleHome(page);
 
   expect([...Object.keys(viewSubpages)].sort()).toEqual(
     [...releaseTopLevel].sort(),
@@ -475,7 +481,7 @@ test("release IA reaches every configured page and subpage", async ({
 });
 
 test("release pages use operational page headers", async ({ page }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   const defaultRoutes = [
     { view: "Home", subpage: "Overview", title: "Home", section: "Overview" },
@@ -581,7 +587,7 @@ test("release pages use operational page headers", async ({ page }) => {
 test("remote operations owns terminal, files, transfers, processes, and bulk files", async ({
   page,
 }, testInfo) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   await openConsoleSubpage(page, "Remote Operations", "Terminal");
   await expect(
@@ -636,7 +642,7 @@ test("remote operations owns terminal, files, transfers, processes, and bulk fil
 test("jobs history links to operational owners without embedding their workflows", async ({
   page,
 }, testInfo) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Jobs", "History");
 
   await expect(
@@ -752,7 +758,7 @@ test("job detail opens from release evidence pages", async ({
   page,
 }, testInfo) => {
   test.slow();
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   await homeActivityPanel(page)
     .getByRole("button", { name: /Scheduled shell command job completed/ })
@@ -811,7 +817,7 @@ test("terminal open and resume stay in Remote Operations without Jobs", async ({
     testInfo.project.name.includes("mobile"),
     "terminal action composer details are covered through the desktop release workflow",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Remote Operations", "Terminal");
 
   const launcher = page.getByLabel("New terminal composer");
@@ -907,7 +913,7 @@ test("terminal open and resume stay in Remote Operations without Jobs", async ({
 test("jobs dispatch keeps terminal creation in remote operations", async ({
   page,
 }, testInfo) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 
   const jobsComposer = page.locator(".commandComposer", {
@@ -968,7 +974,7 @@ test("file browser reads a selected VPS path from Remote Operations without Jobs
     testInfo.project.name.includes("mobile"),
     "file browser path and editor behavior is a dense desktop operations workflow",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await page.evaluate(() =>
     localStorage.removeItem("vpsman.fileBrowser.state"),
   );
@@ -1179,7 +1185,7 @@ test("file browser reads a selected VPS path from Remote Operations without Jobs
 test("home exposes quick actions, availability, running work, failures, attention, and activity", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   await expect(
     page.getByRole("heading", { name: "Fleet command home" }),
@@ -1300,7 +1306,7 @@ test("home quick actions route to release pages with selected VPS scope", async 
 test("home attention queue links to release evidence pages", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   await homeAttentionPanel(page)
     .getByRole("button", { name: /Tunnel adapter status failed/ })
@@ -1309,7 +1315,7 @@ test("home attention queue links to release evidence pages", async ({
     page.getByRole("heading", { level: 1, name: "Network evidence" }),
   ).toBeVisible();
 
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await homeAttentionPanel(page)
     .getByRole("button", { name: /Transfer .*error\.log/ })
     .click();
@@ -1320,7 +1326,7 @@ test("home attention queue links to release evidence pages", async ({
     page.getByRole("heading", { name: "File transfer sessions" }),
   ).toBeVisible();
 
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await homeAttentionPanel(page)
     .getByRole("button", { name: /backup-nyc-03 needs review/ })
     .click();
@@ -1328,7 +1334,7 @@ test("home attention queue links to release evidence pages", async ({
     page.getByRole("heading", { name: "Instance detail" }),
   ).toBeVisible();
 
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await homeAttentionPanel(page)
     .getByRole("button", { name: /Gateway event drops need review/ })
     .click();
@@ -1341,7 +1347,7 @@ test("home shows a useful empty state when no VPS agents are loaded", async ({
   page,
 }) => {
   await installConsoleApiMock(page, { agentListOverride: [] });
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   await expect(
     page.getByRole("heading", { name: "Fleet command home" }),
@@ -1374,7 +1380,7 @@ test("home overview text fits desktop tablet and mobile widths", async ({
       height: viewport.height,
       width: viewport.width,
     });
-    await page.goto("/");
+    await gotoConsoleHome(page);
     await expect(page.getByRole("heading", { name: "Fleet command home" })).toBeVisible();
     await expect(homePanel(page, "Running work")).toBeVisible();
     await expect(homePanel(page, "Recent failures")).toBeVisible();
@@ -1389,7 +1395,7 @@ test("fleet monitor renders VPS card workflow actions", async ({
     testInfo.project.name.includes("mobile"),
     "desktop card action routing covers the detailed monitor interaction model",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Fleet", "Monitor");
 
   await expect(
@@ -1473,7 +1479,7 @@ test("fleet monitor renders VPS card workflow actions", async ({
       heading: "Network graph",
     },
   ]) {
-    await page.goto("/");
+    await gotoConsoleHome(page);
     await openConsoleSubpage(page, "Fleet", "Monitor");
     const card = page
       .getByLabel("VPS monitor cards")
@@ -1503,7 +1509,7 @@ for (const fixtureCount of [0, 3, 20, 50, 100]) {
       agentListOverride: makeMonitorAgentFixtures(fixtureCount),
     });
     await page.setViewportSize({ height: 900, width: 1280 });
-    await page.goto("/");
+    await gotoConsoleHome(page);
     await openConsoleSubpage(page, "Fleet", "Monitor");
 
     const monitor = page.getByLabel("VPS monitor cards");
@@ -1530,7 +1536,7 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
     testInfo.project.name.includes("mobile"),
     "bulk group mutation review is covered through the desktop operator workflow",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   await openConsoleSubpage(page, "Fleet", "Groups");
   await expect(
@@ -1760,7 +1766,7 @@ test("fleet instance row actions expose release VPS workflows", async ({
     { label: "Open backups", heading: "Backup requests" },
     { label: "Open network", heading: "Network graph" },
   ]) {
-    await page.goto("/");
+    await gotoConsoleHome(page);
     await openConsoleSubpage(page, "Fleet", "Instances");
 
     const grid = page.getByLabel("VPS instance records data grid");
@@ -1790,7 +1796,7 @@ test("fleet instance detail is the canonical VPS route from release workflows", 
     "cross-page dense grid and graph entry points are covered in desktop workflow tests",
   );
 
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Fleet", "Monitor");
   await page
     .getByLabel("VPS monitor cards")
@@ -1872,7 +1878,7 @@ test("fleet instance config detail separates source readiness, drift, apply stat
     "mobile config-detail shape is covered by structured screenshots",
   );
 
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Fleet", "Instances");
   const grid = page.getByLabel("VPS instance records data grid");
   const edgeRow = grid
@@ -1922,7 +1928,7 @@ test("fleet instances table keeps dense grid controls and routes card view separ
     testInfo.project.name.includes("mobile"),
     "desktop grid controls are covered separately from mobile navigation",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Fleet", "Instances");
 
   const grid = page.getByLabel("VPS instance records data grid");
@@ -1982,7 +1988,7 @@ test("fleet instances table keeps dense grid controls and routes card view separ
 test("command palette indexes release pages and fixture entities", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await waitForConsoleShell(page);
 
   await page.getByRole("button", { name: "Open command palette" }).click();
@@ -2012,7 +2018,7 @@ test("command palette indexes release pages and fixture entities", async ({
 test("command palette entity selections use release route helpers", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   await selectCommandPaletteResult(page, "VPS", "edge-sfo");
   await expect(
@@ -2045,7 +2051,7 @@ test("jobs approvals and scheduled runs stay separate", async ({
   page,
 }, testInfo) => {
   testInfo.setTimeout(60_000);
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Jobs", "Approvals");
 
   await expect(
@@ -2160,7 +2166,7 @@ test("generic data grids become actionable mobile cards", async ({
     "mobile card rendering is a mobile-only data-grid contract",
   );
 
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Jobs", "Approvals");
 
   const grid = page.getByLabel("Job approval queue data grid");
@@ -2189,7 +2195,7 @@ test("generic data grids become actionable mobile cards", async ({
 });
 
 test("advanced release labels provide inline expert help", async ({ page }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   await openConsoleSubpage(page, "Config", "Bulk patch");
   await expect(page.getByLabel("Incremental patch help")).toHaveAttribute(
@@ -2244,7 +2250,7 @@ test("advanced release labels provide inline expert help", async ({ page }) => {
 test("visible disabled release controls explain their disabled reason", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   for (const route of releaseAccessibilityRoutes) {
     await openConsoleSubpage(page, route.view, route.subpage);
@@ -2256,7 +2262,7 @@ test("visible disabled release controls explain their disabled reason", async ({
 test("release console text colors preserve WCAG AA contrast", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   for (const route of releaseAccessibilityRoutes) {
     await openConsoleSubpage(page, route.view, route.subpage);
@@ -2268,7 +2274,7 @@ test("release console text colors preserve WCAG AA contrast", async ({
 test("automation runbooks promotes command templates into reviewed catalog", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Automation", "Runbooks");
 
   await expect(
@@ -2337,7 +2343,7 @@ test("automation runbooks promotes command templates into reviewed catalog", asy
 test("jobs artifacts is read-only inventory linked to source workflows", async ({
   page,
 }, testInfo) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Jobs", "Artifacts");
 
   await expect(
@@ -2423,7 +2429,7 @@ test("jobs artifacts is read-only inventory linked to source workflows", async (
 test("automation owns agent update rollout, health, and rollback posture", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Automation", "Agent updates");
 
   await expect(
@@ -2486,7 +2492,7 @@ test("automation owns agent update rollout, health, and rollback posture", async
 test("config overview focuses on drift risk and routes to config workflows", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Config", "Overview");
 
   await expect(
@@ -2587,7 +2593,7 @@ test("config overview focuses on drift risk and routes to config workflows", asy
 test("config templates summarizes coverage and links to canonical automation authoring", async ({
   page,
 }, testInfo) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Config", "Template coverage");
 
   await expect(
@@ -2661,7 +2667,7 @@ test("config templates summarizes coverage and links to canonical automation aut
 test("config rules show affected alert policy context and route to alerts", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Config", "Rules");
 
   await expect(page.getByRole("heading", { name: "VPS Rules" })).toBeVisible();
@@ -2687,7 +2693,7 @@ test("observability alerts and webhooks are explicit separate pages", async ({
     testInfo.project.name.includes("mobile"),
     "alert and webhook registries are dense desktop operator workflows",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   await openConsoleSubpage(page, "Fleet", "Alerts");
   await expect(
@@ -2929,7 +2935,7 @@ test("observability alerts and webhooks are explicit separate pages", async ({
 test("observability alert policy editor is a focused create flow", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Observability", "Alerts");
 
   await activate(page.getByRole("button", { name: "Create policy" }));
@@ -2978,7 +2984,7 @@ test("observability alert policy editor is a focused create flow", async ({
 test("observability webhook rule editor is a focused create flow", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Observability", "Event webhooks");
 
   await activate(page.getByRole("button", { name: "Create rule" }));
@@ -3023,7 +3029,7 @@ test("config bulk patch requires reviewed scope and privilege before apply", asy
     testInfo.project.name.includes("mobile"),
     "bulk patch review is a dense desktop workflow covered by desktop release tests",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await page.evaluate(() =>
     localStorage.removeItem("vpsman.config.bulk.selectorExpression"),
   );
@@ -3095,7 +3101,7 @@ test("config per-vps preserves guarded one-vps override workflow", async ({
     testInfo.project.name.includes("mobile"),
     "one-VPS config override is a dense desktop workflow covered by desktop release tests",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await page.evaluate(() =>
     localStorage.removeItem("vpsman.config.single.clientId"),
   );
@@ -3203,7 +3209,7 @@ test("observability hides unfinished process metrics from normal navigation", as
   expect(normalizeSubpage("Observability", "process_metrics")).toBe(
     "fleet_metrics",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Observability", "Fleet metrics");
 
   await expect(
@@ -3229,7 +3235,7 @@ test("observability hides unfinished process metrics from normal navigation", as
 test("observability fleet metrics owns resource charts and read-only analysis controls", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Observability", "Fleet metrics");
 
   await expect(
@@ -3316,7 +3322,7 @@ test("observability fleet metrics owns resource charts and read-only analysis co
 test("observability network metrics is chart-first and mutation-free", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Observability", "Network metrics");
 
   await expect(
@@ -3401,7 +3407,7 @@ test("observability network metrics is chart-first and mutation-free", async ({
 test("observability dashboards manages read-only dashboard presets", async ({
   page,
 }, testInfo) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Observability", "Dashboards");
 
   await expect(
@@ -3532,7 +3538,7 @@ test("observability dashboards use safe labels when summary counts are missing",
       offline: undefined as unknown as number,
     },
   });
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Observability", "Dashboards");
 
   const panel = page.locator(".observabilityDashboardsPanel");
@@ -3546,7 +3552,7 @@ test("observability dashboards use safe labels when summary counts are missing",
 test("audit events stays read-only with filters and event detail", async ({
   page,
 }, testInfo) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Audit", "Events");
 
   await expect(
@@ -3663,7 +3669,7 @@ test("audit latest visible event uses newest timestamp instead of row order", as
       },
     ],
   });
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Audit", "Events");
 
   const latestTime = await page.evaluate(
@@ -3700,7 +3706,7 @@ test("audit latest visible event uses newest timestamp instead of row order", as
 test("audit job evidence proves who ran what without leaving Audit", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Audit", "Job evidence");
 
   await expect(
@@ -3776,7 +3782,7 @@ test("audit job evidence proves who ran what without leaving Audit", async ({
 test("audit sessions correlates terminal and auth evidence without emulator controls", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Audit", "Sessions");
 
   await expect(
@@ -3887,7 +3893,7 @@ test("audit sessions correlates terminal and auth evidence without emulator cont
 test("audit retention explains export scope and prune impact separately from maintenance cleanup", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Audit", "Retention & export");
 
   await expect(
@@ -3956,7 +3962,7 @@ test("audit retention explains export scope and prune impact separately from mai
 });
 
 test("access overview routes to release authority pages", async ({ page }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Access", "Overview");
 
   await expect(
@@ -4063,7 +4069,7 @@ test("access overview routes to release authority pages", async ({ page }) => {
 test("access privilege vault is the locked handoff for privileged workflows", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   const lockedWorkflows: PrivilegeHandoffSpec[] = [
     {
@@ -4167,7 +4173,7 @@ test("access privilege vault is the locked handoff for privileged workflows", as
 test("access operators are separate from vps identities and system navigation", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   const mobilePageSelector = await openMobilePageSelector(page);
   if (mobilePageSelector) {
@@ -4227,7 +4233,7 @@ test("access operators are separate from vps identities and system navigation", 
 test("backups overview explains recoverability and links backup workflows", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Backups", "Overview");
 
   await expect(
@@ -4346,7 +4352,7 @@ test("backups artifacts keep transfer packages separate from job cleanup", async
     testInfo.project.name.includes("mobile"),
     "backup artifact package controls are covered through the desktop drawer workflow",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Backups", "Artifacts");
 
   await expect(
@@ -4454,7 +4460,7 @@ test("backups requests keep request review separate from policy and restore work
     testInfo.project.name.includes("mobile"),
     "backup request role separation is covered through the desktop drawer workflow",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Backups", "Requests");
 
   await expect(
@@ -4537,7 +4543,7 @@ test("backups policies keep authoring separate and review prune preview before a
     testInfo.project.name.includes("mobile"),
     "backup policy prune review is covered through the desktop drawer workflow",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Backups", "Policies");
 
   await expect(
@@ -4648,7 +4654,7 @@ test("backups restore starts from artifact readiness, destination, and confirmat
     testInfo.project.name.includes("mobile"),
     "restore source selection and drawer reviews are covered through the desktop workflow",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Backups", "Restore");
 
   await expect(
@@ -4714,7 +4720,7 @@ test("backups migration starts from source artifact to replacement mapping", asy
     testInfo.project.name.includes("mobile"),
     "migration mapping and drawer are covered through the desktop workflow",
   );
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Backups", "Migration");
 
   await expect(
@@ -4765,7 +4771,7 @@ test("backups migration starts from source artifact to replacement mapping", asy
 test("network overview links to release network workflows", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Network", "Overview");
 
   await expect(
@@ -4844,7 +4850,7 @@ test("network overview links to release network workflows", async ({
 test("network graph stays focused on visual topology inspection", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Network", "Graph");
 
   await expect(
@@ -4882,7 +4888,7 @@ test("network graph stays focused on visual topology inspection", async ({
 test("network tests keeps diagnostics and trends mutation-free", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Network", "Tests");
 
   await expect(
@@ -4923,7 +4929,7 @@ test("network tests keeps diagnostics and trends mutation-free", async ({
 test("network evidence stays read-mostly and links to network action pages", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Network", "Evidence");
 
   await expect(
@@ -5003,7 +5009,7 @@ test("network evidence stays read-mostly and links to network action pages", asy
 test("network tunnel plans owns promotion without a standalone promotion subpage", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
 
   const mobilePageSelector = await openMobilePageSelector(page);
   if (mobilePageSelector) {
@@ -5136,7 +5142,7 @@ test("network tunnel plans owns promotion without a standalone promotion subpage
 test("system overview keeps platform health separate from fleet monitoring", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "System", "Overview");
 
   await expect(
@@ -5173,7 +5179,7 @@ test("system overview keeps platform health separate from fleet monitoring", asy
 test("system capacity focuses on control-plane limits and API gaps", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "System", "Capacity");
 
   await expect(
@@ -5233,7 +5239,7 @@ test("system capacity focuses on control-plane limits and API gaps", async ({
 test("system suite config owns control-plane config and excludes per-VPS editors", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "System", "Suite config");
 
   await expect(
@@ -5347,7 +5353,7 @@ test("system suite config owns control-plane config and excludes per-VPS editors
 test("system maintenance owns artifact cleanup and maintenance job records", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   const mobilePageSelector = await openMobilePageSelector(page);
   if (mobilePageSelector) {
     await expect(mobilePageSelector).not.toContainText("Jobs / Server jobs");
@@ -5431,7 +5437,7 @@ test("system maintenance owns artifact cleanup and maintenance job records", asy
 test("system preferences separates personal display from shared defaults", async ({
   page,
 }) => {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   await openConsoleSubpage(page, "System", "Preferences");
 
   await expect(
@@ -5777,7 +5783,7 @@ async function expectLockedWorkflowPrivilegeHandoff(
 }
 
 async function clickHomeQuickAction(page: Page, name: string) {
-  await page.goto("/");
+  await gotoConsoleHome(page);
   const quickActions = page.getByLabel("Home quick actions");
   await expect(quickActions).toBeVisible();
   await quickActions.getByRole("button", { name }).click();

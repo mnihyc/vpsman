@@ -283,10 +283,11 @@ cat >"$runtime_patch" <<PATCH
 proc_root = "$runtime_proc_root"
 PATCH
 
-VPSMAN_AGENT_CONFIG="$agent_config" \
-RUST_LOG="vpsman_agent=warn" \
-  target/debug/vpsman-agent run >"$agent_log" 2>&1 &
-smoke_track_pid "$!"
+smoke_start_local_agent \
+  "$agent_config" \
+  "$agent_log" \
+  "$SMOKE_TMPDIR/agent-work" \
+  "vpsman_agent=warn"
 wait_agent_online
 
 reject_body="$(jq -nc \

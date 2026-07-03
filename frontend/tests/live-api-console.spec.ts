@@ -23,7 +23,9 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
 }) => {
   await page.goto("/");
   if (
-    await page.getByRole("heading", { name: "Operator access" }).isVisible()
+    await page
+      .getByRole("heading", { exact: true, name: "Operator access" })
+      .isVisible()
   ) {
     await page
       .getByLabel("Username")
@@ -31,7 +33,11 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
     await page
       .getByLabel("Password")
       .fill(process.env.VPSMAN_LIVE_API_PASSWORD ?? "frontend-live-password");
+    await page
+      .getByLabel("Session vault key")
+      .fill(process.env.VPSMAN_LIVE_API_SESSION_KEY ?? "frontend-live-session-key");
     await page.getByRole("button", { name: "Submit login" }).click();
+    await expect(page.locator(".shell")).toBeVisible({ timeout: 10_000 });
   }
 
   await openConsoleSubpage(page, "Fleet", "Instances");
@@ -40,7 +46,7 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
   ).toBeVisible();
   await expect(page.getByRole("row", { name: /edge-live-a/ })).toBeVisible();
   await expect(
-    page.locator(".consoleHeader").getByText("2 online / 2 total"),
+    page.locator(".consoleHeader").getByText("2 live / 2 total"),
   ).toBeVisible();
 
   await openConsoleSubpage(page, "Network", "Tunnel plans");
@@ -85,17 +91,23 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
   await composer.getByLabel("Latency ms").fill("18");
   await composer.getByLabel("Preference").fill("1.2");
   await composer.getByRole("button", { name: "Save plan" }).click();
+  const savePrompt = page.locator(".confirmationPrompt", {
+    hasText: "Confirm tunnel plan save",
+  });
+  await expect(savePrompt).toBeVisible();
+  await savePrompt.getByRole("button", { name: "Save plan", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Close create tunnel plan workflow" })
+    .click();
 
   const planRow = page.getByRole("row", { name: /live-gre-a-b/ });
   await expect(planRow).toBeVisible();
   await expect(
     planRow.getByText("live-gre-a-b", { exact: true }),
   ).toBeVisible();
-  await expect(planRow.getByText("GRE", { exact: true })).toBeVisible();
-  await expect(
-    planRow.getByText("Agent iproute2", { exact: true }),
-  ).toBeVisible();
-  await expect(planRow.getByText("Planned", { exact: true })).toBeVisible();
+  await expect(planRow).toContainText(/GRE.*gre42/);
+  await expect(planRow).toContainText("Agent iproute2");
+  await expect(planRow).toContainText("Planned");
 
   await page.getByRole("button", { name: "Audit" }).click();
   await expect(
@@ -103,5 +115,5 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
       .locator(".consoleHeader")
       .getByRole("heading", { name: "Audit events" }),
   ).toBeVisible();
-  await expect(page.getByText("network.tunnel_plan_created")).toBeVisible();
+  await expect(page.getByText("Network Tunnel Plan Created")).toBeVisible();
 });

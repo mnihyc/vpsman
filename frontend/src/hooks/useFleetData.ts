@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { apiDelete, apiGet, apiPost, isApiUnauthorized } from "../api";
+import { apiDelete, apiGet, apiPost, apiPostPreview, isApiUnauthorized } from "../api";
 import { emptySummary } from "../constants";
 import type {
   AgentView,
@@ -148,30 +148,43 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         throw optionalFailure.reason;
       }
 
-      const valueAt = <T>(index: number, fallback: T): T => {
+      const applyOptionalValue = <T>(
+        index: number,
+        apply: (value: T) => void,
+      ) => {
         const result = optionalResults[index];
-        return result.status === "fulfilled" ? (result.value as T) : fallback;
+        if (result.status === "fulfilled") {
+          apply(result.value as T);
+        }
       };
 
       setSummary(nextSummary);
       setAgents(nextAgents);
-      setFleetAlerts(valueAt<FleetAlertRecord[]>(0, []));
-      setFleetAlertStates(valueAt<FleetAlertStateRecord[]>(1, []));
-      setFleetAlertPolicies(valueAt<FleetAlertPolicyRecord[]>(2, []));
-      setVpsRuleValues(valueAt<VpsRuleValueRecord[]>(3, []));
-      setTrafficAccounting(valueAt<TrafficAccountingRecord[]>(4, []));
-      setPolicyAlerts(valueAt<PolicyAlertRecord[]>(5, []));
-      setFleetAlertNotificationChannels(
-        valueAt<FleetAlertNotificationChannelRecord[]>(6, []),
+      applyOptionalValue<FleetAlertRecord[]>(0, setFleetAlerts);
+      applyOptionalValue<FleetAlertStateRecord[]>(1, setFleetAlertStates);
+      applyOptionalValue<FleetAlertPolicyRecord[]>(2, setFleetAlertPolicies);
+      applyOptionalValue<VpsRuleValueRecord[]>(3, setVpsRuleValues);
+      applyOptionalValue<TrafficAccountingRecord[]>(4, setTrafficAccounting);
+      applyOptionalValue<PolicyAlertRecord[]>(5, setPolicyAlerts);
+      applyOptionalValue<FleetAlertNotificationChannelRecord[]>(
+        6,
+        setFleetAlertNotificationChannels,
       );
-      setFleetAlertNotifications(
-        valueAt<FleetAlertNotificationDeliveryRecord[]>(7, []),
+      applyOptionalValue<FleetAlertNotificationDeliveryRecord[]>(
+        7,
+        setFleetAlertNotifications,
       );
-      setWebhookRules(valueAt<WebhookRuleRecord[]>(8, []));
-      setWebhookRuleDeliveries(valueAt<WebhookRuleDeliveryRecord[]>(9, []));
-      setTelemetryRollups(valueAt<TelemetryRollupRecord[]>(10, []));
-      setTelemetryNetworkRates(valueAt<TelemetryNetworkRateRecord[]>(11, []));
-      setTelemetryTunnels(valueAt<TelemetryTunnelRecord[]>(12, []));
+      applyOptionalValue<WebhookRuleRecord[]>(8, setWebhookRules);
+      applyOptionalValue<WebhookRuleDeliveryRecord[]>(
+        9,
+        setWebhookRuleDeliveries,
+      );
+      applyOptionalValue<TelemetryRollupRecord[]>(10, setTelemetryRollups);
+      applyOptionalValue<TelemetryNetworkRateRecord[]>(
+        11,
+        setTelemetryNetworkRates,
+      );
+      applyOptionalValue<TelemetryTunnelRecord[]>(12, setTelemetryTunnels);
       setApiError(
         optionalFailure?.status === "rejected"
           ? optionalFailure.reason instanceof Error
@@ -273,7 +286,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const dryRunFleetAlertPolicy = useCallback(
     async (request: PolicyDryRunRequest) =>
-      apiPost<PolicyDryRunResponse>(
+      apiPostPreview<PolicyDryRunResponse>(
         "/api/v1/fleet-alert-policies/dry-run",
         apiToken,
         request,
@@ -283,7 +296,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const dryRunVpsRules = useCallback(
     async (request: VpsRulesDryRunRequest) =>
-      apiPost<VpsRulesDryRunResponse>(
+      apiPostPreview<VpsRulesDryRunResponse>(
         "/api/v1/vps-rules/dry-run",
         apiToken,
         request,
@@ -293,7 +306,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const bulkUpsertVpsRules = useCallback(
     async (request: VpsRulesBulkUpsertRequest) => {
-      const preview = await apiPost<VpsRulesDryRunResponse>(
+      const preview = await (request.confirmed ? apiPost : apiPostPreview)<VpsRulesDryRunResponse>(
         "/api/v1/vps-rules/bulk-upsert",
         apiToken,
         request,
@@ -306,7 +319,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const bulkUnsetVpsRules = useCallback(
     async (request: VpsRulesBulkUnsetRequest) => {
-      const preview = await apiPost<VpsRulesDryRunResponse>(
+      const preview = await (request.confirmed ? apiPost : apiPostPreview)<VpsRulesDryRunResponse>(
         "/api/v1/vps-rules/bulk-unset",
         apiToken,
         request,
@@ -391,7 +404,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const dispatchFleetAlertNotifications = useCallback(
     async (request: FleetAlertNotificationDispatchRequest) => {
-      const deliveries = await apiPost<FleetAlertNotificationDeliveryRecord[]>(
+      const deliveries = await (request.dry_run ? apiPostPreview : apiPost)<FleetAlertNotificationDeliveryRecord[]>(
         "/api/v1/fleet-alert-notifications/dispatch",
         apiToken,
         request,
@@ -415,7 +428,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const processFleetAlertNotifications = useCallback(
     async (request: FleetAlertNotificationProcessRequest) => {
-      const deliveries = await apiPost<FleetAlertNotificationDeliveryRecord[]>(
+      const deliveries = await (request.dry_run ? apiPostPreview : apiPost)<FleetAlertNotificationDeliveryRecord[]>(
         "/api/v1/fleet-alert-notifications/process",
         apiToken,
         request,
@@ -480,7 +493,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const dryRunWebhookRule = useCallback(
     async (request: WebhookRuleDryRunRequest) =>
-      apiPost<WebhookRuleDryRunRecord>(
+      apiPostPreview<WebhookRuleDryRunRecord>(
         "/api/v1/webhook-rules/dry-run",
         apiToken,
         request,
@@ -490,7 +503,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const dispatchWebhookRules = useCallback(
     async (request: WebhookRuleDispatchRequest) => {
-      const deliveries = await apiPost<WebhookRuleDeliveryRecord[]>(
+      const deliveries = await (request.dry_run ? apiPostPreview : apiPost)<WebhookRuleDeliveryRecord[]>(
         "/api/v1/webhook-rules/dispatch",
         apiToken,
         request,
@@ -514,7 +527,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const processWebhookRuleDeliveries = useCallback(
     async (request: WebhookRuleProcessRequest) => {
-      const deliveries = await apiPost<WebhookRuleDeliveryRecord[]>(
+      const deliveries = await (request.dry_run ? apiPostPreview : apiPost)<WebhookRuleDeliveryRecord[]>(
         "/api/v1/webhook-deliveries/process",
         apiToken,
         request,
@@ -540,7 +553,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const rotateWebhookDeliveryHistory = useCallback(
     async (request: WebhookDeliveryRotationRequest) => {
-      const response = await apiPost<WebhookDeliveryRotationResponse>(
+      const response = await (request.confirmed ? apiPost : apiPostPreview)<WebhookDeliveryRotationResponse>(
         "/api/v1/webhook-deliveries/rotate",
         apiToken,
         request,

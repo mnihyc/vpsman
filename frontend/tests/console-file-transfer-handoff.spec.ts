@@ -104,6 +104,7 @@ test("starts the default upload flow in resumable dispatch", async ({ page }, te
   await expect(panel.getByText("quick-upload.bin · 20 B")).toBeVisible();
   await activate(panel.getByRole("button", { name: "Upload", exact: true }));
 
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
   await expect(page.getByRole("heading", { level: 1, name: "Command dispatch" })).toBeVisible();
   const composer = page.locator(".fleetPanel", { hasText: "Dispatch command" });
   await expect(composer.getByRole("button", { name: "Resumable upload", exact: true })).toHaveClass(/selected/);
@@ -148,6 +149,7 @@ test("opens failed transfer retry metadata in resumable dispatch", async ({ page
   });
   await activate(review.getByRole("button", { name: "Continue in Dispatch" }));
 
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
   await expect(page.getByRole("heading", { level: 1, name: "Command dispatch" })).toBeVisible();
   const composer = page.locator(".fleetPanel", { hasText: "Dispatch command" });
   await expect(composer.getByRole("button", { name: "Resumable download" })).toHaveClass(/selected/);

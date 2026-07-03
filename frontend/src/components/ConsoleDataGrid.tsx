@@ -45,6 +45,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronRight as ChevronRightIcon,
+  CheckSquare,
   Columns3,
   GripVertical,
   X,
@@ -105,6 +106,7 @@ export function ConsoleDataGrid<T>({
   mobileLayout = "cards",
   onExpandedRowChange,
   onOpenRow,
+  openRowOnClick = true,
   openRowLabel = "Open",
   openRowTitle,
   showMobileOpenRowAction = true,
@@ -132,6 +134,7 @@ export function ConsoleDataGrid<T>({
   mobileLayout?: "cards" | "table";
   onExpandedRowChange?: (row: T | null) => void;
   onOpenRow?: (row: T) => void;
+  openRowOnClick?: boolean;
   openRowLabel?: string;
   openRowTitle?: (row: T) => string;
   showMobileOpenRowAction?: boolean;
@@ -212,7 +215,11 @@ export function ConsoleDataGrid<T>({
                 <input
                   aria-label={`Select all ${title}`}
                   checked={table.getIsAllPageRowsSelected()}
-                  onChange={table.getToggleAllPageRowsSelectedHandler()}
+                  onChange={(event) => {
+                    table.getRowModel().rows.forEach((row) => {
+                      row.toggleSelected(event.currentTarget.checked);
+                    });
+                  }}
                   ref={(input) => {
                     if (input) {
                       input.indeterminate = table.getIsSomePageRowsSelected();
@@ -351,6 +358,13 @@ export function ConsoleDataGrid<T>({
   const showContextSelectionActions = false;
   const pageCount = table.getPageCount() || 1;
   const currentPage = table.getState().pagination.pageIndex + 1;
+  const currentPageRows = table.getRowModel().rows;
+  const selectedPageRowCount = currentPageRows.filter((row) =>
+    row.getIsSelected(),
+  ).length;
+  const allCurrentPageRowsSelected =
+    currentPageRows.length > 0 &&
+    selectedPageRowCount === currentPageRows.length;
 
   useEffect(() => {
     table.setPageSize(pageSize);
@@ -426,6 +440,21 @@ export function ConsoleDataGrid<T>({
       openExpandedRow(actionRows[0]);
     }
     action.onSelect(actionRows);
+  }
+
+  function setCurrentPageRowsSelected(selected: boolean) {
+    const pageRowIds = table.getRowModel().rows.map((row) => row.id);
+    setRowSelection((current) => {
+      const next = { ...current };
+      for (const rowId of pageRowIds) {
+        if (selected) {
+          next[rowId] = true;
+        } else {
+          delete next[rowId];
+        }
+      }
+      return next;
+    });
   }
 
   function actionDescription(action: ConsoleDataGridAction<T>, rows: T[]) {
@@ -644,6 +673,28 @@ export function ConsoleDataGrid<T>({
         />
         <div className="gridToolbarActions">
           {toolbarActions}
+          {selectable && currentPageRows.length > 0 && (
+            <button
+              aria-label={`${
+                allCurrentPageRowsSelected ? "Clear" : "Select"
+              } visible ${title}`}
+              className="secondaryAction compactAction"
+              onClick={() =>
+                setCurrentPageRowsSelected(!allCurrentPageRowsSelected)
+              }
+              title={
+                allCurrentPageRowsSelected
+                  ? `Clear the ${selectedPageRowCount} visible selected ${itemLabel}.`
+                  : `Select the ${currentPageRows.length} visible ${itemLabel} on this page.`
+              }
+              type="button"
+            >
+              <CheckSquare size={16} />
+              <span>
+                {allCurrentPageRowsSelected ? "Clear visible" : "Select visible"}
+              </span>
+            </button>
+          )}
           {selectable && visibleSelectionActions.length > 0 && (
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
@@ -841,7 +892,9 @@ export function ConsoleDataGrid<T>({
                           row.getIsSelected() ? "gridRow selected" : "gridRow"
                         }
                         onClick={() => {
-                          onOpenRow?.(row.original);
+                          if (openRowOnClick) {
+                            onOpenRow?.(row.original);
+                          }
                           if (expandOnRowClick) {
                             toggleExpandedRow(row.id, row.original);
                           }

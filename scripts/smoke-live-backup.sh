@@ -113,10 +113,11 @@ max_archive_bytes = 2097152
 EOF
 fi
 
-VPSMAN_AGENT_CONFIG="$agent_config" \
-RUST_LOG="vpsman_agent=warn" \
-  target/debug/vpsman-agent run >"$agent_log" 2>&1 &
-smoke_track_pid "$!"
+smoke_start_local_agent \
+  "$agent_config" \
+  "$agent_log" \
+  "$SMOKE_TMPDIR/agent-work" \
+  "vpsman_agent=warn"
 
 deadline=$((SECONDS + 30))
 status=""
@@ -146,7 +147,8 @@ reject_body="$(jq -nc \
     operation: {
       type: "backup",
       paths: [$path],
-      include_config: true
+      include_config: true,
+      follow_symlinks: false
     },
     selector_expression: ("id:" + $client),
     target_client_ids: [$client],

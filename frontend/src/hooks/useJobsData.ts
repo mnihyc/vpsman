@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { apiDelete, apiGet, apiGetBlob, apiPost, buildListPath, isApiUnauthorized } from "../api";
+import { apiDelete, apiGet, apiGetBlob, apiPost, apiPostPreview, buildListPath, isApiUnauthorized } from "../api";
 import { downloadVerifiedArtifact, type ArtifactDownloadMode } from "../artifactDownload";
 import type {
   AgentUpdateReleaseRecord,
@@ -577,7 +577,7 @@ export function useJobsData(
   const previewArtifactCleanup = useCallback(
     async (expression: string, domains: string[]) => {
       try {
-        return await apiPost<ArtifactCleanupPreviewRecord>("/api/v1/server-jobs/artifact-cleanup/preview", apiToken, {
+        return await apiPostPreview<ArtifactCleanupPreviewRecord>("/api/v1/server-jobs/artifact-cleanup/preview", apiToken, {
           expression,
           domains,
         });

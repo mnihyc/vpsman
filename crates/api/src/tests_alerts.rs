@@ -677,6 +677,234 @@ async fn fleet_alert_notifications_match_scope_and_dedupe_cooldown() {
 }
 
 #[tokio::test]
+async fn fleet_alert_notification_dispatch_review_tolerates_observation_timestamp_refresh() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.extend([
+            AgentView {
+                id: "edge-a".to_string(),
+                display_name: "Edge A".to_string(),
+                status: "online".to_string(),
+                tags: vec!["edge".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                arch: None,
+                internal_build_number: 1,
+                process_incarnation_id: None,
+                stale_since: None,
+                stale_reason: None,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+            AgentView {
+                id: "edge-b".to_string(),
+                display_name: "Edge B".to_string(),
+                status: "online".to_string(),
+                tags: vec!["edge".to_string()],
+                registration_ip: None,
+                last_ip: None,
+                last_seen_at: None,
+                arch: None,
+                internal_build_number: 1,
+                process_incarnation_id: None,
+                stale_since: None,
+                stale_reason: None,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        ]);
+        let mut edge_b_rollup = alert_test_rollup("edge-b", 2.7, 300, 800);
+        edge_b_rollup.latest_observed_at = "150".to_string();
+        edge_b_rollup.updated_at = "151".to_string();
+        memory
+            .telemetry_rollups
+            .write()
+            .await
+            .extend([alert_test_rollup("edge-a", 2.6, 300, 800), edge_b_rollup]);
+    }
+    repo.upsert_fleet_alert_notification_channel(
+        &CreateFleetAlertNotificationChannelRequest {
+            id: None,
+            name: "resource-webhook".to_string(),
+            scope_kind: "global".to_string(),
+            scope_value: None,
+            min_severity: Some("warning".to_string()),
+            categories: Some(vec!["resource".to_string()]),
+            operator_states: Some(vec!["open".to_string()]),
+            delivery_kind: "webhook".to_string(),
+            target: "http://127.0.0.1:9/resource-webhook".to_string(),
+            cooldown_secs: Some(60),
+            enabled: Some(true),
+            notes: None,
+            confirmed: true,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let state = alert_test_state(repo.clone());
+    let dry_run = state
+        .dispatch_fleet_alert_notifications(
+            &FleetAlertNotificationDispatchRequest {
+                limit: Some(20),
+                client_id: None,
+                severity: None,
+                category: Some("resource".to_string()),
+                operator_state: Some("open".to_string()),
+                include_muted: None,
+                dry_run: Some(true),
+                preview_hash: None,
+                confirmed: false,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(!dry_run.is_empty());
+    let preview_hash = dry_run[0].review_preview_hash.clone();
+    if let Repository::Memory(memory) = &repo {
+        let mut rollups = memory.telemetry_rollups.write().await;
+        rollups[0].cpu_load_1_avg = 9.0;
+        rollups[0].cpu_load_1_max = 9.0;
+        rollups[0].latest_observed_at = "180".to_string();
+        rollups[0].updated_at = "181".to_string();
+    }
+
+    let dispatched = state
+        .dispatch_fleet_alert_notifications(
+            &FleetAlertNotificationDispatchRequest {
+                limit: Some(20),
+                client_id: None,
+                severity: None,
+                category: Some("resource".to_string()),
+                operator_state: Some("open".to_string()),
+                include_muted: None,
+                dry_run: Some(false),
+                preview_hash,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(!dispatched.is_empty());
+    assert!(dispatched.iter().all(|row| row.status == "queued"));
+}
+
+#[tokio::test]
+async fn fleet_alert_notification_dispatch_review_rejects_target_set_change() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.push(AgentView {
+            id: "edge-a".to_string(),
+            display_name: "Edge A".to_string(),
+            status: "online".to_string(),
+            tags: vec!["edge".to_string()],
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: AgentCapabilitySnapshot::default(),
+        });
+        memory
+            .telemetry_rollups
+            .write()
+            .await
+            .push(alert_test_rollup("edge-a", 2.6, 300, 800));
+    }
+    repo.upsert_fleet_alert_notification_channel(
+        &CreateFleetAlertNotificationChannelRequest {
+            id: None,
+            name: "resource-webhook".to_string(),
+            scope_kind: "global".to_string(),
+            scope_value: None,
+            min_severity: Some("warning".to_string()),
+            categories: Some(vec!["resource".to_string()]),
+            operator_states: Some(vec!["open".to_string()]),
+            delivery_kind: "webhook".to_string(),
+            target: "http://127.0.0.1:9/resource-webhook".to_string(),
+            cooldown_secs: Some(60),
+            enabled: Some(true),
+            notes: None,
+            confirmed: true,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let state = alert_test_state(repo.clone());
+    let dry_run = state
+        .dispatch_fleet_alert_notifications(
+            &FleetAlertNotificationDispatchRequest {
+                limit: Some(20),
+                client_id: None,
+                severity: None,
+                category: Some("resource".to_string()),
+                operator_state: Some("open".to_string()),
+                include_muted: None,
+                dry_run: Some(true),
+                preview_hash: None,
+                confirmed: false,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let preview_hash = dry_run[0].review_preview_hash.clone();
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.push(AgentView {
+            id: "edge-b".to_string(),
+            display_name: "Edge B".to_string(),
+            status: "online".to_string(),
+            tags: vec!["edge".to_string()],
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: AgentCapabilitySnapshot::default(),
+        });
+        memory
+            .telemetry_rollups
+            .write()
+            .await
+            .push(alert_test_rollup("edge-b", 2.7, 300, 800));
+    }
+
+    let dispatch_result = state
+        .dispatch_fleet_alert_notifications(
+            &FleetAlertNotificationDispatchRequest {
+                limit: Some(20),
+                client_id: None,
+                severity: None,
+                category: Some("resource".to_string()),
+                operator_state: Some("open".to_string()),
+                include_muted: None,
+                dry_run: Some(false),
+                preview_hash,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await;
+    assert!(dispatch_result.is_err());
+    assert!(dispatch_result
+        .unwrap_err()
+        .to_string()
+        .contains("fleet_alert_notification_dispatch_preview_hash_mismatch"));
+}
+
+#[tokio::test]
 async fn disabled_alert_notification_channel_cancels_retryable_deliveries() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();

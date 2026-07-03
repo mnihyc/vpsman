@@ -18,8 +18,8 @@ environment.
 
 ## 2. Register the public identity
 
-Register the client id and public key from an operator shell or from Access > VPS
-keys in the panel:
+Register the client id and public key from an operator shell or from Access >
+VPS identities in the panel:
 
 ```sh
 cargo run -p vpsctl -- agent-identity-upsert \
@@ -41,7 +41,6 @@ Root service:
 curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \
   VPSMAN_INSTALL_MODE=root \
   VPSMAN_AGENT_CLIENT_ID=edge-nrt-04 \
-  VPSMAN_AGENT_DISPLAY_NAME=edge-nrt-04 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10,backup=gw-backup.example.com:9443=20' \
@@ -74,10 +73,26 @@ cargo run -p vpsctl -- gateway-sessions
 cargo run -p vpsctl -- key-lifecycle-report
 ```
 
-In the panel, open Fleet > Instances and Access > VPS keys. The VPS should have
-a direct identity record and a recent gateway session after first telemetry.
+In the panel, open Fleet > Instances and Access > VPS identities. The VPS should
+have a direct identity record and a recent gateway session after first
+telemetry.
 
-## 5. Rebuild or rotate safely
+## 5. Retire or delete safely
+
+For emergency access lockout, revoke the current client key:
+
+```sh
+cargo run -p vpsctl -- client-key-revoke --client-id edge-nrt-04 --confirmed
+```
+
+For inventory retirement, use Fleet > Instances, select exactly one VPS, then
+run the `Review VPS deletion` row action. Deletion requires local privilege
+unlock and confirmation, hides the VPS from normal fleet views, disconnects any
+active gateway session, disables tunnel plans for that endpoint, and marks
+pending or active work for that VPS as skipped or lost. A deleted client id is
+not reused; rebuild with a new id unless you are only rotating the current key.
+
+## 6. Rebuild or rotate safely
 
 For a planned rebuild that keeps the same client id, generate a new agent keypair
 and run:

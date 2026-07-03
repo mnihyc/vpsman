@@ -666,8 +666,8 @@ fn push_alert(alerts: &mut Vec<FleetAlertView>, input: AlertInput<'_>) {
         "category": input.category,
         "target_kind": input.target_kind,
         "target_id": input.target_id,
+        "title": input.title,
         "status": input.status,
-        "evidence": input.evidence,
     });
     let hash = payload_hash(fingerprint.to_string().as_bytes());
     alerts.push(FleetAlertView {

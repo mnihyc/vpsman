@@ -48,12 +48,92 @@ export function buildListPath(path: string, query: ListQueryParams): string {
   return suffix ? `${path}?${suffix}` : path;
 }
 
+const GET_RETRY_DELAYS_MS = [150, 500, 1_000];
+const PREVIEW_POST_RETRY_DELAYS_MS = [
+  150,
+  500,
+  1_000,
+  2_000,
+  4_000,
+  8_000,
+  13_000,
+];
+
+async function fetchGetWithTransientRetry(
+  path: string,
+  apiToken: string,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fetch(path, { headers: buildAuthHeaders(apiToken) });
+    } catch (error) {
+      const delay = GET_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || !isTransientFetchFailure(error)) {
+        throw error;
+      }
+      await wait(delay);
+    }
+  }
+}
+
+async function fetchPreviewPostWithTransientRetry(
+  path: string,
+  apiToken: string,
+  body: unknown,
+): Promise<Response> {
+  const serializedBody = JSON.stringify(body);
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fetch(path, {
+        method: "POST",
+        headers: buildJsonHeaders(apiToken),
+        body: serializedBody,
+      });
+    } catch (error) {
+      const delay = PREVIEW_POST_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || !isTransientFetchFailure(error)) {
+        throw error;
+      }
+      await wait(delay);
+    }
+  }
+}
+
+function isTransientFetchFailure(error: unknown): boolean {
+  if (!(error instanceof TypeError)) {
+    return false;
+  }
+  return /fetch|network|load|failed/i.test(error.message);
+}
+
+function wait(delayMs: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, delayMs));
+}
+
 export async function apiPost<T = JsonValue>(path: string, apiToken: string, body: unknown): Promise<T> {
   const response = await fetch(path, {
     method: "POST",
     headers: buildJsonHeaders(apiToken),
     body: JSON.stringify(body),
   });
+  if (response.status === 401) {
+    throw new ApiUnauthorizedError();
+  }
+  if (!response.ok) {
+    throw await apiErrorFromResponse(response);
+  }
+  if (response.status === 204) {
+    return undefined as T;
+  }
+  return (await response.json()) as T;
+}
+
+export async function apiPostPreview<T = JsonValue>(
+  path: string,
+  apiToken: string,
+  body: unknown,
+): Promise<T> {
+  const response = await fetchPreviewPostWithTransientRetry(path, apiToken, body);
   if (response.status === 401) {
     throw new ApiUnauthorizedError();
   }
@@ -106,7 +186,7 @@ export async function apiPostBinary<T = JsonValue>(
 }
 
 export async function apiGet<T = JsonValue>(path: string, apiToken: string): Promise<T> {
-  const response = await fetch(path, { headers: buildAuthHeaders(apiToken) });
+  const response = await fetchGetWithTransientRetry(path, apiToken);
   if (response.status === 401) {
     throw new ApiUnauthorizedError();
   }
@@ -117,7 +197,7 @@ export async function apiGet<T = JsonValue>(path: string, apiToken: string): Pro
 }
 
 export async function apiGetBlob(path: string, apiToken: string): Promise<Blob> {
-  const response = await fetch(path, { headers: buildAuthHeaders(apiToken) });
+  const response = await fetchGetWithTransientRetry(path, apiToken);
   if (response.status === 401) {
     throw new ApiUnauthorizedError();
   }

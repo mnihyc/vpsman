@@ -102,7 +102,10 @@ for image in "${images[@]}"; do
       grep -q "^WorkingDirectory=$root_work_dir$" "$systemd_unit"
       grep -q "^ExecStart=$root_work_dir/bin/vpsman-agent --config $root_work_dir/config/agent.toml run$" \
         "$systemd_unit"
+      grep -q "^Environment=VPSMAN_AGENT_STATE_DIR=$root_work_dir/state$" "$systemd_unit"
       grep -q "start-stop-daemon --start" "$sysv_script"
+      grep -q "^WORKDIR=\"$root_work_dir\"$" "$sysv_script"
+      grep -q "^export VPSMAN_AGENT_STATE_DIR=\"$root_work_dir/state\"$" "$sysv_script"
       "$agent_path" \
         --config "$config_path" \
         once >"$VPSMAN_INSTALL_ROOT/metrics.json"

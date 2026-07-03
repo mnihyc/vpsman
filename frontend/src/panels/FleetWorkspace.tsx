@@ -231,7 +231,7 @@ const selectionStatsModes: Array<{
   { id: "telemetry", label: "Telemetry" },
   { id: "network", label: "Network" },
   { id: "overview", label: "Overview" },
-  { id: "capabilities", label: "Config" },
+  { id: "capabilities", label: "Capabilities" },
 ];
 
 const JOB_SELECTOR_STORAGE_KEY = "vpsman.jobDispatch.selectorExpression";
@@ -439,6 +439,12 @@ export function FleetWorkspace({
     }
     return map;
   }, [policyAlerts]);
+  const latestRollupsRef = useRef(latestRollups);
+  const trafficByClientRef = useRef(trafficByClient);
+  const policyAlertsByClientRef = useRef(policyAlertsByClient);
+  latestRollupsRef.current = latestRollups;
+  trafficByClientRef.current = trafficByClient;
+  policyAlertsByClientRef.current = policyAlertsByClient;
   const tagDisplayOrder = useMemo(() => buildTagDisplayOrder(tags), [tags]);
   const fleetSubpageBase = activeSubpage.split(":")[0];
   const policyFilterClientId = activeSubpage.startsWith("policies:id:")
@@ -459,6 +465,7 @@ export function FleetWorkspace({
     setDeleteSnapshot(null);
     setDeleteReviewPending(false);
   }, [invalidateReviewGeneration]);
+  const ignoreRequestedFleetDetailTab = useCallback(() => {}, []);
 
   useEffect(() => {
     deleteSnapshotRef.current = deleteSnapshot;
@@ -610,10 +617,11 @@ export function FleetWorkspace({
         size: 210,
         minSize: 160,
         sortValue: (agent) =>
-          trafficByClient.get(agent.id)?.latest_total_bytes ?? -1,
+          trafficByClientRef.current.get(agent.id)?.latest_total_bytes ?? -1,
         searchValue: (agent) =>
-          trafficNowSummary(trafficByClient.get(agent.id)),
-        cell: (agent) => trafficNowSummary(trafficByClient.get(agent.id)),
+          trafficNowSummary(trafficByClientRef.current.get(agent.id)),
+        cell: (agent) =>
+          trafficNowSummary(trafficByClientRef.current.get(agent.id)),
       },
       {
         id: "cycle_usage",
@@ -621,10 +629,11 @@ export function FleetWorkspace({
         size: 210,
         minSize: 160,
         sortValue: (agent) =>
-          trafficByClient.get(agent.id)?.cycle_percent ?? -1,
+          trafficByClientRef.current.get(agent.id)?.cycle_percent ?? -1,
         searchValue: (agent) =>
-          cycleUsageSummary(trafficByClient.get(agent.id)),
-        cell: (agent) => cycleUsageSummary(trafficByClient.get(agent.id)),
+          cycleUsageSummary(trafficByClientRef.current.get(agent.id)),
+        cell: (agent) =>
+          cycleUsageSummary(trafficByClientRef.current.get(agent.id)),
       },
       {
         id: "traffic_state",
@@ -633,18 +642,18 @@ export function FleetWorkspace({
         minSize: 110,
         sortValue: (agent) =>
           trafficStateForClient(
-            trafficByClient.get(agent.id),
-            policyAlertsByClient.get(agent.id),
+            trafficByClientRef.current.get(agent.id),
+            policyAlertsByClientRef.current.get(agent.id),
           ),
         searchValue: (agent) =>
           trafficStateForClient(
-            trafficByClient.get(agent.id),
-            policyAlertsByClient.get(agent.id),
+            trafficByClientRef.current.get(agent.id),
+            policyAlertsByClientRef.current.get(agent.id),
           ),
         cell: (agent) => {
           const state = trafficStateForClient(
-            trafficByClient.get(agent.id),
-            policyAlertsByClient.get(agent.id),
+            trafficByClientRef.current.get(agent.id),
+            policyAlertsByClientRef.current.get(agent.id),
           );
           return (
             <ConsoleStatusBadge tone={trafficStateTone(state)}>
@@ -658,27 +667,32 @@ export function FleetWorkspace({
         header: "Quota",
         size: 170,
         minSize: 130,
-        searchValue: (agent) => quotaSummary(trafficByClient.get(agent.id)),
-        cell: (agent) => quotaSummary(trafficByClient.get(agent.id)),
+        searchValue: (agent) =>
+          quotaSummary(trafficByClientRef.current.get(agent.id)),
+        cell: (agent) => quotaSummary(trafficByClientRef.current.get(agent.id)),
       },
       {
         id: "reset_day",
         header: "Reset Day",
         size: 125,
         minSize: 105,
-        sortValue: (agent) => trafficByClient.get(agent.id)?.reset_day ?? 0,
-        searchValue: (agent) => resetDaySummary(trafficByClient.get(agent.id)),
-        cell: (agent) => resetDaySummary(trafficByClient.get(agent.id)),
+        sortValue: (agent) =>
+          trafficByClientRef.current.get(agent.id)?.reset_day ?? 0,
+        searchValue: (agent) =>
+          resetDaySummary(trafficByClientRef.current.get(agent.id)),
+        cell: (agent) =>
+          resetDaySummary(trafficByClientRef.current.get(agent.id)),
       },
       {
         id: "selectors",
         header: "Selectors",
         size: 230,
         minSize: 160,
-        searchValue: (agent) => selectorSummary(trafficByClient.get(agent.id)),
+        searchValue: (agent) =>
+          selectorSummary(trafficByClientRef.current.get(agent.id)),
         cell: (agent) => (
           <span className="monoValue">
-            {selectorSummary(trafficByClient.get(agent.id))}
+            {selectorSummary(trafficByClientRef.current.get(agent.id))}
           </span>
         ),
       },
@@ -724,11 +738,11 @@ export function FleetWorkspace({
         size: 78,
         minSize: 68,
         sortValue: (agent) =>
-          latestRollups.get(agent.id)?.cpu_load_1_avg ?? -1,
+          latestRollupsRef.current.get(agent.id)?.cpu_load_1_avg ?? -1,
         searchValue: (agent) =>
-          formatLoad(latestRollups.get(agent.id)?.cpu_load_1_avg),
+          formatLoad(latestRollupsRef.current.get(agent.id)?.cpu_load_1_avg),
         cell: (agent) => {
-          const rollup = latestRollups.get(agent.id);
+          const rollup = latestRollupsRef.current.get(agent.id);
           return (
             <span className="historyPrimary">
               <strong>{formatLoadCompact(rollup?.cpu_load_1_avg)}</strong>
@@ -742,10 +756,12 @@ export function FleetWorkspace({
         header: "Memory",
         size: 88,
         minSize: 76,
-        sortValue: (agent) => memoryUsedRatio(latestRollups.get(agent.id)) ?? -1,
-        searchValue: (agent) => formatMemoryUsed(latestRollups.get(agent.id)),
+        sortValue: (agent) =>
+          memoryUsedRatio(latestRollupsRef.current.get(agent.id)) ?? -1,
+        searchValue: (agent) =>
+          formatMemoryUsed(latestRollupsRef.current.get(agent.id)),
         cell: (agent) => {
-          const rollup = latestRollups.get(agent.id);
+          const rollup = latestRollupsRef.current.get(agent.id);
           return (
             <span className="historyPrimary">
               <strong>{formatMemoryUsedCompact(rollup)}</strong>
@@ -759,10 +775,12 @@ export function FleetWorkspace({
         header: "Disk",
         size: 88,
         minSize: 76,
-        sortValue: (agent) => diskFreeRatio(latestRollups.get(agent.id)) ?? -1,
-        searchValue: (agent) => formatDiskFree(latestRollups.get(agent.id)),
+        sortValue: (agent) =>
+          diskFreeRatio(latestRollupsRef.current.get(agent.id)) ?? -1,
+        searchValue: (agent) =>
+          formatDiskFree(latestRollupsRef.current.get(agent.id)),
         cell: (agent) => {
-          const rollup = latestRollups.get(agent.id);
+          const rollup = latestRollupsRef.current.get(agent.id);
           return (
             <span className="historyPrimary">
               <strong>{formatDiskFreeCompact(rollup)}</strong>
@@ -776,11 +794,16 @@ export function FleetWorkspace({
         header: "Alerts",
         size: 82,
         minSize: 72,
-        sortValue: (agent) => policyAlertsByClient.get(agent.id)?.length ?? 0,
+        sortValue: (agent) =>
+          policyAlertsByClientRef.current.get(agent.id)?.length ?? 0,
         searchValue: (agent) =>
-          activePolicyAlertSummary(policyAlertsByClient.get(agent.id)),
+          activePolicyAlertSummary(
+            policyAlertsByClientRef.current.get(agent.id),
+          ),
         cell: (agent) =>
-          activePolicyAlertSummary(policyAlertsByClient.get(agent.id)),
+          activePolicyAlertSummary(
+            policyAlertsByClientRef.current.get(agent.id),
+          ),
       },
       {
         id: "open_instance",
@@ -804,12 +827,9 @@ export function FleetWorkspace({
       },
     ],
     [
-      latestRollups,
       preferences.fleet_tag_visibility_overrides,
       preferences.show_country_flags,
-      policyAlertsByClient,
       tagDisplayOrder,
-      trafficByClient,
       vpsNameDisplayMode,
     ],
   );
@@ -1094,8 +1114,11 @@ export function FleetWorkspace({
           onOpenRow={(agent) =>
             openSingleReleaseWorkflow([agent], "Fleet", "instance_detail")
           }
+          openRowOnClick={false}
           openRowLabel="Open VPS"
-          openRowTitle={(agent) => `Open VPS detail for ${formatVpsName(agent, vpsNameDisplayMode)}.`}
+          openRowTitle={(agent) =>
+            `Open VPS detail for ${formatVpsName(agent, vpsNameDisplayMode)}.`
+          }
           onSelectionChange={handleFleetSelectionChange}
           renderSelectionPanel={(rows) => (
             <FleetSelectionPanel
@@ -1116,8 +1139,46 @@ export function FleetWorkspace({
               vpsNameDisplayMode={vpsNameDisplayMode}
             />
           )}
+          renderExpandedRow={(agent) => (
+            <FleetInstanceDetail
+              agent={agent}
+              lastLiveEvent={lastLiveEvent}
+              latestNetworkRates={latestNetworkRates.get(agent.id) ?? []}
+              latestRollup={latestRollups.get(agent.id) ?? null}
+              latestTunnels={latestTunnels.get(agent.id) ?? []}
+              mutateTagsForAgents={mutateTagsForAgents}
+              onCreateJob={onCreateJob}
+              onLoadJobOutputs={onLoadJobOutputs}
+              onLoadJobTargets={onLoadJobTargets}
+              onNavigatePanel={onNavigatePanel}
+              onOpenJobDetails={onOpenJobDetails}
+              onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
+              onRenderTemplateRuntimeConfig={onRenderTemplateRuntimeConfig}
+              onRequestedTabConsumed={ignoreRequestedFleetDetailTab}
+              onUpdateAgentAlias={onUpdateAgentAlias}
+              policies={fleetAlertPolicies}
+              policyAlerts={policyAlertsByClient.get(agent.id) ?? []}
+              privilegeMaterial={privilegeMaterial}
+              requestedTab={null}
+              showCountryFlags={preferences.show_country_flags}
+              sourceStatus={sourceStatus}
+              sourceTemplateAssignments={sourceTemplateAssignments}
+              summary={summary}
+              tagDisplayOrder={tagDisplayOrder}
+              tagVisibilityOverrides={
+                preferences.fleet_tag_visibility_overrides
+              }
+              telemetryNetworkRates={telemetryNetworkRates}
+              telemetryRollups={telemetryRollups}
+              trafficAccounting={trafficByClient.get(agent.id) ?? null}
+              vpsNameDisplayMode={vpsNameDisplayMode}
+              vpsRuleValues={vpsRulesByClient.get(agent.id) ?? []}
+              wsState={wsState}
+            />
+          )}
           scopeActive={scopeActive}
           summary={summary}
+          vpsNameDisplayMode={vpsNameDisplayMode}
           wsState={wsState}
         />
       )}
@@ -1196,12 +1257,15 @@ function FleetInstancesPanel({
   onConfirmDelete,
   onOpenMonitor,
   onOpenRow,
+  openRowOnClick,
   openRowLabel,
   openRowTitle,
   onSelectionChange,
+  renderExpandedRow,
   renderSelectionPanel,
   scopeActive,
   summary,
+  vpsNameDisplayMode,
   wsState,
 }: {
   actions: ConsoleDataGridAction<AgentView>[];
@@ -1215,14 +1279,28 @@ function FleetInstancesPanel({
   onConfirmDelete: () => void;
   onOpenMonitor?: () => void;
   onOpenRow: (agent: AgentView) => void;
+  openRowOnClick?: boolean;
   openRowLabel?: string;
   openRowTitle?: (agent: AgentView) => string;
   onSelectionChange: (rows: AgentView[]) => void;
+  renderExpandedRow: (row: AgentView) => ReactNode;
   renderSelectionPanel: (rows: AgentView[]) => ReactNode;
   scopeActive: boolean;
   summary: FleetSummary;
+  vpsNameDisplayMode: VpsNameDisplayMode;
   wsState: string;
 }) {
+  const stableAgents = useMemo(
+    () =>
+      [...agents].sort(
+        (left, right) =>
+          formatVpsName(left, vpsNameDisplayMode).localeCompare(
+            formatVpsName(right, vpsNameDisplayMode),
+          ) || left.id.localeCompare(right.id),
+      ),
+    [agents, vpsNameDisplayMode],
+  );
+
   return (
     <div className="fleetPanel fleetInstancesPanel">
       <div className="sectionHeader fleetInstancesHeader">
@@ -1270,11 +1348,13 @@ function FleetInstancesPanel({
         getRowId={(agent) => agent.id}
         itemLabel="instances"
         onOpenRow={onOpenRow}
+        openRowOnClick={openRowOnClick}
         openRowLabel={openRowLabel}
         openRowTitle={openRowTitle}
         onSelectionChange={onSelectionChange}
+        renderExpandedRow={renderExpandedRow}
         renderSelectionPanel={renderSelectionPanel}
-        rows={agents}
+        rows={stableAgents}
         storageKey="vpsman.grid.fleet.instances.v2"
         title="VPS instance records"
         toolbarActions={
@@ -2923,6 +3003,7 @@ function FleetSelectionPanel({
             className={selectionStatsMode === mode.id ? "selected" : ""}
             key={mode.id}
             onClick={() => setSelectionStatsMode(mode.id)}
+            role="tab"
             type="button"
           >
             {mode.label}
@@ -2959,6 +3040,7 @@ function FleetSelectionStatsTable({
   tagVisibilityOverrides: Record<string, boolean>;
   vpsNameDisplayMode: VpsNameDisplayMode;
 }) {
+  const modeLabel = selectionStatsModeLabel(mode);
   const rows = agents
     .slice()
     .sort((left, right) =>
@@ -2974,7 +3056,11 @@ function FleetSelectionStatsTable({
     );
   if (mode === "network")
     return (
-      <div className="fleetSelectionStatsTable networkMode">
+      <div
+        aria-label={`${modeLabel} for selected VPSs`}
+        className="fleetSelectionStatsTable networkMode"
+        role="tabpanel"
+      >
         <div className="fleetSelectionStatsRow heading">
           <span>VPS</span>
           <span>Total rate</span>
@@ -3006,7 +3092,11 @@ function FleetSelectionStatsTable({
     );
   if (mode === "overview")
     return (
-      <div className="fleetSelectionStatsTable overviewMode">
+      <div
+        aria-label={`${modeLabel} for selected VPSs`}
+        className="fleetSelectionStatsTable overviewMode"
+        role="tabpanel"
+      >
         <div className="fleetSelectionStatsRow heading">
           <span>VPS</span>
           <span>Status</span>
@@ -3040,7 +3130,11 @@ function FleetSelectionStatsTable({
     );
   if (mode === "capabilities")
     return (
-      <div className="fleetSelectionStatsTable capabilitiesMode">
+      <div
+        aria-label={`${modeLabel} for selected VPSs`}
+        className="fleetSelectionStatsTable capabilitiesMode"
+        role="tabpanel"
+      >
         <div className="fleetSelectionStatsRow heading">
           <span>VPS</span>
           <span>Privilege</span>
@@ -3068,7 +3162,11 @@ function FleetSelectionStatsTable({
       </div>
     );
   return (
-    <div className="fleetSelectionStatsTable telemetryMode">
+    <div
+      aria-label={`${modeLabel} for selected VPSs`}
+      className="fleetSelectionStatsTable telemetryMode"
+      role="tabpanel"
+    >
       <div className="fleetSelectionStatsRow heading">
         <span>VPS</span>
         <span>CPU</span>
@@ -3095,6 +3193,10 @@ function FleetSelectionStatsTable({
       })}
     </div>
   );
+}
+
+function selectionStatsModeLabel(mode: FleetSelectionStatsMode) {
+  return selectionStatsModes.find((item) => item.id === mode)?.label ?? mode;
 }
 
 function CountryBadge({
@@ -5403,10 +5505,11 @@ export function FleetAlertNotificationManager({
   }
 
   async function dispatch(dryRun: boolean, openConfirmation = false) {
-    setStatus(dryRun ? "matching alerts" : "queueing alert notifications");
-    if (!dryRun) {
-      setQueuePending(true);
+    if (queuePending) {
+      return;
     }
+    setStatus(dryRun ? "matching alerts" : "queueing alert notifications");
+    setQueuePending(true);
     try {
       const rows = await onDispatch({
         limit: 50,
@@ -5443,19 +5546,18 @@ export function FleetAlertNotificationManager({
         error instanceof Error ? error.message : "notification dispatch failed",
       );
     } finally {
-      if (!dryRun) {
-        setQueuePending(false);
-      }
+      setQueuePending(false);
     }
   }
 
   async function process(dryRun: boolean, openConfirmation = false) {
+    if (queuePending) {
+      return;
+    }
     setStatus(
       dryRun ? "previewing notification queue" : "delivering notifications",
     );
-    if (!dryRun) {
-      setQueuePending(true);
-    }
+    setQueuePending(true);
     try {
       const rows = await onProcess({
         limit: 50,
@@ -5496,9 +5598,7 @@ export function FleetAlertNotificationManager({
           : "notification processing failed",
       );
     } finally {
-      if (!dryRun) {
-        setQueuePending(false);
-      }
+      setQueuePending(false);
     }
   }
 
@@ -6461,6 +6561,9 @@ export function WebhookRuleManager({
   }
 
   async function dryRun(rule?: WebhookRuleRecord) {
+    if (queuePending) {
+      return;
+    }
     const request = rule
       ? {
           name: rule.name,
@@ -6485,6 +6588,7 @@ export function WebhookRuleManager({
           event_id: eventId.trim() || null,
         };
     setStatus("rendering webhook dry run");
+    setQueuePending(true);
     try {
       const preview = await onDryRun(request);
       if (!rule) {
@@ -6498,6 +6602,8 @@ export function WebhookRuleManager({
       setStatus(`dry run matched ${preview.matched_vps.length}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "dry run failed");
+    } finally {
+      setQueuePending(false);
     }
   }
 
@@ -6521,6 +6627,9 @@ export function WebhookRuleManager({
     openConfirmation = false,
     rule?: WebhookRuleRecord,
   ) {
+    if (queuePending) {
+      return;
+    }
     setStatus(
       dryRunMode
         ? rule
@@ -6530,9 +6639,7 @@ export function WebhookRuleManager({
           ? `queueing webhook test for ${rule.name}`
           : "queueing webhooks",
     );
-    if (!dryRunMode) {
-      setQueuePending(true);
-    }
+    setQueuePending(true);
     try {
       const rows = await onDispatch({
         rule_id: rule?.id ?? null,
@@ -6576,9 +6683,7 @@ export function WebhookRuleManager({
         error instanceof Error ? error.message : "webhook dispatch failed",
       );
     } finally {
-      if (!dryRunMode) {
-        setQueuePending(false);
-      }
+      setQueuePending(false);
     }
   }
 
@@ -6587,6 +6692,9 @@ export function WebhookRuleManager({
     openConfirmation = false,
     deliveryStatus: NonNullable<WebhookRuleProcessRequest["status"]> = "queued",
   ) {
+    if (queuePending) {
+      return;
+    }
     const isRetry = deliveryStatus === "failed";
     setStatus(
       dryRunMode
@@ -6595,9 +6703,7 @@ export function WebhookRuleManager({
           ? "retrying failed webhooks"
           : "delivering webhooks",
     );
-    if (!dryRunMode) {
-      setQueuePending(true);
-    }
+    setQueuePending(true);
     try {
       const rows = await onProcess({
         limit: 50,
@@ -6636,9 +6742,7 @@ export function WebhookRuleManager({
         error instanceof Error ? error.message : "webhook processing failed",
       );
     } finally {
-      if (!dryRunMode) {
-        setQueuePending(false);
-      }
+      setQueuePending(false);
     }
   }
 
@@ -6841,6 +6945,7 @@ export function WebhookRuleManager({
               <>
                 <button
                   className="secondaryAction"
+                  disabled={queuePending}
                   type="button"
                   onClick={() => void dryRun()}
                 >
@@ -6848,6 +6953,7 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="primaryAction"
+                  disabled={queuePending}
                   type="button"
                   onClick={reviewSubmit}
                 >
@@ -8153,7 +8259,7 @@ function latestTelemetryTunnelsByClient(tunnels: TelemetryTunnelRecord[]) {
 }
 
 function formatLoad(value: number | undefined) {
-  return typeof value === "number" ? value.toFixed(2) : "No rollup";
+  return typeof value === "number" ? value.toFixed(2) : "Awaiting rollup";
 }
 
 function formatLoadCompact(value: number | undefined) {
@@ -8169,7 +8275,7 @@ function formatMemoryUsedCompact(
 
 function formatMemoryUsed(rollup: TelemetryRollupRecord | null | undefined) {
   if (!rollup || rollup.memory_total_bytes_max <= 0) {
-    return "No rollup";
+    return "Awaiting rollup";
   }
   const used =
     rollup.memory_total_bytes_max - rollup.memory_available_bytes_avg;
@@ -8186,7 +8292,7 @@ function formatDiskFreeCompact(
 
 function formatDiskFree(rollup: TelemetryRollupRecord | null | undefined) {
   if (!rollup || rollup.disk_total_bytes_max <= 0) {
-    return "No rollup";
+    return "Awaiting rollup";
   }
   const percent = Math.round(
     (rollup.disk_available_bytes_avg / rollup.disk_total_bytes_max) * 100,
@@ -8219,7 +8325,7 @@ function formatNetworkBytes(rollup: TelemetryRollupRecord | null | undefined) {
     !rollup ||
     (rollup.network_rx_bytes_max === 0 && rollup.network_tx_bytes_max === 0)
   ) {
-    return "No counters";
+    return "Awaiting counters";
   }
   return `RX ${formatBytes(rollup.network_rx_bytes_max)} / TX ${formatBytes(rollup.network_tx_bytes_max)}`;
 }
@@ -8272,7 +8378,7 @@ function formatSignalSamples(
     (total, rate) => total + rate.sample_count,
     0,
   );
-  return rateSamples > 0 ? `${rateSamples} rate` : "No rollup";
+  return rateSamples > 0 ? `${rateSamples} rate` : "Awaiting rollup";
 }
 
 function formatPrivilege(capabilities: AgentView["capabilities"] | undefined) {
@@ -9062,7 +9168,7 @@ function formatDuration(seconds: number): string {
 
 function formatRollupSamples(rollup: TelemetryRollupRecord | null) {
   if (!rollup) {
-    return "No rollup";
+    return "Awaiting rollup";
   }
   return `${rollup.sample_count} in ${Math.round(rollup.bucket_secs / 60)}m`;
 }

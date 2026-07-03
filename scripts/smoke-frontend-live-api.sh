@@ -69,11 +69,18 @@ start_api
 seed_agent() {
   local client_id="$1"
   local process_incarnation_id="22222222-2222-4222-8222-222222222222"
+  local gateway_session_id
+  case "$client_id" in
+    live-agent-a) gateway_session_id="22222222-2222-4222-8222-22222222222a" ;;
+    live-agent-b) gateway_session_id="22222222-2222-4222-8222-22222222222b" ;;
+    *) gateway_session_id="22222222-2222-4222-8222-22222222222f" ;;
+  esac
   curl -fsS \
     -H "Authorization: Bearer $internal_token" \
     -H "Content-Type: application/json" \
     -d "{
       \"gateway_id\": \"frontend-live-gateway\",
+      \"gateway_session_id\": \"$gateway_session_id\",
       \"noise_public_key_hex\": null,
       \"hello\": {
         \"client_id\": \"$client_id\",

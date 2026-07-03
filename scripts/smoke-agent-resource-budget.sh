@@ -96,6 +96,20 @@ RUST_LOG="vpsman_api=warn" \
 smoke_track_pid "$!"
 smoke_wait_http "$api_url/health"
 
+VPSMAN_GATEWAY_BIND="$gateway_addr" \
+VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
+VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
+VPSMAN_API_URL="$api_url" \
+VPSMAN_SUITE_CONFIG="$SMOKE_TMPDIR/no-suite.toml" \
+VPSMAN_INTERNAL_TOKEN="$internal_token" \
+VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
+VPSMAN_GATEWAY_SPOOL_DIR="$SMOKE_TMPDIR/gateway-spool" \
+RUST_LOG="vpsman_gateway=warn" \
+  "$gateway_bin" >"$gateway_log" 2>&1 &
+smoke_track_pid "$!"
+smoke_wait_tcp 127.0.0.1 "$gateway_port"
+smoke_wait_tcp 127.0.0.1 "$gateway_control_port"
+
 auth_json="$(curl -fsS \
   -H "Content-Type: application/json" \
   -d '{"username":"agent-resource-smoke","password":"agent-resource-smoke-password"}' \
@@ -121,20 +135,6 @@ smoke_write_enrolled_agent_config \
   "$gateway_public_hex" \
   "local=$gateway_addr=10" \
   "$network_root"
-
-VPSMAN_GATEWAY_BIND="$gateway_addr" \
-VPSMAN_GATEWAY_CONTROL_BIND="127.0.0.1:$gateway_control_port" \
-VPSMAN_GATEWAY_PRIVATE_KEY_HEX="$gateway_private_hex" \
-VPSMAN_API_URL="$api_url" \
-VPSMAN_SUITE_CONFIG="$SMOKE_TMPDIR/no-suite.toml" \
-VPSMAN_INTERNAL_TOKEN="$internal_token" \
-VPSMAN_PRIVILEGE_VERIFIER_KEY_HEX="$privilege_verifier_key_hex" \
-VPSMAN_GATEWAY_SPOOL_DIR="$SMOKE_TMPDIR/gateway-spool" \
-RUST_LOG="vpsman_gateway=warn" \
-  "$gateway_bin" >"$gateway_log" 2>&1 &
-smoke_track_pid "$!"
-smoke_wait_tcp 127.0.0.1 "$gateway_port"
-smoke_wait_tcp 127.0.0.1 "$gateway_control_port"
 
 docker run --rm -d \
   --name "$container_name" \

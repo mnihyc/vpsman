@@ -2,8 +2,7 @@
 
 _smoke_seed_policy_prune_artifact() {
   local label="$1"
-  local sha_char="$2"
-  local request_json request_id artifact_json artifact_id
+  local request_json request_id artifact_json artifact_id payload_file artifact_file
   request_json="$(vpsctl_json backup-request \
     --client-id pg-agent-a \
     --paths /etc/hostname \
@@ -11,11 +10,52 @@ _smoke_seed_policy_prune_artifact() {
     --note "postgres policy prune $label" \
     --confirmed)"
   request_id="$(jq -r '.id' <<<"$request_json")"
-  artifact_json="$(vpsctl_json backup-artifact-record \
+  payload_file="$SMOKE_TMPDIR/policy-prune-$label-payload.bin"
+  artifact_file="$SMOKE_TMPDIR/policy-prune-$label-artifact.tar"
+  printf 'synthetic policy prune backup bytes %s %s\n' "$label" "$(date +%s%N)" >"$payload_file"
+  python3 - "pg-agent-a" "$payload_file" "$artifact_file" <<'PY'
+import hashlib
+import io
+import json
+import sys
+import tarfile
+import time
+
+client_id, payload_path, artifact_path = sys.argv[1:]
+with open(payload_path, "rb") as handle:
+    payload = handle.read()
+created_unix = int(time.time())
+manifest = {
+    "format": "vpsman.backup_tar.v1",
+    "client_id": client_id,
+    "created_unix": created_unix,
+    "files": [{
+        "path": "/etc/hostname",
+        "source": "selected_path",
+        "tar_path": "vpsman-backup/files/0000.bin",
+        "mode": 0o644,
+        "size_bytes": len(payload),
+        "sha256_hex": hashlib.sha256(payload).hexdigest(),
+        "mtime_unix": created_unix,
+    }],
+}
+with tarfile.open(artifact_path, "w") as archive:
+    manifest_bytes = json.dumps(manifest, separators=(",", ":")).encode()
+    manifest_info = tarfile.TarInfo("vpsman-backup/manifest.json")
+    manifest_info.size = len(manifest_bytes)
+    manifest_info.mode = 0o600
+    manifest_info.mtime = created_unix
+    archive.addfile(manifest_info, fileobj=io.BytesIO(manifest_bytes))
+    payload_info = tarfile.TarInfo("vpsman-backup/files/0000.bin")
+    payload_info.size = len(payload)
+    payload_info.mode = 0o644
+    payload_info.mtime = created_unix
+    archive.addfile(payload_info, fileobj=io.BytesIO(payload))
+PY
+  artifact_json="$(vpsctl_json backup-artifact-upload \
     --backup-request-id "$request_id" \
     --object-key "backups/pg-agent-a/policy-prune-$label.tar" \
-    --sha256-hex "$(printf "%064s" "" | tr ' ' "$sha_char")" \
-    --size-bytes 4096 \
+    --artifact-file "$artifact_file" \
     --confirmed)"
   artifact_id="$(jq -r '.id' <<<"$artifact_json")"
   printf '%s %s\n' "$request_id" "$artifact_id"
@@ -48,11 +88,7 @@ smoke_postgres_backup_policy_prune_evidence() {
   read -r prune_old_a_request_id prune_old_a_artifact_id < <(_smoke_seed_policy_prune_artifact old-a b)
   read -r prune_old_b_request_id prune_old_b_artifact_id < <(_smoke_seed_policy_prune_artifact old-b c)
   read -r prune_retained_request_id prune_retained_artifact_id < <(_smoke_seed_policy_prune_artifact retained d)
-  backup_prune_object_root="$SMOKE_TMPDIR/backup-prune-objects"
-  mkdir -p "$backup_prune_object_root/backups/pg-agent-a"
-  printf 'old-a\n' >"$backup_prune_object_root/backups/pg-agent-a/policy-prune-old-a.tar"
-  printf 'old-b\n' >"$backup_prune_object_root/backups/pg-agent-a/policy-prune-old-b.tar"
-  printf 'retained\n' >"$backup_prune_object_root/backups/pg-agent-a/policy-prune-retained.tar"
+  backup_prune_object_root="$SMOKE_TMPDIR/object-store"
   docker exec -i "$container_name" psql -U vpsman -d vpsman -v ON_ERROR_STOP=1 >/dev/null <<SQL
 UPDATE backup_requests
 SET source_schedule_id = '$backup_prune_policy_schedule_id'
@@ -101,7 +137,7 @@ SQL
       --backup-policy-prune-enabled \
       --backup-policy-prune-limit 10 \
       --backup-policy-prune-delete-objects \
-      --backup-policy-prune-object-store-dir "$backup_prune_object_root" \
+      --backup-policy-prune-object-store-dir "$SMOKE_TMPDIR/object-store" \
       >"$SMOKE_TMPDIR/backup-policy-prune-worker.log" 2>&1
   policy_prune_json="$(cat "$SMOKE_TMPDIR/backup-policy-prune-worker.log")"
   rg -q 'backup_policy_prune_pruned=2' "$SMOKE_TMPDIR/backup-policy-prune-worker.log" || {

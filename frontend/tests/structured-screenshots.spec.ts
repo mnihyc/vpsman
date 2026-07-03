@@ -753,7 +753,11 @@ async function navigateAndScreenshot(
       .first();
     if ((await row.count()) > 0) {
       await expect(row).toBeVisible({ timeout: 5_000 });
-      await row.click();
+      const explicitOpen = row
+        .getByRole("button", { name: /Open .*detail/ })
+        .first();
+      await expect(explicitOpen).toBeVisible({ timeout: 5_000 });
+      await explicitOpen.click();
     } else {
       const card = grid
         .locator(".gridMobileCard", { hasText: entry.expandVpsRow })

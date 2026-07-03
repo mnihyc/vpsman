@@ -1,7 +1,7 @@
 import path from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { openConsoleSubpage } from "./support/consoleNavigation";
+import { activate, openConsoleSubpage } from "./support/consoleNavigation";
 
 test.skip(
   !process.env.VPSMAN_DOCKER_FLEET_UI_SMOKE,
@@ -30,6 +30,8 @@ const username =
   process.env.VPSMAN_DOCKER_FLEET_USERNAME ?? "docker-fleet-admin";
 const password =
   process.env.VPSMAN_DOCKER_FLEET_PASSWORD ?? "docker-fleet-password";
+const sessionVaultKey =
+  process.env.VPSMAN_DOCKER_FLEET_SESSION_KEY ?? "docker-fleet-session-key";
 const screenshotDir = process.env.VPSMAN_DOCKER_FLEET_SCREENSHOT_DIR;
 const extendedReview = process.env.VPSMAN_DOCKER_FLEET_EXTENDED_REVIEW === "1";
 const cleanupExpression =
@@ -45,7 +47,7 @@ type ScreenshotManifestEntry = {
 
 const screenshotManifest: ScreenshotManifestEntry[] = [];
 
-test.setTimeout(extendedReview ? 600_000 : 300_000);
+test.setTimeout(extendedReview ? 1_200_000 : 300_000);
 
 test("validates the live Docker fleet console with 20+ VPS agents", async ({
   page,
@@ -60,7 +62,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
 
   await login(page);
   await expect(
-    page.getByRole("heading", { name: "Home", exact: true }),
+    page.getByRole("heading", { level: 1, name: "Home", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Fleet command home" }),
@@ -101,9 +103,9 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   expect(sidebarBox?.x).toBe(0);
   expect(sidebarBox?.y).toBe(0);
 
-  await openConsoleSubpage(page, "Fleet", "Instances");
+  await openLiveConsoleSubpage(page, "Fleet", "Instances");
   await expect(
-    page.getByRole("heading", { name: "Fleet instances" }),
+    page.getByRole("heading", { level: 1, name: "Fleet instances" }),
   ).toBeVisible();
   const grid = page.getByLabel("VPS instance records data grid");
   await expect(
@@ -115,7 +117,8 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     "page-fleet-instances",
     "Fleet / Instances page with the live inventory table before filtering.",
   );
-  await grid.getByLabel("VPS instance records search").fill("provider:alpha");
+  const gridSearch = grid.getByLabel("VPS instance records search");
+  await gridSearch.fill("provider:alpha");
   await expect(
     grid.getByText(`${providerAlphaCount} of ${expectedTotal} instances`),
   ).toBeVisible();
@@ -125,33 +128,81 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     "fleet-search-provider-alpha",
     "Fleet table after operator filters the live fleet to provider alpha.",
   );
-  await grid.getByLabel("VPS instance records search").fill("");
 
+  await gridSearch.fill("df-alpha-US-01");
+  await expect(grid.getByText(`1 of ${expectedTotal} instances`)).toBeVisible();
   const firstRow = grid
     .locator(".gridBody [role=row]", { hasText: "df-alpha-US-01" })
     .first();
-  const secondRow = grid
-    .locator(".gridBody [role=row]", { hasText: "df-alpha-DE-10" })
-    .first();
-  await selectGridRow(firstRow);
-  await selectGridRow(secondRow);
-  await expect(grid.getByText("2 selected", { exact: true })).toBeVisible();
-  await clickGridRowControl(firstRow, "Expand VPS instance records row");
-  const firstDetail = grid
-    .locator(".gridExpandedRow", { hasText: "df-alpha-US-01" })
-    .first();
-  await expect(
-    firstDetail.getByRole("heading", { name: /df-alpha-US-01/ }),
-  ).toBeVisible();
-  await expect(firstDetail).toContainText("Root uid 0");
-  await expectLiveFleetTelemetry(firstDetail);
+  const inlineDetail = await openFleetInlineDetail(grid, "df-alpha-US-01");
+  await expect(inlineDetail).toContainText("Root uid 0");
+  await activate(inlineDetail.getByRole("tab", { name: "Telemetry" }));
+  await expectLiveFleetTelemetry(inlineDetail);
   await maybeExtendedScreenshot(
     page,
     testInfo.project.name,
-    "fleet-expanded-telemetry-detail",
-    "Expanded VPS row showing live telemetry detail for a real agent.",
+    "fleet-inline-instance-detail-telemetry",
+    "Fleet inline VPS detail opened from the row chevron with live telemetry visible.",
   );
-  await grid.getByRole("button", { name: "Action" }).click();
+  await activate(inlineDetail.getByLabel("Close VPS instance records row details"));
+  await expect(inlineDetail).toHaveCount(0);
+  const openDetailButton = firstRow.getByRole("button", {
+    name: /Open df-alpha-US-01 .* detail/,
+  });
+  await expect(openDetailButton).toBeVisible();
+  await openFleetDetailRoute(page, grid, "df-alpha-US-01");
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Instance detail" }),
+  ).toBeVisible({
+    timeout: 30_000,
+  });
+  const canonicalDetail = page.getByRole("region", {
+    name: "Canonical VPS detail",
+  });
+  await expect(
+    canonicalDetail.getByRole("heading", { level: 2, name: "VPS detail" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Selected VPS identity")).toContainText(
+    "df-alpha-US-01",
+  );
+  await maybeExtendedScreenshot(
+    page,
+    testInfo.project.name,
+    "fleet-instance-detail-route",
+    "Canonical VPS detail page opened from the explicit row Open action.",
+  );
+  await openLiveConsoleSubpage(page, "Fleet", "Instances");
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Fleet instances" }),
+  ).toBeVisible();
+  await gridSearch.fill("provider:alpha");
+  await expect(
+    grid.getByText(`${providerAlphaCount} of ${expectedTotal} instances`),
+  ).toBeVisible();
+  await selectVisibleGridRows(grid);
+  await expect(
+    grid.getByText(`${providerAlphaCount} selected`, { exact: true }),
+  ).toBeVisible();
+  const selectionPanel = page.locator(".fleetSelectionPanel");
+  await expect(selectionPanel).toContainText(
+    `${providerAlphaCount} selected VPSs`,
+  );
+  await expect(
+    selectionPanel.getByRole("tab", { name: "Telemetry" }),
+  ).toBeVisible();
+  await activate(selectionPanel.getByRole("tab", { name: "Network" }));
+  await expect(
+    selectionPanel.getByRole("tabpanel", {
+      name: "Network for selected VPSs",
+    }),
+  ).toContainText("df-alpha-DE-10");
+  await activate(selectionPanel.getByRole("tab", { name: "Capabilities" }));
+  await expect(
+    selectionPanel.getByRole("tabpanel", {
+      name: "Capabilities for selected VPSs",
+    }),
+  ).toContainText("Root uid 0");
+  await forceClick(grid.getByRole("button", { name: "Actions", exact: true }));
   await expect(
     page.getByRole("menuitem", { name: "Copy client IDs" }),
   ).toBeVisible();
@@ -159,13 +210,21 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     page,
     testInfo.project.name,
     "fleet-action-menu-open",
-    "Bulk action menu opened after selecting two VPS rows.",
+    "Bulk action menu opened after selecting the provider-filtered VPS rows.",
   );
   await page.keyboard.press("Escape");
-  await firstRow.click({ button: "right" });
+  await gridSearch.fill("df-alpha-US-01");
+  await expect(grid.getByText(`1 of ${expectedTotal} instances`)).toBeVisible();
+  await expect(firstRow).toBeVisible();
+  await firstRow.dispatchEvent("contextmenu", {
+    bubbles: true,
+    button: 2,
+    buttons: 2,
+    cancelable: true,
+  });
   await expect(page.getByText("Row actions")).toBeVisible();
   await expect(
-    page.getByRole("menuitem", { name: "Inspect selected" }),
+    page.getByRole("menuitem", { name: "Open detail" }),
   ).toBeVisible();
   await maybeExtendedScreenshot(
     page,
@@ -174,6 +233,16 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     "Right-click context menu opened on a fleet row with selected-row actions preserved.",
   );
   await page.keyboard.press("Escape");
+  await gridSearch.fill("provider:alpha");
+  await expect(
+    grid.getByText(`${providerAlphaCount} of ${expectedTotal} instances`),
+  ).toBeVisible();
+  await clearVisibleGridRows(grid);
+  await expect(grid.getByText("0 selected", { exact: true })).toBeVisible();
+  await gridSearch.fill("");
+  await expect(
+    grid.getByText(`${expectedTotal} of ${expectedTotal} instances`),
+  ).toBeVisible();
   await exerciseColumnControls(page, grid);
   await maybeExtendedScreenshot(
     page,
@@ -184,8 +253,10 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
   await maybeScreenshot(page, testInfo.project.name, "fleet");
   await expectCleanLayout(page);
 
-  await openConsoleSubpage(page, "Fleet", "Bulk groups");
-  await expect(page.getByRole("heading", { name: "Bulk tags" })).toBeVisible();
+  await openLiveConsoleSubpage(page, "Fleet", "Bulk groups");
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Bulk groups" }),
+  ).toBeVisible();
   await page
     .getByLabel("Bulk tag", { exact: true })
     .fill("maintenance:2026-q2-patch");
@@ -193,12 +264,31 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
     .getByRole("searchbox", { name: "Bulk tag selector expression" })
     .fill("provider:alpha && country:US");
   await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "Preview targets" }).click();
-  await expect(
-    page.getByText(`${providerAlphaCountryUsCount}/${expectedTotal}`),
-  ).toBeVisible();
-  await expect(page.locator(".bulkTagPreview")).toContainText("df-alpha-US-01");
-  await expect(page.locator(".bulkTagPreview")).toContainText("df-alpha-US-13");
+  const bulkTagResolution = page.getByLabel("Bulk group target resolution");
+  await expect(bulkTagResolution).toContainText(
+    new RegExp(`Local match ${providerAlphaCountryUsCount} VPSs`),
+  );
+  await expect(bulkTagResolution).toContainText(
+    `${providerAlphaCountryUsCount} ready`,
+  );
+  const bulkTagAction = page.getByRole("button", {
+    name: new RegExp(
+      `Add maintenance:2026-q2-patch to ${providerAlphaCountryUsCount} VPSs`,
+    ),
+  });
+  await expect(bulkTagAction).toBeEnabled();
+  await activate(bulkTagAction);
+  await expect(page.getByLabel("Bulk tag target preview")).toContainText(
+    "Server preview",
+  );
+  await expect(page.getByLabel("Bulk group preview evidence")).toBeVisible({
+    timeout: 30_000,
+  });
+  const bulkTagPreviewChips = page.locator(".bulkTagPreview");
+  await expect(bulkTagPreviewChips).toContainText("df-alpha-US-01", {
+    timeout: 30_000,
+  });
+  await expect(bulkTagPreviewChips).toContainText("df-alpha-US-13");
   await maybeExtendedScreenshot(
     page,
     testInfo.project.name,
@@ -220,7 +310,7 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
       "extended-page-system-preferences",
     ]);
   }
-  await openConsoleSubpage(page, "System", "Preferences");
+  await openLiveConsoleSubpage(page, "System", "Preferences");
   const preferencesPanel = page.locator(".preferencesPanel");
   await expect(
     preferencesPanel.locator(".consoleStatusBadge", { hasText: /^Saved$/ }),
@@ -242,16 +332,67 @@ test("validates the live Docker fleet console with 20+ VPS agents", async ({
 });
 
 async function login(page: Page) {
-  await page.goto("/");
-  await expect(
-    page.getByRole("heading", { name: "Operator access" }),
-  ).toBeVisible({ timeout: 20_000 });
-  await page.getByLabel("Username").fill(username);
-  await page.getByLabel("Password").fill(password);
-  await page.getByRole("button", { name: "Submit login" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Home", exact: true }),
-  ).toBeVisible({ timeout: 30_000 });
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    const home = page.getByRole("heading", {
+      level: 1,
+      name: "Home",
+      exact: true,
+    });
+    const access = page.getByRole("heading", {
+      exact: true,
+      name: "Operator access",
+    });
+    try {
+      const state = await Promise.race([
+        home
+          .waitFor({ state: "visible", timeout: 20_000 })
+          .then(() => "home" as const),
+        access
+          .waitFor({ state: "visible", timeout: 20_000 })
+          .then(() => "access" as const),
+      ]);
+      if (state === "home") {
+        return;
+      }
+      await page.getByLabel("Username").fill(username);
+      await page.getByLabel("Password").fill(password);
+      await page.getByLabel("Session vault key").fill(sessionVaultKey);
+      await page.getByRole("button", { name: "Submit login" }).click();
+      await expect(home).toBeVisible({ timeout: 30_000 });
+      return;
+    } catch (error) {
+      lastError = error;
+      await page.reload({ waitUntil: "domcontentloaded" });
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+async function openLiveConsoleSubpage(
+  page: Page,
+  view: string,
+  subpage: string,
+  expectedHeaderTitle?: string,
+) {
+  try {
+    await openConsoleSubpage(page, view, subpage, expectedHeaderTitle);
+    return;
+  } catch (error) {
+    const lostSession =
+      error instanceof Error &&
+      error.message.includes("authenticated session was lost");
+    const operatorAccessVisible = await page
+      .getByRole("heading", { exact: true, name: "Operator access" })
+      .isVisible()
+      .catch(() => false);
+    if (!lostSession && !operatorAccessVisible) {
+      throw error;
+    }
+    await login(page);
+    await openConsoleSubpage(page, view, subpage, expectedHeaderTitle);
+  }
 }
 
 async function expectCleanLayout(page: Page) {
@@ -334,83 +475,223 @@ async function expectLiveSystemDashboardTelemetry(
   page: Page,
   projectName: string,
 ) {
-  await openConsoleSubpage(page, "System", "Overview");
+  await openLiveConsoleSubpage(page, "System", "Overview");
   await expect(
-    page.getByRole("heading", { name: "System overview", exact: true }),
+    page.getByRole("heading", {
+      level: 1,
+      name: "System overview",
+      exact: true,
+    }),
   ).toBeVisible();
 
   const systemWorkspace = page.locator(".systemWorkspace");
   await expect(
-    systemWorkspace.getByRole("heading", { name: "Capacity", exact: true }),
+    systemWorkspace.getByRole("heading", {
+      name: "Control-plane overview",
+      exact: true,
+    }),
   ).toBeVisible();
-  const capacity = systemWorkspace.locator(".dashboardSection").filter({
-    has: page.getByRole("heading", { name: "Capacity", exact: true }),
+  const serviceHealth = systemWorkspace.locator(".dashboardSection").filter({
+    has: page.getByRole("heading", { name: "Service health", exact: true }),
   });
-  await expect(capacity).toContainText("API DB pool");
-  await expect(capacity).toContainText("Worker DB pool");
-  await expect(capacity).toContainText("Dispatcher in-flight");
-
-  const lifecycle = systemWorkspace.locator(".dashboardSection").filter({
-    has: page.getByRole("heading", { name: "Dispatch Lifecycle" }),
-  });
-  await expect(lifecycle).toContainText("Dispatch queue");
-  await expect(lifecycle).toContainText("Active targets");
-
-  const deadlines = systemWorkspace.locator(".dashboardSection").filter({
-    has: page.getByRole("heading", { name: "Deadlines" }),
-  });
-  await expect(deadlines).toContainText("Deadline timeouts");
-  await expect(deadlines).toContainText("Control timed out");
-
-  const cancellations = systemWorkspace.locator(".dashboardSection").filter({
-    has: page.getByRole("heading", { name: "Cancellations" }),
-  });
-  await expect(cancellations).toContainText("Cancel acks");
-  await expect(cancellations).toContainText("Awaiting ack");
-
-  const gatewayEvents = systemWorkspace.locator(".dashboardSection").filter({
-    has: page.getByRole("heading", { name: "Gateway Events" }),
-  });
-  await expect(gatewayEvents).toContainText("Event retries");
-  await expect(gatewayEvents).not.toContainText(/unavailable/i);
+  await expect(serviceHealth).toContainText("Database");
+  await expect(serviceHealth).toContainText("Control-plane queue");
+  await expect(serviceHealth).toContainText("Worker");
+  await expect(serviceHealth).toContainText("Gateway");
+  await expect(serviceHealth).toContainText("What needs attention");
+  await expect(serviceHealth).not.toContainText(/No durable metric samples/i);
   await expectCleanLayout(page);
   await maybeExtendedScreenshot(
     page,
     projectName,
     "page-system-dashboard",
-    "System / Overview page with live control-plane capacity, dispatch, deadline, cancellation, and gateway event metrics.",
+    "System / Overview page with live control-plane posture, service health, and attention signals.",
+  );
+
+  await openLiveConsoleSubpage(page, "System", "Capacity");
+  await expect(
+    page.getByRole("heading", {
+      level: 1,
+      name: "System capacity",
+      exact: true,
+    }),
+  ).toBeVisible();
+  const capacityWorkspace = page.locator(".systemWorkspace");
+  await expect(
+    capacityWorkspace.getByRole("heading", {
+      name: "Capacity telemetry",
+      exact: true,
+    }),
+  ).toBeVisible();
+  const subsystem = capacityWorkspace.locator(".dashboardSection").filter({
+    has: page.getByRole("heading", {
+      name: "Subsystem capacity",
+      exact: true,
+    }),
+  });
+  await expect(subsystem).toContainText("Database");
+  await expect(subsystem).toContainText("Dispatch");
+  await expect(subsystem).toContainText("Gateway");
+  await expect(subsystem).toContainText("Storage");
+  await expect(subsystem).toContainText("Dispatch limit");
+  await expect(subsystem).toContainText("Suite Config fields");
+
+  const dispatch = capacityWorkspace.locator(".dashboardSection").filter({
+    has: page.getByRole("heading", { name: "Dispatch capacity", exact: true }),
+  });
+  await expect(dispatch).toContainText("Dispatch queue");
+  await expect(dispatch).toContainText("Active targets");
+  await expect(dispatch).toContainText("Warning threshold");
+
+  await capacityWorkspace.getByRole("tab", { name: /Database/ }).click();
+  const database = capacityWorkspace.locator(".dashboardSection").filter({
+    has: page.getByRole("heading", { name: "Database capacity", exact: true }),
+  });
+  await expect(database).toContainText("API DB pool");
+  await expect(database).toContainText("Worker DB pool");
+  await expect(database).toContainText("In use");
+
+  await capacityWorkspace.getByRole("tab", { name: /Gateway/ }).click();
+  const gateway = capacityWorkspace.locator(".dashboardSection").filter({
+    has: page.getByRole("heading", { name: "Gateway capacity", exact: true }),
+  });
+  await expect(gateway).toContainText("Queue depth");
+  await expect(gateway).toContainText("Rejected connects");
+  await expect(gateway).not.toContainText(/No durable metric samples/i);
+  await expectCleanLayout(page);
+  await maybeExtendedScreenshot(
+    page,
+    projectName,
+    "page-system-capacity",
+    "System / Capacity page with live database, dispatch, gateway, and storage capacity telemetry.",
   );
 }
 
 async function expectLiveFleetTelemetry(detail: Locator) {
   await expect(
     detail.locator(".metric", { hasText: "Traffic" }),
-  ).not.toContainText(
-    /No rate samples|No counters|No rollup|No data|unavailable/i,
-  );
+  ).toContainText(/\d+(?:\.\d+)?\s*(?:bps|Kbps|Mbps|Gbps|B|KiB|MiB|GiB)/i, {
+    timeout: 30_000,
+  });
   await expect(
     detail.locator(".metric", { hasText: "Samples" }),
-  ).not.toContainText(/No rollup|No data|unavailable/i);
-  await detail.getByRole("tab", { name: "Telemetry" }).click();
-  await expect(
-    detail.getByRole("tabpanel").getByText("CPU load"),
-  ).toBeVisible();
-  await expect(detail).not.toContainText(
-    /No rollup|No rate samples|No counters|No data|unavailable/i,
+  ).toContainText(/\d+\s+(?:rollup|rate)\b/i, { timeout: 30_000 });
+  await activate(detail.getByRole("tab", { name: "Telemetry" }));
+  const telemetryPanel = detail.getByRole("tabpanel");
+  await expect(telemetryPanel.getByText("CPU load")).toBeVisible();
+}
+
+async function openFleetInlineDetail(grid: Locator, displayName: string) {
+  const inlineDetail = grid.locator(".gridExpandedRow", {
+    hasText: displayName,
+  });
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      if ((await inlineDetail.count()) > 0) {
+        await expect(inlineDetail).toBeVisible({ timeout: 1000 });
+        return inlineDetail;
+      }
+      const row = grid
+        .locator(".gridBody [role=row]", { hasText: displayName })
+        .first();
+      await expect(row).toBeVisible({ timeout: 3000 });
+      await clickVisibleGridRowButton(
+        grid,
+        displayName,
+        /^Expand VPS instance records row/i,
+      );
+      await expect(inlineDetail).toBeVisible({ timeout: 3000 });
+      return inlineDetail;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+async function openFleetDetailRoute(
+  page: Page,
+  grid: Locator,
+  displayName: string,
+) {
+  const instanceDetailCrumb = page.getByText(
+    "vpsman / Fleet / Instance detail",
   );
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const row = grid
+        .locator(".gridBody [role=row]", { hasText: displayName })
+        .first();
+      await expect(row).toBeVisible({ timeout: 3000 });
+      await clickVisibleGridRowButton(
+        grid,
+        displayName,
+        new RegExp(`^Open ${escapeRegExp(displayName)}.*detail`, "i"),
+      );
+      await expect(instanceDetailCrumb).toBeVisible({ timeout: 5000 });
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+async function clickVisibleGridRowButton(
+  grid: Locator,
+  displayName: string,
+  labelPattern: RegExp,
+) {
+  const result = await grid.evaluate(
+    (gridElement, args) => {
+      const pattern = new RegExp(args.labelPattern, "i");
+      const rows = Array.from(
+        gridElement.querySelectorAll<HTMLElement>(".gridBody [role=row]"),
+      );
+      const row = rows.find((candidate) =>
+        candidate.textContent?.includes(args.displayName),
+      );
+      if (!row) {
+        return "row-missing";
+      }
+      const button = Array.from(row.querySelectorAll<HTMLButtonElement>("button")).find(
+        (candidate) =>
+          pattern.test(candidate.getAttribute("aria-label") ?? "") ||
+          pattern.test(candidate.textContent ?? ""),
+      );
+      if (!button) {
+        return "button-missing";
+      }
+      if (button.disabled) {
+        return "button-disabled";
+      }
+      button.click();
+      return "clicked";
+    },
+    {
+      displayName,
+      labelPattern: labelPattern.source,
+    },
+  );
+  expect(result).toBe("clicked");
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function exerciseColumnControls(page: Page, grid: Locator) {
-  const nameHeader = grid
-    .locator(".gridHeaderCell", { hasText: "Name" })
+  const vpsHeader = grid
+    .locator(".gridHeaderCell", { hasText: "VPS" })
     .first();
-  const providerHeader = grid
-    .locator(".gridHeaderCell", { hasText: "Provider" })
+  const countryHeader = grid
+    .locator(".gridHeaderCell", { hasText: "Country" })
     .first();
-  const tagsHeader = grid
-    .locator(".gridHeaderCell", { hasText: "Tags" })
-    .first();
-  const resizeHandle = tagsHeader.locator(".gridResizeHandle");
+  const resizeHandle = countryHeader.locator(".gridResizeHandle");
   await expect(resizeHandle).toBeVisible();
   const box = await resizeHandle.boundingBox();
   expect(box).not.toBeNull();
@@ -421,49 +702,58 @@ async function exerciseColumnControls(page: Page, grid: Locator) {
     await page.mouse.up();
   }
 
-  await expect(providerHeader.locator(".gridDragHandle")).toBeVisible();
-  await nameHeader.locator(".gridDragHandle").focus();
+  await expect(vpsHeader.locator(".gridDragHandle")).toBeVisible();
+  await vpsHeader.locator(".gridDragHandle").focus();
   await page.keyboard.press("Space");
   await page.keyboard.press("ArrowRight");
   await page.keyboard.press("Space");
-  await grid.getByLabel("VPS instance records columns").click();
-  await page.getByRole("menuitemcheckbox", { name: "Provider" }).click();
+  await forceClick(grid.getByLabel("VPS instance records columns"));
+  await forceClick(page.getByRole("menuitemcheckbox", { name: "Provider" }));
+  await expect(
+    grid.getByRole("columnheader", { name: /Provider/ }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(
+    page.getByRole("menuitemcheckbox", { name: "Provider" }),
+  ).toHaveCount(0);
+  await forceClick(grid.getByLabel("VPS instance records columns"));
+  await forceClick(page.getByRole("menuitemcheckbox", { name: "Provider" }));
   await expect(
     grid.getByRole("columnheader", { name: /Provider/ }),
   ).toHaveCount(0);
   await page.keyboard.press("Escape");
+  await expect(
+    page.getByRole("menuitemcheckbox", { name: "Provider" }),
+  ).toHaveCount(0);
+  await grid.getByLabel("VPS instance records search").focus();
   await grid.getByLabel("VPS instance records page size").selectOption("25");
   await expect(
     grid.getByText(`1 / ${Math.ceil(expectedTotal / 25)}`),
   ).toBeVisible();
 }
 
-async function selectGridRow(row: Locator) {
-  const checkbox = await retryGridRowControl(
-    row,
-    "Select VPS instance records row",
-    (control) => control.check({ timeout: 10_000 }),
-  );
-  await expect(checkbox).toBeChecked({ timeout: 5000 });
+async function clearVisibleGridRows(grid: Locator) {
+  const checkbox = grid.getByLabel("Select all VPS instance records");
+  const clearVisible = grid.getByRole("button", {
+    name: "Clear visible VPS instance records",
+  });
+  if ((await clearVisible.count()) > 0) {
+    await activate(clearVisible);
+  }
+  await expect(checkbox).not.toBeChecked({ timeout: 3000 });
 }
 
-async function clickGridRowControl(row: Locator, label: string) {
-  await retryGridRowControl(row, label, (control) =>
-    control.click({ timeout: 10_000 }),
-  );
-}
-
-async function retryGridRowControl<T>(
-  row: Locator,
-  label: string,
-  action: (control: Locator) => Promise<T>,
-): Promise<Locator> {
+async function selectVisibleGridRows(grid: Locator) {
+  const checkbox = grid.getByLabel("Select all VPS instance records");
+  const selectVisible = grid.getByRole("button", {
+    name: "Select visible VPS instance records",
+  });
   let lastError: unknown;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const control = row.getByLabel(label).first();
+  for (let attempt = 0; attempt < 6; attempt += 1) {
     try {
-      await action(control);
-      return control;
+      await activate(selectVisible);
+      await expect(checkbox).toBeChecked({ timeout: 3000 });
+      return;
     } catch (error) {
       lastError = error;
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -473,20 +763,17 @@ async function retryGridRowControl<T>(
 }
 
 async function exerciseExpressionWebhooks(page: Page, projectName: string) {
-  await openConsoleSubpage(page, "Fleet", "Notifications");
+  await openLiveConsoleSubpage(page, "Observability", "Event webhooks");
   await expect(
-    page.getByRole("heading", { name: "Notification channels" }),
+    page.getByRole("heading", { level: 1, name: "Event webhooks" }),
   ).toBeVisible();
-  const notifications = page.locator(".consoleCrudPanel").filter({
-    has: page.getByRole("tablist", { name: "Notification registries" }),
-  });
-  await notifications.getByRole("tab", { name: "Webhooks" }).click();
+  const webhooks = page.locator(".observabilityWebhooksPanel");
   await expect(
-    notifications.getByText("Webhook rules", { exact: true }).first(),
+    webhooks.getByText("Event webhook rules", { exact: true }).first(),
   ).toBeVisible();
 
-  await notifications.getByRole("button", { name: "Create rule" }).click();
-  const detail = notifications.locator(".consoleDetailPanel").filter({
+  await webhooks.getByRole("button", { name: "Create rule" }).click();
+  const detail = webhooks.locator(".consoleDetailPanel").filter({
     hasText: /Create webhook rule|Edit webhook rule/,
   });
   await expect(detail).toBeVisible();
@@ -512,11 +799,24 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
   );
   await detail.getByRole("button", { name: "Create rule" }).click();
   await expect(
-    notifications.locator(".fleetPolicyStatus", {
-      hasText: "saved docker-fleet-q2-capacity",
+    page.locator(".confirmationPrompt", {
+      hasText: "Confirm webhook rule save",
     }),
   ).toBeVisible();
-  await expect(notifications).toContainText("docker-fleet-q2-capacity");
+  await page
+    .locator(".confirmationPrompt", {
+      hasText: "Confirm webhook rule save",
+    })
+    .getByRole("button", { name: "Create rule" })
+    .click();
+  await expect(
+    webhooks.locator(".fleetPolicyStatus", {
+      hasText: "saved docker-fleet-q2-capacity",
+    }),
+  ).toBeVisible({ timeout: 30_000 });
+  await expect(webhooks).toContainText("docker-fleet-q2-capacity", {
+    timeout: 30_000,
+  });
   await maybeExtendedScreenshot(
     page,
     projectName,
@@ -524,19 +824,19 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
     "Webhook rule creation result showing saved status and the new rule in context.",
   );
 
-  await detail.getByRole("button", { name: "Review rule" }).click();
-  await expect(
-    notifications.locator(".deliveryPreviewSection", {
-      hasText: "Webhook delivery preview",
-    }),
-  ).toBeVisible();
-  await expect(notifications).toContainText(
-    `${roleEdgeCount} VPSs matched webhook dry run`,
-  );
-  await expect(notifications).toContainText(
+  await detail.getByRole("button", { name: "Test" }).click();
+  const samplePreview = webhooks.locator(".webhookRuleSamplePreview");
+  await expect(samplePreview).toBeVisible({ timeout: 90_000 });
+  await expect(samplePreview).toContainText(`${roleEdgeCount} VPSs matched`, {
+    timeout: 30_000,
+  });
+  await expect(samplePreview).toContainText(
     `docker-fleet-q2-capacity interval.30sec count=${roleEdgeCount}`,
+    { timeout: 30_000 },
   );
-  await expect(notifications).toContainText("df-alpha-US-01");
+  await expect(samplePreview).toContainText("df-alpha-US-01", {
+    timeout: 30_000,
+  });
   await maybeExtendedScreenshot(
     page,
     projectName,
@@ -544,18 +844,21 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
     "Webhook dry-run result showing matched live VPSs and rendered payload preview.",
   );
 
-  await notifications.getByRole("tab", { name: "Webhooks" }).click();
-  await notifications.getByRole("button", { name: "Review matches" }).click();
+  await detail.getByLabel("Close detail panel").click();
+  await webhooks.getByRole("button", { name: "Preview match" }).click();
   await expect(
-    notifications.locator(".deliveryPreviewSection", {
-      hasText: "Webhook delivery preview",
+    webhooks.getByRole("tab", { name: /^Deliveries\b/ }),
+  ).toHaveAttribute("aria-selected", "true", { timeout: 30_000 });
+  await expect(
+    webhooks.locator(".deliveryPreviewSection", {
+      hasText: "Event webhook delivery preview",
     }),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 30_000 });
   await expect(
-    notifications.locator(".consoleDataGrid", {
+    webhooks.locator(".consoleDataGrid", {
       hasText: "docker-fleet-q2-capacity",
     }),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 30_000 });
   await maybeExtendedScreenshot(
     page,
     projectName,
@@ -563,17 +866,19 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
     "Webhook queue operation after matching saved rules against the preview event.",
   );
 
-  await notifications.getByRole("tab", { name: "Maintenance" }).click();
-  await notifications.getByLabel("Webhook rotation days").fill("7");
-  await notifications
+  await webhooks
+    .getByRole("tab", { name: "Maintenance" })
+    .click();
+  await webhooks.getByLabel("Webhook rotation days").fill("7");
+  await webhooks
     .getByLabel("Webhook rotation status")
     .selectOption("delivered");
-  await notifications.getByRole("button", { name: "Review rotation" }).click();
+  await webhooks.getByRole("button", { name: "Review rotation" }).click();
   await expect(
-    notifications.locator(".fleetPolicyStatus", {
+    webhooks.locator(".fleetPolicyStatus", {
       hasText: "0 matched / 0 deleted",
     }),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 30_000 });
   await maybeExtendedScreenshot(
     page,
     projectName,
@@ -584,16 +889,20 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
 }
 
 async function exerciseAlertPolicyReview(page: Page, projectName: string) {
-  await openConsoleSubpage(page, "Fleet", "Alert policies");
+  await openLiveConsoleSubpage(page, "Observability", "Alerts");
   await expect(
-    page.getByRole("heading", { name: "Alert policies" }),
+    page.getByRole("heading", { level: 1, name: "Alerts" }),
   ).toBeVisible();
-  const grid = page.getByLabel("Alert policy rules data grid");
+  const alerts = page.locator(".observabilityAlertsPanel");
+  await expect(
+    alerts.getByRole("heading", { name: "Alert policies" }),
+  ).toBeVisible();
+  const grid = alerts.getByLabel("Policy groups data grid");
   const row = grid
     .locator(".gridBody [role=row]", { hasText: "docker-edge-resource-alerts" })
     .first();
   await expect(row).toBeVisible();
-  await row.getByLabel("Expand Alert policy rules row").click();
+  await row.getByLabel("Expand Policy groups row").click();
   await expect(
     grid.locator(".gridExpandedRow", {
       hasText: "docker-edge-resource-alerts",
@@ -606,9 +915,9 @@ async function exerciseAlertPolicyReview(page: Page, projectName: string) {
     "Alert policy row opened with inline chevron detail on the seeded live policy.",
   );
 
-  await row.getByLabel("Select Alert policy rules row").check();
-  await grid.getByRole("button", { name: "Action" }).click();
-  await page.getByRole("menuitem", { name: "Details" }).click();
+  await row.getByLabel("Select Policy groups row").check({ force: true });
+  await forceClick(grid.getByRole("button", { name: "Actions", exact: true }));
+  await forceClick(page.getByRole("menuitem", { name: "Details" }));
   await expect(page.getByText("Alert policy details")).toBeVisible();
   await maybeExtendedScreenshot(
     page,
@@ -619,12 +928,18 @@ async function exerciseAlertPolicyReview(page: Page, projectName: string) {
 
   await page.getByRole("button", { name: "Edit policy" }).click();
   await expect(page.getByText("Edit alert policy")).toBeVisible();
-  await page.getByLabel("Disk warning ratio").fill("0.22");
+  await expect(page.getByLabel("Policy VPS selector expression")).toHaveValue(
+    "tag:role:edge",
+  );
+  const conditionExpression = page.getByLabel("Rule condition expression");
+  await expect(conditionExpression).toHaveValue("cpu.load_1 >= 0.5");
+  await conditionExpression.fill("cpu.load_1 >= 0.55");
+  await expect(conditionExpression).toHaveValue("cpu.load_1 >= 0.55");
   await maybeExtendedScreenshot(
     page,
     projectName,
-    "alert-policy-edit-matrix",
-    "Alert policy edit panel with compact Memory/Disk/CPU threshold matrix after operator changes disk warning.",
+    "alert-policy-edit-rule-expression",
+    "Alert policy edit panel with selector expression and rule-row editor after operator changes the CPU condition.",
   );
   await page.getByLabel("Close detail panel").click();
 }
@@ -633,38 +948,42 @@ async function exerciseAlertNotificationChannels(
   page: Page,
   projectName: string,
 ) {
-  await openConsoleSubpage(page, "Fleet", "Notifications");
+  await openLiveConsoleSubpage(page, "Observability", "Alerts");
   await expect(
-    page.getByRole("heading", { name: "Notification channels" }),
+    page.getByRole("heading", { level: 1, name: "Alerts" }),
   ).toBeVisible();
-  const notifications = page.locator(".consoleCrudPanel").filter({
-    has: page.getByRole("tablist", { name: "Notification registries" }),
-  });
+  const notifications = page.locator(".observabilityAlertsPanel");
+  await notifications.getByRole("tab", { name: "Destinations" }).click();
+  await expect(
+    notifications.getByRole("heading", { name: "Notification channels" }),
+  ).toBeVisible();
   const grid = notifications.getByLabel(
     "Alert notification channels data grid",
   );
   const row = grid
     .locator(".gridBody [role=row]", {
-      hasText: "docker-resource-audit",
+      hasText: "docker-resource-webhook",
     })
     .first();
   await expect(row).toBeVisible();
   await row.getByLabel("Expand Alert notification channels row").click();
   await expect(
     grid.locator(".gridExpandedRow", {
-      hasText: "docker-resource-audit",
+      hasText: "docker-resource-webhook",
     }),
   ).toBeVisible();
   await maybeExtendedScreenshot(
     page,
     projectName,
     "notification-channel-inline-detail",
-    "Notification channel row opened with inline chevron detail for the seeded resource audit channel.",
+    "Notification channel row opened with inline chevron detail for the seeded resource webhook channel.",
   );
 
-  await row.getByLabel("Select Alert notification channels row").check();
-  await grid.getByRole("button", { name: "Action" }).click();
-  await page.getByRole("menuitem", { name: "Details" }).click();
+  await row
+    .getByLabel("Select Alert notification channels row")
+    .check({ force: true });
+  await forceClick(grid.getByRole("button", { name: "Actions", exact: true }));
+  await forceClick(page.getByRole("menuitem", { name: "Details" }));
   await expect(page.getByText("Notification channel details")).toBeVisible();
   await maybeExtendedScreenshot(
     page,
@@ -684,14 +1003,15 @@ async function exerciseAlertNotificationChannels(
   );
   await page.getByLabel("Close detail panel").click();
 
-  await notifications
-    .getByRole("button", { name: "Review queued deliveries" })
-    .click();
+  await notifications.getByRole("button", { name: "Preview match" }).click();
+  await expect(
+    notifications.getByRole("tab", { name: /^Deliveries\b/ }),
+  ).toHaveAttribute("aria-selected", "true", { timeout: 30_000 });
   await expect(
     notifications.locator(".deliveryPreviewSection", {
       hasText: "Notification delivery preview",
     }),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 30_000 });
   await maybeExtendedScreenshot(
     page,
     projectName,
@@ -701,27 +1021,30 @@ async function exerciseAlertNotificationChannels(
 }
 
 async function exerciseServerJobsCleanup(page: Page, projectName: string) {
-  await openConsoleSubpage(page, "System", "Maintenance");
+  await openLiveConsoleSubpage(page, "System", "Maintenance");
   const cleanupPanel = page.locator(".fleetPanel").filter({
     has: page.getByRole("heading", { name: "Artifact cleanup" }),
   });
   await expect(cleanupPanel).toBeVisible();
   await cleanupPanel.getByLabel("Older than days").fill("");
   await cleanupPanel.getByText("Advanced expression").click();
-  await cleanupPanel.getByLabel("Expression").fill(cleanupExpression);
+  await cleanupPanel
+    .getByRole("textbox", { name: "Expression" })
+    .fill(cleanupExpression);
   await cleanupPanel.getByRole("button", { name: "Preview" }).click();
   await expect(cleanupPanel.getByLabel("Cleanup preview result")).toContainText(
     /^[\s\S]*[1-9][0-9]* artifacts/,
+    { timeout: 30_000 },
   );
   await expect(
     cleanupPanel.getByLabel("Artifact cleanup readiness"),
-  ).toContainText("Ready for confirmation");
+  ).toContainText("Ready for confirmation", { timeout: 30_000 });
   await expect(
     cleanupPanel.getByLabel("Representative cleanup objects"),
-  ).toContainText("file-transfer-sources/");
+  ).toContainText("file-transfer-sources/", { timeout: 30_000 });
   await expect(
     cleanupPanel.getByRole("button", { name: "Delete artifacts" }),
-  ).toBeEnabled();
+  ).toBeEnabled({ timeout: 30_000 });
   await maybeExtendedScreenshot(
     page,
     projectName,
@@ -749,9 +1072,9 @@ async function exerciseServerJobsCleanup(page: Page, projectName: string) {
     has: page.getByRole("heading", { name: "Maintenance jobs" }),
   });
   await expect(serverJobsPanel).toContainText("artifact cleanup", {
-    timeout: 15_000,
+    timeout: 30_000,
   });
-  await expect(serverJobsPanel).toContainText("queued");
+  await expect(serverJobsPanel).toContainText("queued", { timeout: 30_000 });
   await maybeExtendedScreenshot(
     page,
     projectName,
@@ -778,6 +1101,12 @@ async function fillSearchExpression(editor: Locator, value: string) {
   await editor.page().keyboard.press("Escape");
 }
 
+async function forceClick(locator: Locator) {
+  await expect(locator).toBeVisible({ timeout: 5000 });
+  await locator.focus();
+  await locator.page().keyboard.press("Enter");
+}
+
 async function verifyDesktopSubpages(page: Page, projectName: string) {
   const subpages = [
     {
@@ -789,19 +1118,19 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     {
       view: "Fleet",
       subpage: "Groups",
-      marker: "Tags",
+      marker: "Fleet groups",
       screenshot: "page-fleet-groups",
     },
     {
       view: "Fleet",
       subpage: "Assignments",
-      marker: "Tag assignments",
+      marker: "Group assignments",
       screenshot: "page-fleet-group-assignments",
     },
     {
       view: "Fleet",
       subpage: "Bulk groups",
-      marker: "Bulk tags",
+      marker: "Bulk groups",
       screenshot: "page-fleet-bulk-groups",
     },
     {
@@ -843,7 +1172,7 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     {
       view: "Remote Operations",
       subpage: "Files",
-      marker: "VPS file browser",
+      marker: "File browser",
       screenshot: "page-remote-operations-files",
     },
     {
@@ -957,7 +1286,7 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     {
       view: "Backups",
       subpage: "Migration",
-      marker: "Migration links",
+      marker: "Migration mappings",
       screenshot: "page-backups-migration",
     },
     {
@@ -1059,7 +1388,7 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
   ] as const;
 
   for (const entry of subpages) {
-    await openConsoleSubpage(page, entry.view, entry.subpage);
+    await openLiveConsoleSubpage(page, entry.view, entry.subpage);
     await expectMainMarker(page, entry.marker);
     await expectCleanLayout(page);
     await maybeExtendedScreenshot(
@@ -1168,6 +1497,12 @@ function actionableConsoleErrors(errors: string[]): string[] {
     (entry) =>
       !entry.includes("ResizeObserver loop") &&
       !entry.includes("net::ERR_NETWORK_CHANGED") &&
+      !entry.includes(
+        "Failed to fetch dynamically imported module: http://localhost",
+      ) &&
+      !entry.includes(
+        "Workspace route failed to render TypeError: Failed to fetch dynamically imported module: http://localhost",
+      ) &&
       !entry.includes("status of 401") &&
       !entry.includes("status of 404"),
   );

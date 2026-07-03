@@ -3999,6 +3999,22 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/gateway-sessions" && method === "GET")
           return emptyArrayResponse();
+        if (
+          (pathname === "/api/v1/auth/login" ||
+            pathname === "/api/v1/auth/bootstrap") &&
+          method === "POST"
+        ) {
+          return jsonResponse({
+            access_token:
+              "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            expires_in_secs: 900,
+            operator: operatorView(operatorRecords[0]),
+            refresh_expires_in_secs: 1_209_600,
+            refresh_token:
+              "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            token_type: "Bearer",
+          });
+        }
         if (pathname === "/api/v1/auth/me" && method === "GET")
           return jsonResponse(operatorView(operatorRecords[0]));
         if (pathname === "/api/v1/auth/preferences" && method === "PUT") {

@@ -20,7 +20,9 @@ long_running_secs="${VPSMAN_DOCKER_FLEET_LONG_RUNNING_SECS:-0}"
 simulate_api_backlog="${VPSMAN_DOCKER_FLEET_SIMULATE_API_BACKLOG:-0}"
 gateway_command_output_ttl_secs="${VPSMAN_DOCKER_FLEET_COMMAND_OUTPUT_TTL_SECS:-86400}"
 bulk_max_timeout_secs=45
+bulk_follow_max_polls=$((240 + agent_count * 8))
 rollup_bucket_secs=60
+alert_notification_dispatch_limit=200
 
 run_id="docker-fleet-$(date +%s%N)"
 label_key="vpsman.smoke.run"
@@ -48,6 +50,12 @@ mkdir -p "$object_store_dir" "$screenshot_dir"
 pg_container="vpsman-$run_id-postgres"
 api_container="vpsman-$run_id-api"
 gateway_container="vpsman-$run_id-gateway"
+
+smoke_fleet_log() {
+  printf '[docker-fleet:%s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2
+}
+
+smoke_fleet_log "starting run_id=$run_id agents=$agent_count long_running_secs=$long_running_secs simulate_api_backlog=$simulate_api_backlog extended_review=$extended_review"
 
 cleanup_docker_fleet_smoke() {
   docker ps -aq --filter "label=$label_key=$run_id" | xargs -r docker rm -f >/dev/null 2>&1 || true
@@ -134,6 +142,7 @@ docker run -d \
   -p "127.0.0.1:$pg_port:5432" \
   postgres:16-alpine >/dev/null
 
+smoke_fleet_log "waiting for postgres on 127.0.0.1:$pg_port"
 deadline=$((SECONDS + 45))
 until docker exec "$pg_container" psql -U vpsman -d vpsman -tAc 'select 1' >/dev/null 2>&1; do
   if ((SECONDS >= deadline)); then
@@ -143,6 +152,7 @@ until docker exec "$pg_container" psql -U vpsman -d vpsman -tAc 'select 1' >/dev
   sleep 0.25
 done
 smoke_wait_tcp 127.0.0.1 "$pg_port"
+smoke_fleet_log "postgres is ready"
 
 gateway_keys="$(target/debug/vpsctl noise-keygen)"
 gateway_private_hex="$(jq -r '.private_key_hex' <<<"$gateway_keys")"
@@ -171,10 +181,12 @@ docker run -d \
   "$runtime_image" \
   "$ROOT_DIR/target/debug/vpsman-api" >/dev/null
 
+smoke_fleet_log "waiting for API health on $api_url"
 if ! smoke_wait_http "$api_url/health"; then
   dump_docker_logs "API did not become healthy"
   exit 1
 fi
+smoke_fleet_log "API is healthy; bootstrapping operator"
 
 auth_json="$(curl -fsS \
   -H "Content-Type: application/json" \
@@ -182,6 +194,7 @@ auth_json="$(curl -fsS \
   "$api_url/api/v1/auth/bootstrap")"
 access_token="$(jq -r '.access_token' <<<"$auth_json")"
 jq -e '.operator.username == "docker-fleet-admin" and .operator.role == "admin"' <<<"$auth_json" >/dev/null
+smoke_fleet_log "operator bootstrap succeeded"
 
 docker run -d \
   --name "$gateway_container" \
@@ -203,6 +216,7 @@ docker run -d \
   "$runtime_image" \
   "$ROOT_DIR/target/debug/vpsman-gateway" >/dev/null
 
+smoke_fleet_log "waiting for gateway data/control listeners"
 if ! smoke_wait_tcp 127.0.0.1 "$gateway_port"; then
   dump_docker_logs "gateway agent listener did not start"
   exit 1
@@ -211,6 +225,7 @@ if ! smoke_wait_tcp 127.0.0.1 "$gateway_control_port"; then
   dump_docker_logs "gateway control listener did not start"
   exit 1
 fi
+smoke_fleet_log "gateway listeners are ready"
 
 providers=(alpha beta gamma)
 countries=(US DE SG NL)
@@ -240,6 +255,7 @@ done
 first_client_id=""
 second_client_id=""
 
+smoke_fleet_log "starting $agent_count agent containers"
 for ((i = 1; i <= agent_count; i += 1)); do
   index=$((i - 1))
   provider="${providers[$((index % ${#providers[@]}))]}"
@@ -275,12 +291,14 @@ for ((i = 1; i <= agent_count; i += 1)); do
     --cpus 0.5 \
     --pids-limit 96 \
     -e RUST_LOG=vpsman_agent=warn \
+    -e VPSMAN_AGENT_STATE_DIR="$agent_dir/state" \
     -e VPSMAN_SUPERVISOR_DIR="$agent_dir/supervisor" \
     -v "$ROOT_DIR:$ROOT_DIR" \
     -w "$ROOT_DIR" \
     "$runtime_image" \
     "$ROOT_DIR/target/debug/vpsman-agent" --config "$agent_config" run >/dev/null
 done
+smoke_fleet_log "agent containers started; waiting for all agents online"
 
 deadline=$((SECONDS + 90))
 online_count=0
@@ -293,7 +311,9 @@ until [[ "$online_count" == "$agent_count" ]]; do
   online_count="$(api_get "/api/v1/fleet/summary" | jq -r '.online')"
   sleep 0.5
 done
+smoke_fleet_log "all agents online ($online_count/$agent_count)"
 
+smoke_fleet_log "waiting for telemetry rollups from all agents"
 deadline=$((SECONDS + 60))
 telemetry_rollup_count=0
 telemetry_ready_client_count=0
@@ -308,7 +328,9 @@ until ((telemetry_ready_client_count == agent_count)); do
   sleep 1
 done
 telemetry_rollup_count="$(docker exec "$pg_container" psql -U vpsman -d vpsman -tAc "SELECT count(*) FROM telemetry_rollups WHERE bucket_secs = $rollup_bucket_secs")"
+smoke_fleet_log "telemetry rollups ready: clients=$telemetry_ready_client_count rows=$telemetry_rollup_count"
 
+smoke_fleet_log "waiting for network-rate telemetry from all agents"
 deadline=$((SECONDS + 60))
 telemetry_network_rate_ready_client_count=0
 until ((telemetry_network_rate_ready_client_count >= agent_count)); do
@@ -323,7 +345,9 @@ until ((telemetry_network_rate_ready_client_count >= agent_count)); do
   ')"
   sleep 1
 done
+smoke_fleet_log "network-rate telemetry ready: clients=$telemetry_network_rate_ready_client_count"
 
+smoke_fleet_log "validating fleet inventory, tags, dashboard, and system dashboard APIs"
 agents_json="$(api_get "/api/v1/agents")"
 jq -e \
   --argjson expected "$agent_count" \
@@ -415,7 +439,9 @@ api_get "/api/v1/dashboard/overview?window=1h&scope_kind=country&scope_value=US&
     .scope.matched_clients == $us_count and
     any(.label_clusters[]; .label == "provider:alpha" and .total == $alpha_us_count)
   ' >/dev/null
+smoke_fleet_log "fleet/dashboard API validation passed"
 
+smoke_fleet_log "validating alert notification, network plan, backup metadata, and preferences workflows"
 alert_policy_json="$(vpsctl_json alert-policy upsert \
   --name docker-edge-resource-alerts \
   --selector 'tag:role:edge' \
@@ -432,41 +458,41 @@ jq -e '
 ' <<<"$alert_policy_json" >/dev/null
 
 alert_notification_channel_json="$(vpsctl_json fleet-alert-notification-channel-upsert \
-  --name docker-resource-audit \
+  --name docker-resource-webhook \
   --scope-kind global \
   --min-severity warning \
   --categories resource \
   --operator-states open \
-  --delivery-kind audit_log \
-  --target audit:fleet \
+  --delivery-kind webhook \
+  --target http://127.0.0.1:9/vpsman/docker-resource \
   --cooldown-secs 600 \
   --notes docker-fleet-live-review \
   --confirmed)"
 alert_notification_channel_id="$(jq -r '.id' <<<"$alert_notification_channel_json")"
 jq -e '
-  .name == "docker-resource-audit" and
+  .name == "docker-resource-webhook" and
   .scope_kind == "global" and
   .min_severity == "warning" and
   .categories == ["resource"] and
   .operator_states == ["open"] and
-  .delivery_kind == "audit_log" and
+  .delivery_kind == "webhook" and
   .enabled == true
 ' <<<"$alert_notification_channel_json" >/dev/null
 
 alert_notification_custom_channel_json="$(vpsctl_json fleet-alert-notification-channel-upsert \
-  --name docker-resource-pager \
+  --name docker-resource-backup-webhook \
   --scope-kind global \
   --min-severity warning \
   --categories resource \
   --operator-states open \
-  --delivery-kind custom_pager \
-  --target adapter:docker-pager \
+  --delivery-kind webhook \
+  --target http://127.0.0.1:9/vpsman/docker-resource-backup \
   --cooldown-secs 600 \
   --notes docker-fleet-live-review-custom \
   --confirmed)"
 jq -e '
-  .name == "docker-resource-pager" and
-  .delivery_kind == "custom_pager" and
+  .name == "docker-resource-backup-webhook" and
+  .delivery_kind == "webhook" and
   .enabled == true
 ' <<<"$alert_notification_custom_channel_json" >/dev/null
 
@@ -474,20 +500,48 @@ alert_notification_dry_run_json="$(vpsctl_json fleet-alert-notification-dispatch
   --category resource \
   --include-muted \
   --dry-run \
-  --limit 50)"
+  --limit "$alert_notification_dispatch_limit")"
 jq -e '
   length >= 1 and
-  any(.[]; .channel_name == "docker-resource-audit" and .status == "matched_dry_run")
+  any(.[]; .channel_name == "docker-resource-webhook" and .status == "matched_dry_run")
 ' <<<"$alert_notification_dry_run_json" >/dev/null
+alert_notification_dispatch_preview_hash="$(jq -r '.[0].review_preview_hash // empty' <<<"$alert_notification_dry_run_json")"
+if [[ ! "$alert_notification_dispatch_preview_hash" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "fleet alert notification dry run did not return a valid preview hash" >&2
+  exit 1
+fi
 
+alert_notification_dispatch_err="$SMOKE_TMPDIR/alert-notification-dispatch.err"
+trap - ERR
+set +e
 alert_notification_dispatch_json="$(vpsctl_json fleet-alert-notification-dispatch \
   --category resource \
   --include-muted \
+  --preview-hash "$alert_notification_dispatch_preview_hash" \
   --confirmed \
-  --limit 50)"
+  --limit "$alert_notification_dispatch_limit" 2>"$alert_notification_dispatch_err")"
+alert_notification_dispatch_status="$?"
+set -e
+trap 'docker_fleet_smoke_err "$LINENO" "$?"' ERR
+if [[ "$alert_notification_dispatch_status" != "0" ]]; then
+  alert_notification_retry_dry_run_json="$(vpsctl_json fleet-alert-notification-dispatch \
+    --category resource \
+    --include-muted \
+    --dry-run \
+    --limit "$alert_notification_dispatch_limit" || printf '[]')"
+  echo "fleet alert notification dispatch failed after preview" >&2
+  echo "first_preview_hash=$alert_notification_dispatch_preview_hash" >&2
+  echo "retry_preview_hash=$(jq -r '.[0].review_preview_hash // empty' <<<"$alert_notification_retry_dry_run_json")" >&2
+  echo "first_preview_summary:" >&2
+  jq -c 'group_by(.alert_category, .alert_severity, .channel_name, .status) | map({alert_category: .[0].alert_category, alert_severity: .[0].alert_severity, channel_name: .[0].channel_name, status: .[0].status, count: length})' <<<"$alert_notification_dry_run_json" >&2 || true
+  echo "retry_preview_summary:" >&2
+  jq -c 'group_by(.alert_category, .alert_severity, .channel_name, .status) | map({alert_category: .[0].alert_category, alert_severity: .[0].alert_severity, channel_name: .[0].channel_name, status: .[0].status, count: length})' <<<"$alert_notification_retry_dry_run_json" >&2 || true
+  cat "$alert_notification_dispatch_err" >&2 || true
+  exit "$alert_notification_dispatch_status"
+fi
 jq -e --arg channel_id "$alert_notification_channel_id" '
   length >= 1 and
-  any(.[]; .channel_id == $channel_id and .status == "delivered")
+  any(.[]; .channel_id == $channel_id and .status == "queued" and .delivery_kind == "webhook")
 ' <<<"$alert_notification_dispatch_json" >/dev/null
 
 schedule_json="$(vpsctl_json schedule-create \
@@ -528,7 +582,7 @@ api_post "/api/v1/tunnel-plans" "$(jq -n \
     "prefix_len": 31
   },
   "latency_primary_family": "ipv4",
-  "bandwidth": "1000m",
+  "bandwidth_mbps": 1000,
   "latency_ms": 12,
   "packet_loss_ratio": 0,
   "preference": 1.0,
@@ -552,7 +606,9 @@ api_put "/api/v1/auth/preferences" '{
   "language": "en",
   "sidebar_subpanel_default": "all"
 }' | jq -e '.preferences.timezone == "UTC" and .preferences.sidebar_subpanel_default == "all"' >/dev/null
+smoke_fleet_log "pre-job workflow validation passed"
 
+smoke_fleet_log "dispatching provider:alpha bulk job ($provider_alpha_count targets)"
 job_json="$(vpsctl_json job-shell \
   --script 'printf "docker-bulk-ok\n"' \
   --tags provider:alpha \
@@ -566,23 +622,68 @@ jq -e --argjson alpha_count "$provider_alpha_count" '
 ' <<<"$job_json" >/dev/null
 smoke_assert_job_create_queued "$job_json" "$provider_alpha_count"
 
-vpsctl_json job-follow --job-id "$job_id" --interval-ms 250 --max-polls 240 --json >"$SMOKE_TMPDIR/job-follow.jsonl"
-api_get "/api/v1/jobs/$job_id" | jq -e \
+smoke_fleet_log "following bulk job $job_id"
+trap - ERR
+set +e
+vpsctl_json job-follow --job-id "$job_id" --interval-ms 250 --max-polls "$bulk_follow_max_polls" --json >"$SMOKE_TMPDIR/job-follow.jsonl"
+job_follow_status="$?"
+set -e
+trap 'docker_fleet_smoke_err "$LINENO" "$?"' ERR
+if [[ "$job_follow_status" != "0" ]]; then
+  echo "bulk job follow failed:" >&2
+  api_get "/api/v1/jobs/$job_id" | jq . >&2 || true
+  echo "bulk job target status counts:" >&2
+  api_get "/api/v1/jobs/$job_id/targets" \
+    | jq 'group_by(.status) | map({status: .[0].status, count: length, clients: map(.client_id)})' >&2 || true
+  echo "bulk job output summary:" >&2
+  api_get "/api/v1/jobs/$job_id/outputs" \
+    | jq '.items | group_by(.client_id) | map({client_id: .[0].client_id, streams: map(.stream), done: map(select(.done)) | length})' >&2 || true
+  echo "bulk job follow tail:" >&2
+  tail -n 20 "$SMOKE_TMPDIR/job-follow.jsonl" >&2 || true
+  dump_docker_logs "bulk job follow failed"
+  exit "$job_follow_status"
+fi
+if ! api_get "/api/v1/jobs/$job_id" | jq -e \
   --argjson alpha_count "$provider_alpha_count" '
   .status == "completed" and .target_count == $alpha_count
-' >/dev/null
-api_get "/api/v1/jobs/$job_id/targets" | jq -e \
+' >/dev/null; then
+  echo "bulk job did not finish completed:" >&2
+  api_get "/api/v1/jobs/$job_id" | jq . >&2 || true
+  echo "bulk job target status counts:" >&2
+  api_get "/api/v1/jobs/$job_id/targets" \
+    | jq 'group_by(.status) | map({status: .[0].status, count: length, clients: map(.client_id)})' >&2 || true
+  echo "bulk job output summary:" >&2
+  api_get "/api/v1/jobs/$job_id/outputs" \
+    | jq '.items | group_by(.client_id) | map({client_id: .[0].client_id, streams: map(.stream), done: map(select(.done)) | length})' >&2 || true
+  echo "bulk job follow tail:" >&2
+  tail -n 20 "$SMOKE_TMPDIR/job-follow.jsonl" >&2 || true
+  dump_docker_logs "bulk job did not finish completed"
+  exit 1
+fi
+if ! api_get "/api/v1/jobs/$job_id/targets" | jq -e \
   --argjson alpha_count "$provider_alpha_count" '
   length == $alpha_count and all(.[]; .status == "completed" and .exit_code == 0)
-' >/dev/null
-api_get "/api/v1/jobs/$job_id/outputs" | jq -e \
+' >/dev/null; then
+  echo "bulk job targets were not all successful:" >&2
+  api_get "/api/v1/jobs/$job_id/targets" | jq . >&2 || true
+  dump_docker_logs "bulk job targets were not all successful"
+  exit 1
+fi
+if ! api_get "/api/v1/jobs/$job_id/outputs" | jq -e \
   --argjson alpha_count "$provider_alpha_count" '
   ([.items[] | select(.stream == "stdout") | .data_base64 | @base64d] | map(select(. == "docker-bulk-ok\n")) | length) == $alpha_count
-' >/dev/null
+' >/dev/null; then
+  echo "bulk job outputs were incomplete:" >&2
+  api_get "/api/v1/jobs/$job_id/outputs" | jq . >&2 || true
+  dump_docker_logs "bulk job outputs were incomplete"
+  exit 1
+fi
+smoke_fleet_log "bulk job $job_id completed with all $provider_alpha_count targets"
 
 long_job_id=""
 if ((long_running_secs > 0)); then
   long_timeout=$((long_running_secs + 120))
+  smoke_fleet_log "dispatching long-running fleet job (${long_running_secs}s command; $agent_count targets)"
   long_job_json="$(vpsctl_json job-shell \
     --script "printf 'docker-long-start\n'; sleep $long_running_secs; printf 'docker-long-done\n'" \
     --tags bulk-target \
@@ -592,6 +693,7 @@ if ((long_running_secs > 0)); then
   smoke_assert_job_create_queued "$long_job_json" "$agent_count"
   sleep 2
   if [[ "$simulate_api_backlog" == "1" ]]; then
+    smoke_fleet_log "pausing API container for backlog simulation"
     docker pause "$api_container" >/dev/null
     sleep 6
     docker unpause "$api_container" >/dev/null
@@ -599,8 +701,35 @@ if ((long_running_secs > 0)); then
       dump_docker_logs "API did not recover after backlog pause"
       exit 1
     fi
+    smoke_fleet_log "API recovered after backlog simulation"
   fi
-  vpsctl_json job-follow --job-id "$long_job_id" --interval-ms 500 --max-polls "$((long_timeout * 2))" --json >"$SMOKE_TMPDIR/long-job-follow.jsonl"
+  smoke_fleet_log "following long-running job $long_job_id; heartbeat every 30s"
+  trap - ERR
+  set +e
+  vpsctl_json job-follow --job-id "$long_job_id" --interval-ms 500 --max-polls "$((long_timeout * 2))" --json >"$SMOKE_TMPDIR/long-job-follow.jsonl" &
+  long_follow_pid="$!"
+  long_follow_start="$SECONDS"
+  while kill -0 "$long_follow_pid" >/dev/null 2>&1; do
+    sleep 30
+    if kill -0 "$long_follow_pid" >/dev/null 2>&1; then
+      elapsed=$((SECONDS - long_follow_start))
+      long_job_snapshot="$(api_get "/api/v1/jobs/$long_job_id" 2>/dev/null || true)"
+      long_job_status="$(jq -r '.status // "unavailable"' <<<"$long_job_snapshot" 2>/dev/null || echo unavailable)"
+      target_summary="$(api_get "/api/v1/jobs/$long_job_id/targets" 2>/dev/null \
+        | jq -r 'group_by(.status) | map("\(.[0].status)=\(length)") | join(",")' 2>/dev/null \
+        || echo "targets=unavailable")"
+      smoke_fleet_log "long-running job heartbeat elapsed=${elapsed}s status=$long_job_status targets=$target_summary"
+    fi
+  done
+  wait "$long_follow_pid"
+  long_follow_status="$?"
+  set -e
+  trap 'docker_fleet_smoke_err "$LINENO" "$?"' ERR
+  if [[ "$long_follow_status" != "0" ]]; then
+    echo "long-running job follow failed:" >&2
+    tail -n 20 "$SMOKE_TMPDIR/long-job-follow.jsonl" >&2 || true
+    exit "$long_follow_status"
+  fi
   long_job_status_json="$(api_get "/api/v1/jobs/$long_job_id")"
   if ! jq -e --argjson expected "$agent_count" '
     .status == "completed" and .target_count == $expected
@@ -629,8 +758,10 @@ if ((long_running_secs > 0)); then
     .current.gateway_events.status == "live" and
     any(.series[]; .metric == "dispatch.queue_depth")
   ' >/dev/null
+  smoke_fleet_log "long-running job $long_job_id completed with all $agent_count targets"
 fi
 
+smoke_fleet_log "validating gateway sessions and audit trail"
 gateway_session_limit=$((agent_count * 4))
 api_get "/api/v1/gateway-sessions?limit=$gateway_session_limit" | jq -e --argjson expected "$agent_count" '
   ([.[] | select(.gateway_id == "docker-fleet-gateway" and .status == "active") | .client_id] | unique | length) == $expected
@@ -642,6 +773,7 @@ api_get "/api/v1/audit?limit=100" | jq -e '
   any(.[]; .action == "backup.requested_metadata_only")
 ' >/dev/null
 
+smoke_fleet_log "uploading cleanup source artifact and validating cleanup preview"
 cleanup_expression='artifact.domain = "file_transfer_source"'
 cleanup_source="$SMOKE_TMPDIR/docker-fleet-q2-capacity-reconciliation.csv"
 printf 'account,provider,country,role,instance_count\nacme-network,alpha,US,edge,2\nacme-network,alpha,DE,core,2\nrun,%s,total,%s\n' "$run_id" "$agent_count" >"$cleanup_source"
@@ -666,10 +798,20 @@ jq -e --arg expression "$cleanup_expression" '
   (.preview_hash | length) == 64
 ' <<<"$cleanup_preview_json" >/dev/null
 
+frontend_test_host="${VPSMAN_FRONTEND_TEST_HOST:-localhost}"
+smoke_fleet_log "building frontend production assets for live Docker fleet UI smoke"
+env \
+  VPSMAN_API_PROXY="$api_url" \
+  VPSMAN_FRONTEND_SMOKE_ROOT="$ROOT_DIR" \
+  bash -ic 'cd "$VPSMAN_FRONTEND_SMOKE_ROOT/frontend" && npm run build'
+
+smoke_fleet_log "running live Docker fleet UI smoke (desktop and mobile sequentially)"
 if ! env \
   VPSMAN_API_PROXY="$api_url" \
   VPSMAN_FRONTEND_SMOKE_ROOT="$ROOT_DIR" \
+  VPSMAN_FRONTEND_TEST_HOST="$frontend_test_host" \
   VPSMAN_FRONTEND_TEST_PORT="$frontend_port" \
+  VPSMAN_FRONTEND_TEST_SERVER_COMMAND="npm run preview -- --host $frontend_test_host --port $frontend_port" \
   VPSMAN_DOCKER_FLEET_UI_SMOKE=1 \
   VPSMAN_DOCKER_FLEET_EXPECTED_TOTAL="$agent_count" \
   VPSMAN_DOCKER_FLEET_PROVIDER_ALPHA_COUNT="$provider_alpha_count" \
@@ -681,11 +823,13 @@ if ! env \
   VPSMAN_DOCKER_FLEET_USERNAME="$operator_username" \
   VPSMAN_DOCKER_FLEET_PASSWORD="$operator_password" \
   VPSMAN_DOCKER_FLEET_SCREENSHOT_DIR="$screenshot_dir" \
-  bash -ic 'cd "$VPSMAN_FRONTEND_SMOKE_ROOT/frontend" && npm run test:ui -- tests/live-docker-fleet.spec.ts --project desktop-chrome --project mobile-chrome'; then
+  bash -ic 'cd "$VPSMAN_FRONTEND_SMOKE_ROOT/frontend" && npm run test:ui -- tests/live-docker-fleet.spec.ts --project desktop-chrome --project mobile-chrome --workers=1'; then
   dump_docker_logs "live Docker fleet UI smoke failed"
   exit 1
 fi
+smoke_fleet_log "live Docker fleet UI smoke passed"
 
+smoke_fleet_log "running artifact cleanup worker validation"
 cleanup_worker_log="$SMOKE_TMPDIR/artifact-cleanup-worker.log"
 if ! env \
   VPSMAN_POSTGRES_URL="$postgres_url" \

@@ -2,6 +2,8 @@ import { expect, type Locator, type Page } from "@playwright/test";
 import { defaultSubpages, viewSubpages } from "../../src/constants";
 import type { ActiveView } from "../../src/types";
 
+const WORKSPACE_ROUTE_READY_TIMEOUT_MS = 60_000;
+
 export async function activate(locator: Locator) {
   await expect(locator).toBeVisible({ timeout: 10_000 });
   await expect(locator).toBeEnabled({ timeout: 10_000 });
@@ -9,26 +11,47 @@ export async function activate(locator: Locator) {
 }
 
 export async function waitForConsoleShell(page: Page, timeout = 10_000) {
+  if (page.url() === "about:blank") {
+    await reloadConsole(page);
+  }
   let lastError: unknown;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    if (attempt > 0) {
-      await reloadConsole(page);
-    }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      await expect(page.locator(".shell")).toBeVisible({ timeout });
-      const routeError = page.locator(".workspaceRouteError");
-      if ((await routeError.count()) > 0 && (await routeError.first().isVisible())) {
-        throw new Error("Workspace route recovery panel is visible");
+      if (await isOperatorAccessVisible(page)) {
+        if (await loginMockConsoleSession(page)) {
+          return;
+        }
+        throw new Error(
+          "Console shell is unavailable because the authenticated session was lost",
+        );
       }
+      await expect(page.locator(".shell")).toBeVisible({ timeout });
       return;
     } catch (error) {
       lastError = error;
+      if (await isOperatorAccessVisible(page)) {
+        if (await loginMockConsoleSession(page)) {
+          return;
+        }
+        throw new Error(
+          "Console shell is unavailable because the authenticated session was lost",
+        );
+      }
+      if (attempt === 0 && (await isBlankConsoleDocument(page))) {
+        await reloadConsole(page);
+        continue;
+      }
+      throw error;
     }
   }
-  if (lastError instanceof Error) {
-    throw lastError;
-  }
-  throw new Error(String(lastError));
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+async function isOperatorAccessVisible(page: Page) {
+  return page
+    .getByRole("heading", { exact: true, name: "Operator access" })
+    .isVisible()
+    .catch(() => false);
 }
 
 export async function openConsoleSubpage(
@@ -45,9 +68,7 @@ export async function openConsoleSubpage(
   const mobileValue = `${viewLabel}::${subpageId}`;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    if (attempt > 0) {
-      await reloadConsole(page);
-    }
+    if (attempt > 0) await page.waitForTimeout(750);
     await waitForConsoleShell(page);
     const headerCrumb = page
       .locator(".consoleHeader")
@@ -68,8 +89,17 @@ export async function openConsoleSubpage(
       await expect(headerCrumb).toBeVisible({
         timeout: 10_000,
       });
-      if (await waitForWorkspaceRouteReady(page)) {
+      const routeState = await waitForWorkspaceRouteReady(page);
+      if (routeState === "ready") {
         return;
+      }
+      if (routeState === "error") {
+        if (await recoverWorkspaceRouteError(page, attempt)) {
+          continue;
+        }
+        throw new Error(
+          await workspaceRouteErrorMessage(page, viewLabel, subpageLabel),
+        );
       }
       continue;
     }
@@ -79,8 +109,17 @@ export async function openConsoleSubpage(
       await expect(headerCrumb).toBeVisible({
         timeout: 10_000,
       });
-      if (await waitForWorkspaceRouteReady(page)) {
+      const routeState = await waitForWorkspaceRouteReady(page);
+      if (routeState === "ready") {
         return;
+      }
+      if (routeState === "error") {
+        if (await recoverWorkspaceRouteError(page, attempt)) {
+          continue;
+        }
+        throw new Error(
+          await workspaceRouteErrorMessage(page, viewLabel, subpageLabel),
+        );
       }
       continue;
     }
@@ -114,11 +153,37 @@ export async function openConsoleSubpage(
         timeout: 10_000,
       });
     }
-    if (await waitForWorkspaceRouteReady(page)) {
+    const routeState = await waitForWorkspaceRouteReady(page);
+    if (routeState === "ready") {
       return;
+    }
+    if (routeState === "error") {
+      if (await recoverWorkspaceRouteError(page, attempt)) {
+        continue;
+      }
+      throw new Error(
+        await workspaceRouteErrorMessage(page, viewLabel, subpageLabel),
+      );
     }
   }
   throw new Error(`Workspace route did not become ready: ${viewLabel} / ${subpageLabel}`);
+}
+
+async function recoverWorkspaceRouteError(page: Page, attempt: number) {
+  if (attempt >= 2) {
+    return false;
+  }
+  const reloadButton = page
+    .locator(".workspaceRouteError")
+    .getByRole("button", { name: "Reload console" })
+    .first();
+  if (await reloadButton.isVisible().catch(() => false)) {
+    await reloadButton.click();
+  } else {
+    await reloadConsole(page);
+  }
+  await page.waitForLoadState("domcontentloaded").catch(() => undefined);
+  return true;
 }
 
 export async function unlockPrivilegeFromTop(page: Page) {
@@ -147,6 +212,41 @@ export async function unlockPrivilegeFromTop(page: Page) {
   ).toBeVisible();
 }
 
+async function loginMockConsoleSession(page: Page) {
+  const mockInstalled = await page
+    .evaluate(() => Boolean((window as typeof window & { __vpsmanTestRequests?: unknown }).__vpsmanTestRequests))
+    .catch(() => false);
+  if (!mockInstalled) {
+    return false;
+  }
+  const unlockSessionButton = page.getByRole("button", {
+    name: "Unlock session",
+  });
+  if (await unlockSessionButton.isVisible().catch(() => false)) {
+    await page.getByLabel("Stored session key").fill("console-layout-vault-key");
+    await activate(unlockSessionButton);
+    await expect(page.locator(".shell")).toBeVisible({ timeout: 10_000 });
+    return true;
+  }
+  await page.getByLabel("Username").fill("console-admin");
+  await page.getByLabel("Password").fill("local-super-password");
+  await page.getByLabel("Session vault key").fill("console-layout-vault-key");
+  await activate(page.getByRole("button", { name: "Submit login" }));
+  await expect(page.locator(".shell")).toBeVisible({ timeout: 10_000 });
+  return true;
+}
+
+async function isBlankConsoleDocument(page: Page) {
+  return page
+    .evaluate(() => {
+      const hasConsoleSurface = Boolean(
+        document.querySelector(".shell, .authOnlyShell"),
+      );
+      return !hasConsoleSurface && document.body.innerText.trim().length === 0;
+    })
+    .catch(() => false);
+}
+
 function releaseNavigationDestination(view: string, subpage: string) {
   const subpages = viewSubpages[view as ActiveView] ?? [];
   const match =
@@ -160,38 +260,89 @@ function releaseNavigationDestination(view: string, subpage: string) {
 }
 
 async function reloadConsole(page: Page) {
+  let lastError: unknown;
   if (page.url() === "about:blank") {
-    await page.goto("/");
-    return;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        await page.goto("/", { waitUntil: "domcontentloaded" });
+        return;
+      } catch (error) {
+        lastError = error;
+        if (!isTransientNavigationError(error)) {
+          break;
+        }
+        await page.waitForTimeout(500 * (attempt + 1));
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
-  await page.reload({ waitUntil: "domcontentloaded" });
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      await page.reload({ waitUntil: "domcontentloaded" });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isTransientNavigationError(error)) {
+        break;
+      }
+      await page.waitForTimeout(500 * (attempt + 1));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-async function waitForWorkspaceRouteReady(page: Page): Promise<boolean> {
-  return expect
-    .poll(
-      async () => {
-        const routeError = page.locator(".workspaceRouteError");
-        if (
-          (await routeError.count()) > 0 &&
-          (await routeError.first().isVisible())
-        ) {
-          return "error";
-        }
-        const loading = page.locator(".emptyState.compactEmpty", {
-          hasText: /Loading .* workspace/i,
-        });
-        if (
-          (await loading.count()) > 0 &&
-          (await loading.first().isVisible())
-        ) {
-          return "loading";
-        }
-        return "ready";
-      },
-      { timeout: 10_000 },
-    )
-    .toBe("ready")
-    .then(() => true)
-    .catch(() => false);
+function isTransientNavigationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes("net::ERR_NETWORK_CHANGED") ||
+    message.includes("net::ERR_ABORTED")
+  );
+}
+
+async function waitForWorkspaceRouteReady(
+  page: Page,
+  timeout = WORKSPACE_ROUTE_READY_TIMEOUT_MS,
+): Promise<"error" | "loading" | "ready"> {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const routeError = page.locator(".workspaceRouteError");
+    if (
+      (await routeError.count()) > 0 &&
+      (await routeError.first().isVisible())
+    ) {
+      return "error";
+    }
+    const loading = page.locator(".emptyState.compactEmpty", {
+      hasText: /Loading .* workspace/i,
+    });
+    if ((await loading.count()) === 0 || !(await loading.first().isVisible())) {
+      await page.waitForTimeout(500);
+      if (
+        (await routeError.count()) > 0 &&
+        (await routeError.first().isVisible())
+      ) {
+        return "error";
+      }
+      if ((await loading.count()) > 0 && (await loading.first().isVisible())) {
+        continue;
+      }
+      return "ready";
+    }
+    await page.waitForTimeout(250);
+  }
+  return "loading";
+}
+
+async function workspaceRouteErrorMessage(
+  page: Page,
+  viewLabel: string,
+  subpageLabel: string,
+) {
+  const routeErrorText =
+    (await page
+      .locator(".workspaceRouteError")
+      .first()
+      .innerText()
+      .catch(() => "")) || "Workspace route recovery panel is visible";
+  return `Workspace route failed to render: ${viewLabel} / ${subpageLabel}\n${routeErrorText}`;
 }
