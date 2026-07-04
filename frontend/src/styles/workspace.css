@@ -5625,29 +5625,6 @@ button.vpsDetailRecord:hover {
   color: var(--muted);
 }
 
-.authVaultUnlock {
-  display: grid;
-  gap: 12px;
-  border-top: 1px solid var(--border);
-  padding-top: 18px;
-}
-
-.authVaultUnlock .wideAction {
-  margin-top: 0;
-}
-
-.secondaryWideAction {
-  background: var(--surface);
-  border-color: var(--primary-border);
-  color: var(--primary-text);
-}
-
-.secondaryWideAction:disabled {
-  background: var(--border-subtle);
-  border-color: var(--border);
-  color: var(--placeholder);
-}
-
 .sectionHeader {
   display: flex;
   align-items: center;

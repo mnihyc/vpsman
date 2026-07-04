@@ -1,10 +1,8 @@
 import { normalizeHex, type PrivilegeMaterial } from "./privilege";
-import type { AuthResponse, OperatorView } from "./types";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const PRIVILEGE_STORAGE_KEY = "vpsman.privilegeVault";
-const AUTH_STORAGE_KEY = "vpsman.authVault";
 const KDF_ITERATIONS = 180_000;
 
 type StoredEncryptedVault = {
@@ -17,29 +15,12 @@ type StoredEncryptedVault = {
   ciphertext_hex: string;
 };
 
-type StoredAuthVaultPayload = {
-  token_type: "Bearer";
-  access_token: string;
-  refresh_token: string;
-  expires_in_secs: number;
-  refresh_expires_in_secs: number;
-  operator: OperatorView;
-};
-
 export function hasPrivilegeVault(): boolean {
   return window.localStorage.getItem(PRIVILEGE_STORAGE_KEY) !== null;
 }
 
 export function clearPrivilegeVault(): void {
   window.localStorage.removeItem(PRIVILEGE_STORAGE_KEY);
-}
-
-export function hasAuthVault(): boolean {
-  return window.localStorage.getItem(AUTH_STORAGE_KEY) !== null;
-}
-
-export function clearAuthVault(): void {
-  window.localStorage.removeItem(AUTH_STORAGE_KEY);
 }
 
 export async function savePrivilegeVault(material: PrivilegeMaterial, passphrase: string): Promise<void> {
@@ -73,36 +54,6 @@ export async function loadPrivilegeVault(passphrase: string): Promise<PrivilegeM
     superPassword: material.superPassword,
     superSaltHex: normalizeHex(material.superSaltHex),
   };
-}
-
-export async function saveAuthVault(auth: AuthResponse, passphrase: string): Promise<void> {
-  if (!passphrase) {
-    throw new Error("Session vault key is required");
-  }
-  const payload: StoredAuthVaultPayload = {
-    token_type: "Bearer",
-    access_token: auth.access_token,
-    refresh_token: auth.refresh_token,
-    expires_in_secs: auth.expires_in_secs,
-    refresh_expires_in_secs: auth.refresh_expires_in_secs,
-    operator: auth.operator,
-  };
-  validateAuthVaultPayload(payload);
-  const record = await encryptVaultPayload(payload, passphrase);
-  window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(record));
-}
-
-export async function loadAuthVault(passphrase: string): Promise<AuthResponse> {
-  if (!passphrase) {
-    throw new Error("Session vault key is required");
-  }
-  const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
-  if (!raw) {
-    throw new Error("No encrypted session vault exists");
-  }
-  const payload = await decryptVaultPayload<Partial<StoredAuthVaultPayload>>(raw, passphrase);
-  validateAuthVaultPayload(payload);
-  return payload;
 }
 
 async function encryptVaultPayload(payload: unknown, passphrase: string): Promise<StoredEncryptedVault> {
@@ -184,30 +135,6 @@ function parseVaultRecord(raw: string): StoredEncryptedVault {
     iv_hex: normalizeHex(record.iv_hex),
     ciphertext_hex: normalizeHex(record.ciphertext_hex),
   };
-}
-
-function validateAuthVaultPayload(payload: Partial<StoredAuthVaultPayload>): asserts payload is StoredAuthVaultPayload {
-  const operator = payload.operator;
-  if (
-    !operator ||
-    typeof operator.id !== "string" ||
-    typeof operator.username !== "string" ||
-    typeof operator.role !== "string" ||
-    !Array.isArray(operator.scopes)
-  ) {
-    throw new Error("Session vault payload is invalid");
-  }
-  if (
-    payload.token_type !== "Bearer" ||
-    typeof payload.access_token !== "string" ||
-    !/^[0-9a-f]{64}$/i.test(payload.access_token) ||
-    typeof payload.refresh_token !== "string" ||
-    !/^[0-9a-f]{64}$/i.test(payload.refresh_token) ||
-    typeof payload.expires_in_secs !== "number" ||
-    typeof payload.refresh_expires_in_secs !== "number"
-  ) {
-    throw new Error("Session vault payload is invalid");
-  }
 }
 
 function randomBytes(length: number): Uint8Array {

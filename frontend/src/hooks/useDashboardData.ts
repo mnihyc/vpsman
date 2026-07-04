@@ -3,6 +3,7 @@ import {
   ACCESS_TOKEN_STORAGE_KEY,
   REFRESH_TOKEN_STORAGE_KEY,
 } from "../constants";
+import { apiPost, isApiUnauthorized } from "../api";
 import type {
   ActiveView,
   AuthResponse,
@@ -11,7 +12,6 @@ import type {
   WsTerminalOutputEvent,
 } from "../types";
 import { parseWsEvent } from "../utils";
-import { clearAuthVault, hasAuthVault, saveAuthVault } from "../vault";
 import { useAccessData } from "./useAccessData";
 import { useAuditData } from "./useAuditData";
 import { useBackupsData } from "./useBackupsData";
@@ -23,11 +23,39 @@ import { useSchedulesData } from "./useSchedulesData";
 import { useSystemData } from "./useSystemData";
 import { useTopologyData } from "./useTopologyData";
 
+function readStoredToken(key: string): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return window.localStorage.getItem(key) ?? "";
+}
+
+function readStoredAccessToken(): string {
+  return readStoredToken(ACCESS_TOKEN_STORAGE_KEY);
+}
+
+function readStoredRefreshToken(): string {
+  return readStoredToken(REFRESH_TOKEN_STORAGE_KEY);
+}
+
+function hasStoredAuthSession(): boolean {
+  return Boolean(readStoredAccessToken() || readStoredRefreshToken());
+}
+
+function persistAuthSession(auth: AuthResponse): void {
+  window.localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, auth.access_token);
+  window.localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, auth.refresh_token);
+}
+
+function clearStoredAuthSession(): void {
+  window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+  window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+}
+
 export function useDashboardData(activeView: ActiveView) {
-  const [apiToken, setApiToken] = useState("");
-  const [authRequired, setAuthRequired] = useState(true);
-  const [authVaultAvailable, setAuthVaultAvailable] = useState(() =>
-    hasAuthVault(),
+  const [apiToken, setApiToken] = useState(() => readStoredAccessToken());
+  const [authRequired, setAuthRequired] = useState(
+    () => !hasStoredAuthSession(),
   );
   const [wsState, setWsState] = useState("connecting");
   const [lastLiveEvent, setLastLiveEvent] = useState("waiting");
@@ -38,14 +66,47 @@ export function useDashboardData(activeView: ActiveView) {
   const dashboardOverviewReloadTimer = useRef<number | null>(null);
   const fleetReloadTimer = useRef<number | null>(null);
   const inventoryReloadTimer = useRef<number | null>(null);
+  const refreshAuthRef = useRef<Promise<void> | null>(null);
 
-  const requireAuth = useCallback(() => {
-    window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
-    window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-    setAuthVaultAvailable(hasAuthVault());
+  const forceAuthRequired = useCallback(() => {
+    clearStoredAuthSession();
     setApiToken("");
     setAuthRequired(true);
   }, []);
+
+  const refreshStoredAuth = useCallback(() => {
+    if (refreshAuthRef.current) {
+      return refreshAuthRef.current;
+    }
+    const refreshToken = readStoredRefreshToken();
+    if (!refreshToken) {
+      forceAuthRequired();
+      return Promise.resolve();
+    }
+    refreshAuthRef.current = apiPost<AuthResponse>(
+      "/api/v1/auth/refresh",
+      "",
+      { refresh_token: refreshToken },
+    )
+      .then((auth) => {
+        persistAuthSession(auth);
+        setApiToken(auth.access_token);
+        setAuthRequired(false);
+      })
+      .catch((error) => {
+        if (isApiUnauthorized(error)) {
+          forceAuthRequired();
+        }
+      })
+      .finally(() => {
+        refreshAuthRef.current = null;
+      });
+    return refreshAuthRef.current;
+  }, [forceAuthRequired]);
+
+  const requireAuth = useCallback(() => {
+    void refreshStoredAuth();
+  }, [refreshStoredAuth]);
   const access = useAccessData(apiToken, requireAuth);
   const dashboardOverview = useDashboardOverviewData(apiToken, requireAuth);
   const fleet = useFleetData(apiToken, requireAuth);
@@ -103,6 +164,19 @@ export function useDashboardData(activeView: ActiveView) {
     },
     [],
   );
+
+  useEffect(() => {
+    if (!apiToken && hasStoredAuthSession()) {
+      void refreshStoredAuth();
+    }
+  }, [apiToken, refreshStoredAuth]);
+
+  useEffect(() => {
+    if (!apiToken) {
+      return;
+    }
+    void access.loadCurrentOperatorProfile();
+  }, [access.loadCurrentOperatorProfile, apiToken]);
 
   useEffect(() => {
     if (!apiToken) {
@@ -222,7 +296,6 @@ export function useDashboardData(activeView: ActiveView) {
     }
   }, [
     access.loadCurrentOperator,
-    access.loadCurrentOperatorProfile,
     activeView,
     apiToken,
     audit.loadAudits,
@@ -343,32 +416,10 @@ export function useDashboardData(activeView: ActiveView) {
     activeView,
   ]);
 
-  useEffect(() => {
-    window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
-    window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-  }, []);
-
   const handleAuth = useCallback(
-    async (auth: AuthResponse, sessionVaultKey?: string) => {
-      window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
-      window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-      if (sessionVaultKey) {
-        await saveAuthVault(auth, sessionVaultKey);
-      } else {
-        clearAuthVault();
-      }
+    async (auth: AuthResponse) => {
+      persistAuthSession(auth);
       access.setAuthenticatedOperator(auth.operator);
-      setAuthVaultAvailable(hasAuthVault());
-      setApiToken(auth.access_token);
-      setAuthRequired(false);
-    },
-    [access.setAuthenticatedOperator],
-  );
-
-  const handleAuthVaultUnlock = useCallback(
-    (auth: AuthResponse) => {
-      access.setAuthenticatedOperator(auth.operator);
-      setAuthVaultAvailable(hasAuthVault());
       setApiToken(auth.access_token);
       setAuthRequired(false);
     },
@@ -376,10 +427,7 @@ export function useDashboardData(activeView: ActiveView) {
   );
 
   const clearSession = useCallback(() => {
-    window.localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
-    window.localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
-    clearAuthVault();
-    setAuthVaultAvailable(false);
+    clearStoredAuthSession();
     setApiToken("");
     setAuthRequired(true);
     access.clearOperator();
@@ -407,7 +455,6 @@ export function useDashboardData(activeView: ActiveView) {
     historyPruneResult: audit.historyPruneResult,
     historyRetentionPolicies: audit.historyRetentionPolicies,
     authRequired,
-    authVaultAvailable,
     backupArtifacts: backups.backupArtifacts,
     backupPolicies: backups.backupPolicies,
     backups: backups.backups,
@@ -458,7 +505,6 @@ export function useDashboardData(activeView: ActiveView) {
     promoteTunnelPlanToCustomAdapter: topology.promoteTunnelPlanToCustomAdapter,
     disableTotp: access.disableTotp,
     handleAuth,
-    handleAuthVaultUnlock,
     jobs: jobs.jobs,
     jobApprovals: jobs.jobApprovals,
     commandTemplates: jobs.commandTemplates,

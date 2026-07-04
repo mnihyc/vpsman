@@ -2567,8 +2567,8 @@ Verification:
 
 Target UI/UX:
 
-- Login/session unlock remains outside main navigation.
-- Auth errors, session vault availability, and unlock state are explicit.
+- Login remains outside main navigation.
+- Auth errors are explicit; signed-in browser sessions persist with access and refresh tokens until sign out.
 
 Existing implementation to map:
 

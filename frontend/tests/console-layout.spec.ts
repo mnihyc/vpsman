@@ -646,7 +646,7 @@ test("reviews notification and webhook queue mutations before commit", async ({
     .toMatchObject({ confirmed: true, dry_run: false });
 });
 
-test("clears browser-local console selections without deleting vault records", async ({
+test("clears browser-local console selections without deleting session or privilege records", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -656,7 +656,6 @@ test("clears browser-local console selections without deleting vault records", a
 
   await page.goto("/");
   await page.evaluate(() => {
-    window.localStorage.setItem("vpsman.authVault", "preserved-auth");
     window.localStorage.setItem("vpsman.privilegeVault", "preserved-privilege");
     window.localStorage.setItem(
       "vpsman.dashboardPreferences",
@@ -686,35 +685,31 @@ test("clears browser-local console selections without deleting vault records", a
   await reloaded;
   await waitForConsoleShell(page);
   await expect(
-    page.getByRole("heading", { name: "Home", exact: true }),
+    page.getByRole("heading", { name: "System preferences" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Fleet command home" }),
+    page.locator(".consoleHeader").getByText("vpsman / System / Preferences"),
   ).toBeVisible();
 
   const storage = await page.evaluate(() => ({
-    authVault: window.localStorage.getItem("vpsman.authVault"),
+    accessToken: window.localStorage.getItem("vpsman.accessToken"),
     dashboardPreferences: window.localStorage.getItem(
       "vpsman.dashboardPreferences",
     ),
     grid: window.localStorage.getItem("vpsman.grid.example"),
     privilegeVault: window.localStorage.getItem("vpsman.privilegeVault"),
+    refreshToken: window.localStorage.getItem("vpsman.refreshToken"),
     sidebarSubpanels: window.localStorage.getItem("vpsman.sidebarSubpanels"),
   }));
-  expect(storage.authVault).toContain('"cipher":"AES-GCM"');
-  expect(storage.authVault).not.toContain(
-    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  );
-  expect(storage.authVault).not.toContain(
-    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-  );
   const sidebarSubpanels = storage.sidebarSubpanels
     ? JSON.parse(storage.sidebarSubpanels)
     : null;
   expect(storage).toMatchObject({
+    accessToken: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     dashboardPreferences: null,
     grid: null,
     privilegeVault: "preserved-privilege",
+    refreshToken: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   });
   expect(sidebarSubpanels).toMatchObject({
     defaultMode: "active",
@@ -797,6 +792,24 @@ test("supports interactive fleet data grid controls", async ({
   await expect(
     page.getByRole("menuitem", { name: "Copy client IDs" }),
   ).toBeVisible();
+  const actionMenuLayer = await page.evaluate(() => {
+    const menu = Array.from(document.querySelectorAll<HTMLElement>(".consoleMenu"))
+      .find((element) => element.textContent?.includes("Copy client IDs"));
+    const topbar = document.querySelector<HTMLElement>(".topbar");
+    return {
+      menuZIndex: Number.parseInt(
+        window.getComputedStyle(menu as HTMLElement).zIndex,
+        10,
+      ),
+      topbarZIndex: Number.parseInt(
+        window.getComputedStyle(topbar as HTMLElement).zIndex,
+        10,
+      ),
+    };
+  });
+  expect(actionMenuLayer.menuZIndex).toBeGreaterThan(
+    actionMenuLayer.topbarZIndex,
+  );
   await page.keyboard.press("Escape");
 
   await grid.getByLabel("VPS instance records columns").click();

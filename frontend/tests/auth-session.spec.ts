@@ -2,6 +2,8 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const accessToken = "a".repeat(64);
 const refreshToken = "b".repeat(64);
+const rotatedAccessToken = "c".repeat(64);
+const rotatedRefreshToken = "d".repeat(64);
 const preferences = {
   bulk_output_compare_mode: "binary",
   dashboard_curve_exclusions: [],
@@ -73,42 +75,53 @@ async function expectOperatorAccessShell(page: Page) {
   ).toHaveCount(0);
 }
 
-test("stores bearer session only inside encrypted WebCrypto vault", async ({
+test("keeps ordinary bearer login authenticated across browser reload", async ({
   page,
 }) => {
-  await installAuthVaultApiMock(page);
+  await installAuthSessionApiMock(page);
   await page.goto("/");
 
   await expectOperatorAccessShell(page);
-  await expect(page.getByLabel("Authentication mode")).toHaveCount(0);
-  await expect(page.getByLabel("Username")).toBeFocused();
-  await page.getByLabel("Username").fill("vault-admin");
-  await page.getByLabel("Password").fill("vault-password-123");
-  await page.getByLabel("Session vault key").fill("vault-key-123456");
+  await page.getByLabel("Username").fill("session-admin");
+  await page.getByLabel("Password").fill("session-password-123");
   await activate(page.getByRole("button", { name: "Sign in" }));
 
-  await page.waitForFunction(
-    () => window.localStorage.getItem("vpsman.authVault") !== null,
+  await expectAuthenticatedConsoleShell(page);
+  const storage = await readSessionStorage(page);
+  expect(storage.access).toBe(accessToken);
+  expect(storage.refresh).toBe(refreshToken);
+
+  await page.reload();
+  await expectAuthenticatedConsoleShell(page);
+  await expect(
+    page.getByRole("heading", { name: "Sign in", exact: true }),
+  ).toHaveCount(0);
+});
+
+test("refreshes a stored session before returning to sign in", async ({
+  page,
+}) => {
+  await page.addInitScript(
+    ({ access, refresh }) => {
+      window.localStorage.setItem("vpsman.accessToken", access);
+      window.localStorage.setItem("vpsman.refreshToken", refresh);
+    },
+    { access: "expired".repeat(10).slice(0, 64), refresh: refreshToken },
   );
+  await installAuthSessionApiMock(page);
+
+  await page.goto("/");
   await expectAuthenticatedConsoleShell(page);
 
   const storage = await readSessionStorage(page);
-  expect(storage.access).toBeNull();
-  expect(storage.refresh).toBeNull();
-  expect(storage.authVault).toContain('"cipher":"AES-GCM"');
-  expect(storage.authVault).not.toContain(accessToken);
-  expect(storage.authVault).not.toContain(refreshToken);
-  expect(storage.authVault).not.toContain("vault-password-123");
-  expect(storage.authVault).not.toContain("vault-key-123456");
-
-  await page.reload();
-  await expectOperatorAccessShell(page);
-  await page.getByLabel("Stored session key").fill("vault-key-123456");
-  await activate(page.getByRole("button", { name: "Unlock session" }));
-  await expectAuthenticatedConsoleShell(page);
+  expect(storage.access).toBe(rotatedAccessToken);
+  expect(storage.refresh).toBe(rotatedRefreshToken);
+  await expect(
+    page.getByRole("heading", { name: "Sign in", exact: true }),
+  ).toHaveCount(0);
 });
 
-async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
+async function installAuthSessionApiMock(page: import("@playwright/test").Page) {
   await page.route("**/api/v1/auth/bootstrap-status", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -127,10 +140,41 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
           role: "admin",
           scopes: ["*"],
           totp_enabled: false,
-          username: "vault-admin",
+          username: "session-admin",
         },
         refresh_expires_in_secs: 1209600,
         refresh_token: refreshToken,
+        token_type: "Bearer",
+      },
+    });
+  });
+  await page.route("**/api/v1/auth/refresh", async (route) => {
+    const body = (await route.request().postDataJSON()) as {
+      refresh_token?: string;
+    };
+    if (body.refresh_token !== refreshToken) {
+      await route.fulfill({
+        contentType: "application/json",
+        json: { error: "invalid_refresh_token" },
+        status: 401,
+      });
+      return;
+    }
+    await route.fulfill({
+      contentType: "application/json",
+      json: {
+        access_token: rotatedAccessToken,
+        expires_in_secs: 900,
+        operator: {
+          id: "99999999-aaaa-4bbb-8ccc-000000000001",
+          preferences,
+          role: "admin",
+          scopes: ["*"],
+          totp_enabled: false,
+          username: "session-admin",
+        },
+        refresh_expires_in_secs: 1209600,
+        refresh_token: rotatedRefreshToken,
         token_type: "Bearer",
       },
     });
@@ -255,8 +299,8 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
             privilege_mode: "root",
             unprivileged_hint: null,
           },
-          display_name: "vault-edge-01",
-          id: "vault-agent-01",
+          display_name: "session-edge-01",
+          id: "session-agent-01",
           status: "online",
           tags: ["edge"],
         },
@@ -343,7 +387,7 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
                 role: "admin",
                 scopes: ["*"],
                 totp_enabled: false,
-                username: "vault-admin",
+                username: "session-admin",
               }
             : [],
       });
@@ -352,13 +396,15 @@ async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
 }
 
 function isAuthorized(request: import("@playwright/test").Request): boolean {
-  return request.headers().authorization === `Bearer ${accessToken}`;
+  return (
+    request.headers().authorization === `Bearer ${accessToken}` ||
+    request.headers().authorization === `Bearer ${rotatedAccessToken}`
+  );
 }
 
 async function readSessionStorage(page: import("@playwright/test").Page) {
   return page.evaluate(() => ({
     access: window.localStorage.getItem("vpsman.accessToken"),
-    authVault: window.localStorage.getItem("vpsman.authVault") ?? "",
     refresh: window.localStorage.getItem("vpsman.refreshToken"),
   }));
 }

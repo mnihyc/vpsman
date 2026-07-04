@@ -1786,8 +1786,6 @@ export function App() {
         <AuthPanel
           apiError={dashboard.apiError}
           onAuth={dashboard.handleAuth}
-          onSessionUnlock={dashboard.handleAuthVaultUnlock}
-          sessionVaultAvailable={dashboard.authVaultAvailable}
         />
       </main>
     );

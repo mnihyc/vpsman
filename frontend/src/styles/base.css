@@ -75,8 +75,8 @@
   --shadow-menu: 0 12px 30px rgba(60, 64, 67, 0.18);
   --shadow-drawer: 0 8px 24px rgba(60, 64, 67, 0.14);
   --shadow-raised: 0 8px 20px rgba(60, 64, 67, 0.12);
-  --z-dropdown: 50;
   --z-sticky: 60;
+  --z-dropdown: 70;
   --z-modal-backdrop: 80;
   --z-modal: 90;
   --z-toast: 100;

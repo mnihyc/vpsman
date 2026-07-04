@@ -30,8 +30,6 @@ const username =
   process.env.VPSMAN_DOCKER_FLEET_USERNAME ?? "docker-fleet-admin";
 const password =
   process.env.VPSMAN_DOCKER_FLEET_PASSWORD ?? "docker-fleet-password";
-const sessionVaultKey =
-  process.env.VPSMAN_DOCKER_FLEET_SESSION_KEY ?? "docker-fleet-session-key";
 const screenshotDir = process.env.VPSMAN_DOCKER_FLEET_SCREENSHOT_DIR;
 const extendedReview = process.env.VPSMAN_DOCKER_FLEET_EXTENDED_REVIEW === "1";
 const cleanupExpression =
@@ -358,7 +356,6 @@ async function login(page: Page) {
       }
       await page.getByLabel("Username").fill(username);
       await page.getByLabel("Password").fill(password);
-      await page.getByLabel("Session vault key").fill(sessionVaultKey);
       await page.getByRole("button", { name: "Sign in" }).click();
       await expect(home).toBeVisible({ timeout: 30_000 });
       return;

@@ -224,18 +224,8 @@ async function loginMockConsoleSession(page: Page) {
   if (!mockInstalled) {
     return false;
   }
-  const unlockSessionButton = page.getByRole("button", {
-    name: "Unlock session",
-  });
-  if (await unlockSessionButton.isVisible().catch(() => false)) {
-    await page.getByLabel("Stored session key").fill("console-layout-vault-key");
-    await activate(unlockSessionButton);
-    await expect(page.locator(".shell")).toBeVisible({ timeout: 10_000 });
-    return true;
-  }
   await page.getByLabel("Username").fill("console-admin");
   await page.getByLabel("Password").fill("local-super-password");
-  await page.getByLabel("Session vault key").fill("console-layout-vault-key");
   await activate(page.getByRole("button", { name: "Sign in" }));
   await expect(page.locator(".shell")).toBeVisible({ timeout: 10_000 });
   return true;

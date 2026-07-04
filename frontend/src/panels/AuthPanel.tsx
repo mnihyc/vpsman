@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import { KeyRound, LockKeyhole } from "lucide-react";
+import { KeyRound } from "lucide-react";
 import type { AuthResponse } from "../types";
-import { loadAuthVault } from "../vault";
 
 type AuthMode = "checking" | "login" | "bootstrap";
 
@@ -12,20 +11,14 @@ type BootstrapStatusResponse = {
 export function AuthPanel({
   apiError,
   onAuth,
-  onSessionUnlock,
-  sessionVaultAvailable,
 }: {
   apiError: string | null;
-  onAuth: (auth: AuthResponse, sessionVaultKey?: string) => Promise<void>;
-  onSessionUnlock: (auth: AuthResponse) => void;
-  sessionVaultAvailable: boolean;
+  onAuth: (auth: AuthResponse) => Promise<void>;
 }) {
   const [mode, setMode] = useState<AuthMode>("checking");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
-  const [sessionVaultKey, setSessionVaultKey] = useState("");
-  const [storedSessionKey, setStoredSessionKey] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(apiError);
   const pendingRef = useRef(false);
@@ -98,30 +91,11 @@ export function AuthPanel({
       if (!response.ok) {
         throw new Error(authErrorMessage(response.status, mode));
       }
-      await onAuth((await response.json()) as AuthResponse, sessionVaultKey.trim() || undefined);
+      await onAuth((await response.json()) as AuthResponse);
       setPassword("");
       setTotpCode("");
-      setSessionVaultKey("");
     } catch (authError) {
       setError(authError instanceof Error ? authError.message : "Authentication failed");
-    } finally {
-      pendingRef.current = false;
-      setPending(false);
-    }
-  }
-
-  async function unlockStoredSession() {
-    if (pendingRef.current) {
-      return;
-    }
-    pendingRef.current = true;
-    setPending(true);
-    setError(null);
-    try {
-      onSessionUnlock(await loadAuthVault(storedSessionKey));
-      setStoredSessionKey("");
-    } catch (authError) {
-      setError(authError instanceof Error ? authError.message : "Session unlock failed");
     } finally {
       pendingRef.current = false;
       setPending(false);
@@ -200,21 +174,6 @@ export function AuthPanel({
             value={password}
           />
         </label>
-        <label>
-          <span>Session vault key</span>
-          <input
-            autoComplete="new-password"
-            disabled={isChecking}
-            onChange={(event) => setSessionVaultKey(event.target.value)}
-            placeholder="Optional local key"
-            type="password"
-            value={sessionVaultKey}
-          />
-          <small>
-            Optional. Encrypts this browser session locally so you can unlock
-            it later without storing bearer tokens in plain local storage.
-          </small>
-        </label>
         <button
           aria-describedby="auth-submit-requirements"
           className="wideAction"
@@ -232,33 +191,6 @@ export function AuthPanel({
         <span className="visuallyHidden" id="auth-submit-requirements">
           Sign in and first operator creation need a username and a password of at least 12 characters.
         </span>
-        {sessionVaultAvailable && !isChecking && (
-          <div className="authVaultUnlock">
-            <label>
-              <span>Stored session key</span>
-              <input
-                autoComplete="current-password"
-                onChange={(event) => setStoredSessionKey(event.target.value)}
-                type="password"
-                value={storedSessionKey}
-              />
-            </label>
-            <button
-              className="wideAction secondaryWideAction"
-              disabled={pending || !storedSessionKey}
-              title={
-                pending || !storedSessionKey
-                  ? "Enter the stored session key to unlock the saved session."
-                  : undefined
-              }
-              onClick={() => void unlockStoredSession()}
-              type="button"
-            >
-              <LockKeyhole size={18} />
-              <span>Unlock session</span>
-            </button>
-          </div>
-        )}
       </form>
     </section>
   );

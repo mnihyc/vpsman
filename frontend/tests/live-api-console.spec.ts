@@ -33,9 +33,6 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
     await page
       .getByLabel("Password")
       .fill(process.env.VPSMAN_LIVE_API_PASSWORD ?? "frontend-live-password");
-    await page
-      .getByLabel("Session vault key")
-      .fill(process.env.VPSMAN_LIVE_API_SESSION_KEY ?? "frontend-live-session-key");
     await page.getByRole("button", { name: "Sign in" }).click();
     await expect(page.locator(".shell")).toBeVisible({ timeout: 10_000 });
   }

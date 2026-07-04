@@ -736,11 +736,12 @@ export function PreferencesPanel({
               <div className="preferenceResetRow">
                 <div className="preferenceHint preferenceHintStack">
                   <strong>
-                    Server preferences and encrypted vaults are preserved.
+                    Server preferences, signed-in session, and Privilege Vault
+                    are preserved.
                   </strong>
                   <span>
-                    After clearing, the console reloads and reads default local
-                    selections.
+                    After clearing, this page reloads and reads default local
+                    selections without changing route.
                   </span>
                 </div>
                 <button

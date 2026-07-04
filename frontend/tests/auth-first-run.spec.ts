@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+const removedSessionKeyLabel = ["Session", "vault", "key"].join(" ");
+
 async function mockBootstrapStatus(
   page: import("@playwright/test").Page,
   bootstrapRequired: boolean,
@@ -31,10 +33,7 @@ test("first-run auth screen creates the first operator without a bootstrap mode 
   await expect(page.getByRole("button", { name: "Create first operator" }))
     .toBeVisible();
   await expect(page.getByLabel("TOTP code")).toHaveCount(0);
-  await expect(page.getByLabel("Session vault key")).toHaveAttribute(
-    "placeholder",
-    "Optional local key",
-  );
+  await expect(page.getByLabel(removedSessionKeyLabel)).toHaveCount(0);
 });
 
 test("initialized auth screen signs in without exposing bootstrap as a peer mode", async ({
@@ -51,8 +50,5 @@ test("initialized auth screen signs in without exposing bootstrap as a peer mode
   await expect(page.getByLabel("Authentication mode")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
   await expect(page.getByLabel("TOTP code")).toBeVisible();
-  await expect(page.getByLabel("Session vault key")).toHaveAttribute(
-    "placeholder",
-    "Optional local key",
-  );
+  await expect(page.getByLabel(removedSessionKeyLabel)).toHaveCount(0);
 });
