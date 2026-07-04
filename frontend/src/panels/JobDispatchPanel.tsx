@@ -10,6 +10,7 @@ import {
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { FILE_TRANSFER_CHUNK_BYTES, readFilePushPayload, sha256Hex } from "../fileTransfer";
 import {
   JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE,
@@ -762,18 +763,17 @@ export function JobDispatchPanel({
       value: dispatchConfirmationForceUnprivileged ? "Forced best effort" : operationNeedsConfirmation ? "Privileged mutation" : "Standard",
     },
   ];
-  const status =
-    actionError ??
-    reviewStatus ??
-    (visibleDispatchProgress
-      ? `Job ${shortId(visibleDispatchProgress.jobId)} result recorded`
-      : lastJob
-        ? `Job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
+  const status = visibleDispatchProgress
+    ? `Job ${shortId(visibleDispatchProgress.jobId)} result recorded`
+    : lastJob
+      ? `Job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
       : preview
         ? `${preview.target_count} resolved targets`
         : privilegeMaterial
           ? "Ready"
-          : "Locked");
+          : "Locked";
+  const dispatchFeedbackMessage = actionError ?? reviewStatus;
+  const dispatchFeedbackTone = actionError ? "danger" : "progress";
 
   function lockPrivilege() {
     setPrivilegeMaterial(null);
@@ -1381,14 +1381,20 @@ export function JobDispatchPanel({
           <h2>{terminalSurface ? "Terminal review composer" : "Dispatch command"}</h2>
           <span>{status}</span>
         </div>
-        {privilegeMaterial ? (
-          <button className="secondaryAction" onClick={lockPrivilege} type="button">
-            <LockKeyhole size={17} />
-            Lock
-          </button>
-        ) : (
-          <ShieldCheck size={20} />
-        )}
+        <div className="headerActionStack">
+          {privilegeMaterial ? (
+            <button className="secondaryAction" onClick={lockPrivilege} type="button">
+              <LockKeyhole size={17} />
+              Lock
+            </button>
+          ) : (
+            <ShieldCheck size={20} />
+          )}
+          <ActionFeedback
+            message={dispatchFeedbackMessage}
+            tone={dispatchFeedbackTone}
+          />
+        </div>
       </div>
 
       <form className="dispatchForm" onSubmit={submitJob}>

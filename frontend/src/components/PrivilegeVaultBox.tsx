@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { LockKeyhole, Save, ShieldCheck, Trash2 } from "lucide-react";
+import { ActionFeedback } from "./ActionFeedback";
 import { ConfirmationPrompt } from "./ConfirmationPrompt";
 import { normalizeHex, type PrivilegeMaterial } from "../privilege";
 import {
@@ -204,7 +205,7 @@ export function PrivilegeVaultBox({
         <div className="privilegeStatus">
           <ShieldCheck size={18} />
           <div>
-            <strong>{actionError ?? privilegeStatus}</strong>
+            <strong>{privilegeStatus}</strong>
             <span>
               {lastPayloadHash
                 ? shortHash(lastPayloadHash)
@@ -216,6 +217,7 @@ export function PrivilegeVaultBox({
           <LockKeyhole size={17} />
           {unlockRedirectLabel}
         </button>
+        <ActionFeedback message={actionError} tone="danger" />
       </div>
     );
   }
@@ -226,7 +228,7 @@ export function PrivilegeVaultBox({
       <div className="privilegeVaultNotice">
         <ShieldCheck size={18} />
         <span>
-          <strong>{actionError ?? "Local-only privilege material"}</strong>
+          <strong>Local-only privilege material</strong>
           <small>
             Saved material is encrypted in this browser with your passphrase and
             is not shared with the server.
@@ -335,6 +337,7 @@ export function PrivilegeVaultBox({
           </button>
         </section>
       </div>
+      <ActionFeedback message={actionError} tone="danger" />
 
       {showVaultClear && (
         <div className="privilegeActionRow">{vaultClearButton(!vaultAvailable)}</div>

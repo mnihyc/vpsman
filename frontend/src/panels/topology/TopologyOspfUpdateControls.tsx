@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Gauge, RotateCcw, ShieldCheck } from "lucide-react";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { sha256Hex } from "../../fileTransfer";
@@ -84,13 +85,10 @@ export function TopologyOspfUpdateControls({
       ? [selectedUpdatePlan.left_client_id, selectedUpdatePlan.right_client_id]
       : [],
   );
-  const status =
-    actionError ??
-    (pending
-      ? "Updating OSPF cost"
-      : selectedUpdatePlan
-        ? `${selectedUpdatePlan.current_ospf_cost} to ${selectedUpdatePlan.recommended_ospf_cost}`
-        : "No OSPF cost changes");
+  const status = selectedUpdatePlan
+    ? `${selectedUpdatePlan.current_ospf_cost} to ${selectedUpdatePlan.recommended_ospf_cost}`
+    : "No OSPF cost changes";
+  const ospfFeedbackMessage = actionError ?? (pending ? "Updating OSPF cost" : null);
   const canReview =
     !pending &&
     !snapshot &&
@@ -347,7 +345,13 @@ export function TopologyOspfUpdateControls({
           <h2>OSPF cost</h2>
           <span>{status}</span>
         </div>
-        <ShieldCheck size={20} />
+        <div className="headerActionStack">
+          <ShieldCheck size={20} />
+          <ActionFeedback
+            message={ospfFeedbackMessage}
+            tone={actionError ? "danger" : "progress"}
+          />
+        </div>
       </div>
       <div className="dispatchForm">
         <div className="dispatchControls">

@@ -1,5 +1,6 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { Network, Save, ShieldCheck, Wand2, X } from "lucide-react";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import { usePanelDisplaySettings } from "../../panelDisplay";
@@ -180,9 +181,7 @@ export function TopologyPromotionPanel({
   const adapterPromotionReady = Boolean(
     selectedObservedPlan && adapterForm.statusArgv.trim(),
   );
-  const status =
-    actionError ??
-    `${importCandidates.length} telemetry imports / ${observedPlans.length} observed plans`;
+  const status = `${importCandidates.length} telemetry imports / ${observedPlans.length} observed plans`;
   const promotionReviewItems = buildPromotionReviewItems({
     adapterForm,
     adapterPromotionReady,
@@ -354,19 +353,22 @@ export function TopologyPromotionPanel({
           <h2>Tunnel promotion</h2>
           <span>{status}</span>
         </div>
-        <div className="sectionActions">
-          <Network size={20} />
-          {onClose ? (
-            <button
-              aria-label="Close tunnel promotion workflow"
-              className="iconButton"
-              onClick={onClose}
-              title="Close tunnel promotion workflow"
-              type="button"
-            >
-              <X size={18} />
-            </button>
-          ) : null}
+        <div className="headerActionStack">
+          <div className="sectionActions">
+            <Network size={20} />
+            {onClose ? (
+              <button
+                aria-label="Close tunnel promotion workflow"
+                className="iconButton"
+                onClick={onClose}
+                title="Close tunnel promotion workflow"
+                type="button"
+              >
+                <X size={18} />
+              </button>
+            ) : null}
+          </div>
+          <ActionFeedback message={actionError} tone="danger" />
         </div>
       </div>
       <div className="promotionWorkflow">

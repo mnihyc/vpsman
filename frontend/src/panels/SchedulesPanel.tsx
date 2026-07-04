@@ -33,6 +33,7 @@ import {
   agentsMatchingExpression,
   parseSearchExpression,
 } from "../searchExpression";
+import { ActionFeedback } from "../components/ActionFeedback";
 import type {
   AgentView,
   BulkResolveResponse,
@@ -199,10 +200,10 @@ export function SchedulesPanel({
     nextRuns.length > 0 &&
     selectorExpression.trim().length > 0 &&
     !selectorParse.error;
-  const status =
-    actionError ??
-    error ??
-    (loading ? "Loading" : `${schedules.length} schedules`);
+  const status = `${schedules.length} schedules`;
+  const schedulesFeedbackMessage =
+    actionError ?? error ?? (loading ? "Loading schedules" : null);
+  const schedulesFeedbackTone = actionError || error ? "danger" : "progress";
   const confirmationNextRun =
     pendingScheduleSnapshot?.nextRun ?? nextRuns[0] ?? null;
 
@@ -961,26 +962,32 @@ export function SchedulesPanel({
             <h2>Schedules</h2>
             <span>{status}</span>
           </div>
-          <div className="inlineActions">
-            <button
-              className="secondaryAction compactAction"
-              disabled={!onOpenScheduledRuns}
-              onClick={onOpenScheduledRuns}
-              title="Open worker-created schedule execution history in Jobs / Scheduled runs"
-              type="button"
-            >
-              <ClipboardList size={17} />
-              Scheduled runs
-            </button>
-            <button
-              className="secondaryAction compactAction"
-              disabled={loading || pending}
-              onClick={onRefresh}
-              type="button"
-            >
-              <RefreshCcw size={17} />
-              Refresh
-            </button>
+          <div className="headerActionStack">
+            <div className="inlineActions">
+              <button
+                className="secondaryAction compactAction"
+                disabled={!onOpenScheduledRuns}
+                onClick={onOpenScheduledRuns}
+                title="Open worker-created schedule execution history in Jobs / Scheduled runs"
+                type="button"
+              >
+                <ClipboardList size={17} />
+                Scheduled runs
+              </button>
+              <button
+                className="secondaryAction compactAction"
+                disabled={loading || pending}
+                onClick={onRefresh}
+                type="button"
+              >
+                <RefreshCcw size={17} />
+                Refresh
+              </button>
+            </div>
+            <ActionFeedback
+              message={schedulesFeedbackMessage}
+              tone={schedulesFeedbackTone}
+            />
           </div>
         </div>
         <div

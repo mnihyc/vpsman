@@ -7,6 +7,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import {
@@ -390,6 +391,8 @@ export function AuditLogPanel({
     selectedDomainLabel === "audit_logs" && audits.length === 0
       ? "No audit events are visible for privileged control-plane workflows."
       : "Record totals and storage size need backend evidence for compliance-grade retention.";
+  const auditFeedbackMessage =
+    error ?? (loading ? "Refreshing audit records" : null);
 
   return (
     <section className="workspace singleColumn">
@@ -398,21 +401,22 @@ export function AuditLogPanel({
           <div className="sectionHeader">
             <div>
               <h2>Audit log</h2>
-              <span>
-                {error ??
-                  (loading
-                    ? "Refreshing audit records"
-                    : "Operator and control-plane events")}
-              </span>
+              <span>Operator and control-plane events</span>
             </div>
-            <button
-              className="secondaryAction"
-              disabled={loading}
-              onClick={onRefresh}
-              type="button"
-            >
-              Refresh
-            </button>
+            <div className="headerActionStack">
+              <button
+                className="secondaryAction"
+                disabled={loading}
+                onClick={onRefresh}
+                type="button"
+              >
+                Refresh
+              </button>
+              <ActionFeedback
+                message={auditFeedbackMessage}
+                tone={error ? "danger" : "progress"}
+              />
+            </div>
           </div>
           <div className="auditEventSummary" aria-label="Audit event summary">
             <div className="auditEventMetric">

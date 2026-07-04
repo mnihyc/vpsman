@@ -1,5 +1,6 @@
 import { Download, RefreshCw, ShieldCheck, Upload } from "lucide-react";
 import { useMemo, useState } from "react";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
@@ -161,7 +162,8 @@ export function MultiFileActionsPanel({
     () => (lastOperation?.type === "file_download" ? buildDownloadComparison(lastOutputs) : null),
     [lastOperation, lastOutputs],
   );
-  const summary = actionError ?? reviewStatus ?? actionMessage ?? `${localMatches.length}/${agents.length} local matches`;
+  const actionFeedbackMessage = actionError ?? reviewStatus ?? actionMessage;
+  const actionFeedbackTone = actionError ? "danger" : actionMessage ? "success" : "progress";
 
   function clearExecutionResults() {
     setBulkProgress(null);
@@ -446,12 +448,18 @@ export function MultiFileActionsPanel({
       <div className="sectionHeader">
         <div>
           <h2>Bulk file operations</h2>
-          <span>{summary}</span>
+          <span>{executionSummary}</span>
         </div>
-        <button className="secondaryAction" disabled={pending || loading} onClick={() => void refreshPreview()} type="button">
-          <RefreshCw size={14} />
-          <span>Refresh scope</span>
-        </button>
+        <div className="headerActionStack">
+          <button className="secondaryAction" disabled={pending || loading} onClick={() => void refreshPreview()} type="button">
+            <RefreshCw size={14} />
+            <span>Refresh scope</span>
+          </button>
+          <ActionFeedback
+            message={actionFeedbackMessage}
+            tone={actionFeedbackTone}
+          />
+        </div>
       </div>
 
       <div className="multiFileLayout">

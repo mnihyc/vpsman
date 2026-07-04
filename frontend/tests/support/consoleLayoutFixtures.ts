@@ -4036,6 +4036,25 @@ export async function installConsoleApiMock(
           Object.assign(currentOperatorPreferences, body);
           return jsonResponse(operatorView(operatorRecords[0]));
         }
+        if (pathname === "/api/v1/auth/totp/setup" && method === "POST") {
+          const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
+          if (String(body.password ?? "").length < 12) {
+            return jsonResponse({ error: "password_too_short" }, 400);
+          }
+          return jsonResponse({
+            otpauth_uri:
+              "otpauth://totp/vpsman:console-admin?secret=JBSWY3DPEHPK3PXP&issuer=vpsman",
+            secret_base32: "JBSWY3DPEHPK3PXP",
+          });
+        }
+        if (pathname === "/api/v1/auth/totp/confirm" && method === "POST") {
+          operatorRecords[0].totp_enabled = true;
+          return jsonResponse(operatorView(operatorRecords[0]));
+        }
+        if (pathname === "/api/v1/auth/totp/disable" && method === "POST") {
+          operatorRecords[0].totp_enabled = false;
+          return jsonResponse(operatorView(operatorRecords[0]));
+        }
         if (pathname === "/api/v1/operators" && method === "POST") {
           const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
           requests.operatorActions.push({ action: "create", body });

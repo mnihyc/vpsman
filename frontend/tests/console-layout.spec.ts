@@ -2774,6 +2774,59 @@ test("shows access posture, MFA risk, identity lifecycle, and gateway readiness"
   ).toBeVisible();
 });
 
+test("keeps access action feedback out of headings and durable labels", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "access feedback placement is covered in the desktop console layout",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Access", "Privilege vault");
+
+  const accessHeader = page.locator(".accessMain > .sectionHeader").first();
+  await expect(accessHeader).toContainText(
+    "Local unlock state, request-bound assertions, and vault controls",
+  );
+
+  const privilegePanel = page.locator(".controlPanel").filter({
+    has: page.getByRole("heading", { level: 2, name: "Privilege vault" }),
+  });
+  await expect(privilegePanel.locator(".privilegeVaultNotice strong")).toHaveText(
+    "Local-only privilege material",
+  );
+  await page.getByLabel(/access privilege secret/i).fill("local-super-password");
+  await page.getByLabel(/access privilege salt/i).fill("not-hex");
+  await activate(
+    privilegePanel.getByRole("button", { name: "Unlock", exact: true }),
+  );
+  await expect(privilegePanel.locator(".privilegeVaultNotice strong")).toHaveText(
+    "Local-only privilege material",
+  );
+  await expect(privilegePanel.locator(".actionFeedbackDanger")).toContainText(
+    "Invalid hex value",
+  );
+
+  const totpPanel = page.locator(".controlPanel").filter({
+    has: page.getByRole("heading", { level: 2, name: "TOTP" }),
+  });
+  await expect(totpPanel.locator(".sectionHeader")).toContainText(
+    "admin MFA required",
+  );
+  await page.getByLabel("TOTP password").fill("short");
+  await activate(totpPanel.getByRole("button", { name: "Set up TOTP" }));
+  await expect(totpPanel.locator(".sectionHeader")).toContainText(
+    "admin MFA required",
+  );
+  await expect(totpPanel.locator(".sectionHeader")).not.toContainText(
+    "Password Too Short",
+  );
+  await expect(totpPanel.locator(".actionFeedbackDanger")).toContainText(
+    "Password Too Short (400)",
+  );
+});
+
 test("rotates an existing agent key through the access panel", async ({
   page,
 }, testInfo) => {

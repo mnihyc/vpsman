@@ -1,5 +1,6 @@
 import { RefreshCw, ShieldCheck, Trash2, XCircle } from "lucide-react";
 import { useMemo, useState } from "react";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -87,12 +88,10 @@ export function ServerJobsPanel({
     [advancedExpression, artifactState, objectPrefix, olderThanDays],
   );
   const expressionValid = expression.trim().length > 0 && !expression.startsWith("__invalid__");
-  const summary =
-    error ??
-    previewStatus ??
-    (preview
-      ? `${preview.matched_count} artifacts previewed, ${formatBytes(preview.matched_bytes)}`
-      : `${jobs.length} maintenance jobs`);
+  const summary = preview
+    ? `${preview.matched_count} artifacts previewed, ${formatBytes(preview.matched_bytes)}`
+    : `${jobs.length} maintenance jobs`;
+  const cleanupFeedbackMessage = error ?? previewStatus;
   const previewExpressionMatches = preview?.expression === expression;
   const previewDomainsMatch = preview ? sameDomains(preview.domains, domains) : false;
   const previewFresh = Boolean(preview && previewExpressionMatches && previewDomainsMatch);
@@ -302,15 +301,21 @@ export function ServerJobsPanel({
             <h2>Artifact cleanup</h2>
             <span>{summary}</span>
           </div>
-          <button
-            className="secondaryAction"
-            disabled={loading}
-            onClick={onRefresh}
-            type="button"
-          >
-            <RefreshCw size={14} />
-            Refresh
-          </button>
+          <div className="headerActionStack">
+            <button
+              className="secondaryAction"
+              disabled={loading}
+              onClick={onRefresh}
+              type="button"
+            >
+              <RefreshCw size={14} />
+              Refresh
+            </button>
+            <ActionFeedback
+              message={cleanupFeedbackMessage}
+              tone={error ? "danger" : "progress"}
+            />
+          </div>
         </div>
         <div className="historyRetentionGrid">
           <div className="cleanupPreviewContract">

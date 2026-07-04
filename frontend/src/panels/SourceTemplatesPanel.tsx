@@ -8,6 +8,7 @@ import {
   UserPlus,
 } from "lucide-react";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { ConsoleActionDrawer } from "../components/ConsoleLayout";
 import {
   ConsoleDataGrid,
@@ -248,13 +249,19 @@ export function SourceTemplatePanel({
           ? `${lastDiff.changed_keys.length} keys changed; ${lastDiff.affected_client_count} VPSs affected`
           : null;
   const status =
+    (sourceStatus.length > 0 ? sourceStatusSummary : null) ??
+    `${templates.length} templates across ${new Set(templates.map((template) => template.domain)).size} domains`;
+  const sourceFeedbackMessage =
     actionError ??
     reviewStatus ??
     lifecycleStatus ??
-    (sourceStatus.length > 0 ? sourceStatusSummary : null) ??
-    (lastAssignment
-      ? `${lastAssignment.target_count} template assignments evaluated`
-      : `${templates.length} templates across ${new Set(templates.map((template) => template.domain)).size} domains`);
+    (lastAssignment ? `${lastAssignment.target_count} template assignments evaluated` : null);
+  const sourceFeedbackTone =
+    actionError || lifecycleStatus?.startsWith("Template test failed")
+      ? "danger"
+      : lifecycleStatus || lastAssignment
+        ? "success"
+        : "progress";
   const sourceStatusColumns = useMemo<
     ConsoleDataGridColumn<SourceStatusRecord>[]
   >(
@@ -894,6 +901,11 @@ export function SourceTemplatePanel({
         <div>
           <h2>Source templates</h2>
           <span>{status}</span>
+          <ActionFeedback
+            className="sectionHeaderFeedback"
+            message={sourceFeedbackMessage}
+            tone={sourceFeedbackTone}
+          />
         </div>
       </div>
 

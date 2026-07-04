@@ -4721,6 +4721,91 @@ button.vpsDetailRecord:hover {
   padding: 10px 12px;
 }
 
+.actionFeedback {
+  display: flex;
+  align-items: center;
+  width: fit-content;
+  max-width: min(100%, 460px);
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.actionFeedback span,
+.sectionHeader .actionFeedback span {
+  min-width: 0;
+  color: inherit;
+  overflow-wrap: anywhere;
+}
+
+.actionFeedbackInfo,
+.actionFeedbackProgress {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.actionFeedbackSuccess {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+  color: var(--success-text);
+}
+
+.actionFeedbackWarning {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning-text);
+}
+
+.actionFeedbackDanger {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+}
+
+.localActionFeedback,
+.sectionHeaderFeedback {
+  margin: 10px 18px 0;
+}
+
+.headerActionStack {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 8px;
+  min-width: min(100%, 220px);
+}
+
+.headerActionStack .sectionActions,
+.headerActionStack .inlineActions,
+.headerActionStack .fileBrowserHeaderActions {
+  justify-content: flex-end;
+}
+
+.headerActionStack .actionFeedback {
+  max-width: min(420px, 42vw);
+}
+
+@media (max-width: 760px) {
+  .sectionHeader {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .headerActionStack {
+    width: 100%;
+    align-items: stretch;
+  }
+
+  .headerActionStack .actionFeedback {
+    width: 100%;
+    max-width: 100%;
+  }
+}
+
 .runbooksPanel {
   overflow: hidden;
 }

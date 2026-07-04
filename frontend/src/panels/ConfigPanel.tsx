@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { FileSliders, Play, RefreshCw, ServerCog, Trash2 } from "lucide-react";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -243,6 +244,9 @@ export function ConfigPanel({
   const rulesSelectorPrefill = activeSubpage.startsWith("rules:id:")
     ? `id:${decodeURIComponent(activeSubpage.slice("rules:id:".length))}`
     : null;
+  const configFeedbackMessage =
+    actionError ?? error ?? (loading ? "Refreshing runtime config state" : null);
+  const configFeedbackTone = actionError || error ? "danger" : "progress";
 
   return (
     <section className="workspace singleColumn configWorkspace">
@@ -250,23 +254,23 @@ export function ConfigPanel({
         <div className="sectionHeader">
           <div>
             <h2>{configTitle(subpage)}</h2>
-            <span>
-              {actionError ??
-                error ??
-                (loading
-                  ? "Refreshing runtime config state"
-                  : configSubtitle(subpage))}
-            </span>
+            <span>{configSubtitle(subpage)}</span>
           </div>
-          <button
-            className="secondaryAction"
-            disabled={loading || pending}
-            onClick={onRefresh}
-            type="button"
-          >
-            <RefreshCw size={15} />
-            <span>Refresh</span>
-          </button>
+          <div className="headerActionStack">
+            <button
+              className="secondaryAction"
+              disabled={loading || pending}
+              onClick={onRefresh}
+              type="button"
+            >
+              <RefreshCw size={15} />
+              <span>Refresh</span>
+            </button>
+            <ActionFeedback
+              message={configFeedbackMessage}
+              tone={configFeedbackTone}
+            />
+          </div>
         </div>
         {subpage === "overview" && (
           <ConfigOverview

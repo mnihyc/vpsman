@@ -13,6 +13,7 @@ import {
   topologyObservationStateBadgeClass,
   topologyRuntimeStateBadgeClass,
 } from "../../jobStatusPresentation";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import type {
   JobHistoryRecord,
   JobOutputRecord,
@@ -165,21 +166,19 @@ export function TopologyEvidencePanel({
     probePoints.length > 1 && latencyGroups.length === 0;
   const hasMeasurementEvidence =
     hasStandaloneProbeCurve || latencyGroups.length > 0 || trendRows.length > 0;
-  const status =
-    error ??
-    (loading
-      ? "Loading network outputs"
-      : ospfUpdatePlans.length > 0
-        ? `${ospfUpdatePlans.length} OSPF update plans`
-        : ospfRecommendations.length > 0
-          ? `${ospfRecommendations.length} OSPF recommendations`
-          : trends.length > 0
-            ? `${observations.length} observations / ${trends.length} trends`
-            : observations.length > 0
-              ? `${observations.length} persisted observations`
-              : networkJobs.length === 0
-                ? "No network jobs"
-                : `${networkJobs.length} recent network jobs`);
+  const status = ospfUpdatePlans.length > 0
+    ? `${ospfUpdatePlans.length} OSPF update plans`
+    : ospfRecommendations.length > 0
+      ? `${ospfRecommendations.length} OSPF recommendations`
+      : trends.length > 0
+        ? `${observations.length} observations / ${trends.length} trends`
+        : observations.length > 0
+          ? `${observations.length} persisted observations`
+          : networkJobs.length === 0
+            ? "No network jobs"
+            : `${networkJobs.length} recent network jobs`;
+  const evidenceFeedbackMessage =
+    error ?? (loading ? "Loading network outputs" : null);
 
   async function refreshEvidence() {
     setLoading(true);
@@ -223,15 +222,21 @@ export function TopologyEvidencePanel({
           <h2>Network evidence</h2>
           <span>{status}</span>
         </div>
-        <button
-          className="secondaryAction"
-          disabled={loading}
-          onClick={refreshEvidence}
-          type="button"
-        >
-          <RefreshCcw size={17} />
-          Refresh evidence
-        </button>
+        <div className="headerActionStack">
+          <button
+            className="secondaryAction"
+            disabled={loading}
+            onClick={refreshEvidence}
+            type="button"
+          >
+            <RefreshCcw size={17} />
+            Refresh evidence
+          </button>
+          <ActionFeedback
+            message={evidenceFeedbackMessage}
+            tone={error ? "danger" : "progress"}
+          />
+        </div>
       </div>
       {freshness?.stale && (
         <div

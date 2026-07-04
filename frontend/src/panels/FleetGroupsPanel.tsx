@@ -17,6 +17,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, Plus, RefreshCw, ShieldCheck, Tag, Trash2, X } from "lucide-react";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -97,14 +98,16 @@ export function FleetGroupsPanel({
   const groupSummary = useMemo(() => buildGroupSummary(tags, agents), [agents, tags]);
   const activeLabelCount =
     groupSummary.providerGroupCount + groupSummary.countryGroupCount + groupSummary.customGroupCount;
-  const status =
+  const headerDescription = `${tags.length} registry groups, ${activeLabelCount} active labels across ${agents.length} VPSs`;
+  const groupsFeedbackMessage =
     actionError ??
     error ??
     (lastMutation
       ? `Group ${lastMutation.tag}: ${lastMutation.changed_count} changed, ${lastMutation.skipped_count} skipped`
       : loading
         ? "Refreshing group state"
-        : `${tags.length} registry groups, ${activeLabelCount} active labels across ${agents.length} VPSs`);
+        : null);
+  const groupsFeedbackTone = actionError || error ? "danger" : lastMutation ? "success" : "progress";
 
   return (
     <section className="workspace singleColumn">
@@ -112,12 +115,15 @@ export function FleetGroupsPanel({
         <div className="sectionHeader">
           <div>
             <h2>{subpage === "bulk" ? "Bulk groups" : subpage === "assignments" ? "Group assignments" : "Fleet groups"}</h2>
-            <span>{status}</span>
+            <span>{headerDescription}</span>
           </div>
-          <button className="secondaryAction" disabled={loading || pending} onClick={onRefresh} type="button">
-            <RefreshCw size={15} />
-            <span>Refresh</span>
-          </button>
+          <div className="headerActionStack">
+            <button className="secondaryAction" disabled={loading || pending} onClick={onRefresh} type="button">
+              <RefreshCw size={15} />
+              <span>Refresh</span>
+            </button>
+            <ActionFeedback message={groupsFeedbackMessage} tone={groupsFeedbackTone} />
+          </div>
         </div>
         {subpage === "registry" && (
           <TagRegistry

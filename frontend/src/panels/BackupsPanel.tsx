@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "re
 import { Archive, ArrowRight, DatabaseBackup, ExternalLink, RefreshCw, RotateCcw, Server, ShieldCheck } from "lucide-react";
 import { buildRestoreRollbackOperation } from "../backups/restoreRollback";
 import { clampJobMaxTimeoutSecs, DEFAULT_MAX_JOB_TIMEOUT_SECS } from "../jobMaxTimeout";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleActionDrawer } from "../components/ConsoleLayout";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
@@ -525,34 +526,37 @@ export function BackupsPanel({
     setPendingActionSnapshot(null);
   }, [backupSubpage, invalidateReviewGeneration]);
   const backupSubpageMeta = backupSubpageSummaries[backupSubpage];
-  const status =
-    actionError ??
-    (reviewStatus ??
-    (lastPolicyPrune
-      ? policyPruneStatus(lastPolicyPrune)
-      : lastPolicy
-        ? `Policy ${lastPolicy.name} ${lastPolicy.enabled ? "enabled" : "disabled"}`
-        : lastMigrationLink
-          ? `Migration mapping ${shortId(lastMigrationLink.id)} ${lastMigrationLink.status}`
-          : lastRollbackJob
-            ? `Restore rollback job ${shortId(lastRollbackJob.job_id)} ${lastRollbackJob.status}`
-            : lastRestoreJob
-              ? `Restore job ${shortId(lastRestoreJob.job_id)} ${lastRestoreJob.status}`
-              : lastDownloadedArtifact
-                ? `Artifact ${shortId(lastDownloadedArtifact.id)} downloaded`
-                : lastArtifact
-                ? `Artifact ${shortId(lastArtifact.id)} uploaded`
-                : lastRestorePlan
-                  ? `Draft restore ${shortId(lastRestorePlan.id)} ${lastRestorePlan.status}`
-                  : lastRequest
-                    ? `Request ${shortId(lastRequest.id)} ${lastRequest.status}`
-                    : `${backupPolicies.length} polic${backupPolicies.length === 1 ? "y" : "ies"}, ${backups.length} backup request${
-                        backups.length === 1 ? "" : "s"
-                      }, ${artifacts.length} artifact${
-                        artifacts.length === 1 ? "" : "s"
-                      }, ${restorePlans.length} draft restore${restorePlans.length === 1 ? "" : "s"}, ${migrationLinks.length} migration mapping${
-                        migrationLinks.length === 1 ? "" : "s"
-                      }`));
+  const status = `${backupPolicies.length} polic${backupPolicies.length === 1 ? "y" : "ies"}, ${backups.length} backup request${
+    backups.length === 1 ? "" : "s"
+  }, ${artifacts.length} artifact${artifacts.length === 1 ? "" : "s"}, ${restorePlans.length} draft restore${
+    restorePlans.length === 1 ? "" : "s"
+  }, ${migrationLinks.length} migration mapping${migrationLinks.length === 1 ? "" : "s"}`;
+  const backupFeedbackMessage =
+    error ??
+    (loading
+      ? backupSubpageMeta.loading
+      : actionError ??
+        reviewStatus ??
+        (lastPolicyPrune
+          ? policyPruneStatus(lastPolicyPrune)
+          : lastPolicy
+            ? `Policy ${lastPolicy.name} ${lastPolicy.enabled ? "enabled" : "disabled"}`
+            : lastMigrationLink
+              ? `Migration mapping ${shortId(lastMigrationLink.id)} ${lastMigrationLink.status}`
+              : lastRollbackJob
+                ? `Restore rollback job ${shortId(lastRollbackJob.job_id)} ${lastRollbackJob.status}`
+                : lastRestoreJob
+                  ? `Restore job ${shortId(lastRestoreJob.job_id)} ${lastRestoreJob.status}`
+                  : lastDownloadedArtifact
+                    ? `Artifact ${shortId(lastDownloadedArtifact.id)} downloaded`
+                    : lastArtifact
+                      ? `Artifact ${shortId(lastArtifact.id)} uploaded`
+                      : lastRestorePlan
+                        ? `Draft restore ${shortId(lastRestorePlan.id)} ${lastRestorePlan.status}`
+                        : lastRequest
+                          ? `Request ${shortId(lastRequest.id)} ${lastRequest.status}`
+                          : null));
+  const backupFeedbackTone = error || actionError ? "danger" : "progress";
   const backupPostureItems = buildBackupPostureItems({
     agents,
     artifacts,
@@ -563,20 +567,18 @@ export function BackupsPanel({
   });
 
   if (backupSubpage === "overview") {
+    const overviewFeedbackMessage =
+      error ?? (loading ? backupSubpageMeta.loading : null);
+    const overviewFeedbackTone = error ? "danger" : "progress";
     return (
       <section className="workspace singleColumn backupWorkspace backupSingleWorkspace">
         <div className="fleetPanel">
           <div className="sectionHeader">
             <div>
               <h2>{backupSubpageMeta.title}</h2>
-              <span>
-                {error ??
-                  (loading
-                    ? backupSubpageMeta.loading
-                    : "Recoverability posture, coverage gaps, restore readiness, and backup workflow entry points")}
-              </span>
+              <span>Recoverability posture, coverage gaps, restore readiness, and backup workflow entry points</span>
             </div>
-            <div className="sectionActions">
+            <div className="sectionActions headerActionStack">
               <button
                 className="secondaryAction"
                 onClick={() => void onRefresh()}
@@ -585,6 +587,10 @@ export function BackupsPanel({
                 <RefreshCw size={17} />
                 Refresh
               </button>
+              <ActionFeedback
+                message={overviewFeedbackMessage}
+                tone={overviewFeedbackTone}
+              />
             </div>
           </div>
           <BackupOverview
@@ -2016,24 +2022,30 @@ export function BackupsPanel({
         <div className="sectionHeader">
           <div>
             <h2>{backupSubpageMeta.title}</h2>
-            <span>{loading ? backupSubpageMeta.loading : status}</span>
+            <span>{status}</span>
           </div>
-          <div className="sectionActions">
-            <button
-              className="secondaryAction"
-              onClick={() => void onRefresh()}
-              type="button"
-            >
-              <RefreshCw size={17} />
-              Refresh
-            </button>
-            <button
-              className="primaryAction"
-              onClick={() => setWorkflowOpen(true)}
-              type="button"
-            >
-              {backupWorkflowLabel}
-            </button>
+          <div className="headerActionStack">
+            <div className="sectionActions">
+              <button
+                className="secondaryAction"
+                onClick={() => void onRefresh()}
+                type="button"
+              >
+                <RefreshCw size={17} />
+                Refresh
+              </button>
+              <button
+                className="primaryAction"
+                onClick={() => setWorkflowOpen(true)}
+                type="button"
+              >
+                {backupWorkflowLabel}
+              </button>
+            </div>
+            <ActionFeedback
+              message={backupFeedbackMessage}
+              tone={backupFeedbackTone}
+            />
           </div>
         </div>
         {backupSubpage === "requests" && (

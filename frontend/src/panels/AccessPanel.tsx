@@ -24,6 +24,7 @@ import {
   Wifi,
   X,
 } from "lucide-react";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -396,6 +397,15 @@ export function AccessPanel({
   const activeGatewaySessions = gatewaySessions.filter(
     (session) => !session.ended_at,
   ).length;
+  const accessFeedbackMessage = error ?? (loading ? "Refreshing access records" : null);
+  const accessFeedbackTone = error ? "danger" : "progress";
+  const totpStateLabel = operator?.totp_enabled
+    ? "enabled"
+    : operator?.role === "admin"
+      ? "admin MFA required"
+      : "recommended account hardening";
+  const totpFeedbackMessage = totpError ?? (totpPending ? "Updating TOTP" : null);
+  const totpFeedbackTone = totpError ? "danger" : "progress";
   const gatewayInstallDefaultsNeedReview = activeGatewaySessions === 0;
   const activeOperatorSessions = operatorSessions.filter(
     isOperatorSessionActive,
@@ -1140,22 +1150,23 @@ export function AccessPanel({
         <div className="sectionHeader compactSectionHeader">
           <div>
             <h2>{activePanelHeader.title}</h2>
-            <span>
-              {error ??
-                (loading
-                  ? "Refreshing access records"
-                  : activePanelHeader.description)}
-            </span>
+            <span>{activePanelHeader.description}</span>
           </div>
-          <button
-            className="secondaryAction"
-            disabled={loading}
-            onClick={() => void onRefresh()}
-            type="button"
-          >
-            <RefreshCw size={17} />
-            Refresh
-          </button>
+          <div className="headerActionStack">
+            <button
+              className="secondaryAction"
+              disabled={loading}
+              onClick={() => void onRefresh()}
+              type="button"
+            >
+              <RefreshCw size={17} />
+              Refresh
+            </button>
+            <ActionFeedback
+              message={accessFeedbackMessage}
+              tone={accessFeedbackTone}
+            />
+          </div>
         </div>
 
         <nav className="subpanelTabs accessTabs" aria-label="Access subpanels">
@@ -1283,14 +1294,7 @@ export function AccessPanel({
             <section className="controlPanel">
               <div className="sectionHeader compact">
                 <h2>TOTP</h2>
-                <span>
-                  {totpError ??
-                    (operator?.totp_enabled
-                      ? "enabled"
-                      : operator?.role === "admin"
-                        ? "admin MFA required"
-                        : "recommended account hardening")}
-                </span>
+                <span>{totpStateLabel}</span>
               </div>
               <div
                 className={`accessRiskNotice ${adminMfaRisk ? "attention" : "ready"}`}
@@ -1313,6 +1317,11 @@ export function AccessPanel({
                   </span>
                 </div>
               </div>
+              <ActionFeedback
+                className="localActionFeedback"
+                message={totpFeedbackMessage}
+                tone={totpFeedbackTone}
+              />
               {operator?.totp_enabled ? (
                 <div className="totpDisablePanel">
                   <div>

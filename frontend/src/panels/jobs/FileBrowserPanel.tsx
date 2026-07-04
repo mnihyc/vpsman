@@ -26,6 +26,7 @@ import { css } from "@codemirror/lang-css";
 import { html } from "@codemirror/lang-html";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import { DEFAULT_MAX_JOB_TIMEOUT_SECS } from "../../jobMaxTimeout";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { VpsCombobox } from "../../components/VpsCombobox";
@@ -207,16 +208,14 @@ export function FileBrowserPanel({
   const typedPathChanged = pathInput.trim() !== currentPath;
   const pathRefreshTarget = typedPathChanged ? pathInput : staleDirectoryPath ?? pathInput;
   const targetSummary = selectedAgent ? `target ${targetNameId(selectedAgent)}` : "No target VPS";
-  const summary =
-    actionError ??
-    actionMessage ??
-    staleMessage ??
-    (privilegeMaterial
-      ? `${targetSummary} · ${currentEntries.length} entries loaded`
-      : `${targetSummary} · unlock to read remote files`);
+  const summary = privilegeMaterial
+    ? `${targetSummary} · ${currentEntries.length} entries loaded`
+    : `${targetSummary} · unlock to read remote files`;
+  const fileBrowserFeedbackMessage = actionError ?? actionMessage ?? staleMessage;
+  const fileBrowserFeedbackTone = actionError ? "danger" : staleMessage ? "warning" : "success";
   const selectedDownloadLabel = downloadActionLabel(selectedEntry, selectedPath);
   const editorStateText = editorPath ? `${editorContent.length} chars${editorDirty ? " · unsaved" : ""}` : "Select a text file to edit";
-  const editorStatusText = actionError ?? (actionMessage ? `${actionMessage}${staleDirectoryPath ? " · refresh available" : ""}` : staleMessage) ?? editorStateText;
+  const editorStatusText = editorStateText;
 
   useEffect(() => {
     if (!targetClientId && agents[0]?.id) {
@@ -733,13 +732,19 @@ export function FileBrowserPanel({
           <h2>File browser</h2>
           <span>{summary}</span>
         </div>
-        <div className="fileBrowserHeaderActions">
-          <VpsCombobox
-            agents={agents}
-            ariaLabel="File browser target VPS"
-            onChange={selectTargetClientId}
-            placeholder="Search file browser VPS"
-            value={targetClientId}
+        <div className="headerActionStack">
+          <div className="fileBrowserHeaderActions">
+            <VpsCombobox
+              agents={agents}
+              ariaLabel="File browser target VPS"
+              onChange={selectTargetClientId}
+              placeholder="Search file browser VPS"
+              value={targetClientId}
+            />
+          </div>
+          <ActionFeedback
+            message={fileBrowserFeedbackMessage}
+            tone={fileBrowserFeedbackTone}
           />
         </div>
       </div>

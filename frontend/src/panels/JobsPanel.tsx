@@ -17,6 +17,7 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { type PrivilegeMaterial } from "../privilege";
@@ -370,6 +371,8 @@ export function JobsPanel({
   ].includes(activeSubpage)
     ? activeSubpage
     : "history";
+  const jobHistoryFeedbackMessage =
+    error ?? (loading ? "Refreshing command records" : null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [streamPendingKey, setStreamPendingKey] = useState<string | null>(null);
   const [fileDownloadPendingClientId, setFileDownloadPendingClientId] =
@@ -1387,21 +1390,22 @@ export function JobsPanel({
               <div className="sectionHeader">
                 <div>
                   <h2>Job history</h2>
-                  <span>
-                    {error ??
-                      (loading
-                        ? "Refreshing command records"
-                        : "Latest execution records")}
-                  </span>
+                  <span>Latest execution records</span>
                 </div>
-                <button
-                  className="secondaryAction"
-                  disabled={loading}
-                  onClick={onRefresh}
-                  type="button"
-                >
-                  Refresh
-                </button>
+                <div className="headerActionStack">
+                  <button
+                    className="secondaryAction"
+                    disabled={loading}
+                    onClick={onRefresh}
+                    type="button"
+                  >
+                    Refresh
+                  </button>
+                  <ActionFeedback
+                    message={jobHistoryFeedbackMessage}
+                    tone={error ? "danger" : "progress"}
+                  />
+                </div>
               </div>
               <div
                 className="jobHistoryWorkflowLinks"

@@ -25,6 +25,7 @@ import {
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import { parse, stringify, type TomlTable } from "smol-toml";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import {
@@ -1717,14 +1718,7 @@ export function SystemUsersPanel({
           <div className="sectionHeader fleetInstancesHeader">
             <div>
               <h2>{selectedOperator ? "Edit user" : "Create user"}</h2>
-              <span>
-                {actionError ??
-                  (reviewPending
-                    ? "Preparing review"
-                    : canManageUsers
-                      ? "Ready"
-                      : "Admin role required for changes")}
-              </span>
+              <span>{canManageUsers ? "Ready" : "Admin role required for changes"}</span>
             </div>
             <div className="sectionActions">
               {selectedOperator && (
@@ -1743,6 +1737,10 @@ export function SystemUsersPanel({
               >
                 <X size={16} />
               </button>
+              <ActionFeedback
+                message={actionError ?? (reviewPending ? "Preparing review" : null)}
+                tone={actionError ? "danger" : "progress"}
+              />
             </div>
           </div>
           <div className="operatorEditorBody">
