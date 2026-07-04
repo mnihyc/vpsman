@@ -11,11 +11,12 @@ use crate::{
     error::ApiError,
     model::{
         is_valid_operator_timezone, AuthContext, AuthResponse, BootstrapOperatorRequest,
-        CreateOperatorRequest, HistoryQuery, LoginRequest, OperatorAuthEventQuery,
-        OperatorAuthEventView, OperatorLifecycleRequest, OperatorPasswordResetRequest,
-        OperatorPreferences, OperatorSessionRevokeRequest, OperatorSessionView, OperatorView,
-        RefreshRequest, TotpConfirmRequest, TotpDisableRequest, TotpSetupOutcome, TotpSetupRequest,
-        TotpSetupResponse, TotpUpdateOutcome, UpdateOperatorRequest,
+        BootstrapStatusResponse, CreateOperatorRequest, HistoryQuery, LoginRequest,
+        OperatorAuthEventQuery, OperatorAuthEventView, OperatorLifecycleRequest,
+        OperatorPasswordResetRequest, OperatorPreferences, OperatorSessionRevokeRequest,
+        OperatorSessionView, OperatorView, RefreshRequest, TotpConfirmRequest, TotpDisableRequest,
+        TotpSetupOutcome, TotpSetupRequest, TotpSetupResponse, TotpUpdateOutcome,
+        UpdateOperatorRequest,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     repository_auth::OperatorLoginAttempt,
@@ -26,6 +27,14 @@ use crate::{
     state::AppState,
 };
 use vpsman_common::{operator_db_payload_hash, OperatorDbPayloadInput, PrivilegeAssertion};
+
+pub(crate) async fn bootstrap_status(
+    State(state): State<AppState>,
+) -> Result<Json<BootstrapStatusResponse>, ApiError> {
+    Ok(Json(BootstrapStatusResponse {
+        bootstrap_required: state.repo.operator_count().await? == 0,
+    }))
+}
 
 pub(crate) async fn bootstrap_operator(
     State(state): State<AppState>,

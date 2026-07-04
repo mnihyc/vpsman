@@ -39,7 +39,7 @@ async function expectAuthenticatedConsoleShell(page: Page) {
 }
 
 async function expectOperatorAccessShell(page: Page) {
-  const heading = page.getByRole("heading", { name: "Operator access" });
+  const heading = page.getByRole("heading", { name: "Sign in" });
   const authForm = page.getByLabel("Operator authentication");
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -80,12 +80,12 @@ test("stores bearer session only inside encrypted WebCrypto vault", async ({
   await page.goto("/");
 
   await expectOperatorAccessShell(page);
-  await expect(page.getByLabel("Authentication mode")).toBeVisible();
+  await expect(page.getByLabel("Authentication mode")).toHaveCount(0);
   await expect(page.getByLabel("Username")).toBeFocused();
   await page.getByLabel("Username").fill("vault-admin");
   await page.getByLabel("Password").fill("vault-password-123");
   await page.getByLabel("Session vault key").fill("vault-key-123456");
-  await activate(page.getByRole("button", { name: "Submit login" }));
+  await activate(page.getByRole("button", { name: "Sign in" }));
 
   await page.waitForFunction(
     () => window.localStorage.getItem("vpsman.authVault") !== null,
@@ -109,6 +109,12 @@ test("stores bearer session only inside encrypted WebCrypto vault", async ({
 });
 
 async function installAuthVaultApiMock(page: import("@playwright/test").Page) {
+  await page.route("**/api/v1/auth/bootstrap-status", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: { bootstrap_required: false },
+    });
+  });
   await page.route("**/api/v1/auth/login", async (route) => {
     await route.fulfill({
       contentType: "application/json",

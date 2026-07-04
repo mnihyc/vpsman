@@ -44,11 +44,18 @@ npm run dev -- --port 5173
 
 Open `http://127.0.0.1:5173`.
 
-## 2. Bootstrap Access
+## 2. Create First Operator
+
+On an empty control plane, the browser shows **Create first operator**. Create
+the initial admin operator there; the console signs in immediately after the
+account is created. On later visits, the same screen shows **Sign in** for
+existing operators.
+
+If you also want to run the CLI examples below from a shell, sign in with
+`vpsctl` and export the returned API token:
 
 ```sh
 export VPSMAN_OPERATOR_PASSWORD=<admin_password>
-cargo run -p vpsctl -- bootstrap --username admin --password-env VPSMAN_OPERATOR_PASSWORD
 cargo run -p vpsctl -- login --username admin --password-env VPSMAN_OPERATOR_PASSWORD
 export VPSMAN_API_TOKEN=<operator_token>
 ```

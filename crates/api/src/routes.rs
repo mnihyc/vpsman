@@ -17,11 +17,11 @@ use crate::{
         upsert_fleet_alert_notification_channel, upsert_fleet_alert_policy,
     },
     routes_auth::{
-        bootstrap_operator, clear_operator_totp, confirm_operator_totp, create_operator,
-        current_operator, delete_operator, disable_operator, disable_operator_totp,
-        enable_operator, list_operator_auth_events, list_operator_sessions, list_operators,
-        login_operator, refresh_operator_session, reset_operator_password, revoke_operator_session,
-        setup_operator_totp, update_operator, update_operator_preferences,
+        bootstrap_operator, bootstrap_status, clear_operator_totp, confirm_operator_totp,
+        create_operator, current_operator, delete_operator, disable_operator,
+        disable_operator_totp, enable_operator, list_operator_auth_events, list_operator_sessions,
+        list_operators, login_operator, refresh_operator_session, reset_operator_password,
+        revoke_operator_session, setup_operator_totp, update_operator, update_operator_preferences,
     },
     routes_backups::{
         abort_backup_artifact_upload_session, commit_backup_artifact_upload_session,
@@ -128,6 +128,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/v1/build-info", get(build_info))
+        .route("/api/v1/auth/bootstrap-status", get(bootstrap_status))
         .route("/api/v1/auth/bootstrap", post(bootstrap_operator))
         .route("/api/v1/auth/login", post(login_operator))
         .route("/api/v1/auth/refresh", post(refresh_operator_session))

@@ -89,6 +89,10 @@ files private.
 `runtime/cli/current`, creates missing compose secrets when
 `VPSMAN_SUPER_PASSWORD` is set, then starts compose.
 
+After first start, open the browser console. An empty control plane shows
+**Create first operator** and signs in the initial admin after creation. Once an
+operator exists, the same unauthenticated page shows **Sign in**.
+
 `update.sh latest` updates the same three release payloads for an existing
 deployment. Rollback swaps `current` and `previous` for server, frontend, and
 CLI together. The update script verifies release checksums and does not delete

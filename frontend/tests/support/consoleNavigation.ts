@@ -48,8 +48,13 @@ export async function waitForConsoleShell(page: Page, timeout = 10_000) {
 }
 
 async function isOperatorAccessVisible(page: Page) {
+  const signInVisible = await page
+    .getByRole("heading", { exact: true, name: "Sign in" })
+    .isVisible()
+    .catch(() => false);
+  if (signInVisible) return true;
   return page
-    .getByRole("heading", { exact: true, name: "Operator access" })
+    .getByRole("heading", { exact: true, name: "Create first operator" })
     .isVisible()
     .catch(() => false);
 }
@@ -231,7 +236,7 @@ async function loginMockConsoleSession(page: Page) {
   await page.getByLabel("Username").fill("console-admin");
   await page.getByLabel("Password").fill("local-super-password");
   await page.getByLabel("Session vault key").fill("console-layout-vault-key");
-  await activate(page.getByRole("button", { name: "Submit login" }));
+  await activate(page.getByRole("button", { name: "Sign in" }));
   await expect(page.locator(".shell")).toBeVisible({ timeout: 10_000 });
   return true;
 }

@@ -110,6 +110,11 @@ The updater downloads release assets, verifies `SHA256SUMS`, creates missing
 compose secrets, stages server/frontend/CLI payloads under `deploy/runtime/`,
 and starts the stack.
 
+Open `http://127.0.0.1:5173` after first start. When no operator exists, the
+console shows **Create first operator** and creates the initial admin session
+directly in the browser. After any operator exists, the same page becomes the
+normal **Sign in** screen.
+
 By default:
 
 - the browser console binds to `127.0.0.1:5173`;
@@ -158,8 +163,10 @@ cd frontend
 npm run dev -- --port 5173
 ```
 
-Open `http://127.0.0.1:5173`, bootstrap an operator with `vpsctl`, then follow
-the tutorials to register agents and dispatch work.
+Open `http://127.0.0.1:5173`. The console asks the API whether an operator
+already exists, then shows either **Create first operator** for first start or
+**Sign in** for normal access. Follow the tutorials to register agents and
+dispatch work.
 
 ## Add a VPS Agent
 

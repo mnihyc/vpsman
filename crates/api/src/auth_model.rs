@@ -302,6 +302,11 @@ pub(crate) struct BootstrapOperatorRequest {
     pub(crate) password: String,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct BootstrapStatusResponse {
+    pub(crate) bootstrap_required: bool,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct LoginRequest {
     pub(crate) username: String,

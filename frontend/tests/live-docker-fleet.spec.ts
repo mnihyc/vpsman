@@ -342,7 +342,7 @@ async function login(page: Page) {
     });
     const access = page.getByRole("heading", {
       exact: true,
-      name: "Operator access",
+      name: "Sign in",
     });
     try {
       const state = await Promise.race([
@@ -359,7 +359,7 @@ async function login(page: Page) {
       await page.getByLabel("Username").fill(username);
       await page.getByLabel("Password").fill(password);
       await page.getByLabel("Session vault key").fill(sessionVaultKey);
-      await page.getByRole("button", { name: "Submit login" }).click();
+      await page.getByRole("button", { name: "Sign in" }).click();
       await expect(home).toBeVisible({ timeout: 30_000 });
       return;
     } catch (error) {
@@ -384,7 +384,7 @@ async function openLiveConsoleSubpage(
       error instanceof Error &&
       error.message.includes("authenticated session was lost");
     const operatorAccessVisible = await page
-      .getByRole("heading", { exact: true, name: "Operator access" })
+      .getByRole("heading", { exact: true, name: "Sign in" })
       .isVisible()
       .catch(() => false);
     if (!lostSession && !operatorAccessVisible) {

@@ -25,6 +25,10 @@ export VPSMAN_SUPER_PASSWORD='<local_super_password>'
 `runtime/`, generates missing compose secrets from `VPSMAN_SUPER_PASSWORD`,
 and starts compose.
 
+After the stack starts, open `http://127.0.0.1:5173`. The console discovers
+whether any operator exists: an empty control plane shows **Create first
+operator**, while an initialized control plane shows **Sign in**.
+
 If you place release assets manually, use the deployment-directory runtime
 layout. The repository template names that directory `deploy/`, but the
 directory can be copied or renamed:

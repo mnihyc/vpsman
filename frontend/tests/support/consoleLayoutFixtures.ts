@@ -4007,6 +4007,11 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/gateway-sessions" && method === "GET")
           return emptyArrayResponse();
+        if (pathname === "/api/v1/auth/bootstrap-status" && method === "GET") {
+          return jsonResponse({
+            bootstrap_required: false,
+          });
+        }
         if (
           (pathname === "/api/v1/auth/login" ||
             pathname === "/api/v1/auth/bootstrap") &&

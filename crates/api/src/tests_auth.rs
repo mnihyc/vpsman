@@ -1,7 +1,11 @@
 use super::*;
 use std::collections::BTreeMap;
 
-use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
+use axum::{
+    body::{to_bytes, Body},
+    http::{header::AUTHORIZATION, HeaderMap, Request, StatusCode},
+};
+use tower::ServiceExt;
 
 use crate::model_command_templates::{CommandTemplateQuery, JobOutputComparisonQuery};
 use crate::security::{
@@ -84,6 +88,50 @@ async fn concurrent_bootstrap_operator_creates_exactly_one_admin() {
     assert_eq!(created.len(), 1);
     assert_eq!(rejected, 15);
     assert_eq!(repo.operator_count().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn bootstrap_status_route_reports_first_operator_requirement() {
+    let state = memory_test_state();
+
+    let response = crate::routes::build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/auth/bootstrap-status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload, serde_json::json!({ "bootstrap_required": true }));
+
+    state
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let response = crate::routes::build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/auth/bootstrap-status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload, serde_json::json!({ "bootstrap_required": false }));
 }
 
 #[tokio::test]

@@ -24,7 +24,7 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
   await page.goto("/");
   if (
     await page
-      .getByRole("heading", { exact: true, name: "Operator access" })
+      .getByRole("heading", { exact: true, name: "Sign in" })
       .isVisible()
   ) {
     await page
@@ -36,7 +36,7 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
     await page
       .getByLabel("Session vault key")
       .fill(process.env.VPSMAN_LIVE_API_SESSION_KEY ?? "frontend-live-session-key");
-    await page.getByRole("button", { name: "Submit login" }).click();
+    await page.getByRole("button", { name: "Sign in" }).click();
     await expect(page.locator(".shell")).toBeVisible({ timeout: 10_000 });
   }
 

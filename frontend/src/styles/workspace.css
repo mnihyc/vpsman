@@ -4611,11 +4611,26 @@ button.vpsDetailRecord:hover {
   padding-bottom: 18px;
 }
 
+.authHeader {
+  align-items: flex-start;
+}
+
+.authHeader > div {
+  display: grid;
+  gap: 5px;
+}
+
 .authHeader h1 {
   margin: 0;
   color: var(--text);
   font-size: 24px;
   line-height: 1.2;
+}
+
+.authHeaderSubtitle {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 .authPanel label {
@@ -4631,6 +4646,12 @@ button.vpsDetailRecord:hover {
   text-transform: uppercase;
 }
 
+.authPanel label small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .authPanel input {
   width: 100%;
   min-height: 40px;
@@ -4639,6 +4660,52 @@ button.vpsDetailRecord:hover {
   color: var(--text);
   outline: 0;
   padding: 0 12px;
+}
+
+.authPanel input:disabled {
+  background: var(--surface-soft);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.authModeSummary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.authModeSummary .authStatePill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border: 1px solid var(--primary-border);
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 8px;
+}
+
+.authModeSummary > span:not(.authStatePill) {
+  flex: 1 1 260px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.authNotice {
+  margin: 0 18px;
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: var(--danger-soft);
+  color: var(--danger-strong);
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 10px 12px;
 }
 
 .runbooksPanel {
