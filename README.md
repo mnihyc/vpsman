@@ -1,209 +1,192 @@
 # vpsman
 
-`vpsman` is a Rust-based VPS panel with extended special functions: lightweight
-headless agents, a raw TCP gateway, an HTTP control plane, a CLI/VTY operator
-tool, and a Vite-built web panel.
+[![CI](https://github.com/mnihyc/vpsman/actions/workflows/ci.yml/badge.svg)](https://github.com/mnihyc/vpsman/actions/workflows/ci.yml)
+[![Release Build](https://github.com/mnihyc/vpsman/actions/workflows/release.yml/badge.svg)](https://github.com/mnihyc/vpsman/actions/workflows/release.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
-The public repository intentionally keeps source, migrations, deployment
-templates, GitHub Actions build definitions, and operator tutorials. Local
-planning notes, private smoke harnesses, runtime state, generated secrets, and
-build artifacts are ignored and are not part of the public tree.
+`vpsman` is a private VPS fleet control plane for operators who manage
+long-lived Linux machines and want to stop falling back to SSH, VNC, shell
+scripts, and one-off spreadsheets for routine work.
 
-## Components
+It combines lightweight agents, a raw TCP gateway, an HTTP/WebSocket API, a
+background worker, a scriptable CLI/VTY tool, and a React console. The result is
+one operator surface for fleet inventory, reviewed job dispatch, terminal
+sessions, file transfer, backups, restores, runtime config, network topology,
+agent updates, access control, and audit evidence.
 
-- `crates/agent`: low-overhead Linux client agent.
-- `crates/gateway`: raw TCP gateway for long-lived agent sessions.
+## Contents
+
+- [Why vpsman?](#why-vpsman)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick Start](#quick-start)
+- [Add a VPS Agent](#add-a-vps-agent)
+- [Operating Model](#operating-model)
+- [Development](#development)
+- [Release Assets](#release-assets)
+- [Documentation](#documentation)
+- [License](#license)
+
+## Why vpsman?
+
+Most VPS panels are either provider-specific dashboards or consumer hosting
+UIs. `vpsman` targets a different operating model:
+
+- You own the control plane and deploy it privately.
+- Agents connect outward to your gateway; operators do not need inbound SSH for
+  every routine task.
+- Jobs, terminals, transfers, backups, and topology work are reviewed against
+  explicit VPS targets before mutation.
+- Tags and selectors make 20+ heterogeneous VPSs manageable without forcing a
+  cloud-native business hierarchy.
+- Access scopes, local privilege assertions, retained history, and release
+  checks are built for production use.
+
+## Features
+
+| Area | What it covers |
+| --- | --- |
+| Fleet operations | Inventory, tags, groups, target preview, summaries, alerts, and per-VPS detail panels. |
+| Remote work | Reviewed shell/script jobs, interactive terminal sessions, file browser, file transfer, process supervision, and schedules. |
+| Backups | Backup requests, chunked artifacts, restore plans, rollback, migration links, and object-store retention. |
+| Runtime config | Source templates, per-VPS overrides, bulk config patches, and visible runtime config sync jobs. |
+| Network | Tunnel plans, runtime tunnel sync, topology graph/evidence, network tests, speed tests, Bird2/OSPF cost workflows. |
+| Access and audit | Operator roles/scopes, sessions, TOTP, direct gateway identities, key rotation/revocation, audit logs, and evidence views. |
+| Releases | GitHub release assets, checksum manifests, compose updater, agent update jobs, and rollback-friendly deployment layout. |
+
+## Architecture
+
+```text
+Browser / vpsctl
+      |
+      | HTTPS or private HTTP
+      v
+vpsman-api  <---->  PostgreSQL  <---->  vpsman-worker
+      |
+      | private gateway control
+      v
+vpsman-gateway  <==== raw TCP + Noise ====>  vpsman-agent on each VPS
+```
+
+Core packages:
+
 - `crates/api`: HTTP/WebSocket control-plane API.
-- `crates/worker`: background scheduler and automation worker.
-- `crates/vpsctl`: scriptable CLI and interactive VTY shell.
-- `crates/common`: shared protocol, auth, config, and telemetry types.
-- `frontend`: React + TypeScript panel source.
-- `deploy`: Docker Compose and Nginx templates for release binaries.
+- `crates/gateway`: long-lived raw TCP agent gateway.
+- `crates/agent`: low-overhead Linux VPS agent.
+- `crates/worker`: scheduler, retention, and background automation worker.
+- `crates/vpsctl`: CLI and interactive VTY operator tool.
+- `crates/common`: shared protocol, auth, config, telemetry, and network types.
+- `frontend`: React + TypeScript operator console.
+- `deploy`: Docker Compose runtime, Nginx config, release updater, and agent installer.
 
-Targeting is tag-first. Provider/country/group labels are ordinary tags, while
-resolver-only inner selectors such as `id:<client_id>` and
-`name:<display_name>` are documented in [target selectors](docs/target-selectors.md).
-Jobs and schedules execute fixed, reviewed target snapshots: frontend
-confirmation and CLI preview resolve selectors to concrete VPS IDs, submit those
-IDs to the API, and keep selector text only as audit context for deliberate
-manual Target update.
+## Quick Start
 
-Operator access scopes are documented in
-[operator access scopes](docs/operator-access-scopes.md). `fleet:read` is for
-metadata/status views; payloads, terminal replay, integrations, templates,
-schedules, rendered config, and full network plans require narrower read scopes.
+For a real deployment, start from GitHub Releases through the compose updater.
+For development or evaluation, use the local control-plane tutorial.
 
-## Operator Tutorials
+Prerequisites depend on the path you choose:
 
-The operator-facing tutorial index is [tutorials/README.md](tutorials/README.md).
-It covers quickstart setup, local control-plane operation, direct gateway agent
-installation, fleet organization, daily jobs/schedules, backups, updates, and
-headless CLI/VTY workflows.
+- Docker and Docker Compose for the release deployment.
+- Rust via `rustup` for source builds; the repo pins the toolchain in
+  [rust-toolchain.toml](rust-toolchain.toml).
+- Node matching [frontend/.nvmrc](frontend/.nvmrc) for frontend development.
+- `curl`, `env`, and systemd for the default root/user agent installer path;
+  staged no-systemd installs are also supported.
 
-## Release Assets
-
-GitHub Actions publishes separated runtime assets:
-
-- `vpsman-server-linux-x86_64.zip`
-- `vpsman-agent-*-musl`
-- `vpsctl-*-musl`
-- `vpsman-frontend-dist.tar.gz`
-- `version.json`
-- `SHA256SUMS`
-
-The root `version-template.json` is the canonical release metadata template.
-The release workflow stamps it with the exact tag, commit, generated asset
-list, and tag-pinned per-asset download URLs before uploading it to GitHub
-Releases as `version.json`.
-
-The GitHub release tag is the canonical shipped version. Release builds embed
-that tag-derived version into the server, agent, and CLI binaries so the agent
-updater compares against the same version published in `version.json`.
-
-The frontend artifact is a static Vite build intended for Nginx, Apache2, or an
-equivalent static server.
-
-## Docker Compose Runtime
-
-The compose template runs already-built release assets. It does not rebuild
-Rust or frontend code.
-
-Place release files into this deployment-directory layout. The repository
-template names that directory `deploy/`, but the directory itself can be
-renamed or copied outside a source checkout:
-
-- server ZIP contents: `runtime/server/current/`
-- extracted frontend `dist/`: `runtime/frontend/current/dist/`
-- host CLI: `runtime/cli/current/vpsctl`
-- suite config: `config/vpsman.toml`
-- secret files referenced by suite config: generated under
-  `config/secrets/`
-
-For a first Docker Compose start from GitHub Releases, let the deploy updater
-download the release, verify checksums, generate missing compose secrets, and
-start the stack:
+### Deploy from GitHub Releases
 
 ```sh
 cd deploy
 cp .env.example .env
-# edit .env before real deployment; use a URL-safe random hex
-# POSTGRES_PASSWORD because compose derives the API/worker Postgres URL from it
+
+# Edit .env before production use. POSTGRES_PASSWORD should be a strong,
+# URL-safe secret because compose derives service database URLs from it.
 export VPSMAN_SUPER_PASSWORD='<local_super_password>'
+
 ./update.sh first-start latest
 ```
 
-For manual asset placement or custom bootstrap, run
-`cargo run -p vpsctl -- compose-secrets --secrets-dir deploy/config/secrets`
-from a source checkout if a release `vpsctl` binary is not installed yet. The
-command writes the three mounted compose secret files, a gateway public-key
-file for agent installs, and `operator-privilege.env` containing the generated
-`VPSMAN_SUPER_SALT_HEX`. Keep the super password in your operator password
-manager; the API never receives it.
+The updater downloads release assets, verifies `SHA256SUMS`, creates missing
+compose secrets, stages server/frontend/CLI payloads under `deploy/runtime/`,
+and starts the stack.
 
-Persistent runtime data stays under the deployment directory:
+By default:
 
-- PostgreSQL: `runtime/postgres/data`
-- local object storage: `runtime/data/objects/backups` for retained
-  backup artifacts, large job outputs, file-transfer handoffs, and uploaded
-  source artifacts
+- the browser console binds to `127.0.0.1:5173`;
+- the API is private inside the compose network;
+- the agent gateway binds to loopback on `9443`;
+- persistent data stays under `deploy/runtime/`;
+- non-secret suite config stays in `deploy/config/vpsman.toml`;
+- generated secrets stay in `deploy/config/secrets/`.
 
-See `deploy/README.md` for the full compose directory layout.
+See [deploy/README.md](deploy/README.md) for the full directory layout and
+persistence model.
 
-In Docker, keep the `.env` object-store paths under `/var/lib/vpsman`
-unchanged; compose maps them to `runtime/data`.
-Compose also sets `VPSMAN_SUITE_CONFIG=/etc/vpsman/vpsman.toml`,
-derives `VPSMAN_POSTGRES_URL` for API and worker from `.env`, and mounts
-`config` at `/etc/vpsman`. `config/vpsman.toml` remains the single
-authoritative compose suite config for non-secret runtime settings; the
-database password stays in `.env`. The API receives that config directory as
-writable so dashboard saves can atomically replace the TOML, while gateway,
-worker, and secret mounts stay read-only. Compose mounts secret files per
-service under `/run/secrets`; API and worker containers do not receive
-gateway-only private-key or privilege-verifier material. Direct binary runs are
-independent of the compose layout; set `VPSMAN_SUITE_CONFIG` and
-`VPSMAN_POSTGRES_URL` yourself when you want a specific operator config file.
+### Run locally from source
 
-Long-running job control uses `max_timeout_secs` as the agent execution budget.
-The fleet-wide accepted maximum is `timeout.max_job_timeout_secs` in
-`config/vpsman.toml`, defaulting to 3600 seconds and configurable up to
-seven days. Requests above the configured maximum are rejected so the browser,
-CLI, API, worker, and agent agree on the exact budget. The API adds
-dispatch/event grace through `timeout.control_deadline_grace_secs`, and the
-gateway keeps forwarder delivery RAM-first with overflow and graceful-shutdown
-spool settings under `[gateway]`. Controlled shutdown defers pending forwarder
-events to the spool; hard crashes before RAM-resident events are spooled remain
-a residual loss boundary. Spool replay reposts saved command-output event
-bodies through normal API ingest so duplicate, conflict, late-output, and
-payload-hash checks use the same path as live delivery. Active operator cancellation interrupts
-agent shell/script/PTY children and long-running backup, restore, network, and
-terminal operations; canceled targets become terminal only after the agent sends
-structured `command_canceled` output. Resumable file-transfer steps use the
-same structured cancellation path: upload chunks cancel before a temp-file write
-starts, upload chunk completion wins after that write has succeeded, commits
-cancel before the final move starts, and download chunks cancel before emitting
-stdout/status. Command-output retry retention defaults to 24 hours and can be
-tuned with
-`[gateway].command_output_event_ttl_secs` or
-`VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS`; this remains a best-effort
-gateway forwarder spool, not an end-to-end gateway-agent ACK protocol.
+The shortest local operator walkthrough is
+[tutorials/00-operator-quickstart.md](tutorials/00-operator-quickstart.md).
 
-Tunnel endpoint allocation pools live under `[network]` and are empty by
-default. Operators must set IPv4 and/or IPv6 pool CIDRs, or pass pools on the
-allocation request, before endpoint generation can produce suggestions.
-
-The compose template does not publish the API host port. Nginx reaches the API
-over the private Docker network, and the dashboard binds to `127.0.0.1:5173` by
-default through `VPSMAN_FRONTEND_BIND`. Gateway TCP also stays loopback-bound by
-default, and gateway control uses a shared Unix socket under
-`runtime/data`; expose agent TCP through your chosen public proxy,
-firewall, or tunnel when needed. Gateway-to-API forwarding is intentionally
-plain HTTP and should stay on localhost, a Unix-adjacent private compose
-network, or another trusted private network; TLS termination belongs in the
-operator-facing reverse proxy, not this internal forwarding link.
-Because the API is a private service behind the dashboard proxy, operator
-login throttling and auth history trust `X-Forwarded-For` by default, including
-IPv6 client addresses forwarded by an external TLS provider. Deployments that
-bind the API directly can restrict that trust with `[api].trusted_proxy_cidrs`
-or `VPSMAN_TRUSTED_PROXY_CIDRS`.
-
-Update an existing Docker deployment from GitHub Releases:
+At a high level:
 
 ```sh
-cd deploy
-./update.sh latest
-# or pin a release:
-./update.sh v0.1.0
+# 1. Start Postgres.
+docker run --rm --name vpsman-quickstart-postgres \
+  -e POSTGRES_DB=vpsman \
+  -e POSTGRES_USER=vpsman \
+  -e POSTGRES_PASSWORD=vpsman \
+  -p 127.0.0.1:5432:5432 \
+  postgres:16-alpine
+
+# 2. Export shared service environment.
+export VPSMAN_API_BIND=127.0.0.1:8080
+export VPSMAN_API_URL=http://127.0.0.1:8080
+export VPSMAN_POSTGRES_URL=postgres://vpsman:vpsman@127.0.0.1:5432/vpsman
+export VPSMAN_GATEWAY_BIND=127.0.0.1:9443
+export VPSMAN_GATEWAY_CONTROL_BIND=127.0.0.1:9444
+export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444
+export VPSMAN_INTERNAL_TOKEN="$(openssl rand -hex 32)"
+export VPSMAN_BACKUP_OBJECT_STORE_DIR=.tmp/objects/backups
+
+# 3. Run each service in its own shell with that environment.
+cargo run -p vpsman-api
+cargo run -p vpsman-gateway
+cargo run -p vpsman-worker
+
+# 4. Run the console.
+cd frontend
+npm run dev -- --port 5173
 ```
 
-Rollback swaps back to the previous server/frontend/CLI release directories:
+Open `http://127.0.0.1:5173`, bootstrap an operator with `vpsctl`, then follow
+the tutorials to register agents and dispatch work.
 
-```sh
-cd deploy
-./update.sh rollback
-```
+## Add a VPS Agent
 
-The update script downloads release assets, verifies `SHA256SUMS`, updates
-`runtime/server/current`, `runtime/frontend/current`, and
-`runtime/cli/current/vpsctl`, then recreates containers. It does not
-delete PostgreSQL or local object-storage data.
+The recommended path is the Access -> VPS identities workflow in the web
+console:
 
-## Direct Gateway Agent Install
+1. Open **Access -> VPS identities**.
+2. Choose **Register VPS**.
+3. Keep the default numerical VPS ID or edit it for an imported legacy ID.
+4. Generate a Noise keypair.
+5. Review and register the public identity.
+6. Fill gateway install defaults once.
+7. Copy the generated one-line installer to the VPS.
 
-Remote VPS agents connect to the raw TCP gateway listener. They never contact
-the browser panel, panel HTTP API, or a panel-side lookup endpoint during
-installation. Gateway control must stay private; the default compose deployment
-uses a local Unix socket for it. For public agents, expose or proxy only the
-agent TCP gateway on `9443`, provision each agent with gateway Noise identity
-material, and register the matching public key as a direct gateway identity.
+The generated command installs the latest GitHub release by default and supports
+root service, user service, and staged no-systemd installs.
 
-Typical flow:
+CLI/manual equivalent:
 
 ```sh
 vpsctl noise-keygen
+
 export VPSMAN_SUPER_PASSWORD='<local_super_password>'
-export VPSMAN_SUPER_SALT_HEX='<server_super_salt_hex>'
+export VPSMAN_SUPER_SALT_HEX='<64_hex_salt>'
+
 vpsctl agent-identity-upsert \
-  --client-id agent-nrt-04 \
+  --client-id 1 \
   --client-public-key-hex <agent_noise_public_key_hex> \
   --display-name edge-nrt-04 \
   --tags country:JP,role:edge \
@@ -211,32 +194,82 @@ vpsctl agent-identity-upsert \
 
 curl -fsSL https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh | env \
   VPSMAN_INSTALL_MODE=root \
-  VPSMAN_AGENT_CLIENT_ID=agent-nrt-04 \
+  VPSMAN_AGENT_CLIENT_ID=1 \
   VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX=<agent_noise_private_key_hex> \
   VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=<gateway_noise_public_key_hex> \
   VPSMAN_GATEWAY_ENDPOINTS='primary=gw.example.com:9443=10,backup=gw-backup.example.com:9443=20' \
   bash
 ```
 
-Endpoint DNS names and priorities are part of the agent config; no separate
-panel-side endpoint lookup is used. The installer enables and starts the agent
-service by default; set `VPSMAN_AGENT_ENABLE_SERVICE=0` only when deliberately
-staging files without starting the service. Gateway Noise sessions protect
-agent traffic from tampering, so there is no extra server-side
-command-authentication key.
-Privilege for mutating work is still request-bound through the local
-super-password assertion verified by the private gateway. See
-`deploy/AGENT_GATEWAY_INSTALL.md` and `deploy/install-agent.sh`.
+Agents do not call the browser panel, HTTP API, or a panel-side endpoint lookup
+during installation. They receive a stable client ID, their private Noise key,
+the gateway public key, and a prioritized gateway endpoint list. See
+[deploy/AGENT_GATEWAY_INSTALL.md](deploy/AGENT_GATEWAY_INSTALL.md).
 
-## Local Build
+## Operating Model
+
+### Targets
+
+Targeting is tag-first. Provider, country, role, and ownership labels are
+ordinary tags. Resolver-only selectors such as `id:<client_id>` and
+`name:<display_name>` are available for precise work.
+
+Jobs and schedules execute fixed, reviewed target snapshots. Selector text is
+kept as audit context, but the submitted API payload contains the concrete VPS
+IDs that were reviewed.
+
+Read more in [docs/target-selectors.md](docs/target-selectors.md).
+
+### Access and privilege
+
+Operator API tokens authenticate to the API. Privileged mutations also require a
+request-bound assertion created locally from the operator's super password and
+salt; the API never receives the plaintext super password.
+
+Access scopes intentionally separate broad fleet metadata from sensitive
+payloads, terminal replay, integrations, schedules, templates, rendered config,
+and full network plans. See
+[docs/operator-access-scopes.md](docs/operator-access-scopes.md).
+
+### Persistence and updates
+
+Compose deployments keep durable state under `deploy/runtime/`:
+
+- PostgreSQL data: `runtime/postgres/data`
+- filesystem object store: `runtime/data/objects/backups`
+- active server payload: `runtime/server/current`
+- active frontend payload: `runtime/frontend/current`
+- active CLI payload: `runtime/cli/current`
+
+Update an existing deployment:
+
+```sh
+cd deploy
+./update.sh latest
+
+# or pin a tag:
+./update.sh v0.1.3
+```
+
+Rollback swaps server, frontend, and CLI payload directories back together:
+
+```sh
+cd deploy
+./update.sh rollback
+```
+
+The updater verifies checksums and does not delete PostgreSQL or object-store
+data.
+
+## Development
+
+Rust uses the repository `rust-toolchain.toml`; Node is pinned through
+`frontend/.nvmrc`.
 
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo build --release -p vpsman-api -p vpsman-gateway -p vpsman-worker -p vpsctl
-cargo build --release -p vpsman-agent --target x86_64-unknown-linux-musl
-cargo build --release -p vpsctl --target x86_64-unknown-linux-musl
 ```
 
 Frontend:
@@ -247,3 +280,64 @@ npm ci
 npm run build
 npm audit --audit-level=moderate
 ```
+
+Static Linux agent and CLI builds:
+
+```sh
+cargo build --release -p vpsman-agent --target x86_64-unknown-linux-musl
+cargo build --release -p vpsctl --target x86_64-unknown-linux-musl
+```
+
+Release-gate smoke checks are aggregated by:
+
+```sh
+bash scripts/release-check.sh
+```
+
+More build notes are in [docs/build.md](docs/build.md).
+
+## Release Assets
+
+The release workflow publishes:
+
+- `vpsman-server-linux-x86_64.zip`
+- `vpsman-agent-linux-x86_64-musl`
+- `vpsman-agent-linux-aarch64-musl`
+- `vpsctl-linux-x86_64-musl`
+- `vpsctl-linux-aarch64-musl`
+- `vpsman-frontend-dist.tar.gz`
+- `version.json`
+- `SHA256SUMS`
+
+The release tag is the canonical shipped version. `version.json` is generated
+from [version-template.json](version-template.json), stamped with the tag,
+commit, asset list, checksum manifest, and tag-pinned download URLs.
+
+## Documentation
+
+- [Tutorial index](tutorials/README.md)
+- [Operator quickstart](tutorials/00-operator-quickstart.md)
+- [Local control plane](tutorials/01-local-control-plane.md)
+- [Install agents](tutorials/02-install-agents.md)
+- [Daily operations](tutorials/04-daily-operations.md)
+- [Backup, restore, and migration](tutorials/07-backup-restore-migration.md)
+- [Agent updates](tutorials/08-agent-updates.md)
+- [Headless CLI/VTY](tutorials/09-headless-cli-vty.md)
+- [Deploy layout](deploy/README.md)
+- [Direct gateway agent install](deploy/AGENT_GATEWAY_INSTALL.md)
+- [Target selectors](docs/target-selectors.md)
+- [Operator access scopes](docs/operator-access-scopes.md)
+- [Job status model](docs/job-status-model.md)
+- [Build notes](docs/build.md)
+
+## Project Status
+
+`vpsman` is intended for private or production VPS fleet operation by expert
+operators. It is not a hosted SaaS product and does not try to imitate provider
+business models. Its design goal is an expert-simple control plane: expose
+powerful VPS operations directly, keep common tasks fast, and add friction only
+where an action is broad, destructive, privileged, or difficult to reverse.
+
+## License
+
+Licensed under either [MIT](LICENSE) or [Apache-2.0](LICENSE), at your option.
