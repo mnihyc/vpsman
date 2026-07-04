@@ -11,36 +11,19 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  release-check:
-    name: Aggregate release gate
+  release-quality-gate:
+    name: Release quality gate
+    uses: ./.github/workflows/release-quality-gate.yml
+    permissions:
+      contents: read
+
+  release-build-check:
+    name: Release binary build check
+    needs: release-quality-gate
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: vpsman
-          POSTGRES_USER: vpsman
-          POSTGRES_PASSWORD: vpsman
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U vpsman -d vpsman"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      VPSMAN_TEST_POSTGRES_URL: postgres://vpsman:vpsman@127.0.0.1:5432/vpsman
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: frontend/.nvmrc
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       - name: Install musl targets
         run: |
@@ -82,8 +65,16 @@ jobs:
           PATH="$RUNNER_TEMP/musl-tools:$PATH" command -v aarch64-linux-musl-gcc
           PATH="$RUNNER_TEMP/musl-tools:$PATH" command -v aarch64-linux-musl-ar
 
-      - name: Release quality checks
-        run: bash scripts/ci-release-quality-gate.sh
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-check-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            release-check-cargo-${{ runner.os }}-
 
       - name: Build release server binaries
         run: cargo build --release -p vpsman-api -p vpsman-gateway -p vpsman-worker

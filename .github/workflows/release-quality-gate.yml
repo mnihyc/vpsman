@@ -1,11 +1,7 @@
-name: CI
+name: Release Quality Gate
 
 on:
-  push:
-    branches:
-      - master
-      - main
-  pull_request:
+  workflow_call:
   workflow_dispatch:
 
 permissions:
@@ -16,9 +12,10 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  rust:
-    name: Rust checks
+  release-quality-gate:
+    name: Visible release checks
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     services:
       postgres:
         image: postgres:16-alpine
@@ -39,8 +36,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Show toolchain
-        run: rustup show
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install musl targets
         run: |
@@ -89,41 +90,20 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: release-quality-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-
+            release-quality-cargo-${{ runner.os }}-
 
-      - name: Format
+      - name: Rust format
         run: cargo fmt --all -- --check
 
-      - name: Clippy
+      - name: Rust clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test workspace
+      - name: Rust tests
         run: cargo test --workspace
 
-      - name: Build static client and CLI
-        run: |
-          cargo build --release -p vpsman-agent --target x86_64-unknown-linux-musl
-          cargo build --release -p vpsman-agent --target aarch64-unknown-linux-musl
-          cargo build --release -p vpsctl --target x86_64-unknown-linux-musl
-          cargo build --release -p vpsctl --target aarch64-unknown-linux-musl
-
-  frontend:
-    name: Frontend checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: frontend/.nvmrc
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Install dependencies
+      - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
 
@@ -134,13 +114,6 @@ jobs:
       - name: Audit frontend dependencies
         working-directory: frontend
         run: npm audit --audit-level=moderate
-
-  docs-and-deploy:
-    name: Repository and deploy checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
 
       - name: Docker Compose config
         run: |
