@@ -48,16 +48,19 @@ export function ConfirmationPrompt({
   const { preferences } = usePanelDisplaySettings();
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const promptRef = useRef<HTMLElement | null>(null);
+  const confirmLatchedRef = useRef(false);
+  const observedPendingRef = useRef(false);
   const onCancelRef = useRef(onCancel);
   const pendingRef = useRef(pending);
   const [typedConfirmation, setTypedConfirmation] = useState("");
+  const [confirmLatched, setConfirmLatched] = useState(false);
   const typedConfirmationRequired = Boolean(typedConfirmationText);
   const typedConfirmationMatches =
     !typedConfirmationText || typedConfirmation.trim() === typedConfirmationText;
   const displayMode =
     preferences.review_prompt_mode === "overlay" ? "overlay" : "inline";
   const confirmBlocked =
-    pending || confirmDisabled || !typedConfirmationMatches;
+    pending || confirmLatched || confirmDisabled || !typedConfirmationMatches;
 
   useEffect(() => {
     onCancelRef.current = onCancel;
@@ -65,7 +68,24 @@ export function ConfirmationPrompt({
 
   useEffect(() => {
     pendingRef.current = pending;
+    if (pending) {
+      observedPendingRef.current = true;
+      return;
+    }
+    if (observedPendingRef.current) {
+      observedPendingRef.current = false;
+      confirmLatchedRef.current = false;
+      setConfirmLatched(false);
+    }
   }, [pending]);
+
+  useEffect(() => {
+    if (!open || error) {
+      confirmLatchedRef.current = false;
+      observedPendingRef.current = false;
+      setConfirmLatched(false);
+    }
+  }, [error, open]);
 
   useEffect(() => {
     if (!open || !promptRef.current) {
@@ -200,7 +220,13 @@ export function ConfirmationPrompt({
   }, [open, typedConfirmationText]);
 
   useEffect(() => {
-    if (!open || pending || expiresAtUnix === null || expiresAtUnix === undefined) {
+    if (
+      !open ||
+      pending ||
+      confirmLatched ||
+      expiresAtUnix === null ||
+      expiresAtUnix === undefined
+    ) {
       return undefined;
     }
     const delayMs = expiresAtUnix * 1000 - Date.now();
@@ -216,13 +242,23 @@ export function ConfirmationPrompt({
     return null;
   }
   function handleConfirm() {
-    if (confirmBlocked) {
+    if (confirmBlocked || confirmLatchedRef.current) {
       return;
     }
-    if (displayMode === "overlay") {
-      onCancel();
+    confirmLatchedRef.current = true;
+    pendingRef.current = true;
+    setConfirmLatched(true);
+    try {
+      if (displayMode === "overlay") {
+        onCancel();
+      }
+      onConfirm();
+    } catch (error) {
+      confirmLatchedRef.current = false;
+      pendingRef.current = false;
+      setConfirmLatched(false);
+      throw error;
     }
-    onConfirm();
   }
   const prompt = (
     <section
@@ -269,7 +305,7 @@ export function ConfirmationPrompt({
       <button
         aria-label="Close confirmation"
         className="iconButton confirmationPromptClose"
-        disabled={pending}
+        disabled={pending || confirmLatched}
         onClick={onCancel}
         title="Close confirmation"
         type="button"
@@ -279,7 +315,7 @@ export function ConfirmationPrompt({
       <div className="confirmationPromptActions">
         <button
           className="secondaryAction compactAction"
-          disabled={pending}
+          disabled={pending || confirmLatched}
           onClick={onCancel}
           type="button"
         >
@@ -291,7 +327,7 @@ export function ConfirmationPrompt({
               ? "primaryAction dangerPrimary compactAction"
               : "primaryAction compactAction"
           }
-          disabled={pending || confirmDisabled || !typedConfirmationMatches}
+          disabled={confirmBlocked}
           onClick={handleConfirm}
           type="button"
         >

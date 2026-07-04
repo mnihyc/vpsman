@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -20,7 +21,12 @@ import { NetworkOverviewPanel } from "./panels/NetworkOverviewPanel";
 import { PanelDisplayProvider } from "./panelDisplay";
 import type { ActiveView, AgentView, FleetSummary } from "./types";
 import type { PrivilegeMaterial } from "./privilege";
-import { defaultSubpages, normalizeSubpage, viewSubpages } from "./constants";
+import {
+  defaultSubpages,
+  navItems,
+  normalizeSubpage,
+  viewSubpages,
+} from "./constants";
 import {
   getPageDescription,
   getPageTitle,
@@ -38,6 +44,11 @@ import type {
 import { retryableLazy } from "./lazyImport";
 
 type ReleaseRouteTarget = AgentView | string;
+
+type ConsoleRouteState = {
+  subpage: string;
+  view: ActiveView;
+};
 
 type ReleaseRouteHelpers = {
   openAuditEvidence: (auditId?: string) => void;
@@ -322,62 +333,62 @@ function getScopedPageDescription(view: ActiveView, subpage: string): string {
   if (view === "System") {
     switch (subpage) {
       case "suite_config":
-        return "High-risk suite settings, validation, save review, and reload impact";
+        return "Suite settings, validation, save review, and reload impact";
       case "capacity":
-        return "Control-plane limits, queue posture, artifact pressure, and worker lag";
+        return "Limits, queues, artifact pressure, and worker lag";
       case "maintenance":
-        return "Control-plane cleanup, object-store health, and reviewed maintenance work";
+        return "Cleanup, object-store health, and maintenance jobs";
       case "preferences":
-        return "Personal console preferences, display defaults, and workflow presentation";
+        return "Console display, navigation, and workflow defaults";
       default:
-        return "Service health, queue state, key control-plane KPIs, and attention signals";
+        return "Service health, queues, KPIs, and attention signals";
     }
   }
   if (view === "Access") {
     switch (subpage) {
       case "operators":
-        return "Human operator accounts, roles, scopes, MFA posture, and session revocation";
+        return "Operator accounts, roles, MFA, scopes, and sessions";
       case "vps_identities":
-        return "VPS agent identity registration, rotation, revocation, and install evidence";
+        return "Agent registration, rotation, revocation, and install evidence";
       case "gateway_sessions":
-        return "Gateway stream state, agent connectivity evidence, and routing readiness";
+        return "Gateway streams, agent connectivity, and routing readiness";
       case "privilege_vault":
-        return "Local privilege unlock, vault state, lock action, and safety notes";
+        return "Local privilege unlock, vault state, and lock action";
       default:
-        return "Operator, session, identity, gateway, and privilege authority posture";
+        return "Operators, sessions, identities, gateway, and privilege";
     }
   }
   if (view === "Backups") {
     switch (subpage) {
       case "requests":
-        return "Backup run history and reviewed one-time backup requests";
+        return "Backup runs and reviewed one-time requests";
       case "policies":
-        return "Backup policy registry, retention, schedule linkage, and prune review";
+        return "Policies, retention, schedules, and prune review";
       case "artifacts":
-        return "Backup artifact inventory, upload, hash, size, and transfer package workflows";
+        return "Artifacts, uploads, hashes, and transfer packages";
       case "restore":
-        return "Restore planning, execution review, verification state, and rollback";
+        return "Restore planning, review, verification, and rollback";
       case "migration":
-        return "Replacement VPS migration planning, restore evidence, and cutover checks";
+        return "Replacement VPS migration, restore evidence, and cutover";
       default:
-        return "Recoverability posture, coverage gaps, restore readiness, and backup workflow entry points";
+        return "Recoverability, coverage gaps, and restore readiness";
     }
   }
   if (view === "Observability") {
     if (subpage.startsWith("alerts:policy:")) {
-      return "Alert policies, active alert context, notification channels, and delivery evidence";
+      return "Alert policies, active context, channels, and delivery evidence";
     }
     switch (subpage) {
       case "network_metrics":
-        return "Latency, loss, speed, tunnel grouping, endpoint comparison, and alert overlays";
+        return "Latency, loss, speed, tunnels, endpoints, and alerts";
       case "alerts":
-        return "Alert policies, active alert context, notification channels, and delivery evidence";
+        return "Alert policies, active context, channels, and delivery evidence";
       case "webhooks":
-        return "Event webhook rules, tests, retained delivery evidence, and maintenance independent from alert notification destinations";
+        return "Webhook rules, tests, delivery evidence, and retention";
       case "dashboards":
-        return "Saved read-only observability widgets and shared dashboards";
+        return "Saved read-only widgets and shared dashboards";
       default:
-        return "CPU, memory, disk, network resource charts, grouping controls, and top VPS analysis";
+        return "Resource charts, grouping controls, and top VPS analysis";
     }
   }
   return getPageDescription(view);
@@ -391,6 +402,96 @@ function ConsolePanelFallback({ view }: { view: ActiveView }) {
   );
 }
 
+const VIEW_ROUTE_SLUGS: Record<ActiveView, string> = Object.fromEntries(
+  navItems.map((item) => [item.view, routeToken(item.view)]),
+) as Record<ActiveView, string>;
+
+const ROUTE_VIEWS_BY_SLUG = Object.fromEntries(
+  navItems.map((item) => [VIEW_ROUTE_SLUGS[item.view], item.view]),
+) as Record<string, ActiveView>;
+
+function routeToken(value: string): string {
+  return value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+}
+
+function consoleRouteHash(view: ActiveView, subpage: string): string {
+  return `#/${VIEW_ROUTE_SLUGS[view]}/${subpageRouteSegment(view, subpage)}`;
+}
+
+function parseConsoleRouteHash(hash: string): ConsoleRouteState | null {
+  const trimmed = hash.trim();
+  if (!trimmed.startsWith("#/")) {
+    return null;
+  }
+  const segments = trimmed.slice(2).split("/").filter(Boolean);
+  if (segments.length === 0) {
+    return null;
+  }
+  const view = ROUTE_VIEWS_BY_SLUG[decodeRouteSegment(segments[0])];
+  if (!view) {
+    return null;
+  }
+  const subpage = routeSegmentSubpage(view, segments[1] ?? "");
+  return {
+    subpage: normalizeSubpage(view, subpage),
+    view,
+  };
+}
+
+function readConsoleRouteFromLocation(): ConsoleRouteState | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  return parseConsoleRouteHash(window.location.hash);
+}
+
+function writeConsoleRoute(
+  view: ActiveView,
+  subpage: string,
+  mode: "push" | "replace" = "push",
+) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const hash = consoleRouteHash(view, subpage);
+  if (window.location.hash === hash) {
+    return;
+  }
+  const url = `${window.location.pathname}${window.location.search}${hash}`;
+  if (mode === "replace") {
+    window.history.replaceState(null, "", url);
+    return;
+  }
+  window.history.pushState(null, "", url);
+}
+
+function subpageRouteSegment(view: ActiveView, subpage: string): string {
+  const subpages = viewSubpages[view] ?? [];
+  const known = subpages.find((entry) => entry.id === subpage);
+  if (known) {
+    return routeToken(known.id);
+  }
+  return encodeURIComponent(subpage);
+}
+
+function routeSegmentSubpage(view: ActiveView, segment: string): string {
+  const decoded = decodeRouteSegment(segment);
+  const subpages = viewSubpages[view] ?? [];
+  const known = subpages.find((entry) => routeToken(entry.id) === decoded);
+  if (known) {
+    return known.id;
+  }
+  return decoded;
+}
+
+function decodeRouteSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
 function shortCommandId(id: string) {
   return id.length > 12 ? id.slice(0, 8) : id;
 }
@@ -400,10 +501,22 @@ function releaseTargetId(target: ReleaseRouteTarget): string {
 }
 
 export function App() {
-  const [activeView, setActiveView] = useState<ActiveView>("Home");
+  const initialRouteRef = useRef<ConsoleRouteState | null>(
+    readConsoleRouteFromLocation(),
+  );
+  const [activeView, setActiveView] = useState<ActiveView>(
+    initialRouteRef.current?.view ?? "Home",
+  );
   const [activeSubpages, setActiveSubpages] = useState<
     Record<ActiveView, string>
-  >({ ...defaultSubpages });
+  >(() => ({
+    ...defaultSubpages,
+    ...(initialRouteRef.current
+      ? {
+          [initialRouteRef.current.view]: initialRouteRef.current.subpage,
+        }
+      : {}),
+  }));
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [pendingJobDetailId, setPendingJobDetailId] = useState<string | null>(
     null,
@@ -469,6 +582,29 @@ export function App() {
     setPreferredTimeZone(operatorPreferences.timezone);
   }, [operatorPreferences.timezone]);
 
+  useEffect(() => {
+    if (!readConsoleRouteFromLocation()) {
+      writeConsoleRoute(activeView, activeSubpage, "replace");
+    }
+    const applyLocationRoute = () => {
+      const route = readConsoleRouteFromLocation();
+      if (!route) {
+        return;
+      }
+      setActiveView(route.view);
+      setActiveSubpages((current) => ({
+        ...current,
+        [route.view]: route.subpage,
+      }));
+    };
+    window.addEventListener("hashchange", applyLocationRoute);
+    window.addEventListener("popstate", applyLocationRoute);
+    return () => {
+      window.removeEventListener("hashchange", applyLocationRoute);
+      window.removeEventListener("popstate", applyLocationRoute);
+    };
+  }, []);
+
   function updateVpsNameDisplayMode(mode: VpsNameDisplayMode) {
     void dashboard.updateOperatorPreferences({
       ...operatorPreferences,
@@ -477,20 +613,25 @@ export function App() {
   }
 
   function selectView(view: ActiveView, subpage?: string) {
+    const nextSubpage = normalizeSubpage(
+      view,
+      subpage ?? activeSubpages[view],
+    );
     setActiveView(view);
-    if (subpage) {
-      setActiveSubpages((current) => ({
-        ...current,
-        [view]: normalizeSubpage(view, subpage),
-      }));
-    }
+    setActiveSubpages((current) => ({
+      ...current,
+      [view]: nextSubpage,
+    }));
+    writeConsoleRoute(view, nextSubpage);
   }
 
   function selectSubpage(subpage: string) {
+    const nextSubpage = normalizeSubpage(activeView, subpage);
     setActiveSubpages((current) => ({
       ...current,
-      [activeView]: normalizeSubpage(activeView, subpage),
+      [activeView]: nextSubpage,
     }));
+    writeConsoleRoute(activeView, nextSubpage);
   }
 
   function selectReleaseDestination(view: ActiveView, subpage?: string) {

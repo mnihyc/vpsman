@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -69,6 +70,8 @@ export function PreferencesPanel({
   const [activeScope, setActiveScope] =
     useState<PreferenceScopeTab>("personal");
   const [tagVisibilityFilter, setTagVisibilityFilter] = useState("");
+  const savePendingRef = useRef(false);
+  const [localSavePending, setLocalSavePending] = useState(false);
   const browserTimezone = useMemo(
     () =>
       Intl.DateTimeFormat().resolvedOptions().timeZone || "local browser time",
@@ -92,6 +95,7 @@ export function PreferencesPanel({
     [draft.fleet_tag_visibility_overrides, tags],
   );
   const dirty = JSON.stringify(draft) !== JSON.stringify(preferences);
+  const saveInFlight = preferencesSaving || localSavePending;
 
   useEffect(() => {
     setDraft(preferences);
@@ -99,6 +103,9 @@ export function PreferencesPanel({
 
   async function savePreferences(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!dirty || saveInFlight || savePendingRef.current) {
+      return;
+    }
     setLocalError(null);
     const timezone = draft.timezone?.trim() || null;
     const dashboardCurveExclusions = normalizeCurveExclusions(
@@ -118,6 +125,8 @@ export function PreferencesPanel({
       setLocalError(validationError);
       return;
     }
+    savePendingRef.current = true;
+    setLocalSavePending(true);
     try {
       await updatePreferences({
         ...draft,
@@ -127,6 +136,9 @@ export function PreferencesPanel({
       });
     } catch {
       // The shared preference context exposes the API error for rendering.
+    } finally {
+      savePendingRef.current = false;
+      setLocalSavePending(false);
     }
   }
 
@@ -248,7 +260,7 @@ export function PreferencesPanel({
             <div className="buttonCluster">
               <button
                 className="secondaryAction compactAction"
-                disabled={!dirty || preferencesSaving}
+                disabled={!dirty || saveInFlight}
                 onClick={resetPreferences}
                 type="button"
               >
@@ -257,11 +269,11 @@ export function PreferencesPanel({
               </button>
               <button
                 className="primaryAction compactAction"
-                disabled={!dirty || preferencesSaving}
+                disabled={!dirty || saveInFlight}
                 type="submit"
               >
                 <Save size={16} />
-                <span>{preferencesSaving ? "Saving" : "Save changes"}</span>
+                <span>{saveInFlight ? "Saving" : "Save changes"}</span>
               </button>
             </div>
           </section>
@@ -780,7 +792,7 @@ export function PreferencesPanel({
           <div className="preferencesActions">
             <button
               className="secondaryAction"
-              disabled={!dirty || preferencesSaving}
+              disabled={!dirty || saveInFlight}
               onClick={resetPreferences}
               type="button"
             >
@@ -789,11 +801,11 @@ export function PreferencesPanel({
             </button>
             <button
               className="primaryAction"
-              disabled={!dirty || preferencesSaving}
+              disabled={!dirty || saveInFlight}
               type="submit"
             >
               <Save size={18} />
-              <span>{preferencesSaving ? "Saving" : "Save preferences"}</span>
+              <span>{saveInFlight ? "Saving" : "Save preferences"}</span>
             </button>
           </div>
           <p className="preferenceBuildNote">

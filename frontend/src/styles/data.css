@@ -1321,6 +1321,19 @@
   font-size: 12px;
 }
 
+.fleetPolicyStatus {
+  display: block;
+  min-width: 0;
+  margin: 10px 0 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--text-secondary);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+}
+
 .fleetPolicyGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));

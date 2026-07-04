@@ -28,6 +28,7 @@ export function AuthPanel({
   const [storedSessionKey, setStoredSessionKey] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(apiError);
+  const pendingRef = useRef(false);
   const usernameInputRef = useRef<HTMLInputElement | null>(null);
   const isBootstrap = mode === "bootstrap";
   const isChecking = mode === "checking";
@@ -75,9 +76,10 @@ export function AuthPanel({
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (mode === "checking") {
+    if (mode === "checking" || pendingRef.current) {
       return;
     }
+    pendingRef.current = true;
     setPending(true);
     setError(null);
     try {
@@ -103,11 +105,16 @@ export function AuthPanel({
     } catch (authError) {
       setError(authError instanceof Error ? authError.message : "Authentication failed");
     } finally {
+      pendingRef.current = false;
       setPending(false);
     }
   }
 
   async function unlockStoredSession() {
+    if (pendingRef.current) {
+      return;
+    }
+    pendingRef.current = true;
     setPending(true);
     setError(null);
     try {
@@ -116,6 +123,7 @@ export function AuthPanel({
     } catch (authError) {
       setError(authError instanceof Error ? authError.message : "Session unlock failed");
     } finally {
+      pendingRef.current = false;
       setPending(false);
     }
   }

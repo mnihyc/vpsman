@@ -459,7 +459,7 @@ export function ConsoleShell({
             </details>
             <span className="controlPlanePill">
               <RadioTower size={17} />
-              <span>Live control plane</span>
+              <span>Live</span>
             </span>
             <button
               className="iconButton"

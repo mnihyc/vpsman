@@ -1152,8 +1152,30 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   await expect(editor).toContainText("edge-sfo-01");
   await editor.getByRole("button", { name: "Update policy" }).click();
   await expect(page.getByText("Confirm alert policy save")).toBeVisible();
-  await page.getByRole("button", { name: "Update alert policy" }).click();
+  const policyWriteCountBeforeConfirm = await page.evaluate(() => {
+    return (
+      window as unknown as {
+        __vpsmanTestRequests: { fleetAlertPolicies: unknown[] };
+      }
+    ).__vpsmanTestRequests.fleetAlertPolicies.length;
+  });
+  await page
+    .getByRole("button", { name: "Update alert policy" })
+    .evaluate((button) => {
+      (button as HTMLButtonElement).click();
+      (button as HTMLButtonElement).click();
+    });
   await expect(page.getByText("saved edge-resource-policy")).toBeVisible();
+  const policyWriteCountAfterConfirm = await page.evaluate(() => {
+    return (
+      window as unknown as {
+        __vpsmanTestRequests: { fleetAlertPolicies: unknown[] };
+      }
+    ).__vpsmanTestRequests.fleetAlertPolicies.length;
+  });
+  expect(policyWriteCountAfterConfirm).toBe(
+    policyWriteCountBeforeConfirm + 1,
+  );
   await page.getByLabel("Close detail panel").click();
 
   if (testInfo.project.name.includes("mobile")) {
@@ -1164,6 +1186,39 @@ test("keeps fleet alert policy actions selection-scoped", async ({
     await expect(page.getByRole("menuitem", { name: "Details" })).toBeVisible();
     await page.keyboard.press("Escape");
   }
+});
+
+test("exposes console route state through URL, browser history, and reload", async ({
+  page,
+}) => {
+  await page.goto("/#/network/tunnel-plans");
+  await waitForConsoleShell(page);
+
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Tunnel plans" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/network\/tunnel-plans$/);
+
+  await page.evaluate(() => {
+    window.location.hash = "#/jobs/dispatch";
+  });
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Command dispatch" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/jobs\/dispatch$/);
+
+  await page.goBack();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Tunnel plans" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/network\/tunnel-plans$/);
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await waitForConsoleShell(page);
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Tunnel plans" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#\/network\/tunnel-plans$/);
 });
 
 test("shows issued policy alerts in Fleet Alerts and webhook rule fixtures", async ({
@@ -1218,6 +1273,35 @@ test("keeps console layout usable on desktop and mobile widths", async ({
     const sidebarBox = await page.locator(".sidebar").boundingBox();
     expect(sidebarBox?.x).toBe(0);
     expect(sidebarBox?.y).toBe(0);
+    const appShellScrollState = await page.evaluate(() => {
+      const shell = document.querySelector(".shell") as HTMLElement;
+      const sidebar = document.querySelector(".sidebar") as HTMLElement;
+      const content = document.querySelector(".content") as HTMLElement;
+      const topbar = document.querySelector(".topbar") as HTMLElement;
+      return {
+        contentHeight: content.getBoundingClientRect().height,
+        contentOverflowY: getComputedStyle(content).overflowY,
+        shellOverflow: getComputedStyle(shell).overflow,
+        sidebarHeight: sidebar.getBoundingClientRect().height,
+        sidebarOverflowY: getComputedStyle(sidebar).overflowY,
+        topbarPosition: getComputedStyle(topbar).position,
+        viewportHeight: window.innerHeight,
+      };
+    });
+    expect(appShellScrollState.shellOverflow).toBe("hidden");
+    expect(appShellScrollState.sidebarOverflowY).toBe("auto");
+    expect(appShellScrollState.contentOverflowY).toBe("auto");
+    expect(appShellScrollState.topbarPosition).toBe("sticky");
+    expect(
+      Math.abs(
+        appShellScrollState.sidebarHeight - appShellScrollState.viewportHeight,
+      ),
+    ).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs(
+        appShellScrollState.contentHeight - appShellScrollState.viewportHeight,
+      ),
+    ).toBeLessThanOrEqual(1);
     await expect(
       page.locator(".navSectionTitle", { hasText: "Operate" }),
     ).toBeVisible();
@@ -1231,7 +1315,7 @@ test("keeps console layout usable on desktop and mobile widths", async ({
       page.getByRole("button", { name: /All VPS resources/ }),
     ).toBeVisible();
     await expect(
-      page.locator(".controlPlanePill", { hasText: "Live control plane" }),
+      page.locator(".controlPlanePill", { hasText: "Live" }),
     ).toBeVisible();
   } else {
     await expect(page.locator(".sidebar")).toBeHidden();

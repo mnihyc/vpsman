@@ -4016,6 +4016,8 @@ export function FleetAlertPolicyManager({
   const [saveSnapshot, setSaveSnapshot] = useState<PolicySaveSnapshot | null>(
     null,
   );
+  const [savePending, setSavePending] = useState(false);
+  const savePendingRef = useRef(false);
   const [name, setName] = useState("edge-traffic");
   const [selectorExpression, setSelectorExpression] = useState("tag:edge");
   const [enabled, setEnabled] = useState(true);
@@ -4188,6 +4190,20 @@ export function FleetAlertPolicyManager({
     };
   }
 
+  function beginSaveMutation() {
+    if (savePendingRef.current) {
+      return false;
+    }
+    savePendingRef.current = true;
+    setSavePending(true);
+    return true;
+  }
+
+  function finishSaveMutation() {
+    savePendingRef.current = false;
+    setSavePending(false);
+  }
+
   function resetForm() {
     setEditingId(null);
     setName("edge-traffic");
@@ -4288,6 +4304,9 @@ export function FleetAlertPolicyManager({
       setStatus("Run dry-run and review policy before saving");
       return;
     }
+    if (!beginSaveMutation()) {
+      return;
+    }
     setStatus(editingId ? "updating policy" : "creating policy");
     try {
       const policy = await onUpsert(snapshot.request);
@@ -4298,6 +4317,8 @@ export function FleetAlertPolicyManager({
       setStatus("saved " + policy.name);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "policy save failed");
+    } finally {
+      finishSaveMutation();
     }
   }
 
@@ -4340,6 +4361,9 @@ export function FleetAlertPolicyManager({
     nextEnabled: boolean,
   ) {
     if (rows.length === 0) return;
+    if (!beginSaveMutation()) {
+      return;
+    }
     setStatus(nextEnabled ? "enabling policies" : "disabling policies");
     try {
       for (const policy of rows) {
@@ -4359,6 +4383,8 @@ export function FleetAlertPolicyManager({
       setStatus(
         error instanceof Error ? error.message : "policy update failed",
       );
+    } finally {
+      finishSaveMutation();
     }
   }
 
@@ -4395,7 +4421,8 @@ export function FleetAlertPolicyManager({
         "Enable " +
         rows.filter((policy) => !policy.enabled).length +
         " disabled selected policy groups.",
-      disabled: (rows) => rows.filter((policy) => !policy.enabled).length === 0,
+      disabled: (rows) =>
+        savePending || rows.filter((policy) => !policy.enabled).length === 0,
       icon: <Power size={14} />,
       onSelect: (rows) =>
         void setPoliciesEnabled(
@@ -4409,7 +4436,8 @@ export function FleetAlertPolicyManager({
         "Disable " +
         rows.filter((policy) => policy.enabled).length +
         " enabled selected policy groups.",
-      disabled: (rows) => rows.filter((policy) => policy.enabled).length === 0,
+      disabled: (rows) =>
+        savePending || rows.filter((policy) => policy.enabled).length === 0,
       icon: <PowerOff size={14} />,
       onSelect: (rows) =>
         void setPoliciesEnabled(
@@ -4423,7 +4451,7 @@ export function FleetAlertPolicyManager({
         "Delete " +
         rows.length +
         " selected policy groups. Issued alerts remain in alert history.",
-      disabled: (rows) => rows.length === 0,
+      disabled: (rows) => savePending || rows.length === 0,
       icon: <Trash2 size={14} />,
       onSelect: requestDeletePolicies,
       tone: "danger",
@@ -4507,7 +4535,7 @@ export function FleetAlertPolicyManager({
                 <>
                   <button
                     className="secondaryAction"
-                    disabled={dryRunPending}
+                    disabled={dryRunPending || savePending}
                     type="button"
                     onClick={() => void dryRunCurrentPolicy()}
                   >
@@ -4515,7 +4543,7 @@ export function FleetAlertPolicyManager({
                   </button>
                   <button
                     className="primaryAction"
-                    disabled={dryRunPending}
+                    disabled={dryRunPending || savePending}
                     type="button"
                     onClick={() => void reviewSubmit()}
                   >
@@ -4526,7 +4554,7 @@ export function FleetAlertPolicyManager({
                 <>
                   <button
                     className="secondaryAction"
-                    disabled={dryRunPending}
+                    disabled={dryRunPending || savePending}
                     type="button"
                     onClick={() => void dryRunCurrentPolicy()}
                   >
@@ -4534,7 +4562,7 @@ export function FleetAlertPolicyManager({
                   </button>
                   <button
                     className="primaryAction"
-                    disabled={dryRunPending}
+                    disabled={dryRunPending || savePending}
                     type="button"
                     onClick={() => void reviewSubmit()}
                   >
@@ -4768,7 +4796,7 @@ export function FleetAlertPolicyManager({
         onCancel={() => setSaveSnapshot(null)}
         onConfirm={() => void submit()}
         open={saveSnapshot !== null}
-        pending={false}
+        pending={savePending}
         title="Confirm alert policy save"
       />
       <ConfirmationPrompt
@@ -5202,6 +5230,8 @@ export function FleetAlertNotificationManager({
     request: FleetAlertNotificationChannelRequest;
     title: string;
   } | null>(null);
+  const [savePending, setSavePending] = useState(false);
+  const savePendingRef = useRef(false);
   const [name, setName] = useState("critical-webhook-channel");
   const [scopeKind, setScopeKind] = useState("global");
   const [scopeValue, setScopeValue] = useState("");
@@ -5413,6 +5443,20 @@ export function FleetAlertNotificationManager({
     };
   }
 
+  function beginSaveMutation() {
+    if (savePendingRef.current) {
+      return false;
+    }
+    savePendingRef.current = true;
+    setSavePending(true);
+    return true;
+  }
+
+  function finishSaveMutation() {
+    savePendingRef.current = false;
+    setSavePending(false);
+  }
+
   function reviewSubmit() {
     setSaveSnapshot({
       request: {
@@ -5440,6 +5484,9 @@ export function FleetAlertNotificationManager({
       setStatus("Review channel before saving");
       return;
     }
+    if (!beginSaveMutation()) {
+      return;
+    }
     setStatus(editingId ? "updating channel" : "creating channel");
     try {
       const channel = await onUpsert(snapshot.request);
@@ -5449,6 +5496,8 @@ export function FleetAlertNotificationManager({
       setStatus(`saved ${channel.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "channel save failed");
+    } finally {
+      finishSaveMutation();
     }
   }
 
@@ -5491,6 +5540,9 @@ export function FleetAlertNotificationManager({
     nextEnabled: boolean,
   ) {
     if (rows.length === 0) return;
+    if (!beginSaveMutation()) {
+      return;
+    }
     setStatus(nextEnabled ? "enabling channels" : "disabling channels");
     try {
       for (const channel of rows) {
@@ -5501,6 +5553,8 @@ export function FleetAlertNotificationManager({
       setStatus(
         error instanceof Error ? error.message : "channel update failed",
       );
+    } finally {
+      finishSaveMutation();
     }
   }
 
@@ -5667,6 +5721,7 @@ export function FleetAlertNotificationManager({
         description: (rows) =>
           `Enable ${rows.filter((channel) => !channel.enabled).length} disabled selected notification channel records.`,
         disabled: (rows) =>
+          savePending ||
           rows.filter((channel) => !channel.enabled).length === 0,
         icon: <Power size={14} />,
         onSelect: (rows) =>
@@ -5680,6 +5735,7 @@ export function FleetAlertNotificationManager({
         description: (rows) =>
           `Disable ${rows.filter((channel) => channel.enabled).length} enabled selected notification channel records.`,
         disabled: (rows) =>
+          savePending ||
           rows.filter((channel) => channel.enabled).length === 0,
         icon: <PowerOff size={14} />,
         onSelect: (rows) =>
@@ -5692,7 +5748,7 @@ export function FleetAlertNotificationManager({
         label: "Review deletion",
         description: (rows) =>
           `Delete ${rows.length} selected notification channel records. Retained delivery history is not removed.`,
-        disabled: (rows) => rows.length === 0,
+        disabled: (rows) => savePending || rows.length === 0,
         icon: <Trash2 size={14} />,
         onSelect: requestDeleteChannels,
         tone: "danger",
@@ -5768,6 +5824,7 @@ export function FleetAlertNotificationManager({
               <>
                 <button
                   className="primaryAction"
+                  disabled={savePending}
                   type="button"
                   onClick={reviewSubmit}
                 >
@@ -6047,7 +6104,7 @@ export function FleetAlertNotificationManager({
         onCancel={() => setSaveSnapshot(null)}
         onConfirm={() => void submit()}
         open={saveSnapshot !== null}
-        pending={false}
+        pending={savePending}
         title="Confirm notification channel save"
       />
       <ConfirmationPrompt
@@ -6277,6 +6334,8 @@ export function WebhookRuleManager({
     request: WebhookRuleRequest;
     title: string;
   } | null>(null);
+  const [savePending, setSavePending] = useState(false);
+  const savePendingRef = useRef(false);
   const [name, setName] = useState("edge-interval-webhook");
   const [enabled, setEnabled] = useState(true);
   const [expression, setExpression] = useState("interval.30sec && tag:edge");
@@ -6467,6 +6526,20 @@ export function WebhookRuleManager({
     };
   }
 
+  function beginSaveMutation() {
+    if (savePendingRef.current) {
+      return false;
+    }
+    savePendingRef.current = true;
+    setSavePending(true);
+    return true;
+  }
+
+  function finishSaveMutation() {
+    savePendingRef.current = false;
+    setSavePending(false);
+  }
+
   function reviewSubmit() {
     const nextSigningSecret = signingSecret.trim();
     setSaveSnapshot({
@@ -6494,6 +6567,9 @@ export function WebhookRuleManager({
       setStatus("Review webhook rule before saving");
       return;
     }
+    if (!beginSaveMutation()) {
+      return;
+    }
     setStatus(editingId ? "updating webhook rule" : "creating webhook rule");
     try {
       const rule = await onUpsert(snapshot.request);
@@ -6505,6 +6581,8 @@ export function WebhookRuleManager({
       setStatus(`saved ${rule.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "webhook save failed");
+    } finally {
+      finishSaveMutation();
     }
   }
 
@@ -6547,6 +6625,9 @@ export function WebhookRuleManager({
     nextEnabled: boolean,
   ) {
     if (rows.length === 0) return;
+    if (!beginSaveMutation()) {
+      return;
+    }
     setStatus(
       nextEnabled ? "enabling webhook rules" : "disabling webhook rules",
     );
@@ -6557,6 +6638,8 @@ export function WebhookRuleManager({
       setStatus(`${nextEnabled ? "enabled" : "disabled"} ${rows.length}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "rule update failed");
+    } finally {
+      finishSaveMutation();
     }
   }
 
@@ -6825,7 +6908,8 @@ export function WebhookRuleManager({
       label: "Enable",
       description: (rows) =>
         `Enable ${rows.filter((rule) => !rule.enabled).length} disabled selected webhook rule records.`,
-      disabled: (rows) => rows.filter((rule) => !rule.enabled).length === 0,
+      disabled: (rows) =>
+        savePending || rows.filter((rule) => !rule.enabled).length === 0,
       icon: <Power size={14} />,
       onSelect: (rows) =>
         void setRulesEnabled(
@@ -6837,7 +6921,8 @@ export function WebhookRuleManager({
       label: "Disable",
       description: (rows) =>
         `Disable ${rows.filter((rule) => rule.enabled).length} enabled selected webhook rule records.`,
-      disabled: (rows) => rows.filter((rule) => rule.enabled).length === 0,
+      disabled: (rows) =>
+        savePending || rows.filter((rule) => rule.enabled).length === 0,
       icon: <PowerOff size={14} />,
       onSelect: (rows) =>
         void setRulesEnabled(
@@ -6849,7 +6934,7 @@ export function WebhookRuleManager({
       label: "Review deletion",
       description: (rows) =>
         `Delete ${rows.length} selected webhook rule records. Retained delivery history is not removed.`,
-      disabled: (rows) => rows.length === 0,
+      disabled: (rows) => savePending || rows.length === 0,
       icon: <Trash2 size={14} />,
       onSelect: requestDeleteRules,
       tone: "danger",
@@ -6945,7 +7030,7 @@ export function WebhookRuleManager({
               <>
                 <button
                   className="secondaryAction"
-                  disabled={queuePending}
+                  disabled={queuePending || savePending}
                   type="button"
                   onClick={() => void dryRun()}
                 >
@@ -6953,7 +7038,7 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="primaryAction"
-                  disabled={queuePending}
+                  disabled={queuePending || savePending}
                   type="button"
                   onClick={reviewSubmit}
                 >
@@ -7305,7 +7390,7 @@ export function WebhookRuleManager({
         onCancel={() => setSaveSnapshot(null)}
         onConfirm={() => void submit()}
         open={saveSnapshot !== null}
-        pending={false}
+        pending={savePending}
         title="Confirm webhook rule save"
       />
       <ConfirmationPrompt

@@ -350,6 +350,9 @@
 @media (max-width: 640px) {
   .shell {
     display: block;
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
   }
 
   .sidebar {
@@ -357,7 +360,11 @@
   }
 
   .content {
+    height: auto;
     margin-left: 0;
+    min-height: 100vh;
+    overflow: visible;
+    scrollbar-gutter: auto;
   }
 
   .topbar {

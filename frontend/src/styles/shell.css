@@ -1,7 +1,10 @@
 .shell {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -9,10 +12,15 @@
   background: var(--surface);
   border-right: 1px solid var(--border);
   box-sizing: border-box;
-  min-height: 100vh;
-  overflow-y: visible;
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 18px 12px;
   position: relative;
+  scrollbar-gutter: stable;
   width: 248px;
   z-index: 20;
 }
@@ -148,10 +156,20 @@ nav {
 }
 
 .content {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
   min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
   display: grid;
   grid-template-columns: minmax(220px, 280px) minmax(180px, 1fr) auto;
   align-items: center;
@@ -296,6 +314,14 @@ nav {
   font-weight: 700;
   list-style: none;
   padding: 0 10px;
+}
+
+.mobilePageMenu summary span,
+.mobileSavedViewMenu summary span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mobilePageMenu summary::-webkit-details-marker,
@@ -1333,7 +1359,7 @@ nav {
 
 .consoleHeader {
   display: grid;
-  grid-template-columns: minmax(260px, max-content) minmax(560px, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.9fr);
   align-items: start;
   gap: 20px;
   padding: 18px 24px;
@@ -1353,13 +1379,17 @@ nav {
   display: grid;
   gap: 4px;
   min-width: 0;
-  max-width: 460px;
+  max-width: min(760px, 100%);
 }
 
 .breadcrumb {
+  min-width: 0;
+  overflow: hidden;
   color: var(--muted);
   font-size: 12px;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 h1,
@@ -1386,6 +1416,17 @@ h2 {
   color: var(--muted);
 }
 
+.consoleHeader .pageDescription {
+  display: -webkit-box;
+  max-width: 72ch;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .pageHeaderContext {
   display: flex;
   align-items: center;
@@ -1400,6 +1441,7 @@ h2 {
   align-items: center;
   gap: 5px;
   min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--border-subtle);
   border-radius: 999px;
   background: var(--surface-neutral);
@@ -1407,7 +1449,10 @@ h2 {
   font-size: 11px;
   font-weight: 650;
   line-height: 1;
+  overflow: hidden;
   padding: 5px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pageHeaderContext strong {
