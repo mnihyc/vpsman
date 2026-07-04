@@ -13,8 +13,40 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  release-version-gate:
+    name: Release version gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Reject older release versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release_tag="${GITHUB_REF_NAME}"
+          if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "release tag must look like v1.2.3 or v1.2.3-rc.1: $release_tag" >&2
+            exit 1
+          fi
+
+          published_release_tags="$RUNNER_TEMP/published-release-tags.txt"
+          gh release list \
+            --repo "$GITHUB_REPOSITORY" \
+            --exclude-drafts \
+            --limit 1000 \
+            --json tagName \
+            --jq '.[].tagName' > "$published_release_tags"
+
+          python3 scripts/check-release-version-gate.py \
+            --candidate-tag "$release_tag" \
+            --published-release-tags-file "$published_release_tags"
+
   linux-binaries:
     name: Linux binaries
+    needs: release-version-gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -146,6 +178,7 @@ jobs:
 
   frontend:
     name: Frontend artifact
+    needs: release-version-gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -287,11 +320,13 @@ jobs:
             gh release upload "$RELEASE_TAG" release-assets/* --clobber
             gh release edit "$RELEASE_TAG" \
               --title "vpsman $RELEASE_TAG" \
+              --latest \
               --target "$GITHUB_SHA"
           else
             gh release create "$RELEASE_TAG" release-assets/* \
               --title "vpsman $RELEASE_TAG" \
               --generate-notes \
+              --latest \
               --verify-tag \
               --target "$GITHUB_SHA"
           fi
