@@ -82,14 +82,8 @@ jobs:
           PATH="$RUNNER_TEMP/musl-tools:$PATH" command -v aarch64-linux-musl-gcc
           PATH="$RUNNER_TEMP/musl-tools:$PATH" command -v aarch64-linux-musl-ar
 
-      - name: Rust format
-        run: cargo fmt --all -- --check
-
-      - name: Rust clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Rust tests
-        run: cargo test --workspace
+      - name: Release quality checks
+        run: bash scripts/ci-release-quality-gate.sh
 
       - name: Build release server binaries
         run: cargo build --release -p vpsman-api -p vpsman-gateway -p vpsman-worker
@@ -100,20 +94,3 @@ jobs:
           cargo build --release -p vpsman-agent --target aarch64-unknown-linux-musl
           cargo build --release -p vpsctl --target x86_64-unknown-linux-musl
           cargo build --release -p vpsctl --target aarch64-unknown-linux-musl
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
-      - name: Audit frontend dependencies
-        working-directory: frontend
-        run: npm audit --audit-level=moderate
-
-      - name: Docker Compose config
-        run: |
-          cp deploy/.env.example deploy/.env
-          docker compose -f deploy/compose.yml config

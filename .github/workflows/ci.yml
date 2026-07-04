@@ -142,6 +142,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Release workflow dependency guard
+        run: python3 scripts/check-release-workflow-gate.py
+
       - name: Docker Compose config
         run: |
           cp deploy/.env.example deploy/.env

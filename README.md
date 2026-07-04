@@ -319,6 +319,9 @@ The release workflow publishes:
 The release tag is the canonical shipped version. `version.json` is generated
 from [version-template.json](version-template.json), stamped with the tag,
 commit, asset list, checksum manifest, and tag-pinned download URLs.
+Tag-triggered releases run the release version gate first, then the shared
+release quality gate in [scripts/ci-release-quality-gate.sh](scripts/ci-release-quality-gate.sh)
+before any release artifacts or GitHub release are published.
 
 ## Documentation
 
