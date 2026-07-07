@@ -391,6 +391,12 @@ export function JobsPanel({
   const pendingApprovalCount = jobApprovals.filter(
     (approval) => approval.status === "pending",
   ).length;
+  const approvalActionFeedbackMessage =
+    approvalActionError ??
+    (approvalActionPending ? "Recording approval decision" : null);
+  const approvalActionFeedbackTone = approvalActionError
+    ? "danger"
+    : "progress";
   const agentNameById = useMemo(
     () => clientDisplayNameMap(agents, vpsNameDisplayMode),
     [agents, vpsNameDisplayMode],
@@ -1967,11 +1973,11 @@ export function JobsPanel({
                   </button>
                 </div>
               </div>
-              {approvalActionError && (
-                <div className="panelError" role="alert">
-                  {approvalActionError}
-                </div>
-              )}
+              <ActionFeedback
+                className="localActionFeedback approvalActionFeedback"
+                message={approvalActionFeedbackMessage}
+                tone={approvalActionFeedbackTone}
+              />
               <ConfirmationPrompt
                 cancelLabel="Close"
                 confirmDisabled={approvalRejectReasonMissing}

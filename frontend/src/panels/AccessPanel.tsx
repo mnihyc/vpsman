@@ -462,6 +462,9 @@ export function AccessPanel({
     revokeClientId.trim().length > 0 &&
     !revokePending &&
     !revokeReviewPending;
+  const revokeFeedbackMessage =
+    revokeError ?? (revokeReviewPending ? "Preparing key revoke review" : null);
+  const revokeFeedbackTone = revokeError ? "danger" : "progress";
   const identityColumns = useMemo<
     ConsoleDataGridColumn<KeyLifecycleClientView>[]
   >(
@@ -1856,7 +1859,7 @@ export function AccessPanel({
           }
         >
           <h2>Revoke VPS key</h2>
-          <span>{revokeError ?? "Block the current VPS gateway key"}</span>
+          <span>Block the current VPS gateway key</span>
         </div>
         <form
           className="sideForm"
@@ -1899,8 +1902,13 @@ export function AccessPanel({
             type="submit"
           >
             <Ban size={17} />
-            {revokeReviewPending ? "Preparing review" : "Revoke current key"}
+            Revoke current key
           </button>
+          <ActionFeedback
+            className="localActionFeedback accessRevokeActionFeedback"
+            message={revokeFeedbackMessage}
+            tone={revokeFeedbackTone}
+          />
         </form>
 
       </aside>

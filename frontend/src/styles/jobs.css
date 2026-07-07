@@ -18,6 +18,12 @@
   overflow: hidden;
 }
 
+.approvalActionFeedback.localActionFeedback,
+.processActionFeedback.localActionFeedback {
+  margin: 10px 18px 0;
+  max-width: calc(100% - 36px);
+}
+
 .approvalDecisionFields {
   display: grid;
   gap: 10px;

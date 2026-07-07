@@ -121,8 +121,14 @@
 .accessInspector .sideForm > .inlineSecret,
 .accessInspector .sideForm > .installCommandBlock,
 .accessInspector .sideForm > .formNote,
-.accessInspector .sideForm > .privilegeVaultBox {
+.accessInspector .sideForm > .privilegeVaultBox,
+.accessInspector .sideForm > .accessRevokeActionFeedback {
   grid-column: 1 / -1;
+}
+
+.accessInspector .sideForm > .accessRevokeActionFeedback.localActionFeedback {
+  margin: 0;
+  max-width: 100%;
 }
 
 .accessInspector .sideForm input,

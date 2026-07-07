@@ -2091,6 +2091,14 @@ function SystemSessionsPanel({
   const authFailureCount = authEvents.filter(
     (event) => event.result !== "success",
   ).length;
+  const sessionActionFeedbackMessage =
+    error ??
+    (reviewPending
+      ? "Preparing session revoke review"
+      : pending
+        ? "Revoking sessions"
+        : null);
+  const sessionActionFeedbackTone = error ? "danger" : "progress";
   const uniqueRemoteIps = new Set(
     authEvents
       .map((event) => event.remote_ip)
@@ -2464,13 +2472,13 @@ function SystemSessionsPanel({
         <section className="controlPanel">
           <div className="sectionHeader compact">
             <h2>Sessions</h2>
-            <span>
-              {reviewPending
-                ? "Preparing review"
-                : `${sessions.length} recent sessions`}
-            </span>
+            <span>{sessions.length} recent sessions</span>
           </div>
-          {error && <div className="panelError">{error}</div>}
+          <ActionFeedback
+            className="localActionFeedback systemSessionActionFeedback"
+            message={sessionActionFeedbackMessage}
+            tone={sessionActionFeedbackTone}
+          />
           <ConsoleDataGrid
             actions={[
               {
@@ -5004,6 +5012,17 @@ function SystemConfigPanel({
     reviewDisabled,
     validation,
   });
+  const systemConfigFeedbackMessage =
+    configError ??
+    error ??
+    (configMessage ||
+      (validationPending
+        ? "Validating suite config"
+        : savePending
+          ? "Saving suite config"
+          : null));
+  const systemConfigFeedbackTone =
+    configError || error ? "danger" : configMessage ? "success" : "progress";
 
   useEffect(() => {
     if (config) {
@@ -5212,9 +5231,11 @@ function SystemConfigPanel({
               </button>
             </div>
           </div>
-          {error && <div className="panelError">{error}</div>}
-          {configError && <div className="panelError">{configError}</div>}
-          {configMessage && <div className="panelSuccess">{configMessage}</div>}
+          <ActionFeedback
+            className="localActionFeedback systemConfigActionFeedback"
+            message={systemConfigFeedbackMessage}
+            tone={systemConfigFeedbackTone}
+          />
           {config && (
             <div className="systemConfigSummary">
               <div

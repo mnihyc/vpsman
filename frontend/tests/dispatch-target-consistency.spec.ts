@@ -814,9 +814,11 @@ test("access key lifecycle async reviews ignore stale field edits", async ({
   ).toHaveValue(/edge-sfo-01/);
   await inspector.getByLabel("VPS identity revoke reason").fill("reason-a");
   await activate(inspector.getByRole("button", { name: "Revoke current key" }));
-  await expect(inspector.getByText("Preparing review")).toBeVisible();
+  await expect(inspector.locator(".accessRevokeActionFeedback")).toContainText(
+    "Preparing key revoke review",
+  );
   await inspector.getByLabel("VPS identity revoke reason").fill("reason-b");
-  await expect(inspector.getByText("Preparing review")).toBeHidden();
+  await expect(inspector.locator(".accessRevokeActionFeedback")).toBeHidden();
   await expect(page.getByLabel("Confirm current key revocation")).toBeHidden();
 
   await activate(inspector.getByRole("button", { name: "Revoke current key" }));

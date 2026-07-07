@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { FileText, RefreshCw, RotateCcw, Square, TerminalSquare } from "lucide-react";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -347,12 +348,11 @@ export function ProcessSupervisorInventoryPanel({
           <small>With log paths</small>
         </span>
       </div>
-      {actionError && !stopProcess && (
-        <div className="operationNote formSectionNote processActionNotice" role="status">
-          <strong>Process action blocked</strong>
-          <span>{actionError}</span>
-        </div>
-      )}
+      <ActionFeedback
+        className="localActionFeedback processActionFeedback"
+        message={!stopProcess ? actionError : null}
+        tone="danger"
+      />
       <ConfirmationPrompt
         confirmLabel="Stop process"
         detail="Stop this supervised process on the selected VPS."
