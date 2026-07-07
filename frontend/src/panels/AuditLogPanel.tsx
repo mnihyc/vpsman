@@ -617,10 +617,9 @@ export function AuditLogPanel({
                     : "No audit records returned"}
                 </strong>
                 <span>
-                  {error ??
-                    (hasAuditFilters
-                      ? "Clear filters or broaden the time window to inspect available events."
-                      : "Expected login, unlock, dispatch, file, key, backup, topology, and system events are not evidenced by the API response.")}
+                  {hasAuditFilters
+                    ? "Clear filters or broaden the time window to inspect available events."
+                    : "Expected login, unlock, dispatch, file, key, backup, topology, and system events are not evidenced by the API response."}
                 </span>
               </div>
             }

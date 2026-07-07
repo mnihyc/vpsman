@@ -236,11 +236,11 @@ export function ObservabilityDashboardsPanel({
           </div>
         </div>
 
-        {error ? (
-          <div className="panelError observabilityMetricsError" role="alert">
-            {error}
-          </div>
-        ) : null}
+        <ActionFeedback
+          className="localActionFeedback dashboardActionFeedback dashboardPageActionFeedback"
+          message={error}
+          tone="danger"
+        />
 
         <div
           className="metricGrid observabilityMetricsSummary"

@@ -10,6 +10,7 @@ import {
   Tags,
 } from "lucide-react";
 import { ConsoleActionDrawer, ConsoleStatusBadge } from "../components/ConsoleLayout";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { TimeSeriesChart, type TimeSeriesChartLine } from "../components/TimeSeriesChart";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { consolePalette, dashboardChartColors } from "../colorPalette";
@@ -298,7 +299,11 @@ export function HomeTelemetryPanel({
           </button>
         </div>
 
-        {error && <div className="panelError">{error}</div>}
+        <ActionFeedback
+          className="localActionFeedback dashboardActionFeedback homeTelemetryActionFeedback"
+          message={error}
+          tone="danger"
+        />
 
         <section className="dashboardSection" aria-labelledby="dashboard-operations-title">
           <div className="dashboardSectionHeader">

@@ -1327,10 +1327,7 @@ export function SourceTemplatePanel({
                 <div className="targetSelector templateTargetSelector">
                   <div className="targetSelectorHeader">
                     <strong>Targets</strong>
-                    <span>
-                      {assignmentSelectorParse.error ??
-                        `${assignmentTargetCount}/${agents.length} matching VPSs`}
-                    </span>
+                    <span>{`${assignmentTargetCount}/${agents.length} matching VPSs`}</span>
                   </div>
                   <SearchExpressionInput
                     agents={agents}

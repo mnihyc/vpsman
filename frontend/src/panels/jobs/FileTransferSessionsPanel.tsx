@@ -137,10 +137,9 @@ export function FileTransferSessionsPanel({
   const selectedHandoffKeySet = new Set(selectedHandoffKeys);
   const selectedHandoffTransfers = handoffCandidates.filter((transfer) => selectedHandoffKeySet.has(transferKey(transfer)));
   const handoffBusy = handoffPendingKey !== null;
-  const handoffSummary =
-    handoffError ??
-    handoffProgress ??
-    `${downloadTransfers.length} downloads, ${uploadTransfers.length} uploads tracked`;
+  const handoffSummary = `${downloadTransfers.length} downloads, ${uploadTransfers.length} uploads tracked`;
+  const handoffFeedbackMessage = handoffError ?? handoffProgress;
+  const handoffFeedbackTone = handoffError ? "danger" : "progress";
   const sourceArtifactFeedbackMessage =
     sourceError ??
     (sourcePending
@@ -614,10 +613,17 @@ export function FileTransferSessionsPanel({
           <h2>File transfer sessions</h2>
           <span>{handoffSummary}</span>
         </div>
-        <button className="secondaryAction" disabled={loading} onClick={onRefresh} type="button">
-          <RefreshCw size={14} />
-          <span>Refresh</span>
-        </button>
+        <div className="headerActionStack">
+          <button className="secondaryAction" disabled={loading} onClick={onRefresh} type="button">
+            <RefreshCw size={14} />
+            <span>Refresh</span>
+          </button>
+          <ActionFeedback
+            className="localActionFeedback transferHandoffActionFeedback"
+            message={handoffFeedbackMessage}
+            tone={handoffFeedbackTone}
+          />
+        </div>
       </div>
       <div className="transferLifecycleSummary" aria-label="File transfer lifecycle summary">
         <span>

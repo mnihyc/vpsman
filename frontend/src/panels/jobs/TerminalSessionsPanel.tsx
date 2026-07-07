@@ -143,8 +143,8 @@ export function TerminalSessionsPanel({
   const openSessions = sessions.filter((session) => !session.session_exited && session.state !== "closed").length;
   const replayableSessions = sessions.filter((session) => session.output_next_seq !== null).length;
   const retainedBytes = sessions.reduce((total, session) => total + (session.output_retained_bytes ?? 0), 0);
-  const terminalSummary =
-    replayError ?? `${openSessions} open, ${replayableSessions} replayable, ${formatBytes(retainedBytes)} retained`;
+  const terminalSummary = `${openSessions} open, ${replayableSessions} replayable, ${formatBytes(retainedBytes)} retained`;
+  const terminalReplayFeedbackMessage = replayError;
   const activeReplay =
     replayPreview && activeSession?.session_id === replayPreview.sessionId
       ? replayPreview
@@ -517,28 +517,35 @@ export function TerminalSessionsPanel({
           <h2>Terminal sessions</h2>
           <span>{terminalSummary}</span>
         </div>
-        <div className="rowActions compactRowActions">
-          {onOpenSessionEvidence && (
+        <div className="headerActionStack">
+          <div className="rowActions compactRowActions">
+            {onOpenSessionEvidence && (
+              <button
+                className="secondaryAction compactAction"
+                onClick={onOpenSessionEvidence}
+                title="Open Audit / Sessions evidence for terminal ownership, replay state, and retained proof."
+                type="button"
+              >
+                <History size={14} />
+                <span>Evidence</span>
+              </button>
+            )}
             <button
               className="secondaryAction compactAction"
-              onClick={onOpenSessionEvidence}
-              title="Open Audit / Sessions evidence for terminal ownership, replay state, and retained proof."
+              disabled={loading}
+              onClick={onRefresh}
+              title={loading ? "Terminal session inventory is refreshing." : "Refresh terminal session inventory and retained state."}
               type="button"
             >
-              <History size={14} />
-              <span>Evidence</span>
+              <RefreshCw size={14} />
+              <span>Refresh</span>
             </button>
-          )}
-          <button
-            className="secondaryAction compactAction"
-            disabled={loading}
-            onClick={onRefresh}
-            title={loading ? "Terminal session inventory is refreshing." : "Refresh terminal session inventory and retained state."}
-            type="button"
-          >
-            <RefreshCw size={14} />
-            <span>Refresh</span>
-          </button>
+          </div>
+          <ActionFeedback
+            className="localActionFeedback terminalReplayActionFeedback"
+            message={terminalReplayFeedbackMessage}
+            tone="danger"
+          />
         </div>
       </div>
       <div className="terminalLaunchPanel" aria-label="New terminal composer">

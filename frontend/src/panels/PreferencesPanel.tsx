@@ -22,6 +22,7 @@ import {
   Wifi,
 } from "lucide-react";
 import { clearLocalStorageSelections } from "../localStorageSelections";
+import { ActionFeedback } from "../components/ActionFeedback";
 import { FRONTEND_BUILD_NUMBER } from "../buildInfo";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { DEFAULT_OPERATOR_PREFERENCES } from "../utils";
@@ -786,9 +787,11 @@ export function PreferencesPanel({
             </PreferenceSection>
           )}
 
-          {(localError || preferencesError) && (
-            <p className="preferencesError">{localError ?? preferencesError}</p>
-          )}
+          <ActionFeedback
+            className="localActionFeedback preferencesActionFeedback"
+            message={localError ?? preferencesError}
+            tone="danger"
+          />
 
           <div className="preferencesActions">
             <button

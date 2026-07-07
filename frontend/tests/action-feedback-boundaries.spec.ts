@@ -29,6 +29,7 @@ test("keeps action feedback in dedicated local containers", () => {
   );
   expect(systemPanel).toContain("systemSessionActionFeedback");
   expect(systemPanel).toContain("systemConfigActionFeedback");
+  expect(systemPanel).not.toMatch(/<div className="panelError">\{error\}<\/div>/);
 
   const jobsPanel = source("panels/JobsPanel.tsx");
   expect(jobsPanel).not.toMatch(
@@ -85,21 +86,65 @@ test("keeps action feedback in dedicated local containers", () => {
     "panels/jobs/TerminalSessionsPanel.tsx",
   );
   expect(terminalSessionsPanel).not.toMatch(
+    /const terminalSummary\s*=\s*replayError\s*\?\?/,
+  );
+  expect(terminalSessionsPanel).not.toMatch(
     /\{launchStatus\s*\?\?\s*\(\s*privilegeReady/,
   );
   expect(terminalSessionsPanel).toContain("terminalLaunchActionFeedback");
+  expect(terminalSessionsPanel).toContain("terminalReplayActionFeedback");
 
   const fileTransferSessionsPanel = source(
     "panels/jobs/FileTransferSessionsPanel.tsx",
   );
   expect(fileTransferSessionsPanel).not.toMatch(
+    /const handoffSummary\s*=\s*handoffError\s*\?\?\s*handoffProgress\s*\?\?/,
+  );
+  expect(fileTransferSessionsPanel).not.toMatch(
     /<small>\{sourceError\s*\?\?\s*`\$\{sources\.length\} source artifacts`\}<\/small>/,
   );
   expect(fileTransferSessionsPanel).toContain("sourceArtifactActionFeedback");
+  expect(fileTransferSessionsPanel).toContain("transferHandoffActionFeedback");
 
   const sourceTemplatesPanel = source("panels/SourceTemplatesPanel.tsx");
   expect(sourceTemplatesPanel).not.toContain(
     '{actionError ?? "No template records match the current search."}',
   );
+  expect(sourceTemplatesPanel).not.toMatch(
+    /targetSelectorHeader[\s\S]{0,160}assignmentSelectorParse\.error\s*\?\?/,
+  );
   expect(sourceTemplatesPanel).toContain("sourceTemplateListActionFeedback");
+
+  const auditLogPanel = source("panels/AuditLogPanel.tsx");
+  expect(auditLogPanel).not.toMatch(
+    /error\s*\?\?\s*\(\s*hasAuditFilters/,
+  );
+
+  const homeTelemetryPanel = source("panels/HomeTelemetryPanel.tsx");
+  expect(homeTelemetryPanel).not.toContain(
+    '{error && <div className="panelError">{error}</div>}',
+  );
+  expect(homeTelemetryPanel).toContain("homeTelemetryActionFeedback");
+
+  const fleetMetricsPanel = source("panels/observability/FleetMetricsPanel.tsx");
+  expect(fleetMetricsPanel).not.toContain("panelError observabilityMetricsError");
+  expect(fleetMetricsPanel).toContain("fleetMetricsActionFeedback");
+
+  const alertsPanel = source("panels/observability/AlertsPanel.tsx");
+  expect(alertsPanel).not.toContain("panelError observabilityMetricsError");
+  expect(alertsPanel).toContain("alertsActionFeedback");
+
+  const webhooksPanel = source("panels/observability/WebhooksPanel.tsx");
+  expect(webhooksPanel).not.toContain("panelError observabilityMetricsError");
+  expect(webhooksPanel).toContain("webhooksActionFeedback");
+
+  const dashboardsPanel = source(
+    "panels/observability/ObservabilityDashboardsPanel.tsx",
+  );
+  expect(dashboardsPanel).not.toContain("panelError observabilityMetricsError");
+  expect(dashboardsPanel).toContain("dashboardPageActionFeedback");
+
+  const preferencesPanel = source("panels/PreferencesPanel.tsx");
+  expect(preferencesPanel).not.toContain('<p className="preferencesError"');
+  expect(preferencesPanel).toContain("preferencesActionFeedback");
 });

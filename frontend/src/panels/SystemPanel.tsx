@@ -3997,7 +3997,11 @@ function SystemDashboardPanel({
             </button>
           </div>
         </div>
-        {error && <div className="panelError">{error}</div>}
+        <ActionFeedback
+          className="localActionFeedback dashboardActionFeedback systemDashboardActionFeedback"
+          message={error}
+          tone="danger"
+        />
 
         <section
           className="dashboardSection systemDashboardOverview"
@@ -4593,7 +4597,11 @@ function SystemCapacityPanel({
             </button>
           </div>
         </div>
-        {error && <div className="panelError">{error}</div>}
+        <ActionFeedback
+          className="localActionFeedback dashboardActionFeedback systemDashboardActionFeedback"
+          message={error}
+          tone="danger"
+        />
 
         <section
           className="dashboardSection systemDashboardOverview"

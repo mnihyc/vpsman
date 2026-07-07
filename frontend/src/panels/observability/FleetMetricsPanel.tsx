@@ -1,4 +1,5 @@
 import { Activity, RefreshCw } from "lucide-react";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import { TimeSeriesChart, type TimeSeriesChartLine } from "../../components/TimeSeriesChart";
 import { dashboardChartColors } from "../../colorPalette";
 import type {
@@ -88,11 +89,11 @@ export function FleetMetricsPanel({
           </div>
         </div>
 
-        {error && (
-          <div className="panelError observabilityMetricsError" role="alert">
-            {error}
-          </div>
-        )}
+        <ActionFeedback
+          className="localActionFeedback dashboardActionFeedback fleetMetricsActionFeedback"
+          message={error}
+          tone="danger"
+        />
 
         <div className="observabilityMetricsControls" aria-label="Fleet metrics controls">
           <div className="timeRangeTabs" aria-label="Fleet metrics time range">

@@ -1,5 +1,6 @@
 import { AlertTriangle, Bell, ExternalLink, RadioTower } from "lucide-react";
 import { useState } from "react";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import {
   DeliveryPreviewSection,
   FleetAlertNotificationManager,
@@ -105,11 +106,11 @@ export function AlertsPanel({
           </div>
         ) : null}
 
-        {apiError ? (
-          <div className="panelError observabilityMetricsError" role="alert">
-            {apiError}
-          </div>
-        ) : null}
+        <ActionFeedback
+          className="localActionFeedback dashboardActionFeedback alertsActionFeedback"
+          message={apiError}
+          tone="danger"
+        />
 
         {!policyEditorOpen ? (
           <>

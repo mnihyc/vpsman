@@ -4791,6 +4791,10 @@ button.vpsDetailRecord:hover {
   max-width: min(420px, 42vw);
 }
 
+.headerActionStack .localActionFeedback {
+  margin: 0;
+}
+
 @media (max-width: 760px) {
   .sectionHeader {
     align-items: stretch;
@@ -5548,19 +5552,10 @@ button.vpsDetailRecord:hover {
   padding: 9px 10px;
 }
 
-.preferencesError {
+.preferencesActionFeedback.localActionFeedback {
   grid-column: 1 / -1;
-  min-width: 0;
   margin: 0;
-  border: 1px solid var(--danger-border);
-  border-radius: 8px;
-  background: var(--danger-soft);
-  color: var(--danger-strong);
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-  padding: 9px 10px;
+  max-width: 100%;
 }
 
 .preferencesActions {

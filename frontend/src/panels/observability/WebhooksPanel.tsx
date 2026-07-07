@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import {
   DeliveryPreviewSection,
   WebhookDeliveryHistoryGrid,
@@ -95,11 +96,11 @@ export function WebhooksPanel({
           </div>
         ) : null}
 
-        {apiError ? (
-          <div className="panelError observabilityMetricsError" role="alert">
-            {apiError}
-          </div>
-        ) : null}
+        <ActionFeedback
+          className="localActionFeedback dashboardActionFeedback webhooksActionFeedback"
+          message={apiError}
+          tone="danger"
+        />
 
         {!ruleEditorOpen ? (
           <>
