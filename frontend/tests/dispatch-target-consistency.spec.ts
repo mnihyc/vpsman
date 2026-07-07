@@ -66,6 +66,11 @@ async function openSourceTemplateWorkflow(
     .first();
   await expect(row).toBeVisible();
   await row.click();
+  await activate(
+    panel
+      .getByLabel("Template workflow actions for shared:vnstat-json")
+      .getByRole("button", { name: tab === "Render" ? "Render" : "Assign" }),
+  );
   const drawer = page.getByRole("complementary", {
     name: "shared:vnstat-json",
   });

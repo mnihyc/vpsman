@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { normalizeSubpage, viewSubpages } from "../src/constants";
+import { normalizeSubpage, viewLabel, viewSubpages } from "../src/constants";
 import {
   backupId,
   installConsoleApiMock,
@@ -330,7 +330,9 @@ test("release IA exposes the intended top-level product areas", async ({
   const mobilePageSelector = await openMobilePageSelector(page);
   if (mobilePageSelector) {
     for (const label of releaseTopLevel) {
-      await expect(mobilePageSelector).toContainText(`${label} /`);
+      await expect(mobilePageSelector).toContainText(
+        `${viewLabel(label as ActiveView)} /`,
+      );
     }
     for (const label of legacyTopLevel) {
       await expect(mobilePageSelector).not.toContainText(`${label} /`);
@@ -341,7 +343,10 @@ test("release IA exposes the intended top-level product areas", async ({
     });
     for (const label of releaseTopLevel) {
       await expect(
-        nav.getByRole("button", { name: label, exact: true }),
+        nav.getByRole("button", {
+          name: viewLabel(label as ActiveView),
+          exact: true,
+        }),
       ).toBeVisible();
     }
     for (const label of legacyTopLevel) {
@@ -460,7 +465,9 @@ test("release IA reaches every configured page and subpage", async ({
 
       const header = page.locator(".consoleHeader");
       await expect(
-        header.getByText(`vpsman / ${view} / ${subpage.label}`),
+        header.getByText(
+          `vpsman / ${viewLabel(view)} / ${subpage.label}`,
+        ),
       ).toBeVisible();
       await expect(header.getByLabel("Page operational context")).toContainText(
         subpage.label,
@@ -560,7 +567,9 @@ test("release pages use operational page headers", async ({ page }) => {
       header.getByRole("heading", { name: route.title }),
     ).toBeVisible();
     await expect(
-      header.getByText(`vpsman / ${route.view} / ${route.section}`),
+      header.getByText(
+        `vpsman / ${viewLabel(route.view as ActiveView)} / ${route.section}`,
+      ),
     ).toBeVisible();
 
     const context = header.getByLabel("Page operational context");
@@ -735,7 +744,7 @@ test("jobs history links to operational owners without embedding their workflows
   ).toBeVisible();
 
   await openConsoleSubpage(page, "Jobs", "History");
-  const relatedLinks = page.getByLabel("Related Remote Operations pages");
+  const relatedLinks = page.getByLabel("Related Remote pages");
   await expect(relatedLinks).toContainText("Related workflow owners");
   for (const link of [
     { button: "Terminal", heading: "Terminal" },
@@ -926,7 +935,7 @@ test("jobs dispatch keeps terminal creation in remote operations", async ({
     "Advanced dispatch",
   );
   await expect(jobsComposer.getByLabel("Dispatch mode boundary")).toContainText(
-    "Remote Operations / Terminal",
+    "Remote / Terminal",
   );
   await expect(
     jobsComposer.getByLabel("Dispatch operation groups").getByRole("button", {
@@ -1843,7 +1852,8 @@ test("fleet instance detail is the canonical VPS route from release workflows", 
 
   await openConsoleSubpage(page, "Jobs", "History");
   const jobsGrid = page.getByLabel("Job records data grid");
-  await activate(jobsGrid.locator(".gridBody [role=row]").first());
+  const firstJobRow = jobsGrid.locator(".gridBody [role=row]").first();
+  await activate(firstJobRow.getByRole("button", { name: "Open" }));
   const targetGrid = page.getByLabel("Target result records data grid");
   const targetRow = targetGrid
     .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
@@ -1995,14 +2005,14 @@ test("command palette indexes release pages and fixture entities", async ({
   const palette = page.getByRole("dialog", { name: "Command palette" });
   await expect(palette).toBeVisible();
   const search = page.getByLabel("Command palette search");
-  await search.fill("Remote Operations Terminal");
+  await search.fill("Remote Terminal");
   await expect(
     palette
       .locator('[data-command-group="Page"]')
-      .filter({ hasText: "Remote Operations / Terminal" }),
+      .filter({ hasText: "Remote / Terminal" }),
   ).toBeVisible();
   await palette
-    .getByRole("option", { name: /Page: Remote Operations \/ Terminal/ })
+    .getByRole("option", { name: /Page: Remote \/ Terminal/ })
     .click();
   await expect(page.getByRole("heading", { name: "Terminal" })).toBeVisible();
 
@@ -2152,7 +2162,11 @@ test("jobs approvals and scheduled runs stay separate", async ({
       schedulesGrid.getByRole("button", { name: "Run now" }).first(),
     ).toBeVisible();
   }
-  await activate(page.getByRole("button", { name: "Scheduled runs" }));
+  await activate(
+    page
+      .locator(".sectionHeader .inlineActions")
+      .getByRole("button", { name: "Scheduled runs" }),
+  );
   await expect(
     page.getByRole("heading", { level: 1, name: "Scheduled runs" }),
   ).toBeVisible();
@@ -2372,7 +2386,7 @@ test("jobs artifacts is read-only inventory linked to source workflows", async (
   await expect(grid).toContainText("Backup artifact");
   await grid.getByLabel("Artifact type filter").selectOption("all");
   await expect(grid).toContainText("Backups / Artifacts");
-  await expect(grid).toContainText("Remote Operations / Transfers");
+  await expect(grid).toContainText("Remote / Transfers");
   await expect(grid).toContainText("Automation / Agent updates");
   await expect(grid).not.toContainText("file_transfer_source");
   await expect(grid).not.toContainText("agent_update");
@@ -2410,7 +2424,7 @@ test("jobs artifacts is read-only inventory linked to source workflows", async (
   await openConsoleSubpage(page, "Jobs", "Artifacts");
   const sourceLinks = page.getByLabel("Artifact source workflow links");
   await sourceLinks
-    .getByRole("button", { name: "Remote Operations / Transfers" })
+    .getByRole("button", { name: "Remote / Transfers" })
     .click();
   await expect(
     page.getByRole("heading", { level: 1, name: "Transfers" }),
@@ -2969,6 +2983,12 @@ test("observability alert policy editor is a focused create flow", async ({
     0,
   );
 
+  await editor.getByLabel("Policy name").fill("edge-resource-policy");
+  await editor.getByLabel("Policy VPS selector expression").fill("tag:edge");
+  await editor.getByLabel("Rule name").fill("80% total quota");
+  await editor
+    .getByLabel("Rule condition expression")
+    .fill("traffic.cycle.total >= traffic.quota.total * 0.8");
   await activate(editor.getByRole("button", { name: "Preview matches" }));
   await expect(editor).toContainText("Matches 1 VPS");
   await expect(editor).toContainText("Match preview");
@@ -5075,6 +5095,7 @@ test("network tunnel plans owns promotion without a standalone promotion subpage
   ).toHaveCount(0);
 
   await activate(page.getByRole("button", { name: "Create tunnel plan" }));
+  await expect(tunnelPlanGrid).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "Create tunnel plan" }),
   ).toBeVisible();
@@ -5090,7 +5111,7 @@ test("network tunnel plans owns promotion without a standalone promotion subpage
 
   await activate(page.getByRole("button", { name: "Promotion workflow" }));
   const promotion = page.getByLabel("Tunnel plan promotion workflow");
-  await expect(tunnelPlanGrid).toBeHidden();
+  await expect(tunnelPlanGrid).toBeVisible();
   await expect(
     promotion.getByRole("heading", { name: "Tunnel promotion" }),
   ).toBeVisible();

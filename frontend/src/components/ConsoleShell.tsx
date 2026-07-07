@@ -9,6 +9,7 @@ import {
   KeyRound,
   LockKeyhole,
   RadioTower,
+  Save,
   ShieldCheck,
   Trash2,
   X,
@@ -114,6 +115,17 @@ export function ConsoleShell({
   const commandInputRef = useRef<HTMLInputElement | null>(null);
   const hasFleetScope = fleetQuery.trim().length > 0 || activeSavedFleetViewId !== null;
   const activeSavedFleetView = savedFleetViews.find((view) => view.id === activeSavedFleetViewId) ?? null;
+  const draftSavedFleetViewMatchesExisting = Boolean(
+    draftSavedFleetViewName.trim() &&
+      savedFleetViews.some(
+        (view) =>
+          view.name.trim().toLocaleLowerCase() ===
+          draftSavedFleetViewName.trim().toLocaleLowerCase(),
+      ),
+  );
+  const savedFleetViewActionLabel = draftSavedFleetViewMatchesExisting
+    ? "Override saved fleet view"
+    : "Save current fleet view";
   const scopeName = activeSavedFleetView?.name ?? (fleetQuery.trim() ? "Filtered resources" : "All VPS resources");
   const showFullFleetMetrics =
     activeView === "Home" || (activeView === "Fleet" && activeSubpage === "monitor");
@@ -153,6 +165,16 @@ export function ConsoleShell({
       writeSidebarSubpanelPreferences(preferences.sidebar_subpanel_default, next);
       return next;
     });
+  };
+  const selectPrimaryNavItem = (view: ActiveView, hasSubpages: boolean, expanded: boolean) => {
+    if (hasSubpages && !expanded) {
+      setManualSubpanelState((current) => {
+        const next = { ...current, [view]: true };
+        writeSidebarSubpanelPreferences(preferences.sidebar_subpanel_default, next);
+        return next;
+      });
+    }
+    onSelectView(view);
   };
   const filteredCommandItems = useMemo(() => {
     const terms = commandQuery
@@ -224,9 +246,9 @@ export function ConsoleShell({
         onChange={(event) => onApplySavedFleetView(event.target.value)}
         value={activeSavedFleetViewId ?? ""}
       >
-        <option value="">Saved views</option>
+        <option value="" title="Saved views">Saved views</option>
         {savedFleetViews.map((view) => (
-          <option key={view.id} value={view.id}>
+          <option key={view.id} value={view.id} title={view.name}>
             {view.name}
           </option>
         ))}
@@ -235,17 +257,22 @@ export function ConsoleShell({
         aria-label="Saved fleet view name"
         onChange={(event) => onSavedFleetViewNameChange(event.target.value)}
         placeholder="View name"
+        title={draftSavedFleetViewName || "View name"}
         value={draftSavedFleetViewName}
       />
       <button
-        aria-label="Save current fleet view"
+        aria-label={savedFleetViewActionLabel}
         className="iconButton"
         disabled={!fleetQuery.trim() && !draftSavedFleetViewName.trim()}
         onClick={onSaveFleetView}
-        title="Save current fleet view"
+        title={savedFleetViewActionLabel}
         type="button"
       >
-        <BookmarkPlus size={18} />
+        {draftSavedFleetViewMatchesExisting ? (
+          <Save size={18} />
+        ) : (
+          <BookmarkPlus size={18} />
+        )}
       </button>
       <button
         aria-label="Delete saved fleet view"
@@ -331,7 +358,7 @@ export function ConsoleShell({
                       <button
                         aria-current={activeView === item.view ? "page" : undefined}
                         className={activeView === item.view ? "navItem active" : "navItem"}
-                        onClick={() => onSelectView(item.view)}
+                        onClick={() => selectPrimaryNavItem(item.view, hasSubpages, expanded)}
                         type="button"
                       >
                         <Icon size={18} />
@@ -598,11 +625,12 @@ export function ConsoleShell({
                         key={item.id}
                         onClick={() => selectCommandItem(item)}
                         role="option"
+                        title={`${item.label}\n${item.detail}`}
                         type="button"
                       >
                         <span className="commandPaletteResultText">
-                          <strong>{item.label}</strong>
-                          <small>{item.detail}</small>
+                          <strong title={item.label}>{item.label}</strong>
+                          <small title={item.detail}>{item.detail}</small>
                         </span>
                         <span className="commandPaletteGroupBadge">{item.group}</span>
                       </button>

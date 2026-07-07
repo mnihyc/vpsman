@@ -6,6 +6,7 @@ import {
   openConsoleSubpage,
   waitForConsoleShell,
 } from "./support/consoleNavigation";
+import { viewLabel } from "../src/constants";
 import type { ActiveView } from "../src/types";
 
 const SCREENSHOT_DIR = join(
@@ -471,7 +472,7 @@ const allViews: ScreenshotEntry[] = [
       "agent-fra-02 -> agent-sfo-01",
       "Endpoint comparison",
       "Saved plan match",
-      "Alert overlays",
+      "Network review signals",
     ],
   },
   {
@@ -682,7 +683,7 @@ const allViews: ScreenshotEntry[] = [
       "Subsystem capacity",
       "Queue growth",
       "Suite Config fields",
-      "Unavailable capacity telemetry",
+      "Optional storage telemetry not reported",
     ],
   },
   {
@@ -733,8 +734,8 @@ async function navigateAndScreenshot(
   projectName: string,
 ) {
   const label = entry.subpage
-    ? `${entry.view} / ${entry.subpage}${entry.tab ? ` / ${entry.tab}` : ""}`
-    : entry.view;
+    ? `${viewLabel(entry.view)} / ${entry.subpage}${entry.tab ? ` / ${entry.tab}` : ""}`
+    : viewLabel(entry.view);
 
   await expectNoLegacyTopLevelSidebarEntries(page);
   await openConsoleSubpage(page, entry.view, entry.subpage ?? "Overview");
@@ -799,7 +800,7 @@ async function navigateAndScreenshot(
   await expect(
     page
       .locator(".consoleHeader")
-      .getByText(`vpsman / ${entry.view} / ${activeSection}`),
+      .getByText(`vpsman / ${viewLabel(entry.view)} / ${activeSection}`),
   ).toBeVisible({ timeout: 5_000 });
   try {
     await expect(
@@ -948,7 +949,7 @@ async function navigateAndScreenshot(
 
   return {
     id: entry.id,
-    view: entry.view,
+    view: viewLabel(entry.view),
     subpage: entry.subpage ?? null,
     tab: entry.tab ?? null,
     expandVpsRow: entry.expandVpsRow ?? null,
@@ -1040,7 +1041,7 @@ batches.forEach((batch, batchIndex) => {
         );
         results.push(result);
         console.log(
-          `[screenshot] OK  ${result.id} — ${entry.view}${entry.subpage ? ` / ${entry.subpage}` : ""}`,
+          `[screenshot] OK  ${result.id} — ${viewLabel(entry.view)}${entry.subpage ? ` / ${entry.subpage}` : ""}`,
         );
       } catch (error) {
         console.error(`[screenshot] ERR ${entry.id}: ${String(error)}`);
@@ -1052,9 +1053,9 @@ batches.forEach((batch, batchIndex) => {
             `${entry.id}-${testInfo.project.name}-error.png`,
           );
           await page.screenshot({ fullPage: true, path: errPath });
-          results.push({
-            id: entry.id,
-            view: entry.view,
+            results.push({
+              id: entry.id,
+              view: viewLabel(entry.view),
             subpage: entry.subpage ?? null,
             heading: entry.heading,
             screenshot: errPath,
@@ -1063,7 +1064,7 @@ batches.forEach((batch, batchIndex) => {
         } catch {
           results.push({
             id: entry.id,
-            view: entry.view,
+            view: viewLabel(entry.view),
             subpage: entry.subpage ?? null,
             heading: entry.heading,
             error: String(error),

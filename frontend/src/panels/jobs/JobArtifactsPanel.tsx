@@ -256,7 +256,7 @@ export function JobArtifactsPanel({
             type="button"
           >
             <ExternalLink size={16} />
-            Remote Operations / Transfers
+            Remote / Transfers
           </button>
           <button
             className="secondaryAction"
@@ -374,7 +374,7 @@ function openSourceWorkflow(
     links.onOpenBackupsArtifacts();
     return;
   }
-  if (row.sourceWorkflow === "Remote Operations / Transfers") {
+  if (row.sourceWorkflow === "Remote / Transfers") {
     links.onOpenTransfers();
     return;
   }
@@ -422,7 +422,7 @@ function buildArtifactInventoryRows({
     sha256Hex: source.sha256_hex,
     sizeBytes: source.size_bytes,
     sourceDetail: "Reusable upload source",
-    sourceWorkflow: "Remote Operations / Transfers",
+    sourceWorkflow: "Remote / Transfers",
     type: "Transfer package",
     ...artifactVerification(source.status),
   }));

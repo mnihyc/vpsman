@@ -1409,13 +1409,13 @@ export function JobsPanel({
               </div>
               <div
                 className="jobHistoryWorkflowLinks"
-                aria-label="Related Remote Operations pages"
+                aria-label="Related Remote pages"
               >
                 <span className="jobHistoryWorkflowIntro">
                   <strong>Related workflow owners</strong>
                   <small>
                     Use Jobs for execution evidence. Open operational workflows
-                    in Remote Operations.
+                    in Remote.
                   </small>
                 </span>
                 <span className="jobHistoryWorkflowActions">

@@ -828,7 +828,7 @@ export function FileBrowserPanel({
             className="secondaryAction compactAction"
             disabled={!transferReferencePath || !targetClientId}
             onClick={() => onOpenTransfers(transferReferencePath)}
-            title="Open Remote Operations / Transfers with the selected VPS and path scoped in the transfer table."
+            title="Open Remote / Transfers with the selected VPS and path scoped in the transfer table."
             type="button"
           >
             <ArrowLeftRight size={14} />
@@ -1333,7 +1333,7 @@ function transferHandoffText(
   if (hint) {
     return "Direct browser download completed; retained download and retry evidence live in Transfers";
   }
-  return "Transfer evidence is owned by Remote Operations / Transfers";
+  return "Transfer evidence is owned by Remote / Transfers";
 }
 
 function transferHandoffOutputLabel(hint: TransferHandoffHint): string {

@@ -25,6 +25,13 @@ export function useFleetViews(agents: AgentView[]) {
   const [activeSavedViewId, setActiveSavedViewId] = useState<string | null>(storedState.activeSavedViewId ?? null);
   const [draftSavedViewName, setDraftSavedViewName] = useState("");
   const activeSavedView = savedViews.find((view) => view.id === activeSavedViewId) ?? null;
+  const draftSavedViewNameKey = normalizedSavedViewName(draftSavedViewName);
+  const draftSavedViewMatchesExisting = Boolean(
+    draftSavedViewNameKey &&
+      savedViews.some(
+        (view) => normalizedSavedViewName(view.name) === draftSavedViewNameKey,
+      ),
+  );
   const filteredAgents = useMemo(() => filterAgents(agents, fleetQuery), [agents, fleetQuery]);
 
   useEffect(() => {
@@ -42,10 +49,22 @@ export function useFleetViews(agents: AgentView[]) {
     const now = new Date().toISOString();
     const query = fleetQuery.trim();
     const name = draftSavedViewName.trim() || defaultFleetViewName(query, savedViews.length);
-    if (activeSavedView) {
+    const nameKey = normalizedSavedViewName(name);
+    const matchingNamedView = savedViews.find(
+      (view) => normalizedSavedViewName(view.name) === nameKey,
+    );
+    const targetView = matchingNamedView ?? activeSavedView;
+    if (targetView) {
       setSavedViews((views) =>
-        views.map((view) => (view.id === activeSavedView.id ? { ...view, name, query, updatedAt: now } : view)),
+        views
+          .map((view) =>
+            view.id === targetView.id
+              ? { ...view, name, query, updatedAt: now }
+              : view,
+          )
+          .sort((left, right) => left.name.localeCompare(right.name)),
       );
+      setActiveSavedViewId(targetView.id);
       setDraftSavedViewName(name);
       return;
     }
@@ -93,6 +112,7 @@ export function useFleetViews(agents: AgentView[]) {
     clearFleetView,
     deleteSavedFleetView,
     draftSavedViewName,
+    draftSavedViewMatchesExisting,
     filteredAgents,
     fleetQuery,
     savedViews,
@@ -101,6 +121,10 @@ export function useFleetViews(agents: AgentView[]) {
     setFleetQuery,
     applySavedFleetView,
   };
+}
+
+function normalizedSavedViewName(name: string): string {
+  return name.trim().toLocaleLowerCase();
 }
 
 function filterAgents(agents: AgentView[], query: string): AgentView[] {

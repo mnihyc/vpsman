@@ -389,13 +389,13 @@ export function VpsDetailPanel({
               icon={<TerminalSquare size={18} />}
               loading={loading}
               title="Remote access"
-              description="Open browser terminal sessions from the Remote Operations surface. Session lifecycle, replay, input, resize, and close controls stay there."
+              description="Open browser terminal sessions from Remote. Session lifecycle, replay, input, resize, and close controls stay there."
               primary={{ label: "Open terminal", onClick: () => onOpenTerminal(agent) }}
               rows={[
                 ["Agent status", agent.status],
                 ["Privilege mode", privilegeLabel(agent)],
                 ["Max timeout", `${agent.capabilities.max_job_timeout_secs}s`],
-                ["Local workflow", "Remote Operations / Terminal"],
+                ["Local workflow", "Remote / Terminal"],
               ]}
             />
           )}
@@ -404,7 +404,7 @@ export function VpsDetailPanel({
               icon={<FolderOpen size={18} />}
               loading={loading}
               title="Files"
-              description="Browse, transfer, edit, and review file operations from Remote Operations / Files."
+              description="Browse, transfer, edit, and review file operations from Remote / Files."
               primary={{ label: "Browse files", onClick: () => onOpenFiles(agent) }}
               rows={[
                 ["Transfer sessions", String(related.fileTransfers.length)],
@@ -418,12 +418,12 @@ export function VpsDetailPanel({
               icon={<Activity size={18} />}
               loading={loading}
               title="Processes"
-              description="Inspect process inventory, logs, restarts, and reviewed stop/restart work from Remote Operations / Processes."
+              description="Inspect process inventory, logs, restarts, and reviewed stop/restart work from Remote / Processes."
               primary={{ label: "Open processes", onClick: () => onOpenProcesses(agent) }}
               rows={[
                 ["Process limits", agent.capabilities.can_apply_process_limits ? "Supported" : "Not reported"],
                 ["Privilege mode", privilegeLabel(agent)],
-                ["Workflow", "Remote Operations / Processes"],
+                ["Workflow", "Remote / Processes"],
               ]}
             />
           )}

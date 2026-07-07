@@ -1033,7 +1033,7 @@ export function JobDispatchPanel({
     }
     if (!terminalSurface && template.operation.type === "terminal_open") {
       setSelectedTemplateId("");
-      setActionError("Open terminal sessions from Remote Operations / Terminal. Jobs / Dispatch stays focused on generic command, file, backup, update, session, and process dispatch.");
+      setActionError("Open terminal sessions from Remote / Terminal. Jobs / Dispatch stays focused on generic command, file, backup, update, session, and process dispatch.");
       return;
     }
     applyTemplateOperation(template.operation);
@@ -1577,7 +1577,7 @@ export function JobDispatchPanel({
           <>
             <div className="dispatchModeNotice" aria-label="Dispatch mode boundary">
               <strong>Advanced dispatch</strong>
-              <span>Terminal open and resume start in Remote Operations / Terminal.</span>
+              <span>Terminal open and resume start in Remote / Terminal.</span>
               {onOpenRemoteTerminal ? (
                 <button className="secondaryAction compactAction" onClick={onOpenRemoteTerminal} type="button">
                   Remote terminal

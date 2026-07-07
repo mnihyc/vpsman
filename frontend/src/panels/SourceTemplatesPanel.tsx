@@ -964,22 +964,62 @@ export function SourceTemplatePanel({
             </div>
           }
           renderExpandedRow={(template) => (
-            <div className="consoleInlineDetailGrid">
-              <span>Template ID</span>
-              <strong>{template.id}</strong>
-              <span>Name</span>
-              <strong>{template.name}</strong>
-              <span>Domain</span>
-              <strong>{sourceDomainLabel(template.domain)}</strong>
-              <span>Scope</span>
-              <strong>{sourceTokenLabel(template.scope)}</strong>
-              <span>Default</span>
-              <strong>{template.is_default ? "Yes" : "No"}</strong>
-              <span>Assigned VPSs</span>
-              <strong>{template.assigned_client_count}</strong>
-              <span>Description</span>
-              <strong>{template.description ?? "None"}</strong>
-            </div>
+            <>
+              <div className="consoleInlineDetailGrid">
+                <span>Template ID</span>
+                <strong>{template.id}</strong>
+                <span>Name</span>
+                <strong>{template.name}</strong>
+                <span>Domain</span>
+                <strong>{sourceDomainLabel(template.domain)}</strong>
+                <span>Scope</span>
+                <strong>{sourceTokenLabel(template.scope)}</strong>
+                <span>Default</span>
+                <strong>{template.is_default ? "Yes" : "No"}</strong>
+                <span>Assigned VPSs</span>
+                <strong>{template.assigned_client_count}</strong>
+                <span>Description</span>
+                <strong>{template.description ?? "None"}</strong>
+              </div>
+              <div
+                className="consoleInlineDetailActions"
+                aria-label={`Template workflow actions for ${template.name}`}
+              >
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openTemplateDetail(template, "assign");
+                  }}
+                  type="button"
+                >
+                  <UserPlus size={14} />
+                  <span>Assign</span>
+                </button>
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openTemplateDetail(template, "render");
+                  }}
+                  type="button"
+                >
+                  <FileText size={14} />
+                  <span>Render</span>
+                </button>
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    openTemplateDetail(template, "lifecycle");
+                  }}
+                  type="button"
+                >
+                  <Pencil size={14} />
+                  <span>Test/update</span>
+                </button>
+              </div>
+            </>
           )}
           renderSelectionPanel={(rows) => (
             <div className="gridSelectionSummary">
@@ -1535,9 +1575,9 @@ export function SourceTemplatePanel({
 
 function defaultCloneName(name: string): string {
   if (name.startsWith("builtin:")) {
-    return `shared:${name.slice("builtin:".length)}`;
+    return `shared:${name.slice("builtin:".length)} (cloned)`;
   }
-  return `${name}.copy`;
+  return `${name} (cloned)`;
 }
 
 function sourceTemplatePrivilegeTarget(templateId: string) {

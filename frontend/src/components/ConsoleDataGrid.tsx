@@ -102,7 +102,7 @@ export function ConsoleDataGrid<T>({
   getRowId,
   itemLabel = "rows",
   mobileFieldLayout = "auto",
-  expandOnRowClick = false,
+  expandOnRowClick,
   mobileLayout = "cards",
   onExpandedRowChange,
   onOpenRow,
@@ -182,6 +182,7 @@ export function ConsoleDataGrid<T>({
   renderExpandedRowRef.current = renderExpandedRow;
   singleExpandedRowRef.current = singleExpandedRow;
   const hasExpandedRows = Boolean(renderExpandedRow);
+  const rowClickExpands = expandOnRowClick ?? hasExpandedRows;
   const searchValuesForRow = (row: T) =>
     columns.map(
       (column) => column.searchValue?.(row) ?? column.sortValue?.(row),
@@ -200,6 +201,10 @@ export function ConsoleDataGrid<T>({
         searchFieldsForRow,
       ),
     [columns, rows],
+  );
+  const dataColumnsById = useMemo(
+    () => new Map(columns.map((column) => [column.id, column])),
+    [columns],
   );
   const tableColumns = useMemo<ColumnDef<T>[]>(
     () => [
@@ -295,6 +300,10 @@ export function ConsoleDataGrid<T>({
                 ? "gridCellContent alignEnd"
                 : "gridCellContent"
             }
+            title={tooltipFromValue(
+              column.searchValue?.(row.original) ??
+                column.sortValue?.(row.original),
+            )}
           >
             {column.cell(row.original)}
           </span>
@@ -470,6 +479,13 @@ export function ConsoleDataGrid<T>({
       );
   }
 
+  function tooltipForCell(cell: Cell<T, unknown>, row: T): string | undefined {
+    const column = dataColumnsById.get(cell.column.id);
+    return tooltipFromValue(
+      column?.searchValue?.(row) ?? column?.sortValue?.(row) ?? cell.getValue(),
+    );
+  }
+
   function renderMobileCard(row: Row<T>) {
     const rowId = getRowId(row.original);
     const dataCells = rowDataCells(row);
@@ -524,7 +540,10 @@ export function ConsoleDataGrid<T>({
               type="checkbox"
             />
           ) : null}
-          <div className="gridMobilePrimary">
+          <div
+            className="gridMobilePrimary"
+            title={primaryCell ? tooltipForCell(primaryCell, row.original) : rowId}
+          >
             {primaryCell ? (
               flexRender(
                 primaryCell.column.columnDef.cell,
@@ -535,7 +554,10 @@ export function ConsoleDataGrid<T>({
             )}
           </div>
           {stateCell ? (
-            <div className="gridMobileState">
+            <div
+              className="gridMobileState"
+              title={tooltipForCell(stateCell, row.original)}
+            >
               {flexRender(
                 stateCell.column.columnDef.cell,
                 stateCell.getContext(),
@@ -547,9 +569,16 @@ export function ConsoleDataGrid<T>({
         {detailCells.length > 0 ? (
           <div className="gridMobileFields">
             {detailCells.map((cell) => (
-              <div className="gridMobileField" key={cell.id}>
-                <span>{cellHeaderLabel(cell)}</span>
-                <div className="gridMobileFieldValue">
+              <div
+                className="gridMobileField"
+                key={cell.id}
+                title={tooltipForCell(cell, row.original)}
+              >
+                <span title={cellHeaderLabel(cell)}>{cellHeaderLabel(cell)}</span>
+                <div
+                  className="gridMobileFieldValue"
+                  title={tooltipForCell(cell, row.original)}
+                >
                   {flexRender(cell.column.columnDef.cell, cell.getContext())}
                 </div>
               </div>
@@ -892,11 +921,12 @@ export function ConsoleDataGrid<T>({
                           row.getIsSelected() ? "gridRow selected" : "gridRow"
                         }
                         onClick={() => {
+                          if (rowClickExpands) {
+                            toggleExpandedRow(row.id, row.original);
+                            return;
+                          }
                           if (openRowOnClick) {
                             onOpenRow?.(row.original);
-                          }
-                          if (expandOnRowClick) {
-                            toggleExpandedRow(row.id, row.original);
                           }
                         }}
                         role="row"
@@ -907,6 +937,7 @@ export function ConsoleDataGrid<T>({
                             key={cell.id}
                             role="gridcell"
                             style={gridColumnStyle(cell.column)}
+                            title={tooltipForCell(cell, row.original)}
                           >
                             {flexRender(
                               cell.column.columnDef.cell,
@@ -1083,6 +1114,14 @@ function writeGridPreferences(
   }
 }
 
+function tooltipFromValue(value: unknown): string | undefined {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  const text = String(value).trim();
+  return text ? text : undefined;
+}
+
 function SortableHeaderCell<T>({
   canDrag,
   header,
@@ -1104,6 +1143,7 @@ function SortableHeaderCell<T>({
   const headerClassName = ["gridHeaderCell", isDragging ? "dragging" : ""]
     .filter(Boolean)
     .join(" ");
+  const headerTitle = String(header.column.columnDef.header ?? "");
 
   return (
     <div
@@ -1118,8 +1158,9 @@ function SortableHeaderCell<T>({
     >
       {canDrag && (
         <button
-          aria-label={`Reorder ${String(header.column.columnDef.header)} column`}
+          aria-label={`Reorder ${headerTitle} column`}
           className="gridDragHandle"
+          title={`Reorder ${headerTitle} column`}
           type="button"
           {...attributes}
           {...listeners}
@@ -1131,6 +1172,7 @@ function SortableHeaderCell<T>({
         <button
           className="gridHeaderButton sortable"
           onClick={header.column.getToggleSortingHandler()}
+          title={headerTitle}
           type="button"
         >
           {flexRender(header.column.columnDef.header, header.getContext())}
@@ -1141,7 +1183,7 @@ function SortableHeaderCell<T>({
               : ""}
         </button>
       ) : (
-        <div className="gridHeaderButton">
+        <div className="gridHeaderButton" title={headerTitle}>
           {flexRender(header.column.columnDef.header, header.getContext())}
         </div>
       )}

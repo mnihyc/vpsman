@@ -152,7 +152,8 @@ async function installAuthSessionApiMock(page: import("@playwright/test").Page) 
     const body = (await route.request().postDataJSON()) as {
       refresh_token?: string;
     };
-    if (body.refresh_token !== refreshToken) {
+    const validRefreshTokens = new Set([refreshToken, rotatedRefreshToken]);
+    if (!body.refresh_token || !validRefreshTokens.has(body.refresh_token)) {
       await route.fulfill({
         contentType: "application/json",
         json: { error: "invalid_refresh_token" },

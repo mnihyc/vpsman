@@ -25,6 +25,7 @@ import {
   defaultSubpages,
   navItems,
   normalizeSubpage,
+  viewLabel,
   viewSubpages,
 } from "./constants";
 import {
@@ -36,6 +37,7 @@ import {
 } from "./utils";
 import { useDashboardData } from "./hooks/useDashboardData";
 import { useFleetViews } from "./hooks/useFleetViews";
+import { useValueTooltips } from "./useValueTooltips";
 import { agentDisplayState } from "./agentDisplayState";
 import type {
   JobDispatchPreset,
@@ -201,7 +203,7 @@ function getScopedPageTitle(view: ActiveView, subpage: string): string {
       case "processes":
         return "Processes";
       default:
-        return "Remote operations";
+        return "Remote";
     }
   }
   if (view === "Jobs") {
@@ -501,6 +503,7 @@ function releaseTargetId(target: ReleaseRouteTarget): string {
 }
 
 export function App() {
+  useValueTooltips();
   const initialRouteRef = useRef<ConsoleRouteState | null>(
     readConsoleRouteFromLocation(),
   );
@@ -766,9 +769,9 @@ export function App() {
       subpages.map((subpage) => ({
         id: `page:${view}:${subpage.id}`,
         group: "Page" as const,
-        label: `${view} / ${subpage.label}`,
+        label: `${viewLabel(view)} / ${subpage.label}`,
         detail: subpage.description,
-        keywords: `${view} ${subpage.id} ${subpage.label}`,
+        keywords: `${viewLabel(view)} ${view} ${subpage.id} ${subpage.label}`,
         onSelect: () => selectView(view, subpage.id),
       })),
     );

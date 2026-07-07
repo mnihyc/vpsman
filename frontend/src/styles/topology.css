@@ -804,10 +804,6 @@
   overflow: hidden;
 }
 
-.tunnelPlansRegistryPanel.mobileWorkflowFocused {
-  display: none;
-}
-
 .tunnelPlansRegistryPanel .gridToolbar,
 .tunnelPlansRegistryPanel .gridToolbarActions {
   flex-wrap: wrap;
@@ -875,6 +871,18 @@
 .tunnelPlanRowActions .compactAction {
   justify-content: center;
   min-width: 94px;
+}
+
+.lifecycleAction.enableAction {
+  border-color: var(--success-border);
+  background: var(--success-soft);
+  color: var(--success-text);
+}
+
+.lifecycleAction.disableAction {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+  color: var(--warning-text);
 }
 
 .tunnelPlanRowActions .secondaryAction[aria-disabled="true"] {

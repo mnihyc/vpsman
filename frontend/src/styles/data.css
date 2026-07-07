@@ -2599,6 +2599,10 @@
 }
 
 .configApplyGrid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.configApplyGrid.singleConfigFlow {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
 }
 
@@ -2706,8 +2710,10 @@
 .bulkGeneratorManagement {
   display: grid;
   gap: 10px;
-  padding: 10px 0 0;
-  border-top: 1px solid var(--border-subtle);
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
 }
 
 .bulkGeneratorManagement > summary {
@@ -2726,6 +2732,15 @@
 
 .bulkGeneratorManagement > .consoleDataGrid {
   margin: 0;
+}
+
+.patchGeneratorEditor {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 14px;
 }
 
 .configTargetCombobox:focus-within {
@@ -3438,11 +3453,33 @@
   text-transform: uppercase;
 }
 
+.consoleInlineDetailGrid > span > span,
+.consoleInlineDetailGrid > span > pre {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.consoleInlineDetailGrid > span > pre {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .consoleInlineDetailGrid span span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.consoleInlineDetailActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
 }
 
 .auditEventMetadata {
@@ -4215,6 +4252,21 @@
   color: var(--muted);
 }
 
+.compactReviewCheck {
+  justify-self: start;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.compactReviewCheck input[type="checkbox"] {
+  flex: 0 0 auto;
+}
+
 .bulkTagPreview {
   align-content: start;
   min-height: 180px;
@@ -4437,6 +4489,12 @@
   border-radius: 8px;
   background: var(--canvas);
   padding: 10px 12px;
+}
+
+.webhookOperationsPanel {
+  border-color: var(--border);
+  background: var(--surface);
+  box-shadow: inset 3px 0 0 var(--primary);
 }
 
 .consoleOperationsBar span {
@@ -4818,8 +4876,10 @@
   display: grid;
   gap: 10px;
   min-width: 0;
-  border-top: 1px solid var(--border-subtle);
-  padding-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 12px;
 }
 
 .policyRuleCardHeader {

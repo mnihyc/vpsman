@@ -49,7 +49,7 @@ export function getPageTitle(view: ActiveView): string {
     case "Fleet":
       return "Fleet overview";
     case "Remote Operations":
-      return "Remote operations";
+      return "Remote";
     case "Config":
       return "Config";
     case "Jobs":

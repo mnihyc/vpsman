@@ -4679,7 +4679,7 @@ function SystemCapacityPanel({
           <div>
             <AlertTriangle size={17} />
             <div>
-              <strong>Unavailable capacity telemetry</strong>
+              <strong>Optional storage telemetry not reported</strong>
               <span>
                 Artifact bytes, retention prune backlog, and worker lag are
                 not reported by the current dashboard API. Cleanup previews
@@ -4687,7 +4687,7 @@ function SystemCapacityPanel({
               </span>
             </div>
           </div>
-          <ConsoleStatusBadge tone="warning">Backend fields needed</ConsoleStatusBadge>
+          <ConsoleStatusBadge tone="warning">Not reported</ConsoleStatusBadge>
         </section>
 
         {activeSubsystem === "storage" ? (

@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { FileSliders, Play, RefreshCw, ServerCog, Trash2 } from "lucide-react";
+import { FileSliders, Play, RefreshCw, ServerCog, Trash2, X } from "lucide-react";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
@@ -18,6 +18,7 @@ import {
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
+import { scrollIntoViewWithMotion } from "../motion";
 import {
   useReviewGenerationGuard,
   waitForReviewRender,
@@ -136,6 +137,18 @@ type BulkConfigApplySnapshot = {
   maxTimeoutSecs: number;
   privilegeAssertion: PrivilegeAssertion;
   payloadHashHex: string;
+};
+
+type PatchGeneratorEditorState = {
+  mode: "new" | "edit";
+  id: string | null;
+  name: string;
+  category: string;
+  domain: string;
+  description: string;
+  fieldSchemaText: string;
+  rawGeneratorBody: string;
+  docsMetadataText: string;
 };
 
 type SingleVpsConfigApplySnapshot = {
@@ -1804,7 +1817,12 @@ function BulkConfigApply({
   const [deleteGenerator, setDeleteGenerator] =
     useState<RuntimeConfigPatchGeneratorRecord | null>(null);
   const [manageGeneratorsOpen, setManageGeneratorsOpen] = useState(false);
+  const [patchGeneratorEditor, setPatchGeneratorEditor] =
+    useState<PatchGeneratorEditorState | null>(null);
+  const [patchGeneratorStatus, setPatchGeneratorStatus] =
+    useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const generatorManagementRef = useRef<HTMLDetailsElement | null>(null);
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(
     DEFAULT_MAX_JOB_TIMEOUT_SECS,
   );
@@ -1909,6 +1927,16 @@ function BulkConfigApply({
           `Load ${rows[0]?.name ?? "one patch generator"} into the apply form.`,
       },
       {
+        icon: <FileSliders size={14} />,
+        label: "Edit",
+        onSelect: (rows) => openPatchGeneratorEditor(rows[0]),
+        disabled: (rows) => rows.length !== 1 || rows[0].built_in,
+        description: (rows) =>
+          rows[0]?.built_in
+            ? "Built-in patch generators are read-only; clone before editing."
+            : `Edit ${rows[0]?.name ?? "one custom patch generator"}.`,
+      },
+      {
         label: "Clone",
         onSelect: (rows) => void clonePatchGenerator(rows[0]),
         disabled: (rows) => rows.length !== 1,
@@ -1954,6 +1982,22 @@ function BulkConfigApply({
     setReviewStatus(null);
   }
 
+  function scrollGeneratorManagementIntoView() {
+    window.requestAnimationFrame(() => {
+      const element = generatorManagementRef.current;
+      if (!element) {
+        return;
+      }
+      scrollIntoViewWithMotion(element, { block: "start" });
+      element.focus({ preventScroll: true });
+    });
+  }
+
+  function openGeneratorManagement() {
+    setManageGeneratorsOpen(true);
+    scrollGeneratorManagementIntoView();
+  }
+
   function loadPatchGeneratorForApply(
     generator: RuntimeConfigPatchGeneratorRecord,
   ) {
@@ -1968,16 +2012,85 @@ function BulkConfigApply({
     generator: RuntimeConfigPatchGeneratorRecord,
   ) {
     await runAction(async () => {
-      await onUpsertRuntimeConfigPatchGenerator({
+      const cloned = await onUpsertRuntimeConfigPatchGenerator({
         category: generator.category,
         description: generator.description,
         docs_metadata: generator.docs_metadata,
         domain: generator.domain,
         field_schema: generator.field_schema,
-        name: `${generator.name}.copy`,
+        name: `${generator.name} (cloned)`,
         raw_generator_body: generator.raw_generator_body,
         confirmed: true,
       });
+      setPatchGeneratorStatus(`cloned ${cloned.name}`);
+      setGeneratorId(cloned.id);
+      openGeneratorManagement();
+    });
+  }
+
+  function openPatchGeneratorEditor(
+    generator?: RuntimeConfigPatchGeneratorRecord,
+  ) {
+    setPatchGeneratorStatus(null);
+    setPatchGeneratorEditor(
+      generator
+        ? {
+            mode: "edit",
+            id: generator.id,
+            name: generator.name,
+            category: generator.category,
+            domain: generator.domain,
+            description: generator.description,
+            fieldSchemaText: formatJsonObject(generator.field_schema),
+            rawGeneratorBody: generator.raw_generator_body,
+            docsMetadataText: formatJsonObject(generator.docs_metadata),
+          }
+        : {
+            mode: "new",
+            id: null,
+            name: "",
+            category: "",
+            domain: "",
+            description: "",
+            fieldSchemaText: "{\n  \"fields\": {}\n}",
+            rawGeneratorBody: "",
+            docsMetadataText:
+              "{\n  \"expandable\": true,\n  \"affected_sections\": [],\n  \"patch_only\": true\n}",
+          },
+    );
+    openGeneratorManagement();
+  }
+
+  function updatePatchGeneratorEditor(
+    patch: Partial<PatchGeneratorEditorState>,
+  ) {
+    setPatchGeneratorEditor((current) =>
+      current ? { ...current, ...patch } : current,
+    );
+  }
+
+  async function savePatchGeneratorEditor() {
+    const editor = patchGeneratorEditor;
+    if (!editor) {
+      return;
+    }
+    await runAction(async () => {
+      const saved = await onUpsertRuntimeConfigPatchGenerator({
+        id: editor.mode === "edit" ? editor.id : null,
+        name: editor.name.trim(),
+        category: editor.category.trim(),
+        domain: editor.domain.trim(),
+        description: editor.description.trim(),
+        field_schema: parseJsonObject(editor.fieldSchemaText),
+        raw_generator_body: editor.rawGeneratorBody,
+        docs_metadata: parseJsonObject(editor.docsMetadataText),
+        confirmed: true,
+      });
+      setGeneratorId(saved.id);
+      setPatchGeneratorEditor(null);
+      setPatchGeneratorStatus(`saved ${saved.name}`);
+      clearBulkConfigReview();
+      openGeneratorManagement();
     });
   }
 
@@ -2201,7 +2314,13 @@ function BulkConfigApply({
           />
           <button
             className="secondaryAction"
-            onClick={() => setManageGeneratorsOpen((open) => !open)}
+            onClick={() => {
+              if (manageGeneratorsOpen) {
+                setManageGeneratorsOpen(false);
+                return;
+              }
+              openGeneratorManagement();
+            }}
             type="button"
           >
             Manage generators
@@ -2427,45 +2546,193 @@ function BulkConfigApply({
       </section>
       <details
         className="bulkGeneratorManagement"
+        ref={generatorManagementRef}
         open={manageGeneratorsOpen}
         onToggle={(event) => setManageGeneratorsOpen(event.currentTarget.open)}
+        tabIndex={-1}
       >
         <summary>Patch generator registry</summary>
         {manageGeneratorsOpen && (
-          <ConsoleDataGrid
-            actions={patchGeneratorActions}
-            columns={patchGeneratorColumns}
-            defaultPageSize={10}
-            expandOnRowClick
-            getRowId={(generator) => generator.id}
-            itemLabel="patch generators"
-            empty="No patch generators match the current search."
-            renderExpandedRow={(generator) => (
-              <div className="consoleInlineDetailGrid">
-                <span>Generator ID</span>
-                <strong>{generator.id}</strong>
-                <span>Name</span>
-                <strong>{generator.name}</strong>
-                <span>Category</span>
-                <strong>{generator.category}</strong>
-                <span>Domain</span>
-                <strong>{generator.domain}</strong>
-                <span>Scope</span>
-                <strong>{generator.built_in ? "built-in" : "custom"}</strong>
-                <span>Updated</span>
-                <strong>{formatTime(generator.updated_at)}</strong>
-                <span>Schema</span>
-                <pre>{JSON.stringify(generator.field_schema, null, 2)}</pre>
-                <span>Docs</span>
-                <pre>{JSON.stringify(generator.docs_metadata, null, 2)}</pre>
-              </div>
-            )}
-            rowActions={patchGeneratorActions}
-            rows={runtimeConfigPatchGenerators}
-            searchPlaceholder="Search patch generators"
-            storageKey="vpsman.config.patchGenerators"
-            title="Patch generators"
-          />
+          <>
+            <ConsoleDataGrid
+              actions={patchGeneratorActions}
+              columns={patchGeneratorColumns}
+              defaultPageSize={10}
+              expandOnRowClick
+              getRowId={(generator) => generator.id}
+              itemLabel="patch generators"
+              empty="No patch generators match the current search."
+              renderExpandedRow={(generator) => (
+                <div className="consoleInlineDetailGrid">
+                  {detailField("Generator ID", generator.id)}
+                  {detailField("Name", generator.name)}
+                  {detailField("Category", generator.category)}
+                  {detailField("Domain", generator.domain)}
+                  {detailField(
+                    "Scope",
+                    generator.built_in ? "built-in" : "custom",
+                  )}
+                  {detailField("Updated", formatTime(generator.updated_at))}
+                  {detailField(
+                    "Schema",
+                    JSON.stringify(generator.field_schema, null, 2),
+                    true,
+                  )}
+                  {detailField(
+                    "Docs",
+                    JSON.stringify(generator.docs_metadata, null, 2),
+                    true,
+                  )}
+                </div>
+              )}
+              rowActions={patchGeneratorActions}
+              rows={runtimeConfigPatchGenerators}
+              searchPlaceholder="Search patch generators"
+              storageKey="vpsman.config.patchGenerators"
+              title="Patch generators"
+              toolbarActions={
+                <button
+                  className="primaryAction compactAction"
+                  onClick={() => openPatchGeneratorEditor()}
+                  type="button"
+                >
+                  <FileSliders size={15} />
+                  <span>New generator</span>
+                </button>
+              }
+            />
+            {patchGeneratorStatus ? (
+              <span className="fleetPolicyStatus">{patchGeneratorStatus}</span>
+            ) : null}
+            {patchGeneratorEditor ? (
+              <section
+                className="compactForm patchGeneratorEditor"
+                aria-label={
+                  patchGeneratorEditor.mode === "edit"
+                    ? "Edit patch generator"
+                    : "New patch generator"
+                }
+              >
+                <div className="bulkPatchHeader">
+                  <strong>
+                    {patchGeneratorEditor.mode === "edit"
+                      ? "Edit custom generator"
+                      : "New custom generator"}
+                  </strong>
+                  <button
+                    className="iconButton"
+                    onClick={() => setPatchGeneratorEditor(null)}
+                    title="Close generator editor"
+                    type="button"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+                <div className="consoleFormGrid">
+                  <label className="consoleField fieldWide">
+                    <span>Name</span>
+                    <input
+                      value={patchGeneratorEditor.name}
+                      onChange={(event) =>
+                        updatePatchGeneratorEditor({ name: event.target.value })
+                      }
+                      placeholder="Custom runtime toggle"
+                    />
+                  </label>
+                  <label className="consoleField">
+                    <span>Category</span>
+                    <input
+                      value={patchGeneratorEditor.category}
+                      onChange={(event) =>
+                        updatePatchGeneratorEditor({
+                          category: event.target.value,
+                        })
+                      }
+                      placeholder="network"
+                    />
+                  </label>
+                  <label className="consoleField">
+                    <span>Domain</span>
+                    <input
+                      value={patchGeneratorEditor.domain}
+                      onChange={(event) =>
+                        updatePatchGeneratorEditor({
+                          domain: event.target.value,
+                        })
+                      }
+                      placeholder="runtime"
+                    />
+                  </label>
+                  <label className="consoleField fieldFull">
+                    <span>Description</span>
+                    <input
+                      value={patchGeneratorEditor.description}
+                      onChange={(event) =>
+                        updatePatchGeneratorEditor({
+                          description: event.target.value,
+                        })
+                      }
+                      placeholder="What this generator changes"
+                    />
+                  </label>
+                  <label className="consoleField fieldFull">
+                    <span>Field schema JSON</span>
+                    <textarea
+                      rows={7}
+                      value={patchGeneratorEditor.fieldSchemaText}
+                      onChange={(event) =>
+                        updatePatchGeneratorEditor({
+                          fieldSchemaText: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="consoleField fieldFull">
+                    <span>Generator body</span>
+                    <textarea
+                      rows={8}
+                      value={patchGeneratorEditor.rawGeneratorBody}
+                      onChange={(event) =>
+                        updatePatchGeneratorEditor({
+                          rawGeneratorBody: event.target.value,
+                        })
+                      }
+                      placeholder="[section]\nkey = {{value}}"
+                    />
+                  </label>
+                  <label className="consoleField fieldFull">
+                    <span>Docs metadata JSON</span>
+                    <textarea
+                      rows={6}
+                      value={patchGeneratorEditor.docsMetadataText}
+                      onChange={(event) =>
+                        updatePatchGeneratorEditor({
+                          docsMetadataText: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                </div>
+                <div className="consoleFormActions">
+                  <button
+                    className="secondaryAction"
+                    onClick={() => setPatchGeneratorEditor(null)}
+                    type="button"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="primaryAction"
+                    disabled={pending}
+                    onClick={() => void savePatchGeneratorEditor()}
+                    type="button"
+                  >
+                    Save generator
+                  </button>
+                </div>
+              </section>
+            ) : null}
+          </>
         )}
       </details>
       {progress && (
@@ -2526,6 +2793,15 @@ function BulkConfigApply({
         tone="danger"
       />
     </div>
+  );
+}
+
+function detailField(label: string, value: string, pre = false) {
+  return (
+    <span key={label}>
+      <strong>{label}</strong>
+      {pre ? <pre>{value}</pre> : <span>{value}</span>}
+    </span>
   );
 }
 
@@ -4720,8 +4996,8 @@ function isJsonValue(value: unknown): value is JsonValue {
   return false;
 }
 
-function formatJsonObject(value: Record<string, JsonValue>): string {
-  return JSON.stringify(value, null, 2);
+function formatJsonObject(value: JsonValue): string {
+  return JSON.stringify(asRecord(value) ?? {}, null, 2);
 }
 
 function extractConfigRead(outputs: JobOutputRecord[]): {

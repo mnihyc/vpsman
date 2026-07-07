@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -90,6 +91,7 @@ import {
   runPanelAction,
   shortId,
 } from "../utils";
+import { scrollIntoViewWithMotion } from "../motion";
 import { TopologyNetworkTestControls } from "./topology/TopologyNetworkTestControls";
 import { TopologyEvidencePanel } from "./topology/TopologyEvidencePanel";
 import { TopologyGraphPanel } from "./topology/TopologyGraphPanel";
@@ -106,6 +108,7 @@ const tunnelKinds: TunnelKind[] = [
   "tun_tap",
   "custom",
 ];
+const iproute2TunnelKinds = new Set<TunnelKind>(["gre", "ipip", "sit", "fou"]);
 const runtimeManagers: RuntimeTunnelManager[] = [
   "agent_iproute2_managed",
   "external_observed",
@@ -266,6 +269,7 @@ export function TopologyPanel({
     useState<TunnelPlanToggleSnapshot | null>(null);
   const [activePlanWorkflow, setActivePlanWorkflow] =
     useState<TunnelPlanWorkflow>(null);
+  const planWorkflowRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (!initialPlanWorkflow) {
       return;
@@ -498,7 +502,9 @@ export function TopologyPanel({
               <button
                 aria-describedby={disableBlockedHintId}
                 aria-disabled={disableBlocked ? true : undefined}
-                className="secondaryAction compactAction"
+                className={`secondaryAction compactAction lifecycleAction ${
+                  plan.enabled ? "disableAction" : "enableAction"
+                }`}
                 disabled={tunnelPlanTogglePending}
                 onClick={() =>
                   setTunnelPlanEnabledForRows([plan], !plan.enabled)
@@ -663,6 +669,10 @@ export function TopologyPanel({
   ];
   const runtimeManager =
     form.runtime_control?.manager ?? "agent_iproute2_managed";
+  const runtimeKindConstraint = runtimeKindConstraintMessage(
+    runtimeManager,
+    form.kind,
+  );
   const topologySubpage = [
     "graph",
     "plans",
@@ -754,6 +764,24 @@ export function TopologyPanel({
     ? buildGeneratedConfigReviewItems(latestTunnelPlan, clientLabel)
     : [];
 
+  useEffect(() => {
+    if (topologySubpage !== "plans" || !activePlanWorkflow) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      const element = planWorkflowRef.current;
+      if (!element) {
+        return;
+      }
+      scrollIntoViewWithMotion(element, { block: "start" });
+      element.focus({ preventScroll: true });
+    });
+  }, [activePlanWorkflow, topologySubpage]);
+
+  function openPlanWorkflow(workflow: Exclude<TunnelPlanWorkflow, null>) {
+    setActivePlanWorkflow(workflow);
+  }
+
   function buildTunnelPlanReviewRequest(): {
     error: string | null;
     request: CreateTunnelPlanRequest | null;
@@ -797,6 +825,13 @@ export function TopologyPanel({
   }
 
   function buildTunnelPlanSaveRequest(): CreateTunnelPlanRequest {
+    const invalidRuntimeKind = runtimeKindConstraintMessage(
+      runtimeManager,
+      form.kind,
+    );
+    if (invalidRuntimeKind) {
+      throw new Error(invalidRuntimeKind);
+    }
     return {
       ...form,
       bandwidth_mbps: clampTunnelBandwidthMbps(form.bandwidth_mbps),
@@ -877,14 +912,7 @@ export function TopologyPanel({
   return (
     <div className="workspaceGrid">
       {topologySubpage === "plans" && (
-        <section
-          className={`fleetPanel tunnelPlansRegistryPanel ${
-            activePlanWorkflow === "create" ||
-            activePlanWorkflow === "promotion"
-              ? "mobileWorkflowFocused"
-              : ""
-          }`}
-        >
+        <section className="fleetPanel tunnelPlansRegistryPanel">
           <ConsoleDataGrid
             actions={tunnelPlanActions}
             columns={tunnelPlanColumns}
@@ -928,7 +956,7 @@ export function TopologyPanel({
               <>
                 <button
                   className="primaryAction compactAction"
-                  onClick={() => setActivePlanWorkflow("create")}
+                  onClick={() => openPlanWorkflow("create")}
                   title="Create a saved tunnel plan with endpoints, routing, runtime ownership, and OSPF cost preview."
                   type="button"
                 >
@@ -951,7 +979,7 @@ export function TopologyPanel({
                 </button>
                 <button
                   className="secondaryAction compactAction"
-                  onClick={() => setActivePlanWorkflow("promotion")}
+                  onClick={() => openPlanWorkflow("promotion")}
                   title="Promote observed tunnel telemetry into a reviewed saved plan or adapter workflow."
                   type="button"
                 >
@@ -961,7 +989,7 @@ export function TopologyPanel({
                 {latestTunnelPlan ? (
                   <button
                     className="secondaryAction compactAction"
-                    onClick={() => setActivePlanWorkflow("config")}
+                    onClick={() => openPlanWorkflow("config")}
                     title="Generate and review runtime tunnel configuration for the latest saved plan."
                     type="button"
                   >
@@ -988,7 +1016,7 @@ export function TopologyPanel({
             action={
               <button
                 className="secondaryAction compactAction"
-                onClick={() => setActivePlanWorkflow("automation")}
+                onClick={() => openPlanWorkflow("automation")}
                 type="button"
               >
                 <Route size={15} />
@@ -1096,7 +1124,11 @@ export function TopologyPanel({
 
       {((topologySubpage === "plans" && activePlanWorkflow === "automation") ||
         topologySubpage === "ospf") && (
-        <section className="fleetPanel topologyPlanWorkflowPanel">
+        <section
+          className="fleetPanel topologyPlanWorkflowPanel"
+          ref={activePlanWorkflow === "automation" ? planWorkflowRef : null}
+          tabIndex={-1}
+        >
           {topologySubpage === "plans" ? (
             <div className="sectionHeader">
               <div>
@@ -1160,7 +1192,11 @@ export function TopologyPanel({
       )}
 
       {topologySubpage === "plans" && activePlanWorkflow === "create" && (
-        <section className="fleetPanel scheduleComposer topologyPlanComposer">
+        <section
+          className="fleetPanel scheduleComposer topologyPlanComposer"
+          ref={planWorkflowRef}
+          tabIndex={-1}
+        >
           <div className="sectionHeader">
             <div>
               <h2>Create tunnel plan</h2>
@@ -1221,13 +1257,21 @@ export function TopologyPanel({
               <label>
                 <span>Kind</span>
                 <select
+                  aria-describedby="tunnel-kind-runtime-constraint"
                   value={form.kind}
                   onChange={(event) =>
                     setField("kind", event.target.value as TunnelKind)
                   }
                 >
                   {tunnelKinds.map((kind) => (
-                    <option key={kind} value={kind}>
+                    <option
+                      disabled={
+                        runtimeManager === "agent_iproute2_managed" &&
+                        !iproute2TunnelKinds.has(kind)
+                      }
+                      key={kind}
+                      value={kind}
+                    >
                       {kind.toUpperCase()}
                     </option>
                   ))}
@@ -1502,10 +1546,7 @@ export function TopologyPanel({
                 <select
                   value={runtimeManager}
                   onChange={(event) =>
-                    setField("runtime_control", {
-                      ...(form.runtime_control ?? { traffic_limit: {} }),
-                      manager: event.target.value as RuntimeTunnelManager,
-                    })
+                    setRuntimeManager(event.target.value as RuntimeTunnelManager)
                   }
                 >
                   {runtimeManagers.map((manager) => (
@@ -1560,6 +1601,20 @@ export function TopologyPanel({
                   value={trafficBurstKb}
                 />
               </label>
+            </div>
+            <div
+              className={
+                runtimeKindConstraint
+                  ? "operationNote formSectionNote attention"
+                  : "operationNote formSectionNote"
+              }
+              id="tunnel-kind-runtime-constraint"
+              role={runtimeKindConstraint ? "alert" : undefined}
+            >
+              <strong>
+                {runtimeKindConstraint ??
+                  "Runtime owner and tunnel kind are compatible."}
+              </strong>
             </div>
             {form.kind === "fou" && (
               <div className="dispatchControls">
@@ -1716,17 +1771,19 @@ export function TopologyPanel({
       )}
 
       {topologySubpage === "plans" && activePlanWorkflow === "promotion" && (
-        <TopologyPromotionPanel
-          agents={agents}
-          onClose={() => setActivePlanWorkflow(null)}
-          onAllocateTunnelEndpoints={onAllocateTunnelEndpoints}
-          onPromoteTelemetryTunnel={onPromoteTelemetryTunnel}
-          onPromoteTunnelPlanToCustomAdapter={
-            onPromoteTunnelPlanToCustomAdapter
-          }
-          telemetryTunnels={telemetryTunnels}
-          tunnelPlans={tunnelPlans}
-        />
+        <section ref={planWorkflowRef} tabIndex={-1}>
+          <TopologyPromotionPanel
+            agents={agents}
+            onClose={() => setActivePlanWorkflow(null)}
+            onAllocateTunnelEndpoints={onAllocateTunnelEndpoints}
+            onPromoteTelemetryTunnel={onPromoteTelemetryTunnel}
+            onPromoteTunnelPlanToCustomAdapter={
+              onPromoteTunnelPlanToCustomAdapter
+            }
+            telemetryTunnels={telemetryTunnels}
+            tunnelPlans={tunnelPlans}
+          />
+        </section>
       )}
 
       {topologySubpage === "apply" && tunnelPlans.length > 0 && (
@@ -1782,7 +1839,11 @@ export function TopologyPanel({
       {topologySubpage === "plans" &&
         latestTunnelPlan &&
         activePlanWorkflow === "config" && (
-          <section className="fleetPanel topologyPreview">
+          <section
+            className="fleetPanel topologyPreview"
+            ref={planWorkflowRef}
+            tabIndex={-1}
+          >
             <div className="sectionHeader">
               <div>
                 <h2>Latest generated config</h2>
@@ -1844,6 +1905,21 @@ export function TopologyPanel({
     value: CreateTunnelPlanRequest[K],
   ) {
     setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function setRuntimeManager(manager: RuntimeTunnelManager) {
+    setForm((current) => ({
+      ...current,
+      kind:
+        manager === "agent_iproute2_managed" &&
+        !iproute2TunnelKinds.has(current.kind)
+          ? "gre"
+          : current.kind,
+      runtime_control: {
+        ...(current.runtime_control ?? { traffic_limit: {} }),
+        manager,
+      },
+    }));
   }
 
   function setEndpointClient(side: "left" | "right", clientId: string) {
@@ -2461,6 +2537,16 @@ function initialTunnelPlanForm(): CreateTunnelPlanRequest {
     enabled: false,
     confirmed: false,
   };
+}
+
+function runtimeKindConstraintMessage(
+  manager: RuntimeTunnelManager,
+  kind: TunnelKind,
+): string | null {
+  if (manager !== "agent_iproute2_managed" || iproute2TunnelKinds.has(kind)) {
+    return null;
+  }
+  return "Agent iproute2 supports GRE, IPIP, SIT, or FOU only. Use External observed or Custom adapter for OpenVPN, WireGuard, TUN/TAP, or custom tunnels.";
 }
 
 function saveBlob(blob: Blob, name: string) {

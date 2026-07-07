@@ -404,7 +404,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   );
   await expect(inspector.getByText("sin-payments-edge-25")).toBeVisible();
 
-  const layout = await collectLayoutSignals(page, ".commandComposer");
+  const layout = await collectLayoutSignals(page, ".accessInspector");
   expect(layout.horizontalOverflowPx).toBeLessThanOrEqual(1);
   expect(layout.clippedControls).toEqual([]);
   expect(layout.overlaps).toEqual([]);

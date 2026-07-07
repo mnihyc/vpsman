@@ -1,5 +1,5 @@
 import { expect, type Locator, type Page } from "@playwright/test";
-import { defaultSubpages, viewSubpages } from "../../src/constants";
+import { defaultSubpages, viewLabel, viewSubpages } from "../../src/constants";
 import type { ActiveView } from "../../src/types";
 
 const WORKSPACE_ROUTE_READY_TIMEOUT_MS = 60_000;
@@ -66,18 +66,19 @@ export async function openConsoleSubpage(
   expectedHeaderTitle?: string,
 ) {
   const destination = releaseNavigationDestination(view, subpage);
-  const viewLabel = destination.view;
+  const viewDisplayLabel = destination.labelView;
+  const viewRoute = destination.view;
   const subpageId = destination.subpage;
   const subpageLabel = destination.label;
   const headerTitle = expectedHeaderTitle ?? subpageLabel;
-  const mobileValue = `${viewLabel}::${subpageId}`;
+  const mobileValue = `${viewRoute}::${subpageId}`;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     if (attempt > 0) await page.waitForTimeout(750);
     await waitForConsoleShell(page);
     const headerCrumb = page
       .locator(".consoleHeader")
-      .getByText(`vpsman / ${viewLabel} / ${headerTitle}`);
+      .getByText(`vpsman / ${viewDisplayLabel} / ${headerTitle}`);
     const routeReached = async (timeout = 500) =>
       expect(headerCrumb)
         .toBeVisible({ timeout })
@@ -103,7 +104,7 @@ export async function openConsoleSubpage(
           continue;
         }
         throw new Error(
-          await workspaceRouteErrorMessage(page, viewLabel, subpageLabel),
+          await workspaceRouteErrorMessage(page, viewDisplayLabel, subpageLabel),
         );
       }
       continue;
@@ -123,7 +124,7 @@ export async function openConsoleSubpage(
           continue;
         }
         throw new Error(
-          await workspaceRouteErrorMessage(page, viewLabel, subpageLabel),
+          await workspaceRouteErrorMessage(page, viewDisplayLabel, subpageLabel),
         );
       }
       continue;
@@ -134,13 +135,13 @@ export async function openConsoleSubpage(
     });
     await expect(nav).toBeVisible({ timeout: 10_000 });
     await activate(
-      nav.getByRole("button", { name: viewLabel, exact: true }).first(),
+      nav.getByRole("button", { name: viewDisplayLabel, exact: true }).first(),
     );
     if (
-      subpageId !== defaultSubpages[viewLabel as ActiveView] ||
+      subpageId !== defaultSubpages[viewRoute as ActiveView] ||
       !(await routeReached())
     ) {
-      const subpageGroup = nav.getByLabel(`${viewLabel} sections`);
+      const subpageGroup = nav.getByLabel(`${viewDisplayLabel} sections`);
       const subpageButton = subpageGroup.getByRole("button", {
         name: subpageLabel,
         exact: true,
@@ -167,11 +168,11 @@ export async function openConsoleSubpage(
         continue;
       }
       throw new Error(
-        await workspaceRouteErrorMessage(page, viewLabel, subpageLabel),
+        await workspaceRouteErrorMessage(page, viewDisplayLabel, subpageLabel),
       );
     }
   }
-  throw new Error(`Workspace route did not become ready: ${viewLabel} / ${subpageLabel}`);
+  throw new Error(`Workspace route did not become ready: ${viewDisplayLabel} / ${subpageLabel}`);
 }
 
 async function recoverWorkspaceRouteError(page: Page, attempt: number) {
@@ -249,6 +250,7 @@ function releaseNavigationDestination(view: string, subpage: string) {
     subpages.find((item) => item.label === subpage);
   return {
     label: match?.label ?? subpage,
+    labelView: viewLabel(view as ActiveView),
     subpage: match?.id ?? subpage,
     view,
   };

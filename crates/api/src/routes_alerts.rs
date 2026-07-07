@@ -158,7 +158,13 @@ pub(crate) async fn dry_run_fleet_alert_policy(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(state.repo.dry_run_fleet_alert_policy(&request).await?))
+    Ok(Json(
+        state
+            .repo
+            .dry_run_fleet_alert_policy(&request)
+            .await
+            .map_err(fleet_alert_policy_error)?,
+    ))
 }
 
 pub(crate) async fn upsert_fleet_alert_policy(
@@ -173,7 +179,8 @@ pub(crate) async fn upsert_fleet_alert_policy(
         state
             .repo
             .upsert_fleet_alert_policy(&request, &operator)
-            .await?,
+            .await
+            .map_err(fleet_alert_policy_error)?,
     ))
 }
 
@@ -729,6 +736,51 @@ fn validate_alert_policy_query(query: &FleetAlertPolicyQuery) -> Result<(), ApiE
         }
     }
     Ok(())
+}
+
+fn fleet_alert_policy_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("fleet_alert_policy_preview_hash_mismatch") {
+        return ApiError::conflict("fleet_alert_policy_preview_hash_mismatch");
+    }
+    if message.contains("confirmation_required") {
+        return ApiError::bad_request("fleet_alert_policy_confirmation_required");
+    }
+    if message.contains("rule name") {
+        return ApiError::bad_request("fleet_alert_policy_rule_name_invalid");
+    }
+    if message.contains("policy name") {
+        return ApiError::bad_request("fleet_alert_policy_name_invalid");
+    }
+    if message.contains("selector expression") {
+        return ApiError::bad_request("fleet_alert_policy_selector_invalid");
+    }
+    if message.contains("requires at least one rule") {
+        return ApiError::bad_request("fleet_alert_policy_rules_required");
+    }
+    if message.contains("fleet_alert_policy_condition_invalid")
+        || message.contains("condition expression")
+    {
+        return ApiError::bad_request("fleet_alert_policy_condition_invalid");
+    }
+    if message.contains("fleet_alert_policy_severity_invalid") {
+        return ApiError::bad_request("fleet_alert_policy_severity_invalid");
+    }
+    if message.contains("fleet_alert_policy_window_invalid") {
+        return ApiError::bad_request("fleet_alert_policy_window_invalid");
+    }
+    if message.contains("fleet_alert_policy_traffic_selector_requires_traffic_metric") {
+        return ApiError::bad_request(
+            "fleet_alert_policy_traffic_selector_requires_traffic_metric",
+        );
+    }
+    if message.contains("traffic selector") {
+        return ApiError::bad_request("fleet_alert_policy_traffic_selector_invalid");
+    }
+    if message.contains("notes are too long") {
+        return ApiError::bad_request("fleet_alert_policy_notes_too_long");
+    }
+    ApiError::from(error)
 }
 
 fn validate_alert_severity(severity: &str, error: &'static str) -> Result<(), ApiError> {

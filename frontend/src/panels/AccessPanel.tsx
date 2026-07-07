@@ -447,8 +447,8 @@ export function AccessPanel({
       : `${activeOperatorSessions} active API bearer session${activeOperatorSessions === 1 ? "" : "s"} after expiry validation; current bearer record ${currentBearerSessionState}. Console, privilege, terminal, and gateway scopes are separate.`;
   const terminalSessionDetail =
     terminalSessions.length === 0
-      ? "No terminal session records are loaded; terminal shells are managed in Remote Operations and audited separately."
-      : `${replayableTerminalSessions} replayable terminal session${replayableTerminalSessions === 1 ? "" : "s"}; shell streams stay in Remote Operations and audit evidence.`;
+      ? "No terminal session records are loaded; terminal shells are managed in Remote and audited separately."
+      : `${replayableTerminalSessions} replayable terminal session${replayableTerminalSessions === 1 ? "" : "s"}; shell streams stay in Remote and audit evidence.`;
   const canUpsertIdentity =
     canManageOperators &&
     !identityPending &&
@@ -815,7 +815,7 @@ export function AccessPanel({
       setIdentityError(null);
     } catch {
       setIdentityError(
-        "Key generation failed — browser may not support Web Crypto",
+        "Key generation failed. Web Crypto X25519 JWK export is unavailable.",
       );
     }
   }

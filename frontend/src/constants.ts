@@ -63,6 +63,9 @@ export const navSections: readonly {
 ];
 
 export function viewLabel(view: ActiveView): string {
+  if (view === "Remote Operations") {
+    return "Remote";
+  }
   return view;
 }
 

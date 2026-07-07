@@ -534,7 +534,7 @@ export function TerminalSessionsPanel({
         <div className="terminalLaunchIntro">
           <div>
             <h3>New terminal</h3>
-            <span>Open one browser terminal without leaving Remote Operations.</span>
+            <span>Open one browser terminal without leaving Remote.</span>
           </div>
           <div className="terminalLaunchBadges">
             <strong title="Submitted as an audited terminal_open job with durable job and terminal evidence.">

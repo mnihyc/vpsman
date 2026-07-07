@@ -150,6 +150,50 @@ async function openFleetFromDashboard(page: import("@playwright/test").Page) {
   ).toBeVisible();
 }
 
+test("exposes hover titles for truncated grid text and editable values", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Fleet", "Instances");
+
+  const fleetGrid = page.getByLabel("VPS instance records data grid");
+  await page.evaluate(() => {
+    const input = document.createElement("input");
+    input.setAttribute("aria-label", "Agent identity private key");
+    input.dataset.testTooltipProbe = "true";
+    input.value = "a".repeat(64);
+    document.body.append(input);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(
+    page.locator('input[data-test-tooltip-probe="true"]'),
+  ).not.toHaveAttribute("title", /.+/);
+  if (testInfo.project.name.includes("mobile")) {
+    const mobileCard = fleetGrid.getByLabel(
+      "VPS instance records mobile card agent-sfo-01",
+    );
+    await expect(mobileCard.locator(".gridMobilePrimary")).toHaveAttribute(
+      "title",
+      /edge-sfo-01/,
+    );
+    await expect(
+      mobileCard.locator(".gridMobileFieldValue").first(),
+    ).toHaveAttribute("title", /.+/);
+    return;
+  }
+
+  const edgeRow = fleetGrid
+    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+    .first();
+  await expect(
+    edgeRow.locator(".gridCellContent", { hasText: "edge-sfo-01" }).first(),
+  ).toHaveAttribute("title", /edge-sfo-01/);
+  const fleetSearch = page.getByRole("searchbox", { name: "Search fleet" });
+  await fleetSearch.fill("edge-sfo-01");
+  await expect(fleetSearch).toHaveAttribute("title", "edge-sfo-01");
+});
+
 test("renders an operational cloud-console fleet workspace", async ({
   page,
 }, testInfo) => {
@@ -1973,6 +2017,11 @@ test("manages template assignments from automation source templates", async ({
   await activate(
     templateRows.filter({ hasText: "shared:vnstat-json" }).first(),
   );
+  await activate(
+    templateRegistryGrid
+      .getByLabel("Template workflow actions for shared:vnstat-json")
+      .getByRole("button", { name: "Assign" }),
+  );
   await expect(
     templatePanel.getByLabel("shared:vnstat-json", { exact: true }),
   ).toBeVisible();
@@ -2044,6 +2093,11 @@ test("keeps source template assignment review while unlocking privilege inline",
     .locator(".gridBody .gridRow");
   await activate(
     templateRows.filter({ hasText: "shared:vnstat-json" }).first(),
+  );
+  await activate(
+    templatePanel
+      .getByLabel("Template workflow actions for shared:vnstat-json")
+      .getByRole("button", { name: "Assign" }),
   );
   await templatePanel
     .getByLabel("Assignment domain")
@@ -2433,7 +2487,7 @@ test("registers VPS identities and revokes current keys from the access panel", 
   await inspector.getByLabel("Agent identity client ID").fill("agent-tokyo-04");
   await page.evaluate(
     ({ privateKeyHex, publicKeyHex }) => {
-      function hexToArrayBuffer(hex: string): ArrayBuffer {
+      function hexToBase64Url(hex: string): string {
         const bytes = new Uint8Array(hex.length / 2);
         for (let index = 0; index < bytes.length; index += 1) {
           bytes[index] = Number.parseInt(
@@ -2441,7 +2495,10 @@ test("registers VPS identities and revokes current keys from the access panel", 
             16,
           );
         }
-        return bytes.buffer.slice(0);
+        return btoa(String.fromCharCode(...bytes))
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_")
+          .replace(/=+$/g, "");
       }
 
       const subtle = window.crypto.subtle;
@@ -2471,11 +2528,24 @@ test("registers VPS identities and revokes current keys from the access panel", 
           const [format, key] = args;
           const role = (key as unknown as { __vpsmanKeypairRole?: string })
             .__vpsmanKeypairRole;
-          if (format === "raw" && role === "private") {
-            return hexToArrayBuffer(privateKeyHex);
+          if (format === "jwk" && role === "private") {
+            return {
+              crv: "X25519",
+              d: hexToBase64Url(privateKeyHex),
+              ext: true,
+              key_ops: ["deriveBits"],
+              kty: "OKP",
+              x: hexToBase64Url(publicKeyHex),
+            };
           }
-          if (format === "raw" && role === "public") {
-            return hexToArrayBuffer(publicKeyHex);
+          if (format === "jwk" && role === "public") {
+            return {
+              crv: "X25519",
+              ext: true,
+              key_ops: [],
+              kty: "OKP",
+              x: hexToBase64Url(publicKeyHex),
+            };
           }
           return originalExportKey(...args);
         }) as SubtleCrypto["exportKey"],
@@ -3188,7 +3258,7 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
   ]);
 
   await page.getByRole("button", { name: "Create tunnel plan" }).click();
-  await expect(planGrid).toBeHidden();
+  await expect(planGrid).toBeVisible();
   const composer = page.locator(".scheduleComposer", {
     has: page.getByRole("heading", { name: "Create tunnel plan" }),
   });
@@ -3251,7 +3321,8 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
     composer.getByLabel("Right IPv4 CIDR", { exact: true }),
   ).toHaveValue("10.255.50.1/31");
   await expect(tunnelWizard).toContainText("No visible overlap");
-  await expect(tunnelWizard).toContainText("Save enabled");
+  await expect(tunnelWizard).toContainText("Invalid draft");
+  await expect(tunnelWizard).toContainText("Agent iproute2 supports GRE");
   await composer
     .getByLabel("Runtime owner")
     .selectOption("external_managed_adapter");
@@ -3269,6 +3340,7 @@ test("authors custom adapter tunnel plans from the topology panel", async ({
     .getByLabel("Status argv", { exact: true })
     .fill("/usr/local/libexec/vpsman-openvpn-adapter\nstatus\n{interface}");
   await expect(tunnelWizard).toContainText("adapter status argv present");
+  await expect(tunnelWizard).toContainText("Save enabled");
   await composer
     .getByLabel("Traffic argv", { exact: true })
     .fill("/usr/local/libexec/vpsman-openvpn-adapter\nshape\n{interface}");

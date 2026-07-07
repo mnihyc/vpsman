@@ -1488,7 +1488,7 @@ function BulkTagPanel({
               </span>
             </div>
             <label
-              className="inlineCheck tightCheck"
+              className="inlineCheck tightCheck compactReviewCheck"
               title="Default excludes contact-unknown, stale, and degraded targets from the final mutation. Enable only when you intentionally want those targets included."
             >
               <input

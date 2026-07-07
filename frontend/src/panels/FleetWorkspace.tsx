@@ -67,6 +67,7 @@ import {
   type TimeSeriesChartLine,
 } from "../components/TimeSeriesChart";
 import { fleetChartColors } from "../colorPalette";
+import { scrollIntoViewWithMotion } from "../motion";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
   addressFamilyLabel,
@@ -3442,8 +3443,19 @@ function ConsoleDetailPanel({
   onClose?: () => void;
   title: ReactNode;
 }) {
+  const panelRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    window.requestAnimationFrame(() => {
+      const panel = panelRef.current;
+      if (!panel) {
+        return;
+      }
+      scrollIntoViewWithMotion(panel, { block: "start" });
+      panel.focus({ preventScroll: true });
+    });
+  }, []);
   return (
-    <section className="consoleDetailPanel">
+    <section className="consoleDetailPanel" ref={panelRef} tabIndex={-1}>
       <div className="consoleDetailPanelHeader">
         <span>
           <strong>{title}</strong>
@@ -3920,9 +3932,9 @@ type PolicySaveSnapshot = {
 function defaultPolicyRuleDraft(): PolicyRuleDraft {
   return {
     localId: crypto.randomUUID(),
-    name: "80% total quota",
+    name: "",
     enabled: true,
-    condition_expression: "traffic.cycle.total >= traffic.quota.total * 0.8",
+    condition_expression: "",
     traffic_selector: "",
     window_secs: "0",
     severity: "warning",
@@ -3979,6 +3991,30 @@ function policyRequestFromRecord(
   };
 }
 
+function policyDraftValidationMessage(
+  request: PolicyDryRunRequest | FleetAlertPolicyRequest,
+): string | null {
+  if (!request.name.trim()) {
+    return "Policy name is required";
+  }
+  if (!request.selector_expression.trim()) {
+    return "Policy VPS selector expression is required";
+  }
+  if (request.rules.length === 0) {
+    return "At least one rule row is required";
+  }
+  for (const [index, rule] of request.rules.entries()) {
+    const row = index + 1;
+    if (!rule.name.trim()) {
+      return `Rule ${row} name is required`;
+    }
+    if (!rule.condition_expression.trim()) {
+      return `Rule ${row} condition expression is required`;
+    }
+  }
+  return null;
+}
+
 export function FleetAlertPolicyManager({
   agents,
   editorMode = "inline",
@@ -4018,8 +4054,8 @@ export function FleetAlertPolicyManager({
   );
   const [savePending, setSavePending] = useState(false);
   const savePendingRef = useRef(false);
-  const [name, setName] = useState("edge-traffic");
-  const [selectorExpression, setSelectorExpression] = useState("tag:edge");
+  const [name, setName] = useState("");
+  const [selectorExpression, setSelectorExpression] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [notes, setNotes] = useState("");
   const [ruleDrafts, setRuleDrafts] = useState<PolicyRuleDraft[]>([
@@ -4206,8 +4242,8 @@ export function FleetAlertPolicyManager({
 
   function resetForm() {
     setEditingId(null);
-    setName("edge-traffic");
-    setSelectorExpression("tag:edge");
+    setName("");
+    setSelectorExpression("");
     setEnabled(true);
     setNotes("");
     setRuleDrafts([defaultPolicyRuleDraft()]);
@@ -4268,6 +4304,12 @@ export function FleetAlertPolicyManager({
 
   async function dryRunCurrentPolicy(): Promise<PolicyDryRunResponse> {
     const request = currentDryRunRequest();
+    const draftError = policyDraftValidationMessage(request);
+    if (draftError) {
+      setDryRunPreview(null);
+      setStatus(draftError);
+      throw new Error(draftError);
+    }
     setDryRunPending(true);
     setStatus("dry-running policy");
     try {
@@ -4597,6 +4639,7 @@ export function FleetAlertPolicyManager({
               <ConsoleField label="Name" className="fieldWide">
                 <input
                   aria-label="Policy name"
+                  placeholder="Edge traffic budget"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                 />
@@ -4681,6 +4724,7 @@ export function FleetAlertPolicyManager({
                       <ConsoleField label="Rule">
                         <input
                           aria-label="Rule name"
+                          placeholder="80% total quota"
                           value={draft.name}
                           onChange={(event) =>
                             updateRuleDraft(draft.localId, {
@@ -4695,6 +4739,7 @@ export function FleetAlertPolicyManager({
                       >
                         <textarea
                           aria-label="Rule condition expression"
+                          placeholder="traffic.cycle.total >= traffic.quota.total * 0.8"
                           value={draft.condition_expression}
                           onChange={(event) =>
                             updateRuleDraft(draft.localId, {
@@ -7204,7 +7249,7 @@ export function WebhookRuleManager({
         ) : null}
       </div>
       {!focusedEditorOpen ? (
-        <div className="consoleOperationsBar">
+        <div className="consoleOperationsBar webhookOperationsPanel">
           <span>
             <strong>
               {configurationQueue ? "Event webhook tests" : "Webhook queue"}

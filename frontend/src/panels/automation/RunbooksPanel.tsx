@@ -330,7 +330,7 @@ export function RunbooksPanel({
                         }
                         title={
                           runbook.capability.route === "terminal"
-                            ? "Open Remote Operations / Terminal for terminal lifecycle actions."
+                            ? "Open Remote / Terminal for terminal lifecycle actions."
                             : "Open the owner workflow for this operation type."
                         }
                         type="button"
@@ -535,7 +535,7 @@ function capabilityForOperation(operation: JobOperation): RunbookCapability {
     case "terminal_close":
       return {
         dispatchable: false,
-        reason: "Terminal lifecycle belongs in Remote Operations.",
+        reason: "Terminal lifecycle belongs in Remote.",
         route: "terminal",
       };
     case "file_transfer_start":
@@ -546,7 +546,7 @@ function capabilityForOperation(operation: JobOperation): RunbookCapability {
     case "file_transfer_download_chunk":
       return {
         dispatchable: false,
-        reason: "Transfer sessions belong in Remote Operations / Transfers.",
+        reason: "Transfer sessions belong in Remote / Transfers.",
         route: "transfers",
       };
     default:
