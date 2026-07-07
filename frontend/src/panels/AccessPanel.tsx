@@ -1675,12 +1675,20 @@ export function AccessPanel({
         >
           <h2>{identityMode === "rotate" ? "Rotate key" : "Register VPS"}</h2>
           <span>
-            {identityError ??
-              (identityMode === "rotate"
-                ? "Replace the selected VPS public key"
-                : "Generate a keypair or import a public key")}
+            {identityMode === "rotate"
+              ? "Replace the selected VPS public key"
+              : "Generate a keypair or import a public key"}
           </span>
         </div>
+        {activeSubpage === "VPS identities" &&
+          identityWorkflow !== null &&
+          identityWorkflow !== "revoke" && (
+            <ActionFeedback
+              className="localActionFeedback identityActionFeedback"
+              message={identityError}
+              tone="danger"
+            />
+          )}
         <form
           className="sideForm"
           hidden={

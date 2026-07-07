@@ -4001,6 +4001,13 @@
   border-top: 1px solid var(--border);
 }
 
+.targetDetail .jobDetailActionFeedback.localActionFeedback,
+.outputDetail .jobDetailActionFeedback.localActionFeedback,
+.executionSummary .jobDetailActionFeedback.localActionFeedback {
+  margin: 0 18px;
+  max-width: calc(100% - 36px);
+}
+
 .executionSummary {
   display: grid;
   gap: 14px;
@@ -4191,6 +4198,11 @@
 
 .bulkTagMutationForm .searchExpressionInput {
   min-width: 0;
+}
+
+.bulkTagMutationForm .bulkTagPreviewActionFeedback.localActionFeedback {
+  margin: 0;
+  max-width: 100%;
 }
 
 .bulkPreviewFailure {

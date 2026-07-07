@@ -15,6 +15,7 @@ import {
   TerminalSquare,
 } from "lucide-react";
 import { agentDisplayState } from "../agentDisplayState";
+import { ActionFeedback } from "../components/ActionFeedback";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import type {
   AgentView,
@@ -196,14 +197,18 @@ export function VpsDetailPanel({
             </div>
             <Server size={20} />
           </div>
+          <ActionFeedback
+            className="localActionFeedback"
+            message={apiError}
+            tone="danger"
+          />
           <div className="emptyState">
             <Server size={22} />
             <strong>{agents.length === 0 ? "No VPS inventory" : "No VPS selected"}</strong>
             <span>
-              {apiError ??
-                (loading
-                  ? "Loading fleet inventory before opening the canonical detail page."
-                  : "Open a VPS from an inventory row, monitor card, alert, job target, backup record, or network node.")}
+              {loading
+                ? "Loading fleet inventory before opening the canonical detail page."
+                : "Open a VPS from an inventory row, monitor card, alert, job target, backup record, or network node."}
             </span>
             <div className="emptyStateActions">
               <button className="secondaryAction compactAction" onClick={onOpenInstances} type="button">

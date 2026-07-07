@@ -2664,6 +2664,11 @@
   padding: 14px 18px 18px;
 }
 
+.sourceArtifactPanel .sourceArtifactActionFeedback.localActionFeedback {
+  margin: 0;
+  max-width: 100%;
+}
+
 .sectionSubheader {
   display: flex;
   align-items: center;
@@ -3041,6 +3046,11 @@
 .terminalLaunchFooter span {
   flex: 1 1 320px;
   min-width: 0;
+}
+
+.terminalLaunchPanel .terminalLaunchActionFeedback.localActionFeedback {
+  margin: 0;
+  max-width: 100%;
 }
 
 .terminalSummaryStrip {

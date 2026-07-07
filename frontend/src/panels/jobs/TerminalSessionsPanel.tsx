@@ -20,6 +20,10 @@ import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
+import {
+  ActionFeedback,
+  type ActionFeedbackTone,
+} from "../../components/ActionFeedback";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import { consolePalette } from "../../colorPalette";
 import { terminalSessionStateBadgeClass } from "../../jobStatusPresentation";
@@ -105,6 +109,8 @@ export function TerminalSessionsPanel({
   const [launchCols, setLaunchCols] = useState(120);
   const [launchRows, setLaunchRows] = useState(40);
   const [launchStatus, setLaunchStatus] = useState<string | null>(null);
+  const [launchStatusTone, setLaunchStatusTone] =
+    useState<ActionFeedbackTone>("info");
   const [launchPending, setLaunchPending] = useState(false);
   const [replayPreview, setReplayPreview] = useState<TerminalReplayPreview | null>(null);
   const [replayPendingKey, setReplayPendingKey] = useState<string | null>(null);
@@ -445,10 +451,12 @@ export function TerminalSessionsPanel({
 
   async function openNewTerminal() {
     if (!launchTarget) {
+      setLaunchStatusTone("warning");
       setLaunchStatus("Select a VPS before opening a terminal.");
       return;
     }
     if (!privilegeMaterial) {
+      setLaunchStatusTone("warning");
       setLaunchStatus("Unlock privilege, then open the terminal from this launcher.");
       onOpenPrivilegeUnlock();
       return;
@@ -482,6 +490,7 @@ export function TerminalSessionsPanel({
       observed_at: now,
     };
     setLaunchPending(true);
+    setLaunchStatusTone("progress");
     setLaunchStatus(`Opening terminal on ${clientLabel(launchTarget.id)}...`);
     try {
       await onOpenTerminal({
@@ -491,8 +500,10 @@ export function TerminalSessionsPanel({
         terminalUser: launchUser === "agent" ? "" : "root",
         terminalUserPolicy: launchUser === "root-fallback" ? "fallback" : "fail",
       });
+      setLaunchStatusTone("success");
       setLaunchStatus(`${clientLabel(launchTarget.id)} terminal open job submitted.`);
     } catch (error) {
+      setLaunchStatusTone("danger");
       setLaunchStatus(error instanceof Error ? error.message : "Terminal open failed.");
     } finally {
       setLaunchPending(false);
@@ -644,10 +655,9 @@ export function TerminalSessionsPanel({
         </details>
         <div className="terminalLaunchFooter">
           <span>
-            {launchStatus ??
-              (privilegeReady
-                ? "Open submits a privileged terminal_open job for the selected VPS; protocol controls stay under Advanced session controls."
-                : "Unlock privilege once to enable terminal_open; replay, copy, and audit evidence stay available while locked.")}
+            {privilegeReady
+              ? "Open submits a privileged terminal_open job for the selected VPS; protocol controls stay under Advanced session controls."
+              : "Unlock privilege once to enable terminal_open; replay, copy, and audit evidence stay available while locked."}
           </span>
           <button
             className="primaryAction compactAction"
@@ -660,6 +670,11 @@ export function TerminalSessionsPanel({
             <span>{privilegeReady ? "Open terminal" : "Unlock privilege"}</span>
           </button>
         </div>
+        <ActionFeedback
+          className="localActionFeedback terminalLaunchActionFeedback"
+          message={launchStatus}
+          tone={launchStatusTone}
+        />
       </div>
       <div className="terminalSummaryStrip">
         <span>

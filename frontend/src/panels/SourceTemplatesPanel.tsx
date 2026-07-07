@@ -262,6 +262,8 @@ export function SourceTemplatePanel({
       : lifecycleStatus || lastAssignment
         ? "success"
         : "progress";
+  const sourceTemplateListFeedbackMessage =
+    drawerMode === null ? actionError : null;
   const sourceStatusColumns = useMemo<
     ConsoleDataGridColumn<SourceStatusRecord>[]
   >(
@@ -943,129 +945,137 @@ export function SourceTemplatePanel({
       )}
 
       {showTemplateManagement && (
-        <ConsoleDataGrid
-          actions={templateActions}
-          columns={templateColumns}
-          defaultPageSize={10}
-          getRowId={(template) => template.id}
-          itemLabel="templates"
-          empty={
-            <div className="emptyState">
-              <DatabaseZap size={22} />
-              <strong>No templates</strong>
-              <span>
-                {actionError ?? "No template records match the current search."}
-              </span>
-            </div>
-          }
-          renderExpandedRow={(template) => (
-            <>
-              <div className="consoleInlineDetailGrid">
-                <span>Template ID</span>
-                <strong>{template.id}</strong>
-                <span>Name</span>
-                <strong>{template.name}</strong>
-                <span>Domain</span>
-                <strong>{sourceDomainLabel(template.domain)}</strong>
-                <span>Scope</span>
-                <strong>{sourceTokenLabel(template.scope)}</strong>
-                <span>Default</span>
-                <strong>{template.is_default ? "Yes" : "No"}</strong>
-                <span>Assigned VPSs</span>
-                <strong>{template.assigned_client_count}</strong>
-                <span>Description</span>
-                <strong>{template.description ?? "None"}</strong>
+        <>
+          <ActionFeedback
+            className="localActionFeedback sourceTemplateListActionFeedback"
+            message={sourceTemplateListFeedbackMessage}
+            tone="danger"
+          />
+          <ConsoleDataGrid
+            actions={templateActions}
+            columns={templateColumns}
+            defaultPageSize={10}
+            getRowId={(template) => template.id}
+            itemLabel="templates"
+            empty={
+              <div className="emptyState">
+                <DatabaseZap size={22} />
+                <strong>No templates</strong>
+                <span>No template records match the current search.</span>
               </div>
-              <div
-                className="consoleInlineDetailActions"
-                aria-label={`Template workflow actions for ${template.name}`}
+            }
+            renderExpandedRow={(template) => (
+              <>
+                <div className="consoleInlineDetailGrid">
+                  <span>Template ID</span>
+                  <strong>{template.id}</strong>
+                  <span>Name</span>
+                  <strong>{template.name}</strong>
+                  <span>Domain</span>
+                  <strong>{sourceDomainLabel(template.domain)}</strong>
+                  <span>Scope</span>
+                  <strong>{sourceTokenLabel(template.scope)}</strong>
+                  <span>Default</span>
+                  <strong>{template.is_default ? "Yes" : "No"}</strong>
+                  <span>Assigned VPSs</span>
+                  <strong>{template.assigned_client_count}</strong>
+                  <span>Description</span>
+                  <strong>{template.description ?? "None"}</strong>
+                </div>
+                <div
+                  className="consoleInlineDetailActions"
+                  aria-label={`Template workflow actions for ${template.name}`}
+                >
+                  <button
+                    className="secondaryAction compactAction"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openTemplateDetail(template, "assign");
+                    }}
+                    type="button"
+                  >
+                    <UserPlus size={14} />
+                    <span>Assign</span>
+                  </button>
+                  <button
+                    className="secondaryAction compactAction"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openTemplateDetail(template, "render");
+                    }}
+                    type="button"
+                  >
+                    <FileText size={14} />
+                    <span>Render</span>
+                  </button>
+                  <button
+                    className="secondaryAction compactAction"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openTemplateDetail(template, "lifecycle");
+                    }}
+                    type="button"
+                  >
+                    <Pencil size={14} />
+                    <span>Test/update</span>
+                  </button>
+                </div>
+              </>
+            )}
+            renderSelectionPanel={(rows) => (
+              <div className="gridSelectionSummary">
+                <span>
+                  <strong>{rows.length}</strong>
+                  selected
+                </span>
+                <span>
+                  <strong>
+                    {new Set(rows.map((template) => template.domain)).size}
+                  </strong>
+                  domains
+                </span>
+                <span>
+                  <strong>
+                    {rows.filter((template) => template.built_in).length}
+                  </strong>
+                  built-in
+                </span>
+                <span>
+                  <strong>
+                    {rows.reduce(
+                      (total, template) =>
+                        total + template.assigned_client_count,
+                      0,
+                    )}
+                  </strong>
+                  assigned VPSs
+                </span>
+              </div>
+            )}
+            rowActions={templateActions}
+            onOpenRow={(template) => openTemplateDetail(template, "assign")}
+            openRowLabel="Assign"
+            openRowTitle={(template) =>
+              `Open assignment details for template ${template.name}.`
+            }
+            showMobileOpenRowAction={false}
+            rows={templates}
+            searchPlaceholder="Search templates"
+            storageKey="vpsman.sourceTemplates.registry"
+            title="Template registry"
+            toolbarActions={
+              <button
+                className="primaryAction compactAction"
+                onClick={prepareNewTemplate}
+                title="Create a new source template for runtime config, telemetry, or workflow policy."
+                type="button"
               >
-                <button
-                  className="secondaryAction compactAction"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openTemplateDetail(template, "assign");
-                  }}
-                  type="button"
-                >
-                  <UserPlus size={14} />
-                  <span>Assign</span>
-                </button>
-                <button
-                  className="secondaryAction compactAction"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openTemplateDetail(template, "render");
-                  }}
-                  type="button"
-                >
-                  <FileText size={14} />
-                  <span>Render</span>
-                </button>
-                <button
-                  className="secondaryAction compactAction"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    openTemplateDetail(template, "lifecycle");
-                  }}
-                  type="button"
-                >
-                  <Pencil size={14} />
-                  <span>Test/update</span>
-                </button>
-              </div>
-            </>
-          )}
-          renderSelectionPanel={(rows) => (
-            <div className="gridSelectionSummary">
-              <span>
-                <strong>{rows.length}</strong>
-                selected
-              </span>
-              <span>
-                <strong>
-                  {new Set(rows.map((template) => template.domain)).size}
-                </strong>
-                domains
-              </span>
-              <span>
-                <strong>
-                  {rows.filter((template) => template.built_in).length}
-                </strong>
-                built-in
-              </span>
-              <span>
-                <strong>
-                  {rows.reduce(
-                    (total, template) => total + template.assigned_client_count,
-                    0,
-                  )}
-                </strong>
-                assigned VPSs
-              </span>
-            </div>
-          )}
-          rowActions={templateActions}
-          onOpenRow={(template) => openTemplateDetail(template, "assign")}
-          openRowLabel="Assign"
-          openRowTitle={(template) => `Open assignment details for template ${template.name}.`}
-          showMobileOpenRowAction={false}
-          rows={templates}
-          searchPlaceholder="Search templates"
-          storageKey="vpsman.sourceTemplates.registry"
-          title="Template registry"
-          toolbarActions={
-            <button
-              className="primaryAction compactAction"
-              onClick={prepareNewTemplate}
-              title="Create a new source template for runtime config, telemetry, or workflow policy."
-              type="button"
-            >
-              <Plus size={15} />
-              <span>New template</span>
-            </button>
-          }
-        />
+                <Plus size={15} />
+                <span>New template</span>
+              </button>
+            }
+          />
+        </>
       )}
 
       {showSourceStatus && (

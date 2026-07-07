@@ -397,6 +397,9 @@ export function JobsPanel({
   const approvalActionFeedbackTone = approvalActionError
     ? "danger"
     : "progress";
+  const targetDetailFeedbackMessage = targetError;
+  const outputDetailFeedbackMessage = outputError ?? downloadError;
+  const comparisonFeedbackMessage = comparisonError;
   const agentNameById = useMemo(
     () => clientDisplayNameMap(agents, vpsNameDisplayMode),
     [agents, vpsNameDisplayMode],
@@ -1474,9 +1477,7 @@ export function JobsPanel({
                   <div className="emptyState">
                     <TerminalSquare size={22} />
                     <strong>No job records</strong>
-                    <span>
-                      {error ?? "No job records match the current search."}
-                    </span>
+                    <span>No job records match the current search.</span>
                   </div>
                 }
                 getRowId={(job) => job.id}
@@ -1529,12 +1530,16 @@ export function JobsPanel({
                 <div className="sectionHeader compact">
                   <h2>Target results</h2>
                   <span>
-                    {targetError ??
-                      (targetsLoading
-                        ? "Loading target records"
-                        : shortId(selectedJobId))}
+                    {targetsLoading
+                      ? "Loading target records"
+                      : shortId(selectedJobId)}
                   </span>
                 </div>
+                <ActionFeedback
+                  className="localActionFeedback jobDetailActionFeedback"
+                  message={targetDetailFeedbackMessage}
+                  tone="danger"
+                />
                 <ConsoleDataGrid
                   columns={targetColumns}
                   defaultPageSize={10}
@@ -1545,10 +1550,7 @@ export function JobsPanel({
                     <div className="emptyState">
                       <Server size={22} />
                       <strong>No target records</strong>
-                      <span>
-                        {targetError ??
-                          "This job has no resolved per-client records."}
-                      </span>
+                      <span>This job has no resolved per-client records.</span>
                     </div>
                   }
                   renderExpandedRow={(target) => (
@@ -1582,11 +1584,9 @@ export function JobsPanel({
                     <div>
                       <h2>Output</h2>
                       <span>
-                        {outputError ??
-                          downloadError ??
-                          (outputsLoading
-                            ? "Loading output records"
-                            : `${outputs.length} chunks`)}
+                        {outputsLoading
+                          ? "Loading output records"
+                          : `${outputs.length} chunks`}
                       </span>
                     </div>
                     <div className="outputActions">
@@ -1649,18 +1649,27 @@ export function JobsPanel({
                       )}
                     </div>
                   </div>
+                  <ActionFeedback
+                    className="localActionFeedback jobDetailActionFeedback"
+                    message={outputDetailFeedbackMessage}
+                    tone="danger"
+                  />
                   <div className="executionSummary">
                     <div className="sectionHeader compact">
                       <h2>Execution summary</h2>
                       <span>
-                        {comparisonError ??
-                          (comparisonLoading
-                            ? "Comparing target results"
-                            : outputComparison
-                              ? `${outputComparison.group_count} groups across ${outputComparison.compared_targets} targets`
-                              : "No summary loaded")}
+                        {comparisonLoading
+                          ? "Comparing target results"
+                          : outputComparison
+                            ? `${outputComparison.group_count} groups across ${outputComparison.compared_targets} targets`
+                            : "No summary loaded"}
                       </span>
                     </div>
+                    <ActionFeedback
+                      className="localActionFeedback jobDetailActionFeedback"
+                      message={comparisonFeedbackMessage}
+                      tone="danger"
+                    />
                     <div className="comparisonToolbar">
                       <div
                         className="targetModeControls"
@@ -1940,8 +1949,7 @@ export function JobsPanel({
                         <TerminalSquare size={22} />
                         <strong>No output chunks</strong>
                         <span>
-                          {outputError ??
-                            "This job has no retained stdout, stderr, or status output."}
+                          This job has no retained stdout, stderr, or status output.
                         </span>
                       </div>
                     )}

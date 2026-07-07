@@ -11,7 +11,11 @@ test("keeps action feedback in dedicated local containers", () => {
   expect(accessPanel).not.toMatch(
     /<span>\{revokeError\s*\?\?\s*"Block the current VPS gateway key"\}<\/span>/,
   );
+  expect(accessPanel).not.toMatch(
+    /identityError\s*\?\?\s*\(\s*identityMode\s*===\s*"rotate"/,
+  );
   expect(accessPanel).toContain("accessRevokeActionFeedback");
+  expect(accessPanel).toContain("identityActionFeedback");
 
   const systemPanel = source("panels/SystemPanel.tsx");
   expect(systemPanel).not.toMatch(
@@ -30,11 +34,72 @@ test("keeps action feedback in dedicated local containers", () => {
   expect(jobsPanel).not.toMatch(
     /approvalActionError\s*&&\s*\(\s*<div className="panelError"/,
   );
+  expect(jobsPanel).not.toContain(
+    '{error ?? "No job records match the current search."}',
+  );
+  expect(jobsPanel).not.toMatch(
+    /targetError\s*\?\?\s*\(\s*targetsLoading/,
+  );
+  expect(jobsPanel).not.toMatch(
+    /targetError\s*\?\?\s*"This job has no resolved per-client records\."/,
+  );
+  expect(jobsPanel).not.toMatch(
+    /outputError\s*\?\?\s*downloadError\s*\?\?\s*\(\s*outputsLoading/,
+  );
+  expect(jobsPanel).not.toMatch(
+    /outputError\s*\?\?\s*"This job has no retained stdout, stderr, or status output\."/,
+  );
+  expect(jobsPanel).not.toMatch(
+    /comparisonError\s*\?\?\s*\(\s*comparisonLoading/,
+  );
   expect(jobsPanel).toContain("approvalActionFeedback");
+  expect(jobsPanel).toContain("jobDetailActionFeedback");
+
+  const fleetWorkspace = source("panels/FleetWorkspace.tsx");
+  expect(fleetWorkspace).not.toMatch(
+    /apiError\s*\?\?\s*\(\s*scopeActive\s*\?/,
+  );
+
+  const vpsDetailPanel = source("panels/VpsDetailPanel.tsx");
+  expect(vpsDetailPanel).not.toMatch(
+    /apiError\s*\?\?\s*\(\s*loading\s*\?/,
+  );
+  expect(vpsDetailPanel).toContain("ActionFeedback");
 
   const processSupervisorPanel = source(
     "panels/jobs/ProcessSupervisorInventoryPanel.tsx",
   );
   expect(processSupervisorPanel).not.toContain("processActionNotice");
   expect(processSupervisorPanel).toContain("processActionFeedback");
+
+  const fleetGroupsPanel = source("panels/FleetGroupsPanel.tsx");
+  expect(fleetGroupsPanel).not.toMatch(
+    /:\s*previewStatus\s*\?\?\s*bulkMutationPrimaryLabel/,
+  );
+  expect(fleetGroupsPanel).not.toMatch(
+    /<span>\{previewStatus\s*\?\?\s*\(preview\s*\?/,
+  );
+  expect(fleetGroupsPanel).toContain("bulkTagPreviewActionFeedback");
+
+  const terminalSessionsPanel = source(
+    "panels/jobs/TerminalSessionsPanel.tsx",
+  );
+  expect(terminalSessionsPanel).not.toMatch(
+    /\{launchStatus\s*\?\?\s*\(\s*privilegeReady/,
+  );
+  expect(terminalSessionsPanel).toContain("terminalLaunchActionFeedback");
+
+  const fileTransferSessionsPanel = source(
+    "panels/jobs/FileTransferSessionsPanel.tsx",
+  );
+  expect(fileTransferSessionsPanel).not.toMatch(
+    /<small>\{sourceError\s*\?\?\s*`\$\{sources\.length\} source artifacts`\}<\/small>/,
+  );
+  expect(fileTransferSessionsPanel).toContain("sourceArtifactActionFeedback");
+
+  const sourceTemplatesPanel = source("panels/SourceTemplatesPanel.tsx");
+  expect(sourceTemplatesPanel).not.toContain(
+    '{actionError ?? "No template records match the current search."}',
+  );
+  expect(sourceTemplatesPanel).toContain("sourceTemplateListActionFeedback");
 });

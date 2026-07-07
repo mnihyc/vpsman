@@ -1423,7 +1423,7 @@ function BulkTagPanel({
     eligibleLocalTargets.length === 0 &&
     !includeReviewTargets
       ? `Include review targets to apply ${trimmedTag}`
-      : previewStatus ?? bulkMutationPrimaryLabel(action, trimmedTag, targetCountForAction);
+      : bulkMutationPrimaryLabel(action, trimmedTag, targetCountForAction);
 
   return (
     <div className="configApplyGrid bulkTagApplyGrid">
@@ -1531,6 +1531,11 @@ function BulkTagPanel({
           <Tag size={16} />
           {reviewButtonLabel}
         </button>
+        <ActionFeedback
+          className="localActionFeedback bulkTagPreviewActionFeedback"
+          message={previewStatus}
+          tone="progress"
+        />
         {previewError && (
           <div className="bulkPreviewFailure" role="alert">
             <X size={15} />
@@ -1541,15 +1546,14 @@ function BulkTagPanel({
           </div>
         )}
       </div>
-      {(preview || previewStatus) && (
-      <section className="bulkTagPreviewPanel" aria-label="Bulk tag target preview">
-        <div className="bulkTagPreviewHeader">
-          <div>
-            <strong>Server preview</strong>
-            <span>{previewStatus ?? (preview ? `${preview.target_count} resolved / ${preview.changed_count} changes` : "Resolving target snapshot")}</span>
+      {preview && (
+        <section className="bulkTagPreviewPanel" aria-label="Bulk tag target preview">
+          <div className="bulkTagPreviewHeader">
+            <div>
+              <strong>Server preview</strong>
+              <span>{`${preview.target_count} resolved / ${preview.changed_count} changes`}</span>
+            </div>
           </div>
-        </div>
-        {preview && (
           <div className="bulkTagPreviewStats" aria-label="Bulk group preview evidence">
             <span>
               <strong>{preview.target_count}</strong>
@@ -1572,22 +1576,21 @@ function BulkTagPanel({
               <small>preview hash</small>
             </span>
           </div>
-        )}
-        {previewAgents.length > 0 ? (
-          <div className="targetChipList bulkTagPreview">
-            {previewAgents.map((agent) => (
-              <span className="targetChip" key={agent.id} title={agent.id}>
-                {agent.display_name}
-              </span>
-            ))}
-          </div>
-        ) : (
-          <div className="bulkTagPreviewEmpty">
-            <ShieldCheck size={18} />
-            <span>{preview ? "No VPSs would change for this mutation." : "Review targets to show selected VPSs and schedule target-update notices."}</span>
-          </div>
-        )}
-      </section>
+          {previewAgents.length > 0 ? (
+            <div className="targetChipList bulkTagPreview">
+              {previewAgents.map((agent) => (
+                <span className="targetChip" key={agent.id} title={agent.id}>
+                  {agent.display_name}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div className="bulkTagPreviewEmpty">
+              <ShieldCheck size={18} />
+              <span>No VPSs would change for this mutation.</span>
+            </div>
+          )}
+        </section>
       )}
       <ConfirmationPrompt
         confirmLabel="Apply tag mutation"

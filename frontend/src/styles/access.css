@@ -131,6 +131,11 @@
   max-width: 100%;
 }
 
+.accessInspector > .identityActionFeedback.localActionFeedback {
+  margin: 0 18px 10px;
+  max-width: calc(100% - 36px);
+}
+
 .accessInspector .sideForm input,
 .accessInspector .sideForm select,
 .accessInspector .sideForm textarea {

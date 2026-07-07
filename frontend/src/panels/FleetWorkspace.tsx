@@ -1343,10 +1343,9 @@ function FleetInstancesPanel({
               {scopeActive ? "No VPS match this view" : "No live agents"}
             </strong>
             <span>
-              {apiError ??
-                (scopeActive
-                  ? "Adjust or clear the saved fleet view."
-                  : "Waiting for VPS agents to connect through gateways and report in.")}
+              {scopeActive
+                ? "Adjust or clear the saved fleet view."
+                : "Waiting for VPS agents to connect through gateways and report in."}
             </span>
           </div>
         }

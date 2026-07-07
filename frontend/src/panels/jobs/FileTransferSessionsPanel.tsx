@@ -141,6 +141,14 @@ export function FileTransferSessionsPanel({
     handoffError ??
     handoffProgress ??
     `${downloadTransfers.length} downloads, ${uploadTransfers.length} uploads tracked`;
+  const sourceArtifactFeedbackMessage =
+    sourceError ??
+    (sourcePending
+      ? "Reviewing source artifact"
+      : sourcePendingId
+        ? "Downloading source artifact"
+        : null);
+  const sourceArtifactFeedbackTone = sourceError ? "danger" : "progress";
   const transferRowActions: ConsoleDataGridAction<FileTransferSessionRecord>[] = [
     {
       description: ([transfer]) =>
@@ -966,7 +974,7 @@ export function FileTransferSessionsPanel({
         <summary>
           <span>
             <strong>Advanced: source artifacts</strong>
-            <small>{sourceError ?? `${sources.length} source artifacts`}</small>
+            <small>{sources.length} source artifacts</small>
           </span>
           <Database size={16} />
         </summary>
@@ -1010,6 +1018,11 @@ export function FileTransferSessionsPanel({
               <span>{sourcePending ? "Reviewing" : "Review source artifact"}</span>
             </button>
           </div>
+          <ActionFeedback
+            className="localActionFeedback sourceArtifactActionFeedback"
+            message={sourceArtifactFeedbackMessage}
+            tone={sourceArtifactFeedbackTone}
+          />
           <ConfirmationPrompt
             confirmLabel="Upload source artifact"
             detail="Persists the reviewed source artifact with computed SHA-256 and size."
