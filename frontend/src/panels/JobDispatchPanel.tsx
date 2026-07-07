@@ -1390,14 +1390,15 @@ export function JobDispatchPanel({
           ) : (
             <ShieldCheck size={20} />
           )}
-          <ActionFeedback
-            message={dispatchFeedbackMessage}
-            tone={dispatchFeedbackTone}
-          />
         </div>
       </div>
 
       <form className="dispatchForm" onSubmit={submitJob}>
+        <ActionFeedback
+          className="localActionFeedback"
+          message={dispatchFeedbackMessage}
+          tone={dispatchFeedbackTone}
+        />
         {!terminalSurface && (
           <>
             <div className="templateToolbar" aria-label="Command template controls">

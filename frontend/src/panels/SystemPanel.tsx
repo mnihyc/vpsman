@@ -1737,13 +1737,14 @@ export function SystemUsersPanel({
               >
                 <X size={16} />
               </button>
-              <ActionFeedback
-                message={actionError ?? (reviewPending ? "Preparing review" : null)}
-                tone={actionError ? "danger" : "progress"}
-              />
             </div>
           </div>
           <div className="operatorEditorBody">
+            <ActionFeedback
+              className="localActionFeedback"
+              message={actionError ?? (reviewPending ? "Preparing review" : null)}
+              tone={actionError ? "danger" : "progress"}
+            />
             {selectedOperator && selectedAccessSummary ? (
               <OperatorAccessEvidencePanel
                 operator={selectedOperator}

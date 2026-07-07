@@ -455,12 +455,14 @@ export function MultiFileActionsPanel({
             <RefreshCw size={14} />
             <span>Refresh scope</span>
           </button>
-          <ActionFeedback
-            message={actionFeedbackMessage}
-            tone={actionFeedbackTone}
-          />
         </div>
       </div>
+
+      <ActionFeedback
+        className="localActionFeedback"
+        message={actionFeedbackMessage}
+        tone={actionFeedbackTone}
+      />
 
       <div className="multiFileLayout">
         <section className="multiFileComposer">

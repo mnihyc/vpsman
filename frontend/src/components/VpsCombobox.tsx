@@ -1,5 +1,14 @@
 import { ChevronDown, Search } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+} from "react";
+import { createPortal } from "react-dom";
 import { clientIdSuffix } from "../utils";
 
 export type VpsComboboxOption = {
@@ -34,9 +43,11 @@ export function VpsCombobox({
 }: VpsComboboxProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const skipBlurCommitRef = useRef(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [focused, setFocused] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(() => displayValue(value, agents));
   const options = useMemo(
@@ -61,7 +72,13 @@ export function VpsCombobox({
     }
     function handleDocumentPointerDown(event: PointerEvent) {
       const container = containerRef.current;
-      if (!container || !event.target || container.contains(event.target as Node)) {
+      const menu = menuRef.current;
+      if (
+        !container ||
+        !event.target ||
+        container.contains(event.target as Node) ||
+        menu?.contains(event.target as Node)
+      ) {
         return;
       }
       commitQuery();
@@ -69,6 +86,48 @@ export function VpsCombobox({
     document.addEventListener("pointerdown", handleDocumentPointerDown, true);
     return () => document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
   });
+
+  useLayoutEffect(() => {
+    if (!open || disabled) {
+      setMenuStyle(null);
+      return;
+    }
+    const updateMenuPosition = () => {
+      const container = containerRef.current;
+      if (!container) {
+        return;
+      }
+      const rect = container.getBoundingClientRect();
+      const margin = 8;
+      const gap = 4;
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const below = viewportHeight - rect.bottom - margin;
+      const above = rect.top - margin;
+      const openAbove = below < 160 && above > below;
+      const available = Math.max(openAbove ? above : below, 120);
+      const maxHeight = Math.min(240, available);
+      const left = Math.min(
+        Math.max(rect.left, margin),
+        Math.max(margin, viewportWidth - rect.width - margin),
+      );
+      setMenuStyle({
+        left,
+        maxHeight,
+        top: openAbove
+          ? Math.max(margin, rect.top - maxHeight - gap)
+          : Math.min(viewportHeight - margin, rect.bottom + gap),
+        width: rect.width,
+      });
+    };
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+    };
+  }, [disabled, open, filtered.length]);
 
   function selectOption(option: SearchableVpsOption) {
     skipBlurCommitRef.current = true;
@@ -174,14 +233,21 @@ export function VpsCombobox({
         value={query}
       />
       <ChevronDown size={15} />
-      {open && !disabled && (
-        <div className="vpsComboboxMenu" role="listbox">
+      {open && !disabled && menuStyle
+        ? createPortal(
+          <div
+            className="vpsComboboxMenu"
+            ref={menuRef}
+            role="listbox"
+            style={menuStyle}
+          >
           {filtered.length > 0 ? (
             filtered.slice(0, 10).map((option, index) => (
               <button
                 aria-selected={index === activeIndex}
                 className={index === activeIndex ? "active" : undefined}
                 key={option.id}
+                title={`${option.label} ${option.detail}`.trim()}
                 onMouseDown={(event) => {
                   event.preventDefault();
                   selectOption(option);
@@ -194,10 +260,12 @@ export function VpsCombobox({
               </button>
             ))
           ) : (
-            <span className="vpsComboboxEmpty">No VPS matches this search.</span>
+            <span className="vpsComboboxEmpty" title="No VPS matches this search.">No VPS matches this search.</span>
           )}
-        </div>
-      )}
+          </div>,
+          document.body,
+        )
+        : null}
     </div>
   );
 }

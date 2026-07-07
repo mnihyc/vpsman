@@ -46,6 +46,10 @@ import {
   type BulkJobProgress,
 } from "../bulkJobProgress";
 import { DEFAULT_MAX_JOB_TIMEOUT_SECS } from "../jobMaxTimeout";
+import {
+  ActionFeedback,
+  type ActionFeedbackTone,
+} from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -1489,6 +1493,8 @@ function FleetInstanceDetail({
   const [tagDraft, setTagDraft] = useState("");
   const [tagPending, setTagPending] = useState(false);
   const [tagStatus, setTagStatus] = useState<string | null>(null);
+  const [tagStatusTone, setTagStatusTone] =
+    useState<ActionFeedbackTone>("info");
   const [tagError, setTagError] = useState<string | null>(null);
   const [interfacePending, setInterfacePending] = useState(false);
   const [interfaceError, setInterfaceError] = useState<string | null>(null);
@@ -1648,11 +1654,14 @@ function FleetInstanceDetail({
   }
 
   async function mutateTag(action: "add" | "remove", tag: string) {
+    setTagStatus(`${action === "add" ? "adding" : "removing"} ${tag}`);
+    setTagStatusTone("progress");
     await runPanelAction(setTagPending, setTagError, async () => {
       const response = await mutateTagsForAgents([agent], action, tag);
       setTagStatus(
         `${response.action} ${response.tag}: ${response.changed_count} changed, ${response.skipped_count} skipped`,
       );
+      setTagStatusTone("success");
       setTagDraft("");
     });
   }
@@ -1694,7 +1703,11 @@ function FleetInstanceDetail({
           >
             Rename
           </button>
-          {aliasError && <small className="errorText">{aliasError}</small>}
+          <ActionFeedback
+            className="localActionFeedback fleetAliasFeedback"
+            message={aliasError}
+            tone="danger"
+          />
         </form>
         <ConfirmationPrompt
           confirmLabel="Rename VPS"
@@ -1766,13 +1779,11 @@ function FleetInstanceDetail({
           ))
         )}
       </div>
-      {(tagError || tagStatus) && (
-        <small
-          className={tagError ? "errorText panelErrorText" : "panelStatusText"}
-        >
-          {tagError ?? tagStatus}
-        </small>
-      )}
+      <ActionFeedback
+        className="localActionFeedback fleetDetailTagFeedback"
+        message={tagError ?? tagStatus}
+        tone={tagError ? "danger" : tagStatusTone}
+      />
       <div
         className="detailTabs"
         role="tablist"
@@ -2190,7 +2201,11 @@ function ConfigPreviewBlock({
           <RefreshCw size={14} />
           Load config
         </button>
-        {error ? <small className="errorText">{error}</small> : null}
+        <ActionFeedback
+          className="localActionFeedback configPreviewActionFeedback"
+          message={error}
+          tone="danger"
+        />
         {preview ? (
           <pre className="configPreviewToml">{preview.toml}</pre>
         ) : null}
@@ -2841,17 +2856,21 @@ function FleetSelectionPanel({
   const [tagToRemove, setTagToRemove] = useState("");
   const [pending, setPending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
   const [error, setError] = useState<string | null>(null);
   const selectorExpression = selectorExpressionForClientIds(
     agents.map((agent) => agent.id),
   );
   const tagNames = useMemo(() => allTags.map((tag) => tag.name), [allTags]);
   async function submitTag(action: "add" | "remove", tag: string) {
+    setStatus(`${action === "add" ? "adding" : "removing"} ${tag}`);
+    setStatusTone("progress");
     await runPanelAction(setPending, setError, async () => {
       const response = await mutateTagsForAgents(agents, action, tag);
       setStatus(
         `${response.action} ${response.tag}: ${response.changed_count} changed, ${response.skipped_count} skipped`,
       );
+      setStatusTone("success");
       if (action === "add") setTagToAdd("");
       else setTagToRemove("");
     });
@@ -2987,11 +3006,11 @@ function FleetSelectionPanel({
             <option key={tag} value={tag} />
           ))}
         </datalist>
-        {(error || status) && (
-          <small className={error ? "errorText" : undefined}>
-            {error ?? status}
-          </small>
-        )}
+        <ActionFeedback
+          className="localActionFeedback fleetSelectionActionFeedback"
+          message={error ?? status}
+          tone={error ? "danger" : statusTone}
+        />
       </div>
       <div
         className="selectionStatsTabs"
@@ -4065,6 +4084,7 @@ export function FleetAlertPolicyManager({
     useState<PolicyDryRunResponse | null>(null);
   const [dryRunPending, setDryRunPending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
 
   const agentNameById = useMemo(
     () =>
@@ -4199,12 +4219,12 @@ export function FleetAlertPolicyManager({
     }
     const focused = policies.find((policy) => policy.id === policyFocusId);
     if (!focused) {
-      setStatus("Policy not found: " + shortId(policyFocusId));
+      setPolicyStatus("Policy not found: " + shortId(policyFocusId), "danger");
       return;
     }
     setEditorOpen(false);
     setDetailPolicyId(focused.id);
-    setStatus("viewing " + focused.name);
+    setPolicyStatus("viewing " + focused.name, "info");
   }, [policies, policyFocusId]);
 
   function currentDryRunRequest(): PolicyDryRunRequest {
@@ -4240,6 +4260,11 @@ export function FleetAlertPolicyManager({
     setSavePending(false);
   }
 
+  function setPolicyStatus(message: string, tone: ActionFeedbackTone) {
+    setStatus(message);
+    setStatusTone(tone);
+  }
+
   function resetForm() {
     setEditingId(null);
     setName("");
@@ -4272,14 +4297,14 @@ export function FleetAlertPolicyManager({
     );
     setDryRunPreview(null);
     setSaveSnapshot(null);
-    setStatus("editing " + policy.name);
+    setPolicyStatus("editing " + policy.name, "info");
     setEditorOpen(true);
   }
 
   function openPolicyDetails(policy: FleetAlertPolicyRecord) {
     setEditorOpen(false);
     setDetailPolicyId(policy.id);
-    setStatus("viewing " + policy.name);
+    setPolicyStatus("viewing " + policy.name, "info");
   }
 
   function updateRuleDraft(localId: string, patch: Partial<PolicyRuleDraft>) {
@@ -4307,20 +4332,23 @@ export function FleetAlertPolicyManager({
     const draftError = policyDraftValidationMessage(request);
     if (draftError) {
       setDryRunPreview(null);
-      setStatus(draftError);
+      setPolicyStatus(draftError, "danger");
       throw new Error(draftError);
     }
     setDryRunPending(true);
-    setStatus("dry-running policy");
+    setPolicyStatus("dry-running policy", "progress");
     try {
       const preview = await onDryRun(request);
       setDryRunPreview(preview);
-      setStatus("dry-run matched " + preview.matched_vps_count + " VPSs");
+      setPolicyStatus(
+        "dry-run matched " + preview.matched_vps_count + " VPSs",
+        "success",
+      );
       return preview;
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "policy dry-run failed";
-      setStatus(message);
+      setPolicyStatus(message, "danger");
       throw error;
     } finally {
       setDryRunPending(false);
@@ -4343,22 +4371,28 @@ export function FleetAlertPolicyManager({
   async function submit() {
     const snapshot = saveSnapshot;
     if (!snapshot) {
-      setStatus("Run dry-run and review policy before saving");
+      setPolicyStatus("Run dry-run and review policy before saving", "warning");
       return;
     }
     if (!beginSaveMutation()) {
       return;
     }
-    setStatus(editingId ? "updating policy" : "creating policy");
+    setPolicyStatus(
+      editingId ? "updating policy" : "creating policy",
+      "progress",
+    );
     try {
       const policy = await onUpsert(snapshot.request);
       setEditingId(policy.id);
       setEditorOpen(true);
       setSaveSnapshot(null);
       setDryRunPreview(snapshot.preview);
-      setStatus("saved " + policy.name);
+      setPolicyStatus("saved " + policy.name, "success");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "policy save failed");
+      setPolicyStatus(
+        error instanceof Error ? error.message : "policy save failed",
+        "danger",
+      );
     } finally {
       finishSaveMutation();
     }
@@ -4374,7 +4408,7 @@ export function FleetAlertPolicyManager({
     if (rows.length === 0 || deletePending) return;
     setDeletePending(true);
     setDeleteError(null);
-    setStatus("deleting policies");
+    setPolicyStatus("deleting policies", "progress");
     try {
       for (const policy of rows) {
         await onDelete(policy.id, policy.name);
@@ -4387,12 +4421,12 @@ export function FleetAlertPolicyManager({
         setDetailPolicyId(null);
       }
       setDeleteRows(null);
-      setStatus("deleted " + rows.length);
+      setPolicyStatus("deleted " + rows.length, "success");
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "policy delete failed";
       setDeleteError(message);
-      setStatus(message);
+      setPolicyStatus(message, "danger");
     } finally {
       setDeletePending(false);
     }
@@ -4406,7 +4440,10 @@ export function FleetAlertPolicyManager({
     if (!beginSaveMutation()) {
       return;
     }
-    setStatus(nextEnabled ? "enabling policies" : "disabling policies");
+    setPolicyStatus(
+      nextEnabled ? "enabling policies" : "disabling policies",
+      "progress",
+    );
     try {
       for (const policy of rows) {
         const base = policyRequestFromRecord(policy, { enabled: nextEnabled });
@@ -4420,10 +4457,14 @@ export function FleetAlertPolicyManager({
         });
         await onUpsert({ ...base, preview_hash: preview.preview_hash });
       }
-      setStatus((nextEnabled ? "enabled " : "disabled ") + rows.length);
+      setPolicyStatus(
+        (nextEnabled ? "enabled " : "disabled ") + rows.length,
+        "success",
+      );
     } catch (error) {
-      setStatus(
+      setPolicyStatus(
         error instanceof Error ? error.message : "policy update failed",
+        "danger",
       );
     } finally {
       finishSaveMutation();
@@ -4811,7 +4852,11 @@ export function FleetAlertPolicyManager({
           </ConsoleDetailPanel>
         ) : null}
       </div>
-      {status && <small className="fleetPolicyStatus">{status}</small>}
+      <ActionFeedback
+        className="localActionFeedback fleetPolicyActionFeedback"
+        message={status}
+        tone={statusTone}
+      />
       <ConfirmationPrompt
         confirmLabel={saveSnapshot?.title ?? "Save policy"}
         detail="Saves the reviewed policy group and all rule rows with the dry-run preview hash."
@@ -5289,6 +5334,7 @@ export function FleetAlertNotificationManager({
   const [enabled, setEnabled] = useState(true);
   const [notes, setNotes] = useState("");
   const [status, setStatus] = useState<string | null>(null);
+  const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
   const [queueConfirmation, setQueueConfirmation] = useState<
     "dispatch" | "process" | null
   >(null);
@@ -5434,6 +5480,11 @@ export function FleetAlertNotificationManager({
     setStatus(null);
   }
 
+  function setChannelStatus(message: string, tone: ActionFeedbackTone) {
+    setStatus(message);
+    setStatusTone(tone);
+  }
+
   function createChannel() {
     resetForm();
     setDetailChannelId(null);
@@ -5456,14 +5507,14 @@ export function FleetAlertNotificationManager({
     setCooldownSecs(String(channel.cooldown_secs));
     setEnabled(channel.enabled);
     setNotes(channel.notes ?? "");
-    setStatus(`editing ${channel.name}`);
+    setChannelStatus(`editing ${channel.name}`, "info");
     setEditorOpen(true);
   }
 
   function openChannelDetails(channel: FleetAlertNotificationChannelRecord) {
     setEditorOpen(false);
     setDetailChannelId(channel.id);
-    setStatus(`viewing ${channel.name}`);
+    setChannelStatus(`viewing ${channel.name}`, "info");
   }
 
   function requestFromChannel(
@@ -5526,21 +5577,27 @@ export function FleetAlertNotificationManager({
   async function submit() {
     const snapshot = saveSnapshot;
     if (!snapshot) {
-      setStatus("Review channel before saving");
+      setChannelStatus("Review channel before saving", "warning");
       return;
     }
     if (!beginSaveMutation()) {
       return;
     }
-    setStatus(editingId ? "updating channel" : "creating channel");
+    setChannelStatus(
+      editingId ? "updating channel" : "creating channel",
+      "progress",
+    );
     try {
       const channel = await onUpsert(snapshot.request);
       setEditingId(channel.id);
       setEditorOpen(true);
       setSaveSnapshot(null);
-      setStatus(`saved ${channel.name}`);
+      setChannelStatus(`saved ${channel.name}`, "success");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "channel save failed");
+      setChannelStatus(
+        error instanceof Error ? error.message : "channel save failed",
+        "danger",
+      );
     } finally {
       finishSaveMutation();
     }
@@ -5556,7 +5613,7 @@ export function FleetAlertNotificationManager({
     if (rows.length === 0 || deletePending) return;
     setDeletePending(true);
     setDeleteError(null);
-    setStatus("deleting channels");
+    setChannelStatus("deleting channels", "progress");
     try {
       for (const channel of rows) {
         await onDelete(channel.id, channel.name);
@@ -5569,12 +5626,12 @@ export function FleetAlertNotificationManager({
         setDetailChannelId(null);
       }
       setDeleteRows(null);
-      setStatus(`deleted ${rows.length}`);
+      setChannelStatus(`deleted ${rows.length}`, "success");
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "channel delete failed";
       setDeleteError(message);
-      setStatus(message);
+      setChannelStatus(message, "danger");
     } finally {
       setDeletePending(false);
     }
@@ -5588,15 +5645,22 @@ export function FleetAlertNotificationManager({
     if (!beginSaveMutation()) {
       return;
     }
-    setStatus(nextEnabled ? "enabling channels" : "disabling channels");
+    setChannelStatus(
+      nextEnabled ? "enabling channels" : "disabling channels",
+      "progress",
+    );
     try {
       for (const channel of rows) {
         await onUpsert(requestFromChannel(channel, { enabled: nextEnabled }));
       }
-      setStatus(`${nextEnabled ? "enabled" : "disabled"} ${rows.length}`);
+      setChannelStatus(
+        `${nextEnabled ? "enabled" : "disabled"} ${rows.length}`,
+        "success",
+      );
     } catch (error) {
-      setStatus(
+      setChannelStatus(
         error instanceof Error ? error.message : "channel update failed",
+        "danger",
       );
     } finally {
       finishSaveMutation();
@@ -5607,7 +5671,10 @@ export function FleetAlertNotificationManager({
     if (queuePending) {
       return;
     }
-    setStatus(dryRun ? "matching alerts" : "queueing alert notifications");
+    setChannelStatus(
+      dryRun ? "matching alerts" : "queueing alert notifications",
+      "progress",
+    );
     setQueuePending(true);
     try {
       const rows = await onDispatch({
@@ -5639,10 +5706,14 @@ export function FleetAlertNotificationManager({
           setQueueConfirmation("dispatch");
         }
       }
-      setStatus(`${dryRun ? "matched" : "queued"} ${rows.length}`);
+      setChannelStatus(
+        `${dryRun ? "matched" : "queued"} ${rows.length}`,
+        "success",
+      );
     } catch (error) {
-      setStatus(
+      setChannelStatus(
         error instanceof Error ? error.message : "notification dispatch failed",
+        "danger",
       );
     } finally {
       setQueuePending(false);
@@ -5653,8 +5724,9 @@ export function FleetAlertNotificationManager({
     if (queuePending) {
       return;
     }
-    setStatus(
+    setChannelStatus(
       dryRun ? "previewing notification queue" : "delivering notifications",
+      "progress",
     );
     setQueuePending(true);
     try {
@@ -5689,12 +5761,16 @@ export function FleetAlertNotificationManager({
           setQueueConfirmation("process");
         }
       }
-      setStatus(`${dryRun ? "previewed" : "processed"} ${rows.length}`);
+      setChannelStatus(
+        `${dryRun ? "previewed" : "processed"} ${rows.length}`,
+        "success",
+      );
     } catch (error) {
-      setStatus(
+      setChannelStatus(
         error instanceof Error
           ? error.message
           : "notification processing failed",
+        "danger",
       );
     } finally {
       setQueuePending(false);
@@ -5707,26 +5783,29 @@ export function FleetAlertNotificationManager({
       return;
     }
     setQueuePending(true);
-    setStatus(
+    setChannelStatus(
       snapshot.action === "dispatch"
         ? "queueing reviewed alert notifications"
         : "delivering reviewed notifications",
+      "progress",
     );
     try {
       const rows =
         snapshot.action === "dispatch"
           ? await onDispatch(snapshot.request)
           : await onProcess(snapshot.request);
-      setStatus(
+      setChannelStatus(
         `${snapshot.action === "dispatch" ? "queued" : "processed"} ${rows.length}`,
+        "success",
       );
       setQueueConfirmation(null);
       setQueueSnapshot(null);
     } catch (error) {
-      setStatus(
+      setChannelStatus(
         error instanceof Error
           ? error.message
           : "notification queue action failed",
+        "danger",
       );
     } finally {
       setQueuePending(false);
@@ -6120,7 +6199,11 @@ export function FleetAlertNotificationManager({
         }
         tone={queueConfirmation === "process" ? "danger" : "normal"}
       />
-      {status && <small className="fleetPolicyStatus">{status}</small>}
+      <ActionFeedback
+        className="localActionFeedback fleetPolicyActionFeedback"
+        message={status}
+        tone={statusTone}
+      />
       <ConfirmationPrompt
         confirmLabel={saveSnapshot?.title ?? "Save channel"}
         detail="Saves the reviewed notification channel request exactly as shown."
@@ -6395,6 +6478,7 @@ export function WebhookRuleManager({
   const [eventKind, setEventKind] = useState("interval.30sec");
   const [eventId, setEventId] = useState("");
   const [status, setStatus] = useState<string | null>(null);
+  const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
   const [queueConfirmation, setQueueConfirmation] = useState<
     "dispatch" | "process" | null
   >(null);
@@ -6522,6 +6606,11 @@ export function WebhookRuleManager({
     setStatus(null);
   }
 
+  function setWebhookStatus(message: string, tone: ActionFeedbackTone) {
+    setStatus(message);
+    setStatusTone(tone);
+  }
+
   function createRule() {
     resetForm();
     setDetailRuleId(null);
@@ -6541,14 +6630,14 @@ export function WebhookRuleManager({
     setClearSigningSecret(false);
     setCooldownSecs(String(rule.cooldown_secs));
     setNotes(rule.notes ?? "");
-    setStatus(`editing ${rule.name}`);
+    setWebhookStatus(`editing ${rule.name}`, "info");
     setEditorOpen(true);
   }
 
   function openRuleDetails(rule: WebhookRuleRecord) {
     setEditorOpen(false);
     setDetailRuleId(rule.id);
-    setStatus(`viewing ${rule.name}`);
+    setWebhookStatus(`viewing ${rule.name}`, "info");
   }
 
   function requestFromRule(
@@ -6609,13 +6698,16 @@ export function WebhookRuleManager({
   async function submit() {
     const snapshot = saveSnapshot;
     if (!snapshot) {
-      setStatus("Review webhook rule before saving");
+      setWebhookStatus("Review webhook rule before saving", "warning");
       return;
     }
     if (!beginSaveMutation()) {
       return;
     }
-    setStatus(editingId ? "updating webhook rule" : "creating webhook rule");
+    setWebhookStatus(
+      editingId ? "updating webhook rule" : "creating webhook rule",
+      "progress",
+    );
     try {
       const rule = await onUpsert(snapshot.request);
       setEditingId(rule.id);
@@ -6623,9 +6715,12 @@ export function WebhookRuleManager({
       setClearSigningSecret(false);
       setEditorOpen(true);
       setSaveSnapshot(null);
-      setStatus(`saved ${rule.name}`);
+      setWebhookStatus(`saved ${rule.name}`, "success");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "webhook save failed");
+      setWebhookStatus(
+        error instanceof Error ? error.message : "webhook save failed",
+        "danger",
+      );
     } finally {
       finishSaveMutation();
     }
@@ -6641,7 +6736,7 @@ export function WebhookRuleManager({
     if (rows.length === 0 || deletePending) return;
     setDeletePending(true);
     setDeleteError(null);
-    setStatus("deleting webhook rules");
+    setWebhookStatus("deleting webhook rules", "progress");
     try {
       for (const rule of rows) {
         await onDelete(rule.id, rule.name);
@@ -6654,12 +6749,12 @@ export function WebhookRuleManager({
         setDetailRuleId(null);
       }
       setDeleteRows(null);
-      setStatus(`deleted ${rows.length}`);
+      setWebhookStatus(`deleted ${rows.length}`, "success");
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "rule delete failed";
       setDeleteError(message);
-      setStatus(message);
+      setWebhookStatus(message, "danger");
     } finally {
       setDeletePending(false);
     }
@@ -6673,16 +6768,23 @@ export function WebhookRuleManager({
     if (!beginSaveMutation()) {
       return;
     }
-    setStatus(
+    setWebhookStatus(
       nextEnabled ? "enabling webhook rules" : "disabling webhook rules",
+      "progress",
     );
     try {
       for (const rule of rows) {
         await onUpsert(requestFromRule(rule, { enabled: nextEnabled }));
       }
-      setStatus(`${nextEnabled ? "enabled" : "disabled"} ${rows.length}`);
+      setWebhookStatus(
+        `${nextEnabled ? "enabled" : "disabled"} ${rows.length}`,
+        "success",
+      );
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "rule update failed");
+      setWebhookStatus(
+        error instanceof Error ? error.message : "rule update failed",
+        "danger",
+      );
     } finally {
       finishSaveMutation();
     }
@@ -6715,7 +6817,7 @@ export function WebhookRuleManager({
           event_kind: eventKind.trim(),
           event_id: eventId.trim() || null,
         };
-    setStatus("rendering webhook dry run");
+    setWebhookStatus("rendering webhook dry run", "progress");
     setQueuePending(true);
     try {
       const preview = await onDryRun(request);
@@ -6727,9 +6829,15 @@ export function WebhookRuleManager({
       if (!focusedEditorOpen) {
         onOpenDeliveries();
       }
-      setStatus(`dry run matched ${preview.matched_vps.length}`);
+      setWebhookStatus(
+        `dry run matched ${preview.matched_vps.length}`,
+        "success",
+      );
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "dry run failed");
+      setWebhookStatus(
+        error instanceof Error ? error.message : "dry run failed",
+        "danger",
+      );
     } finally {
       setQueuePending(false);
     }
@@ -6758,7 +6866,7 @@ export function WebhookRuleManager({
     if (queuePending) {
       return;
     }
-    setStatus(
+    setWebhookStatus(
       dryRunMode
         ? rule
           ? `matching webhook rule ${rule.name}`
@@ -6766,6 +6874,7 @@ export function WebhookRuleManager({
         : rule
           ? `queueing webhook test for ${rule.name}`
           : "queueing webhooks",
+      "progress",
     );
     setQueuePending(true);
     try {
@@ -6805,10 +6914,14 @@ export function WebhookRuleManager({
           setQueueConfirmation("dispatch");
         }
       }
-      setStatus(`${dryRunMode ? "matched" : "queued"} ${rows.length}`);
+      setWebhookStatus(
+        `${dryRunMode ? "matched" : "queued"} ${rows.length}`,
+        "success",
+      );
     } catch (error) {
-      setStatus(
+      setWebhookStatus(
         error instanceof Error ? error.message : "webhook dispatch failed",
+        "danger",
       );
     } finally {
       setQueuePending(false);
@@ -6824,12 +6937,13 @@ export function WebhookRuleManager({
       return;
     }
     const isRetry = deliveryStatus === "failed";
-    setStatus(
+    setWebhookStatus(
       dryRunMode
         ? `previewing ${isRetry ? "failed" : "queued"} webhook deliveries`
         : isRetry
           ? "retrying failed webhooks"
           : "delivering webhooks",
+      "progress",
     );
     setQueuePending(true);
     try {
@@ -6862,12 +6976,14 @@ export function WebhookRuleManager({
           setQueueConfirmation("process");
         }
       }
-      setStatus(
+      setWebhookStatus(
         `${dryRunMode ? "previewed" : isRetry ? "retried" : "processed"} ${rows.length}`,
+        "success",
       );
     } catch (error) {
-      setStatus(
+      setWebhookStatus(
         error instanceof Error ? error.message : "webhook processing failed",
+        "danger",
       );
     } finally {
       setQueuePending(false);
@@ -6880,23 +6996,26 @@ export function WebhookRuleManager({
       return;
     }
     setQueuePending(true);
-    setStatus(
+    setWebhookStatus(
       snapshot.action === "dispatch"
         ? "queueing reviewed webhooks"
         : "delivering reviewed webhooks",
+      "progress",
     );
     try {
       const rows =
         snapshot.action === "dispatch"
           ? await onDispatch(snapshot.request)
           : await onProcess(snapshot.request);
-      setStatus(
+      setWebhookStatus(
         `${snapshot.action === "dispatch" ? "queued" : "processed"} ${rows.length}`,
+        "success",
       );
       clearWebhookQueueReview();
     } catch (error) {
-      setStatus(
+      setWebhookStatus(
         error instanceof Error ? error.message : "webhook queue action failed",
+        "danger",
       );
     } finally {
       setQueuePending(false);
@@ -7399,7 +7518,11 @@ export function WebhookRuleManager({
         }
         tone={queueConfirmation === "process" ? "danger" : "normal"}
       />
-      {status && <small className="fleetPolicyStatus">{status}</small>}
+      <ActionFeedback
+        className="localActionFeedback fleetPolicyActionFeedback"
+        message={status}
+        tone={statusTone}
+      />
       <ConfirmationPrompt
         confirmLabel={saveSnapshot?.title ?? "Save rule"}
         detail="Saves the reviewed webhook rule request exactly as shown."
@@ -7691,11 +7814,20 @@ export function WebhookDeliveryMaintenancePanel({
   const [rotationPending, setRotationPending] = useState(false);
   const [rotationError, setRotationError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
 
   function clearRotationReview() {
     setRotationPreview(null);
     setConfirmDelete(false);
     setRotationError(null);
+  }
+
+  function setRotationStatusMessage(
+    message: string,
+    tone: ActionFeedbackTone,
+  ) {
+    setStatus(message);
+    setStatusTone(tone);
   }
 
   async function rotate(confirmed: boolean) {
@@ -7708,8 +7840,9 @@ export function WebhookDeliveryMaintenancePanel({
     }
     setRotationPending(true);
     setRotationError(null);
-    setStatus(
+    setRotationStatusMessage(
       confirmed ? "deleting matched deliveries" : "previewing rotation",
+      "progress",
     );
     try {
       const response = await onRotate({
@@ -7721,14 +7854,15 @@ export function WebhookDeliveryMaintenancePanel({
       });
       setRotationPreview(response);
       setConfirmDelete(false);
-      setStatus(
+      setRotationStatusMessage(
         `${response.matched_count} matched / ${response.deleted_count} deleted`,
+        "success",
       );
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "rotation failed";
       setRotationError(message);
-      setStatus(message);
+      setRotationStatusMessage(message, "danger");
     } finally {
       setRotationPending(false);
     }
@@ -7821,7 +7955,11 @@ export function WebhookDeliveryMaintenancePanel({
             </span>
           </ConsoleField>
         </div>
-        {status && <small className="fleetPolicyStatus">{status}</small>}
+        <ActionFeedback
+          className="localActionFeedback fleetPolicyActionFeedback"
+          message={status}
+          tone={statusTone}
+        />
       </ConsoleDetailPanel>
       <ConfirmationPrompt
         confirmLabel="Delete retained history"

@@ -155,7 +155,9 @@ async function chooseVpsBySearch(
   optionName: RegExp,
 ) {
   await root.getByRole("combobox", { name: label }).fill(query);
-  const option = root.getByRole("option", { name: optionName });
+  const option = root.page().locator(".vpsComboboxMenu").getByRole("option", {
+    name: optionName,
+  });
   await expect(option).toBeVisible();
   await option.click();
 }

@@ -742,12 +742,14 @@ export function FileBrowserPanel({
               value={targetClientId}
             />
           </div>
-          <ActionFeedback
-            message={fileBrowserFeedbackMessage}
-            tone={fileBrowserFeedbackTone}
-          />
         </div>
       </div>
+
+      <ActionFeedback
+        className="localActionFeedback"
+        message={fileBrowserFeedbackMessage}
+        tone={fileBrowserFeedbackTone}
+      />
 
       {!privilegeMaterial && (
         <div className="fileBrowserPrivilegeRow">

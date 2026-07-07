@@ -99,15 +99,15 @@ export function FleetGroupsPanel({
   const activeLabelCount =
     groupSummary.providerGroupCount + groupSummary.countryGroupCount + groupSummary.customGroupCount;
   const headerDescription = `${tags.length} registry groups, ${activeLabelCount} active labels across ${agents.length} VPSs`;
-  const groupsFeedbackMessage =
+  const groupsPageFeedbackMessage =
+    error ?? (loading ? "Refreshing group state" : null);
+  const groupsPageFeedbackTone = error ? "danger" : "progress";
+  const groupsActionFeedbackMessage =
     actionError ??
-    error ??
     (lastMutation
       ? `Group ${lastMutation.tag}: ${lastMutation.changed_count} changed, ${lastMutation.skipped_count} skipped`
-      : loading
-        ? "Refreshing group state"
-        : null);
-  const groupsFeedbackTone = actionError || error ? "danger" : lastMutation ? "success" : "progress";
+      : null);
+  const groupsActionFeedbackTone = actionError ? "danger" : "success";
 
   return (
     <section className="workspace singleColumn">
@@ -122,9 +122,14 @@ export function FleetGroupsPanel({
               <RefreshCw size={15} />
               <span>Refresh</span>
             </button>
-            <ActionFeedback message={groupsFeedbackMessage} tone={groupsFeedbackTone} />
+            <ActionFeedback message={groupsPageFeedbackMessage} tone={groupsPageFeedbackTone} />
           </div>
         </div>
+        <ActionFeedback
+          className="localActionFeedback"
+          message={groupsActionFeedbackMessage}
+          tone={groupsActionFeedbackTone}
+        />
         {subpage === "registry" && (
           <TagRegistry
             onCreateTag={onCreateTag}

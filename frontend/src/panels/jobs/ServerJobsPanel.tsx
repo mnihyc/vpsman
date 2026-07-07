@@ -91,7 +91,8 @@ export function ServerJobsPanel({
   const summary = preview
     ? `${preview.matched_count} artifacts previewed, ${formatBytes(preview.matched_bytes)}`
     : `${jobs.length} maintenance jobs`;
-  const cleanupFeedbackMessage = error ?? previewStatus;
+  const cleanupPageFeedbackMessage = error;
+  const cleanupActionFeedbackMessage = previewStatus;
   const previewExpressionMatches = preview?.expression === expression;
   const previewDomainsMatch = preview ? sameDomains(preview.domains, domains) : false;
   const previewFresh = Boolean(preview && previewExpressionMatches && previewDomainsMatch);
@@ -312,11 +313,16 @@ export function ServerJobsPanel({
               Refresh
             </button>
             <ActionFeedback
-              message={cleanupFeedbackMessage}
-              tone={error ? "danger" : "progress"}
+              message={cleanupPageFeedbackMessage}
+              tone="danger"
             />
           </div>
         </div>
+        <ActionFeedback
+          className="localActionFeedback"
+          message={cleanupActionFeedbackMessage}
+          tone="progress"
+        />
         <div className="historyRetentionGrid">
           <div className="cleanupPreviewContract">
             <ShieldCheck size={18} />

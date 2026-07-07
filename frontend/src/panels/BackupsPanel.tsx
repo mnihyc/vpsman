@@ -531,32 +531,36 @@ export function BackupsPanel({
   }, ${artifacts.length} artifact${artifacts.length === 1 ? "" : "s"}, ${restorePlans.length} draft restore${
     restorePlans.length === 1 ? "" : "s"
   }, ${migrationLinks.length} migration mapping${migrationLinks.length === 1 ? "" : "s"}`;
-  const backupFeedbackMessage =
-    error ??
-    (loading
-      ? backupSubpageMeta.loading
-      : actionError ??
-        reviewStatus ??
-        (lastPolicyPrune
-          ? policyPruneStatus(lastPolicyPrune)
-          : lastPolicy
-            ? `Policy ${lastPolicy.name} ${lastPolicy.enabled ? "enabled" : "disabled"}`
-            : lastMigrationLink
-              ? `Migration mapping ${shortId(lastMigrationLink.id)} ${lastMigrationLink.status}`
-              : lastRollbackJob
-                ? `Restore rollback job ${shortId(lastRollbackJob.job_id)} ${lastRollbackJob.status}`
-                : lastRestoreJob
-                  ? `Restore job ${shortId(lastRestoreJob.job_id)} ${lastRestoreJob.status}`
-                  : lastDownloadedArtifact
-                    ? `Artifact ${shortId(lastDownloadedArtifact.id)} downloaded`
-                    : lastArtifact
-                      ? `Artifact ${shortId(lastArtifact.id)} uploaded`
-                      : lastRestorePlan
-                        ? `Draft restore ${shortId(lastRestorePlan.id)} ${lastRestorePlan.status}`
-                        : lastRequest
-                          ? `Request ${shortId(lastRequest.id)} ${lastRequest.status}`
-                          : null));
-  const backupFeedbackTone = error || actionError ? "danger" : "progress";
+  const backupPageFeedbackMessage =
+    error ?? (loading ? backupSubpageMeta.loading : null);
+  const backupPageFeedbackTone = error ? "danger" : "progress";
+  const backupWorkflowFeedbackMessage =
+    actionError ??
+    reviewStatus ??
+    (lastPolicyPrune
+      ? policyPruneStatus(lastPolicyPrune)
+      : lastPolicy
+        ? `Policy ${lastPolicy.name} ${lastPolicy.enabled ? "enabled" : "disabled"}`
+        : lastMigrationLink
+          ? `Migration mapping ${shortId(lastMigrationLink.id)} ${lastMigrationLink.status}`
+          : lastRollbackJob
+            ? `Restore rollback job ${shortId(lastRollbackJob.job_id)} ${lastRollbackJob.status}`
+            : lastRestoreJob
+              ? `Restore job ${shortId(lastRestoreJob.job_id)} ${lastRestoreJob.status}`
+              : lastDownloadedArtifact
+                ? `Artifact ${shortId(lastDownloadedArtifact.id)} downloaded`
+                : lastArtifact
+                  ? `Artifact ${shortId(lastArtifact.id)} uploaded`
+                  : lastRestorePlan
+                    ? `Draft restore ${shortId(lastRestorePlan.id)} ${lastRestorePlan.status}`
+                    : lastRequest
+                      ? `Request ${shortId(lastRequest.id)} ${lastRequest.status}`
+                      : null);
+  const backupWorkflowFeedbackTone = actionError
+    ? "danger"
+    : reviewStatus
+      ? "progress"
+      : "success";
   const backupPostureItems = buildBackupPostureItems({
     agents,
     artifacts,
@@ -2043,8 +2047,8 @@ export function BackupsPanel({
               </button>
             </div>
             <ActionFeedback
-              message={backupFeedbackMessage}
-              tone={backupFeedbackTone}
+              message={backupPageFeedbackMessage}
+              tone={backupPageFeedbackTone}
             />
           </div>
         </div>
@@ -2147,6 +2151,11 @@ export function BackupsPanel({
         title={backupWorkflowLabel}
       >
         <div className="backupInspector backupWorkflowBody">
+          <ActionFeedback
+            className="localActionFeedback"
+            message={backupWorkflowFeedbackMessage}
+            tone={backupWorkflowFeedbackTone}
+          />
           <ConfirmationPrompt
             confirmLabel={backupConfirmationConfirmLabel}
             detail={backupConfirmationDetail(pendingConfirmation)}

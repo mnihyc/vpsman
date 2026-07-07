@@ -1315,23 +1315,9 @@
 }
 
 .fleetPolicyHeader span,
-.fleetPolicyStatus,
 .fleetPolicyRows small {
   color: var(--muted);
   font-size: 12px;
-}
-
-.fleetPolicyStatus {
-  display: block;
-  min-width: 0;
-  margin: 10px 0 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface-subtle);
-  color: var(--text-secondary);
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-  padding: 8px 10px;
 }
 
 .fleetPolicyGrid {
@@ -1666,11 +1652,6 @@
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-
-.webhookRuleGrid .searchExpressionAutocomplete {
-  top: auto;
-  bottom: calc(100% + 4px);
 }
 
 .webhookPreviewSplit {
@@ -2612,6 +2593,17 @@
 .configApplyGrid > .confirmationPrompt {
   grid-column: 1 / -1;
   margin: 0;
+}
+
+.configApplyGrid .configReviewFeedback.localActionFeedback {
+  margin: 0;
+  max-width: 100%;
+}
+
+.bulkGeneratorManagement .patchGeneratorActionFeedback.localActionFeedback,
+.vpsRulesWorkspace .vpsRulesActionFeedback.localActionFeedback {
+  margin: 10px 0 0;
+  max-width: 100%;
 }
 
 .bulkPatchPrimary,

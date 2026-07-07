@@ -149,7 +149,9 @@ async function openVpsMenu(
   const combobox = root.getByRole("combobox", { name: label });
   await expect(combobox).toBeVisible();
   await combobox.fill(query);
-  await expect(root.getByRole("option", { name: expectedOption })).toBeVisible();
+  await expect(
+    root.page().locator(".vpsComboboxMenu").getByRole("option", { name: expectedOption }),
+  ).toBeVisible();
 }
 
 async function openExpressionMenu(
@@ -164,7 +166,9 @@ async function openExpressionMenu(
   await searchbox.fill("");
   await searchbox.click();
   await searchbox.pressSequentially(query);
-  await expect(root.getByRole("option", { name: expectedOption })).toBeVisible();
+  await expect(
+    root.page().locator(".searchExpressionAutocomplete").getByRole("option", { name: expectedOption }),
+  ).toBeVisible();
 }
 
 async function capture(

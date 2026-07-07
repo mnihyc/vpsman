@@ -251,12 +251,12 @@ export function SourceTemplatePanel({
   const status =
     (sourceStatus.length > 0 ? sourceStatusSummary : null) ??
     `${templates.length} templates across ${new Set(templates.map((template) => template.domain)).size} domains`;
-  const sourceFeedbackMessage =
+  const sourceWorkflowFeedbackMessage =
     actionError ??
     reviewStatus ??
     lifecycleStatus ??
     (lastAssignment ? `${lastAssignment.target_count} template assignments evaluated` : null);
-  const sourceFeedbackTone =
+  const sourceWorkflowFeedbackTone =
     actionError || lifecycleStatus?.startsWith("Template test failed")
       ? "danger"
       : lifecycleStatus || lastAssignment
@@ -901,11 +901,6 @@ export function SourceTemplatePanel({
         <div>
           <h2>Source templates</h2>
           <span>{status}</span>
-          <ActionFeedback
-            className="sectionHeaderFeedback"
-            message={sourceFeedbackMessage}
-            tone={sourceFeedbackTone}
-          />
         </div>
       </div>
 
@@ -1152,6 +1147,11 @@ export function SourceTemplatePanel({
               Create one reusable template. Scope decides whether it is shared
               or owned by one VPS.
             </span>
+            <ActionFeedback
+              className="localActionFeedback sourceTemplateActionFeedback"
+              message={actionError}
+              tone="danger"
+            />
             <div className="formRow templateFormRow">
               <label>
                 <span>Domain</span>
@@ -1262,6 +1262,11 @@ export function SourceTemplatePanel({
                 <span>{assignmentSummary(assignments, lastAssignment)}</span>
               </div>
             </div>
+            <ActionFeedback
+              className="localActionFeedback sourceTemplateActionFeedback"
+              message={sourceWorkflowFeedbackMessage}
+              tone={sourceWorkflowFeedbackTone}
+            />
 
             {detailTab === "assign" && (
               <form

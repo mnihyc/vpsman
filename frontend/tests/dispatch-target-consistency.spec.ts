@@ -34,7 +34,9 @@ async function chooseVpsBySearch(
 ) {
   const combobox = root.getByRole("combobox", { name: label });
   await combobox.fill(query);
-  const option = root.getByRole("option", { name: optionName });
+  const option = root.page().locator(".vpsComboboxMenu").getByRole("option", {
+    name: optionName,
+  });
   await expect(option).toBeVisible();
   const selectedLabel = (await option.locator("strong").innerText()).trim();
   await option.click();
@@ -652,9 +654,16 @@ test("bulk config async review preparation ignores stale selector edits", async 
   });
   await selector.fill("id:agent-sfo-01");
   await activate(panel.getByRole("button", { name: "Preview changes" }));
-  await expect(page.getByText("Previewing bulk patch changes")).toBeVisible();
+  await expect(
+    panel.locator(".configReviewFeedback.actionFeedbackProgress"),
+  ).toContainText("Previewing bulk patch changes");
+  await expect(
+    panel.locator(".formHint", { hasText: "Previewing bulk patch changes" }),
+  ).toHaveCount(0);
   await selector.fill("id:agent-fra-02");
-  await expect(page.getByText("Previewing bulk patch changes")).toBeHidden();
+  await expect(
+    panel.locator(".configReviewFeedback.actionFeedbackProgress"),
+  ).toHaveCount(0);
   await expect(page.getByText("Confirm bulk patch")).toBeHidden();
 
   await activate(panel.getByRole("button", { name: "Preview changes" }));

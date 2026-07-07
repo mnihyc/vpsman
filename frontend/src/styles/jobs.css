@@ -317,7 +317,7 @@
 
 .releaseRecordForm .operationNote,
 .releaseRecordForm .wideField,
-.releaseRecordForm .inlineError {
+.releaseRecordForm .releaseActionFeedback {
   grid-column: 1 / -1;
 }
 
@@ -2467,6 +2467,11 @@
   min-width: 0;
 }
 
+.transferQuickUpload .transferQuickUploadFeedback.localActionFeedback {
+  margin: 0;
+  max-width: 100%;
+}
+
 @media (max-width: 640px) {
   .transferFocusBanner {
     align-items: stretch;
@@ -4090,8 +4095,13 @@
 
 .agentReleasesPanel .releaseFormActions,
 .agentReleasesPanel .releaseDrawerHeader,
-.agentReleasesPanel .inlineError {
+.agentReleasesPanel .releaseActionFeedback {
   grid-column: 1 / -1;
+}
+
+.agentReleasesPanel .releaseActionFeedback.localActionFeedback {
+  margin: 0;
+  max-width: 100%;
 }
 
 .releaseDrawerHeader {

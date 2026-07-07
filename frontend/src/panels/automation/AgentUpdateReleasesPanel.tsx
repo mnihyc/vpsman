@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ExternalLink, PackageCheck, X } from "lucide-react";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -340,6 +341,9 @@ export function AgentUpdateReleasesPanel({
     setRollbackSizeBytes("");
     setReleaseNotes("");
   }
+  const releaseFeedbackMessage =
+    releaseError ?? (releasePending ? "Processing release metadata" : null);
+  const releaseFeedbackTone = releaseError ? "danger" : "progress";
 
   return (
     <div className="fleetPanel agentReleasesPanel">
@@ -632,7 +636,11 @@ export function AgentUpdateReleasesPanel({
               Review release
             </button>
           </div>
-          {releaseError && <span className="inlineError">{releaseError}</span>}
+          <ActionFeedback
+            className="localActionFeedback releaseActionFeedback"
+            message={releaseFeedbackMessage}
+            tone={releaseFeedbackTone}
+          />
         </div>
       ) : null}
       <ConfirmationPrompt

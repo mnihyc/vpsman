@@ -1,9 +1,11 @@
 import { Search, X } from "lucide-react";
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ChangeEvent,
   type ClipboardEvent,
   type KeyboardEvent,
@@ -13,6 +15,7 @@ import {
   type SyntheticEvent,
   type WheelEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import type { AgentView } from "../types";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
@@ -60,8 +63,10 @@ export function SearchExpressionInput({
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const editorRef = useRef<HTMLInputElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
   const [autocompleteOpen, setAutocompleteOpen] = useState(false);
+  const [autocompleteStyle, setAutocompleteStyle] = useState<CSSProperties | null>(null);
   const [focused, setFocused] = useState(false);
   const [caretIndex, setCaretIndex] = useState(value.length);
   const parsed = parseSearchExpression(value);
@@ -73,6 +78,8 @@ export function SearchExpressionInput({
     [agents, caretIndex, suggestions, value, vpsNameDisplayMode],
   );
   const matchTitle = agents && !parsed.error ? agentListTitle(matchedAgents) : undefined;
+  const autocompleteVisible =
+    (focused || autocompleteOpen) && completion.filtered.length > 0 && completion.fragment.trim().length > 0;
 
   useEffect(() => {
     if (!focused && !autocompleteOpen) {
@@ -80,7 +87,13 @@ export function SearchExpressionInput({
     }
     function handleDocumentPointerDown(event: PointerEvent) {
       const container = containerRef.current;
-      if (!container || !event.target || container.contains(event.target as Node)) {
+      const menu = menuRef.current;
+      if (
+        !container ||
+        !event.target ||
+        container.contains(event.target as Node) ||
+        menu?.contains(event.target as Node)
+      ) {
         return;
       }
       setAutocompleteOpen(false);
@@ -89,6 +102,49 @@ export function SearchExpressionInput({
     document.addEventListener("pointerdown", handleDocumentPointerDown, true);
     return () => document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
   }, [autocompleteOpen, focused]);
+
+  useLayoutEffect(() => {
+    if (!autocompleteVisible) {
+      setAutocompleteStyle(null);
+      return;
+    }
+    const updateAutocompletePosition = () => {
+      const container = containerRef.current;
+      if (!container) {
+        return;
+      }
+      const rect = container.getBoundingClientRect();
+      const margin = 8;
+      const gap = 4;
+      const viewportWidth = window.innerWidth;
+      const viewportHeight = window.innerHeight;
+      const below = viewportHeight - rect.bottom - margin;
+      const above = rect.top - margin;
+      const openAbove = below < 178 && above > below;
+      const available = Math.max(openAbove ? above : below, 120);
+      const maxHeight = Math.min(240, available);
+      const width = Math.max(rect.width, 180);
+      const left = Math.min(
+        Math.max(rect.left, margin),
+        Math.max(margin, viewportWidth - width - margin),
+      );
+      setAutocompleteStyle({
+        left,
+        maxHeight,
+        top: openAbove
+          ? Math.max(margin, rect.top - maxHeight - gap)
+          : Math.min(viewportHeight - margin, rect.bottom + gap),
+        width,
+      });
+    };
+    updateAutocompletePosition();
+    window.addEventListener("resize", updateAutocompletePosition);
+    window.addEventListener("scroll", updateAutocompletePosition, true);
+    return () => {
+      window.removeEventListener("resize", updateAutocompletePosition);
+      window.removeEventListener("scroll", updateAutocompletePosition, true);
+    };
+  }, [autocompleteVisible, completion.filtered.length, completion.fragment]);
 
   useEffect(() => {
     setCaretIndex((current) => Math.min(current, value.length));
@@ -305,24 +361,33 @@ export function SearchExpressionInput({
           value={value}
         />
       </div>
-      {(focused || autocompleteOpen) && completion.filtered.length > 0 && completion.fragment.trim() && (
-        <div className="searchExpressionAutocomplete" role="listbox">
-          {completion.filtered.slice(0, 8).map((suggestion) => (
-            <button
-              key={`${suggestion.value}:${suggestion.label}`}
-              onMouseDown={(event) => {
-                event.preventDefault();
-                applySuggestion(suggestion);
-              }}
-              role="option"
-              type="button"
-            >
-              <span>{suggestion.label}</span>
-              {suggestion.detail ? <small>{suggestion.detail}</small> : null}
-            </button>
-          ))}
-        </div>
-      )}
+      {autocompleteVisible && autocompleteStyle
+        ? createPortal(
+          <div
+            className="searchExpressionAutocomplete"
+            ref={menuRef}
+            role="listbox"
+            style={autocompleteStyle}
+          >
+            {completion.filtered.slice(0, 8).map((suggestion) => (
+              <button
+                key={`${suggestion.value}:${suggestion.label}`}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  applySuggestion(suggestion);
+                }}
+                role="option"
+                title={`${suggestion.label} ${suggestion.detail ?? ""}`.trim()}
+                type="button"
+              >
+                <span title={suggestion.label}>{suggestion.label}</span>
+                {suggestion.detail ? <small title={suggestion.detail}>{suggestion.detail}</small> : null}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )
+        : null}
       {showMatchCount && agents && (
         <span className={parsed.error ? "searchExpressionMeta errorText" : "searchExpressionMeta"} title={matchTitle}>
           {verificationMessage ?? (parsed.error ? parsed.error : `${matchedAgents.length}/${agents.length}`)}

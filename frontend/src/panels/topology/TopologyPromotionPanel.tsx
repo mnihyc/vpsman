@@ -368,10 +368,14 @@ export function TopologyPromotionPanel({
               </button>
             ) : null}
           </div>
-          <ActionFeedback message={actionError} tone="danger" />
         </div>
       </div>
       <div className="promotionWorkflow">
+        <ActionFeedback
+          className="localActionFeedback"
+          message={actionError}
+          tone="danger"
+        />
         <ConfirmationPrompt
           confirmLabel="Save managed plan"
           detail={telemetryPromotionSnapshot?.detail ?? ""}

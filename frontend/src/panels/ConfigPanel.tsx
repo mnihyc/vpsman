@@ -8,7 +8,10 @@ import {
   type ReactNode,
 } from "react";
 import { FileSliders, Play, RefreshCw, ServerCog, Trash2, X } from "lucide-react";
-import { ActionFeedback } from "../components/ActionFeedback";
+import {
+  ActionFeedback,
+  type ActionFeedbackTone,
+} from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -257,9 +260,15 @@ export function ConfigPanel({
   const rulesSelectorPrefill = activeSubpage.startsWith("rules:id:")
     ? `id:${decodeURIComponent(activeSubpage.slice("rules:id:".length))}`
     : null;
-  const configFeedbackMessage =
-    actionError ?? error ?? (loading ? "Refreshing runtime config state" : null);
-  const configFeedbackTone = actionError || error ? "danger" : "progress";
+  const configPageFeedbackMessage =
+    error ?? (loading ? "Refreshing runtime config state" : null);
+  const configPageFeedbackTone = error ? "danger" : "progress";
+  const configActionFeedbackMessage =
+    subpage === "bulk" || subpage === "single" ? actionError : null;
+
+  useEffect(() => {
+    setActionError(null);
+  }, [subpage]);
 
   return (
     <section className="workspace singleColumn configWorkspace">
@@ -280,11 +289,16 @@ export function ConfigPanel({
               <span>Refresh</span>
             </button>
             <ActionFeedback
-              message={configFeedbackMessage}
-              tone={configFeedbackTone}
+              message={configPageFeedbackMessage}
+              tone={configPageFeedbackTone}
             />
           </div>
         </div>
+        <ActionFeedback
+          className="localActionFeedback configActionFeedback"
+          message={configActionFeedbackMessage}
+          tone="danger"
+        />
         {subpage === "overview" && (
           <ConfigOverview
             agents={agents}
@@ -2477,7 +2491,11 @@ function BulkConfigApply({
         >
           Preview changes
         </button>
-        {reviewStatus && <span className="formHint">{reviewStatus}</span>}
+        <ActionFeedback
+          className="localActionFeedback configReviewFeedback"
+          message={reviewStatus}
+          tone="progress"
+        />
         <BulkPatchChangeSummary
           patchMode={patchMode}
           patchName={
@@ -2601,9 +2619,11 @@ function BulkConfigApply({
                 </button>
               }
             />
-            {patchGeneratorStatus ? (
-              <span className="fleetPolicyStatus">{patchGeneratorStatus}</span>
-            ) : null}
+            <ActionFeedback
+              className="localActionFeedback patchGeneratorActionFeedback"
+              message={patchGeneratorStatus}
+              tone="success"
+            />
             {patchGeneratorEditor ? (
               <section
                 className="compactForm patchGeneratorEditor"
@@ -2938,6 +2958,9 @@ function SingleVpsConfig({
   const overrideReady = Boolean(
     singleTarget && privilegeMaterial && baseHash && overrideToml.trim(),
   );
+  const reviewFeedbackTone = reviewStatus?.startsWith("Patch preview ready")
+    ? "success"
+    : "progress";
 
   useEffect(() => {
     clientIdRef.current = clientId;
@@ -3407,7 +3430,11 @@ function SingleVpsConfig({
               rows={14}
               value={overrideToml}
             />
-            {reviewStatus && <span className="formHint">{reviewStatus}</span>}
+            <ActionFeedback
+              className="localActionFeedback configReviewFeedback"
+              message={reviewStatus}
+              tone={reviewFeedbackTone}
+            />
             <PrivilegeVaultBox
               labelPrefix="Runtime config apply"
               lastPayloadHash={overrideValidation?.payloadHashHex ?? null}
@@ -3902,6 +3929,7 @@ function VpsRulesPanel({
   const [reviewPromptOpen, setReviewPromptOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
+  const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
   const agentNameById = useMemo(
     () =>
       new Map(
@@ -4172,13 +4200,19 @@ function VpsRulesPanel({
     return values;
   }
 
+  function setRuleStatus(message: string, tone: ActionFeedbackTone) {
+    setStatus(message);
+    setStatusTone(tone);
+  }
+
   async function dryRun(operation: "upsert" | "unset") {
     setPending(true);
     setReviewPromptOpen(false);
-    setStatus(
+    setRuleStatus(
       operation === "upsert"
         ? "dry-running set values"
         : "dry-running unset values",
+      "progress",
     );
     try {
       const values = operation === "upsert" ? parseSetValues() : {};
@@ -4205,14 +4239,16 @@ function VpsRulesPanel({
             }
           : null,
       );
-      setStatus(
+      setRuleStatus(
         nextPreview.changed_row_count === 0
           ? `No changes detected across ${nextPreview.matched_vps_count} matched VPSs`
           : `${operation === "upsert" ? "set" : "unset"} preview found ${nextPreview.changed_row_count} changes across ${nextPreview.matched_vps_count} matched VPSs`,
+        nextPreview.changed_row_count === 0 ? "warning" : "success",
       );
     } catch (error) {
-      setStatus(
+      setRuleStatus(
         error instanceof Error ? error.message : "VPS rules dry-run failed",
+        "danger",
       );
       setReviewSnapshot(null);
     } finally {
@@ -4223,15 +4259,16 @@ function VpsRulesPanel({
   async function applyReview() {
     const snapshot = reviewSnapshot;
     if (!snapshot) {
-      setStatus("Run dry-run before applying VPS rules");
+      setRuleStatus("Run dry-run before applying VPS rules", "warning");
       return;
     }
     if (snapshot.preview.changed_row_count === 0) {
-      setStatus("No changes detected; Apply is disabled.");
+      setRuleStatus("No changes detected; Apply is disabled.", "warning");
       setReviewSnapshot(null);
       return;
     }
     setPending(true);
+    setRuleStatus("applying VPS rule changes", "progress");
     try {
       const rawPreview =
         snapshot.operation === "upsert"
@@ -4250,11 +4287,15 @@ function VpsRulesPanel({
       const nextPreview = buildOperatorVpsRulesPreview(rawPreview);
       setPreview(nextPreview);
       setReviewSnapshot(null);
-      setStatus(`applied ${nextPreview.changed_row_count} VPS rule changes`);
+      setRuleStatus(
+        `applied ${nextPreview.changed_row_count} VPS rule changes`,
+        "success",
+      );
       setReviewPromptOpen(false);
     } catch (error) {
-      setStatus(
+      setRuleStatus(
         error instanceof Error ? error.message : "VPS rules apply failed",
+        "danger",
       );
     } finally {
       setPending(false);
@@ -4622,7 +4663,11 @@ function VpsRulesPanel({
             preview={preview}
           />
         ) : null}
-        {status && <small className="fleetPolicyStatus">{status}</small>}
+        <ActionFeedback
+          className="localActionFeedback vpsRulesActionFeedback"
+          message={status}
+          tone={statusTone}
+        />
       </section>
       <ConfirmationPrompt
         confirmLabel={

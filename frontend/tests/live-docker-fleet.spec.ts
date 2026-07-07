@@ -807,7 +807,7 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
     .getByRole("button", { name: "Create rule" })
     .click();
   await expect(
-    webhooks.locator(".fleetPolicyStatus", {
+    webhooks.locator(".fleetPolicyActionFeedback.actionFeedbackSuccess", {
       hasText: "saved docker-fleet-q2-capacity",
     }),
   ).toBeVisible({ timeout: 30_000 });
@@ -872,7 +872,7 @@ async function exerciseExpressionWebhooks(page: Page, projectName: string) {
     .selectOption("delivered");
   await webhooks.getByRole("button", { name: "Review rotation" }).click();
   await expect(
-    webhooks.locator(".fleetPolicyStatus", {
+    webhooks.locator(".fleetPolicyActionFeedback.actionFeedbackSuccess", {
       hasText: "0 matched / 0 deleted",
     }),
   ).toBeVisible({ timeout: 30_000 });

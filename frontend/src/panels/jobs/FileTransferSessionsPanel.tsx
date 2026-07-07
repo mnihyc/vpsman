@@ -1,6 +1,7 @@
 import { AlertTriangle, Database, Download, ExternalLink, FileArchive, RefreshCw, RotateCcw, Upload, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ArtifactDownloadMode } from "../../artifactDownload";
+import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import {
   ConsoleDataGrid,
@@ -703,10 +704,14 @@ export function FileTransferSessionsPanel({
               : "No local file selected"}
           </span>
           <span>
-            {quickUploadError ??
-              `Target ${quickUploadTargetClientId ? clientLabel(quickUploadTargetClientId) : "not selected"}`}
+            {`Target ${quickUploadTargetClientId ? clientLabel(quickUploadTargetClientId) : "not selected"}`}
           </span>
         </div>
+        <ActionFeedback
+          className="localActionFeedback transferQuickUploadFeedback"
+          message={quickUploadError}
+          tone="danger"
+        />
       </section>
       <div className="handoffBulkBar">
         <span className="historyPrimary">

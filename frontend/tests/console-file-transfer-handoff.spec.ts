@@ -94,6 +94,15 @@ test("starts the default upload flow in resumable dispatch", async ({ page }, te
   await openConsoleSubpage(page, "Remote Operations", "Transfers");
 
   const panel = page.locator(".fleetPanel", { hasText: "File transfer sessions" });
+  await activate(panel.getByRole("button", { name: "Upload", exact: true }));
+  await expect(
+    panel.locator(".transferQuickUploadFeedback.actionFeedbackDanger"),
+  ).toContainText("Choose a local file before uploading");
+  await expect(
+    panel.locator(".transferQuickUploadStatus", {
+      hasText: "Choose a local file before uploading",
+    }),
+  ).toHaveCount(0);
   const payload = Buffer.from("quick upload payload");
   await panel.getByLabel("Transfer upload local file").setInputFiles({
     name: "quick-upload.bin",

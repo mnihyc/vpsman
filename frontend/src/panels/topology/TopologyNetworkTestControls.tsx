@@ -487,16 +487,17 @@ export function TopologyNetworkTestControls({
         </div>
         <div className="headerActionStack">
           <ShieldCheck size={20} />
-          <ActionFeedback
-            message={networkTestFeedbackMessage}
-            tone={actionError ? "danger" : "progress"}
-          />
         </div>
       </div>
       <form
         className="dispatchForm topologyNetworkTestForm"
         onSubmit={(event) => event.preventDefault()}
       >
+        <ActionFeedback
+          className="localActionFeedback"
+          message={networkTestFeedbackMessage}
+          tone={actionError ? "danger" : "progress"}
+        />
         <div
           className="topologyNetworkReviewStrip"
           aria-label="Network test review contract"

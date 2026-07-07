@@ -80,7 +80,9 @@ async function chooseVpsBySearch(
   optionName: RegExp,
 ) {
   await root.getByRole("combobox", { name: label }).fill(query);
-  const option = root.getByRole("option", { name: optionName });
+  const option = root.page().locator(".vpsComboboxMenu").getByRole("option", {
+    name: optionName,
+  });
   await expect(option).toBeVisible();
   await option.click();
 }
@@ -170,6 +172,9 @@ test("exposes hover titles for truncated grid text and editable values", async (
     page.locator('input[data-test-tooltip-probe="true"]'),
   ).not.toHaveAttribute("title", /.+/);
   if (testInfo.project.name.includes("mobile")) {
+    await expect(
+      page.locator(".mobilePageMenu summary span"),
+    ).toHaveAttribute("title", /Fleet \/ Instances/);
     const mobileCard = fleetGrid.getByLabel(
       "VPS instance records mobile card agent-sfo-01",
     );
@@ -192,6 +197,76 @@ test("exposes hover titles for truncated grid text and editable values", async (
   const fleetSearch = page.getByRole("searchbox", { name: "Search fleet" });
   await fleetSearch.fill("edge-sfo-01");
   await expect(fleetSearch).toHaveAttribute("title", "edge-sfo-01");
+});
+
+test("keeps VPS combobox menus above clipped workflow panels", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "overflow escape for dense combobox menus is covered in desktop workflow panels",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Remote Operations", "Terminal");
+
+  const terminalPanel = page.locator(".terminalSessionsPanel");
+  const targetPicker = terminalPanel.getByRole("combobox", {
+    name: "New terminal target",
+  });
+  await targetPicker.fill("edge");
+
+  const menu = page.locator(".vpsComboboxMenu");
+  await expect(menu).toBeVisible();
+  await expect(terminalPanel.locator(".vpsComboboxMenu")).toHaveCount(0);
+  const edgeOption = menu.getByRole("option", { name: /edge-sfo-01/ });
+  await expect(edgeOption).toBeVisible();
+  await expect(edgeOption).toHaveAttribute("title", /edge-sfo-01.*agent-sfo-01/);
+});
+
+test("keeps search expression autocomplete above clipped workflow panels", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "overflow escape for dense expression autocomplete is covered in desktop workflow panels",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Automation", "Source templates");
+
+  const templatePanel = page.locator(".sourceTemplatePanel");
+  const templateRegistryGrid = templatePanel.getByLabel(
+    "Template registry data grid",
+  );
+  await activate(
+    templateRegistryGrid
+      .locator(".gridBody .gridRow")
+      .filter({ hasText: "shared:vnstat-json" })
+      .first(),
+  );
+  await activate(
+    templateRegistryGrid
+      .getByLabel("Template workflow actions for shared:vnstat-json")
+      .getByRole("button", { name: "Assign" }),
+  );
+
+  const drawer = templatePanel.getByLabel("shared:vnstat-json", {
+    exact: true,
+  });
+  const targetExpression = drawer.getByRole("searchbox", {
+    name: "Template assignment target expression",
+  });
+  await targetExpression.fill("provider:");
+
+  const autocomplete = page.locator(".searchExpressionAutocomplete");
+  await expect(autocomplete).toBeVisible();
+  await expect(drawer.locator(".searchExpressionAutocomplete")).toHaveCount(0);
+  const providerOption = autocomplete.getByRole("option", {
+    name: /^provider:alpha$/,
+  });
+  await expect(providerOption).toBeVisible();
+  await expect(providerOption).toHaveAttribute("title", "provider:alpha");
 });
 
 test("renders an operational cloud-console fleet workspace", async ({
@@ -1040,7 +1115,12 @@ test("supports Config VPS Rules dry-run, confirm, and explicit unset", async ({
   });
   await expect(applyPrompt).toBeVisible();
   await applyPrompt.getByRole("button", { name: "Apply 1 change" }).click();
-  await expect(page.getByText("applied 1 VPS rule changes")).toBeVisible();
+  await expect(
+    page.locator(".vpsRulesActionFeedback.actionFeedbackSuccess"),
+  ).toContainText("applied 1 VPS rule changes");
+  await expect(
+    page.locator(".vpsRulesWorkspace > .fleetPolicyStatus"),
+  ).toHaveCount(0);
 
   await editor.getByRole("button", { name: "Unset values" }).click();
   await checkControl(editor.getByLabel("Unset traffic.quota.total"));
@@ -2074,6 +2154,12 @@ test("manages template assignments from automation source templates", async ({
     selector_expression: "(provider:alpha && country:US) || id:agent-fra-02",
     target_client_ids: ["agent-fra-02", "agent-sfo-01"],
   });
+  await expect(
+    templatePanel.locator("> .sectionHeader .actionFeedback"),
+  ).toHaveCount(0);
+  await expect(
+    templatePanel.locator(".actionDrawer .sourceTemplateActionFeedback.actionFeedbackSuccess"),
+  ).toContainText("template assignments evaluated");
 });
 
 test("keeps source template assignment review while unlocking privilege inline", async ({
@@ -2182,6 +2268,14 @@ test("prefills registered agent update shortcuts into dispatch", async ({
   await expect(
     page.getByText("Latest release has no rollback artifact."),
   ).toBeVisible();
+  await activate(page.getByRole("button", { name: "Register release" }));
+  await activate(page.getByRole("button", { name: "Review release" }));
+  await expect(
+    page.locator(".releaseActionFeedback.actionFeedbackDanger"),
+  ).toContainText("Artifact URL must use https://");
+  await expect(
+    page.locator(".agentReleasesPanel .inlineError"),
+  ).toHaveCount(0);
   await expect(
     shortcuts.getByRole("button", { name: "Rollback" }),
   ).toBeDisabled();
@@ -2233,9 +2327,11 @@ test("renders patch generators and submits explicit runtime config patch modes",
   await bulk
     .getByLabel("Patch generator", { exact: true })
     .selectOption({ label: "Autonomous updater disabled" });
-  await expect(bulk.getByLabel("Patch generator values JSON")).toHaveValue(
+  const generatorValues = bulk.getByLabel("Patch generator values JSON");
+  await expect(generatorValues).toHaveValue(
     /github\.com\/mnihyc\/vpsman\/releases\/latest\/download\/version\.json/,
   );
+  const validGeneratorValues = await generatorValues.inputValue();
   await bulk
     .getByRole("searchbox", { name: "Bulk patch target expression" })
     .fill("id:agent-sfo-01");
@@ -2243,6 +2339,15 @@ test("renders patch generators and submits explicit runtime config patch modes",
     page.getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ }),
   ).toBeVisible();
   await page.keyboard.press("Enter");
+  await generatorValues.fill("{");
+  await activate(bulk.getByRole("button", { name: "Preview changes" }));
+  await expect(
+    page.locator(".configWorkspace > .fleetPanel > .sectionHeader .actionFeedbackDanger"),
+  ).toHaveCount(0);
+  await expect(
+    page.locator(".configActionFeedback.actionFeedbackDanger"),
+  ).toBeVisible();
+  await generatorValues.fill(validGeneratorValues);
   await activate(bulk.getByRole("button", { name: "Preview changes" }));
   await expect(
     bulk.getByLabel("Rendered bulk runtime config patch TOML"),
@@ -2351,6 +2456,14 @@ test("uses an exact VPS combobox for single config jobs", async ({
   await expect(page.getByLabel("One-VPS config override guard")).toContainText(
     "update",
   );
+  await expect(
+    page.locator(".configReviewFeedback.actionFeedbackSuccess"),
+  ).toContainText("Patch preview ready");
+  await expect(
+    page.locator(".singleConfigPatchPane .formHint", {
+      hasText: "Patch preview ready",
+    }),
+  ).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Apply patch" })).toBeEnabled();
 });
 

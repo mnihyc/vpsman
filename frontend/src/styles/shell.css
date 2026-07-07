@@ -790,17 +790,14 @@ nav {
 }
 
 .searchExpressionAutocomplete {
-  position: absolute;
-  z-index: 50;
-  top: calc(100% + 4px);
-  left: 28px;
-  right: 8px;
+  position: fixed;
+  z-index: var(--z-dropdown);
   display: grid;
-  max-height: 178px;
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
+  box-sizing: border-box;
   box-shadow: 0 8px 20px rgba(60, 64, 67, 0.18);
   padding: 4px;
 }
@@ -898,13 +895,9 @@ nav {
 }
 
 .vpsComboboxMenu {
-  position: absolute;
-  z-index: 70;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
+  position: fixed;
+  z-index: var(--z-dropdown);
   display: grid;
-  max-height: 240px;
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 8px;

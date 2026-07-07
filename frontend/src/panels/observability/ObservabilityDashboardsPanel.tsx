@@ -12,6 +12,10 @@ import {
 import { useMemo, useState } from "react";
 import { ConsoleStatusBadge } from "../../components/ConsoleLayout";
 import {
+  ActionFeedback,
+  type ActionFeedbackTone,
+} from "../../components/ActionFeedback";
+import {
   TimeSeriesChart,
   type TimeSeriesChartLine,
 } from "../../components/TimeSeriesChart";
@@ -135,6 +139,7 @@ export function ObservabilityDashboardsPanel({
   const [selectedSection, setSelectedSection] =
     useState<DashboardSectionId>("widgets");
   const [status, setStatus] = useState<string | null>(null);
+  const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
   const selectedPreset =
     dashboardPresets.find((preset) => preset.id === selectedId) ??
     dashboardPresets[0];
@@ -156,6 +161,11 @@ export function ObservabilityDashboardsPanel({
     [dashboardRange, dashboardScope, overview, preferences, selectedPreset],
   );
 
+  function setDashboardStatus(message: string, tone: ActionFeedbackTone) {
+    setStatus(message);
+    setStatusTone(tone);
+  }
+
   function exportDashboard() {
     const payload = JSON.stringify(exportPayload, null, 2);
     const blob = new Blob([payload], { type: "application/json" });
@@ -165,7 +175,7 @@ export function ObservabilityDashboardsPanel({
     anchor.download = `vpsman-${selectedPreset.id}-dashboard.json`;
     anchor.click();
     URL.revokeObjectURL(url);
-    setStatus(`Exported ${selectedPreset.label}`);
+    setDashboardStatus(`Exported ${selectedPreset.label}`, "success");
   }
 
   async function copyPresetLink() {
@@ -175,10 +185,13 @@ export function ObservabilityDashboardsPanel({
     url.searchParams.set("window", window);
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(url.toString());
-      setStatus(`Copied ${selectedPreset.label} link`);
+      setDashboardStatus(`Copied ${selectedPreset.label} link`, "success");
       return;
     }
-    setStatus("Clipboard is unavailable; use export JSON for handoff.");
+    setDashboardStatus(
+      "Clipboard is unavailable; use export JSON for handoff.",
+      "warning",
+    );
   }
 
   return (
@@ -418,9 +431,11 @@ export function ObservabilityDashboardsPanel({
                 </small>
               </span>
             </div>
-            {status ? (
-              <small className="dashboardManagerStatus">{status}</small>
-            ) : null}
+            <ActionFeedback
+              className="localActionFeedback dashboardActionFeedback"
+              message={status}
+              tone={statusTone}
+            />
           </section>
         )}
       </div>

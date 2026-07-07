@@ -347,13 +347,14 @@ export function TopologyOspfUpdateControls({
         </div>
         <div className="headerActionStack">
           <ShieldCheck size={20} />
-          <ActionFeedback
-            message={ospfFeedbackMessage}
-            tone={actionError ? "danger" : "progress"}
-          />
         </div>
       </div>
       <div className="dispatchForm">
+        <ActionFeedback
+          className="localActionFeedback"
+          message={ospfFeedbackMessage}
+          tone={actionError ? "danger" : "progress"}
+        />
         <div className="dispatchControls">
           <label>
             <span>Update plan</span>

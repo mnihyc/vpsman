@@ -201,9 +201,10 @@ export function SchedulesPanel({
     selectorExpression.trim().length > 0 &&
     !selectorParse.error;
   const status = `${schedules.length} schedules`;
-  const schedulesFeedbackMessage =
-    actionError ?? error ?? (loading ? "Loading schedules" : null);
-  const schedulesFeedbackTone = actionError || error ? "danger" : "progress";
+  const schedulesPageFeedbackMessage =
+    error ?? (loading ? "Loading schedules" : null);
+  const schedulesPageFeedbackTone = error ? "danger" : "progress";
+  const schedulesActionFeedbackMessage = actionError;
   const confirmationNextRun =
     pendingScheduleSnapshot?.nextRun ?? nextRuns[0] ?? null;
 
@@ -985,8 +986,8 @@ export function SchedulesPanel({
               </button>
             </div>
             <ActionFeedback
-              message={schedulesFeedbackMessage}
-              tone={schedulesFeedbackTone}
+              message={schedulesPageFeedbackMessage}
+              tone={schedulesPageFeedbackTone}
             />
           </div>
         </div>
@@ -1151,6 +1152,11 @@ export function SchedulesPanel({
           title={editingScheduleId ? "Modify schedule" : "Create schedule"}
         >
           <form className="dispatchForm" onSubmit={submitSchedule}>
+            <ActionFeedback
+              className="localActionFeedback scheduleActionFeedback"
+              message={schedulesActionFeedbackMessage}
+              tone="danger"
+            />
             <label>
               <span>Name</span>
               <input

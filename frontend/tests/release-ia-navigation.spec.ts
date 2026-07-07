@@ -2992,6 +2992,12 @@ test("observability alert policy editor is a focused create flow", async ({
   await activate(editor.getByRole("button", { name: "Preview matches" }));
   await expect(editor).toContainText("Matches 1 VPS");
   await expect(editor).toContainText("Match preview");
+  await expect(
+    page.locator(".fleetPolicyActionFeedback.actionFeedbackSuccess"),
+  ).toContainText("dry-run matched 1 VPS");
+  await expect(
+    page.locator(".observabilityAlertsPanel > .fleetPolicyStatus"),
+  ).toHaveCount(0);
   await activate(editor.getByRole("button", { name: "Create policy" }));
   const confirmation = page.getByLabel("Confirm alert policy save");
   await expect(confirmation).toBeVisible();
@@ -3543,6 +3549,13 @@ test("observability dashboards manages read-only dashboard presets", async ({
   await expect(
     panel.getByLabel("Dashboard copy and export details"),
   ).toContainText("Read-only");
+  const downloadPromise = page.waitForEvent("download");
+  await panel.getByRole("button", { name: "Export JSON" }).click();
+  await downloadPromise;
+  await expect(
+    panel.locator(".dashboardActionFeedback.actionFeedbackSuccess"),
+  ).toContainText("Exported Group posture");
+  await expect(panel.locator(".dashboardManagerStatus")).toHaveCount(0);
   await expect(
     panel.getByRole("button", {
       name: /Open terminal|Run backup|Dispatch|Apply|Delete|Restart|Stop|Create/,
@@ -5681,7 +5694,9 @@ async function chooseVpsBySearch(
   optionName: RegExp,
 ) {
   await root.getByRole("combobox", { name: label }).fill(query);
-  const option = root.getByRole("option", { name: optionName });
+  const option = root.page().locator(".vpsComboboxMenu").getByRole("option", {
+    name: optionName,
+  });
   await expect(option).toBeVisible();
   await option.click();
 }

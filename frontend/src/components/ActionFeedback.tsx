@@ -1,4 +1,9 @@
-type ActionFeedbackTone = "danger" | "info" | "progress" | "success" | "warning";
+export type ActionFeedbackTone =
+  | "danger"
+  | "info"
+  | "progress"
+  | "success"
+  | "warning";
 
 const toneClass: Record<ActionFeedbackTone, string> = {
   danger: "actionFeedbackDanger",
