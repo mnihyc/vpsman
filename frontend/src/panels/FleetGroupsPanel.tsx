@@ -1533,18 +1533,13 @@ function BulkTagPanel({
         </button>
         <ActionFeedback
           className="localActionFeedback bulkTagPreviewActionFeedback"
-          message={previewStatus}
-          tone="progress"
+          message={
+            previewError
+              ? `Preview failed. ${previewError}. Retry review; final apply stays locked until a fresh server preview succeeds.`
+              : previewStatus
+          }
+          tone={previewError ? "danger" : "progress"}
         />
-        {previewError && (
-          <div className="bulkPreviewFailure" role="alert">
-            <X size={15} />
-            <span>
-              <strong>Preview failed.</strong> {previewError}. Retry review; final apply stays locked until a fresh
-              server preview succeeds.
-            </span>
-          </div>
-        )}
       </div>
       {preview && (
         <section className="bulkTagPreviewPanel" aria-label="Bulk tag target preview">

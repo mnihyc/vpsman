@@ -55,17 +55,29 @@ test("keeps action feedback in dedicated local containers", () => {
   );
   expect(jobsPanel).toContain("approvalActionFeedback");
   expect(jobsPanel).toContain("jobDetailActionFeedback");
+  expect(jobsPanel).not.toContain('className="vpsDetailNotice warning"');
+  expect(jobsPanel).toContain("jobHistoryFreshnessFeedback");
 
   const fleetWorkspace = source("panels/FleetWorkspace.tsx");
   expect(fleetWorkspace).not.toMatch(
     /apiError\s*\?\?\s*\(\s*scopeActive\s*\?/,
   );
+  expect(fleetWorkspace).not.toContain(
+    '{apiError ? "API unavailable" : "Live control-plane inventory"}',
+  );
+  expect(fleetWorkspace).not.toMatch(
+    /const status\s*=\s*error\s*\?\?[\s\S]{0,260}bulkOutcomeSummary\(progress\)/,
+  );
+  expect(fleetWorkspace).toContain("<span>Live control-plane inventory</span>");
+  expect(fleetWorkspace).toContain("networkInterfacesActionFeedback");
 
   const vpsDetailPanel = source("panels/VpsDetailPanel.tsx");
   expect(vpsDetailPanel).not.toMatch(
     /apiError\s*\?\?\s*\(\s*loading\s*\?/,
   );
+  expect(vpsDetailPanel).not.toContain('className="vpsDetailNotice critical"');
   expect(vpsDetailPanel).toContain("ActionFeedback");
+  expect(vpsDetailPanel).toContain("vpsDetailActionFeedback");
 
   const processSupervisorPanel = source(
     "panels/jobs/ProcessSupervisorInventoryPanel.tsx",
@@ -80,6 +92,7 @@ test("keeps action feedback in dedicated local containers", () => {
   expect(fleetGroupsPanel).not.toMatch(
     /<span>\{previewStatus\s*\?\?\s*\(preview\s*\?/,
   );
+  expect(fleetGroupsPanel).not.toContain("bulkPreviewFailure");
   expect(fleetGroupsPanel).toContain("bulkTagPreviewActionFeedback");
 
   const terminalSessionsPanel = source(
@@ -146,5 +159,49 @@ test("keeps action feedback in dedicated local containers", () => {
 
   const preferencesPanel = source("panels/PreferencesPanel.tsx");
   expect(preferencesPanel).not.toContain('<p className="preferencesError"');
+  expect(preferencesPanel).not.toContain('<p className="preferencesNotice">');
   expect(preferencesPanel).toContain("preferencesActionFeedback");
+  expect(preferencesPanel).toContain("preferencesSelectionActionFeedback");
+
+  const topologyPanel = source("panels/TopologyPanel.tsx");
+  expect(topologyPanel).not.toMatch(
+    /const status\s*=\s*actionError\s*\?\?\s*error\s*\?\?/,
+  );
+  expect(topologyPanel).not.toMatch(
+    /status\s*===\s*"Loading"\s*\?\s*"Loading tunnel plans"/,
+  );
+  expect(topologyPanel).not.toMatch(
+    /toolbarActions=\{\s*automationBulkStatus\s*\?/,
+  );
+  expect(topologyPanel).toContain("topologyPlanActionFeedback");
+  expect(topologyPanel).toContain("topologyAutomationActionFeedback");
+
+  const backupHistoryTables = source("panels/backups/BackupHistoryTables.tsx");
+  expect(backupHistoryTables).not.toMatch(
+    /if\s*\(error\)\s*\{[\s\S]{0,180}<div className="emptyState"/,
+  );
+  expect(backupHistoryTables).not.toMatch(/\berror:\s*string\s*\|\s*null/);
+
+  const backupsPanel = source("panels/BackupsPanel.tsx");
+  expect(backupsPanel).not.toMatch(
+    /<BackupHistoryTables[\s\S]{0,360}\berror=\{error\}/,
+  );
+
+  const jobDispatchPanel = source("panels/JobDispatchPanel.tsx");
+  expect(jobDispatchPanel).not.toMatch(
+    /const status\s*=\s*visibleDispatchProgress/,
+  );
+  expect(jobDispatchPanel).toMatch(
+    /\{!dispatchPromptOpen\s*&&\s*visibleDispatchProgress\s*&&/,
+  );
+
+  const topologyNetworkTests = source(
+    "panels/topology/TopologyNetworkTestControls.tsx",
+  );
+  expect(topologyNetworkTests).not.toMatch(
+    /const status\s*=\s*visibleJobProgress/,
+  );
+  expect(topologyNetworkTests).toMatch(
+    /\{networkSnapshot\s*===\s*null\s*&&\s*visibleJobProgress\s*&&/,
+  );
 });

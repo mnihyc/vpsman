@@ -754,9 +754,11 @@ export function PreferencesPanel({
                   <span>Clear local selections</span>
                 </button>
               </div>
-              {localSelectionMessage && (
-                <p className="preferencesNotice">{localSelectionMessage}</p>
-              )}
+              <ActionFeedback
+                className="localActionFeedback preferencesSelectionActionFeedback"
+                message={localSelectionMessage}
+                tone="success"
+              />
             </PreferenceGroup>
           </PreferenceSection>
           )}

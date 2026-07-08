@@ -3830,6 +3830,10 @@
   min-width: 0;
 }
 
+.networkInterfacesPanel .networkInterfacesActionFeedback.localActionFeedback {
+  margin: 6px 0 0;
+}
+
 .interfaceActions {
   display: flex;
   flex-wrap: wrap;

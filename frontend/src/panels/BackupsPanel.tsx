@@ -2104,7 +2104,6 @@ export function BackupsPanel({
             backupPolicies={backupPolicies}
             backups={backups}
             clientLabel={clientLabel}
-            error={error}
             migrationLinks={migrationLinks}
             onDownloadArtifact={(artifact, backup) =>
               void downloadArtifactPackage(artifact, backup)
@@ -2130,7 +2129,6 @@ export function BackupsPanel({
             backupPolicies={backupPolicies}
             backups={backups}
             clientLabel={clientLabel}
-            error={error}
             migrationLinks={migrationLinks}
             onCreatePolicy={
               backupSubpage === "policies"

@@ -172,15 +172,11 @@ export function TopologyNetworkTestControls({
     : lastJob
       ? `${actionLabel(lastAction)} ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
       : "No local network test run in this view";
-  const status = visibleJobProgress
-    ? `${actionLabel(lastAction)} result for job ${shortId(visibleJobProgress.jobId)}`
-    : lastJob
-      ? `${actionLabel(lastAction)} job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
-      : selectedPlan && !selectedPlan.enabled
-        ? "Plan disabled; inspect only"
-        : privilegeMaterial
-          ? "Ready"
-          : "Inspect available; unlock for probe/speed";
+  const networkHeaderStatus = selectedPlan && !selectedPlan.enabled
+    ? "Plan disabled; inspect only"
+    : privilegeMaterial
+      ? "Ready"
+      : "Inspect available; unlock for probe/speed";
   const networkTestFeedbackMessage =
     actionError ?? (reviewPending ? `Preparing ${actionLabel(lastAction).toLowerCase()} review` : null);
 
@@ -483,7 +479,7 @@ export function TopologyNetworkTestControls({
       <div className="sectionHeader">
         <div>
           <h2>Network tests</h2>
-          <span>{status}</span>
+          <span>{networkHeaderStatus}</span>
         </div>
         <div className="headerActionStack">
           <ShieldCheck size={20} />
@@ -831,7 +827,7 @@ export function TopologyNetworkTestControls({
           }
           tone="normal"
         />
-        {visibleJobProgress && (
+        {networkSnapshot === null && visibleJobProgress && (
           <ExecutionResultPanel
             loading={jobProgress !== null}
             onClearResults={clearExecutionResults}

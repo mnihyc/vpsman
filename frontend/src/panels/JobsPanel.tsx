@@ -8,7 +8,6 @@ import {
 import {
   Download,
   ExternalLink,
-  History,
   Server,
   ShieldCheck,
   TerminalSquare,
@@ -1448,16 +1447,11 @@ export function JobsPanel({
                   ))}
                 </span>
               </div>
-              {historicalJobsBanner ? (
-                <div
-                  className="vpsDetailNotice warning"
-                  aria-label="Job history freshness"
-                  role="status"
-                >
-                  <History size={16} />
-                  <span>{historicalJobsBanner}</span>
-                </div>
-              ) : null}
+              <ActionFeedback
+                className="localActionFeedback jobHistoryFreshnessFeedback"
+                message={historicalJobsBanner}
+                tone="warning"
+              />
               <ConsoleDataGrid
                 actions={[
                   {

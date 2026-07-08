@@ -24,6 +24,10 @@ import {
   type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
+import {
+  ActionFeedback,
+  type ActionFeedbackTone,
+} from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { usePanelDisplaySettings } from "../panelDisplay";
@@ -262,6 +266,8 @@ export function TopologyPanel({
   const [automationBulkStatus, setAutomationBulkStatus] = useState<
     string | null
   >(null);
+  const [automationBulkFeedbackTone, setAutomationBulkFeedbackTone] =
+    useState<ActionFeedbackTone>("info");
   const [tunnelPlanTogglePending, setTunnelPlanTogglePending] = useState(false);
   const [tunnelPlanSaveSnapshot, setTunnelPlanSaveSnapshot] =
     useState<TunnelPlanSaveSnapshot | null>(null);
@@ -691,10 +697,10 @@ export function TopologyPanel({
     form.left_underlay.trim() &&
     form.right_underlay.trim() &&
     hasAddressSource(form);
-  const status =
-    actionError ??
-    error ??
-    (loading ? "Loading" : `${tunnelPlans.length} plans`);
+  const topologyPlanFeedbackMessage =
+    actionError ?? error ?? (loading ? "Loading tunnel plans" : null);
+  const topologyPlanFeedbackTone =
+    actionError || error ? "danger" : "progress";
   const tunnelPlanDraftKey = useMemo(
     () =>
       JSON.stringify({
@@ -913,15 +919,18 @@ export function TopologyPanel({
     <div className="workspaceGrid">
       {topologySubpage === "plans" && (
         <section className="fleetPanel tunnelPlansRegistryPanel">
+          <ActionFeedback
+            className="localActionFeedback topologyPlanActionFeedback"
+            message={topologyPlanFeedbackMessage}
+            tone={topologyPlanFeedbackTone}
+          />
           <ConsoleDataGrid
             actions={tunnelPlanActions}
             columns={tunnelPlanColumns}
             defaultPageSize={20}
             empty={
               <div className="emptyState compactEmpty">
-                {status === "Loading"
-                  ? "Loading tunnel plans"
-                  : "No tunnel plans"}
+                {loading ? "Loading tunnel plans" : "No tunnel plans"}
               </div>
             }
             getRowId={(plan) => plan.id}
@@ -1152,6 +1161,11 @@ export function TopologyPanel({
               </div>
             </div>
           ) : null}
+          <ActionFeedback
+            className="localActionFeedback topologyAutomationActionFeedback"
+            message={automationBulkStatus}
+            tone={automationBulkFeedbackTone}
+          />
           <ConsoleDataGrid
             actions={automationActions}
             columns={automationColumns}
@@ -1169,13 +1183,7 @@ export function TopologyPanel({
                 ? "Automation state"
                 : "Latency and auto OSPF"
             }
-            toolbarActions={
-              automationBulkStatus ? (
-                <span className="mutedCell">{automationBulkStatus}</span>
-              ) : (
-                <Route size={18} />
-              )
-            }
+            toolbarActions={<Route size={18} />}
           />
         </section>
       )}
@@ -2012,18 +2020,30 @@ export function TopologyPanel({
 
   async function applyAutomationBulk(rows: AutomationRow[], enabled: boolean) {
     if (!privilegeMaterial) {
+      setAutomationBulkFeedbackTone("danger");
       setAutomationBulkStatus("Privilege unlock required");
       onOpenPrivilegeUnlock();
       return;
     }
     const targets = rows.filter((row) => row.endpointCount > 0);
     if (targets.length === 0) {
+      setAutomationBulkFeedbackTone("danger");
       setAutomationBulkStatus("No endpoint targets selected");
       return;
     }
+    setAutomationBulkFeedbackTone("progress");
+    setAutomationBulkStatus(
+      `${enabled ? "Enabling" : "Disabling"} monitoring defaults on ${targets.length} VPS${targets.length === 1 ? "" : "s"}`,
+    );
     await runPanelAction(
       setAutomationBulkPending,
-      setAutomationBulkStatus,
+      (message) => {
+        if (message === null) {
+          return;
+        }
+        setAutomationBulkFeedbackTone("danger");
+        setAutomationBulkStatus(message);
+      },
       async () => {
         const targetClientIds = targets.map((target) => target.clientId);
         const selectorExpression =
@@ -2051,6 +2071,7 @@ export function TopologyPanel({
           toml,
           privilege_assertion: privilegeAssertion,
         });
+        setAutomationBulkFeedbackTone("success");
         setAutomationBulkStatus(
           `${enabled ? "Enabled" : "Disabled"} monitoring defaults on ${response.target_count} VPSs; ${response.sync_job_ids.length} sync jobs`,
         );

@@ -1311,15 +1311,14 @@ function FleetInstancesPanel({
       <div className="sectionHeader fleetInstancesHeader">
         <div>
           <h2>VPS instances</h2>
-          <span>
-            {apiError ? "API unavailable" : "Live control-plane inventory"}
-          </span>
+          <span>Live control-plane inventory</span>
         </div>
         <span className="sectionContext">
           {summary.online} live / {summary.total} total ·{" "}
           {formatConsoleStreamState(wsState)}
         </span>
       </div>
+      <ConsoleFreshnessBanner error={apiError} />
 
       <ConsoleDataGrid
         actions={actions}
@@ -8926,17 +8925,18 @@ function NetworkInterfacesPanel({
   snapshot: NetworkInterfacesSnapshot | null;
 }) {
   const live = selectedAgent ? agentDisplayState(selectedAgent).label === "Online" : false;
-  const status =
+  const networkInterfaceSummary = snapshot
+    ? `${snapshot.interfaces.length} interface${snapshot.interfaces.length === 1 ? "" : "s"}`
+    : privilegeReady
+      ? "No snapshot"
+      : "Privilege locked";
+  const networkInterfacesFeedbackMessage =
     error ??
     (pending
-      ? "Refreshing"
+      ? "Refreshing host interfaces"
       : progress
         ? bulkOutcomeSummary(progress)
-        : snapshot
-          ? `${snapshot.interfaces.length} interface${snapshot.interfaces.length === 1 ? "" : "s"}`
-          : privilegeReady
-            ? "No snapshot"
-            : "Privilege locked");
+        : null);
   const observed =
     typeof snapshot?.observed_unix === "number"
       ? formatCompactTime(new Date(snapshot.observed_unix * 1000).toISOString())
@@ -8947,10 +8947,15 @@ function NetworkInterfacesPanel({
       <div>
         <strong>Host interfaces</strong>
         <span>
-          {status}
+          {networkInterfaceSummary}
           {observed ? `; seen ${observed}` : ""}
           {payloadHash ? `; payload ${payloadHash.slice(0, 12)}` : ""}
         </span>
+        <ActionFeedback
+          className="localActionFeedback networkInterfacesActionFeedback"
+          message={networkInterfacesFeedbackMessage}
+          tone={error ? "danger" : "progress"}
+        />
         <div className="interfaceActions">
           <button
             className="secondaryAction compactAction"

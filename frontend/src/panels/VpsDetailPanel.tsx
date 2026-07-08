@@ -271,12 +271,11 @@ export function VpsDetailPanel({
           </div>
         </div>
 
-        {apiError ? (
-          <div className="vpsDetailNotice critical" role="status">
-            <AlertTriangle size={16} />
-            <span>{apiError}</span>
-          </div>
-        ) : null}
+        <ActionFeedback
+          className="localActionFeedback vpsDetailActionFeedback"
+          message={apiError}
+          tone="danger"
+        />
 
         <div
           className="vpsDetailResourceSummary"

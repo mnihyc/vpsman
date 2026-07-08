@@ -763,15 +763,7 @@ export function JobDispatchPanel({
       value: dispatchConfirmationForceUnprivileged ? "Forced best effort" : operationNeedsConfirmation ? "Privileged mutation" : "Standard",
     },
   ];
-  const status = visibleDispatchProgress
-    ? `Job ${shortId(visibleDispatchProgress.jobId)} result recorded`
-    : lastJob
-      ? `Job ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} targets`
-      : preview
-        ? `${preview.target_count} resolved targets`
-        : privilegeMaterial
-          ? "Ready"
-          : "Locked";
+  const dispatchHeaderStatus = privilegeMaterial ? "Ready" : "Locked";
   const dispatchFeedbackMessage = actionError ?? reviewStatus;
   const dispatchFeedbackTone = actionError ? "danger" : "progress";
 
@@ -1379,7 +1371,7 @@ export function JobDispatchPanel({
       <div className="sectionHeader">
         <div>
           <h2>{terminalSurface ? "Terminal review composer" : "Dispatch command"}</h2>
-          <span>{status}</span>
+          <span>{dispatchHeaderStatus}</span>
         </div>
         <div className="headerActionStack">
           {privilegeMaterial ? (
@@ -1746,7 +1738,7 @@ export function JobDispatchPanel({
           tone={dispatchConfirmationDestructive ? "danger" : "normal"}
         />
 
-        {visibleDispatchProgress && (
+        {!dispatchPromptOpen && visibleDispatchProgress && (
           <ExecutionResultPanel
             loading={dispatchProgress !== null}
             onClearResults={clearExecutionResults}

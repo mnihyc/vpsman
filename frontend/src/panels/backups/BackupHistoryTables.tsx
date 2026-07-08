@@ -31,7 +31,6 @@ export function BackupHistoryTables({
   backupPolicies,
   backups,
   clientLabel,
-  error,
   migrationLinks,
   onCreatePolicy,
   onDownloadArtifact,
@@ -46,7 +45,6 @@ export function BackupHistoryTables({
   backupPolicies: BackupPolicyRecord[];
   backups: BackupRequestRecord[];
   clientLabel: (clientId: string) => string;
-  error: string | null;
   migrationLinks: MigrationLinkRecord[];
   onCreatePolicy?: () => void;
   onDownloadArtifact?: (
@@ -62,15 +60,6 @@ export function BackupHistoryTables({
   onRetryBackup?: (backup: BackupRequestRecord) => void;
   restorePlans: RestorePlanRecord[];
 }) {
-  if (error) {
-    return (
-      <div className="emptyState">
-        <strong>{error}</strong>
-        <span>Backup request history is unavailable.</span>
-      </div>
-    );
-  }
-
   if (activeSubpage === "policies") {
     return (
       <BackupPoliciesTable
