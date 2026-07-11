@@ -1283,6 +1283,7 @@ async fn source_status_enriches_backup_and_update_runtime_readiness() {
                 paths: vec!["/srv/app".to_string()],
                 include_config: true,
                 follow_symlinks: false,
+                missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
                 status: "artifact_metadata_recorded".to_string(),
                 payload_hash: "6".repeat(64),
                 command_scope: "backup".to_string(),

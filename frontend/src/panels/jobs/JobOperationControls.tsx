@@ -159,6 +159,7 @@ function formatBytes(value: number): string {
 export function JobOperationEditor({
   backupIncludeConfig,
   backupFollowSymlinks,
+  backupSkipMissingPaths,
   backupPathsText,
   commandText,
   shellPty,
@@ -195,6 +196,7 @@ export function JobOperationEditor({
   processLimit,
   setBackupIncludeConfig,
   setBackupFollowSymlinks,
+  setBackupSkipMissingPaths,
   setBackupPathsText,
   setCommandText,
   setShellPty,
@@ -260,6 +262,7 @@ export function JobOperationEditor({
 }: {
   backupIncludeConfig: boolean;
   backupFollowSymlinks: boolean;
+  backupSkipMissingPaths: boolean;
   backupPathsText: string;
   commandText: string;
   shellPty: boolean;
@@ -296,6 +299,7 @@ export function JobOperationEditor({
   processLimit: number;
   setBackupIncludeConfig: (value: boolean) => void;
   setBackupFollowSymlinks: (value: boolean) => void;
+  setBackupSkipMissingPaths: (value: boolean) => void;
   setBackupPathsText: (value: string) => void;
   setCommandText: (value: string) => void;
   setShellPty: (value: boolean) => void;
@@ -754,7 +758,7 @@ export function JobOperationEditor({
 
   if (mode === "backup") {
     return (
-      <div className="operationNote compactOperation">
+      <div className="operationNote compactOperation backupOperation">
         <DatabaseBackup size={18} />
         <div>
           <strong>Backup artifact</strong>
@@ -770,25 +774,38 @@ export function JobOperationEditor({
             value={backupPathsText}
           />
         </label>
-        <label className="checkLine inlineCheck">
-          <input
-            checked={backupIncludeConfig}
-            onChange={(event) => setBackupIncludeConfig(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Include agent config</span>
-        </label>
-        <label
-          className="checkLine inlineCheck"
-          title="Default is off. Enable only when the backup should archive symlink target contents."
-        >
-          <input
-            checked={backupFollowSymlinks}
-            onChange={(event) => setBackupFollowSymlinks(event.target.checked)}
-            type="checkbox"
-          />
-          <span>Follow symlink targets</span>
-        </label>
+        <div className="backupOptionStrip" aria-label="Backup collection options">
+          <label className="checkLine inlineCheck">
+            <input
+              checked={backupIncludeConfig}
+              onChange={(event) => setBackupIncludeConfig(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Agent config</span>
+          </label>
+          <label
+            className="checkLine inlineCheck"
+            title="Default is off. Enable only when the backup should archive symlink target contents."
+          >
+            <input
+              checked={backupFollowSymlinks}
+              onChange={(event) => setBackupFollowSymlinks(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Follow symlinks</span>
+          </label>
+          <label
+            className="checkLine inlineCheck"
+            title="Continue only when a selected root does not exist on a target VPS. Unreadable paths and collection errors still fail that target."
+          >
+            <input
+              checked={backupSkipMissingPaths}
+              onChange={(event) => setBackupSkipMissingPaths(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Skip missing roots</span>
+          </label>
+        </div>
       </div>
     );
   }

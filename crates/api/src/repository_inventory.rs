@@ -11,6 +11,7 @@ use crate::repository::Repository;
 use crate::repository_jobs::{
     mark_active_targets_agent_lost_for_client_in_tx, skip_unstarted_queued_targets_for_client_in_tx,
 };
+use crate::repository_key_lifecycle::{lock_postgres_agent_key_lifecycle, public_key_sha256_hex};
 use crate::selector_expression::{agent_matches_selector_expression, parse_selector_expression};
 use crate::unix_now;
 
@@ -851,6 +852,7 @@ impl Repository {
             .map(str::to_string);
         match self {
             Self::Memory(memory) => {
+                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
                 let deleted_at = unix_now().to_string();
                 let already_hidden = {
                     let mut hidden = memory.hidden_clients.write().await;
@@ -868,7 +870,26 @@ impl Repository {
                 agents.retain(|agent| agent.id != client_id);
                 drop(agents);
                 anyhow::ensure!(found || already_hidden, "agent_not_found");
-                memory.client_public_keys.write().await.remove(client_id);
+                if let Some(public_key) = memory.client_public_keys.write().await.remove(client_id)
+                {
+                    if !public_key.is_empty() {
+                        let fingerprint = public_key_sha256_hex(&public_key);
+                        let mut revocations = memory.client_key_revocations.write().await;
+                        if !revocations
+                            .iter()
+                            .any(|record| record.public_key_sha256_hex == fingerprint)
+                        {
+                            revocations.push(ClientKeyRevocationView {
+                                id: Uuid::new_v4(),
+                                client_id: client_id.to_string(),
+                                public_key_sha256_hex: fingerprint,
+                                reason: Some("vps_deleted".to_string()),
+                                revoked_by: Some(operator.operator.id),
+                                created_at: deleted_at.clone(),
+                            });
+                        }
+                    }
+                }
                 let tunnel_delete_reason =
                     deleted_endpoint_tunnel_plan_reason(client_id, reason.as_deref());
                 let soft_deleted_tunnel_plan_count = {
@@ -941,9 +962,10 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_agent_key_lifecycle(&mut tx).await?;
                 let client_row = sqlx::query(
                     r#"
-                    SELECT process_incarnation_id
+                    SELECT process_incarnation_id, public_key
                     FROM clients
                     WHERE id = $1
                     FOR UPDATE
@@ -957,6 +979,24 @@ impl Repository {
                 };
                 let old_process_incarnation_id: Option<Uuid> =
                     client_row.try_get("process_incarnation_id")?;
+                let public_key: Vec<u8> = client_row.try_get("public_key")?;
+                if !public_key.is_empty() {
+                    sqlx::query(
+                        r#"
+                        INSERT INTO client_key_revocations (
+                            id, client_id, public_key_sha256_hex, reason, revoked_by
+                        )
+                        VALUES ($1, $2, $3, 'vps_deleted', $4)
+                        ON CONFLICT (public_key_sha256_hex) DO NOTHING
+                        "#,
+                    )
+                    .bind(Uuid::new_v4())
+                    .bind(client_id)
+                    .bind(public_key_sha256_hex(&public_key))
+                    .bind(operator.operator.id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
                 let row = sqlx::query(
                     r#"
                     UPDATE clients

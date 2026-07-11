@@ -1,13 +1,10 @@
-import {
-  presetPathsText,
-  type BackupPathPreset,
-} from "../../presets/backupPathPresets";
+import type { BackupPathPreset } from "../../presets/backupPathPresets";
 
 export function PathPresetButtons({
   onApply,
   presets,
 }: {
-  onApply: (value: string) => void;
+  onApply: (preset: BackupPathPreset) => void;
   presets: BackupPathPreset[];
 }) {
   return (
@@ -16,7 +13,7 @@ export function PathPresetButtons({
       {presets.map((preset) => (
         <button
           key={preset.label}
-          onClick={() => onApply(presetPathsText(preset.paths))}
+          onClick={() => onApply(preset)}
           title={preset.description}
           type="button"
         >

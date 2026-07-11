@@ -1306,6 +1306,7 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
                 paths: vec!["/etc/app.conf".to_string()],
                 include_config: false,
                 follow_symlinks: false,
+                missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
             },
         ),
         golden_vector(

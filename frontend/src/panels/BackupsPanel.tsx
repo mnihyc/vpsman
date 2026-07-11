@@ -45,6 +45,7 @@ import type {
   BackupPolicyPruneRequest,
   BackupPolicyPruneResponse,
   BackupPolicyRecord,
+  BackupMissingPathPolicy,
   BackupRequestRecord,
   BulkResolveResponse,
   CreateBackupPolicyRequest,
@@ -329,6 +330,8 @@ export function BackupsPanel({
   const [pathsText, setPathsText] = useState(DEFAULT_BACKUP_SELECTED_PATHS);
   const [includeConfig, setIncludeConfig] = useState(true);
   const [followSymlinks, setFollowSymlinks] = useState(false);
+  const [missingPathPolicy, setMissingPathPolicy] =
+    useState<BackupMissingPathPolicy>("fail");
   const [note, setNote] = useState("");
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
   const [policyName, setPolicyName] = useState("nightly-backup");
@@ -340,6 +343,8 @@ export function BackupsPanel({
   );
   const [policyIncludeConfig, setPolicyIncludeConfig] = useState(true);
   const [policyFollowSymlinks, setPolicyFollowSymlinks] = useState(false);
+  const [policyMissingPathPolicy, setPolicyMissingPathPolicy] =
+    useState<BackupMissingPathPolicy>("fail");
   const [policyCronExpr, setPolicyCronExpr] = useState("0 3 * * *");
   const [policyRetentionDays, setPolicyRetentionDays] = useState(30);
   const [policyKeepLast, setPolicyKeepLast] = useState(7);
@@ -658,6 +663,7 @@ export function BackupsPanel({
         paths: policyPaths,
         include_config: policyIncludeConfig,
         follow_symlinks: policyFollowSymlinks,
+        missing_path_policy: policyMissingPathPolicy,
       };
       const operationPayloadHash = await operationPayloadHashHex(operation);
       const request: CreateBackupPolicyRequest = {
@@ -667,6 +673,7 @@ export function BackupsPanel({
         paths: policyPaths,
         include_config: policyIncludeConfig,
         follow_symlinks: policyFollowSymlinks,
+        missing_path_policy: policyMissingPathPolicy,
         retention_days: clampInteger(policyRetentionDays, 1, 3650),
         keep_last: clampInteger(policyKeepLast, 1, 1000),
         rotation_generation: policyRotationGeneration.trim() || null,
@@ -822,6 +829,7 @@ export function BackupsPanel({
         paths,
         include_config: includeConfig,
         follow_symlinks: followSymlinks,
+        missing_path_policy: missingPathPolicy,
       };
       const selectorExpression = selectorExpressionForClientIds([clientId]);
       const built = await buildPrivilegeForJobOperation({
@@ -846,13 +854,14 @@ export function BackupsPanel({
           paths,
           include_config: includeConfig,
           follow_symlinks: followSymlinks,
+          missing_path_policy: missingPathPolicy,
           confirmed: true,
           note: note.trim() || null,
           privilege_assertion: built.privilegeAssertion,
         },
         scopeLabel: `${includeConfig ? "config, " : ""}${paths.length} paths, ${
           followSymlinks ? "follow symlinks" : "no symlink follow"
-        }`,
+        }, ${missingPathPolicy === "skip" ? "optional roots" : "strict roots"}`,
       });
       setPendingConfirmation("backup-request");
     });
@@ -1007,6 +1016,7 @@ export function BackupsPanel({
     setPathsText(backup.paths.join("\n"));
     setIncludeConfig(backup.include_config);
     setFollowSymlinks(backup.follow_symlinks);
+    setMissingPathPolicy(backup.missing_path_policy);
     setNote(
       backup.note
         ? `Retry ${shortId(backup.id)}: ${backup.note}`
@@ -1505,10 +1515,10 @@ export function BackupsPanel({
             value: policySnapshot
               ? `${policySnapshot.request.include_config ? "config, " : ""}${policySnapshot.request.paths.length} paths, ${
                   policySnapshot.request.follow_symlinks ? "follow symlinks" : "no symlink follow"
-                }`
+                }, ${policySnapshot.request.missing_path_policy === "skip" ? "optional roots" : "strict roots"}`
               : `${policyIncludeConfig ? "config, " : ""}${policyPaths.length} paths, ${
                   policyFollowSymlinks ? "follow symlinks" : "no symlink follow"
-                }`,
+                }, ${policyMissingPathPolicy === "skip" ? "optional roots" : "strict roots"}`,
           },
           {
             label: "Schedule",
@@ -1583,7 +1593,9 @@ export function BackupsPanel({
             label: "Scope",
             value:
               snapshot?.scopeLabel ??
-              `${includeConfig ? "config, " : ""}${paths.length} paths`,
+              `${includeConfig ? "config, " : ""}${paths.length} paths, ${
+                missingPathPolicy === "skip" ? "optional roots" : "strict roots"
+              }`,
           },
           {
             label: "Privilege",
@@ -2180,6 +2192,7 @@ export function BackupsPanel({
                 cronExpr={policyCronExpr}
                 followSymlinks={policyFollowSymlinks}
                 includeConfig={policyIncludeConfig}
+                missingPathPolicy={policyMissingPathPolicy}
                 keepLast={policyKeepLast}
                 name={policyName}
                 onCronExprChange={(value) => {
@@ -2196,6 +2209,10 @@ export function BackupsPanel({
                 }}
                 onIncludeConfigChange={(value) => {
                   setPolicyIncludeConfig(value);
+                  clearPolicyConfirmation();
+                }}
+                onMissingPathPolicyChange={(value) => {
+                  setPolicyMissingPathPolicy(value);
                   clearPolicyConfirmation();
                 }}
                 onKeepLastChange={(value) => {
@@ -2284,6 +2301,7 @@ export function BackupsPanel({
                 confirmationOpen={pendingConfirmation === "backup-request"}
                 followSymlinks={followSymlinks}
                 includeConfig={includeConfig}
+                missingPathPolicy={missingPathPolicy}
                 note={note}
                 onClientIdChange={(value) => {
                   setClientId(value);
@@ -2295,6 +2313,10 @@ export function BackupsPanel({
                 }}
                 onIncludeConfigChange={(value) => {
                   setIncludeConfig(value);
+                  clearBackupConfirmations(["backup-request"]);
+                }}
+                onMissingPathPolicyChange={(value) => {
+                  setMissingPathPolicy(value);
                   clearBackupConfirmations(["backup-request"]);
                 }}
                 onNoteChange={(value) => {

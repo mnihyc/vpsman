@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::Engine as _;
 use serde_json::json;
 use sqlx::Row;
@@ -123,6 +123,7 @@ impl Repository {
                         paths,
                         include_config,
                         follow_symlinks,
+                        missing_path_policy,
                         status,
                         payload_hash,
                         command_scope,
@@ -195,6 +196,7 @@ impl Repository {
                         paths,
                         include_config,
                         follow_symlinks,
+                        missing_path_policy,
                         status,
                         payload_hash,
                         command_scope,
@@ -268,6 +270,7 @@ impl Repository {
             paths: request.paths.clone(),
             include_config: request.include_config,
             follow_symlinks: request.follow_symlinks,
+            missing_path_policy: request.missing_path_policy,
             status: status.as_str().to_string(),
             payload_hash: payload_hash.to_string(),
             command_scope: command_scope.to_string(),
@@ -298,6 +301,7 @@ impl Repository {
                         paths,
                         include_config,
                         follow_symlinks,
+                        missing_path_policy,
                         status,
                         payload_hash,
                         command_scope,
@@ -306,7 +310,7 @@ impl Repository {
                         source_schedule_id,
                         note
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10, $11, $12)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, $13)
                     RETURNING created_at::text AS created_at
                     "#,
                 )
@@ -316,6 +320,7 @@ impl Repository {
                 .bind(&view.paths)
                 .bind(view.include_config)
                 .bind(view.follow_symlinks)
+                .bind(view.missing_path_policy.as_str())
                 .bind(&view.status)
                 .bind(&view.payload_hash)
                 .bind(&view.command_scope)
@@ -404,6 +409,7 @@ impl Repository {
                         paths,
                         include_config,
                         follow_symlinks,
+                        missing_path_policy,
                         status,
                         payload_hash,
                         command_scope,
@@ -517,6 +523,7 @@ impl Repository {
                         paths,
                         include_config,
                         follow_symlinks,
+                        missing_path_policy,
                         status,
                         payload_hash,
                         command_scope,
@@ -598,6 +605,7 @@ impl Repository {
                         paths,
                         include_config,
                         follow_symlinks,
+                        missing_path_policy,
                         status,
                         payload_hash,
                         command_scope,
@@ -791,6 +799,10 @@ pub(crate) fn backup_request_from_row(row: sqlx::postgres::PgRow) -> Result<Back
         paths: row.try_get("paths")?,
         include_config: row.try_get("include_config")?,
         follow_symlinks: row.try_get("follow_symlinks")?,
+        missing_path_policy: crate::model::BackupMissingPathPolicy::from_storage(
+            row.try_get::<String, _>("missing_path_policy")?.as_str(),
+        )
+        .context("backup request missing path policy is invalid")?,
         status: BackupRequestStatus::from_storage(&status)
             .map(|status| status.as_str().to_string())
             .unwrap_or(status),
@@ -831,6 +843,7 @@ fn backup_request_metadata(
         "paths": &view.paths,
         "include_config": view.include_config,
         "follow_symlinks": view.follow_symlinks,
+        "missing_path_policy": view.missing_path_policy.as_str(),
         "status": &view.status,
         "payload_hash": &view.payload_hash,
         "command_scope": &view.command_scope,
@@ -869,6 +882,7 @@ fn backup_request_source_metadata(
         "client_id": &view.client_id,
         "payload_hash": &view.payload_hash,
         "follow_symlinks": view.follow_symlinks,
+        "missing_path_policy": view.missing_path_policy.as_str(),
         "source_job_id": view.source_job_id,
         "source_schedule_id": view.source_schedule_id,
         "operator_username": &operator.operator.username,
@@ -910,6 +924,7 @@ fn backup_request_execution_metadata(
         "paths": &view.paths,
         "include_config": view.include_config,
         "follow_symlinks": view.follow_symlinks,
+        "missing_path_policy": view.missing_path_policy.as_str(),
         "status": &view.status,
         "payload_hash": &view.payload_hash,
         "command_scope": &view.command_scope,
@@ -934,6 +949,7 @@ fn backup_rejection_metadata(
         "paths": &request.paths,
         "include_config": request.include_config,
         "follow_symlinks": request.follow_symlinks,
+        "missing_path_policy": request.missing_path_policy.as_str(),
         "confirmed": request.confirmed,
         "payload_hash": payload_hash,
         "reason": reason,

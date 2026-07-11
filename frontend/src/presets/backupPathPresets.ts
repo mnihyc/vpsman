@@ -1,23 +1,28 @@
+import type { BackupMissingPathPolicy } from "../types";
+
 export const DEFAULT_BACKUP_SELECTED_PATHS = "/etc/hostname";
 export const DEFAULT_RESTORE_SELECTED_PATHS = "/etc/hostname";
 
 export type BackupPathPreset = {
   description: string;
   label: string;
+  missingPathPolicy: BackupMissingPathPolicy;
   paths: string[];
 };
 
 export const BACKUP_PATH_PRESETS: BackupPathPreset[] = [
   {
     description:
-      "Small identity snapshot for connectivity and inventory checks.",
+      "Strict snapshot of host identity files; every selected file must exist.",
     label: "Identity",
+    missingPathPolicy: "fail",
     paths: ["/etc/hostname", "/etc/hosts"],
   },
   {
     description:
-      "Common Linux service, SSH, network, and package configuration.",
+      "Regular files under common Linux identity, SSH, service, and network configuration roots. Unavailable roots are skipped.",
     label: "OS config",
+    missingPathPolicy: "skip",
     paths: [
       "/etc/hostname",
       "/etc/hosts",
@@ -28,14 +33,18 @@ export const BACKUP_PATH_PRESETS: BackupPathPreset[] = [
     ],
   },
   {
-    description: "Typical web app roots and reverse-proxy configuration.",
-    label: "Web stack",
-    paths: ["/etc/nginx", "/etc/caddy", "/srv", "/var/www"],
+    description:
+      "Regular files under common reverse-proxy configuration roots. Application data is intentionally excluded.",
+    label: "Web config",
+    missingPathPolicy: "skip",
+    paths: ["/etc/nginx", "/etc/caddy"],
   },
   {
-    description: "Container compose files and persistent container state.",
-    label: "Docker data",
-    paths: ["/etc/docker", "/opt", "/srv", "/var/lib/docker/volumes"],
+    description:
+      "Regular files under Docker daemon configuration. Compose projects and volume data require a purpose-built backup workflow.",
+    label: "Docker config",
+    missingPathPolicy: "skip",
+    paths: ["/etc/docker"],
   },
 ];
 
@@ -43,12 +52,14 @@ export const RESTORE_PATH_PRESETS: BackupPathPreset[] = [
   {
     description: "Restore only host identity files for a low-risk rehearsal.",
     label: "Identity",
+    missingPathPolicy: "fail",
     paths: ["/etc/hostname", "/etc/hosts"],
   },
   {
     description:
       "Restore service and network configuration captured by OS config backups.",
     label: "OS config",
+    missingPathPolicy: "skip",
     paths: [
       "/etc/hostname",
       "/etc/hosts",
@@ -59,9 +70,10 @@ export const RESTORE_PATH_PRESETS: BackupPathPreset[] = [
     ],
   },
   {
-    description: "Restore common web application and proxy paths.",
-    label: "Web stack",
-    paths: ["/etc/nginx", "/etc/caddy", "/srv", "/var/www"],
+    description: "Restore common reverse-proxy configuration paths.",
+    label: "Web config",
+    missingPathPolicy: "skip",
+    paths: ["/etc/nginx", "/etc/caddy"],
   },
 ];
 

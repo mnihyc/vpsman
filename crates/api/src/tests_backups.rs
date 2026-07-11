@@ -59,6 +59,7 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
         paths: Vec::new(),
         include_config: false,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         confirmed: true,
         note: None,
         privilege_assertion: None,
@@ -75,6 +76,7 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
         paths: vec!["relative".to_string()],
         include_config: false,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         confirmed: true,
         note: None,
         privilege_assertion: None,
@@ -91,6 +93,7 @@ fn backup_request_validation_requires_safe_scope_and_confirmation() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: false,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         confirmed: false,
         note: None,
         privilege_assertion: None,
@@ -112,6 +115,7 @@ fn backup_policy_validation_requires_targets_retention_and_confirmation() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         retention_days: Some(30),
         keep_last: Some(7),
         rotation_generation: Some("keyring/v2".to_string()),
@@ -200,6 +204,7 @@ fn backup_job_command_validates_executable_scope() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
     })
     .unwrap();
     assert_eq!(
@@ -207,6 +212,7 @@ fn backup_job_command_validates_executable_scope() {
             paths: Vec::new(),
             include_config: false,
             follow_symlinks: false,
+            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         })
         .unwrap_err()
         .code,
@@ -217,6 +223,7 @@ fn backup_job_command_validates_executable_scope() {
             paths: vec!["relative".to_string()],
             include_config: false,
             follow_symlinks: false,
+            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         })
         .unwrap_err()
         .code,
@@ -238,6 +245,7 @@ async fn backup_job_dispatch_requires_confirmation() {
             paths: vec!["/etc/hostname".to_string()],
             include_config: true,
             follow_symlinks: false,
+            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         }),
         max_timeout_secs: Some(30),
         force_unprivileged: false,
@@ -275,6 +283,7 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
     };
     let request = CreateJobRequest {
         job_id: Some(Uuid::new_v4()),
@@ -352,6 +361,7 @@ async fn backup_job_dispatch_terminal_failure_marks_backup_request_failed() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         confirmed: true,
         note: Some("source job request".to_string()),
         privilege_assertion: None,
@@ -360,6 +370,7 @@ async fn backup_job_dispatch_terminal_failure_marks_backup_request_failed() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
     };
     let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let backup = repo
@@ -406,6 +417,7 @@ async fn async_backup_final_failure_marks_backup_request_failed() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
     };
     let command_hash = payload_hash(&encode_json(&operation).unwrap());
     let request = CreateJobRequest {
@@ -439,6 +451,7 @@ async fn async_backup_final_failure_marks_backup_request_failed() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         confirmed: true,
         note: Some("source job request".to_string()),
         privilege_assertion: None,
@@ -506,6 +519,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         confirmed: true,
         note: Some("operator-requested".to_string()),
         privilege_assertion: None,
@@ -518,6 +532,7 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
     };
     let (gateway_url, gateway_task) =
         spawn_backup_gateway_once(plain_backup_artifact_bytes("client-a")).await;
@@ -590,6 +605,7 @@ async fn backup_request_records_metadata_and_audit_after_privilege_unlock() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Skip,
         confirmed: true,
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,
@@ -605,13 +621,19 @@ async fn backup_request_records_metadata_and_audit_after_privilege_unlock() {
     assert_eq!(view.client_id, "client-a");
     assert_eq!(view.paths, vec!["/etc/hostname"]);
     assert!(view.include_config);
+    assert_eq!(
+        view.missing_path_policy,
+        vpsman_common::BackupMissingPathPolicy::Skip
+    );
     assert_eq!(view.status, "requested_metadata_only");
     assert_eq!(view.command_scope, "client:client-a");
     assert!(view.artifact_id.is_none());
     assert_eq!(backups.len(), 1);
     assert_eq!(backups[0].id, view.id);
+    assert_eq!(backups[0].missing_path_policy, view.missing_path_policy);
     assert_eq!(audits.len(), 1);
     assert_eq!(audits[0].action, "backup.requested_metadata_only");
+    assert_eq!(audits[0].metadata["missing_path_policy"], "skip");
     assert_eq!(
         audits[0].command_hash.as_deref(),
         Some(view.payload_hash.as_str())
@@ -635,6 +657,7 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Skip,
         retention_days: Some(45),
         keep_last: Some(12),
         rotation_generation: Some("keyring/v2".to_string()),
@@ -664,6 +687,10 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     assert_eq!(view.target_client_ids, vec!["client-a", "client-b"]);
     assert_eq!(view.paths, vec!["/etc/hostname"]);
     assert!(view.include_config);
+    assert_eq!(
+        view.missing_path_policy,
+        vpsman_common::BackupMissingPathPolicy::Skip
+    );
     assert_eq!(view.retention_days, 45);
     assert_eq!(view.keep_last, 12);
     assert_eq!(view.rotation_generation.as_deref(), Some("keyring/v2"));
@@ -679,8 +706,11 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
         JobCommand::Backup {
             paths,
             include_config,
+            missing_path_policy,
             ..
-        } if paths == &vec!["/etc/hostname".to_string()] && *include_config
+        } if paths == &vec!["/etc/hostname".to_string()]
+            && *include_config
+            && *missing_path_policy == vpsman_common::BackupMissingPathPolicy::Skip
     ));
     assert!(audits
         .iter()
@@ -709,6 +739,7 @@ async fn backup_policy_prune_applies_retention_and_keep_last_per_client() {
             paths: vec!["/etc/hostname".to_string()],
             include_config: true,
             follow_symlinks: false,
+            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
             retention_days: Some(1),
             keep_last: Some(1),
             rotation_generation: None,
@@ -835,6 +866,7 @@ async fn backup_policy_prune_partial_error_preserves_metadata_after_delete_failu
             paths: vec!["/etc/hostname".to_string()],
             include_config: true,
             follow_symlinks: false,
+            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
             retention_days: Some(1),
             keep_last: Some(1),
             rotation_generation: None,
@@ -971,6 +1003,7 @@ async fn backup_artifact_metadata_links_request_and_audits() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         confirmed: true,
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,
@@ -1437,6 +1470,7 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
                 paths: backup.paths.clone(),
                 include_config: backup.include_config,
                 follow_symlinks: backup.follow_symlinks,
+                missing_path_policy: backup.missing_path_policy,
             },
         );
         memory.job_targets.write().await.push(JobTargetView {
@@ -1542,6 +1576,7 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
                 paths: backup.paths.clone(),
                 include_config: backup.include_config,
                 follow_symlinks: backup.follow_symlinks,
+                missing_path_policy: backup.missing_path_policy,
             },
         );
         memory.job_targets.write().await.push(JobTargetView {
@@ -1673,6 +1708,7 @@ async fn backup_request_requires_privilege_gateway_verification() {
         paths: vec!["/etc/hostname".to_string()],
         include_config: false,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         confirmed: true,
         note: None,
         privilege_assertion: None,
@@ -1750,6 +1786,7 @@ async fn create_test_backup_request(
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         confirmed: true,
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,
@@ -1775,6 +1812,7 @@ async fn seed_policy_backup_artifact(
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         confirmed: true,
         note: Some(format!("policy artifact {label}")),
         privilege_assertion: None,
@@ -1783,6 +1821,7 @@ async fn seed_policy_backup_artifact(
         paths: request.paths.clone(),
         include_config: request.include_config,
         follow_symlinks: request.follow_symlinks,
+        missing_path_policy: request.missing_path_policy,
     };
     let command_hash = payload_hash(&encode_json(&command).unwrap());
     let command_scope = format!("client:{}", request.client_id);

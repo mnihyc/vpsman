@@ -46,12 +46,15 @@ impl Repository {
         }
 
         if self
-            .is_client_key_revoked(client_id, &public_key)
+            .is_public_key_revoked(&public_key)
             .await
             .context("failed to check agent key revocation before identity import")?
         {
             anyhow::bail!("agent_identity_key_revoked");
         }
+
+        self.ensure_agent_public_key_available(client_id, &public_key)
+            .await?;
 
         match self {
             Self::Memory(memory) => {
@@ -73,6 +76,10 @@ impl Repository {
                     if existing.as_ref().is_none_or(|key| key.is_empty()) {
                         anyhow::bail!("client_not_found_or_no_key");
                     }
+                    anyhow::ensure!(
+                        existing.as_ref().is_some_and(|key| key != &public_key),
+                        "agent_identity_key_unchanged"
+                    );
                 } else if existing.is_some()
                     || memory
                         .agents
@@ -111,6 +118,7 @@ impl Repository {
                         if existing_key.is_empty() {
                             anyhow::bail!("client_not_found_or_no_key");
                         }
+                        anyhow::ensure!(existing_key != public_key, "agent_identity_key_unchanged");
                     } else {
                         anyhow::bail!("client_id_already_registered");
                     }
@@ -155,7 +163,7 @@ impl Repository {
         let tags = normalize_tags(&request.tags);
 
         if self
-            .is_client_key_revoked(&client_id, &public_key)
+            .is_public_key_revoked(&public_key)
             .await
             .context("failed to check agent key revocation before identity import")?
         {
@@ -164,6 +172,16 @@ impl Repository {
 
         match self {
             Self::Memory(memory) => {
+                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                if memory
+                    .client_key_revocations
+                    .read()
+                    .await
+                    .iter()
+                    .any(|record| record.public_key_sha256_hex == public_key_sha256_hex)
+                {
+                    anyhow::bail!("agent_identity_key_revoked");
+                }
                 if memory.hidden_clients.read().await.contains(&client_id) {
                     anyhow::bail!("agent_identity_deactivated");
                 }
@@ -205,6 +223,38 @@ impl Repository {
                 } else {
                     None
                 };
+                let mut public_keys = memory.client_public_keys.write().await;
+                if public_keys.iter().any(|(owner_id, existing_key)| {
+                    owner_id != &client_id
+                        && !existing_key.is_empty()
+                        && existing_key == &public_key
+                }) {
+                    anyhow::bail!("agent_identity_key_already_registered");
+                }
+                if request.replace_existing_key {
+                    let existing_key = public_keys
+                        .get(&client_id)
+                        .context("client_not_found_or_no_key")?;
+                    anyhow::ensure!(existing_key != &public_key, "agent_identity_key_unchanged");
+                    let retired_fingerprint =
+                        crate::repository_key_lifecycle::public_key_sha256_hex(existing_key);
+                    let mut revocations = memory.client_key_revocations.write().await;
+                    if !revocations
+                        .iter()
+                        .any(|record| record.public_key_sha256_hex == retired_fingerprint)
+                    {
+                        revocations.push(ClientKeyRevocationView {
+                            id: Uuid::new_v4(),
+                            client_id: client_id.clone(),
+                            public_key_sha256_hex: retired_fingerprint,
+                            reason: Some("client_key_replaced".to_string()),
+                            revoked_by: Some(operator.operator.id),
+                            created_at: unix_now().to_string(),
+                        });
+                    }
+                }
+                public_keys.insert(client_id.to_string(), public_key.clone());
+                drop(public_keys);
                 let agent_lost_job_ids =
                     if let Some(old_process_incarnation_id) = old_process_incarnation_id {
                         self.mark_active_targets_agent_lost_for_client(
@@ -229,11 +279,6 @@ impl Repository {
                         }
                     }
                 }
-                memory
-                    .client_public_keys
-                    .write()
-                    .await
-                    .insert(client_id.to_string(), public_key.clone());
                 {
                     let mut known_tags = memory.tags.write().await;
                     for tag in &tags {
@@ -314,12 +359,31 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_agent_key_lifecycle(&mut tx).await?;
                 let mut agent_lost_job_ids = Vec::new();
-                if fetch_postgres_key_revocation(&mut tx, &client_id, &public_key_sha256_hex)
+                if fetch_postgres_key_revocation(&mut tx, &public_key_sha256_hex)
                     .await?
                     .is_some()
                 {
                     anyhow::bail!("agent_identity_key_revoked");
+                }
+                if sqlx::query(
+                    r#"
+                    SELECT 1
+                    FROM clients
+                    WHERE public_key = $1
+                      AND id <> $2
+                      AND octet_length(public_key) > 0
+                    LIMIT 1
+                    "#,
+                )
+                .bind(&public_key)
+                .bind(&client_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some()
+                {
+                    anyhow::bail!("agent_identity_key_already_registered");
                 }
                 let existing = sqlx::query(
                     r#"
@@ -350,6 +414,24 @@ impl Repository {
                         if existing_key.is_empty() {
                             anyhow::bail!("client_not_found_or_no_key");
                         }
+                        anyhow::ensure!(existing_key != public_key, "agent_identity_key_unchanged");
+                        sqlx::query(
+                            r#"
+                            INSERT INTO client_key_revocations (
+                                id, client_id, public_key_sha256_hex, reason, revoked_by
+                            )
+                            VALUES ($1, $2, $3, 'client_key_replaced', $4)
+                            ON CONFLICT (public_key_sha256_hex) DO NOTHING
+                            "#,
+                        )
+                        .bind(Uuid::new_v4())
+                        .bind(&client_id)
+                        .bind(crate::repository_key_lifecycle::public_key_sha256_hex(
+                            &existing_key,
+                        ))
+                        .bind(operator.operator.id)
+                        .execute(&mut *tx)
+                        .await?;
                         let old_process_incarnation_id: Option<Uuid> =
                             row.try_get("process_incarnation_id")?;
                         if let Some(old_process_incarnation_id) = old_process_incarnation_id {
@@ -502,6 +584,7 @@ impl Repository {
         let reason = normalized_reason(request.reason.as_deref());
         match self {
             Self::Memory(memory) => {
+                let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
                 if memory.hidden_clients.read().await.contains(client_id) {
                     anyhow::bail!("client not found: {client_id}");
                 }
@@ -525,10 +608,7 @@ impl Repository {
                     .read()
                     .await
                     .iter()
-                    .find(|record| {
-                        record.client_id == client_id
-                            && record.public_key_sha256_hex == public_key_sha256_hex
-                    })
+                    .find(|record| record.public_key_sha256_hex == public_key_sha256_hex)
                     .cloned()
                 {
                     if let Some(old_process_incarnation_id) = old_process_incarnation_id {
@@ -604,6 +684,7 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_agent_key_lifecycle(&mut tx).await?;
                 let row = sqlx::query(
                     r#"
                     SELECT public_key, status, process_incarnation_id
@@ -627,8 +708,7 @@ impl Repository {
                     row.try_get("process_incarnation_id")?;
                 let public_key_sha256_hex = public_key_sha256_hex(&current_public_key);
                 if let Some(existing) =
-                    fetch_postgres_key_revocation(&mut tx, client_id, &public_key_sha256_hex)
-                        .await?
+                    fetch_postgres_key_revocation(&mut tx, &public_key_sha256_hex).await?
                 {
                     let mut job_ids =
                         if let Some(old_process_incarnation_id) = old_process_incarnation_id {
@@ -734,10 +814,9 @@ impl Repository {
                 }))
                 .execute(&mut *tx)
                 .await?;
-                let record =
-                    fetch_postgres_key_revocation(&mut tx, client_id, &public_key_sha256_hex)
-                        .await?
-                        .context("inserted client key revocation was not readable")?;
+                let record = fetch_postgres_key_revocation(&mut tx, &public_key_sha256_hex)
+                    .await?
+                    .context("inserted client key revocation was not readable")?;
                 tx.commit().await?;
                 let mut job_ids = agent_lost_job_ids;
                 job_ids.extend(skipped_job_ids);
@@ -914,40 +993,68 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn is_client_key_revoked(
-        &self,
-        client_id: &str,
-        public_key: &[u8],
-    ) -> Result<bool> {
+    pub(crate) async fn is_public_key_revoked(&self, public_key: &[u8]) -> Result<bool> {
         let public_key_sha256_hex = public_key_sha256_hex(public_key);
         match self {
-            Self::Memory(memory) => {
-                Ok(memory
-                    .client_key_revocations
-                    .read()
-                    .await
-                    .iter()
-                    .any(|record| {
-                        record.client_id == client_id
-                            && record.public_key_sha256_hex == public_key_sha256_hex
-                    }))
-            }
+            Self::Memory(memory) => Ok(memory
+                .client_key_revocations
+                .read()
+                .await
+                .iter()
+                .any(|record| record.public_key_sha256_hex == public_key_sha256_hex)),
             Self::Postgres(pool) => {
                 let row = sqlx::query(
                     r#"
                     SELECT 1
                     FROM client_key_revocations
-                    WHERE client_id = $1 AND public_key_sha256_hex = $2
+                    WHERE public_key_sha256_hex = $1
                     LIMIT 1
                     "#,
                 )
-                .bind(client_id)
                 .bind(public_key_sha256_hex)
                 .fetch_optional(pool)
                 .await?;
                 Ok(row.is_some())
             }
         }
+    }
+
+    async fn ensure_agent_public_key_available(
+        &self,
+        client_id: &str,
+        public_key: &[u8],
+    ) -> Result<()> {
+        let duplicate = match self {
+            Self::Memory(memory) => {
+                memory
+                    .client_public_keys
+                    .read()
+                    .await
+                    .iter()
+                    .any(|(owner_id, existing_key)| {
+                        owner_id != client_id
+                            && !existing_key.is_empty()
+                            && existing_key == public_key
+                    })
+            }
+            Self::Postgres(pool) => sqlx::query(
+                r#"
+                SELECT 1
+                FROM clients
+                WHERE public_key = $1
+                  AND id <> $2
+                  AND octet_length(public_key) > 0
+                LIMIT 1
+                "#,
+            )
+            .bind(public_key)
+            .bind(client_id)
+            .fetch_optional(pool)
+            .await?
+            .is_some(),
+        };
+        anyhow::ensure!(!duplicate, "agent_identity_key_already_registered");
+        Ok(())
     }
 
     pub(crate) async fn client_public_key_sha256_hex(
@@ -1114,6 +1221,16 @@ async fn fetch_postgres_agent_identity(
     })
 }
 
+pub(crate) async fn lock_postgres_agent_key_lifecycle(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<()> {
+    // Key mutations are rare; one transaction lock closes ownership/revocation races across clients.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.agent_key_lifecycle'))")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 async fn upsert_postgres_tag(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tag: &str,
@@ -1136,7 +1253,6 @@ async fn upsert_postgres_tag(
 
 async fn fetch_postgres_key_revocation(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    client_id: &str,
     public_key_sha256_hex: &str,
 ) -> Result<Option<ClientKeyRevocationView>> {
     let row = sqlx::query(
@@ -1149,10 +1265,9 @@ async fn fetch_postgres_key_revocation(
             revoked_by,
             EXTRACT(EPOCH FROM created_at)::bigint AS created_unix
         FROM client_key_revocations
-        WHERE client_id = $1 AND public_key_sha256_hex = $2
+        WHERE public_key_sha256_hex = $1
         "#,
     )
-    .bind(client_id)
     .bind(public_key_sha256_hex)
     .fetch_optional(&mut **tx)
     .await?;

@@ -527,6 +527,7 @@ async fn record_backup_request_for_claim(
         paths,
         include_config,
         follow_symlinks,
+        missing_path_policy,
     } = &claimed.operation
     else {
         return Ok(());
@@ -560,6 +561,7 @@ async fn record_backup_request_for_claim(
         paths: paths.clone(),
         include_config: *include_config,
         follow_symlinks: *follow_symlinks,
+        missing_path_policy: *missing_path_policy,
         confirmed: true,
         note: Some(format!("auto-linked from backup job {}", claimed.job_id)),
         privilege_assertion: None,

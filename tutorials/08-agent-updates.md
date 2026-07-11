@@ -24,7 +24,7 @@ tag-derived version that appears in `version.json`, so an agent reports
 `current` only when its embedded release version matches the manifest.
 
 Operators can enable or disable autonomous updates from the dashboard under
-Runtime config -> Bulk patch with the built-in updater patch generators.
+Config > Bulk patch with the built-in updater patch generators.
 These templates are ordinary operator-managed records once cloned: they can be
 edited, reused for bulk patch review, or deleted if they are operator-managed.
 The CLI can apply the same setting with an incremental config patch:
@@ -102,8 +102,8 @@ job without staging.
 
 ## Dispatch A Direct Update Job
 
-The dashboard exposes this under Jobs -> Command dispatch -> Check update, and
-Fleet -> Instances -> Check update opens the same dispatch flow with the selected
+The dashboard exposes this under Jobs > Dispatch > Check update, and
+Fleet > Instances > Check update opens the same dispatch flow with the selected
 VPSs prefilled and the default GitHub manifest URL selected.
 
 Manifest-check jobs are privileged mutating jobs when activation is enabled. They
@@ -121,8 +121,8 @@ cargo run -p vpsctl -- agent-update-check \
 ```
 
 Manual update jobs download from the supplied external HTTPS URL, verify
-SHA-256, stage the binary, and create local rollback material. Use Jobs ->
-Command dispatch -> Manual update or the CLI when the operator wants to pin an
+SHA-256, stage the binary, and create local rollback material. Use Jobs >
+Dispatch > Manual update or the CLI when the operator wants to pin an
 exact artifact URL and digest instead of using the release manifest. The release
 registry stores URL hashes for admission/audit and does not expose raw artifact
 URLs back into dispatch shortcuts.

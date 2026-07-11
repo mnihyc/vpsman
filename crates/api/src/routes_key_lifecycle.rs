@@ -138,6 +138,12 @@ fn agent_identity_mutation_error(error: anyhow::Error) -> ApiError {
         ApiError::not_found("client_not_found_or_no_key")
     } else if message.contains("client_id_already_registered") {
         ApiError::conflict("client_id_already_registered")
+    } else if message.contains("agent_identity_key_already_registered")
+        || message.contains("clients_public_key_unique_idx")
+    {
+        ApiError::conflict("agent_identity_key_already_registered")
+    } else if message.contains("agent_identity_key_unchanged") {
+        ApiError::conflict("agent_identity_key_unchanged")
     } else if message.contains("agent_identity_key_revoked") {
         ApiError::conflict("agent_identity_key_revoked")
     } else {

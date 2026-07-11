@@ -1,16 +1,19 @@
 # Direct Gateway Agent Install
 
-Agents never contact the browser panel or HTTP API during installation. A VPS is
-provisioned with immutable agent identity material, the pinned gateway Noise public
-key, and a prioritized raw TCP gateway endpoint list. The panel may register the matching public key for
-inventory and revocation, but it does not mint install tokens.
+Agents never contact the browser panel or HTTP API during installation. Each VPS
+is provisioned with its own agent identity material, the pinned gateway Noise
+public key, and a prioritized raw TCP gateway endpoint list. The panel registers
+the matching agent public key for inventory and revocation; it does not mint
+install tokens.
 
 ## Required material
 
 Generate or obtain these values before running the installer on a VPS:
 
-- `VPSMAN_AGENT_CLIENT_ID`: stable client id, such as `agent-nrt-04`.
-- `VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX`: agent Noise private key hex.
+- `VPSMAN_AGENT_CLIENT_ID`: stable client ID. New panel registrations default to
+  a numerical ID such as `1042`; imported legacy string IDs remain supported.
+- `VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX`: the unique agent Noise private key for
+  this VPS. Do not copy one VPS keypair to another VPS.
 - `VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX`: gateway Noise public key hex.
 - `VPSMAN_GATEWAY_ENDPOINTS`: comma or newline separated endpoint list in
   `label=host:port=priority` format. DNS names are supported; lower priority
@@ -44,6 +47,12 @@ vpsctl agent-identity-upsert \
 Use `--replace-existing-key --confirmed` only for a planned key rotation of a
 non-revoked, non-deleted identity. Revoked or deleted client ids are blocked and
 must not be reused.
+
+Public-key ownership is global, not scoped only by client ID. Registration
+rejects a key already assigned to another VPS and rejects any key retired by
+rotation, revocation, or deletion. Rotation permanently retires the previous key;
+reinstall that VPS with the new private key. Gateway hello validation rechecks
+current ownership, so a stale connection cannot continue by claiming the old key.
 
 ## Install on the VPS
 

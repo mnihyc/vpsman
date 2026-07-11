@@ -30,8 +30,8 @@ role receives the scopes needed for normal daily operation. The default
   recurring operation payloads.
 - `config:read`: template definitions, template assignments,
   diff/test output, rendered runtime config, runtime config patch generators,
-  rendered incremental config patches, per-VPS rule values, VPS Rules dry-runs,
-  and private agent-update release metadata.
+  rendered incremental config patches, per-VPS rule values, Config > Rules
+  dry-runs, and private agent-update release metadata.
 - `network:read`: full tunnel plans, exportable runtime `plan.json` details,
   OSPF update plans, raw network observations, and topology history exports.
 - `audit:read`: audit logs and audit history exports.
@@ -45,7 +45,7 @@ Existing write scopes remain separate from read scopes. Examples include
 sensitive read scope unless the operator record explicitly has both, or the
 operator is an admin with `*`.
 
-VPS Rules writes require `config:write`. Alert policy group and notification
+Config > Rules writes require `config:write`. Alert policy group and notification
 channel writes require `integrations:write`.
 
 History retention writes require `history:write` plus authority for the selected
@@ -76,10 +76,11 @@ a custom list.
 
 ## User And Session Management
 
-The dashboard manages operator accounts under System > Users and active bearer
-sessions plus login history under System > Sessions. Access remains focused on
-gateway identities, client key lifecycle, browser session state, and privilege
-unlock material.
+The dashboard manages accounts, roles, scopes, MFA, and active bearer-session
+revocation under Access > Operators. Audit > Sessions holds operator and
+terminal session evidence, while Access > Gateway sessions shows live and ended
+agent streams. Access > VPS identities owns agent key lifecycle, and Access >
+Privilege vault owns local privilege unlock state.
 
 Operator usernames are immutable. Disabling or deleting an operator blocks
 login, revokes that operator's sessions, preserves audit history, and prevents

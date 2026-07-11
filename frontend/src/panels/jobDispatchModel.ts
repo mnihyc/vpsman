@@ -75,6 +75,7 @@ export function buildOperation(
   backupPathsText: string,
   backupIncludeConfig: boolean,
   backupFollowSymlinks: boolean,
+  backupSkipMissingPaths: boolean,
   filePushPath: string,
   filePushMode: string,
   filePushPayload: FilePushPayload | null,
@@ -211,6 +212,7 @@ export function buildOperation(
       paths,
       include_config: backupIncludeConfig,
       follow_symlinks: backupFollowSymlinks,
+      missing_path_policy: backupSkipMissingPaths ? "skip" : "fail",
     };
   }
   if (mode === "process_supervisor") {

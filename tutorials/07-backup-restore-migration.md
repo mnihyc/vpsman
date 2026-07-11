@@ -22,7 +22,7 @@ cargo run -p vpsctl -- backup-policy-upsert \
   --paths /etc/hostname \
   --include-config \
   --tags backup-critical \
-  --interval-secs 86400 \
+  --cron-expr "0 3 * * *" \
   --retention-days 30 \
   --keep-last 7 \
   --rotation-generation keyring/v2 \
@@ -116,6 +116,30 @@ Selected backup paths do not follow symlinks by default. Use
 the symlink target bytes; the choice is recorded with the backup request,
 policy, job, and artifact metadata.
 
+A selected directory captures regular files recursively. Direct backups are
+bounded configuration snapshots, not unbounded application-data backups: a
+scanned-path ceiling bounds traversal, while file count, uncompressed bytes,
+and archive bytes bound captured content.
+The panel presets therefore cover host, service, reverse-proxy, and Docker
+daemon configuration; they do not claim to protect Docker volumes or arbitrary
+`/srv` and `/opt` data.
+
+Missing selected roots fail by default. For a reviewed cross-distribution or
+heterogeneous-fleet scope, add `--skip-missing-paths` (or select **Skip missing
+roots** in the panel). Only roots that do not exist are omitted; unreadable
+paths, traversal errors, size limits, and an empty captured scope still fail.
+The artifact status records omitted paths and reasons. The OS, web, and Docker
+configuration presets select this policy explicitly, while the Identity preset
+remains strict.
+
+```sh
+cargo run -p vpsctl -- backup-run \
+  --paths /etc/nginx,/etc/caddy \
+  --skip-missing-paths \
+  --tags web \
+  --confirmed
+```
+
 Inspect artifacts:
 
 ```sh
@@ -163,6 +187,12 @@ artifact limit. The default maximum is 128 MiB; set
 the API environment to change it. Values are clamped between 1 MiB and 4 GiB.
 `api.job_output_artifact_min_bytes` remains only the threshold for externalizing
 large job output chunks to object storage.
+
+In the official Compose deployment, Nginx allows `25m` per `/api/` request so
+the current Base64-expanded JSON request envelopes fit. This does not reduce the
+artifact limit: large backup artifacts use the chunked command above (4 MiB
+chunks by default), and downloads use binary streaming rather than one large
+JSON request.
 
 For an explicit S3/MinIO-backed deployment, configure the full
 `VPSMAN_OBJECT_*` set before starting the API. The adapter uses path-style
@@ -223,6 +253,13 @@ cargo run -p vpsctl -- restore-rollback \
   --confirmed
 ```
 
+Rollback first validates the full recorded destination set, then revalidates
+each file immediately before replacing or removing it. If a service or local
+writer changes one destination after restore, rollback preserves that changed
+file, continues with independent destinations, and finishes as
+`partial_failure` with both successful rollback evidence and per-file failures.
+Inspect that evidence before retrying or applying a manual compensating change.
+
 Unprivileged targets degrade by default for privileged restore paths. Use
 `--force-unprivileged` only when a best-effort attempt is intentional.
 
@@ -260,11 +297,13 @@ server-side state intact while replacing the VPS.
 Use the Backups panel for the same sequence:
 
 1. Create or inspect backup request.
-2. Save backup policies and use Policy prune for dry-run or confirmed
+2. Choose strict roots for exact hosts or **Skip missing roots** for reviewed
+   heterogeneous scopes; directory roots capture regular files recursively.
+3. Save backup policies and use Policy prune for dry-run or confirmed
    retention cleanup.
-3. Promote retained plain output or upload a plain backup artifact if needed.
-4. Create restore plan.
-5. Run restore with a selected completed archive upload record.
-6. Roll back restore from retained restore evidence if needed.
-7. Use Run migration restore for rebuilt targets, or link metadata only when
+4. Promote retained plain output or upload a plain backup artifact if needed.
+5. Create restore plan.
+6. Run restore with a selected completed archive upload record.
+7. Roll back restore from retained restore evidence if needed.
+8. Use Run migration restore for rebuilt targets, or link metadata only when
    restore has already been handled.

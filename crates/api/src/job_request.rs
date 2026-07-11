@@ -260,6 +260,7 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             paths,
             include_config,
             follow_symlinks: _,
+            missing_path_policy: _,
         } => validate_backup_operation(paths, *include_config),
         JobCommand::Restore {
             archive_transfer_session_id,

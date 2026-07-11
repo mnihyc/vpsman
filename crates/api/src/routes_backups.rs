@@ -457,6 +457,7 @@ mod tests {
                 paths: vec!["/etc".to_string()],
                 include_config: true,
                 follow_symlinks: false,
+                missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
                 retention_days: 7,
                 keep_last: 2,
                 rotation_generation: None,
@@ -1145,6 +1146,7 @@ pub(crate) fn validate_create_backup_policy_request(
             paths: request.paths.clone(),
             include_config: request.include_config,
             follow_symlinks: request.follow_symlinks,
+            missing_path_policy: request.missing_path_policy,
         },
         selector_expression: request.selector_expression.clone(),
         target_client_ids: request.target_client_ids.clone(),
@@ -1335,6 +1337,7 @@ fn backup_command(request: &CreateBackupRequest) -> JobCommand {
         paths: request.paths.clone(),
         include_config: request.include_config,
         follow_symlinks: request.follow_symlinks,
+        missing_path_policy: request.missing_path_policy,
     }
 }
 
@@ -1343,6 +1346,7 @@ fn backup_policy_command(request: &CreateBackupPolicyRequest) -> JobCommand {
         paths: request.paths.clone(),
         include_config: request.include_config,
         follow_symlinks: request.follow_symlinks,
+        missing_path_policy: request.missing_path_policy,
     }
 }
 

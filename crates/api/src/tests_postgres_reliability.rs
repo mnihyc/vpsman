@@ -165,6 +165,96 @@ async fn insert_client(pool: &PgPool, client_id: &str, incarnation: Option<Uuid>
     .unwrap();
 }
 
+#[tokio::test]
+async fn postgres_schema_enforces_global_agent_key_ownership() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let key = vec![0x42_u8; 32];
+    sqlx::query(
+        "INSERT INTO clients (id, display_name, public_key, status) VALUES ($1, $1, $2, 'never')",
+    )
+    .bind("key-owner-a")
+    .bind(&key)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let duplicate = sqlx::query(
+        "INSERT INTO clients (id, display_name, public_key, status) VALUES ($1, $1, $2, 'never')",
+    )
+    .bind("key-owner-b")
+    .bind(&key)
+    .execute(&db.pool)
+    .await
+    .unwrap_err();
+    assert!(duplicate
+        .to_string()
+        .contains("clients_public_key_unique_idx"));
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_agent_hello_cannot_restore_a_rotated_key() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "hello-rotation-race";
+    let old_key = vec![0x51_u8; 32];
+    let new_key = vec![0x52_u8; 32];
+    sqlx::query(
+        "INSERT INTO clients (id, display_name, public_key, status) VALUES ($1, $1, $2, 'never')",
+    )
+    .bind(client_id)
+    .bind(&old_key)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let mut stale_hello = hello_event(client_id, Uuid::new_v4(), None);
+    stale_hello.noise_public_key_hex = Some(hex::encode(&old_key));
+    assert!(db.repo.upsert_agent_hello(&stale_hello).await.unwrap());
+
+    let mut tx = db.pool.begin().await.unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO client_key_revocations (
+            id, client_id, public_key_sha256_hex, reason
+        )
+        VALUES ($1, $2, $3, 'client_key_replaced')
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(client_id)
+    .bind(crate::repository_key_lifecycle::public_key_sha256_hex(
+        &old_key,
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE clients SET public_key = $2, status = 'offline', process_incarnation_id = NULL WHERE id = $1",
+    )
+    .bind(client_id)
+    .bind(&new_key)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(!db.repo.upsert_agent_hello(&stale_hello).await.unwrap());
+    let row = sqlx::query("SELECT public_key, status FROM clients WHERE id = $1")
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(row.try_get::<Vec<u8>, _>("public_key").unwrap(), new_key);
+    assert_eq!(row.try_get::<String, _>("status").unwrap(), "offline");
+
+    db.cleanup().await;
+}
+
 async fn insert_job_target(
     pool: &PgPool,
     job_id: Uuid,
@@ -1546,6 +1636,7 @@ async fn postgres_delete_agent_cleanup_terminal_events_cover_backup_and_queued_s
             paths: vec!["/etc".to_string()],
             include_config: false,
             follow_symlinks: false,
+            missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         },
         "backup",
         None,
@@ -1565,6 +1656,7 @@ async fn postgres_delete_agent_cleanup_terminal_events_cover_backup_and_queued_s
                 paths: vec!["/etc".to_string()],
                 include_config: false,
                 follow_symlinks: false,
+                missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
                 confirmed: true,
                 note: None,
                 privilege_assertion: None,

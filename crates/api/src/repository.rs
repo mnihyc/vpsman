@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use sqlx::{postgres::PgPoolOptions, PgPool};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 use uuid::Uuid;
 
@@ -107,6 +107,7 @@ pub(crate) struct MemoryState {
     pub(crate) backup_artifacts: Arc<RwLock<Vec<BackupArtifactView>>>,
     pub(crate) restore_plans: Arc<RwLock<Vec<RestorePlanView>>>,
     pub(crate) migration_links: Arc<RwLock<Vec<MigrationLinkView>>>,
+    pub(crate) agent_key_lifecycle: Arc<Mutex<()>>,
     pub(crate) client_public_keys: Arc<RwLock<HashMap<String, Vec<u8>>>>,
     pub(crate) client_key_revocations: Arc<RwLock<Vec<ClientKeyRevocationView>>>,
 }

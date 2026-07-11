@@ -56,6 +56,7 @@ impl Repository {
                 paths: request.paths,
                 include_config: request.include_config,
                 follow_symlinks: request.follow_symlinks,
+                missing_path_policy: request.missing_path_policy,
             },
             selector_expression: request.selector_expression,
             target_client_ids: request.target_client_ids,
@@ -760,6 +761,7 @@ fn backup_policy_view(
         paths,
         include_config,
         follow_symlinks,
+        missing_path_policy,
     } = schedule.operation.clone()
     else {
         return None;
@@ -773,6 +775,7 @@ fn backup_policy_view(
         paths,
         include_config,
         follow_symlinks,
+        missing_path_policy,
         retention_days: metadata.retention_days,
         keep_last: metadata.keep_last,
         rotation_generation: metadata.rotation_generation,

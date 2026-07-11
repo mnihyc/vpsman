@@ -176,7 +176,7 @@ job.status.become_failed && job.type:shell && job.target.status:online
 
 ## Alert Policy Rule Expressions
 
-Fleet > Alert Policies use selector expressions only to choose target VPSs.
+Observability > Alerts uses selector expressions only to choose target VPSs.
 Each rule then evaluates a full boolean condition expression against that VPS.
 Condition expressions support numeric literals, variables, comparisons,
 `+`, `-`, `*`, `/`, parentheses, unary signs, `&&`, `||`, and `!` through the

@@ -534,6 +534,7 @@ fn builtin_command_templates() -> Vec<CommandTemplateView> {
                 paths: vec!["/etc/hostname".to_string()],
                 include_config: true,
                 follow_symlinks: false,
+                missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
             },
             30,
         ),

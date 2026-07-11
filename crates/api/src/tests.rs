@@ -860,6 +860,21 @@ fn file_browser_job_commands_validate_paths_and_limits() {
         request.job_command().unwrap_err().code,
         "file_list_limit_out_of_range"
     );
+
+    request.operation = Some(JobCommand::FileWriteText {
+        path: "/etc/service.conf".to_string(),
+        mode: 0o644,
+        size_bytes: 7,
+        sha256_hex: vpsman_common::payload_hash(b"updated"),
+        content_base64: "dXBkYXRlZA==".to_string(),
+        expected_sha256_hex: None,
+        create: false,
+        policy: vpsman_common::FileActionPolicy::Fail,
+    });
+    assert_eq!(
+        request.job_command().unwrap_err().code,
+        "file_write_expected_sha256_required"
+    );
 }
 
 #[test]

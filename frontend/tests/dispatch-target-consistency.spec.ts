@@ -534,6 +534,9 @@ test("backup policy review submits a frozen target list and privilege assertion"
   await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.type("id:agent-fra-02");
   await page.keyboard.press("Escape");
+  await page
+    .getByRole("checkbox", { name: "Skip missing roots" })
+    .check();
   await activate(page.getByRole("button", { name: "Review policy" }));
   await expect(page.getByText("Confirm backup policy")).toBeVisible();
   await activate(page.getByRole("button", { name: "Save policy" }));
@@ -548,6 +551,7 @@ test("backup policy review submits a frozen target list and privilege assertion"
   });
   expect(request).toMatchObject({
     confirmed: true,
+    missing_path_policy: "skip",
     selector_expression: "id:agent-fra-02",
     target_client_ids: ["agent-fra-02"],
   });

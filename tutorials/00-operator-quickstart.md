@@ -92,6 +92,10 @@ cargo run -p vpsctl -- agent-identity-upsert \
   --confirmed
 ```
 
+Generate a different Noise keypair for every VPS. Public-key ownership is
+global: a key already active or retired under any client ID is rejected rather
+than allowing one agent to impersonate another.
+
 Install the agent with `deploy/install-agent.sh` or follow
 `02-install-agents.md`. After it connects, use the assigned display name in Fleet
 and target expressions.
@@ -167,8 +171,11 @@ cargo run -p vpsctl -- backup-run --paths /etc/hostname --clients "$EDGE_CLIENT_
 cargo run -p vpsctl -- backup-artifacts
 ```
 
-Backup selected paths reject symlinks by default. Add `--follow-symlinks` only
-when the symlink target bytes are intentionally part of the reviewed backup.
+Backup selected directories capture regular files recursively under scan,
+file-count, plaintext-byte, and archive-byte bounds. Missing roots fail by
+default; add `--skip-missing-paths` only for a reviewed heterogeneous scope.
+Selected paths reject symlinks by default. Add `--follow-symlinks` only when the
+symlink target bytes are intentionally part of the reviewed backup.
 
 Create a restore plan before changing a rebuilt VPS:
 

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use uuid::Uuid;
-use vpsman_common::{JobCommand, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS};
+use vpsman_common::{BackupMissingPathPolicy, JobCommand, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS};
 
 use crate::{
     commands_backups::{
@@ -25,6 +25,7 @@ pub(crate) struct VtyBackupRequest {
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) follow_symlinks: bool,
+    pub(crate) skip_missing_paths: bool,
     pub(crate) confirmed: bool,
     pub(crate) note: Option<String>,
 }
@@ -62,6 +63,7 @@ pub(crate) struct VtyBackupRunRequest {
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) follow_symlinks: bool,
+    pub(crate) skip_missing_paths: bool,
     pub(crate) selection: VtyJobSelection,
     pub(crate) max_timeout_secs: u64,
 }
@@ -72,6 +74,7 @@ pub(crate) struct VtyBackupPolicyUpsert {
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) follow_symlinks: bool,
+    pub(crate) skip_missing_paths: bool,
     pub(crate) selection: VtyJobSelection,
     pub(crate) cron_expr: String,
     pub(crate) enabled: bool,
@@ -87,13 +90,14 @@ pub(crate) struct VtyBackupPolicyUpsert {
 pub(crate) fn parse_vty_backup_request(tokens: &[&str]) -> Result<VtyBackupRequest> {
     let client_id = tokens
         .first()
-        .context("usage: backup-request <client_id> [--path <abs>] [--include-config] [--confirmed] [--note <text>]")?
+        .context("usage: backup-request <client_id> [--path <abs>] [--include-config] [--follow-symlinks] [--skip-missing-paths] [--confirmed] [--note <text>]")?
         .to_string();
     let mut request = VtyBackupRequest {
         client_id,
         paths: Vec::new(),
         include_config: false,
         follow_symlinks: false,
+        skip_missing_paths: false,
         confirmed: false,
         note: None,
     };
@@ -106,6 +110,10 @@ pub(crate) fn parse_vty_backup_request(tokens: &[&str]) -> Result<VtyBackupReque
             }
             "--follow-symlinks" => {
                 request.follow_symlinks = true;
+                index += 1;
+            }
+            "--skip-missing-paths" => {
+                request.skip_missing_paths = true;
                 index += 1;
             }
             "--confirmed" => {
@@ -151,6 +159,7 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
     let mut paths = Vec::new();
     let mut include_config = false;
     let mut follow_symlinks = false;
+    let mut skip_missing_paths = false;
     let mut max_timeout_secs = 60_u64;
     let mut target_tokens = Vec::new();
     let mut index = 0;
@@ -162,6 +171,10 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
             }
             "--follow-symlinks" => {
                 follow_symlinks = true;
+                index += 1;
+            }
+            "--skip-missing-paths" => {
+                skip_missing_paths = true;
                 index += 1;
             }
             "--path" => {
@@ -216,6 +229,7 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
         paths,
         include_config,
         follow_symlinks,
+        skip_missing_paths,
         selection: VtyJobSelection::parse(&target_tokens)?,
         max_timeout_secs,
     })
@@ -224,11 +238,12 @@ pub(crate) fn parse_vty_backup_run(tokens: &[&str]) -> Result<VtyBackupRunReques
 pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBackupPolicyUpsert> {
     let name = tokens
         .first()
-        .context("usage: backup-policy-upsert <name> [--path <abs>] [--include-config] [--cron <min> <hour> <dom> <mon> <dow>] [--retention-days <n>] [--keep-last <n>] [--rotation-generation <id>] [--disabled] <target>... --confirmed")?
+        .context("usage: backup-policy-upsert <name> [--path <abs>] [--include-config] [--follow-symlinks] [--skip-missing-paths] [--cron <min> <hour> <dom> <mon> <dow>] [--retention-days <n>] [--keep-last <n>] [--rotation-generation <id>] [--disabled] <target>... --confirmed")?
         .to_string();
     let mut paths = Vec::new();
     let mut include_config = false;
     let mut follow_symlinks = false;
+    let mut skip_missing_paths = false;
     let mut cron_expr = "0 3 * * *".to_string();
     let mut enabled = true;
     let mut catch_up_policy = "skip_missed".to_string();
@@ -248,6 +263,10 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
             }
             "--follow-symlinks" => {
                 follow_symlinks = true;
+                index += 1;
+            }
+            "--skip-missing-paths" => {
+                skip_missing_paths = true;
                 index += 1;
             }
             "--disabled" => {
@@ -429,6 +448,7 @@ pub(crate) fn parse_vty_backup_policy_upsert(tokens: &[&str]) -> Result<VtyBacku
         paths,
         include_config,
         follow_symlinks,
+        skip_missing_paths,
         selection,
         cron_expr,
         enabled,
@@ -654,6 +674,14 @@ pub(crate) fn parse_vty_restore_rollback(tokens: &[&str]) -> Result<VtyRestoreRo
     Ok(request)
 }
 
+fn backup_missing_path_policy(skip_missing_paths: bool) -> BackupMissingPathPolicy {
+    if skip_missing_paths {
+        BackupMissingPathPolicy::Skip
+    } else {
+        BackupMissingPathPolicy::Fail
+    }
+}
+
 pub(crate) fn submit_vty_backup_request(
     api_url: &str,
     token: Option<&str>,
@@ -665,6 +693,7 @@ pub(crate) fn submit_vty_backup_request(
         paths: request.paths.clone(),
         include_config: request.include_config,
         follow_symlinks: request.follow_symlinks,
+        missing_path_policy: backup_missing_path_policy(request.skip_missing_paths),
     };
     let target_ids = vec![request.client_id.clone()];
     let selector_expression = selector_expression_from_targets(&target_ids, &[]);
@@ -685,6 +714,7 @@ pub(crate) fn submit_vty_backup_request(
             "paths": request.paths,
             "include_config": request.include_config,
             "follow_symlinks": request.follow_symlinks,
+            "missing_path_policy": backup_missing_path_policy(request.skip_missing_paths),
             "confirmed": request.confirmed,
             "note": request.note,
             "privilege_assertion": privilege_assertion,
@@ -702,6 +732,7 @@ pub(crate) fn submit_vty_backup_run(
         paths: request.paths,
         include_config: request.include_config,
         follow_symlinks: request.follow_symlinks,
+        missing_path_policy: backup_missing_path_policy(request.skip_missing_paths),
     };
     anyhow::ensure!(
         request.selection.confirmed,
@@ -730,6 +761,7 @@ pub(crate) fn submit_vty_backup_policy_upsert(
         paths: request.paths.clone(),
         include_config: request.include_config,
         follow_symlinks: request.follow_symlinks,
+        missing_path_policy: backup_missing_path_policy(request.skip_missing_paths),
     };
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
@@ -765,6 +797,7 @@ pub(crate) fn submit_vty_backup_policy_upsert(
             "paths": request.paths,
             "include_config": request.include_config,
             "follow_symlinks": request.follow_symlinks,
+            "missing_path_policy": backup_missing_path_policy(request.skip_missing_paths),
             "selector_expression": selector_expression,
             "target_client_ids": target_client_ids,
             "cron_expr": request.cron_expr,

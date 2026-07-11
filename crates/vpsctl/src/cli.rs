@@ -799,6 +799,9 @@ pub(crate) enum Command {
         include_config: bool,
         #[arg(long, default_value_t = false)]
         follow_symlinks: bool,
+        /// Continue when a selected root does not exist on a target.
+        #[arg(long, default_value_t = false)]
+        skip_missing_paths: bool,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]
@@ -853,6 +856,9 @@ pub(crate) enum Command {
         include_config: bool,
         #[arg(long, default_value_t = false)]
         follow_symlinks: bool,
+        /// Continue when a selected root does not exist on the target.
+        #[arg(long, default_value_t = false)]
+        skip_missing_paths: bool,
         #[arg(long)]
         note: Option<String>,
         #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -871,6 +877,9 @@ pub(crate) enum Command {
         include_config: bool,
         #[arg(long, default_value_t = false)]
         follow_symlinks: bool,
+        /// Continue when a selected root does not exist on a target.
+        #[arg(long, default_value_t = false)]
+        skip_missing_paths: bool,
         #[arg(long, value_delimiter = ',')]
         clients: Vec<String>,
         #[arg(long, value_delimiter = ',')]

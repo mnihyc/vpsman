@@ -7,8 +7,8 @@ use tokio::{
     sync::Mutex,
 };
 use vpsman_common::{
-    AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, GatewayPrivilegeVerificationResult,
-    GatewaySessionDisconnectResult, PrivilegeAssertion,
+    AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, GatewayAgentHelloIngest,
+    GatewayPrivilegeVerificationResult, GatewaySessionDisconnectResult, PrivilegeAssertion,
 };
 use vpsman_server_core::TARGET_STATUS_AGENT_LOST;
 
@@ -44,6 +44,146 @@ async fn direct_agent_identity_imports_key_and_tags_without_panel_token() {
     let report = repo.key_lifecycle_report().await.unwrap();
     assert_eq!(report.direct_identity_client_count, 1);
     assert_eq!(report.current_key_revoked_count, 0);
+}
+
+#[tokio::test]
+async fn direct_agent_identity_rejects_cross_client_key_reuse_and_retired_keys() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = identity_operator();
+    let original_key = "21".repeat(32);
+
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some("edge-key-owner".to_string()),
+            client_public_key_hex: original_key.clone(),
+            display_name: Some("Key owner".to_string()),
+            tags: Vec::new(),
+            replace_existing_key: false,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let duplicate = repo
+        .upsert_agent_identity(
+            &UpsertAgentIdentityRequest {
+                client_id: Some("edge-key-impersonator".to_string()),
+                client_public_key_hex: original_key.clone(),
+                display_name: Some("Key impersonator".to_string()),
+                tags: Vec::new(),
+                replace_existing_key: false,
+                confirmed: true,
+                privilege_assertion: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert!(duplicate
+        .to_string()
+        .contains("agent_identity_key_already_registered"));
+
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some("edge-key-owner".to_string()),
+            client_public_key_hex: "22".repeat(32),
+            display_name: None,
+            tags: Vec::new(),
+            replace_existing_key: true,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    assert!(!repo
+        .validate_agent_public_key("edge-key-owner", &original_key)
+        .await
+        .unwrap());
+    let retired = repo
+        .upsert_agent_identity(
+            &UpsertAgentIdentityRequest {
+                client_id: Some("edge-retired-key".to_string()),
+                client_public_key_hex: original_key,
+                display_name: Some("Retired key".to_string()),
+                tags: Vec::new(),
+                replace_existing_key: false,
+                confirmed: true,
+                privilege_assertion: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert!(retired.to_string().contains("agent_identity_key_revoked"));
+}
+
+#[tokio::test]
+async fn agent_hello_rechecks_the_current_key_after_rotation() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = identity_operator();
+    let client_id = "edge-hello-race";
+    let old_key_hex = "31".repeat(32);
+    let new_key_hex = "32".repeat(32);
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some(client_id.to_string()),
+            client_public_key_hex: old_key_hex.clone(),
+            display_name: Some("Hello race".to_string()),
+            tags: Vec::new(),
+            replace_existing_key: false,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let stale_hello = GatewayAgentHelloIngest {
+        gateway_id: "gateway-test".to_string(),
+        gateway_session_id: Uuid::new_v4(),
+        noise_public_key_hex: Some(old_key_hex),
+        remote_ip: Some("203.0.113.31".to_string()),
+        hello: AgentHello {
+            client_id: client_id.to_string(),
+            process_incarnation_id: Uuid::new_v4(),
+            agent_version: "test".to_string(),
+            internal_build_number: 1,
+            os_release: "test".to_string(),
+            arch: "x86_64".to_string(),
+            update_heartbeat: None,
+            capabilities: AgentCapabilitySnapshot::default(),
+        },
+    };
+    assert!(repo.upsert_agent_hello(&stale_hello).await.unwrap());
+
+    repo.upsert_agent_identity(
+        &UpsertAgentIdentityRequest {
+            client_id: Some(client_id.to_string()),
+            client_public_key_hex: new_key_hex.clone(),
+            display_name: None,
+            tags: Vec::new(),
+            replace_existing_key: true,
+            confirmed: true,
+            privilege_assertion: None,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    assert!(!repo.upsert_agent_hello(&stale_hello).await.unwrap());
+    assert_eq!(repo.agent_by_id(client_id).await.unwrap().status, "offline");
+    assert!(repo
+        .validate_agent_public_key(client_id, &new_key_hex)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]

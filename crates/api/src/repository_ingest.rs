@@ -24,6 +24,7 @@ use crate::repository_jobs::{
     append_synthetic_agent_lost_output_in_tx, append_synthetic_status_output_in_tx,
     enqueue_target_terminal_event_in_tx,
 };
+use crate::repository_key_lifecycle::public_key_sha256_hex;
 use crate::security::constant_time_eq;
 
 const TELEMETRY_BUCKET_SECS: i32 = 60;
@@ -373,7 +374,7 @@ impl Repository {
         if provided.len() != 32 {
             return Ok(false);
         }
-        if self.is_client_key_revoked(client_id, &provided).await? {
+        if self.is_public_key_revoked(&provided).await? {
             return Ok(false);
         }
         match self {
@@ -408,14 +409,62 @@ impl Repository {
         let update_heartbeat = event.hello.update_heartbeat.clone();
         let mut accepted_hello = true;
         let session_event = agent_hello_session_event(event);
+        let authenticated_public_key = event
+            .noise_public_key_hex
+            .as_deref()
+            .map(|value| {
+                hex::decode(value).with_context(|| {
+                    format!("invalid noise public key hex for {}", event.hello.client_id)
+                })
+            })
+            .transpose()?;
+        if authenticated_public_key
+            .as_ref()
+            .is_some_and(|public_key| public_key.len() != 32)
+        {
+            return Ok(false);
+        }
         match self {
             Self::Memory(memory) => {
-                if !memory
+                let _key_lifecycle_guard = if authenticated_public_key.is_some() {
+                    Some(memory.agent_key_lifecycle.lock().await)
+                } else {
+                    None
+                };
+                let hidden = memory
                     .hidden_clients
                     .read()
                     .await
-                    .contains(&event.hello.client_id)
-                {
+                    .contains(&event.hello.client_id);
+                let credential_accepted =
+                    if let Some(public_key) = authenticated_public_key.as_ref() {
+                        let fingerprint = public_key_sha256_hex(public_key);
+                        let current_key_matches = memory
+                            .client_public_keys
+                            .read()
+                            .await
+                            .get(&event.hello.client_id)
+                            .is_some_and(|expected| constant_time_eq(expected, public_key));
+                        let key_revoked = memory
+                            .client_key_revocations
+                            .read()
+                            .await
+                            .iter()
+                            .any(|record| record.public_key_sha256_hex == fingerprint);
+                        let identity_active = memory
+                            .agents
+                            .read()
+                            .await
+                            .iter()
+                            .find(|agent| agent.id == event.hello.client_id)
+                            .is_some_and(|agent| {
+                                !matches!(agent.status.as_str(), "revoked" | "deleted")
+                            });
+                        current_key_matches && !key_revoked && identity_active
+                    } else {
+                        true
+                    };
+                if !hidden && credential_accepted {
                     let prior = {
                         let agents = memory.agents.read().await;
                         agents
@@ -518,17 +567,12 @@ impl Repository {
             Self::Postgres(pool) => {
                 crate::repository_webhook_rules::ensure_webhook_event_partition(pool, Utc::now())
                     .await?;
-                let public_key = match event.noise_public_key_hex.as_deref() {
-                    Some(value) => hex::decode(value).with_context(|| {
-                        format!("invalid noise public key hex for {}", event.hello.client_id)
-                    })?,
-                    None => Vec::new(),
-                };
                 let mut tx = pool.begin().await?;
                 let prior = sqlx::query(
                     r#"
                     SELECT
                         status,
+                        public_key,
                         internal_build_number,
                         stale_build_number,
                         process_incarnation_id
@@ -540,6 +584,31 @@ impl Repository {
                 .bind(&event.hello.client_id)
                 .fetch_optional(&mut *tx)
                 .await?;
+                if let Some(public_key) = authenticated_public_key.as_ref() {
+                    let Some(prior_row) = prior.as_ref() else {
+                        return Ok(false);
+                    };
+                    let current_public_key: Vec<u8> = prior_row.try_get("public_key")?;
+                    let current_status: String = prior_row.try_get("status")?;
+                    let revoked = sqlx::query(
+                        r#"
+                        SELECT 1
+                        FROM client_key_revocations
+                        WHERE public_key_sha256_hex = $1
+                        LIMIT 1
+                        "#,
+                    )
+                    .bind(public_key_sha256_hex(public_key))
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .is_some();
+                    if !constant_time_eq(&current_public_key, public_key)
+                        || matches!(current_status.as_str(), "revoked" | "deleted")
+                        || revoked
+                    {
+                        return Ok(false);
+                    }
+                }
                 let prior_status = prior
                     .as_ref()
                     .and_then(|row| row.try_get::<String, _>("status").ok());
@@ -575,10 +644,6 @@ impl Repository {
                     )
                     VALUES ($1, $2, $3, 'online', $4, $5, $6, $7, $8, $9, $10::inet, $10::inet, now())
                     ON CONFLICT (id) DO UPDATE SET
-                        public_key = CASE
-                            WHEN octet_length(EXCLUDED.public_key) > 0 THEN EXCLUDED.public_key
-                            ELSE clients.public_key
-                        END,
                         status = CASE
                             WHEN clients.status = 'stale'
                              AND EXCLUDED.internal_build_number = COALESCE(clients.stale_build_number, clients.internal_build_number)
@@ -617,7 +682,7 @@ impl Repository {
                 )
                 .bind(&event.hello.client_id)
                 .bind(&event.hello.client_id)
-                .bind(public_key)
+                .bind(authenticated_public_key.clone().unwrap_or_default())
                 .bind(&event.hello.agent_version)
                 .bind(event.hello.internal_build_number as i64)
                 .bind(event.hello.process_incarnation_id)

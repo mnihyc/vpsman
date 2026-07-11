@@ -34,3 +34,6 @@ Rules enforced by `scripts/audit-migrations.sh`:
 | `0007_source_templates_file_transfer.sql` | Initial source template, client assignment, file-transfer session, and file-transfer source-artifact schema, including built-in templates. |
 | `0008_system_metrics.sql` | Initial durable System Dashboard metric-rollup schema. Adds 60-second control-plane metric buckets. |
 | `0009_job_approvals.sql` | Initial persisted job-approval queue schema. Approval rows preserve fixed target snapshots, payload hash, request fingerprint, requester/decision metadata, and risk/privilege state for audited operator decisions. |
+| `0010_predefined_alert_policies.sql` | Adds three disabled, operator-editable starter policy groups for CPU load, memory pressure, and traffic quota warnings. No predefined policy evaluates until an operator explicitly enables it. |
+| `0011_agent_noise_key_ownership.sql` | Enforces global one-key-per-VPS ownership for non-empty active client public keys and retired-key fingerprints. Migration aborts if existing duplicates would make ownership ambiguous. |
+| `0012_backup_missing_path_policy.sql` | Adds the explicit backup missing-root policy. Existing and new requests default to strict `fail`; reviewed heterogeneous scopes may select `skip`. |

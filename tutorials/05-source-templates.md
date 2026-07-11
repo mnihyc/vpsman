@@ -1,6 +1,6 @@
 # Tutorial 05: Templates
 
-Templates are the business model for heterogeneous VPS fleets. A VPS
+Templates are the configuration model for heterogeneous VPS fleets. A VPS
 selects a template for each source domain instead of forcing commands directly
 into every workflow.
 
@@ -24,7 +24,7 @@ cargo run -p vpsctl -- source-template-assignments
 cargo run -p vpsctl -- source-status
 ```
 
-Use the Tags panel for the same workflow when operating visually.
+Use Automation > Source templates for the same workflow when operating visually.
 
 ## Create A Shared Template
 

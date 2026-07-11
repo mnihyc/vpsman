@@ -4,15 +4,17 @@ import { SearchExpressionInput } from "../../components/SearchExpressionInput";
 import {
   BACKUP_PATH_PLACEHOLDER,
   BACKUP_PATH_PRESETS,
+  presetPathsText,
 } from "../../presets/backupPathPresets";
 import { PathPresetButtons } from "./PathPresetButtons";
-import type { AgentView } from "../../types";
+import type { AgentView, BackupMissingPathPolicy } from "../../types";
 
 type BackupPolicyFormProps = {
   agents: AgentView[];
   cronExpr: string;
   followSymlinks: boolean;
   includeConfig: boolean;
+  missingPathPolicy: BackupMissingPathPolicy;
   keepLast: number;
   name: string;
   confirmationOpen: boolean;
@@ -20,6 +22,7 @@ type BackupPolicyFormProps = {
   onEnabledChange: (value: boolean) => void;
   onFollowSymlinksChange: (value: boolean) => void;
   onIncludeConfigChange: (value: boolean) => void;
+  onMissingPathPolicyChange: (value: BackupMissingPathPolicy) => void;
   onKeepLastChange: (value: number) => void;
   onNameChange: (value: string) => void;
   onPathsTextChange: (value: string) => void;
@@ -44,6 +47,7 @@ export function BackupPolicyForm({
   cronExpr,
   followSymlinks,
   includeConfig,
+  missingPathPolicy,
   keepLast,
   name,
   confirmationOpen,
@@ -51,6 +55,7 @@ export function BackupPolicyForm({
   onEnabledChange,
   onFollowSymlinksChange,
   onIncludeConfigChange,
+  onMissingPathPolicyChange,
   onKeepLastChange,
   onNameChange,
   onPathsTextChange,
@@ -116,7 +121,10 @@ export function BackupPolicyForm({
             value={pathsText}
           />
           <PathPresetButtons
-            onApply={onPathsTextChange}
+            onApply={(preset) => {
+              onPathsTextChange(presetPathsText(preset.paths));
+              onMissingPathPolicyChange(preset.missingPathPolicy);
+            }}
             presets={BACKUP_PATH_PRESETS}
           />
         </label>
@@ -164,14 +172,14 @@ export function BackupPolicyForm({
             value={rotationGeneration}
           />
         </label>
-        <div className="dispatchControls">
+        <div className="backupOptionStrip" aria-label="Backup policy options">
           <label className="checkLine inlineCheck">
             <input
               checked={includeConfig}
               onChange={(event) => onIncludeConfigChange(event.target.checked)}
               type="checkbox"
             />
-            <span>Include agent config</span>
+            <span>Agent config</span>
           </label>
           <label
             className="checkLine inlineCheck"
@@ -182,7 +190,20 @@ export function BackupPolicyForm({
               onChange={(event) => onFollowSymlinksChange(event.target.checked)}
               type="checkbox"
             />
-            <span>Follow symlink targets</span>
+            <span>Follow symlinks</span>
+          </label>
+          <label
+            className="checkLine inlineCheck"
+            title="Continue only when a selected root does not exist on a target VPS. Unreadable paths and collection errors still fail that target."
+          >
+            <input
+              checked={missingPathPolicy === "skip"}
+              onChange={(event) =>
+                onMissingPathPolicyChange(event.target.checked ? "skip" : "fail")
+              }
+              type="checkbox"
+            />
+            <span>Skip missing roots</span>
           </label>
           <label className="checkLine inlineCheck">
             <input
@@ -198,6 +219,7 @@ export function BackupPolicyForm({
           <span>{cronExpr.trim() || "cron required"}</span>
           <span>{includeConfig ? "config" : "no config"}</span>
           <span>{followSymlinks ? "follows symlinks" : "no symlink follow"}</span>
+          <span>{missingPathPolicy === "skip" ? "optional roots" : "strict roots"}</span>
           <span>
             {pathsCount} path{pathsCount === 1 ? "" : "s"}
           </span>

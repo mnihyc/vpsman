@@ -11,7 +11,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use vpsman_common::{
-    validate_absolute_file_path, JobCommand, RestoreRollbackFile, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    validate_absolute_file_path, BackupMissingPathPolicy, JobCommand, RestoreRollbackFile,
+    DEFAULT_MAX_JOB_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -36,6 +37,7 @@ pub(crate) struct BackupPolicyUpsertOptions {
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) follow_symlinks: bool,
+    pub(crate) skip_missing_paths: bool,
     pub(crate) clients: Vec<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) cron_expr: String,
@@ -47,6 +49,20 @@ pub(crate) struct BackupPolicyUpsertOptions {
     pub(crate) retention_days: Option<i32>,
     pub(crate) keep_last: Option<i32>,
     pub(crate) rotation_generation: Option<String>,
+    pub(crate) confirmed: bool,
+}
+
+pub(crate) struct BackupRunOptions {
+    pub(crate) paths: Vec<String>,
+    pub(crate) include_config: bool,
+    pub(crate) follow_symlinks: bool,
+    pub(crate) skip_missing_paths: bool,
+    pub(crate) clients: Vec<String>,
+    pub(crate) tags: Vec<String>,
+    pub(crate) password_env: String,
+    pub(crate) super_salt_hex: Option<String>,
+    pub(crate) privilege_ttl_secs: u64,
+    pub(crate) max_timeout_secs: u64,
     pub(crate) confirmed: bool,
 }
 
@@ -246,6 +262,7 @@ pub(crate) fn backup_policy_upsert(
         paths: options.paths.clone(),
         include_config: options.include_config,
         follow_symlinks: options.follow_symlinks,
+        missing_path_policy: backup_missing_path_policy(options.skip_missing_paths),
     };
     let password = load_super_password("VPSMAN_SUPER_PASSWORD")?;
     let salt_hex = load_super_salt_hex(None)?;
@@ -283,6 +300,7 @@ pub(crate) fn backup_policy_upsert(
                 "paths": options.paths,
                 "include_config": options.include_config,
                 "follow_symlinks": options.follow_symlinks,
+                "missing_path_policy": backup_missing_path_policy(options.skip_missing_paths),
                 "selector_expression": selector_expression,
                 "target_client_ids": target_ids,
                 "cron_expr": options.cron_expr,
@@ -550,27 +568,19 @@ pub(crate) fn backup_artifact_handoff(
 pub(crate) fn backup_run(
     api_url: &str,
     token: Option<&str>,
-    paths: Vec<String>,
-    include_config: bool,
-    follow_symlinks: bool,
-    clients: Vec<String>,
-    tags: Vec<String>,
-    password_env: String,
-    super_salt_hex: Option<String>,
-    privilege_ttl_secs: u64,
-    max_timeout_secs: u64,
-    confirmed: bool,
+    options: BackupRunOptions,
 ) -> Result<()> {
-    validate_backup_scope(&paths, include_config)?;
-    anyhow::ensure!(confirmed, "backup-run requires --confirmed");
-    let password = load_super_password(&password_env)?;
-    let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let selector_expression = selector_expression_from_targets(&clients, &tags);
-    let target_ids = resolve_target_ids(api_url, token, &clients, &tags)?;
+    validate_backup_scope(&options.paths, options.include_config)?;
+    anyhow::ensure!(options.confirmed, "backup-run requires --confirmed");
+    let password = load_super_password(&options.password_env)?;
+    let salt_hex = load_super_salt_hex(options.super_salt_hex.as_deref())?;
+    let selector_expression = selector_expression_from_targets(&options.clients, &options.tags);
+    let target_ids = resolve_target_ids(api_url, token, &options.clients, &options.tags)?;
     let operation = JobCommand::Backup {
-        paths: paths.clone(),
-        include_config,
-        follow_symlinks,
+        paths: options.paths.clone(),
+        include_config: options.include_config,
+        follow_symlinks: options.follow_symlinks,
+        missing_path_policy: backup_missing_path_policy(options.skip_missing_paths),
     };
     let privilege = build_privilege_for_job_command(
         &target_ids,
@@ -579,8 +589,8 @@ pub(crate) fn backup_run(
         &selector_expression,
         &password,
         &salt_hex,
-        privilege_ttl_secs,
-        max_timeout_secs,
+        options.privilege_ttl_secs,
+        options.max_timeout_secs,
         false,
         true,
     )?;
@@ -598,8 +608,8 @@ pub(crate) fn backup_run(
                 "target_client_ids": target_ids,
                 "privileged": true,
                 "destructive": false,
-                "confirmed": confirmed,
-                "max_timeout_secs": max_timeout_secs,
+                "confirmed": options.confirmed,
+                "max_timeout_secs": options.max_timeout_secs,
                 "operation": operation,
                 "privilege_assertion": privilege.privilege_assertion,
             }),
@@ -615,6 +625,7 @@ pub(crate) fn backup_request(
     paths: Vec<String>,
     include_config: bool,
     follow_symlinks: bool,
+    skip_missing_paths: bool,
     note: Option<String>,
     password_env: String,
     super_salt_hex: Option<String>,
@@ -628,6 +639,7 @@ pub(crate) fn backup_request(
         paths: paths.clone(),
         include_config,
         follow_symlinks,
+        missing_path_policy: backup_missing_path_policy(skip_missing_paths),
     };
     let target_ids = vec![client_id.clone()];
     let selector_expression = selector_expression_from_targets(&target_ids, &[]);
@@ -651,6 +663,7 @@ pub(crate) fn backup_request(
                 "paths": paths,
                 "include_config": include_config,
                 "follow_symlinks": follow_symlinks,
+                "missing_path_policy": backup_missing_path_policy(skip_missing_paths),
                 "confirmed": confirmed,
                 "note": note,
                 "privilege_assertion": privilege_assertion,
@@ -658,6 +671,14 @@ pub(crate) fn backup_request(
         )?
     );
     Ok(())
+}
+
+fn backup_missing_path_policy(skip_missing_paths: bool) -> BackupMissingPathPolicy {
+    if skip_missing_paths {
+        BackupMissingPathPolicy::Skip
+    } else {
+        BackupMissingPathPolicy::Fail
+    }
 }
 
 pub(crate) fn build_backup_metadata_privilege(
@@ -1328,7 +1349,7 @@ mod tests {
     use uuid::Uuid;
     use vpsman_common::{
         canonical_job_privilege_intent, derive_super_key, encode_json, payload_hash,
-        verify_privilege_assertion, JobCommand, JobPrivilegeIntentInput,
+        verify_privilege_assertion, BackupMissingPathPolicy, JobCommand, JobPrivilegeIntentInput,
         PrivilegeAssertionReplayCache, DEFAULT_MAX_JOB_TIMEOUT_SECS,
     };
 
@@ -1482,6 +1503,7 @@ mod tests {
             paths: vec!["/etc/hostname".to_string()],
             include_config: false,
             follow_symlinks: false,
+            missing_path_policy: BackupMissingPathPolicy::Fail,
         };
         let target_ids = vec!["client-a".to_string()];
         let selector_expression = "id:client-a";

@@ -376,10 +376,12 @@ function BackupRequestsTable({
       cell: (backup) => (
         <span className="historyPrimary">
           <strong>{backupPathSummaryLabel(backup)}</strong>
-          <small title={`${backupSymlinkLabel(backup)}; ${backup.paths.join(", ")}`}>
+          <small
+            title={`${backupSymlinkLabel(backup)}; ${backupMissingPathLabel(backup)}; ${backup.paths.join(", ")}`}
+          >
             {backup.paths[0]
-              ? `${backupSymlinkLabel(backup)} · ${backup.paths[0]}`
-              : backupSymlinkLabel(backup)}
+              ? `${backupMissingPathLabel(backup)} · ${backup.paths[0]}`
+              : backupMissingPathLabel(backup)}
           </small>
         </span>
       ),
@@ -1335,6 +1337,7 @@ function backupScopeLabel(backup: BackupRequestRecord): string {
     );
   }
   scopes.push(backup.follow_symlinks ? "follows symlinks" : "no symlink follow");
+  scopes.push(backupMissingPathLabel(backup));
   return scopes.length > 0 ? scopes.join(" + ") : "empty";
 }
 
@@ -1353,6 +1356,10 @@ function backupPathSummaryLabel(backup: BackupRequestRecord): string {
 
 function backupSymlinkLabel(backup: BackupRequestRecord): string {
   return backup.follow_symlinks ? "follow symlinks" : "no symlink follow";
+}
+
+function backupMissingPathLabel(backup: BackupRequestRecord): string {
+  return backup.missing_path_policy === "skip" ? "optional roots" : "strict roots";
 }
 
 function backupRequestNeedsAttention(status: string): boolean {
@@ -1414,6 +1421,7 @@ function policyScopeLabel(policy: BackupPolicyRecord): string {
     );
   }
   scopes.push(policy.follow_symlinks ? "follows symlinks" : "no symlink follow");
+  scopes.push(policy.missing_path_policy === "skip" ? "optional roots" : "strict roots");
   return scopes.length > 0 ? scopes.join(" + ") : "empty";
 }
 

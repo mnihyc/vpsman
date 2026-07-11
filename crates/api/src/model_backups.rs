@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vpsman_common::PrivilegeAssertion;
 
-pub(crate) use vpsman_common::{BackupRequestStatus, MigrationLinkStatus, RestorePlanStatus};
+pub(crate) use vpsman_common::{
+    BackupMissingPathPolicy, BackupRequestStatus, MigrationLinkStatus, RestorePlanStatus,
+};
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct BackupRequestView {
@@ -12,6 +14,7 @@ pub(crate) struct BackupRequestView {
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) follow_symlinks: bool,
+    pub(crate) missing_path_policy: BackupMissingPathPolicy,
     pub(crate) status: String,
     pub(crate) payload_hash: String,
     pub(crate) command_scope: String,
@@ -44,6 +47,8 @@ pub(crate) struct CreateBackupRequest {
     #[serde(default)]
     pub(crate) follow_symlinks: bool,
     #[serde(default)]
+    pub(crate) missing_path_policy: BackupMissingPathPolicy,
+    #[serde(default)]
     pub(crate) confirmed: bool,
     pub(crate) note: Option<String>,
     #[serde(default)]
@@ -60,6 +65,7 @@ pub(crate) struct BackupPolicyView {
     pub(crate) paths: Vec<String>,
     pub(crate) include_config: bool,
     pub(crate) follow_symlinks: bool,
+    pub(crate) missing_path_policy: BackupMissingPathPolicy,
     pub(crate) retention_days: i32,
     pub(crate) keep_last: i32,
     pub(crate) rotation_generation: Option<String>,
@@ -101,6 +107,8 @@ pub(crate) struct CreateBackupPolicyRequest {
     pub(crate) include_config: bool,
     #[serde(default)]
     pub(crate) follow_symlinks: bool,
+    #[serde(default)]
+    pub(crate) missing_path_policy: BackupMissingPathPolicy,
     pub(crate) retention_days: Option<i32>,
     pub(crate) keep_last: Option<i32>,
     pub(crate) rotation_generation: Option<String>,

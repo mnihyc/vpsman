@@ -171,8 +171,8 @@ cargo run -p vpsctl -- history-export \
   --limit 50
 ```
 
-The Audit panel exposes the same policy update, dry-run, prune, and export
-controls.
+Audit > Retention & export exposes the same policy update, dry-run, prune, and
+export controls.
 
 ## Terminal Sessions
 
@@ -216,8 +216,8 @@ cargo run -p vpsctl -- terminal-replay \
   --output-file ./terminal.log
 ```
 
-The panel Jobs view exposes the same attach/replay, durable replay preview,
-poll, input, resize, and close actions from terminal session rows.
+Remote > Terminal exposes the same attach/replay, durable replay preview, poll,
+input, resize, and close actions from terminal session rows.
 
 ## File Transfers
 
@@ -260,8 +260,8 @@ cargo run -p vpsctl -- file-transfer-handoff \
   --confirmed
 ```
 
-In the Jobs panel, use File transfer sessions to select multiple completed
-download handoffs and download them together. The browser saves each verified
+In Remote > Transfers, select multiple completed download handoffs to download
+them together. The browser saves each verified
 artifact with a client/session prefix so the same remote path from different
 VPSs does not overwrite another file. Select Stream to file when the browser
 supports the File System Access API and the artifact should be written without
@@ -295,6 +295,14 @@ cargo run -p vpsctl -- file-transfer-upload \
 File-transfer handoffs and source-artifact downloads use the same binary
 streaming path as job-output downloads, so routine downloads are bounded by the
 configured artifact max rather than by the small JSON response limit.
+
+Remote > Files is the one-VPS browser and text editor. Reading a text file
+returns its current SHA-256 revision. Replacing an existing file must submit that
+revision, and the agent checks it again immediately before atomic placement. If
+a service, package manager, or local administrator changed the file meanwhile,
+the write fails or reports a stale skip according to the selected policy; refresh
+and reapply the edit instead of overwriting the local change. Creating a file is
+similarly bound to the destination remaining absent through commit.
 
 ## User Sessions And Processes
 
@@ -333,10 +341,11 @@ cargo run -p vpsctl -- schedule-create \
   --name hourly-uptime \
   --command /usr/bin/uptime \
   --tags edge \
-  --interval-secs 3600 \
+  --cron-expr "0 * * * *" \
   --catch-up-policy run_once \
   --retry-delay-secs 300 \
-  --max-failures 5
+  --max-failures 5 \
+  --confirmed
 ```
 
 Use `--catch-up-policy skip_missed` to ignore missed runs, `run_once` to work

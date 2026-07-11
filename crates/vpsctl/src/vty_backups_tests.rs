@@ -12,6 +12,7 @@ fn parses_vty_backup_request_scope_and_confirmation() {
         "--path",
         "/etc/hostname",
         "--include-config",
+        "--skip-missing-paths",
         "--confirmed",
         "--note=pre-migration",
     ])
@@ -20,6 +21,7 @@ fn parses_vty_backup_request_scope_and_confirmation() {
     assert_eq!(request.client_id, "client-a");
     assert_eq!(request.paths, vec!["/etc/hostname"]);
     assert!(request.include_config);
+    assert!(request.skip_missing_paths);
     assert!(request.confirmed);
     assert_eq!(request.note.as_deref(), Some("pre-migration"));
 }
@@ -36,6 +38,7 @@ fn parses_vty_backup_run_targets_and_scope() {
         "--path",
         "/etc/hostname",
         "--include-config",
+        "--skip-missing-paths",
         "--max-timeout=90",
         "id:client-a",
         "tag:edge",
@@ -45,6 +48,7 @@ fn parses_vty_backup_run_targets_and_scope() {
 
     assert_eq!(request.paths, vec!["/etc/hostname"]);
     assert!(request.include_config);
+    assert!(request.skip_missing_paths);
     assert_eq!(request.max_timeout_secs, 90);
     assert!(request.selection.clients.is_empty());
     assert_eq!(request.selection.tags, vec!["edge", "id:client-a"]);
@@ -64,6 +68,7 @@ fn parses_vty_backup_policy_upsert() {
         "--path",
         "/etc/hostname",
         "--include-config",
+        "--skip-missing-paths",
         "--cron=0,3,*,*,*",
         "--retention-days=45",
         "--keep-last=12",
@@ -77,6 +82,7 @@ fn parses_vty_backup_policy_upsert() {
     assert_eq!(request.name, "nightly-edge");
     assert_eq!(request.paths, vec!["/etc/hostname"]);
     assert!(request.include_config);
+    assert!(request.skip_missing_paths);
     assert_eq!(request.cron_expr, "0 3 * * *");
     assert_eq!(request.retention_days, Some(45));
     assert_eq!(request.keep_last, Some(12));

@@ -1,19 +1,21 @@
 use std::{
+    collections::HashSet,
+    fs,
     io::{self, Write},
-    os::unix::fs::PermissionsExt,
-    path::Path,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::{
-    io::AsyncReadExt,
     sync::mpsc,
     time::{self, Duration},
 };
 use vpsman_common::{
-    payload_hash, validate_absolute_file_path, AgentConfig, CommandOutput, OutputStream,
+    payload_hash, validate_absolute_file_path, AgentConfig, BackupMissingPathPolicy, CommandOutput,
+    OutputStream,
 };
 
 use crate::command_worker::{run_cancelable, CommandCancelToken};
@@ -22,6 +24,9 @@ use crate::telemetry::unix_now;
 pub(crate) const BACKUP_ARCHIVE_FORMAT: &str = "vpsman.backup_tar.v1";
 pub(crate) const BACKUP_ARCHIVE_MANIFEST_PATH: &str = "vpsman-backup/manifest.json";
 const MAX_BACKUP_PATHS: usize = 64;
+const MAX_BACKUP_FILES: usize = 16_384;
+const MAX_BACKUP_SCANNED_PATHS: usize = 65_536;
+const MAX_REPORTED_SKIPPED_PATHS: usize = 256;
 
 struct LimitedVecWriter {
     inner: Vec<u8>,
@@ -95,6 +100,32 @@ struct BackupFilePayload {
     data: Vec<u8>,
 }
 
+#[derive(Debug, Serialize)]
+struct BackupSkippedPath {
+    path: String,
+    reason: &'static str,
+}
+
+struct BackupCollection {
+    files: Vec<BackupFilePayload>,
+    directory_count: usize,
+    scanned_path_count: usize,
+    skipped_path_count: usize,
+    skipped_paths: Vec<BackupSkippedPath>,
+}
+
+impl BackupCollection {
+    fn record_skip(&mut self, path: &Path, reason: &'static str) {
+        self.skipped_path_count = self.skipped_path_count.saturating_add(1);
+        if self.skipped_paths.len() < MAX_REPORTED_SKIPPED_PATHS {
+            self.skipped_paths.push(BackupSkippedPath {
+                path: path.display().to_string(),
+                reason,
+            });
+        }
+    }
+}
+
 pub(crate) struct BackupCommandInput<'a> {
     pub(crate) job_id: uuid::Uuid,
     pub(crate) config: &'a AgentConfig,
@@ -102,6 +133,7 @@ pub(crate) struct BackupCommandInput<'a> {
     pub(crate) paths: &'a [String],
     pub(crate) include_config: bool,
     pub(crate) follow_symlinks: bool,
+    pub(crate) missing_path_policy: BackupMissingPathPolicy,
     pub(crate) output_tx: Option<mpsc::Sender<CommandOutput>>,
     pub(crate) max_timeout_secs: u64,
     pub(crate) cancel_token: CommandCancelToken,
@@ -117,6 +149,7 @@ pub(crate) async fn execute_backup_command(
         paths,
         include_config,
         follow_symlinks,
+        missing_path_policy,
         output_tx,
         max_timeout_secs,
         cancel_token,
@@ -131,6 +164,7 @@ pub(crate) async fn execute_backup_command(
                 paths,
                 include_config,
                 follow_symlinks,
+                missing_path_policy,
                 output_tx,
                 cancel_token,
             ),
@@ -148,21 +182,31 @@ async fn create_backup_archive_artifact(
     paths: &[String],
     include_config: bool,
     follow_symlinks: bool,
+    missing_path_policy: BackupMissingPathPolicy,
     output_tx: Option<mpsc::Sender<CommandOutput>>,
     cancel_token: CommandCancelToken,
 ) -> Result<Vec<CommandOutput>> {
     cancel_token.check("backup")?;
     validate_backup_scope(paths, include_config)?;
-    let files = collect_backup_files(
+    let collection = collect_backup_files(
         config_path,
         paths,
         include_config,
         follow_symlinks,
+        missing_path_policy,
         config.backup.max_uncompressed_bytes,
         &cancel_token,
     )
     .await?;
     cancel_token.check("backup")?;
+    let BackupCollection {
+        files,
+        directory_count,
+        scanned_path_count,
+        skipped_path_count,
+        skipped_paths,
+    } = collection;
+    anyhow::ensure!(!files.is_empty(), "backup scope captured no regular files");
     let file_count = files.len();
     let created_unix = unix_now();
     let archive = BackupArchive {
@@ -218,7 +262,13 @@ async fn create_backup_archive_artifact(
         "paths": paths,
         "include_config": include_config,
         "follow_symlinks": follow_symlinks,
+        "missing_path_policy": missing_path_policy.as_str(),
         "file_count": file_count,
+        "directory_count": directory_count,
+        "scanned_path_count": scanned_path_count,
+        "skipped_path_count": skipped_path_count,
+        "skipped_paths": skipped_paths,
+        "skipped_paths_truncated": skipped_path_count > MAX_REPORTED_SKIPPED_PATHS,
         "artifact_size_bytes": artifact_bytes.len(),
         "artifact_sha256_hex": artifact_sha256_hex,
         "chunk_bytes": chunk_bytes,
@@ -240,47 +290,207 @@ async fn collect_backup_files(
     paths: &[String],
     include_config: bool,
     follow_symlinks: bool,
+    missing_path_policy: BackupMissingPathPolicy,
     max_uncompressed_bytes: u64,
     cancel_token: &CommandCancelToken,
-) -> Result<Vec<BackupFilePayload>> {
-    let mut files = Vec::new();
+) -> Result<BackupCollection> {
+    let config_path = config_path.to_path_buf();
+    let paths = paths.to_vec();
+    let cancel_token = cancel_token.clone();
+    tokio::task::spawn_blocking(move || {
+        collect_backup_files_blocking(
+            &config_path,
+            &paths,
+            include_config,
+            follow_symlinks,
+            missing_path_policy,
+            max_uncompressed_bytes,
+            &cancel_token,
+        )
+    })
+    .await
+    .context("backup collection worker failed")?
+}
+
+fn collect_backup_files_blocking(
+    config_path: &Path,
+    paths: &[String],
+    include_config: bool,
+    follow_symlinks: bool,
+    missing_path_policy: BackupMissingPathPolicy,
+    max_uncompressed_bytes: u64,
+    cancel_token: &CommandCancelToken,
+) -> Result<BackupCollection> {
+    let mut collection = BackupCollection {
+        files: Vec::new(),
+        directory_count: 0,
+        scanned_path_count: 0,
+        skipped_path_count: 0,
+        skipped_paths: Vec::new(),
+    };
     let mut total_bytes = 0_u64;
-    for (index, path) in paths.iter().enumerate() {
+    let mut visited_directories = HashSet::<(u64, u64)>::new();
+    let mut seen_file_paths = HashSet::<PathBuf>::new();
+    for path in paths {
         cancel_token.check("backup")?;
-        files.push(
-            read_backup_file(
-                Path::new(path),
-                path,
-                BackupFileSource::SelectedPath,
-                index,
-                follow_symlinks,
-                &mut total_bytes,
-                max_uncompressed_bytes,
-                cancel_token,
-            )
-            .await?,
-        );
+        collect_selected_path(
+            Path::new(path),
+            true,
+            false,
+            follow_symlinks,
+            missing_path_policy,
+            &mut collection,
+            &mut total_bytes,
+            max_uncompressed_bytes,
+            &mut visited_directories,
+            &mut seen_file_paths,
+            cancel_token,
+        )?;
     }
     if include_config {
         cancel_token.check("backup")?;
-        files.push(
-            read_backup_file(
-                config_path,
-                "vpsman:agent_config",
-                BackupFileSource::AgentConfig,
-                files.len(),
-                true,
-                &mut total_bytes,
-                max_uncompressed_bytes,
-                cancel_token,
-            )
-            .await?,
+        anyhow::ensure!(
+            collection.files.len() < MAX_BACKUP_FILES,
+            "backup file count limit exceeded"
         );
+        collection.files.push(read_backup_file(
+            config_path,
+            "vpsman:agent_config",
+            BackupFileSource::AgentConfig,
+            collection.files.len(),
+            true,
+            &mut total_bytes,
+            max_uncompressed_bytes,
+            cancel_token,
+        )?);
     }
-    Ok(files)
+    Ok(collection)
 }
 
-async fn read_backup_file(
+#[allow(clippy::too_many_arguments)]
+fn collect_selected_path(
+    path: &Path,
+    selected_root: bool,
+    path_counted: bool,
+    follow_symlinks: bool,
+    missing_path_policy: BackupMissingPathPolicy,
+    collection: &mut BackupCollection,
+    total_bytes: &mut u64,
+    max_uncompressed_bytes: u64,
+    visited_directories: &mut HashSet<(u64, u64)>,
+    seen_file_paths: &mut HashSet<PathBuf>,
+    cancel_token: &CommandCancelToken,
+) -> Result<()> {
+    cancel_token.check("backup")?;
+    if !path_counted {
+        anyhow::ensure!(
+            collection.scanned_path_count < MAX_BACKUP_SCANNED_PATHS,
+            "backup scanned path limit exceeded"
+        );
+        collection.scanned_path_count = collection.scanned_path_count.saturating_add(1);
+    }
+    let link_metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if selected_root
+                && error.kind() == io::ErrorKind::NotFound
+                && missing_path_policy == BackupMissingPathPolicy::Skip =>
+        {
+            collection.record_skip(path, "missing");
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to stat backup path {}", path.display()));
+        }
+    };
+    let is_symlink = link_metadata.file_type().is_symlink();
+    if is_symlink && !follow_symlinks {
+        if selected_root {
+            anyhow::bail!(
+                "backup path is a symlink; set follow_symlinks to use the target: {}",
+                path.display()
+            );
+        }
+        collection.record_skip(path, "symlink_not_followed");
+        return Ok(());
+    }
+    let metadata = if is_symlink {
+        fs::metadata(path)
+            .with_context(|| format!("failed to follow backup path {}", path.display()))?
+    } else {
+        link_metadata
+    };
+    cancel_token.check("backup")?;
+    if metadata.is_file() {
+        if !seen_file_paths.insert(path.to_path_buf()) {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            collection.files.len() < MAX_BACKUP_FILES,
+            "backup file count limit exceeded"
+        );
+        let archive_path = path.display().to_string();
+        collection.files.push(read_backup_file(
+            path,
+            &archive_path,
+            BackupFileSource::SelectedPath,
+            collection.files.len(),
+            follow_symlinks,
+            total_bytes,
+            max_uncompressed_bytes,
+            cancel_token,
+        )?);
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        let identity = (metadata.dev(), metadata.ino());
+        if !visited_directories.insert(identity) {
+            collection.record_skip(path, "directory_already_visited");
+            return Ok(());
+        }
+        collection.directory_count = collection.directory_count.saturating_add(1);
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(path)
+            .with_context(|| format!("failed to read backup directory {}", path.display()))?
+        {
+            anyhow::ensure!(
+                collection.scanned_path_count < MAX_BACKUP_SCANNED_PATHS,
+                "backup scanned path limit exceeded"
+            );
+            collection.scanned_path_count = collection.scanned_path_count.saturating_add(1);
+            entries.push(entry?);
+        }
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            collect_selected_path(
+                &entry.path(),
+                false,
+                true,
+                follow_symlinks,
+                missing_path_policy,
+                collection,
+                total_bytes,
+                max_uncompressed_bytes,
+                visited_directories,
+                seen_file_paths,
+                cancel_token,
+            )?;
+        }
+        return Ok(());
+    }
+    if selected_root {
+        anyhow::bail!(
+            "backup path is not a regular file or directory: {}",
+            path.display()
+        );
+    }
+    collection.record_skip(path, "special_file");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_backup_file(
     path: &Path,
     archive_path: &str,
     source: BackupFileSource,
@@ -295,13 +505,14 @@ async fn read_backup_file(
         validate_absolute_file_path(archive_path)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     }
-    let metadata = backup_path_metadata(path, follow_symlinks)
-        .await
-        .with_context(|| format!("failed to stat backup path {}", path.display()))?;
+    let opened = crate::safe_file::open_regular_file_for_read(
+        path,
+        follow_symlinks,
+        "backup path is a symlink; set follow_symlinks to use the target",
+    )
+    .with_context(|| format!("failed to open backup path {}", path.display()))?;
+    let metadata = opened.metadata;
     cancel_token.check("backup")?;
-    if !metadata.is_file() {
-        anyhow::bail!("backup path is not a regular file: {}", path.display());
-    }
     let remaining = max_uncompressed_bytes.saturating_sub(*total_bytes);
     if metadata.len() > remaining {
         anyhow::bail!(
@@ -310,7 +521,11 @@ async fn read_backup_file(
             max_uncompressed_bytes
         );
     }
-    let data = read_backup_file_bounded(path, remaining, follow_symlinks).await?;
+    let data = crate::safe_file::read_opened_file_bounded(
+        opened.file,
+        remaining,
+        "backup file exceeds remaining uncompressed payload limit while reading",
+    )?;
     *total_bytes = total_bytes
         .checked_add(data.len() as u64)
         .context("backup size overflow")?;
@@ -365,60 +580,6 @@ fn encode_backup_tar_archive(
         .into_inner()
         .context("failed to collect backup tar archive")?
         .into_inner())
-}
-
-async fn backup_path_metadata(path: &Path, follow_symlinks: bool) -> Result<std::fs::Metadata> {
-    let metadata = tokio::fs::symlink_metadata(path).await?;
-    if metadata.file_type().is_symlink() {
-        if !follow_symlinks {
-            anyhow::bail!("backup path is a symlink; set follow_symlinks to use the target");
-        }
-        return tokio::fs::metadata(path).await.map_err(Into::into);
-    }
-    Ok(metadata)
-}
-
-async fn read_backup_file_bounded(
-    path: &Path,
-    max_bytes: u64,
-    follow_symlinks: bool,
-) -> Result<Vec<u8>> {
-    let mut options = tokio::fs::OpenOptions::new();
-    options.read(true);
-    if !follow_symlinks {
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut file = options
-        .open(path)
-        .await
-        .with_context(|| format!("failed to open backup path {}", path.display()))?;
-    let opened_metadata = file
-        .metadata()
-        .await
-        .with_context(|| format!("failed to stat opened backup path {}", path.display()))?;
-    if !opened_metadata.is_file() {
-        anyhow::bail!("backup path is not a regular file: {}", path.display());
-    }
-    let mut data = Vec::with_capacity((max_bytes.min(16 * 1024)) as usize);
-    let mut buffer = vec![0_u8; 16 * 1024];
-    let mut total = 0_u64;
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .await
-            .with_context(|| format!("failed to read backup path {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        total = total
-            .checked_add(read as u64)
-            .context("backup file size overflow")?;
-        if total > max_bytes {
-            anyhow::bail!("backup file exceeds remaining uncompressed payload limit while reading");
-        }
-        data.extend_from_slice(&buffer[..read]);
-    }
-    Ok(data)
 }
 
 fn append_tar_bytes<W: Write>(
@@ -489,6 +650,7 @@ mod tests {
             paths: &paths,
             include_config: true,
             follow_symlinks: false,
+            missing_path_policy: BackupMissingPathPolicy::Fail,
             output_tx: None,
             max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -550,6 +712,7 @@ mod tests {
             paths: &paths,
             include_config: false,
             follow_symlinks: false,
+            missing_path_policy: BackupMissingPathPolicy::Fail,
             output_tx: None,
             max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -567,6 +730,7 @@ mod tests {
             paths: &paths,
             include_config: false,
             follow_symlinks: true,
+            missing_path_policy: BackupMissingPathPolicy::Fail,
             output_tx: None,
             max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -585,6 +749,94 @@ mod tests {
             archive.files[0].sha256_hex,
             payload_hash(b"target contents")
         );
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn backup_recurses_directories_and_reports_tolerated_omissions() {
+        let job_id = uuid::Uuid::new_v4();
+        let dir = std::env::temp_dir().join(format!("vpsman-agent-backup-tree-{job_id}"));
+        let root = dir.join("config");
+        let nested = root.join("service");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        let root_file = root.join("root.conf");
+        let nested_file = nested.join("service.conf");
+        let nested_link = nested.join("linked.conf");
+        let missing = dir.join("optional-missing");
+        tokio::fs::write(&root_file, b"root=true\n").await.unwrap();
+        tokio::fs::write(&nested_file, b"enabled=true\n")
+            .await
+            .unwrap();
+        symlink(&root_file, &nested_link).unwrap();
+
+        let config = AgentConfig {
+            client_id: "client-tree".to_string(),
+            backup: AgentBackupConfig {
+                max_uncompressed_bytes: 8192,
+                max_archive_bytes: 32 * 1024,
+            },
+            ..AgentConfig::default()
+        };
+        let paths = vec![
+            root.to_string_lossy().to_string(),
+            missing.to_string_lossy().to_string(),
+        ];
+        let outputs = execute_backup_command(BackupCommandInput {
+            job_id,
+            config: &config,
+            config_path: &root_file,
+            paths: &paths,
+            include_config: false,
+            follow_symlinks: false,
+            missing_path_policy: BackupMissingPathPolicy::Skip,
+            output_tx: None,
+            max_timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
+        })
+        .await
+        .unwrap();
+        let artifact_bytes = outputs
+            .iter()
+            .filter(|output| output.stream == OutputStream::Stdout)
+            .flat_map(|output| output.data.clone())
+            .collect::<Vec<_>>();
+        let archive = manifest_from_tar(&artifact_bytes);
+        let archived_paths = archive
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(archive.files.len(), 2);
+        assert!(archived_paths.contains(&root_file.to_string_lossy().as_ref()));
+        assert!(archived_paths.contains(&nested_file.to_string_lossy().as_ref()));
+        assert!(!archived_paths.contains(&nested_link.to_string_lossy().as_ref()));
+
+        let status = outputs.iter().find(|output| output.done).unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&status.data).unwrap();
+        assert_eq!(status["missing_path_policy"], "skip");
+        assert_eq!(status["directory_count"], 2);
+        assert_eq!(status["skipped_path_count"], 2);
+        assert_eq!(status["skipped_paths"][0]["reason"], "symlink_not_followed");
+        assert_eq!(status["skipped_paths"][1]["reason"], "missing");
+
+        let error = execute_backup_command(BackupCommandInput {
+            job_id: uuid::Uuid::new_v4(),
+            config: &config,
+            config_path: &root_file,
+            paths: &paths,
+            include_config: false,
+            follow_symlinks: false,
+            missing_path_policy: BackupMissingPathPolicy::Fail,
+            output_tx: None,
+            max_timeout_secs: 5,
+            cancel_token: CommandCancelToken::default(),
+        })
+        .await
+        .unwrap_err();
+        assert!(error
+            .chain()
+            .any(|cause| cause.to_string().contains("failed to stat backup path")));
 
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
@@ -624,6 +876,7 @@ mod tests {
             paths: &paths,
             include_config: true,
             follow_symlinks: false,
+            missing_path_policy: BackupMissingPathPolicy::Fail,
             output_tx: Some(tx),
             max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -678,6 +931,7 @@ mod tests {
             paths: &relative_paths,
             include_config: false,
             follow_symlinks: false,
+            missing_path_policy: BackupMissingPathPolicy::Fail,
             output_tx: None,
             max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -693,6 +947,7 @@ mod tests {
             paths: &paths,
             include_config: false,
             follow_symlinks: false,
+            missing_path_policy: BackupMissingPathPolicy::Fail,
             output_tx: None,
             max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),
@@ -728,6 +983,7 @@ mod tests {
             paths: &paths,
             include_config: false,
             follow_symlinks: false,
+            missing_path_policy: BackupMissingPathPolicy::Fail,
             output_tx: None,
             max_timeout_secs: 5,
             cancel_token: CommandCancelToken::default(),

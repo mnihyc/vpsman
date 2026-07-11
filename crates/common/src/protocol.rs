@@ -39,7 +39,7 @@ pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const USER_SESSIONS_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const PROCESS_COMMAND_PROTOCOL_VERSION: u16 = 1;
-pub const BACKUP_COMMAND_PROTOCOL_VERSION: u16 = 2;
+pub const BACKUP_COMMAND_PROTOCOL_VERSION: u16 = 3;
 pub const RESTORE_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const NETWORK_COMMAND_PROTOCOL_VERSION: u16 = 1;
 
@@ -2443,6 +2443,31 @@ pub enum BackupRequestStatus {
     ExecutionCanceled,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupMissingPathPolicy {
+    #[default]
+    Fail,
+    Skip,
+}
+
+impl BackupMissingPathPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fail => "fail",
+            Self::Skip => "skip",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "fail" => Some(Self::Fail),
+            "skip" => Some(Self::Skip),
+            _ => None,
+        }
+    }
+}
+
 impl BackupRequestStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -2829,6 +2854,8 @@ pub enum JobCommand {
         paths: Vec<String>,
         include_config: bool,
         follow_symlinks: bool,
+        #[serde(default)]
+        missing_path_policy: BackupMissingPathPolicy,
     },
     Restore {
         source_backup_request_id: Uuid,

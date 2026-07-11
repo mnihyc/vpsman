@@ -405,6 +405,10 @@ async fn execute_file_write_text(
     create: bool,
     policy: FileActionPolicy,
 ) -> Result<Vec<CommandOutput>> {
+    anyhow::ensure!(
+        create || expected_sha256_hex.is_some(),
+        "file write expected hash is required when replacing an existing file"
+    );
     validate_mutable_path(path)?;
     validate_file_mode(mode).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let data = decode_inline_file_payload(content_base64, size_bytes, sha256_hex)
@@ -509,7 +513,72 @@ async fn execute_file_write_text(
             anyhow::bail!("file changed since it was opened");
         }
     }
-    atomic_write(destination, mode, &data, !create).await?;
+    let commit = atomic_write(
+        destination,
+        mode,
+        &data,
+        !create,
+        expected_sha256_hex,
+        sha256_hex,
+        policy,
+    )
+    .await?;
+    match commit {
+        AtomicWriteOutcome::Written => {}
+        AtomicWriteOutcome::Unchanged {
+            sha256_hex,
+            size_bytes,
+        } => {
+            return status_output(
+                job_id,
+                json!({
+                    "type": "file_write_text",
+                    "path": path,
+                    "status": "unchanged",
+                    "sha256_hex": sha256_hex,
+                    "size_bytes": size_bytes,
+                }),
+            );
+        }
+        AtomicWriteOutcome::SkippedMissing => {
+            return status_output(
+                job_id,
+                json!({"type": "file_write_text", "path": path, "status": "skipped", "reason": "missing"}),
+            );
+        }
+        AtomicWriteOutcome::SkippedDestinationExists => {
+            return status_output(
+                job_id,
+                json!({"type": "file_write_text", "path": path, "status": "skipped", "reason": "destination_exists"}),
+            );
+        }
+        AtomicWriteOutcome::SkippedStale { current_sha256_hex } => {
+            return status_output(
+                job_id,
+                json!({
+                    "type": "file_write_text",
+                    "path": path,
+                    "status": "skipped",
+                    "reason": "stale",
+                    "current_sha256_hex": current_sha256_hex,
+                    "expected_sha256_hex": expected_sha256_hex,
+                }),
+            );
+        }
+        AtomicWriteOutcome::SkippedVerification { error } => {
+            return status_output(
+                job_id,
+                json!({
+                    "type": "file_write_text",
+                    "path": path,
+                    "status": "skipped",
+                    "reason": "verification_failed",
+                    "error": error,
+                    "expected_sha256_hex": expected_sha256_hex,
+                }),
+            );
+        }
+    }
     status_output(
         job_id,
         json!({
@@ -1029,19 +1098,57 @@ fn rename_path_blocking(
     Ok(RenameOutcome::Renamed)
 }
 
-async fn atomic_write(destination: &Path, mode: u32, data: &[u8], replace: bool) -> Result<()> {
-    let destination = destination.to_path_buf();
-    let data = data.to_vec();
-    tokio::task::spawn_blocking(move || atomic_write_blocking(&destination, mode, &data, replace))
-        .await
-        .context("file write worker failed")?
+#[derive(Debug, Eq, PartialEq)]
+enum AtomicWriteOutcome {
+    Written,
+    Unchanged { sha256_hex: String, size_bytes: u64 },
+    SkippedMissing,
+    SkippedDestinationExists,
+    SkippedStale { current_sha256_hex: String },
+    SkippedVerification { error: String },
 }
 
-fn atomic_write_blocking(destination: &Path, mode: u32, data: &[u8], replace: bool) -> Result<()> {
+async fn atomic_write(
+    destination: &Path,
+    mode: u32,
+    data: &[u8],
+    replace: bool,
+    expected_sha256_hex: Option<&str>,
+    desired_sha256_hex: &str,
+    policy: FileActionPolicy,
+) -> Result<AtomicWriteOutcome> {
+    let destination = destination.to_path_buf();
+    let data = data.to_vec();
+    let expected_sha256_hex = expected_sha256_hex.map(str::to_ascii_lowercase);
+    let desired_sha256_hex = desired_sha256_hex.to_ascii_lowercase();
+    tokio::task::spawn_blocking(move || {
+        atomic_write_blocking(
+            &destination,
+            mode,
+            &data,
+            replace,
+            expected_sha256_hex.as_deref(),
+            &desired_sha256_hex,
+            policy,
+        )
+    })
+    .await
+    .context("file write worker failed")?
+}
+
+fn atomic_write_blocking(
+    destination: &Path,
+    mode: u32,
+    data: &[u8],
+    replace: bool,
+    expected_sha256_hex: Option<&str>,
+    desired_sha256_hex: &str,
+    policy: FileActionPolicy,
+) -> Result<AtomicWriteOutcome> {
     let parent = safe_fs::resolve_parent(destination)?;
     let (mut temp_file, temp_name) =
         safe_fs::create_private_temp_file(parent.dir(), parent.name(), "edit")?;
-    let result = (|| -> Result<()> {
+    let result = (|| -> Result<AtomicWriteOutcome> {
         temp_file.write_all(data).with_context(|| {
             format!(
                 "failed to write temporary file for {}",
@@ -1055,6 +1162,72 @@ fn atomic_write_blocking(destination: &Path, mode: u32, data: &[u8], replace: bo
                 destination.display()
             )
         })?;
+        let destination_at_commit = parent.child_stat_nofollow()?;
+        if replace && destination_at_commit.is_none() {
+            return match policy {
+                FileActionPolicy::Ensure | FileActionPolicy::Ignore => {
+                    Ok(AtomicWriteOutcome::SkippedMissing)
+                }
+                FileActionPolicy::Fail => {
+                    anyhow::bail!("file write target disappeared before commit")
+                }
+            };
+        }
+        if !replace && destination_at_commit.is_some() {
+            return match policy {
+                FileActionPolicy::Ignore => Ok(AtomicWriteOutcome::SkippedDestinationExists),
+                FileActionPolicy::Ensure => {
+                    let (current_sha256_hex, size_bytes) = hash_destination_at_commit(&parent)?;
+                    if current_sha256_hex == desired_sha256_hex {
+                        Ok(AtomicWriteOutcome::Unchanged {
+                            sha256_hex: current_sha256_hex,
+                            size_bytes,
+                        })
+                    } else {
+                        anyhow::bail!("file write create target appeared before commit")
+                    }
+                }
+                FileActionPolicy::Fail => {
+                    anyhow::bail!("file write create target appeared before commit")
+                }
+            };
+        }
+        if destination_at_commit
+            .as_ref()
+            .is_some_and(|metadata| !metadata.is_file())
+        {
+            anyhow::bail!("file write target is no longer a regular file")
+        }
+        if let Some(expected_sha256_hex) = expected_sha256_hex {
+            let (current_sha256_hex, size_bytes) = match hash_destination_at_commit(&parent) {
+                Ok(current) => current,
+                Err(error) if policy == FileActionPolicy::Ignore => {
+                    return Ok(AtomicWriteOutcome::SkippedVerification {
+                        error: error.to_string(),
+                    });
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to revalidate current file before committing {}",
+                            destination.display()
+                        )
+                    });
+                }
+            };
+            if current_sha256_hex != expected_sha256_hex {
+                if policy == FileActionPolicy::Ensure && current_sha256_hex == desired_sha256_hex {
+                    return Ok(AtomicWriteOutcome::Unchanged {
+                        sha256_hex: current_sha256_hex,
+                        size_bytes,
+                    });
+                }
+                if policy == FileActionPolicy::Ignore {
+                    return Ok(AtomicWriteOutcome::SkippedStale { current_sha256_hex });
+                }
+                anyhow::bail!("file changed before the write committed");
+            }
+        }
         safe_fs::rename_child(
             parent.dir(),
             &temp_name,
@@ -1069,12 +1242,47 @@ fn atomic_write_blocking(destination: &Path, mode: u32, data: &[u8], replace: bo
             )
         })?;
         safe_fs::sync_dir_best_effort(parent.dir());
-        Ok(())
+        Ok(AtomicWriteOutcome::Written)
     })();
-    if result.is_err() {
+    if !matches!(&result, Ok(AtomicWriteOutcome::Written)) {
         let _ = safe_fs::remove_child_file(parent.dir(), &temp_name);
     }
     result
+}
+
+fn hash_destination_at_commit(parent: &safe_fs::SafeParent) -> Result<(String, u64)> {
+    let identity_before = parent
+        .child_stat_nofollow()?
+        .context("file write target disappeared during commit verification")?;
+    if !identity_before.is_file() {
+        anyhow::bail!("file write target is no longer a regular file");
+    }
+    let file = parent.open_child_file_read(false)?;
+    let metadata_before = file.metadata()?;
+    let file_identity_before = safe_file::FileIdentity::from_metadata(&metadata_before);
+    if metadata_before.len() > MAX_FILE_READ_BYTES {
+        anyhow::bail!(
+            "current file exceeds text verification limit: {} > {} bytes",
+            metadata_before.len(),
+            MAX_FILE_READ_BYTES
+        );
+    }
+    let hash = safe_file::hash_opened_file_bounded(
+        file.try_clone()?,
+        MAX_FILE_READ_BYTES,
+        "current file exceeds text verification limit",
+    )?;
+    let metadata_after = file.metadata()?;
+    let file_identity_after = safe_file::FileIdentity::from_metadata(&metadata_after);
+    let identity_after = parent
+        .child_stat_nofollow()?
+        .context("file write target disappeared during commit verification")?;
+    anyhow::ensure!(
+        identity_before.identity == identity_after.identity
+            && file_identity_before == file_identity_after,
+        "file changed during commit verification"
+    );
+    Ok((hash, metadata_after.len()))
 }
 
 fn mkdir_path_blocking(
@@ -2092,6 +2300,51 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn atomic_text_write_revalidates_destination_at_commit() {
+        let root = test_root("commit-bound-stale-write");
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("service.conf");
+        fs::write(&file, b"service-update").unwrap();
+        let desired = b"operator-update";
+        let stale_hash = payload_hash(b"opened-content");
+
+        let error = atomic_write_blocking(
+            &file,
+            0o644,
+            desired,
+            true,
+            Some(&stale_hash),
+            &payload_hash(desired),
+            FileActionPolicy::Fail,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("changed before the write committed"));
+        assert_eq!(fs::read(&file).unwrap(), b"service-update");
+
+        let outcome = atomic_write_blocking(
+            &file,
+            0o644,
+            desired,
+            true,
+            Some(&stale_hash),
+            &payload_hash(desired),
+            FileActionPolicy::Ignore,
+        )
+        .unwrap();
+        assert!(matches!(outcome, AtomicWriteOutcome::SkippedStale { .. }));
+        assert_eq!(fs::read(&file).unwrap(), b"service-update");
+        assert!(fs::read_dir(&root).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".vpsman-edit-")));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn stale_text_write_fails() {
         let root = test_root("stale-write");
@@ -2111,6 +2364,33 @@ mod tests {
         )
         .await;
         assert!(result.unwrap_err().to_string().contains("changed"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn text_replacement_requires_the_opened_file_hash() {
+        let root = test_root("write-requires-revision");
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("service.conf");
+        fs::write(&file, "current").unwrap();
+        let result = execute_file_write_text(
+            Uuid::new_v4(),
+            file.to_str().unwrap(),
+            0o644,
+            7,
+            &payload_hash(b"updated"),
+            &base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"updated"),
+            None,
+            false,
+            FileActionPolicy::Fail,
+        )
+        .await;
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("expected hash is required"));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "current");
         let _ = fs::remove_dir_all(&root);
     }
 

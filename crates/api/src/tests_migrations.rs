@@ -266,6 +266,7 @@ async fn create_source_backup(repo: &Repository) -> Uuid {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         confirmed: true,
         note: Some("pre-migration".to_string()),
         privilege_assertion: None,

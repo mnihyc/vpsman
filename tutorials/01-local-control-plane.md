@@ -164,5 +164,5 @@ bash scripts/release-check.sh
 
 The alert policy variables are fleet-wide startup defaults for built-in
 resource alerts. For per-VPS traffic rules and environment-specific alert
-logic, use Config > VPS Rules or `vpsctl vps-rules`, then Fleet > Alert
-Policies or `vpsctl alert-policy`.
+logic, use Config > Rules or `vpsctl vps-rules`, then Observability > Alerts or
+`vpsctl alert-policy`.

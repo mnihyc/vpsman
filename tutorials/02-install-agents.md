@@ -1,13 +1,14 @@
 # 02 - Install Agents With Direct Gateway Identity
 
 Agents do not call the panel or the HTTP API during install. Each VPS receives
-all immutable gateway identity material up front, then connects directly to the
-raw TCP gateway endpoint list. Runtime config changes are delivered later over
-the gateway channel.
+its per-install gateway identity material up front, then connects directly to
+the raw TCP gateway endpoint list. Runtime config changes are delivered later
+over the gateway channel.
 
 ## 1. Generate agent identity material
 
-Generate a Noise keypair for each VPS and keep the private key on that VPS only:
+Generate a unique Noise keypair for each VPS and keep the private key on that
+VPS only. Never copy one agent keypair across machines:
 
 ```sh
 cargo run -p vpsctl -- noise-keygen
@@ -30,8 +31,10 @@ cargo run -p vpsctl -- agent-identity-upsert \
   --confirmed
 ```
 
-A key change requires `--replace-existing-key --confirmed`. Revoked or deleted
-client ids are intentionally blocked and must not be reused.
+A key change requires `--replace-existing-key --confirmed`. Public-key ownership
+is global: registration rejects a key already assigned to another client and a
+key retired by any rotation, revocation, or deletion. Revoked or deleted client
+IDs are intentionally blocked and must not be reused.
 
 ## 3. Install the agent service
 
@@ -105,5 +108,8 @@ cargo run -p vpsctl -- agent-identity-upsert \
   --confirmed
 ```
 
-Then reinstall the service with the new private key. If the old key was revoked
-or the client was deleted, choose a new client id instead of reusing the old one.
+Then reinstall the service with the new private key. Rotation permanently
+retires the old key and disconnects its live session; gateway hello validation
+also rejects a stale connection that reaches registration after the rotation.
+If the old key was revoked or the client was deleted, choose a new client ID
+instead of reusing the old one.

@@ -92,9 +92,9 @@ cargo run -p vpsctl -- fleet-alert-export --include-muted --limit 200
 Use `--action acknowledge`, `--action escalate`, or `--action clear` for the
 same alert id when the operational state changes.
 
-For per-VPS traffic accounting, save VPS Rules first. These are low-level
-server-side values keyed by VPS and rule key; the alert policy editor reads
-them but does not modify them.
+For per-VPS traffic accounting, save Config > Rules values first. These are
+low-level server-side values keyed by VPS and rule key; the alert policy editor
+reads them but does not modify them.
 
 ```sh
 cargo run -p vpsctl -- vps-rules preview \
@@ -138,9 +138,10 @@ cargo run -p vpsctl -- alert-policies list --selector 'tag:edge'
 In the UI, Fleet > Instances keeps traffic columns hidden by default; enable
 them through Fields when you need operational status in the main table. Expand a
 VPS and open Traffic & Rules for counters, current cycle usage, incomplete
-reasons, matched policies, and recent issued alerts. Use Config > VPS Rules for
-bulk dry-run, preview-hash confirmation, and explicit unset actions. Use Fleet
-> Alert Policies for policy-group editing, selector dry-runs, and rule previews.
+reasons, matched policies, and recent issued alerts. Use Config > Rules for bulk
+dry-run, preview-hash confirmation, and explicit unset actions. Use
+Observability > Alerts for policy-group editing, selector dry-runs, notification
+channels, and rule previews.
 Issued policy alerts appear in Fleet > Alerts and are delivered by the existing
 notification/webhook channels as `alert.policy_reached` events with `alert`,
 `vps`, `policy`, `rule`, and `traffic` payload roots.

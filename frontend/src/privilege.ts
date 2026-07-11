@@ -617,6 +617,7 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["paths", operation.paths],
         ["include_config", operation.include_config],
         ["follow_symlinks", operation.follow_symlinks],
+        ["missing_path_policy", operation.missing_path_policy],
       ]);
     case "restore":
       return ordered([

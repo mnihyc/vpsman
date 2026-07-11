@@ -1594,6 +1594,8 @@ export type PrivilegeAssertion = {
   assertion_hex: string;
 };
 
+export type BackupMissingPathPolicy = "fail" | "skip";
+
 export type JobOperation =
   | { type: "shell"; argv: string[]; pty: boolean }
   | { type: "shell_script"; script: string }
@@ -1844,6 +1846,7 @@ export type JobOperation =
       paths: string[];
       include_config: boolean;
       follow_symlinks: boolean;
+      missing_path_policy: BackupMissingPathPolicy;
     }
   | {
       type: "network_status";
@@ -2007,6 +2010,7 @@ export type BackupPolicyRecord = {
   paths: string[];
   include_config: boolean;
   follow_symlinks: boolean;
+  missing_path_policy: BackupMissingPathPolicy;
   retention_days: number;
   keep_last: number;
   rotation_generation: string | null;
@@ -2032,6 +2036,7 @@ export type CreateBackupPolicyRequest = {
   paths: string[];
   include_config: boolean;
   follow_symlinks: boolean;
+  missing_path_policy: BackupMissingPathPolicy;
   retention_days?: number | null;
   keep_last?: number | null;
   rotation_generation?: string | null;
@@ -2082,6 +2087,7 @@ export type BackupRequestRecord = {
   paths: string[];
   include_config: boolean;
   follow_symlinks: boolean;
+  missing_path_policy: BackupMissingPathPolicy;
   status: BackupRequestStatus;
   payload_hash: string;
   command_scope: string;
@@ -2138,6 +2144,7 @@ export type CreateBackupRequest = {
   paths: string[];
   include_config: boolean;
   follow_symlinks: boolean;
+  missing_path_policy: BackupMissingPathPolicy;
   confirmed: boolean;
   note: string | null;
   privilege_assertion?: PrivilegeAssertion | null;

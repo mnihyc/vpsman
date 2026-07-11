@@ -2,10 +2,11 @@
 
 The recommended source-file threshold is 1,000 lines. It is not a hard limit:
 focused fixtures, integration tests, broad CLI/VTY parsers, and repository
-models may exceed it when role separation is clear. Every source file above
-the recommendation must be documented here with a reason and a next split
-direction. `scripts/audit-large-files.sh` enforces that the current
-recommendation set is documented.
+models may exceed it when role separation is clear. Changed large files should
+be added here when their current role and next split direction need an explicit
+maintenance decision. `scripts/audit-large-files.sh` reports undocumented,
+missing, or newly-small entries as non-blocking recommendations; it fails only
+when this notes file itself is unavailable or unreadable.
 
 ## Current Justifications
 
@@ -42,11 +43,11 @@ recommendation set is documented.
 | `./crates/worker/src/webhook_rules.rs` | Worker-side webhook rule materialization, delivery, retry, partitioning, and retention. | Split delivery adapters, event selection/materialization, and retention pruning as webhook behavior expands. |
 | `./frontend/src/panels/AccessPanel.tsx` | Access panel covering direct agent identity import, key lifecycle, local privilege state, and gateway session workflows. | Split direct identity import, key lifecycle, local privilege state, and gateway session sections into subpanels. |
 | `./frontend/src/panels/BackupsPanel.tsx` | Backup/restore panel covering requests, artifacts, policies, restore plans, and operator actions. | Split backup requests, artifacts, restore plans, and policy management into focused components. |
-| `./frontend/src/panels/DashboardPanel.tsx` | Dashboard panel for fleet summary, alerts, telemetry groups, and operational overview cards. | Split summary cards, telemetry groups, and alert sections into focused components. |
-| `./frontend/src/panels/SourceTemplatePanel.tsx` | Source template panel for template lifecycle, assignments, status, and push actions. | Split template lifecycle, assignment controls, status views, and push actions into focused components. |
+| `./frontend/src/panels/HomeTelemetryPanel.tsx` | Home telemetry composition for fleet resource summaries, trend charts, unavailable states, and operational evidence. | Split metric-domain chart groups and telemetry state shaping into focused components as the home evidence model expands. |
+| `./frontend/src/panels/SourceTemplatesPanel.tsx` | Source template panel for template lifecycle, assignments, status, and push actions. | Split template lifecycle, assignment controls, status views, and push actions into focused components. |
 | `./frontend/src/panels/FleetWorkspace.tsx` | Main fleet workspace composition with agent table, filters, bulk actions, details, and workspace state. | Split table controls, details drawer, bulk-action toolbar, and filter/state helpers into focused modules. |
 | `./frontend/src/panels/JobDispatchPanel.tsx` | Job dispatch form and progress UI for many operation families and target selections. | Split operation-family editors, target selector, privilege prompt, and progress rendering into focused components. |
-| `./frontend/src/panels/JobHistoryPanel.tsx` | Job history panel with filtering, target/output readback, bundles, and comparison actions. | Split filters, target/output viewers, artifact download, and comparison sections into subcomponents. |
+| `./frontend/src/panels/JobsPanel.tsx` | Jobs workspace composition for history, dispatch, approvals, scheduled runs, artifacts, and progress routing. | Keep domain controls in existing `panels/jobs/` components and split remaining subpage composition as each workflow changes. |
 | `./frontend/src/panels/SchedulesPanel.tsx` | Schedule CRUD panel with fixed-target previews, manual target-update workflow, due-run controls, and privilege confirmation. | Split schedule table, target snapshot editor, recurrence form, and action-confirmation helpers when schedule workflows change next. |
 | `./frontend/src/panels/jobs/FileBrowserPanel.tsx` | File browser panel with listing, preview, transfers, and per-target file actions. | Split listing, preview, upload/download, and mutation controls into focused components. |
 | `./frontend/src/panels/jobs/MultiFileActionsPanel.tsx` | Multi-target file action panel covering copy, rename, delete, chmod, chown, and mkdir workflows. | Split each action family and shared target/path validation into focused components. |

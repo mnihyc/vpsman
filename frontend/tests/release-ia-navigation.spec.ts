@@ -976,6 +976,48 @@ test("jobs dispatch keeps terminal creation in remote operations", async ({
   ).toBeVisible();
 });
 
+test("backup dispatch keeps paths full-width and collection options compact", async ({
+  page,
+}, testInfo) => {
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Jobs", "Dispatch");
+  const composer = page.locator(".commandComposer", {
+    has: page.getByRole("heading", { name: "Dispatch command" }),
+  });
+  if (testInfo.project.name.includes("mobile")) {
+    await composer
+      .getByLabel("Dispatch operation", { exact: true })
+      .selectOption("backup");
+  } else {
+    await composer
+      .getByLabel("Dispatch operation groups")
+      .getByRole("button", { name: "Backup", exact: true })
+      .click();
+  }
+
+  const operation = composer.locator(".backupOperation");
+  const options = operation.getByLabel("Backup collection options");
+  await expect(operation.getByLabel("Backup selected paths")).toBeVisible();
+  const layout = await operation.evaluate((element) => {
+    const paths = element.querySelector("textarea");
+    const optionStrip = element.querySelector<HTMLElement>(".backupOptionStrip");
+    return {
+      operationWidth: element.getBoundingClientRect().width,
+      optionHeight: optionStrip?.getBoundingClientRect().height ?? 0,
+      optionOverflow: optionStrip
+        ? optionStrip.scrollWidth - optionStrip.clientWidth
+        : Number.POSITIVE_INFINITY,
+      pathsWidth: paths?.getBoundingClientRect().width ?? 0,
+    };
+  });
+  expect(layout.pathsWidth / layout.operationWidth).toBeGreaterThan(0.9);
+  expect(layout.optionOverflow).toBeLessThanOrEqual(1);
+  expect(layout.optionHeight).toBeLessThanOrEqual(90);
+  await expect(
+    options.getByRole("checkbox", { name: "Skip missing roots" }),
+  ).not.toBeChecked();
+});
+
 test("file browser reads a selected VPS path from Remote Operations without Jobs", async ({
   page,
 }, testInfo) => {
@@ -4567,6 +4609,37 @@ test("backups requests keep request review separate from policy and restore work
   await expect(
     drawer.getByRole("heading", { name: "Draft restore" }),
   ).toHaveCount(0);
+});
+
+test("backup request presets keep collection policy compact and explicit", async ({
+  page,
+}) => {
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Backups", "Requests");
+  await activate(
+    page.getByRole("button", { name: "Open backup request", exact: true }),
+  );
+  const drawer = page.getByLabel("Open backup request");
+  const options = drawer.getByLabel("Backup collection options");
+  await expect(options).toBeVisible();
+  const optionLayout = await options.evaluate((element) => ({
+    height: element.getBoundingClientRect().height,
+    overflow: element.scrollWidth - element.clientWidth,
+  }));
+  expect(optionLayout.overflow).toBeLessThanOrEqual(1);
+  expect(optionLayout.height).toBeLessThanOrEqual(90);
+
+  await drawer.getByRole("button", { name: "Docker config" }).click();
+  await expect(drawer.getByLabel("Backup selected paths")).toHaveValue(
+    "/etc/docker",
+  );
+  await expect(
+    drawer.getByRole("checkbox", { name: "Skip missing roots" }),
+  ).toBeChecked();
+  await drawer.getByRole("button", { name: "Identity" }).click();
+  await expect(
+    drawer.getByRole("checkbox", { name: "Skip missing roots" }),
+  ).not.toBeChecked();
 });
 
 test("backups policies keep authoring separate and review prune preview before apply", async ({

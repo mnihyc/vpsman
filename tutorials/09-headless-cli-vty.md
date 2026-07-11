@@ -144,6 +144,7 @@ topology-graph --limit 50
 backups
 backup-policies
 backup-policy-upsert nightly-edge --path /etc/hostname --include-config tag:backup-critical --confirmed
+backup-run --path /etc/nginx --path /etc/caddy --skip-missing-paths tag:web --confirmed
 backup-policy-prune --dry-run
 restore-plans
 migration-run <restore_plan_uuid> --archive-transfer-session-id <completed_upload_session_uuid> --confirmed

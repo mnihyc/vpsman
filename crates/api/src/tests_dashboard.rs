@@ -475,6 +475,7 @@ fn dashboard_test_backup(
         paths: vec!["/etc/hostname".to_string()],
         include_config: false,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         status: status.as_str().to_string(),
         payload_hash: "bb".repeat(32),
         command_scope: format!("client:{client_id}"),

@@ -433,7 +433,9 @@ fn validate_restore_scope(
 
 fn entry_requested(entry: &BackupFileEntry, paths: &[String], include_config: bool) -> bool {
     match entry.source {
-        BackupFileSource::SelectedPath => paths.iter().any(|path| path == &entry.path),
+        BackupFileSource::SelectedPath => paths
+            .iter()
+            .any(|path| Path::new(&entry.path).starts_with(Path::new(path))),
         BackupFileSource::AgentConfig => include_config,
     }
 }
@@ -871,6 +873,46 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     use super::*;
+
+    #[test]
+    fn restore_scope_matches_selected_files_and_directory_descendants() {
+        let selected = BackupFileEntry {
+            path: "/etc/nginx/conf.d/site.conf".to_string(),
+            source: BackupFileSource::SelectedPath,
+            tar_path: "vpsman-backup/files/0000.bin".to_string(),
+            mode: 0o600,
+            size_bytes: 0,
+            sha256_hex: payload_hash(&[]),
+            mtime_unix: None,
+        };
+        let adjacent = BackupFileEntry {
+            path: "/etc/nginx-old/site.conf".to_string(),
+            ..selected.clone()
+        };
+        let config = BackupFileEntry {
+            path: "vpsman:agent_config".to_string(),
+            source: BackupFileSource::AgentConfig,
+            ..selected.clone()
+        };
+
+        assert!(entry_requested(
+            &selected,
+            &["/etc/nginx".to_string()],
+            false
+        ));
+        assert!(entry_requested(
+            &selected,
+            std::slice::from_ref(&selected.path),
+            false
+        ));
+        assert!(!entry_requested(
+            &adjacent,
+            &["/etc/nginx".to_string()],
+            false
+        ));
+        assert!(!entry_requested(&config, &[], false));
+        assert!(entry_requested(&config, &[], true));
+    }
 
     #[tokio::test]
     async fn restores_selected_path_and_config_under_destination_root_with_rollback() {

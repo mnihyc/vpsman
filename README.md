@@ -35,8 +35,8 @@ UIs. `vpsman` targets a different operating model:
 - You own the control plane and deploy it privately.
 - Agents connect outward to your gateway; operators do not need inbound SSH for
   every routine task.
-- Jobs, terminals, transfers, backups, and topology work are reviewed against
-  explicit VPS targets before mutation.
+- Mutating work is bound to explicit VPS targets; broad, destructive,
+  privileged, or difficult-to-reverse actions add a frozen review step.
 - Tags and selectors make 20+ heterogeneous VPSs manageable without forcing a
   cloud-native business hierarchy.
 - Access scopes, local privilege assertions, retained history, and release
@@ -48,7 +48,7 @@ UIs. `vpsman` targets a different operating model:
 | --- | --- |
 | Fleet operations | Inventory, tags, groups, target preview, summaries, alerts, and per-VPS detail panels. |
 | Remote work | Reviewed shell/script jobs, interactive terminal sessions, file browser, file transfer, process supervision, and schedules. |
-| Backups | Backup requests, chunked artifacts, restore plans, rollback, migration links, and object-store retention. |
+| Backups | Bounded recursive configuration snapshots, chunked artifacts, restore plans, rollback, migration links, and object-store retention. |
 | Runtime config | Source templates, per-VPS overrides, bulk config patches, and visible runtime config sync jobs. |
 | Network | Tunnel plans, runtime tunnel sync, topology graph/evidence, network tests, speed tests, Bird2/OSPF cost workflows. |
 | Access and audit | Operator roles/scopes, sessions, TOTP, direct gateway identities, key rotation/revocation, audit logs, and evidence views. |
@@ -170,13 +170,13 @@ dispatch work.
 
 ## Add a VPS Agent
 
-The recommended path is the Access -> VPS identities workflow in the web
+The recommended path is the Access > VPS identities workflow in the web
 console:
 
-1. Open **Access -> VPS identities**.
+1. Open **Access > VPS identities**.
 2. Choose **Register VPS**.
 3. Keep the default numerical VPS ID or edit it for an imported legacy ID.
-4. Generate a Noise keypair.
+4. Generate a unique Noise keypair for this VPS.
 5. Review and register the public identity.
 6. Fill gateway install defaults once.
 7. Copy the generated one-line installer to the VPS.
@@ -213,6 +213,10 @@ during installation. They receive a stable client ID, their private Noise key,
 the gateway public key, and a prioritized gateway endpoint list. See
 [deploy/AGENT_GATEWAY_INSTALL.md](deploy/AGENT_GATEWAY_INSTALL.md).
 
+One Noise public key identifies exactly one VPS. The control plane rejects a
+key already active under another client ID, and rotated, revoked, or deleted
+keys remain retired rather than becoming reusable identities.
+
 ## Operating Model
 
 ### Targets
@@ -237,6 +241,20 @@ Access scopes intentionally separate broad fleet metadata from sensitive
 payloads, terminal replay, integrations, schedules, templates, rendered config,
 and full network plans. See
 [docs/operator-access-scopes.md](docs/operator-access-scopes.md).
+
+### Backups and file integrity
+
+Directory selections create bounded recursive snapshots of regular files. They
+are intended for host and service configuration, not unbounded application or
+container-volume data. Missing selected roots fail by default; operators may
+explicitly skip only missing roots for a reviewed heterogeneous-fleet backup.
+
+Remote text replacement is revision-bound: an existing file must carry the
+hash read by the editor, and the agent rechecks it immediately before atomic
+replacement. Restore rollback applies the same commit-time stale-content guard
+per destination and reports partial completion without overwriting a concurrent
+local change. See [Tutorial 07](tutorials/07-backup-restore-migration.md) and
+[Tutorial 04](tutorials/04-daily-operations.md).
 
 ### Persistence and updates
 

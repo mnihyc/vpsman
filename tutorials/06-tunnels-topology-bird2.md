@@ -17,10 +17,11 @@ the pool. Manual tunnel endpoints are CIDRs such as `10.255.0.2/31`; they are
 not limited to `/31` or `/127` when the tunnel segment occupies a larger
 subnet. Reserved addresses accept comma-separated values.
 
-In the frontend, open Topology -> Plans or Topology -> Promotion. Enter IPv4
-and/or IPv6 endpoint CIDRs directly, or click Allocate endpoints to use the
-persistent pools from Preferences -> Tunnel allocation. The Allocation overrides
-section is optional and only for one-off pool or reserved-address overrides.
+In the frontend, open Network > Tunnel plans and choose Create tunnel plan or
+the promotion workflow. Enter IPv4 and/or IPv6 endpoint CIDRs directly, or click
+Allocate endpoints to use the persistent pools from System > Preferences. The
+Allocation overrides section is optional and only for one-off pool or
+reserved-address overrides.
 Empty pools mean there is no default allocator. Clicking Allocate endpoints
 again appends the currently displayed endpoint addresses to Reserved addresses
 before asking for another suggestion.
@@ -92,7 +93,7 @@ cargo run -p vpsctl -- tunnel-plan-export \
   --output-file ./plan.json
 ```
 
-In the frontend, use Topology -> Plans -> Export JSON for the selected saved
+In the frontend, use Network > Tunnel plans > Export JSON for the selected saved
 plan. The exported file is the inner runtime `TunnelPlan` object expected by
 status, probe, and speed-test commands, not the full saved-plan database record.
 

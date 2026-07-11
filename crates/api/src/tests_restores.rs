@@ -525,6 +525,7 @@ async fn create_source_backup(repo: &crate::repository::Repository) -> Uuid {
         paths: vec!["/etc/hostname".to_string()],
         include_config: true,
         follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
         confirmed: true,
         note: Some("source".to_string()),
         privilege_assertion: None,

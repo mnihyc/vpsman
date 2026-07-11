@@ -1652,6 +1652,7 @@ async fn execute_authorized_command(
             paths,
             include_config,
             follow_symlinks,
+            missing_path_policy,
         } => {
             execute_backup_command(BackupCommandInput {
                 job_id: request.job_id,
@@ -1660,6 +1661,7 @@ async fn execute_authorized_command(
                 paths,
                 include_config: *include_config,
                 follow_symlinks: *follow_symlinks,
+                missing_path_policy: *missing_path_policy,
                 output_tx: Some(streamed_output_tx),
                 max_timeout_secs,
                 cancel_token: cancel_token.clone(),

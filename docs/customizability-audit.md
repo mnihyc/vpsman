@@ -160,19 +160,20 @@ binary path, or one accounting source is not enough.
     policy, agent config, server config, or test fixture; avoid introducing
     new implicit global paths.
 - Frontend frequent-use configuration:
-  - Current state: the Tags view now has a source template manager backed by
-    server storage. Operators can save shared templates, save VPS-local templates,
-    see built-in/default templates and assignment counts, and assign the selected
-    template by VPS or tag with API confirmation semantics. The panel, API, CLI,
-    and VTY can clone, diff, test, update, and preview the read-only config
-    patch rendered from a VPS's source templates. The first Active source
-    status read model is visible in API, CLI/VTY, and the Tags panel, including
-    backup/update object-store readiness evidence, privilege-gated on-demand
-    workflow evidence, and process-limit capability readiness for root-capable,
-    unknown, and unprivileged agents. The Tags panel now uses shared CRUD/list
-    controls for active source rows and template registry rows, including
-    total/filtered counts, current page, field search, and page controls; the
-    same abstraction is used for audit, job, and schedule record tables.
+  - Current state: Automation > Source templates provides a source template
+    manager backed by server storage. Operators can save shared templates, save
+    VPS-local templates, see built-in/default templates and assignment counts,
+    and assign the selected template by VPS or tag with API confirmation
+    semantics. The panel, API, CLI, and VTY can clone, diff, test, update, and
+    preview the read-only config patch rendered from a VPS's source templates.
+    The first Active source status read model is visible in API, CLI/VTY, and
+    Source templates, including backup/update object-store readiness evidence,
+    privilege-gated on-demand workflow evidence, and process-limit capability
+    readiness for root-capable, unknown, and unprivileged agents. Source
+    templates now uses shared CRUD/list controls for active source rows and
+    template registry rows, including total/filtered counts, current page,
+    field search, and page controls; the same abstraction is used for audit,
+    job, and schedule record tables.
   - Required remaining model: active-template badges in each operational module,
     deeper source/status linkage for restore/update/routing/traffic-limit
     workflows, richer curated provider libraries, and privilege-gated dispatch of
@@ -239,7 +240,7 @@ binary path, or one accounting source is not enough.
 - Converted the prior fixed FOU assumptions (`port=5555`, `peer_port=5555`,
   `ipproto=4`) into `RuntimeTunnelFouOptions` with serde defaults and
   validation. Non-default values now render through compatibility backends,
-  agent runtime commands, CLI, VTY, and the Topology panel.
+  agent runtime commands, CLI, VTY, and Network > Tunnel plans.
 - This is a typed adapter-field conversion, not a source template bulk command
   model. Fleet-wide changes should be modeled later as updating a named tunnel
   realization template selected by relevant VPSs/plans, then validating/rendering

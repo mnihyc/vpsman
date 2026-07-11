@@ -215,7 +215,7 @@ pub(crate) fn validate_file_command(command: &JobCommand) -> Option<Result<(), A
             sha256_hex,
             content_base64,
             expected_sha256_hex,
-            create: _,
+            create,
             policy: _,
         } => validate_file_write_text(
             path,
@@ -224,6 +224,7 @@ pub(crate) fn validate_file_command(command: &JobCommand) -> Option<Result<(), A
             sha256_hex,
             content_base64,
             expected_sha256_hex.as_deref(),
+            *create,
         ),
         JobCommand::FileMkdir {
             path,
@@ -309,8 +310,12 @@ fn validate_file_write_text(
     sha256_hex: &str,
     content_base64: &str,
     expected_sha256_hex: Option<&str>,
+    create: bool,
 ) -> Result<(), ApiError> {
     validate_file_push(path, mode, size_bytes, sha256_hex, content_base64)?;
+    if !create && expected_sha256_hex.is_none() {
+        return Err(ApiError::bad_request("file_write_expected_sha256_required"));
+    }
     if let Some(expected) = expected_sha256_hex {
         vpsman_common::normalize_sha256_hex(expected).map_err(file_transfer_error)?;
     }
