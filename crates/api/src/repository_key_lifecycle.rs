@@ -526,7 +526,7 @@ impl Repository {
                 )
                 .bind(Uuid::new_v4())
                 .bind(operator.operator.id)
-                .bind(format!("client:{}", &client_id))
+                .bind(format!("client:{}", client_id))
                 .bind(json!({
                     "client_id": &client_id,
                     "public_key_sha256_hex": public_key_sha256_hex,
